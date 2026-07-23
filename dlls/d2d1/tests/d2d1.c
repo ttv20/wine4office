@@ -13326,6 +13326,136 @@ struct effect_property
     D2D1_PROPERTY_TYPE type;
 };
 
+static void test_subpixel_stroke_continuity(BOOL d3d11)
+{
+    struct d2d1_test_context ctx;
+    struct resource_readback rb;
+    ID2D1DeviceContext *context;
+    ID2D1SolidColorBrush *brush;
+    D2D1_COLOR_F color;
+    D2D1_POINT_2F p0 = {50.0f, 200.0f}, p1 = {250.0f, 235.0f};
+    DWORD background;
+    unsigned int x, y, missing = 0;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    context = ctx.context;
+    set_color(&color, 1.0f, 0.5f, 0.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &color, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawLine(context, p0, p1, (ID2D1Brush *)brush, 0.5f, NULL);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    background = get_readback_colour(&rb, 20, 20);
+    for (x = p0.x + 1; x < p1.x; ++x)
+    {
+        unsigned int expected_y = p0.y + (x - p0.x) * (p1.y - p0.y) / (p1.x - p0.x);
+        BOOL covered = FALSE;
+
+        for (y = expected_y - 2; y <= expected_y + 2; ++y)
+            if (get_readback_colour(&rb, x, y) != background)
+                covered = TRUE;
+        if (!covered)
+            ++missing;
+    }
+    ok(!missing, "Subpixel stroke has %u uncovered columns.\n", missing);
+    release_resource_readback(&rb);
+
+    ID2D1SolidColorBrush_Release(brush);
+    release_test_context(&ctx);
+}
+
+static void test_effect_command_list_output(BOOL d3d11)
+{
+    D2D1_MATRIX_3X2_F transform;
+    struct d2d1_test_context ctx;
+    struct resource_readback rb;
+    ID2D1DeviceContext *context;
+    ID2D1CommandList *commands;
+    ID2D1SolidColorBrush *brush;
+    ID2D1Effect *blur, *affine;
+    ID2D1Image *target, *blur_output, *output;
+    D2D1_COLOR_F color;
+    D2D1_RECT_F rect;
+    DWORD foreground, background;
+    float sigma = 0.5f;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+
+    context = ctx.context;
+    set_color(&color, 0.5f, 0.0f, 0.5f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &color, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_GetTarget(context, &target);
+    hr = ID2D1DeviceContext_CreateCommandList(context, &commands);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)commands);
+    ID2D1DeviceContext_BeginDraw(context);
+    set_rect(&rect, 100.0f, 100.0f, 180.0f, 130.0f);
+    ID2D1DeviceContext_FillRectangle(context, &rect, (ID2D1Brush *)brush);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1CommandList_Close(commands);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, target);
+
+    hr = ID2D1DeviceContext_CreateEffect(context, &CLSID_D2D1GaussianBlur, &blur);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Effect_SetValue(blur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+            D2D1_PROPERTY_TYPE_FLOAT, (const BYTE *)&sigma, sizeof(sigma));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Effect_SetInput(blur, 0, (ID2D1Image *)commands, FALSE);
+    ID2D1Effect_GetOutput(blur, &blur_output);
+
+    hr = ID2D1DeviceContext_CreateEffect(context, &CLSID_D2D12DAffineTransform, &affine);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_matrix_identity(&transform);
+    transform._32 = 40.0f;
+    hr = ID2D1Effect_SetValue(affine, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX,
+            D2D1_PROPERTY_TYPE_MATRIX_3X2, (const BYTE *)&transform, sizeof(transform));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Effect_SetInput(affine, 0, blur_output, FALSE);
+    ID2D1Effect_GetOutput(affine, &output);
+
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawImage(context, output, NULL, NULL,
+            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    foreground = get_readback_colour(&rb, 120, 150);
+    background = get_readback_colour(&rb, 20, 20);
+    ok(foreground != background, "Effect output was not rendered, got %#lx.\n", foreground);
+    release_resource_readback(&rb);
+
+    ID2D1Image_Release(output);
+    ID2D1Effect_Release(affine);
+    ID2D1Image_Release(blur_output);
+    ID2D1Effect_Release(blur);
+    ID2D1CommandList_Release(commands);
+    ID2D1Image_Release(target);
+    ID2D1SolidColorBrush_Release(brush);
+    release_test_context(&ctx);
+}
+
 static void test_effect_2d_affine(BOOL d3d11)
 {
     static const struct effect_property properties[] =
@@ -18095,6 +18225,8 @@ START_TEST(d2d1)
     queue_test(test_effect_context);
     queue_d3d10_test(test_effect_properties);
     queue_d3d10_test(test_builtin_effect);
+    queue_test(test_subpixel_stroke_continuity);
+    queue_test(test_effect_command_list_output);
     queue_test(test_effect_2d_affine);
     queue_test(test_effect_crop);
     queue_test(test_effect_grayscale);

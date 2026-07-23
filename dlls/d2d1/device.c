@@ -1134,6 +1134,21 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
             stroke_width /= context->drawing_state.transform.m11;
     }
 
+    if (stroke_width > 0.0f && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+    {
+        const D2D1_MATRIX_3X2_F *transform = &context->drawing_state.transform;
+        float dpi_x = context->desc.dpiX / 96.0f, dpi_y = context->desc.dpiY / 96.0f;
+        float scale_x = hypotf(transform->_11 * dpi_x, transform->_12 * dpi_y);
+        float scale_y = hypotf(transform->_21 * dpi_x, transform->_22 * dpi_y);
+        float device_scale = sqrtf(scale_x * scale_y);
+
+        /* Preserve antialiased hairlines as continuous one-pixel strokes.  Fractional
+         * geometry narrower than one device pixel otherwise develops coverage gaps
+         * along shallow curves and diagonals. */
+        if (device_scale > 0.0f && stroke_width * device_scale < 1.0f)
+            stroke_width = 1.0f / device_scale;
+    }
+
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
 }
 
@@ -3059,6 +3074,706 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
     d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
 }
 
+struct d2d_replay_sink
+{
+    ID2D1CommandSink ID2D1CommandSink_iface;
+    struct d2d_device_context *context;
+    D2D1_MATRIX_3X2_F base_transform;
+};
+
+static inline struct d2d_replay_sink *impl_from_ID2D1CommandSink(ID2D1CommandSink *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_replay_sink, ID2D1CommandSink_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_QueryInterface(ID2D1CommandSink *iface,
+        REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_ID2D1CommandSink) || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_replay_sink_AddRef(ID2D1CommandSink *iface)
+{
+    return 2;
+}
+
+static ULONG STDMETHODCALLTYPE d2d_replay_sink_Release(ID2D1CommandSink *iface)
+{
+    return 1;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_BeginDraw(ID2D1CommandSink *iface)
+{
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_EndDraw(ID2D1CommandSink *iface)
+{
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetAntialiasMode(ID2D1CommandSink *iface,
+        D2D1_ANTIALIAS_MODE mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetAntialiasMode(&sink->context->ID2D1DeviceContext6_iface, mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetTags(ID2D1CommandSink *iface,
+        D2D1_TAG tag1, D2D1_TAG tag2)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetTags(&sink->context->ID2D1DeviceContext6_iface, tag1, tag2);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetTextAntialiasMode(ID2D1CommandSink *iface,
+        D2D1_TEXT_ANTIALIAS_MODE mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetTextAntialiasMode(&sink->context->ID2D1DeviceContext6_iface, mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetTextRenderingParams(ID2D1CommandSink *iface,
+        IDWriteRenderingParams *params)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetTextRenderingParams(&sink->context->ID2D1DeviceContext6_iface, params);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetTransform(ID2D1CommandSink *iface,
+        const D2D1_MATRIX_3X2_F *transform)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    D2D1_MATRIX_3X2_F combined = *transform;
+
+    d2d_matrix_multiply(&combined, &sink->base_transform);
+    ID2D1DeviceContext6_SetTransform(&sink->context->ID2D1DeviceContext6_iface, &combined);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetPrimitiveBlend(ID2D1CommandSink *iface,
+        D2D1_PRIMITIVE_BLEND blend)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetPrimitiveBlend(&sink->context->ID2D1DeviceContext6_iface, blend);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_SetUnitMode(ID2D1CommandSink *iface, D2D1_UNIT_MODE mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_SetUnitMode(&sink->context->ID2D1DeviceContext6_iface, mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_Clear(ID2D1CommandSink *iface, const D2D1_COLOR_F *color)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_Clear(&sink->context->ID2D1DeviceContext6_iface, color);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawGlyphRun(ID2D1CommandSink *iface,
+        D2D1_POINT_2F origin, const DWRITE_GLYPH_RUN *run, const DWRITE_GLYPH_RUN_DESCRIPTION *desc,
+        ID2D1Brush *brush, DWRITE_MEASURING_MODE mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawGlyphRun(&sink->context->ID2D1DeviceContext6_iface,
+            origin, run, desc, brush, mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawLine(ID2D1CommandSink *iface, D2D1_POINT_2F p0,
+        D2D1_POINT_2F p1, ID2D1Brush *brush, float width, ID2D1StrokeStyle *style)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawLine(&sink->context->ID2D1DeviceContext6_iface, p0, p1, brush, width, style);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawGeometry(ID2D1CommandSink *iface,
+        ID2D1Geometry *geometry, ID2D1Brush *brush, float width, ID2D1StrokeStyle *style)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawGeometry(&sink->context->ID2D1DeviceContext6_iface,
+            geometry, brush, width, style);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawRectangle(ID2D1CommandSink *iface,
+        const D2D1_RECT_F *rect, ID2D1Brush *brush, float width, ID2D1StrokeStyle *style)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawRectangle(&sink->context->ID2D1DeviceContext6_iface,
+            rect, brush, width, style);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawBitmap(ID2D1CommandSink *iface, ID2D1Bitmap *bitmap,
+        const D2D1_RECT_F *dst_rect, float opacity, D2D1_INTERPOLATION_MODE mode,
+        const D2D1_RECT_F *src_rect, const D2D1_MATRIX_4X4_F *perspective)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawBitmap(&sink->context->ID2D1DeviceContext6_iface,
+            bitmap, dst_rect, opacity, mode, src_rect, perspective);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawImage(ID2D1CommandSink *iface, ID2D1Image *image,
+        const D2D1_POINT_2F *offset, const D2D1_RECT_F *rect, D2D1_INTERPOLATION_MODE mode,
+        D2D1_COMPOSITE_MODE composite_mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_DrawImage(&sink->context->ID2D1DeviceContext6_iface,
+            image, offset, rect, mode, composite_mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_DrawGdiMetafile(ID2D1CommandSink *iface,
+        ID2D1GdiMetafile *metafile, const D2D1_POINT_2F *offset)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext_DrawGdiMetafile((ID2D1DeviceContext *)&sink->context->ID2D1DeviceContext6_iface,
+            metafile, offset);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_FillMesh(ID2D1CommandSink *iface,
+        ID2D1Mesh *mesh, ID2D1Brush *brush)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_FillMesh(&sink->context->ID2D1DeviceContext6_iface, mesh, brush);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_FillOpacityMask(ID2D1CommandSink *iface,
+        ID2D1Bitmap *bitmap, ID2D1Brush *brush, const D2D1_RECT_F *dst_rect, const D2D1_RECT_F *src_rect)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_FillOpacityMask(&sink->context->ID2D1DeviceContext6_iface,
+            bitmap, brush, dst_rect, src_rect);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_FillGeometry(ID2D1CommandSink *iface,
+        ID2D1Geometry *geometry, ID2D1Brush *brush, ID2D1Brush *opacity_brush)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_FillGeometry(&sink->context->ID2D1DeviceContext6_iface,
+            geometry, brush, opacity_brush);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_FillRectangle(ID2D1CommandSink *iface,
+        const D2D1_RECT_F *rect, ID2D1Brush *brush)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_FillRectangle(&sink->context->ID2D1DeviceContext6_iface, rect, brush);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_PushAxisAlignedClip(ID2D1CommandSink *iface,
+        const D2D1_RECT_F *rect, D2D1_ANTIALIAS_MODE mode)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_PushAxisAlignedClip(&sink->context->ID2D1DeviceContext6_iface, rect, mode);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_PushLayer(ID2D1CommandSink *iface,
+        const D2D1_LAYER_PARAMETERS1 *params, ID2D1Layer *layer)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_PushLayer(&sink->context->ID2D1DeviceContext6_iface, params, layer);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_PopAxisAlignedClip(ID2D1CommandSink *iface)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_PopAxisAlignedClip(&sink->context->ID2D1DeviceContext6_iface);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_replay_sink_PopLayer(ID2D1CommandSink *iface)
+{
+    struct d2d_replay_sink *sink = impl_from_ID2D1CommandSink(iface);
+    ID2D1DeviceContext6_PopLayer(&sink->context->ID2D1DeviceContext6_iface);
+    return S_OK;
+}
+
+static const ID2D1CommandSinkVtbl d2d_replay_sink_vtbl =
+{
+    d2d_replay_sink_QueryInterface,
+    d2d_replay_sink_AddRef,
+    d2d_replay_sink_Release,
+    d2d_replay_sink_BeginDraw,
+    d2d_replay_sink_EndDraw,
+    d2d_replay_sink_SetAntialiasMode,
+    d2d_replay_sink_SetTags,
+    d2d_replay_sink_SetTextAntialiasMode,
+    d2d_replay_sink_SetTextRenderingParams,
+    d2d_replay_sink_SetTransform,
+    d2d_replay_sink_SetPrimitiveBlend,
+    d2d_replay_sink_SetUnitMode,
+    d2d_replay_sink_Clear,
+    d2d_replay_sink_DrawGlyphRun,
+    d2d_replay_sink_DrawLine,
+    d2d_replay_sink_DrawGeometry,
+    d2d_replay_sink_DrawRectangle,
+    d2d_replay_sink_DrawBitmap,
+    d2d_replay_sink_DrawImage,
+    d2d_replay_sink_DrawGdiMetafile,
+    d2d_replay_sink_FillMesh,
+    d2d_replay_sink_FillOpacityMask,
+    d2d_replay_sink_FillGeometry,
+    d2d_replay_sink_FillRectangle,
+    d2d_replay_sink_PushAxisAlignedClip,
+    d2d_replay_sink_PushLayer,
+    d2d_replay_sink_PopAxisAlignedClip,
+    d2d_replay_sink_PopLayer,
+};
+
+struct d2d_software_image
+{
+    BYTE *pixels;
+    UINT32 width;
+    UINT32 height;
+    UINT32 stride;
+};
+
+static void d2d_software_image_cleanup(struct d2d_software_image *image)
+{
+    free(image->pixels);
+    memset(image, 0, sizeof(*image));
+}
+
+static BOOL d2d_software_image_allocate(struct d2d_software_image *image, UINT32 width, UINT32 height)
+{
+    if (!width || !height || width > UINT_MAX / 4 || (size_t)width * 4 > SIZE_MAX / height)
+        return FALSE;
+
+    image->width = width;
+    image->height = height;
+    image->stride = width * 4;
+    return !!(image->pixels = calloc(height, image->stride));
+}
+
+static BOOL d2d_device_context_rasterize_image(struct d2d_device_context *context,
+        ID2D1Image *image, D2D1_INTERPOLATION_MODE interpolation_mode, struct d2d_software_image *result)
+{
+    D2D1_BITMAP_PROPERTIES1 properties = {{0}};
+    D2D1_DRAWING_STATE_DESCRIPTION1 previous_state = context->drawing_state;
+    D2D1_MAPPED_RECT mapped;
+    D2D1_SIZE_U size = context->pixel_size;
+    ID2D1CommandList *command_list = NULL;
+    ID2D1Bitmap1 *target_bitmap = NULL, *read_bitmap = NULL;
+    ID2D1Bitmap *bitmap = NULL;
+    ID2D1Image *previous_target = NULL;
+    IDWriteRenderingParams *previous_text_params = context->text_rendering_params;
+    struct d2d_replay_sink sink;
+    D2D1_COLOR_F clear = {0};
+    unsigned int y;
+    HRESULT hr;
+
+    if (context->desc.pixelFormat.format != DXGI_FORMAT_B8G8R8A8_UNORM
+            && context->desc.pixelFormat.format != DXGI_FORMAT_R8G8B8A8_UNORM
+            && context->desc.pixelFormat.format != DXGI_FORMAT_B8G8R8X8_UNORM
+            && context->desc.pixelFormat.format != DXGI_FORMAT_UNKNOWN)
+        return FALSE;
+    if (!d2d_software_image_allocate(result, size.width, size.height))
+        return FALSE;
+    if (previous_text_params) IDWriteRenderingParams_AddRef(previous_text_params);
+
+    properties.pixelFormat = context->desc.pixelFormat;
+    if (properties.pixelFormat.format == DXGI_FORMAT_UNKNOWN)
+        properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    properties.dpiX = context->desc.dpiX;
+    properties.dpiY = context->desc.dpiY;
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+
+    ID2D1DeviceContext6_GetTarget(&context->ID2D1DeviceContext6_iface, &previous_target);
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, NULL, 0, &properties, &target_bitmap);
+    if (FAILED(hr))
+        goto done;
+
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)target_bitmap);
+    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+
+    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
+    {
+        d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f,
+                interpolation_mode, NULL, NULL, NULL);
+    }
+    else if (SUCCEEDED(ID2D1Image_QueryInterface(image,
+            &IID_ID2D1CommandList, (void **)&command_list)))
+    {
+        sink.ID2D1CommandSink_iface.lpVtbl = &d2d_replay_sink_vtbl;
+        sink.context = context;
+        sink.base_transform = previous_state.transform;
+        hr = ID2D1CommandList_Stream(command_list, &sink.ID2D1CommandSink_iface);
+    }
+    else
+    {
+        hr = E_NOINTERFACE;
+    }
+
+    ID2D1DeviceContext6_Flush(&context->ID2D1DeviceContext6_iface, NULL, NULL);
+    if (FAILED(hr))
+        goto done;
+
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, NULL, 0, &properties, &read_bitmap);
+    if (FAILED(hr))
+        goto done;
+    hr = ID2D1Bitmap1_CopyFromBitmap(read_bitmap, NULL, (ID2D1Bitmap *)target_bitmap, NULL);
+    if (FAILED(hr))
+        goto done;
+    hr = ID2D1Bitmap1_Map(read_bitmap, D2D1_MAP_OPTIONS_READ, &mapped);
+    if (FAILED(hr))
+        goto done;
+
+    for (y = 0; y < result->height; ++y)
+        memcpy(result->pixels + (size_t)y * result->stride,
+                mapped.bits + (size_t)y * mapped.pitch, result->stride);
+    ID2D1Bitmap1_Unmap(read_bitmap);
+
+ done:
+    if (previous_target)
+        ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
+    else
+        ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, NULL);
+    context->drawing_state = previous_state;
+    ID2D1DeviceContext6_SetTextRenderingParams(&context->ID2D1DeviceContext6_iface, previous_text_params);
+    if (previous_text_params) IDWriteRenderingParams_Release(previous_text_params);
+    if (command_list) ID2D1CommandList_Release(command_list);
+    if (bitmap) ID2D1Bitmap_Release(bitmap);
+    if (read_bitmap) ID2D1Bitmap1_Release(read_bitmap);
+    if (target_bitmap) ID2D1Bitmap1_Release(target_bitmap);
+    if (previous_target) ID2D1Image_Release(previous_target);
+    if (FAILED(hr))
+        d2d_software_image_cleanup(result);
+    return SUCCEEDED(hr);
+}
+
+static BYTE d2d_composite_channel(BYTE source, BYTE destination, BYTE source_alpha,
+        BYTE destination_alpha, D2D1_COMPOSITE_MODE mode)
+{
+    unsigned int value;
+
+    switch (mode)
+    {
+        case D2D1_COMPOSITE_MODE_SOURCE_OVER:
+            value = source + (destination * (255 - source_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_DESTINATION_OVER:
+            value = destination + (source * (255 - destination_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_SOURCE_IN:
+            value = (source * destination_alpha + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_DESTINATION_IN:
+            value = (destination * source_alpha + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_SOURCE_OUT:
+            value = (source * (255 - destination_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_DESTINATION_OUT:
+        case D2D1_COMPOSITE_MODE_MASK_INVERT:
+            value = (destination * (255 - source_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_SOURCE_ATOP:
+            value = (source * destination_alpha + destination * (255 - source_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_DESTINATION_ATOP:
+            value = (destination * source_alpha + source * (255 - destination_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_XOR:
+            value = (source * (255 - destination_alpha)
+                    + destination * (255 - source_alpha) + 127) / 255;
+            break;
+        case D2D1_COMPOSITE_MODE_PLUS:
+            value = min(255, source + destination);
+            break;
+        case D2D1_COMPOSITE_MODE_SOURCE_COPY:
+        case D2D1_COMPOSITE_MODE_BOUNDED_SOURCE_COPY:
+            value = source;
+            break;
+        default:
+            value = source + (destination * (255 - source_alpha) + 127) / 255;
+            break;
+    }
+    return min(255, value);
+}
+
+static void d2d_software_image_composite(struct d2d_software_image *destination,
+        const struct d2d_software_image *source, D2D1_COMPOSITE_MODE mode)
+{
+    size_t i, count = (size_t)destination->width * destination->height;
+
+    for (i = 0; i < count; ++i)
+    {
+        BYTE *d = destination->pixels + i * 4;
+        const BYTE *s = source->pixels + i * 4;
+        BYTE source_alpha = s[3], destination_alpha = d[3];
+        unsigned int channel;
+
+        for (channel = 0; channel < 4; ++channel)
+            d[channel] = d2d_composite_channel(s[channel], d[channel],
+                    source_alpha, destination_alpha, mode);
+    }
+}
+
+static BOOL d2d_software_image_blur(struct d2d_software_image *image, float sigma)
+{
+    struct d2d_software_image temporary = {0}, output = {0};
+    float *kernel, kernel_sum = 0.0f;
+    unsigned int x, y, channel, i, radius;
+
+    if (sigma <= 0.0f)
+        return TRUE;
+    radius = min(64, (unsigned int)ceilf(3.0f * sigma));
+    if (!radius)
+        return TRUE;
+    if (!(kernel = malloc((radius * 2 + 1) * sizeof(*kernel)))
+            || !d2d_software_image_allocate(&temporary, image->width, image->height)
+            || !d2d_software_image_allocate(&output, image->width, image->height))
+    {
+        free(kernel);
+        d2d_software_image_cleanup(&temporary);
+        d2d_software_image_cleanup(&output);
+        return FALSE;
+    }
+
+    for (i = 0; i <= radius * 2; ++i)
+    {
+        int distance = (int)i - radius;
+        kernel[i] = expf(-(float)(distance * distance) / (2.0f * sigma * sigma));
+        kernel_sum += kernel[i];
+    }
+    for (i = 0; i <= radius * 2; ++i)
+        kernel[i] /= kernel_sum;
+
+    for (y = 0; y < image->height; ++y)
+    {
+        for (x = 0; x < image->width; ++x)
+        {
+            for (channel = 0; channel < 4; ++channel)
+            {
+                float value = 0.0f;
+                int k;
+
+                for (k = -(int)radius; k <= (int)radius; ++k)
+                    if ((int)x + k >= 0 && (int)x + k < image->width)
+                        value += image->pixels[(size_t)y * image->stride
+                                + ((int)x + k) * 4 + channel] * kernel[k + radius];
+                temporary.pixels[(size_t)y * temporary.stride + x * 4 + channel]
+                        = min(255, (unsigned int)(value + 0.5f));
+            }
+        }
+    }
+
+    for (y = 0; y < image->height; ++y)
+    {
+        for (x = 0; x < image->width; ++x)
+        {
+            for (channel = 0; channel < 4; ++channel)
+            {
+                float value = 0.0f;
+                int k;
+
+                for (k = -(int)radius; k <= (int)radius; ++k)
+                    if ((int)y + k >= 0 && (int)y + k < image->height)
+                        value += temporary.pixels[(size_t)((int)y + k) * temporary.stride
+                                + x * 4 + channel] * kernel[k + radius];
+                output.pixels[(size_t)y * output.stride + x * 4 + channel]
+                        = min(255, (unsigned int)(value + 0.5f));
+            }
+        }
+    }
+
+    free(kernel);
+    d2d_software_image_cleanup(&temporary);
+    free(image->pixels);
+    *image = output;
+    return TRUE;
+}
+
+static BOOL d2d_device_context_realize_effect_input(struct d2d_device_context *context,
+        ID2D1Image *image, D2D1_INTERPOLATION_MODE interpolation_mode,
+        unsigned int depth, struct d2d_software_image *result);
+
+static BOOL d2d_device_context_realize_effect(struct d2d_device_context *context,
+        ID2D1Effect *effect, D2D1_INTERPOLATION_MODE interpolation_mode,
+        unsigned int depth, struct d2d_software_image *result)
+{
+    D2D1_MATRIX_3X2_F transform, previous_transform;
+    struct d2d_software_image input = {0}, source = {0};
+    D2D1_COMPOSITE_MODE mode;
+    ID2D1Image *input_image;
+    CLSID clsid;
+    unsigned int i, input_count;
+    float sigma;
+    HRESULT hr;
+
+    if (depth > 16 || FAILED(ID2D1Effect_GetValue(effect, D2D1_PROPERTY_CLSID,
+            D2D1_PROPERTY_TYPE_CLSID, (BYTE *)&clsid, sizeof(clsid))))
+        return FALSE;
+
+    input_count = ID2D1Effect_GetInputCount(effect);
+    if (IsEqualGUID(&clsid, &CLSID_D2D12DAffineTransform) && input_count)
+    {
+        if (FAILED(ID2D1Effect_GetValue(effect, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX,
+                D2D1_PROPERTY_TYPE_MATRIX_3X2, (BYTE *)&transform, sizeof(transform))))
+            return FALSE;
+        ID2D1Effect_GetInput(effect, 0, &input_image);
+        if (!input_image)
+            return FALSE;
+        previous_transform = context->drawing_state.transform;
+        d2d_matrix_multiply(&transform, &previous_transform);
+        context->drawing_state.transform = transform;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, result) ? S_OK : E_FAIL;
+        context->drawing_state.transform = previous_transform;
+        ID2D1Image_Release(input_image);
+        return SUCCEEDED(hr);
+    }
+
+    if ((IsEqualGUID(&clsid, &CLSID_D2D1GaussianBlur)
+            || IsEqualGUID(&clsid, &CLSID_D2D1Crop)) && input_count)
+    {
+        ID2D1Effect_GetInput(effect, 0, &input_image);
+        if (!input_image)
+            return FALSE;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, result) ? S_OK : E_FAIL;
+        ID2D1Image_Release(input_image);
+        if (FAILED(hr) || IsEqualGUID(&clsid, &CLSID_D2D1Crop))
+            return SUCCEEDED(hr);
+        sigma = 0.0f;
+        ID2D1Effect_GetValue(effect, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                D2D1_PROPERTY_TYPE_FLOAT, (BYTE *)&sigma, sizeof(sigma));
+        return d2d_software_image_blur(result, sigma);
+    }
+
+    if (IsEqualGUID(&clsid, &CLSID_D2D1Composite) && input_count)
+    {
+        mode = D2D1_COMPOSITE_MODE_SOURCE_OVER;
+        ID2D1Effect_GetValue(effect, D2D1_COMPOSITE_PROP_MODE,
+                D2D1_PROPERTY_TYPE_ENUM, (BYTE *)&mode, sizeof(mode));
+
+        ID2D1Effect_GetInput(effect, input_count - 1, &input_image);
+        if (!input_image)
+            return FALSE;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, &input) ? S_OK : E_FAIL;
+        ID2D1Image_Release(input_image);
+        if (FAILED(hr))
+            return FALSE;
+
+        for (i = input_count - 1; i-- > 0;)
+        {
+            ID2D1Effect_GetInput(effect, i, &input_image);
+            if (!input_image)
+                continue;
+            hr = d2d_device_context_realize_effect_input(context, input_image,
+                    interpolation_mode, depth + 1, &source) ? S_OK : E_FAIL;
+            ID2D1Image_Release(input_image);
+            if (FAILED(hr))
+            {
+                d2d_software_image_cleanup(&input);
+                return FALSE;
+            }
+            d2d_software_image_composite(&input, &source, mode);
+            d2d_software_image_cleanup(&source);
+        }
+        *result = input;
+        return TRUE;
+    }
+
+    FIXME("Unhandled effect %s.\n", wine_dbgstr_guid(&clsid));
+    return FALSE;
+}
+
+static BOOL d2d_device_context_realize_effect_input(struct d2d_device_context *context,
+        ID2D1Image *image, D2D1_INTERPOLATION_MODE interpolation_mode,
+        unsigned int depth, struct d2d_software_image *result)
+{
+    ID2D1CommandList *command_list;
+    ID2D1Effect *effect;
+    ID2D1Bitmap *bitmap;
+    BOOL handled;
+
+    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
+    {
+        handled = d2d_device_context_realize_effect(context, effect,
+                interpolation_mode, depth, result);
+        ID2D1Effect_Release(effect);
+        return handled;
+    }
+    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
+    {
+        ID2D1Bitmap_Release(bitmap);
+        return d2d_device_context_rasterize_image(context, image, interpolation_mode, result);
+    }
+    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
+    {
+        ID2D1CommandList_Release(command_list);
+        return d2d_device_context_rasterize_image(context, image, interpolation_mode, result);
+    }
+    return FALSE;
+}
+
+static BOOL d2d_device_context_draw_effect_image(struct d2d_device_context *context,
+        ID2D1Image *image, D2D1_INTERPOLATION_MODE interpolation_mode)
+{
+    D2D1_BITMAP_PROPERTIES1 properties = {{0}};
+    D2D1_MATRIX_3X2_F previous_transform;
+    struct d2d_software_image software = {0};
+    ID2D1Bitmap1 *bitmap;
+    D2D1_SIZE_U size;
+    HRESULT hr;
+
+    if (!d2d_device_context_realize_effect_input(context, image,
+            interpolation_mode, 0, &software))
+        return FALSE;
+
+    size.width = software.width;
+    size.height = software.height;
+    properties.pixelFormat = context->desc.pixelFormat;
+    if (properties.pixelFormat.format == DXGI_FORMAT_UNKNOWN)
+        properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    properties.dpiX = context->desc.dpiX;
+    properties.dpiY = context->desc.dpiY;
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, software.pixels, software.stride, &properties, &bitmap);
+    if (SUCCEEDED(hr))
+    {
+        previous_transform = context->drawing_state.transform;
+        context->drawing_state.transform = identity;
+        d2d_device_context_draw_bitmap(context, (ID2D1Bitmap *)bitmap, NULL,
+                1.0f, interpolation_mode, NULL, NULL, NULL);
+        context->drawing_state.transform = previous_transform;
+        ID2D1Bitmap1_Release(bitmap);
+    }
+    d2d_software_image_cleanup(&software);
+    return SUCCEEDED(hr);
+}
+
 static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *iface, ID2D1Image *image,
         const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
         D2D1_COMPOSITE_MODE composite_mode)
@@ -3098,6 +3813,10 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
         ID2D1Bitmap_Release(bitmap);
         return;
     }
+
+    if (!target_offset && !image_rect
+            && d2d_device_context_draw_effect_image(context, image, interpolation_mode))
+        return;
 
     FIXME("Unhandled image %p.\n", image);
 }
