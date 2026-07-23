@@ -894,7 +894,7 @@ static void STDMETHODCALLTYPE d2d_device_context_FillEllipse(ID2D1DeviceContext6
 }
 
 static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *context,
-        struct d2d_brush *brush, struct d2d_brush *opacity_brush, BOOL outline, BOOL is_arc)
+        struct d2d_brush *brush, struct d2d_brush *opacity_brush, BOOL outline, BOOL is_curve, BOOL is_arc)
 {
     D3D11_MAPPED_SUBRESOURCE map_desc;
     ID3D11DeviceContext *d3d_context;
@@ -913,9 +913,9 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
 
     cb_data = map_desc.pData;
     cb_data->outline = outline;
+    cb_data->is_curve = is_curve;
     cb_data->is_arc = is_arc;
-    cb_data->pad[0] = 0;
-    cb_data->pad[1] = 0;
+    cb_data->antialias = context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
     if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
         WARN("Failed to initialize colour brush buffer.\n");
     if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
@@ -971,6 +971,15 @@ static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *contex
     cb_data->transform_rty.z = w->_32 * tmp_y;
     cb_data->transform_rty.w = -2.0f / context->pixel_size.height;
 
+    /* PER_PRIMITIVE requires high-quality antialiasing for non-text edges.
+     * The vertex shaders use this one-pixel fringe to make the complete
+     * coverage ramp available to the pixel shader. */
+    cb_data->stroke_aa.x = stroke_width > 0.0f
+            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE ? 1.0f : 0.0f;
+    cb_data->stroke_aa.y = 0.0f;
+    cb_data->stroke_aa.z = 0.0f;
+    cb_data->stroke_aa.w = 0.0f;
+
     ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->vs_cb, 0);
     ID3D11DeviceContext_Release(d3d_context);
 
@@ -991,7 +1000,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         return;
     }
 
-    if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE)))
+    if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
         return;
@@ -1036,6 +1045,12 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
 
     if (geometry->outline.bezier_face_count)
     {
+        if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, FALSE)))
+        {
+            WARN("Failed to update curve ps constant buffer, hr %#lx.\n", hr);
+            return;
+        }
+
         buffer_desc.ByteWidth = geometry->outline.bezier_face_count * sizeof(*geometry->outline.bezier_faces);
         buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
         buffer_data.pSysMem = geometry->outline.bezier_faces;
@@ -1088,7 +1103,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE)))
+        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
             d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_ARC_OUTLINE, ib,
                     3 * geometry->outline.arc_face_count, vb,
                     sizeof(*geometry->outline.arcs), brush, NULL);
@@ -1134,21 +1149,6 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
             stroke_width /= context->drawing_state.transform.m11;
     }
 
-    if (stroke_width > 0.0f && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
-    {
-        const D2D1_MATRIX_3X2_F *transform = &context->drawing_state.transform;
-        float dpi_x = context->desc.dpiX / 96.0f, dpi_y = context->desc.dpiY / 96.0f;
-        float scale_x = hypotf(transform->_11 * dpi_x, transform->_12 * dpi_y);
-        float scale_y = hypotf(transform->_21 * dpi_x, transform->_22 * dpi_y);
-        float device_scale = sqrtf(scale_x * scale_y);
-
-        /* Preserve antialiased hairlines as continuous one-pixel strokes.  Fractional
-         * geometry narrower than one device pixel otherwise develops coverage gaps
-         * along shallow curves and diagonals. */
-        if (device_scale > 0.0f && stroke_width * device_scale < 1.0f)
-            stroke_width = 1.0f / device_scale;
-    }
-
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
 }
 
@@ -1173,7 +1173,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         return;
     }
 
-    if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, FALSE)))
+    if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
         return;
@@ -1239,7 +1239,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, TRUE)))
+        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, TRUE, TRUE)))
             d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.arc_vertex_count, vb,
                     sizeof(*geometry->fill.arc_vertices), brush, opacity_brush);
 
@@ -5490,6 +5490,7 @@ static const D3D11_INPUT_ELEMENT_DESC shape_il_desc_outline[] =
     {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
     {"PREV", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
     {"NEXT", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    {"SIDE", 0, DXGI_FORMAT_R32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
 };
 static const D3D11_INPUT_ELEMENT_DESC shape_il_desc_curve_outline[] =
 {
@@ -5512,6 +5513,7 @@ static const D3D11_INPUT_ELEMENT_DESC shape_il_desc_curve[] =
 static const char shape_vs_code_outline[] =
     "float3x2 transform_geometry;\n"
     "float stroke_width;\n"
+    "float4 stroke_aa;\n"
     "float4 transform_rtx;\n"
     "float4 transform_rty;\n"
     "\n"
@@ -5520,6 +5522,7 @@ static const char shape_vs_code_outline[] =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "    float4 position : SV_POSITION;\n"
     "};\n"
     "\n"
@@ -5532,13 +5535,15 @@ static const char shape_vs_code_outline[] =
     " *   q⃑ᵢ = q̂ₚᵣₑᵥ⊥ + tan(½θ) · -q̂ₚᵣₑᵥ\n"
     " *   θ  = ∠PₚᵣₑᵥP₀Pₙₑₓₜ\n"
     " *   q⃑ₚᵣₑᵥ = P₀ - Pₚᵣₑᵥ */\n"
-    "void main(float2 position : POSITION, float2 prev : PREV, float2 next : NEXT, out struct output o)\n"
+    "void main(float2 position : POSITION, float2 prev : PREV, float2 next : NEXT,\n"
+    "        float side : SIDE, out struct output o)\n"
     "{\n"
     "    float2 q_prev, q_next, v_p, q_i;\n"
-    "    float2x2 geom;\n"
-    "    float l;\n"
+    "    float2x2 geom, rt;\n"
+    "    float expand, l;\n"
     "\n"
-    "    o.stroke_transform = float2x2(transform_rtx.xy, transform_rty.xy) * stroke_width * 0.5f;\n"
+    "    rt = float2x2(transform_rtx.xy, transform_rty.xy);\n"
+    "    o.stroke_transform = rt * stroke_width * 0.5f;\n"
     "\n"
     "    geom = float2x2(transform_geometry._11_21, transform_geometry._12_22);\n"
     "    q_prev = normalize(mul(geom, prev));\n"
@@ -5549,10 +5554,13 @@ static const char shape_vs_code_outline[] =
     "    v_p = float2(-q_prev.y, q_prev.x);\n"
     "    l = -dot(v_p, q_next) / (1.0f + dot(q_prev, q_next));\n"
     "    q_i = l * q_prev + v_p;\n"
+    "    expand = stroke_aa.x / max(length(mul(rt, q_i)), 1.0e-6f);\n"
+    "    o.edge = side * (1.0f + expand / max(stroke_width * 0.5f, 1.0e-6f));\n"
     "\n"
     "    o.b = float4(0.0, 0.0, 0.0, 0.0);\n"
     "\n"
-    "    o.p = mul(float3(position, 1.0f), transform_geometry) + stroke_width * 0.5f * q_i;\n"
+    "    o.p = mul(float3(position, 1.0f), transform_geometry)\n"
+    "            + (stroke_width * 0.5f + expand) * q_i;\n"
     "    position = mul(float2x3(transform_rtx.xyz, transform_rty.xyz), float3(o.p, 1.0f))\n"
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
@@ -5577,6 +5585,7 @@ static const char shape_vs_code_outline[] =
 static const char shape_vs_code_bezier_outline[] =
     "float3x2 transform_geometry;\n"
     "float stroke_width;\n"
+    "float4 stroke_aa;\n"
     "float4 transform_rtx;\n"
     "float4 transform_rty;\n"
     "\n"
@@ -5585,6 +5594,7 @@ static const char shape_vs_code_bezier_outline[] =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "    float4 position : SV_POSITION;\n"
     "};\n"
     "\n"
@@ -5593,7 +5603,7 @@ static const char shape_vs_code_bezier_outline[] =
     "{\n"
     "    float2 q_prev, q_next, v_p, q_i, p;\n"
     "    float2x2 geom, rt;\n"
-    "    float l;\n"
+    "    float expand, l;\n"
     "\n"
     "    geom = float2x2(transform_geometry._11_21, transform_geometry._12_22);\n"
     "    rt = float2x2(transform_rtx.xy, transform_rty.xy);\n"
@@ -5614,7 +5624,9 @@ static const char shape_vs_code_bezier_outline[] =
     "    v_p = float2(-q_prev.y, q_prev.x);\n"
     "    l = -dot(v_p, q_next) / (1.0f + dot(q_prev, q_next));\n"
     "    q_i = l * q_prev + v_p;\n"
-    "    p += 0.5f * stroke_width * q_i;\n"
+    "    expand = stroke_aa.x / max(length(mul(rt, q_i)), 1.0e-6f);\n"
+    "    p += (0.5f * stroke_width + expand) * q_i;\n"
+    "    o.edge = 0.0f;\n"
     "\n"
     "    v_p = mul(rt, p2);\n"
     "    v_p = normalize(float2(-v_p.y, v_p.x));\n"
@@ -5631,7 +5643,8 @@ static const char shape_vs_code_bezier_outline[] =
     "        o.b.y = dot(v_p, p1);\n"
     "    }\n"
     "\n"
-    "    o.p = mul(float3(position, 1.0f), transform_geometry) + 0.5f * stroke_width * q_i;\n"
+    "    o.p = mul(float3(position, 1.0f), transform_geometry)\n"
+    "            + (0.5f * stroke_width + expand) * q_i;\n"
     "    position = mul(float2x3(transform_rtx.xyz, transform_rty.xyz), float3(o.p, 1.0f))\n"
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
@@ -5656,6 +5669,7 @@ static const char shape_vs_code_bezier_outline[] =
 static const char shape_vs_code_arc_outline[] =
     "float3x2 transform_geometry;\n"
     "float stroke_width;\n"
+    "float4 stroke_aa;\n"
     "float4 transform_rtx;\n"
     "float4 transform_rty;\n"
     "\n"
@@ -5664,6 +5678,7 @@ static const char shape_vs_code_arc_outline[] =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "    float4 position : SV_POSITION;\n"
     "};\n"
     "\n"
@@ -5672,7 +5687,7 @@ static const char shape_vs_code_arc_outline[] =
     "{\n"
     "    float2 q_prev, q_next, v_p, q_i, p;\n"
     "    float2x2 geom, rt, p_inv;\n"
-    "    float l;\n"
+    "    float expand, l;\n"
     "    float a;\n"
     "    float2 bc;\n"
     "\n"
@@ -5695,19 +5710,23 @@ static const char shape_vs_code_arc_outline[] =
     "    v_p = float2(-q_prev.y, q_prev.x);\n"
     "    l = -dot(v_p, q_next) / (1.0f + dot(q_prev, q_next));\n"
     "    q_i = l * q_prev + v_p;\n"
-    "    p += 0.5f * stroke_width * q_i;\n"
+    "    expand = stroke_aa.x / max(length(mul(rt, q_i)), 1.0e-6f);\n"
+    "    p += (0.5f * stroke_width + expand) * q_i;\n"
+    "    o.edge = 0.0f;\n"
     "\n"
     "    p_inv = float2x2(p1.y, -p1.x, p2.y - p1.y, p1.x - p2.x) / (p1.x * p2.y - p2.x * p1.y);\n"
     "    o.b.xy = mul(p_inv, p) + float2(1.0f, 0.0f);\n"
     "    o.b.zw = 0.0f;\n"
     "\n"
-    "    o.p = mul(float3(position, 1.0f), transform_geometry) + 0.5f * stroke_width * q_i;\n"
+    "    o.p = mul(float3(position, 1.0f), transform_geometry)\n"
+    "            + (0.5f * stroke_width + expand) * q_i;\n"
     "    position = mul(float2x3(transform_rtx.xyz, transform_rty.xyz), float3(o.p, 1.0f))\n"
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
     "}\n";
 static const char shape_vs_code_triangle[] =
     "float3x2 transform_geometry;\n"
+    "float4 stroke_aa;\n"
     "float4 transform_rtx;\n"
     "float4 transform_rty;\n"
     "\n"
@@ -5716,6 +5735,7 @@ static const char shape_vs_code_triangle[] =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "    float4 position : SV_POSITION;\n"
     "};\n"
     "\n"
@@ -5724,12 +5744,14 @@ static const char shape_vs_code_triangle[] =
     "    o.p = mul(float3(position, 1.0f), transform_geometry);\n"
     "    o.b = float4(1.0, 0.0, 1.0, 1.0);\n"
     "    o.stroke_transform = float2x2(1.0, 0.0, 0.0, 1.0);\n"
+    "    o.edge = 0.0f;\n"
     "    position = mul(float2x3(transform_rtx.xyz, transform_rty.xyz), float3(o.p, 1.0f))\n"
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
     "}\n";
 static const char shape_vs_code_curve[] =
     "float3x2 transform_geometry;\n"
+    "float4 stroke_aa;\n"
     "float4 transform_rtx;\n"
     "float4 transform_rty;\n"
     "\n"
@@ -5738,6 +5760,7 @@ static const char shape_vs_code_curve[] =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "    float4 position : SV_POSITION;\n"
     "};\n"
     "\n"
@@ -5746,6 +5769,7 @@ static const char shape_vs_code_curve[] =
     "    o.p = mul(float3(position, 1.0f), transform_geometry);\n"
     "    o.b = float4(texcoord, 1.0);\n"
     "    o.stroke_transform = float2x2(1.0, 0.0, 0.0, 1.0);\n"
+    "    o.edge = 0.0f;\n"
     "    position = mul(float2x3(transform_rtx.xyz, transform_rty.xyz), float3(o.p, 1.0f))\n"
     "            * float2(transform_rtx.w, transform_rty.w);\n"
     "    o.position = float4(position + float2(-1.0f, 1.0f), 0.0f, 1.0f);\n"
@@ -5758,7 +5782,9 @@ static const char shape_ps_code[] __attribute__((unused)) =
     "#define BRUSH_TYPE_COUNT    4\n"
     "\n"
     "bool outline;\n"
+    "bool is_curve;\n"
     "bool is_arc;\n"
+    "bool antialias;\n"
     "struct brush\n"
     "{\n"
     "    uint type;\n"
@@ -5775,6 +5801,7 @@ static const char shape_ps_code[] __attribute__((unused)) =
     "    float2 p : WORLD_POSITION;\n"
     "    float4 b : BEZIER;\n"
     "    nointerpolation float2x2 stroke_transform : STROKE_TRANSFORM;\n"
+    "    float edge : EDGE_DISTANCE;\n"
     "};\n"
     "\n"
     "float4 sample_gradient(Buffer<float4> gradient, uint stop_count, float position)\n"
@@ -5900,41 +5927,50 @@ static const char shape_ps_code[] __attribute__((unused)) =
     "    {\n"
     "        float2 du, dv, df;\n"
     "        float4 uv;\n"
+    "        float coverage, f, half_width;\n"
     "\n"
-    "        /* Evaluate the implicit form of the curve (u² - v = 0\n"
-    "         * for Béziers, u² + v² - 1 = 0 for arcs) in texture\n"
-    "         * space, using the screen-space partial derivatives\n"
-    "         * to convert the calculated distance to object space.\n"
-    "         *\n"
-    "         * d(x, y) = |f(x, y)| / ‖∇f(x, y)‖\n"
-    "         *         = |f(x, y)| / √((∂f/∂x)² + (∂f/∂y)²)\n"
-    "         *\n"
-    "         * For Béziers:\n"
-    "         * f(x, y) = u(x, y)² - v(x, y)\n"
-    "         * ∂f/∂x = 2u · ∂u/∂x - ∂v/∂x\n"
-    "         * ∂f/∂y = 2u · ∂u/∂y - ∂v/∂y\n"
-    "         *\n"
-    "         * For arcs:\n"
-    "         * f(x, y) = u(x, y)² + v(x, y)² - 1\n"
-    "         * ∂f/∂x = 2u · ∂u/∂x + 2v · ∂v/∂x\n"
-    "         * ∂f/∂y = 2u · ∂u/∂y + 2v · ∂v/∂y */\n"
-    "        uv = i.b;\n"
-    "        du = float2(ddx(uv.x), ddy(uv.x));\n"
-    "        dv = float2(ddx(uv.y), ddy(uv.y));\n"
-    "\n"
-    "        if (!is_arc)\n"
+    "        if (!is_curve)\n"
     "        {\n"
-    "            df = 2.0f * uv.x * du - dv;\n"
-    "\n"
-    "            clip(dot(df, uv.zw));\n"
-    "            clip(length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x - uv.y));\n"
+    "            if (antialias)\n"
+    "            {\n"
+    "                coverage = saturate(0.5f + (1.0f - abs(i.edge))\n"
+    "                        / max(fwidth(i.edge), 1.0e-6f));\n"
+    "                clip(coverage - 1.0e-4f);\n"
+    "                colour *= coverage;\n"
+    "            }\n"
     "        }\n"
     "        else\n"
     "        {\n"
-    "            df = 2.0f * uv.x * du + 2.0f * uv.y * dv;\n"
+    "            /* Evaluate the implicit curve and convert its signed distance\n"
+    "             * to pixel coverage using screen-space derivatives. */\n"
+    "            uv = i.b;\n"
+    "            du = float2(ddx(uv.x), ddy(uv.x));\n"
+    "            dv = float2(ddx(uv.y), ddy(uv.y));\n"
+    "\n"
+    "            if (!is_arc)\n"
+    "            {\n"
+    "                df = 2.0f * uv.x * du - dv;\n"
+    "                f = uv.x * uv.x - uv.y;\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                df = 2.0f * uv.x * du + 2.0f * uv.y * dv;\n"
+    "                f = uv.x * uv.x + uv.y * uv.y - 1.0f;\n"
+    "            }\n"
     "\n"
     "            clip(dot(df, uv.zw));\n"
-    "            clip(length(mul(i.stroke_transform, df)) - abs(uv.x * uv.x + uv.y * uv.y - 1.0f));\n"
+    "            half_width = length(mul(i.stroke_transform, df));\n"
+    "            if (antialias)\n"
+    "            {\n"
+    "                coverage = saturate(0.5f + (half_width - abs(f))\n"
+    "                        / max(length(df), 1.0e-6f));\n"
+    "                clip(coverage - 1.0e-4f);\n"
+    "                colour *= coverage;\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                clip(half_width - abs(f));\n"
+    "            }\n"
     "        }\n"
     "    }\n"
     "    else\n"

@@ -123,8 +123,9 @@ struct d2d_brush_cb
 struct d2d_ps_cb
 {
     BOOL outline;
+    BOOL is_curve;
     BOOL is_arc;
-    BOOL pad[2];
+    BOOL antialias;
     struct d2d_brush_cb colour_brush;
     struct d2d_brush_cb opacity_brush;
 };
@@ -141,6 +142,7 @@ struct d2d_vs_cb
         float _11, _21, _31, pad0;
         float _12, _22, _32, stroke_width;
     } transform_geometry;
+    struct d2d_vec4 stroke_aa;
     struct d2d_vec4 transform_rtx;
     struct d2d_vec4 transform_rty;
 };
@@ -561,6 +563,7 @@ struct d2d_outline_vertex
     D2D1_POINT_2F position;
     D2D1_POINT_2F prev;
     D2D1_POINT_2F next;
+    float side;
 };
 
 struct d2d_curve_outline_vertex

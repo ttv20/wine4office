@@ -13332,10 +13332,13 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
     struct resource_readback rb;
     ID2D1DeviceContext *context;
     ID2D1SolidColorBrush *brush;
+    ID2D1PathGeometry *geometry;
+    ID2D1GeometrySink *sink;
+    D2D1_BEZIER_SEGMENT bezier;
     D2D1_COLOR_F color;
     D2D1_POINT_2F p0 = {50.0f, 200.0f}, p1 = {250.0f, 235.0f};
     DWORD background;
-    unsigned int x, y, missing = 0;
+    unsigned int x, y, angle, missing = 0, missing_curve = 0, partial = 0;
     HRESULT hr;
 
     if (!init_test_context(&ctx, d3d11))
@@ -13344,11 +13347,40 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
     set_color(&color, 1.0f, 0.5f, 0.0f, 1.0f);
     hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &color, NULL, &brush);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_Open(geometry, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_point(&p0, 350.0f, 170.0f);
+    ID2D1GeometrySink_BeginFigure(sink, p0, D2D1_FIGURE_BEGIN_HOLLOW);
+    set_point(&bezier.point1, 366.5685f, 170.0f);
+    set_point(&bezier.point2, 380.0f, 183.4315f);
+    set_point(&bezier.point3, 380.0f, 200.0f);
+    ID2D1GeometrySink_AddBezier(sink, &bezier);
+    set_point(&bezier.point1, 380.0f, 216.5685f);
+    set_point(&bezier.point2, 366.5685f, 230.0f);
+    set_point(&bezier.point3, 350.0f, 230.0f);
+    ID2D1GeometrySink_AddBezier(sink, &bezier);
+    set_point(&bezier.point1, 333.4315f, 230.0f);
+    set_point(&bezier.point2, 320.0f, 216.5685f);
+    set_point(&bezier.point3, 320.0f, 200.0f);
+    ID2D1GeometrySink_AddBezier(sink, &bezier);
+    set_point(&bezier.point1, 320.0f, 183.4315f);
+    set_point(&bezier.point2, 333.4315f, 170.0f);
+    set_point(&bezier.point3, 350.0f, 170.0f);
+    ID2D1GeometrySink_AddBezier(sink, &bezier);
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
 
+    set_point(&p0, 50.0f, 200.0f);
     ID2D1DeviceContext_BeginDraw(context);
     set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
     ID2D1DeviceContext_Clear(context, &color);
     ID2D1DeviceContext_DrawLine(context, p0, p1, (ID2D1Brush *)brush, 0.5f, NULL);
+    ID2D1DeviceContext_DrawGeometry(context, (ID2D1Geometry *)geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
     hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
@@ -13366,8 +13398,39 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
             ++missing;
     }
     ok(!missing, "Subpixel stroke has %u uncovered columns.\n", missing);
+
+    for (y = 168; y <= 232; ++y)
+        for (x = 318; x <= 382; ++x)
+        {
+            DWORD colour = get_readback_colour(&rb, x, y);
+            unsigned int red = (colour >> 16) & 0xff;
+
+            if (red && red < 0xff)
+                ++partial;
+        }
+    trace("Subpixel curve has %u partially covered pixels.\n", partial);
+    ok(partial >= 20, "Subpixel curve has only %u partially covered pixels.\n", partial);
+
+    for (angle = 0; angle < 360; ++angle)
+    {
+        float theta = angle * M_PI / 180.0f;
+        BOOL covered = FALSE;
+        unsigned int radius;
+
+        for (radius = 28; radius <= 32; ++radius)
+        {
+            x = 350.0f + cosf(theta) * radius + 0.5f;
+            y = 200.0f + sinf(theta) * radius + 0.5f;
+            if (get_readback_colour(&rb, x, y) != background)
+                covered = TRUE;
+        }
+        if (!covered)
+            ++missing_curve;
+    }
+    ok(!missing_curve, "Subpixel curve has %u uncovered angles.\n", missing_curve);
     release_resource_readback(&rb);
 
+    ID2D1PathGeometry_Release(geometry);
     ID2D1SolidColorBrush_Release(brush);
     release_test_context(&ctx);
 }
