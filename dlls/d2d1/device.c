@@ -3844,12 +3844,36 @@ static BOOL d2d_software_image_blur(struct d2d_software_image *image, float sigm
     struct d2d_software_image temporary = {0}, output = {0};
     float *kernel, kernel_sum = 0.0f;
     unsigned int x, y, channel, i, radius;
+    unsigned int left, top, right = 0, bottom = 0;
+    unsigned int horizontal_left, horizontal_right, vertical_top, vertical_bottom;
 
     if (sigma <= 0.0f)
         return TRUE;
     radius = min(64, (unsigned int)ceilf(3.0f * sigma));
     if (!radius)
         return TRUE;
+
+    left = image->width;
+    top = image->height;
+    for (y = 0; y < image->height; ++y)
+    {
+        for (x = 0; x < image->width; ++x)
+        {
+            if (!image->pixels[(size_t)y * image->stride + x * 4 + 3])
+                continue;
+            left = min(left, x);
+            top = min(top, y);
+            right = max(right, x + 1);
+            bottom = max(bottom, y + 1);
+        }
+    }
+    if (left == image->width)
+        return TRUE;
+
+    horizontal_left = left > radius ? left - radius : 0;
+    horizontal_right = min(image->width, right + radius);
+    vertical_top = top > radius ? top - radius : 0;
+    vertical_bottom = min(image->height, bottom + radius);
     if (!(kernel = malloc((radius * 2 + 1) * sizeof(*kernel)))
             || !d2d_software_image_allocate(&temporary, image->width, image->height)
             || !d2d_software_image_allocate(&output, image->width, image->height))
@@ -3869,9 +3893,9 @@ static BOOL d2d_software_image_blur(struct d2d_software_image *image, float sigm
     for (i = 0; i <= radius * 2; ++i)
         kernel[i] /= kernel_sum;
 
-    for (y = 0; y < image->height; ++y)
+    for (y = top; y < bottom; ++y)
     {
-        for (x = 0; x < image->width; ++x)
+        for (x = horizontal_left; x < horizontal_right; ++x)
         {
             for (channel = 0; channel < 4; ++channel)
             {
@@ -3888,9 +3912,9 @@ static BOOL d2d_software_image_blur(struct d2d_software_image *image, float sigm
         }
     }
 
-    for (y = 0; y < image->height; ++y)
+    for (y = vertical_top; y < vertical_bottom; ++y)
     {
-        for (x = 0; x < image->width; ++x)
+        for (x = horizontal_left; x < horizontal_right; ++x)
         {
             for (channel = 0; channel < 4; ++channel)
             {
@@ -3914,6 +3938,92 @@ static BOOL d2d_software_image_blur(struct d2d_software_image *image, float sigm
     return TRUE;
 }
 
+/* Office registers this one-input effect for glow and bevel masks. */
+static const GUID office_alpha_threshold_effect =
+        {0xd29d6bb8, 0x61f5, 0x4952, {0xb4, 0x49, 0x71, 0xcf, 0x6a, 0x41, 0xdd, 0x9f}};
+
+static void d2d_software_image_apply_alpha_threshold(struct d2d_software_image *image,
+        float threshold)
+{
+    size_t i, count = (size_t)image->width * image->height;
+
+    threshold = fminf(1.0f, fmaxf(0.0f, threshold));
+    for (i = 0; i < count; ++i)
+    {
+        BYTE *pixel = image->pixels + i * 4;
+        unsigned int channel, alpha = pixel[3];
+
+        if (alpha < threshold * 255.0f)
+        {
+            memset(pixel, 0, 4);
+            continue;
+        }
+        if (alpha && alpha < 255)
+            for (channel = 0; channel < 3; ++channel)
+                pixel[channel] = min(255, (pixel[channel] * 255 + alpha / 2) / alpha);
+        pixel[3] = 255;
+    }
+}
+
+static void d2d_software_image_apply_shadow(struct d2d_software_image *image,
+        const D2D_VECTOR_4F *color, DXGI_FORMAT format)
+{
+    unsigned int red = format == DXGI_FORMAT_R8G8B8A8_UNORM ? 0 : 2;
+    unsigned int blue = format == DXGI_FORMAT_R8G8B8A8_UNORM ? 2 : 0;
+    size_t i, count = (size_t)image->width * image->height;
+
+    for (i = 0; i < count; ++i)
+    {
+        BYTE *pixel = image->pixels + i * 4;
+        float alpha = pixel[3] * color->w / 255.0f;
+
+        pixel[red] = min(255, (unsigned int)(color->x * alpha * 255.0f + 0.5f));
+        pixel[1] = min(255, (unsigned int)(color->y * alpha * 255.0f + 0.5f));
+        pixel[blue] = min(255, (unsigned int)(color->z * alpha * 255.0f + 0.5f));
+        pixel[3] = min(255, (unsigned int)(alpha * 255.0f + 0.5f));
+    }
+}
+
+static void d2d_software_image_apply_color_matrix(struct d2d_software_image *image,
+        const D2D1_MATRIX_5X4_F *matrix, D2D1_COLORMATRIX_ALPHA_MODE alpha_mode,
+        DXGI_FORMAT format)
+{
+    unsigned int red = format == DXGI_FORMAT_R8G8B8A8_UNORM ? 0 : 2;
+    unsigned int blue = format == DXGI_FORMAT_R8G8B8A8_UNORM ? 2 : 0;
+    size_t i, count = (size_t)image->width * image->height;
+
+    for (i = 0; i < count; ++i)
+    {
+        BYTE *pixel = image->pixels + i * 4;
+        float input[4], output[4];
+        unsigned int x, y;
+
+        input[0] = pixel[red] / 255.0f;
+        input[1] = pixel[1] / 255.0f;
+        input[2] = pixel[blue] / 255.0f;
+        input[3] = pixel[3] / 255.0f;
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT && input[3] > 0.0f)
+            for (x = 0; x < 3; ++x)
+                input[x] /= input[3];
+
+        for (y = 0; y < 4; ++y)
+        {
+            output[y] = matrix->m[4][y];
+            for (x = 0; x < 4; ++x)
+                output[y] += input[x] * matrix->m[x][y];
+            output[y] = fminf(1.0f, fmaxf(0.0f, output[y]));
+        }
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT)
+            for (x = 0; x < 3; ++x)
+                output[x] *= output[3];
+
+        pixel[red] = output[0] * 255.0f + 0.5f;
+        pixel[1] = output[1] * 255.0f + 0.5f;
+        pixel[blue] = output[2] * 255.0f + 0.5f;
+        pixel[3] = output[3] * 255.0f + 0.5f;
+    }
+}
+
 static BOOL d2d_device_context_realize_effect_input(struct d2d_device_context *context,
         ID2D1Image *image, D2D1_INTERPOLATION_MODE interpolation_mode,
         unsigned int depth, struct d2d_software_image *result);
@@ -3923,8 +4033,11 @@ static BOOL d2d_device_context_realize_effect(struct d2d_device_context *context
         unsigned int depth, struct d2d_software_image *result)
 {
     D2D1_MATRIX_3X2_F transform, previous_transform;
+    D2D1_MATRIX_5X4_F color_matrix;
     struct d2d_software_image input = {0}, source = {0};
+    D2D1_COLORMATRIX_ALPHA_MODE alpha_mode;
     D2D1_COMPOSITE_MODE mode;
+    D2D_VECTOR_4F color;
     ID2D1Image *input_image;
     CLSID clsid;
     unsigned int i, input_count;
@@ -3969,6 +4082,70 @@ static BOOL d2d_device_context_realize_effect(struct d2d_device_context *context
         ID2D1Effect_GetValue(effect, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
                 D2D1_PROPERTY_TYPE_FLOAT, (BYTE *)&sigma, sizeof(sigma));
         return d2d_software_image_blur(result, sigma);
+    }
+
+    if (IsEqualGUID(&clsid, &CLSID_D2D1Shadow) && input_count)
+    {
+        ID2D1Effect_GetInput(effect, 0, &input_image);
+        if (!input_image)
+            return FALSE;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, result) ? S_OK : E_FAIL;
+        ID2D1Image_Release(input_image);
+        if (FAILED(hr))
+            return FALSE;
+        sigma = 3.0f;
+        color.x = color.y = color.z = 0.0f;
+        color.w = 1.0f;
+        ID2D1Effect_GetValue(effect, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
+                D2D1_PROPERTY_TYPE_FLOAT, (BYTE *)&sigma, sizeof(sigma));
+        ID2D1Effect_GetValue(effect, D2D1_SHADOW_PROP_COLOR,
+                D2D1_PROPERTY_TYPE_VECTOR4, (BYTE *)&color, sizeof(color));
+        d2d_software_image_apply_shadow(result, &color, context->desc.pixelFormat.format);
+        return d2d_software_image_blur(result, sigma);
+    }
+
+    if (IsEqualGUID(&clsid, &CLSID_D2D1ColorMatrix) && input_count)
+    {
+        ID2D1Effect_GetInput(effect, 0, &input_image);
+        if (!input_image)
+            return FALSE;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, result) ? S_OK : E_FAIL;
+        ID2D1Image_Release(input_image);
+        if (FAILED(hr))
+            return FALSE;
+        memset(&color_matrix, 0, sizeof(color_matrix));
+        color_matrix._11 = color_matrix._22 = color_matrix._33 = color_matrix._44 = 1.0f;
+        alpha_mode = D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED;
+        ID2D1Effect_GetValue(effect, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+                D2D1_PROPERTY_TYPE_MATRIX_5X4, (BYTE *)&color_matrix, sizeof(color_matrix));
+        ID2D1Effect_GetValue(effect, D2D1_COLORMATRIX_PROP_ALPHA_MODE,
+                D2D1_PROPERTY_TYPE_ENUM, (BYTE *)&alpha_mode, sizeof(alpha_mode));
+        d2d_software_image_apply_color_matrix(result, &color_matrix, alpha_mode,
+                context->desc.pixelFormat.format);
+        return TRUE;
+    }
+
+    if (IsEqualGUID(&clsid, &office_alpha_threshold_effect) && input_count)
+    {
+        UINT32 threshold_index;
+        float threshold = 0.5f;
+
+        ID2D1Effect_GetInput(effect, 0, &input_image);
+        if (!input_image)
+            return FALSE;
+        hr = d2d_device_context_realize_effect_input(context, input_image,
+                interpolation_mode, depth + 1, result) ? S_OK : E_FAIL;
+        ID2D1Image_Release(input_image);
+        if (FAILED(hr))
+            return FALSE;
+        threshold_index = ID2D1Effect_GetPropertyIndex(effect, L"Threshold");
+        if (threshold_index != D2D1_INVALID_PROPERTY_INDEX)
+            ID2D1Effect_GetValue(effect, threshold_index, D2D1_PROPERTY_TYPE_FLOAT,
+                    (BYTE *)&threshold, sizeof(threshold));
+        d2d_software_image_apply_alpha_threshold(result, threshold);
+        return TRUE;
     }
 
     if (IsEqualGUID(&clsid, &CLSID_D2D1Composite) && input_count)

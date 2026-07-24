@@ -3265,9 +3265,10 @@ static ULONG STDMETHODCALLTYPE d2d_draw_info_Release(ID2D1DrawInfo *iface)
 static HRESULT STDMETHODCALLTYPE d2d_draw_info_SetInputDescription(ID2D1DrawInfo *iface,
         UINT32 index, D2D1_INPUT_DESCRIPTION description)
 {
-    FIXME("iface %p, index %u stub.\n", iface, index);
+    TRACE("iface %p, index %u, description {%u, %u}.\n", iface, index,
+            description.filter, description.levelOfDetailCount);
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_draw_info_SetOutputBuffer(ID2D1DrawInfo *iface,
@@ -3494,7 +3495,7 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
     if (FAILED(hr = ID2D1EffectImpl_Initialize(object->impl, &effect_context->ID2D1EffectContext_iface,
             &object->graph->ID2D1TransformGraph_iface)))
     {
-        WARN("Failed to initialize effect, hr %#lx.\n", hr);
+        WARN("Failed to initialize effect %s, hr %#lx.\n", wine_dbgstr_guid(effect_id), hr);
         ID2D1Effect_Release(&object->ID2D1Effect_iface);
         return hr;
     }

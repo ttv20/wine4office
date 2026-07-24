@@ -516,12 +516,78 @@ struct d2d_command_list *unsafe_impl_from_ID2D1CommandList(ID2D1CommandList *ifa
     return CONTAINING_RECORD(iface, struct d2d_command_list, ID2D1CommandList_iface);
 }
 
+static void d2d_command_list_rebase_data(struct d2d_command_list *command_list, const void *old_data)
+{
+    intptr_t delta = (uintptr_t)command_list->data - (uintptr_t)old_data;
+    void *data = command_list->data, *end = (BYTE *)command_list->data + command_list->size;
+
+#define REBASE_FIELD(field) do { if (field) (field) = (void *)((uintptr_t)(field) + delta); } while (0)
+
+    while (data < end)
+    {
+        struct d2d_command *command = data;
+
+        switch (command->op)
+        {
+            case D2D_COMMAND_DRAW_GLYPH_RUN:
+            {
+                struct d2d_command_draw_glyph_run *c = data;
+
+                REBASE_FIELD(c->run.glyphIndices);
+                REBASE_FIELD(c->run.glyphAdvances);
+                REBASE_FIELD(c->run.glyphOffsets);
+                REBASE_FIELD(c->run_desc);
+                if (c->run_desc)
+                {
+                    REBASE_FIELD(c->run_desc->localeName);
+                    REBASE_FIELD(c->run_desc->string);
+                    REBASE_FIELD(c->run_desc->clusterMap);
+                }
+                break;
+            }
+            case D2D_COMMAND_DRAW_BITMAP:
+            {
+                struct d2d_command_draw_bitmap *c = data;
+
+                REBASE_FIELD(c->dst_rect);
+                REBASE_FIELD(c->src_rect);
+                REBASE_FIELD(c->perspective_transform);
+                break;
+            }
+            case D2D_COMMAND_DRAW_IMAGE:
+            {
+                struct d2d_command_draw_image *c = data;
+
+                REBASE_FIELD(c->target_offset);
+                REBASE_FIELD(c->image_rect);
+                break;
+            }
+            case D2D_COMMAND_FILL_OPACITY_MASK:
+            {
+                struct d2d_command_fill_opacity_mask *c = data;
+
+                REBASE_FIELD(c->dst_rect);
+                REBASE_FIELD(c->src_rect);
+                break;
+            }
+            default:
+                break;
+        }
+        data = (BYTE *)data + command->size;
+    }
+
+#undef REBASE_FIELD
+}
+
 static void * d2d_command_list_require_space(struct d2d_command_list *command_list, size_t size)
 {
     struct d2d_command *command;
+    void *old_data = command_list->data;
 
     if (!d2d_array_reserve(&command_list->data, &command_list->capacity, command_list->size + size, 1))
         return NULL;
+    if (old_data && old_data != command_list->data)
+        d2d_command_list_rebase_data(command_list, old_data);
 
     command = (struct d2d_command *)((char *)command_list->data + command_list->size);
     command->size = size;
