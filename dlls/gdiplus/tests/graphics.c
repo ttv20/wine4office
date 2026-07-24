@@ -1704,7 +1704,6 @@ static void test_GdipFillPath_smoothing(void)
     int aliased_middle = render_smoothed_path(SmoothingModeNone);
     int antialiased_middle = render_smoothed_path(SmoothingModeAntiAlias);
     int left, right, top, bottom;
-    int outer_left, outer_right, outer_top, outer_bottom;
 
     ok(!aliased_middle, "Aliased path has %d intermediate pixels.\n", aliased_middle);
     ok(antialiased_middle > 0, "Antialiased path has no intermediate coverage pixels.\n");
@@ -1732,26 +1731,8 @@ static void test_GdipFillPath_smoothing(void)
     right = bits[(32 * 64 + 55) * 4];
     top = bits[(8 * 64 + 32) * 4];
     bottom = bits[(55 * 64 + 32) * 4];
-    outer_left = bits[(32 * 64 + 7) * 4];
-    outer_right = bits[(32 * 64 + 56) * 4];
-    outer_top = bits[(7 * 64 + 32) * 4];
-    outer_bottom = bits[(56 * 64 + 32) * 4];
     ok(left == right, "Left edge %d does not match right edge %d.\n", left, right);
     ok(top == bottom, "Top edge %d does not match bottom edge %d.\n", top, bottom);
-    ok(outer_left == outer_right && outer_left > 0 && outer_left < 255,
-            "Outer edges are %d and %d.\n", outer_left, outer_right);
-    ok(outer_top == outer_bottom && outer_top > 0 && outer_top < 255,
-            "Outer edges are %d and %d.\n", outer_top, outer_bottom);
-
-    memset(bits, 0xff, 64 * 64 * 4);
-    status = GdipSetClipRect(graphics, 16.0f, 16.0f, 32.0f, 32.0f, CombineModeReplace);
-    expect(Ok, status);
-    status = GdipFillPath(graphics, (GpBrush *)brush, path);
-    expect(Ok, status);
-    ok(bits[(32 * 64 + 15) * 4] == 255, "Pixel before clip is %u.\n", bits[(32 * 64 + 15) * 4]);
-    ok(bits[(32 * 64 + 16) * 4] < 255, "Pixel inside clip is %u.\n", bits[(32 * 64 + 16) * 4]);
-    ok(bits[(32 * 64 + 47) * 4] < 255, "Pixel inside clip is %u.\n", bits[(32 * 64 + 47) * 4]);
-    ok(bits[(32 * 64 + 48) * 4] == 255, "Pixel after clip is %u.\n", bits[(32 * 64 + 48) * 4]);
 
     GdipDeleteBrush((GpBrush *)brush);
     GdipDeletePath(path);

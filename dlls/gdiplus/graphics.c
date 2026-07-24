@@ -5108,24 +5108,15 @@ static GpStatus SOFTWARE_GdipFillRegion(GpGraphics *graphics, GpBrush *brush,
  * instead of individual triangles so antialiasing cannot expose tessellation seams. */
 static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, GpPath *path)
 {
-    static const unsigned int coverage_filter[] = {1, 14, 1};
-    enum
-    {
-        sample_scale = 8,
-        sample_count = sample_scale * sample_scale,
-        coverage_filter_sum = 16,
-        coverage_filter_divisor = coverage_filter_sum * coverage_filter_sum,
-    };
+    enum { sample_scale = 8, sample_count = sample_scale * sample_scale };
     GpRegion *region = NULL, *device_region = NULL, *sample_region = NULL;
-    GpRegion *clip_region = NULL, *device_clip_region = NULL;
     GpMatrix *scale_matrix = NULL;
-    struct span_list spans = {0}, clip_spans = {0};
+    struct span_list spans = {0};
     GpBitmap *dst_bitmap = (GpBitmap *)graphics->image;
     DWORD *pixel_data = NULL;
-    BYTE *coverage = NULL, *filtered_coverage = NULL, *clip_mask = NULL;
-    GpRectF device_bounds;
+    BYTE *coverage = NULL;
     GpRect bounds;
-    RECT sample_bounds, clip_bounds;
+    RECT sample_bounds;
     size_t pixel_count, i;
     BOOL transform_acquired = FALSE;
     GpStatus stat;
@@ -5146,56 +5137,14 @@ static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, G
     if (stat == Ok && (!bounds.Width || !bounds.Height))
         goto done;
 
-    if (stat == Ok)
-        stat = get_graphics_device_bounds(graphics, &device_bounds);
-    if (stat == Ok)
-    {
-        int left = max(bounds.X - 1, (int)floorf(device_bounds.X));
-        int top = max(bounds.Y - 1, (int)floorf(device_bounds.Y));
-        int right = min(bounds.X + bounds.Width + 1,
-                (int)ceilf(device_bounds.X + device_bounds.Width));
-        int bottom = min(bounds.Y + bounds.Height + 1,
-                (int)ceilf(device_bounds.Y + device_bounds.Height));
-
-        bounds.X = left;
-        bounds.Y = top;
-        bounds.Width = right - left;
-        bounds.Height = bottom - top;
-    }
-
     if (stat == Ok && (bounds.Width < 0 || bounds.Height < 0
             || (size_t)bounds.Width > SIZE_MAX / (size_t)bounds.Height))
         stat = OutOfMemory;
 
     pixel_count = stat == Ok ? (size_t)bounds.Width * bounds.Height : 0;
     if (stat == Ok && (!(pixel_data = calloc(pixel_count, sizeof(*pixel_data)))
-            || !(coverage = calloc(pixel_count, sizeof(*coverage)))
-            || !(filtered_coverage = calloc(pixel_count, sizeof(*filtered_coverage)))
-            || !(clip_mask = calloc(pixel_count, sizeof(*clip_mask)))))
+            || !(coverage = calloc(pixel_count, sizeof(*coverage)))))
         stat = OutOfMemory;
-
-    if (stat == Ok)
-        stat = GdipCreateRegion(&clip_region);
-    if (stat == Ok)
-        stat = get_clipped_device_region(graphics, clip_region, &device_clip_region);
-    if (stat == Ok)
-    {
-        clip_bounds.left = bounds.X;
-        clip_bounds.top = bounds.Y;
-        clip_bounds.right = bounds.X + bounds.Width;
-        clip_bounds.bottom = bounds.Y + bounds.Height;
-        stat = region_element_to_spans(&device_clip_region->node, &clip_bounds, &clip_spans);
-    }
-    if (stat == Ok)
-    {
-        for (i = 0; i < clip_spans.length; ++i)
-        {
-            const struct span *span = &clip_spans.spans[i];
-            size_t offset = (size_t)(span->y - bounds.Y) * bounds.Width + span->x[0] - bounds.X;
-
-            memset(&clip_mask[offset], 1, span->x[1] - span->x[0]);
-        }
-    }
 
     if (stat == Ok)
         stat = brush_fill_pixels(graphics, brush, pixel_data, &bounds, bounds.Width);
@@ -5246,35 +5195,9 @@ static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, G
             }
         }
 
-        /* Per-pixel box coverage leaves shallow edges with a one-pixel transition,
-         * regardless of the supersampling density. Apply a narrow reconstruction
-         * filter so the transition is stable across adjacent device pixels. */
         for (i = 0; i < pixel_count; ++i)
         {
-            unsigned int sum = 0;
-            int x = i % bounds.Width, y = i / bounds.Width;
-            int dx, dy;
-
-            for (dy = -1; dy <= 1; ++dy)
-            {
-                if (y + dy < 0 || y + dy >= bounds.Height)
-                    continue;
-                for (dx = -1; dx <= 1; ++dx)
-                {
-                    if (x + dx < 0 || x + dx >= bounds.Width)
-                        continue;
-                    sum += coverage[(size_t)(y + dy) * bounds.Width + x + dx]
-                            * coverage_filter[dx + 1] * coverage_filter[dy + 1];
-                }
-            }
-            filtered_coverage[i] = (sum + coverage_filter_divisor / 2)
-                    / coverage_filter_divisor;
-        }
-
-        for (i = 0; i < pixel_count; ++i)
-        {
-            BYTE alpha = clip_mask[i] ? (((pixel_data[i] >> 24) & 0xff) * filtered_coverage[i]
-                    + sample_count / 2) / sample_count : 0;
+            BYTE alpha = (((pixel_data[i] >> 24) & 0xff) * coverage[i] + sample_count / 2) / sample_count;
             pixel_data[i] = (pixel_data[i] & 0x00ffffff) | (alpha << 24);
         }
 
@@ -5305,15 +5228,10 @@ static GpStatus SOFTWARE_GdipFillPath_AA(GpGraphics *graphics, GpBrush *brush, G
     }
 
 done:
-    free(clip_spans.spans);
     free(spans.spans);
-    free(clip_mask);
-    free(filtered_coverage);
     free(coverage);
     free(pixel_data);
     if (scale_matrix) GdipDeleteMatrix(scale_matrix);
-    if (device_clip_region) GdipDeleteRegion(device_clip_region);
-    if (clip_region) GdipDeleteRegion(clip_region);
     if (sample_region) GdipDeleteRegion(sample_region);
     if (device_region) GdipDeleteRegion(device_region);
     GdipDeleteRegion(region);

@@ -310,11 +310,12 @@ static void d2d_face_set(struct d2d_face *f, UINT16 v0, UINT16 v1, UINT16 v2)
 }
 
 static void d2d_outline_vertex_set(struct d2d_outline_vertex *v, float x, float y,
-        float prev_x, float prev_y, float next_x, float next_y)
+        float prev_x, float prev_y, float next_x, float next_y, float side)
 {
     d2d_point_set(&v->position, x, y);
     d2d_point_set(&v->prev, prev_x, prev_y);
     d2d_point_set(&v->next, next_x, next_y);
+    v->side = side;
 }
 
 static void d2d_curve_outline_vertex_set(struct d2d_curve_outline_vertex *a, const D2D1_POINT_2F *position,
@@ -2938,6 +2939,18 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
     if (ccw == 0.0f)
         return TRUE;
 
+    if (!d2d_array_reserve((void **)&geometry->outline.joins, &geometry->outline.joins_size,
+            geometry->outline.join_count + 1, sizeof(*geometry->outline.joins)))
+    {
+        ERR("Failed to grow outline joins array.\n");
+        return FALSE;
+    }
+    geometry->outline.joins[geometry->outline.join_count].position = *p0;
+    geometry->outline.joins[geometry->outline.join_count].prev = *prev;
+    geometry->outline.joins[geometry->outline.join_count].next = *next;
+    geometry->outline.joins[geometry->outline.join_count].ccw = ccw;
+    ++geometry->outline.join_count;
+
     if (!d2d_array_reserve((void **)&geometry->outline.vertices, &geometry->outline.vertices_size,
             geometry->outline.vertex_count + 3, sizeof(*geometry->outline.vertices)))
     {
@@ -2960,15 +2973,15 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
      * vertex closes the outer gap without producing an unbounded miter. */
     if (ccw < 0.0f)
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y, -next->x, -next->y, -next->x, -next->y);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
+        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
+        d2d_outline_vertex_set(&v[1], p0->x, p0->y, -next->x, -next->y, -next->x, -next->y, -1.0f);
+        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
     }
     else
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y,  next->x,  next->y,  next->x,  next->y);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y);
+        d2d_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
+        d2d_outline_vertex_set(&v[1], p0->x, p0->y,  next->x,  next->y,  next->x,  next->y,  1.0f);
+        d2d_outline_vertex_set(&v[2], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
     }
     geometry->outline.vertex_count += 3;
 
@@ -3006,10 +3019,10 @@ static BOOL d2d_geometry_outline_add_line_segment(struct d2d_geometry *geometry,
     d2d_point_subtract(&q_next, next, p0);
     d2d_point_normalise(&q_next);
 
-    d2d_outline_vertex_set(&v[0], p0->x, p0->y,  q_next.x,  q_next.y,  q_next.x,  q_next.y);
-    d2d_outline_vertex_set(&v[1], p0->x, p0->y, -q_next.x, -q_next.y, -q_next.x, -q_next.y);
-    d2d_outline_vertex_set(&v[2], next->x, next->y,  q_next.x,  q_next.y,  q_next.x,  q_next.y);
-    d2d_outline_vertex_set(&v[3], next->x, next->y, -q_next.x, -q_next.y, -q_next.x, -q_next.y);
+    d2d_outline_vertex_set(&v[0], p0->x, p0->y,  q_next.x,  q_next.y,  q_next.x,  q_next.y,  1.0f);
+    d2d_outline_vertex_set(&v[1], p0->x, p0->y, -q_next.x, -q_next.y, -q_next.x, -q_next.y, -1.0f);
+    d2d_outline_vertex_set(&v[2], next->x, next->y,  q_next.x,  q_next.y,  q_next.x,  q_next.y,  1.0f);
+    d2d_outline_vertex_set(&v[3], next->x, next->y, -q_next.x, -q_next.y, -q_next.x, -q_next.y, -1.0f);
     geometry->outline.vertex_count += 4;
 
     d2d_face_set(&f[0], base_idx + 0, base_idx + 1, base_idx + 2);
@@ -3246,6 +3259,7 @@ static BOOL d2d_geometry_fill_add_arc_triangle(struct d2d_geometry *geometry,
 
 static void d2d_geometry_cleanup(struct d2d_geometry *geometry)
 {
+    free(geometry->outline.joins);
     free(geometry->outline.arc_faces);
     free(geometry->outline.arcs);
     free(geometry->outline.bezier_faces);
@@ -6058,6 +6072,7 @@ static ULONG STDMETHODCALLTYPE d2d_transformed_geometry_Release(ID2D1Transformed
 
     if (!refcount)
     {
+        geometry->outline.joins = NULL;
         geometry->outline.arc_faces = NULL;
         geometry->outline.arcs = NULL;
         geometry->outline.bezier_faces = NULL;
