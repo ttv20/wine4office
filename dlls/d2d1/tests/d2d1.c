@@ -13463,14 +13463,16 @@ static void test_effect_command_list_output(BOOL d3d11)
     ID2D1DeviceContext *context;
     ID2D1CommandList *commands, *mask_commands;
     ID2D1SolidColorBrush *brush, *mask_brush;
-    ID2D1Effect *blur, *affine, *composite;
-    ID2D1Image *target, *blur_output, *output, *composite_output;
+    ID2D1Effect *blur, *affine, *composite, *shadow, *color_matrix_effect;
+    ID2D1Image *target, *blur_output, *output, *composite_output, *shadow_output, *matrix_output;
     D2D1_COMPOSITE_MODE composite_mode = D2D1_COMPOSITE_MODE_DESTINATION_IN;
+    D2D1_MATRIX_5X4_F matrix;
+    D2D_VECTOR_4F shadow_color = {1.0f, 0.0f, 0.0f, 1.0f};
     D2D1_COLOR_F color;
     D2D1_RECT_F rect;
     DWORD foreground, background;
     unsigned int red, green, blue;
-    float sigma = 0.5f;
+    float sigma = 0.5f, zero_sigma = 0.0f;
     HRESULT hr;
 
     if (!init_test_context(&ctx, d3d11))
@@ -13571,6 +13573,66 @@ static void test_effect_command_list_output(BOOL d3d11)
             "Destination-in lost destination colour, got %#lx.\n", foreground);
     release_resource_readback(&rb);
 
+    hr = ID2D1DeviceContext_CreateEffect(context, &CLSID_D2D1Shadow, &shadow);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Effect_SetValue(shadow, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
+            D2D1_PROPERTY_TYPE_FLOAT, (const BYTE *)&zero_sigma, sizeof(zero_sigma));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Effect_SetValue(shadow, D2D1_SHADOW_PROP_COLOR,
+            D2D1_PROPERTY_TYPE_VECTOR4, (const BYTE *)&shadow_color, sizeof(shadow_color));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Effect_SetInput(shadow, 0, (ID2D1Image *)commands, FALSE);
+    ID2D1Effect_GetOutput(shadow, &shadow_output);
+
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawImage(context, shadow_output, NULL, NULL,
+            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    foreground = get_readback_colour(&rb, 120, 110);
+    blue = foreground & 0xff;
+    green = (foreground >> 8) & 0xff;
+    red = (foreground >> 16) & 0xff;
+    ok(red > green + 32 && red > blue + 32,
+            "Shadow output did not use its colour, got %#lx.\n", foreground);
+    release_resource_readback(&rb);
+
+    memset(&matrix, 0, sizeof(matrix));
+    matrix._42 = 1.0f;
+    matrix._44 = 1.0f;
+    hr = ID2D1DeviceContext_CreateEffect(context, &CLSID_D2D1ColorMatrix, &color_matrix_effect);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Effect_SetValue(color_matrix_effect, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+            D2D1_PROPERTY_TYPE_MATRIX_5X4, (const BYTE *)&matrix, sizeof(matrix));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Effect_SetInput(color_matrix_effect, 0, (ID2D1Image *)commands, FALSE);
+    ID2D1Effect_GetOutput(color_matrix_effect, &matrix_output);
+
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawImage(context, matrix_output, NULL, NULL,
+            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    foreground = get_readback_colour(&rb, 120, 110);
+    blue = foreground & 0xff;
+    green = (foreground >> 8) & 0xff;
+    red = (foreground >> 16) & 0xff;
+    ok(green > red + 32 && green > blue + 32,
+            "Color matrix output was not transformed, got %#lx.\n", foreground);
+    release_resource_readback(&rb);
+
+    ID2D1Image_Release(matrix_output);
+    ID2D1Effect_Release(color_matrix_effect);
+    ID2D1Image_Release(shadow_output);
+    ID2D1Effect_Release(shadow);
     ID2D1Image_Release(composite_output);
     ID2D1Effect_Release(composite);
     ID2D1CommandList_Release(mask_commands);
@@ -18186,6 +18248,117 @@ not_found:
     return fontface;
 }
 
+static void test_command_list_glyph_run_lifetime(BOOL d3d11)
+{
+    DWRITE_GLYPH_OFFSET offsets[1] = {{0.0f, 0.0f}};
+    UINT16 indices[1], clusters[1] = {0};
+    float advances[1] = {60.0f};
+    WCHAR text[2] = L"A";
+    DWRITE_GLYPH_RUN_DESCRIPTION description;
+    ID2D1SolidColorBrush *brush;
+    ID2D1DeviceContext *context;
+    ID2D1CommandList *commands;
+    IDWriteFactory *dwrite_factory;
+    struct d2d1_test_context ctx;
+    struct resource_readback rb;
+    DWRITE_GLYPH_RUN glyph_run;
+    IDWriteFontFace *fontface;
+    ID2D1Image *target;
+    D2D1_POINT_2F origin;
+    D2D1_COLOR_F color;
+    D2D1_RECT_F rect;
+    unsigned int i, x, y, covered = 0;
+    UINT32 ch = 'A';
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("Command lists are not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+    context = ctx.context;
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, &IID_IDWriteFactory,
+            (IUnknown **)&dwrite_factory);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    fontface = get_tahoma(dwrite_factory);
+    if (!fontface)
+    {
+        win_skip("Tahoma is not available.\n");
+        IDWriteFactory_Release(dwrite_factory);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, indices);
+    ok(hr == S_OK && indices[0], "Unexpected hr %#lx, index %u.\n", hr, indices[0]);
+
+    memset(&glyph_run, 0, sizeof(glyph_run));
+    glyph_run.fontFace = fontface;
+    glyph_run.fontEmSize = 60.0f;
+    glyph_run.glyphCount = 1;
+    glyph_run.glyphIndices = indices;
+    glyph_run.glyphAdvances = advances;
+    glyph_run.glyphOffsets = offsets;
+    memset(&description, 0, sizeof(description));
+    description.localeName = L"en-us";
+    description.string = text;
+    description.stringLength = 1;
+    description.clusterMap = clusters;
+
+    set_color(&color, 1.0f, 1.0f, 1.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &color, NULL, &brush);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_GetTarget(context, &target);
+    hr = ID2D1DeviceContext_CreateCommandList(context, &commands);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)commands);
+    ID2D1DeviceContext_BeginDraw(context);
+    set_point(&origin, 100.0f, 150.0f);
+    ID2D1DeviceContext_DrawGlyphRun(context, origin, &glyph_run, &description,
+            (ID2D1Brush *)brush, DWRITE_MEASURING_MODE_NATURAL);
+
+    /* Force multiple command-buffer reallocations after storing inline glyph data. */
+    set_rect(&rect, 500.0f, 400.0f, 501.0f, 401.0f);
+    for (i = 0; i < 512; ++i)
+        ID2D1DeviceContext_FillRectangle(context, &rect, (ID2D1Brush *)brush);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = ID2D1CommandList_Close(commands);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    indices[0] = 0;
+    advances[0] = 0.0f;
+    memset(offsets, 0xcc, sizeof(offsets));
+    text[0] = 'Z';
+    clusters[0] = 5;
+
+    ID2D1DeviceContext_SetTarget(context, target);
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawImage(context, (ID2D1Image *)commands, NULL, NULL,
+            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    for (y = 80; y < 170; ++y)
+        for (x = 80; x < 180; ++x)
+            if (get_readback_colour(&rb, x, y) != 0xff000000)
+                ++covered;
+    ok(covered, "Replayed glyph run did not render.\n");
+    release_resource_readback(&rb);
+
+    ID2D1CommandList_Release(commands);
+    ID2D1Image_Release(target);
+    ID2D1SolidColorBrush_Release(brush);
+    IDWriteFontFace_Release(fontface);
+    IDWriteFactory_Release(dwrite_factory);
+    release_test_context(&ctx);
+}
+
 static void test_glyph_run_world_bounds(BOOL d3d11)
 {
     ID2D1DeviceContext *device_context, *device_context2;
@@ -18395,6 +18568,7 @@ START_TEST(d2d1)
     queue_test(test_geometry_realization);
     queue_d3d10_test(test_path_geometry_stream);
     queue_d3d10_test(test_transformed_geometry);
+    queue_test(test_command_list_glyph_run_lifetime);
     queue_d3d10_test(test_glyph_run_world_bounds);
 
     run_queued_tests();
