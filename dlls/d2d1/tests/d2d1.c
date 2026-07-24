@@ -13339,6 +13339,8 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
     D2D1_POINT_2F p0 = {50.0f, 200.0f}, p1 = {250.0f, 235.0f};
     DWORD background;
     unsigned int x, y, angle, missing = 0, missing_curve = 0, partial = 0;
+    unsigned int line_partial = 0, line_opaque = 0, line_sum = 0, line_max = 0;
+    unsigned int curve_opaque = 0, curve_sum = 0, curve_max = 0;
     HRESULT hr;
 
     if (!init_test_context(&ctx, d3d11))
@@ -13398,6 +13400,19 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
             ++missing;
     }
     ok(!missing, "Subpixel stroke has %u uncovered columns.\n", missing);
+    for (y = 195; y <= 240; ++y)
+        for (x = 48; x <= 252; ++x)
+        {
+            DWORD colour = get_readback_colour(&rb, x, y);
+            unsigned int red = (colour >> 16) & 0xff;
+
+            line_sum += red;
+            line_max = max(line_max, red);
+            if (red && red < 0xff) ++line_partial;
+            if (red == 0xff) ++line_opaque;
+        }
+    trace("Subpixel line has coverage %.2f pixels, %u partial, %u opaque, max %u.\n",
+            line_sum / 255.0f, line_partial, line_opaque, line_max);
 
     for (y = 168; y <= 232; ++y)
         for (x = 318; x <= 382; ++x)
@@ -13405,10 +13420,15 @@ static void test_subpixel_stroke_continuity(BOOL d3d11)
             DWORD colour = get_readback_colour(&rb, x, y);
             unsigned int red = (colour >> 16) & 0xff;
 
+            curve_sum += red;
+            curve_max = max(curve_max, red);
             if (red && red < 0xff)
                 ++partial;
+            if (red == 0xff)
+                ++curve_opaque;
         }
-    trace("Subpixel curve has %u partially covered pixels.\n", partial);
+    trace("Subpixel curve has coverage %.2f pixels, %u partial, %u opaque, max %u.\n",
+            curve_sum / 255.0f, partial, curve_opaque, curve_max);
     ok(partial >= 20, "Subpixel curve has only %u partially covered pixels.\n", partial);
 
     for (angle = 0; angle < 360; ++angle)
@@ -13441,13 +13461,15 @@ static void test_effect_command_list_output(BOOL d3d11)
     struct d2d1_test_context ctx;
     struct resource_readback rb;
     ID2D1DeviceContext *context;
-    ID2D1CommandList *commands;
-    ID2D1SolidColorBrush *brush;
-    ID2D1Effect *blur, *affine;
-    ID2D1Image *target, *blur_output, *output;
+    ID2D1CommandList *commands, *mask_commands;
+    ID2D1SolidColorBrush *brush, *mask_brush;
+    ID2D1Effect *blur, *affine, *composite;
+    ID2D1Image *target, *blur_output, *output, *composite_output;
+    D2D1_COMPOSITE_MODE composite_mode = D2D1_COMPOSITE_MODE_DESTINATION_IN;
     D2D1_COLOR_F color;
     D2D1_RECT_F rect;
     DWORD foreground, background;
+    unsigned int red, green, blue;
     float sigma = 0.5f;
     HRESULT hr;
 
@@ -13509,6 +13531,50 @@ static void test_effect_command_list_output(BOOL d3d11)
     ok(foreground != background, "Effect output was not rendered, got %#lx.\n", foreground);
     release_resource_readback(&rb);
 
+    set_color(&color, 1.0f, 1.0f, 1.0f, 0.5f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &color, NULL, &mask_brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateCommandList(context, &mask_commands);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)mask_commands);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_FillRectangle(context, &rect, (ID2D1Brush *)mask_brush);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1CommandList_Close(mask_commands);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, target);
+
+    hr = ID2D1DeviceContext_CreateEffect(context, &CLSID_D2D1Composite, &composite);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Effect_SetValue(composite, D2D1_COMPOSITE_PROP_MODE,
+            D2D1_PROPERTY_TYPE_ENUM, (const BYTE *)&composite_mode, sizeof(composite_mode));
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Effect_SetInput(composite, 0, (ID2D1Image *)commands, FALSE);
+    ID2D1Effect_SetInput(composite, 1, (ID2D1Image *)mask_commands, FALSE);
+    ID2D1Effect_GetOutput(composite, &composite_output);
+
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &color);
+    ID2D1DeviceContext_DrawImage(context, composite_output, NULL, NULL,
+            D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    foreground = get_readback_colour(&rb, 120, 110);
+    blue = foreground & 0xff;
+    green = (foreground >> 8) & 0xff;
+    red = (foreground >> 16) & 0xff;
+    ok(red > green + 16 && blue > green + 16,
+            "Destination-in lost destination colour, got %#lx.\n", foreground);
+    release_resource_readback(&rb);
+
+    ID2D1Image_Release(composite_output);
+    ID2D1Effect_Release(composite);
+    ID2D1CommandList_Release(mask_commands);
+    ID2D1SolidColorBrush_Release(mask_brush);
     ID2D1Image_Release(output);
     ID2D1Effect_Release(affine);
     ID2D1Image_Release(blur_output);

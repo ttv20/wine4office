@@ -1113,6 +1113,291 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     }
 }
 
+static void d2d_device_context_add_geometry_aa_bound(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, const D2D1_POINT_2F *point,
+        D2D1_RECT_F *bounds, BOOL *have_bounds)
+{
+    D2D1_POINT_2F p;
+
+    d2d_point_transform(&p, &geometry->transform, point->x, point->y);
+    d2d_point_transform(&p, &context->drawing_state.transform, p.x, p.y);
+    p.x *= context->desc.dpiX / 96.0f;
+    p.y *= context->desc.dpiY / 96.0f;
+    if (!*have_bounds)
+    {
+        d2d_rect_set(bounds, p.x, p.y, p.x, p.y);
+        *have_bounds = TRUE;
+    }
+    else
+        d2d_rect_expand(bounds, &p);
+}
+
+static void d2d_device_context_fill_round_joins(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
+{
+    ID2D1PathGeometry *join_geometry;
+    ID2D1GeometrySink *sink;
+    D2D1_POINT_2F point, n0, n1;
+    unsigned int i, k, segment_count;
+    float a0, a1, delta, a, radius;
+    HRESULT hr;
+
+    if (FAILED(hr = ID2D1Factory_CreatePathGeometry(context->factory, &join_geometry)))
+        return;
+    if (FAILED(hr = ID2D1PathGeometry_Open(join_geometry, &sink)))
+    {
+        ID2D1PathGeometry_Release(join_geometry);
+        return;
+    }
+
+    radius = stroke_width * 0.5f;
+    for (i = 0; i < geometry->outline.join_count; ++i)
+    {
+        const struct d2d_outline_join *join = &geometry->outline.joins[i];
+
+        if (join->ccw < 0.0f)
+        {
+            d2d_point_set(&n0, -join->prev.y, join->prev.x);
+            d2d_point_set(&n1, join->next.y, -join->next.x);
+        }
+        else
+        {
+            d2d_point_set(&n0, join->prev.y, -join->prev.x);
+            d2d_point_set(&n1, -join->next.y, join->next.x);
+        }
+        a0 = atan2f(n0.y, n0.x);
+        a1 = atan2f(n1.y, n1.x);
+        delta = a1 - a0;
+        if (join->ccw < 0.0f)
+        {
+            while (delta < 0.0f) delta += 2.0f * M_PI;
+            if (delta > M_PI) delta -= 2.0f * M_PI;
+        }
+        else
+        {
+            while (delta > 0.0f) delta -= 2.0f * M_PI;
+            if (delta < -M_PI) delta += 2.0f * M_PI;
+        }
+        segment_count = max(1, (unsigned int)ceilf(fabsf(delta) * 8.0f / M_PI));
+
+        ID2D1GeometrySink_BeginFigure(sink, join->position, D2D1_FIGURE_BEGIN_FILLED);
+        d2d_point_set(&point, join->position.x + radius * n0.x,
+                join->position.y + radius * n0.y);
+        ID2D1GeometrySink_AddLine(sink, point);
+        for (k = 1; k <= segment_count; ++k)
+        {
+            a = a0 + delta * k / segment_count;
+            d2d_point_set(&point, join->position.x + radius * cosf(a),
+                    join->position.y + radius * sinf(a));
+            ID2D1GeometrySink_AddLine(sink, point);
+        }
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    }
+
+    hr = ID2D1GeometrySink_Close(sink);
+    ID2D1GeometrySink_Release(sink);
+    if (SUCCEEDED(hr))
+        ID2D1DeviceContext6_FillGeometry(&context->ID2D1DeviceContext6_iface,
+                (ID2D1Geometry *)join_geometry, &brush->ID2D1Brush_iface, NULL);
+    ID2D1PathGeometry_Release(join_geometry);
+}
+
+static void d2d_device_context_fill_geometry(struct d2d_device_context *render_target,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, struct d2d_brush *opacity_brush);
+
+static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, struct d2d_brush *opacity_brush,
+        float stroke_width, const struct d2d_stroke_style *stroke_style, BOOL fill)
+{
+    D2D1_BITMAP_PROPERTIES1 properties = {{0}};
+    D2D1_DRAWING_STATE_DESCRIPTION1 previous_state = context->drawing_state;
+    float previous_dpi_x = context->desc.dpiX, previous_dpi_y = context->desc.dpiY;
+    D2D1_SIZE_U previous_size = context->pixel_size, output_size, size;
+    ID2D1Bitmap1 *target = NULL, *readback = NULL, *resolved = NULL;
+    ID2D1Image *previous_target = NULL;
+    D2D1_MAPPED_RECT mapped;
+    D2D1_MATRIX_3X2_F join_transform, shifted_transform;
+    D2D1_RECT_F bounds, dst_rect;
+    D2D1_COLOR_F clear = {0};
+    BYTE *pixels = NULL;
+    UINT32 origin_x, origin_y, right, bottom;
+    BOOL have_bounds = FALSE;
+    size_t clip_count;
+    unsigned int x, y, channel, i;
+    unsigned int aa_scale = 8;
+    unsigned int sample_count = aa_scale * aa_scale;
+    HRESULT hr;
+
+    if (fill)
+    {
+        for (i = 0; i < geometry->fill.vertex_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->fill.vertices[i], &bounds, &have_bounds);
+        for (i = 0; i < geometry->fill.bezier_vertex_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->fill.bezier_vertices[i].position, &bounds, &have_bounds);
+        for (i = 0; i < geometry->fill.arc_vertex_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->fill.arc_vertices[i].position, &bounds, &have_bounds);
+    }
+    else
+    {
+        for (i = 0; i < geometry->outline.vertex_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->outline.vertices[i].position, &bounds, &have_bounds);
+        for (i = 0; i < geometry->outline.bezier_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->outline.beziers[i].position, &bounds, &have_bounds);
+        for (i = 0; i < geometry->outline.arc_count; ++i)
+            d2d_device_context_add_geometry_aa_bound(context, geometry,
+                    &geometry->outline.arcs[i].position, &bounds, &have_bounds);
+    }
+    if (!have_bounds || bounds.right < 0.0f || bounds.bottom < 0.0f
+            || bounds.left >= previous_size.width || bounds.top >= previous_size.height)
+        return FALSE;
+
+    origin_x = max(0.0f, floorf(bounds.left - 4.0f));
+    origin_y = max(0.0f, floorf(bounds.top - 4.0f));
+    right = min((float)previous_size.width, ceilf(bounds.right + 4.0f));
+    bottom = min((float)previous_size.height, ceilf(bounds.bottom + 4.0f));
+    output_size.width = right - origin_x;
+    output_size.height = bottom - origin_y;
+    if (!output_size.width || !output_size.height || output_size.width > UINT_MAX / aa_scale
+            || output_size.height > UINT_MAX / aa_scale
+            || (size_t)output_size.width * 4 > SIZE_MAX / output_size.height)
+        return FALSE;
+
+    properties.pixelFormat = context->desc.pixelFormat;
+    if (properties.pixelFormat.format == DXGI_FORMAT_UNKNOWN)
+        properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    properties.dpiX = previous_dpi_x * aa_scale;
+    properties.dpiY = previous_dpi_y * aa_scale;
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    size.width = output_size.width * aa_scale;
+    size.height = output_size.height * aa_scale;
+
+    ID2D1DeviceContext6_GetTarget(&context->ID2D1DeviceContext6_iface, &previous_target);
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, NULL, 0, &properties, &target);
+    if (FAILED(hr))
+        goto done;
+
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, NULL, 0, &properties, &readback);
+    if (FAILED(hr))
+        goto done;
+
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)target);
+    context->desc.dpiX = previous_dpi_x * aa_scale;
+    context->desc.dpiY = previous_dpi_y * aa_scale;
+    shifted_transform = previous_state.transform;
+    shifted_transform._31 -= origin_x * 96.0f / previous_dpi_x;
+    shifted_transform._32 -= origin_y * 96.0f / previous_dpi_y;
+    context->drawing_state.transform = shifted_transform;
+    context->drawing_state.antialiasMode = D2D1_ANTIALIAS_MODE_ALIASED;
+    for (i = 0; i < context->clip_stack.count; ++i)
+    {
+        context->clip_stack.stack[i].left = (context->clip_stack.stack[i].left - origin_x) * aa_scale;
+        context->clip_stack.stack[i].top = (context->clip_stack.stack[i].top - origin_y) * aa_scale;
+        context->clip_stack.stack[i].right = (context->clip_stack.stack[i].right - origin_x) * aa_scale;
+        context->clip_stack.stack[i].bottom = (context->clip_stack.stack[i].bottom - origin_y) * aa_scale;
+    }
+    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+    if (fill)
+        d2d_device_context_fill_geometry(context, geometry, brush, opacity_brush);
+    else
+        d2d_device_context_draw_geometry(context, geometry, brush, stroke_width);
+    if (!fill && stroke_style && stroke_style->desc.lineJoin == D2D1_LINE_JOIN_ROUND
+            && geometry->outline.join_count)
+    {
+        join_transform = geometry->transform;
+        d2d_matrix_multiply(&join_transform, &shifted_transform);
+        context->drawing_state.transform = join_transform;
+        d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
+        context->drawing_state.transform = shifted_transform;
+    }
+    hr = ID2D1DeviceContext6_Flush(&context->ID2D1DeviceContext6_iface, NULL, NULL);
+    for (i = 0; i < context->clip_stack.count; ++i)
+    {
+        context->clip_stack.stack[i].left = context->clip_stack.stack[i].left / aa_scale + origin_x;
+        context->clip_stack.stack[i].top = context->clip_stack.stack[i].top / aa_scale + origin_y;
+        context->clip_stack.stack[i].right = context->clip_stack.stack[i].right / aa_scale + origin_x;
+        context->clip_stack.stack[i].bottom = context->clip_stack.stack[i].bottom / aa_scale + origin_y;
+    }
+    if (FAILED(hr))
+        goto restore;
+
+    hr = ID2D1Bitmap1_CopyFromBitmap(readback, NULL, (ID2D1Bitmap *)target, NULL);
+    if (FAILED(hr) || FAILED(hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped)))
+        goto restore;
+    if (!(pixels = malloc((size_t)output_size.width * output_size.height * 4)))
+    {
+        ID2D1Bitmap1_Unmap(readback);
+        hr = E_OUTOFMEMORY;
+        goto restore;
+    }
+
+    for (y = 0; y < output_size.height; ++y)
+    {
+        for (x = 0; x < output_size.width; ++x)
+        {
+            for (channel = 0; channel < 4; ++channel)
+            {
+                unsigned int sx, sy, value = 0;
+                for (sy = 0; sy < aa_scale; ++sy)
+                    for (sx = 0; sx < aa_scale; ++sx)
+                        value += mapped.bits[(size_t)(y * aa_scale + sy) * mapped.pitch
+                                + (x * aa_scale + sx) * 4 + channel];
+                pixels[((size_t)y * output_size.width + x) * 4 + channel]
+                        = (value + sample_count / 2) / sample_count;
+            }
+        }
+    }
+    ID2D1Bitmap1_Unmap(readback);
+
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
+    context->desc.dpiX = previous_dpi_x;
+    context->desc.dpiY = previous_dpi_y;
+    context->drawing_state = previous_state;
+    properties.dpiX = previous_dpi_x;
+    properties.dpiY = previous_dpi_y;
+    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+    size = output_size;
+    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            size, pixels, output_size.width * 4, &properties, &resolved);
+    if (FAILED(hr))
+        goto done;
+
+    clip_count = context->clip_stack.count;
+    context->clip_stack.count = 0;
+    context->drawing_state.transform = identity;
+    d2d_rect_set(&dst_rect, origin_x * 96.0f / previous_dpi_x,
+            origin_y * 96.0f / previous_dpi_y,
+            right * 96.0f / previous_dpi_x, bottom * 96.0f / previous_dpi_y);
+    ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
+            (ID2D1Bitmap *)resolved, &dst_rect, 1.0f,
+            D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+    context->drawing_state = previous_state;
+    context->clip_stack.count = clip_count;
+    goto done;
+
+ restore:
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
+    context->desc.dpiX = previous_dpi_x;
+    context->desc.dpiY = previous_dpi_y;
+    context->drawing_state = previous_state;
+
+ done:
+    free(pixels);
+    if (resolved) ID2D1Bitmap1_Release(resolved);
+    if (readback) ID2D1Bitmap1_Release(readback);
+    if (target) ID2D1Bitmap1_Release(target);
+    if (previous_target) ID2D1Image_Release(previous_target);
+    return SUCCEEDED(hr);
+}
+
 static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext6 *iface,
         ID2D1Geometry *geometry, ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
 {
@@ -1148,6 +1433,12 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
         if (stroke_style_impl->desc.transformType == D2D1_STROKE_TRANSFORM_TYPE_FIXED)
             stroke_width /= context->drawing_state.transform.m11;
     }
+
+    if (stroke_width < 1.0f
+            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl, NULL,
+                    stroke_width, stroke_style_impl, FALSE))
+        return;
 
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
 }
@@ -1274,6 +1565,17 @@ static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_fill_geometry(context->target.command_list, context, geometry, brush, opacity_brush);
+    /* Resolve compound paths as one coverage image. Otherwise their triangle and
+     * curve meshes can overwrite each other's partially covered boundaries. */
+    else if (context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
+            && (brush_impl->type == D2D_BRUSH_TYPE_SOLID
+                    || brush_impl->type == D2D_BRUSH_TYPE_LINEAR)
+            && geometry_impl->fill.face_count >= 16
+            && (geometry_impl->fill.bezier_vertex_count >= 24
+                    || geometry_impl->fill.arc_vertex_count >= 12)
+            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl,
+                    opacity_brush_impl, 0.0f, NULL, TRUE))
+        return;
     else
         d2d_device_context_fill_geometry(context, geometry_impl, brush_impl, opacity_brush_impl);
 }
@@ -3675,7 +3977,9 @@ static BOOL d2d_device_context_realize_effect(struct d2d_device_context *context
         ID2D1Effect_GetValue(effect, D2D1_COMPOSITE_PROP_MODE,
                 D2D1_PROPERTY_TYPE_ENUM, (BYTE *)&mode, sizeof(mode));
 
-        ID2D1Effect_GetInput(effect, input_count - 1, &input_image);
+        /* Input 0 is the destination. Subsequent inputs are sources and are
+         * composited in ascending index order. */
+        ID2D1Effect_GetInput(effect, 0, &input_image);
         if (!input_image)
             return FALSE;
         hr = d2d_device_context_realize_effect_input(context, input_image,
@@ -3684,7 +3988,7 @@ static BOOL d2d_device_context_realize_effect(struct d2d_device_context *context
         if (FAILED(hr))
             return FALSE;
 
-        for (i = input_count - 1; i-- > 0;)
+        for (i = 1; i < input_count; ++i)
         {
             ID2D1Effect_GetInput(effect, i, &input_image);
             if (!input_image)

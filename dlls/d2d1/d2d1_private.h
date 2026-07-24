@@ -573,6 +573,13 @@ struct d2d_curve_outline_vertex
     D2D1_POINT_2F prev, next;
 };
 
+struct d2d_outline_join
+{
+    D2D1_POINT_2F position;
+    D2D1_POINT_2F prev, next;
+    float ccw;
+};
+
 struct d2d_geometry;
 
 struct d2d_geometry_ops
@@ -635,6 +642,10 @@ struct d2d_geometry
         struct d2d_face *arc_faces;
         size_t arc_faces_size;
         size_t arc_face_count;
+
+        struct d2d_outline_join *joins;
+        size_t joins_size;
+        size_t join_count;
     } outline;
 
     union

@@ -2939,6 +2939,18 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
     if (ccw == 0.0f)
         return TRUE;
 
+    if (!d2d_array_reserve((void **)&geometry->outline.joins, &geometry->outline.joins_size,
+            geometry->outline.join_count + 1, sizeof(*geometry->outline.joins)))
+    {
+        ERR("Failed to grow outline joins array.\n");
+        return FALSE;
+    }
+    geometry->outline.joins[geometry->outline.join_count].position = *p0;
+    geometry->outline.joins[geometry->outline.join_count].prev = *prev;
+    geometry->outline.joins[geometry->outline.join_count].next = *next;
+    geometry->outline.joins[geometry->outline.join_count].ccw = ccw;
+    ++geometry->outline.join_count;
+
     if (!d2d_array_reserve((void **)&geometry->outline.vertices, &geometry->outline.vertices_size,
             geometry->outline.vertex_count + 3, sizeof(*geometry->outline.vertices)))
     {
@@ -3247,6 +3259,7 @@ static BOOL d2d_geometry_fill_add_arc_triangle(struct d2d_geometry *geometry,
 
 static void d2d_geometry_cleanup(struct d2d_geometry *geometry)
 {
+    free(geometry->outline.joins);
     free(geometry->outline.arc_faces);
     free(geometry->outline.arcs);
     free(geometry->outline.bezier_faces);
@@ -6059,6 +6072,7 @@ static ULONG STDMETHODCALLTYPE d2d_transformed_geometry_Release(ID2D1Transformed
 
     if (!refcount)
     {
+        geometry->outline.joins = NULL;
         geometry->outline.arc_faces = NULL;
         geometry->outline.arcs = NULL;
         geometry->outline.bezier_faces = NULL;
