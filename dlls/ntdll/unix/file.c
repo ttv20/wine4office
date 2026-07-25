@@ -4969,7 +4969,10 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
     char *unix_name;
     unsigned int status;
     UNICODE_STRING nt_name;
-    OBJECT_ATTRIBUTES new_attr = *attr;
+    OBJECT_ATTRIBUTES new_attr;
+
+    if (!attr || !info) return STATUS_INVALID_PARAMETER;
+    new_attr = *attr;
 
     status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE );
     if (status)
