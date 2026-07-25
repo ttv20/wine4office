@@ -155,6 +155,9 @@ static void create_file_test(void)
     char buf[32];
     DWORD ret;
 
+    status = pNtQueryFullAttributesFile( NULL, &info );
+    ok( status == STATUS_INVALID_PARAMETER, "expected STATUS_INVALID_PARAMETER, got %08lx\n", status );
+
     GetCurrentDirectoryW( MAX_PATH, path );
     pRtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL );
     InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );

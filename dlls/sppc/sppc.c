@@ -40,11 +40,12 @@ static const SLID o365_proplus_grace_id =
     {0x3ad61e22, 0xe4fe, 0x497f, {0xbd, 0xb1, 0x3e, 0x51, 0xbd, 0x87, 0x21, 0x73}};
 static const SLID office_app_id =
     {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
-/* Product-key SLID observed on native Windows for Word 2024 Retail Grace
- * via SLGetSLIDList(SKU → PKEY). Wine previously invented b7e4a201-… which
- * native rejects with SL_E_PKEY_NOT_INSTALLED (0xC004F014). */
+/* Product-key SLIDs observed through SLGetSLIDList(SKU → PKEY) on native
+ * Windows after each Grace product completed its first Office launch. */
 static const SLID word2024_grace_pkey_id =
     {0x8dd5c488, 0xa99b, 0x0ab1, {0xb2, 0x89, 0x03, 0x34, 0x9b, 0x2c, 0xae, 0x56}};
+static const SLID o365_proplus_grace_pkey_id =
+    {0xa82b4eda, 0xc8b9, 0xa341, {0x8e, 0xa3, 0xd8, 0xf2, 0xcf, 0xbf, 0xb4, 0x11}};
 /* licenseId values from native SLGetSLIDList(SKU → LICENSE) and the Grace
  * UL-OOB XRM. Order matches the native probe. */
 static const SLID word2024_grace_binding_license_id =
@@ -68,6 +69,43 @@ static const WCHAR o365_proplus_grace_license[] =
     L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ul-oob.xrm-ms";
 static const WCHAR o365_proplus_grace_ppd_license[] =
     L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ppd.xrm-ms";
+
+struct o365_product_sku
+{
+    SLID id;
+    const WCHAR *name;
+    const WCHAR *description;
+    const WCHAR *ux_differentiator;
+};
+
+static const WCHAR o365_timebased_description[] = L"Office 16, TIMEBASED_SUB channel";
+static const WCHAR o365_timebased_ux[] = L"TIMEBASED_SUB";
+static const WCHAR o365_free_description[] = L"Office 16, RETAIL(Free) channel";
+static const WCHAR o365_free_ux[] = L"RETAIL(Free)";
+static const WCHAR o365_grace_description[] = L"Office 16, RETAIL(Grace) channel";
+static const WCHAR o365_grace_ux[] = L"RETAIL(Grace)";
+
+/* Native APP → PRODUCT_SKU inventory from two clean ODT O365ProPlusRetail
+ * installations. The Grace SKU is index 4; all other entries are unlicensed. */
+static const struct o365_product_sku o365_product_skus[] =
+{
+    {{0x149dbce7,0xa48e,0x44db,{0x83,0x64,0xa5,0x33,0x86,0xcd,0x45,0x80}}, L"Office 16, Office16O365ProPlusR_Subscription1 edition", o365_timebased_description, o365_timebased_ux},
+    {{0x24fc428e,0xa37e,0x4996,{0xac,0x66,0x8e,0xa0,0x30,0x4a,0x15,0x2d}}, L"Office 16, Office16O365ProPlusE5R_SubTrial edition", o365_timebased_description, o365_timebased_ux},
+    {{0x26b6a7ce,0xb174,0x40aa,{0xa1,0x14,0x31,0x6a,0xa5,0x6b,0xa9,0xfc}}, L"Office 16, Office16O365ProPlusR_SubTrial2 edition", o365_timebased_description, o365_timebased_ux},
+    {{0x35ec6e0e,0x2df4,0x4629,{0x9e,0xe3,0xd5,0x25,0xe8,0x06,0xb9,0x88}}, L"Office 16, Office16O365ProPlusDemoR_BypassTrial365 edition", o365_free_description, o365_free_ux},
+    {{0x3ad61e22,0xe4fe,0x497f,{0xbd,0xb1,0x3e,0x51,0xbd,0x87,0x21,0x73}}, L"Office 16, Office16O365ProPlusR_Grace edition", o365_grace_description, o365_grace_ux},
+    {{0x46d2c0bd,0xf912,0x4ddc,{0x8e,0x67,0xb9,0x0e,0xad,0xc3,0xf8,0x3c}}, L"Office 16, Office16O365ProPlusR_SubTrial1 edition", o365_timebased_description, o365_timebased_ux},
+    {{0x6e5db8a5,0x78e6,0x4953,{0xb7,0x93,0x74,0x22,0x35,0x1a,0xfe,0x88}}, L"Office 16, Office16O365ProPlusR_Subscription4 edition", o365_timebased_description, o365_timebased_ux},
+    {{0x7984d9ed,0x81f9,0x4d50,{0x91,0x3d,0x31,0x7e,0xcd,0x86,0x30,0x65}}, L"Office 16, Office16O365ProPlusE5R_Subscription edition", o365_timebased_description, o365_timebased_ux},
+    {{0xa8119e32,0xb17c,0x4bd3,{0x89,0x50,0x7d,0x18,0x53,0xf4,0xb4,0x12}}, L"Office 16, Office16O365ProPlusR_Subscription3 edition", o365_timebased_description, o365_timebased_ux},
+    {{0xb27b3d00,0x9a95,0x4fcd,{0xa0,0xc2,0x11,0x8c,0xbd,0x5e,0x69,0x9b}}, L"Office 16, Office16O365ProPlusEDUR_SubTrial edition", o365_timebased_description, o365_timebased_ux},
+    {{0xb6b47040,0xb38e,0x4be2,{0xbf,0x6a,0xda,0xbf,0x0c,0x41,0x54,0x0a}}, L"Office 16, Office16O365ProPlusR_SubTrial3 edition", o365_timebased_description, o365_timebased_ux},
+    {{0xcbecb6f5,0xda49,0x4029,{0xbe,0x25,0x59,0x45,0xac,0x97,0x50,0xb3}}, L"Office 16, Office16O365ProPlusEDUR_Subscription edition", o365_timebased_description, o365_timebased_ux},
+    {{0xdfc5a8b0,0xe9fd,0x43f7,{0xb4,0xca,0xd6,0x3f,0x1e,0x74,0x97,0x11}}, L"Office 16, Office16O365ProPlusR_SubTrial5 edition", o365_timebased_description, o365_timebased_ux},
+    {{0xe3dacc06,0x3bc2,0x4e13,{0x8e,0x59,0x8e,0x05,0xf3,0x23,0x23,0x25}}, L"Office 16, Office16O365ProPlusR_Subscription2 edition", o365_timebased_description, o365_timebased_ux},
+    {{0xe538d623,0xc066,0x433d,{0xa6,0xb7,0xe0,0x70,0x8b,0x1f,0xad,0xf7}}, L"Office 16, Office16O365ProPlusR_SubTrial4 edition", o365_timebased_description, o365_timebased_ux},
+    {{0xff02e86c,0xfef0,0x4063,{0xb3,0x9f,0x74,0x27,0x5c,0xdd,0xd7,0xc3}}, L"Office 16, Office16O365ProPlusR_Subscription5 edition", o365_timebased_description, o365_timebased_ux},
+};
 
 #define SLC_CONTEXT_MAGIC 0x534c4343
 #define AUTH_MARKER       0x00010000
@@ -141,6 +179,16 @@ static BOOL grace_license_present(void); /* defined below with license paths */
 static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
 static const WCHAR *installed_profile_product_info(const WCHAR *name);
+
+static const struct o365_product_sku *find_o365_product_sku(const SLID *id)
+{
+    unsigned int i;
+
+    if (!id) return NULL;
+    for (i = 0; i < ARRAY_SIZE(o365_product_skus); ++i)
+        if (IsEqualGUID(id, &o365_product_skus[i].id)) return &o365_product_skus[i];
+    return NULL;
+}
 
 static void clear_last_policy(struct slc_context *context)
 {
@@ -331,33 +379,81 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
                                                LPCWSTR name, UINT *count, SL_LICENSING_STATUS **status)
 {
     const SLID *grace_id = selected_grace_id();
-    SL_LICENSING_STATUS *entry;
+    const struct o365_product_sku *o365_sku;
+    struct slc_context *context;
+    SL_LICENSING_STATUS *entries;
+    unsigned int i, entry_count = 1;
 
     FIXME("(%p %p %p %s %p %p) semi-stub\n", handle, app, product,
             debugstr_w(name), count, status );
 
-    if (!handle || !count || !status)
+    if (!(context = get_slc_context(handle)) || !count || !status)
         return E_INVALIDARG;
 
-    if (!(entry = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, sizeof(*entry))))
+    /* A fresh native context rejects the global aggregate query. Office first
+     * consumes the application right, then repeats the same query on that
+     * context to obtain the effective Office inventory. */
+    if (!app && !product && !context->rights_consumed)
+        return SL_E_RIGHT_NOT_CONSUMED;
+
+    if (o365_proplus_configured() && grace_license_present() && !product &&
+        ((app && IsEqualGUID(app, &office_app_id)) || (!app && context->rights_consumed)))
+        entry_count = ARRAY_SIZE(o365_product_skus);
+
+    if (!(entries = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, entry_count * sizeof(*entries))))
         return E_OUTOFMEMORY;
 
-    if ((!product || IsEqualGUID(product, grace_id)) && grace_license_present())
+    if (entry_count > 1)
     {
-        entry->SkuId = *grace_id;
-        entry->eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
-        entry->dwGraceTime = 5 * 24 * 60;
-        entry->dwTotalGraceDays = 5;
-        entry->hrReason = SL_I_OOB_GRACE_PERIOD;
+        for (i = 0; i < entry_count; ++i)
+        {
+            entries[i].SkuId = o365_product_skus[i].id;
+            if (IsEqualGUID(&entries[i].SkuId, &o365_proplus_grace_id))
+            {
+                entries[i].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
+                entries[i].dwGraceTime = 5 * 24 * 60;
+                entries[i].dwTotalGraceDays = 5;
+                entries[i].hrReason = SL_I_OOB_GRACE_PERIOD;
+            }
+            else
+            {
+                entries[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+                entries[i].hrReason = 0xC004F014; /* SL_E_PKEY_NOT_INSTALLED */
+            }
+        }
+    }
+    else if ((o365_sku = find_o365_product_sku(product)) && o365_proplus_configured())
+    {
+        entries[0].SkuId = o365_sku->id;
+        if (IsEqualGUID(&o365_sku->id, &o365_proplus_grace_id) && grace_license_present())
+        {
+            entries[0].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
+            entries[0].dwGraceTime = 5 * 24 * 60;
+            entries[0].dwTotalGraceDays = 5;
+            entries[0].hrReason = SL_I_OOB_GRACE_PERIOD;
+        }
+        else
+        {
+            entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+            entries[0].hrReason = 0xC004F014; /* SL_E_PKEY_NOT_INSTALLED */
+        }
+    }
+    else if ((!product || IsEqualGUID(product, grace_id)) && grace_license_present())
+    {
+        entries[0].SkuId = *grace_id;
+        entries[0].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
+        entries[0].dwGraceTime = 5 * 24 * 60;
+        entries[0].dwTotalGraceDays = 5;
+        entries[0].hrReason = SL_I_OOB_GRACE_PERIOD;
     }
     else
     {
-        if (product) entry->SkuId = *product;
-        entry->eStatus = SL_LICENSING_STATUS_UNLICENSED;
-        entry->hrReason = SL_E_RIGHT_NOT_CONSUMED;
+        if (product) entries[0].SkuId = *product;
+        entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+        entries[0].hrReason = SL_E_RIGHT_NOT_CONSUMED;
     }
-    *count = 1;
-    *status = entry;
+    *count = entry_count;
+    *status = entries;
     return S_OK;
 }
 
@@ -365,14 +461,12 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
                                           SLDATATYPE *type, UINT *size, BYTE **value)
 {
     static const WCHAR word_sku_name[] = L"Office 24, Office24Word2024R_Grace edition";
-    static const WCHAR o365_sku_name[] = L"Office 16, Office16O365ProPlusR_Grace edition";
     static const WCHAR word_description[] = L"Office 24, RETAIL(Grace) channel";
-    static const WCHAR o365_description[] = L"Office 16, RETAIL(Grace) channel";
     static const WCHAR author[] = L"Microsoft Corporation";
     static const WCHAR word_application_bitmap[] = L"0x00000100";
     static const WCHAR o365_application_bitmap[] = L"0x0001F1BB";
     static const WCHAR ux_differentiator[] = L"RETAIL(Grace)";
-    BOOL o365 = o365_proplus_configured();
+    const struct o365_product_sku *o365_sku;
     const WCHAR *string = NULL;
     UINT bytes;
 
@@ -382,19 +476,28 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
     if (!handle || !product || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (IsEqualGUID(product, selected_grace_id()) && grace_license_present())
+    o365_sku = find_o365_product_sku(product);
+    if (o365_sku && o365_proplus_configured() && grace_license_present())
     {
-        string = installed_profile_product_info(name);
-        if (!string)
+        if (!wcsicmp(name, L"Name")) string = o365_sku->name;
+        else if (!wcsicmp(name, L"Description")) string = o365_sku->description;
+        else if (!wcsicmp(name, L"Author")) string = author;
+        else if (!wcsicmp(name, L"ApplicationBitmap")) string = o365_application_bitmap;
+        else if (!wcsicmp(name, L"UXDifferentiator")) string = o365_sku->ux_differentiator;
+    }
+    else if (IsEqualGUID(product, selected_grace_id()) && grace_license_present())
+    {
+        /* Preserve the native-captured identity of known profiles. Dynamic UL
+         * metadata does not contain the channel Description. */
+        if (IsEqualGUID(product, &word2024_grace_id))
         {
-            if (!wcsicmp(name, L"Name")) string = o365 ? o365_sku_name : word_sku_name;
-            else if (!wcsicmp(name, L"Description"))
-                string = o365 ? o365_description : word_description;
+            if (!wcsicmp(name, L"Name")) string = word_sku_name;
+            else if (!wcsicmp(name, L"Description")) string = word_description;
             else if (!wcsicmp(name, L"Author")) string = author;
-            else if (!wcsicmp(name, L"ApplicationBitmap"))
-                string = o365 ? o365_application_bitmap : word_application_bitmap;
+            else if (!wcsicmp(name, L"ApplicationBitmap")) string = word_application_bitmap;
             else if (!wcsicmp(name, L"UXDifferentiator")) string = ux_differentiator;
         }
+        else string = installed_profile_product_info(name);
     }
 
     if (!string)
@@ -865,8 +968,8 @@ static const WCHAR *installed_profile_product_info(const WCHAR *name)
     return NULL;
 }
 
-static BOOL installed_profile_get_policy(const WCHAR *name, SLDATATYPE *type,
-        UINT *size, BYTE **value)
+static BOOL installed_profile_get_policy(const WCHAR *name, BOOL include_strings,
+        SLDATATYPE *type, UINT *size, BYTE **value)
 {
     const struct installed_grace_profile *profile = get_installed_profile();
     char ascii_name[192], needle[256];
@@ -889,12 +992,16 @@ static BOOL installed_profile_get_policy(const WCHAR *name, SLDATATYPE *type,
         start += strlen(needle);
         if (!(end = strchr(start, '<')) || !(number = LocalAlloc(LMEM_FIXED, sizeof(*number))))
             return FALSE;
-        *number = strtoul(start, NULL, 0);
+        /* XRM policyInt values are decimal, including zero-padded values such
+         * as office-MPC=02244.  Base 0 would incorrectly parse those as octal. */
+        *number = strtoul(start, NULL, 10);
         if (type) *type = SL_DATA_DWORD;
         *size = sizeof(*number);
         *value = (BYTE *)number;
         return TRUE;
     }
+
+    if (!include_strings) return FALSE;
 
     snprintf(needle, sizeof(needle), "<sl:policyStr name=\"%s\">", ascii_name);
     if (!(start = strstr(profile->ppd_xml, needle))) return FALSE;
@@ -943,7 +1050,7 @@ static BOOL grace_license_present(void)
 
 static const struct grace_policy_dword *selected_dword_policies(UINT *count)
 {
-    if (o365_proplus_configured())
+    if (IsEqualGUID(selected_grace_id(), &o365_proplus_grace_id))
     {
         *count = ARRAY_SIZE(o365_grace_dword_policies);
         return o365_grace_dword_policies;
@@ -954,7 +1061,7 @@ static const struct grace_policy_dword *selected_dword_policies(UINT *count)
 
 static const struct grace_policy_string *selected_string_policies(UINT *count)
 {
-    if (o365_proplus_configured())
+    if (IsEqualGUID(selected_grace_id(), &o365_proplus_grace_id))
     {
         *count = ARRAY_SIZE(o365_grace_string_policies);
         return o365_grace_string_policies;
@@ -967,10 +1074,11 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
         UINT *size, BYTE **value)
 {
     struct slc_context *context = get_slc_context(handle);
-    const struct installed_grace_profile *profile;
+    const SLID *grace_id;
     const struct grace_policy_dword *dword_policies;
     const struct grace_policy_string *string_policies;
     SLDATATYPE profile_type;
+    BOOL known_profile;
     UINT dword_count, string_count, i;
 
     FIXME("(%p, %s, %p, %p, %p) semi-stub\n", handle, debugstr_w(name),
@@ -1009,16 +1117,19 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
         return SL_E_VALUE_NOT_FOUND;
     }
 
-    profile = get_installed_profile();
-    if (installed_profile_get_policy(name, type ? type : &profile_type, size, value))
+    grace_id = selected_grace_id();
+    known_profile = IsEqualGUID(grace_id, &o365_proplus_grace_id) ||
+            IsEqualGUID(grace_id, &word2024_grace_id);
+    if (!known_profile && installed_profile_get_policy(name, TRUE,
+            type ? type : &profile_type, size, value))
     {
         if (context) remember_policy(context, name, type ? *type : profile_type, *value, *size);
         return S_OK;
     }
 
-    /* Installed PPD metadata is authoritative. Do not leak fallback Word/O365
-     * privileges into a different dynamically discovered Office SKU. */
-    if (!profile && grace_license_present())
+    /* Preserve the native-captured policy surface for the two known profiles.
+     * For other profiles, installed PPD metadata remains authoritative. */
+    if (known_profile && grace_license_present())
     {
         dword_policies = selected_dword_policies(&dword_count);
         string_policies = selected_string_policies(&string_count);
@@ -1066,12 +1177,17 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
 HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR name,
         SLDATATYPE *type, UINT *size, BYTE **value)
 {
-    /* Values captured from native SLGetPKeyInformation on Word 2024 Grace. */
-    static const WCHAR digital_pid[] =
+    /* Values captured from native SLGetPKeyInformation for each Grace PKEY. */
+    static const WCHAR word_digital_pid[] =
         L"03612-05125-000-000000-00-1033-19044.0000-1912026";
-    static const WCHAR digital_pid2[] = L"00512-50000-00000-AA762";
-    static const WCHAR partial[] = L"WMC37";
+    static const WCHAR word_digital_pid2[] = L"00512-50000-00000-AA762";
+    static const WCHAR word_partial[] = L"WMC37";
+    static const WCHAR o365_digital_pid[] =
+        L"03612-02023-000-000000-00-1033-19044.0000-2052026";
+    static const WCHAR o365_digital_pid2[] = L"00202-30000-00000-AA478";
+    static const WCHAR o365_partial[] = L"VMFTK";
     static const WCHAR channel[] = L"Retail";
+    const WCHAR *digital_pid = NULL, *digital_pid2 = NULL, *partial = NULL;
     const WCHAR *string = NULL;
     UINT bytes;
 
@@ -1081,8 +1197,22 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (!IsEqualGUID(selected_grace_id(), &word2024_grace_id) ||
-        !IsEqualGUID(pkey_id, &word2024_grace_pkey_id) || !grace_license_present())
+    if (grace_license_present() && IsEqualGUID(selected_grace_id(), &word2024_grace_id) &&
+        IsEqualGUID(pkey_id, &word2024_grace_pkey_id))
+    {
+        digital_pid = word_digital_pid;
+        digital_pid2 = word_digital_pid2;
+        partial = word_partial;
+    }
+    else if (grace_license_present() &&
+        IsEqualGUID(selected_grace_id(), &o365_proplus_grace_id) &&
+        IsEqualGUID(pkey_id, &o365_proplus_grace_pkey_id))
+    {
+        digital_pid = o365_digital_pid;
+        digital_pid2 = o365_digital_pid2;
+        partial = o365_partial;
+    }
+    else
     {
         if (type) *type = SL_DATA_NONE;
         *size = 0;
@@ -1393,7 +1523,8 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
     const SLID *grace_id = selected_grace_id();
     const SLID *binding_id, *ul_id;
     BOOL o365 = o365_proplus_configured();
-    BOOL word_pkey;
+    const SLID *pkey_id = NULL;
+    unsigned int i;
     SLID *list;
 
     FIXME("(%p, %u, %s, %u, %p, %p) semi-stub\n", handle, query_type,
@@ -1420,16 +1551,18 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
                 &word2024_grace_binding_license_id;
         ul_id = o365 ? &o365_proplus_grace_ul_license_id : &word2024_grace_ul_license_id;
     }
-    word_pkey = IsEqualGUID(grace_id, &word2024_grace_id);
+    if (IsEqualGUID(grace_id, &word2024_grace_id))
+        pkey_id = &word2024_grace_pkey_id;
+    else if (IsEqualGUID(grace_id, &o365_proplus_grace_id))
+        pkey_id = &o365_proplus_grace_pkey_id;
 
-    /* SKU → PKEY: native returns one real product-key SLID.  The captured
-     * product-key ID is specific to Word 2024, so do not expose it for other SKUs. */
-    if (word_pkey && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
+    /* SKU → PKEY: expose only product-key SLIDs captured for this exact SKU. */
+    if (pkey_id && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
         query_id && IsEqualGUID(query_id, grace_id))
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
             return E_OUTOFMEMORY;
-        *list = word2024_grace_pkey_id;
+        *list = *pkey_id;
         *count = 1;
         *ids = list;
         return S_OK;
@@ -1464,8 +1597,23 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         return 0xC004F016;
     }
 
+    /* Native O365 APP → PRODUCT_SKU returns the complete Office inventory,
+     * including unlicensed subscription and trial channels. */
+    if (o365 && return_type == SL_ID_PRODUCT_SKU && query_type == SL_ID_APPLICATION &&
+        query_id && IsEqualGUID(query_id, &office_app_id))
+    {
+        if (!(list = LocalAlloc(LMEM_FIXED, ARRAY_SIZE(o365_product_skus) * sizeof(*list))))
+            return E_OUTOFMEMORY;
+        for (i = 0; i < ARRAY_SIZE(o365_product_skus); ++i)
+            list[i] = o365_product_skus[i].id;
+        *count = ARRAY_SIZE(o365_product_skus);
+        *ids = list;
+        return S_OK;
+    }
+
     if (return_type == SL_ID_PRODUCT_SKU &&
-        (query_type == SL_ID_APPLICATION || query_type == SL_ID_PRODUCT_SKU))
+        ((query_type == SL_ID_APPLICATION && query_id && IsEqualGUID(query_id, &office_app_id)) ||
+         query_type == SL_ID_PRODUCT_SKU))
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
             return E_OUTOFMEMORY;
@@ -1511,9 +1659,10 @@ HRESULT WINAPI SLLoadApplicationPolicies(const SLID *app, const SLID *product,
 HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *type,
         UINT *size, BYTE **value)
 {
-    const struct installed_grace_profile *profile;
+    const SLID *grace_id;
     const struct grace_policy_dword *dword_policies;
     DWORD *installed;
+    BOOL known_profile;
     UINT dword_count, i;
 
     FIXME("(%p, %s, %p, %p, %p) semi-stub\n", context, debugstr_w(name),
@@ -1554,14 +1703,18 @@ HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *ty
         }
     }
 
-    /* Grace PPD AppPrivilege / feature flags also surface through application
-     * policy queries during Office startup (before full SPP authentication). */
-    profile = get_installed_profile();
-    if (installed_profile_get_policy(name, type, size, value)) return S_OK;
+    /* Grace PPD AppPrivilege / feature DWORDs also surface through application
+     * policy queries during Office startup.  Do not expose licensing strings or
+     * Security-SPP policies through this application-policy API. */
+    grace_id = selected_grace_id();
+    known_profile = IsEqualGUID(grace_id, &o365_proplus_grace_id) ||
+            IsEqualGUID(grace_id, &word2024_grace_id);
+    if (!known_profile && !wcsnicmp(name, L"office-", 7) &&
+        installed_profile_get_policy(name, FALSE, type, size, value)) return S_OK;
 
     if (grace_license_present())
     {
-        if (!profile)
+        if (known_profile)
         {
             dword_policies = selected_dword_policies(&dword_count);
             for (i = 0; i < dword_count; i++)

@@ -67,6 +67,25 @@ static void test_SLGetSLIDList(void)
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
 }
 
+static void test_SLGetLicensingStatusInformation(void)
+{
+    SL_LICENSING_STATUS *status = (SL_LICENSING_STATUS *)0xdeadbeef;
+    UINT count = 0xdeadbeef;
+    HSLC handle = NULL;
+    HRESULT hr;
+
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
+
+    hr = SLGetLicensingStatusInformation(handle, NULL, NULL, NULL, &count, &status);
+    ok(hr == SL_E_RIGHT_NOT_CONSUMED, "Expected SL_E_RIGHT_NOT_CONSUMED, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(status == (SL_LICENSING_STATUS *)0xdeadbeef, "Unexpected status pointer %p.\n", status);
+
+    hr = SLClose(handle);
+    ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
+}
+
 static void test_SLInstallLicense(void)
 {
     static const BYTE license[] = "license";
@@ -132,8 +151,8 @@ static void test_authentication_data(void)
 static void test_service_information(void)
 {
     static const WCHAR expected_plugins[] =
-        L"C:\\Windows\\system32\\sppobjs.dll\0"
-        L"C:\\Windows\\system32\\sppwinob.dll\0";
+        L"C:\\Windows\\system32\\sppwinob.dll\0"
+        L"C:\\Windows\\system32\\sppobjs.dll\0";
     BYTE *value = (BYTE *)0xdeadbeef;
     SLDATATYPE type = 0xdeadbeef;
     UINT size = 0xdeadbeef;
@@ -172,6 +191,7 @@ static void test_service_information(void)
 START_TEST(sppc)
 {
     test_SLGetSLIDList();
+    test_SLGetLicensingStatusInformation();
     test_SLInstallLicense();
     test_authentication_data();
     test_service_information();
