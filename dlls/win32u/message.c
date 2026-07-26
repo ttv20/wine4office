@@ -2630,12 +2630,6 @@ static BOOL get_office_net_ui_ltr_capture_clip( HWND hwnd, RECT *rect )
      * monitor-wide LTR capture child. */
     map_window_points( 0, hwnd, (POINT *)rect, 2, get_thread_dpi() );
 
-    /* The expanded Hebrew Insert Table grid already hit-tests from its
-     * rightmost cell.  Unlike other clipped NetUI galleries, it must retain
-     * the capture child's native coordinate after its usable width is restored. */
-    if (rect->right - rect->left >= 300 && rect->bottom - rect->top >= 330 &&
-        rect->bottom - rect->top <= 420)
-        return FALSE;
     return TRUE;
 }
 
@@ -2780,7 +2774,17 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                 if (info.hwndCapture &&
                     get_office_net_ui_ltr_capture_clip( msg->hwnd, &clip ) &&
                     pt.x >= clip.left && pt.x < clip.right)
-                    pt.x = clip.left + clip.right - 1 - pt.x;
+                {
+                    /* NetUI paints the expanded Hebrew Insert Table grid seven
+                     * pixels to the right of the capture child's hit-test
+                     * interval.  Keep screen cursor placement intact while
+                     * aligning the delivered client coordinate. */
+                    if (clip.right - clip.left >= 300 && clip.bottom - clip.top >= 330 &&
+                        clip.bottom - clip.top <= 420)
+                        pt.x -= 7;
+                    else
+                        pt.x = clip.left + clip.right - 1 - pt.x;
+                }
             }
         }
     }
