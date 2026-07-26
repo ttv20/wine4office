@@ -2766,11 +2766,9 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                 RECT clip;
 
                 screen_to_client( msg->hwnd, &pt );
-                /* Office renders the monitor-wide NetUIHWND capture child as
-                 * RTL inside its constrained RTL gallery, but creates that
-                 * child without WS_EX_LAYOUTRTL.  Mirror inside the clipped
-                 * parent interval only; mirroring against the full monitor
-                 * sends the point outside NetUI's positioned controls. */
+                /* Office uses a monitor-wide LTR capture child inside a
+                 * constrained RTL gallery.  Keep compatibility adjustments
+                 * limited to the proven Insert Table geometry. */
                 if (info.hwndCapture &&
                     get_office_net_ui_ltr_capture_clip( msg->hwnd, &clip ) &&
                     pt.x >= clip.left && pt.x < clip.right)
@@ -2782,8 +2780,6 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                     if (clip.right - clip.left >= 300 && clip.bottom - clip.top >= 330 &&
                         clip.bottom - clip.top <= 420)
                         pt.x -= 7;
-                    else
-                        pt.x = clip.left + clip.right - 1 - pt.x;
                 }
             }
         }
