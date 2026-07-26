@@ -2078,6 +2078,17 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
         return;
 
     monitor = monitor_info_from_window( winpos->hwnd, MONITOR_DEFAULTTONEAREST );
+    /* A natural-size RTL gallery at the right ribbon edge grows left.  Move it
+     * left before Office observes an overflow and retries at monitor width;
+     * truncating it to the space on the right clips leading gallery cells. */
+    if (!(winpos->flags & SWP_NOMOVE) && winpos->cx < monitor.rcWork.right - monitor.rcWork.left &&
+        winpos->x > monitor.rcWork.left &&
+        (LONGLONG)winpos->x + winpos->cx > monitor.rcWork.right)
+    {
+        winpos->x = monitor.rcWork.right - winpos->cx;
+        return;
+    }
+
     /* Keep the existing ribbon anchor instead of accepting Office's
      * monitor-wide fallback after its unbounded sizing pass. */
     if (!(winpos->flags & SWP_NOMOVE) && winpos->x <= monitor.rcWork.left &&
