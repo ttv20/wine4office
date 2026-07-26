@@ -2630,12 +2630,12 @@ static BOOL get_office_net_ui_ltr_capture_clip( HWND hwnd, RECT *rect )
      * monitor-wide LTR capture child. */
     map_window_points( 0, hwnd, (POINT *)rect, 2, get_thread_dpi() );
 
-    /* Word's RTL Insert Table grid has ten hit-test columns positioned to the
-     * left of the narrow on-screen clip.  Include that virtual grid interval
-     * when mirroring captured input, without resizing the rendering child. */
-    if (rect->right - rect->left < 240 && rect->bottom - rect->top >= 330 &&
+    /* The expanded Hebrew Insert Table grid already hit-tests from its
+     * rightmost cell.  Unlike other clipped NetUI galleries, it must retain
+     * the capture child's native coordinate after its usable width is restored. */
+    if (rect->right - rect->left >= 300 && rect->bottom - rect->top >= 330 &&
         rect->bottom - rect->top <= 420)
-        rect->left = rect->right - 320;
+        return FALSE;
     return TRUE;
 }
 
