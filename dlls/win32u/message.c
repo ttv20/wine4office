@@ -2629,6 +2629,13 @@ static BOOL get_office_net_ui_ltr_capture_clip( HWND hwnd, RECT *rect )
     /* Convert the physically visible popup interval to coordinates of the
      * monitor-wide LTR capture child. */
     map_window_points( 0, hwnd, (POINT *)rect, 2, get_thread_dpi() );
+
+    /* Word's RTL Insert Table grid has ten hit-test columns positioned to the
+     * left of the narrow on-screen clip.  Include that virtual grid interval
+     * when mirroring captured input, without resizing the rendering child. */
+    if (rect->right - rect->left < 240 && rect->bottom - rect->top >= 330 &&
+        rect->bottom - rect->top <= 420)
+        rect->left = rect->right - 320;
     return TRUE;
 }
 
