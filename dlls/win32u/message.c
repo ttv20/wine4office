@@ -2599,6 +2599,32 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static BOOL is_office_net_ui_ltr_capture( HWND hwnd )
+{
+    static const WCHAR net_ui_hwnd[] = {'N','e','t','U','I','H','W','N','D',0};
+    static const WCHAR net_ui_tool[] =
+        {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    HWND parent;
+    INT len;
+
+    if ((get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
+        (len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    if (wcscmp( buffer, net_ui_hwnd ) ||
+        !(parent = NtUserGetAncestor( hwnd, GA_PARENT )) ||
+        !(get_window_long( parent, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL))
+        return FALSE;
+
+    name.Length = 0;
+    if ((len = NtUserGetClassName( parent, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, net_ui_tool );
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2728,7 +2754,19 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             /* coordinates don't get translated while tracking a menu */
             /* FIXME: should differentiate popups and top-level menus */
             if (!(info.flags & GUI_INMENUMODE))
+            {
+                RECT rect;
+
                 screen_to_client( msg->hwnd, &pt );
+                /* Office renders the monitor-wide NetUIHWND capture child as
+                 * RTL inside its constrained RTL gallery, but creates that
+                 * child without WS_EX_LAYOUTRTL.  Mirror only the delivered
+                 * client coordinate; changing the child style also mirrors its
+                 * already-positioned content out of the clipped popup. */
+                if (info.hwndCapture && is_office_net_ui_ltr_capture( msg->hwnd ) &&
+                    get_client_rect( msg->hwnd, &rect, get_thread_dpi() ))
+                    pt.x = rect.right - rect.left - 1 - pt.x;
+            }
         }
     }
     msg->lParam = MAKELONG( pt.x, pt.y );
