@@ -1501,7 +1501,8 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
         context_release(context);
 
         wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, valid_locations);
-        wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~valid_locations);
+        wined3d_texture_invalidate_location_box(dst_texture, dst_sub_resource_idx,
+                ~valid_locations, &dst_rect);
 
         return WINED3D_OK;
     }
@@ -1571,7 +1572,9 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
         }
     }
     else if (!(src_sub_resource->locations & (WINED3D_LOCATION_BUFFER | WINED3D_LOCATION_SYSMEM))
-            && !(dst_texture->resource.access & WINED3D_RESOURCE_ACCESS_GPU))
+            && (!(dst_texture->resource.access & WINED3D_RESOURCE_ACCESS_GPU)
+            || (!dst_texture->resource.bind_flags
+            && dst_texture->resource.access & WINED3D_RESOURCE_ACCESS_CPU)))
     {
         /* Download */
         if (scale)
@@ -1582,14 +1585,68 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
             TRACE("Not doing download because the source format needs conversion.\n");
         else if (!(src_texture->flags & WINED3D_TEXTURE_DOWNLOADABLE))
             TRACE("Not doing download because texture is not downloadable.\n");
-        else if (!wined3d_texture_is_full_rect(src_texture, src_sub_resource_idx % src_texture->level_count, &src_rect))
-            TRACE("Not doing download because of partial download (src).\n");
-        else if (!wined3d_texture_is_full_rect(dst_texture, dst_sub_resource_idx % dst_texture->level_count, &dst_rect))
-            TRACE("Not doing download because of partial download (dst).\n");
+        else if (src_texture->resource.format_attrs & WINED3D_FORMAT_ATTR_COMPRESSED
+                && (!wined3d_texture_is_full_rect(src_texture,
+                src_sub_resource_idx % src_texture->level_count, &src_rect)
+                || !wined3d_texture_is_full_rect(dst_texture,
+                dst_sub_resource_idx % dst_texture->level_count, &dst_rect)))
+            TRACE("Not doing a partial download of a compressed texture.\n");
         else
         {
-            wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx, src_texture,
-                    src_sub_resource_idx);
+            bool full_copy = wined3d_texture_is_full_rect(src_texture,
+                    src_sub_resource_idx % src_texture->level_count, &src_rect)
+                    && wined3d_texture_is_full_rect(dst_texture,
+                    dst_sub_resource_idx % dst_texture->level_count, &dst_rect);
+            bool pair_matches = false;
+
+            if (full_copy)
+            {
+                if (!src_sub_resource->staging_destination_id)
+                    src_sub_resource->staging_destination_id = dst_texture->object_id;
+                else if (src_sub_resource->staging_destination_id != dst_texture->object_id)
+                    src_sub_resource->staging_multi_consumer = true;
+                pair_matches = !src_sub_resource->staging_multi_consumer
+                        && src_sub_resource->staging_destination_id == dst_texture->object_id;
+            }
+
+            /* Keep read-only staging resources as CPU shadows of their source.
+             * When a render target is copied repeatedly, downloading only the
+             * GPU-written rectangle avoids re-reading unchanged atlas pixels. */
+            if (full_copy && pair_matches
+                    && dst_sub_resource->staging_source_id == src_texture->object_id
+                    && dst_sub_resource->staging_source_sub_resource_idx == src_sub_resource_idx
+                    && dst_sub_resource->locations & dst_texture->resource.map_binding
+                    && !src_sub_resource->gpu_dirty_full)
+            {
+                if (src_sub_resource->gpu_dirty_valid)
+                {
+                    struct wined3d_box dirty_box;
+
+                    wined3d_box_set(&dirty_box, src_sub_resource->gpu_dirty_rect.left,
+                            src_sub_resource->gpu_dirty_rect.top, src_sub_resource->gpu_dirty_rect.right,
+                            src_sub_resource->gpu_dirty_rect.bottom, 0, 1);
+                    wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx,
+                            dirty_box.left, dirty_box.top, 0,
+                            src_texture, src_sub_resource_idx, &dirty_box);
+                }
+            }
+            else
+            {
+                wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx,
+                        dst_box->left, dst_box->top, dst_box->front,
+                        src_texture, src_sub_resource_idx, src_box);
+            }
+
+            if (full_copy)
+            {
+                dst_sub_resource->staging_source_id = src_texture->object_id;
+                dst_sub_resource->staging_source_sub_resource_idx = src_sub_resource_idx;
+                if (pair_matches)
+                {
+                    src_sub_resource->gpu_dirty_valid = false;
+                    src_sub_resource->gpu_dirty_full = false;
+                }
+            }
             return WINED3D_OK;
         }
     }
@@ -1637,7 +1694,8 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     context_release(context);
 
     wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, valid_locations);
-    wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~valid_locations);
+    wined3d_texture_invalidate_location_box(dst_texture, dst_sub_resource_idx,
+            ~valid_locations, &dst_rect);
 
     return WINED3D_OK;
 

@@ -4616,6 +4616,7 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
     struct wined3d_context *context;
+    RECT dirty_rect;
     bool rasterizer_discard = false;
     unsigned int i, idx_size = 0;
     const void *idx_data = NULL;
@@ -4653,6 +4654,13 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     }
     gl_info = context_gl->gl_info;
 
+    SetRect(&dirty_rect, state->viewports[0].x, state->viewports[0].y,
+            state->viewports[0].x + state->viewports[0].width,
+            state->viewports[0].y + state->viewports[0].height);
+    if (state->rasterizer_state && state->rasterizer_state->desc.scissor
+            && state->scissor_rect_count)
+        IntersectRect(&dirty_rect, &dirty_rect, &state->scissor_rects[0]);
+
     if (!use_transform_feedback(state))
         wined3d_context_gl_pause_transform_feedback(context_gl, TRUE);
 
@@ -4664,7 +4672,8 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
         if (wined3d_blend_state_get_writemask(state->blend_state, i))
         {
             wined3d_rendertarget_view_load_location(rtv, context, rtv->resource->draw_binding);
-            wined3d_rendertarget_view_invalidate_location(rtv, ~rtv->resource->draw_binding);
+            wined3d_rendertarget_view_invalidate_location_box(rtv,
+                    ~rtv->resource->draw_binding, &dirty_rect);
         }
         else
         {
