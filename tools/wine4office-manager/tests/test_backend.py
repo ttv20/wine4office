@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import wine365_backend as backend
+import wine4office_backend as backend
 
 
 class BackendTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class BackendTests(unittest.TestCase):
         self._script("wine", "#!/bin/sh\nexit 0\n")
         self._script("wineserver", "#!/bin/sh\nexit 0\n")
         self._script("wineboot", """#!/bin/sh
-if [ "${WINE365_TEST_FAIL:-}" = 1 ]; then exit 9; fi
+if [ "${WINE4OFFICE_TEST_FAIL:-}" = 1 ]; then exit 9; fi
 mkdir -p "$WINEPREFIX"
 touch "$WINEPREFIX/system.reg"
 """)
@@ -50,20 +50,20 @@ touch "$WINEPREFIX/system.reg"
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
-    def test_default_prefix_is_home_wine365(self):
+    def test_default_prefix_is_home_wine4office(self):
         config = backend.default_config()
-        self.assertEqual(config["prefix"], str(self.home / ".wine365"))
+        self.assertEqual(config["prefix"], str(self.home / ".wine4office"))
         self.assertEqual(config["update_url"], "")
 
     def test_update_without_address_is_explicitly_disabled(self):
         with self.assertRaisesRegex(ValueError, "No update address"):
-            backend.update_wine365("", lambda line: None)
+            backend.update_wine4office("", lambda line: None)
 
     def test_update_downloads_and_verifies_onefile_installer(self):
         installer = b"#!/bin/sh\necho update-ran\nexit 0\n"
         manifest = json.dumps({
             "version": "2.0.0",
-            "installer_url": "https://updates.example/wine365-2.0.0.run",
+            "installer_url": "https://updates.example/wine4office-2.0.0.run",
             "sha256": hashlib.sha256(installer).hexdigest(),
         }).encode()
 
@@ -80,10 +80,10 @@ touch "$WINEPREFIX/system.reg"
         with mock.patch.object(backend.urllib.request, "urlopen",
                                side_effect=[Response(manifest), Response(installer)]), \
              mock.patch.object(backend, "current_version", return_value="1.0.0"):
-            result = backend.update_wine365("https://updates.example/manifest.json", output.append)
+            result = backend.update_wine4office("https://updates.example/manifest.json", output.append)
         self.assertIn("2.0.0 installed", result)
         self.assertIn("update-ran", output)
-        self.assertFalse(list((backend.cache_home() / "wine365/updates").glob("*.part")))
+        self.assertFalse(list((backend.cache_home() / "wine4office/updates").glob("*.part")))
 
     def test_rejects_dangerous_prefixes(self):
         for value in ("/", str(self.home), ""):
@@ -91,24 +91,24 @@ touch "$WINEPREFIX/system.reg"
                 backend.validate_prefix(value)
 
     def test_create_environment(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         message = backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
         self.assertTrue((prefix / "system.reg").is_file())
         self.assertIn(str(prefix), message)
 
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         prefix.mkdir()
         (prefix / "system.reg").write_text("old")
         (prefix / "keep-me").write_text("important")
-        with mock.patch.dict(os.environ, {"WINE365_TEST_FAIL": "1"}):
+        with mock.patch.dict(os.environ, {"WINE4OFFICE_TEST_FAIL": "1"}):
             with self.assertRaises(Exception):
                 backend.create_environment(str(prefix), str(self.wine), True, lambda line: None)
         self.assertEqual((prefix / "keep-me").read_text(), "important")
-        self.assertFalse(list(prefix.parent.glob(".*.wine365-backup-*")))
+        self.assertFalse(list(prefix.parent.glob(".*.wine4office-backup-*")))
 
     def test_launches_exe_in_selected_environment_with_arguments(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         prefix.mkdir()
         (prefix / "system.reg").write_text("registry")
         installer = self.home / "Downloads/Office Setup.exe"
@@ -124,7 +124,7 @@ touch "$WINEPREFIX/system.reg"
         self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], str(prefix))
 
     def test_executable_launcher_rejects_non_exe(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         prefix.mkdir()
         (prefix / "system.reg").write_text("registry")
         document = self.home / "Downloads/readme.txt"
@@ -134,7 +134,7 @@ touch "$WINEPREFIX/system.reg"
             backend.launch_executable(str(prefix), str(self.wine), str(document))
 
     def test_command_prompt_opens_in_system_terminal(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         process = mock.Mock(pid=8765)
 
         def which(name, path=None):
@@ -155,10 +155,10 @@ touch "$WINEPREFIX/system.reg"
     def test_command_prompt_reports_missing_system_terminal(self):
         with mock.patch.object(backend.shutil, "which", return_value=None):
             with self.assertRaisesRegex(FileNotFoundError, "No supported system terminal"):
-                backend.launch_tool(str(self.home / ".wine365"), str(self.wine), "cmd")
+                backend.launch_tool(str(self.home / ".wine4office"), str(self.wine), "cmd")
 
     def test_office_detection_and_shortcut_lifecycle(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         (office / "WINWORD.EXE").write_bytes(b"exe")
@@ -169,7 +169,7 @@ touch "$WINEPREFIX/system.reg"
         self.assertTrue(status["apps"]["excel"])
         self.assertTrue(status["apps"]["powerpoint"])
         self.assertEqual(backend.find_office_app(str(prefix), "word"), office / "WINWORD.EXE")
-        launcher = self.home / ".local/share/wine365/bin/wine365-launcher"
+        launcher = self.home / ".local/share/wine4office/bin/wine4office-launcher"
         launcher.parent.mkdir(parents=True)
         launcher.write_text("launcher")
 
@@ -184,20 +184,20 @@ touch "$WINEPREFIX/system.reg"
             )
         self.assertEqual(len(created), 2)
         extract.assert_called_once_with(
-            office / "WINWORD.EXE", backend.data_home() / "icons/wine365/word.ico",
+            office / "WINWORD.EXE", backend.data_home() / "icons/wine4office/word.ico",
         )
-        menu = backend.data_home() / "applications/wine365-word.desktop"
+        menu = backend.data_home() / "applications/wine4office-word.desktop"
         text = menu.read_text()
-        self.assertIn("X-Wine365-Managed=true", text)
+        self.assertIn("X-Wine4Office-Managed=true", text)
         self.assertIn("%F", text)
         self.assertIn('"' + str(prefix) + '"', text)
-        self.assertIn(f"Icon={backend.data_home() / 'icons/wine365/word.ico'}", text)
+        self.assertIn(f"Icon={backend.data_home() / 'icons/wine4office/word.ico'}", text)
         removed = backend.remove_app_shortcuts(["word"])
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
 
     def test_outlook_first_run_sets_language_and_safe_launch_options(self):
-        prefix = self.home / ".wine365"
+        prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         outlook = office / "OUTLOOK.EXE"
@@ -222,12 +222,12 @@ touch "$WINEPREFIX/system.reg"
     def test_shortcut_creation_rejects_missing_application_launcher(self):
         with self.assertRaisesRegex(FileNotFoundError, "application launcher is missing"):
             backend.create_app_shortcuts(
-                ["word"], str(self.home / ".wine365"), str(self.wine),
+                ["word"], str(self.home / ".wine4office"), str(self.wine),
                 self.home / "missing-launcher", False,
             )
 
     def test_shortcut_removal_does_not_delete_unowned_file(self):
-        path = backend.data_home() / "applications/wine365-excel.desktop"
+        path = backend.data_home() / "applications/wine4office-excel.desktop"
         path.parent.mkdir(parents=True)
         path.write_text("[Desktop Entry]\nName=Someone else\n")
         self.assertEqual(backend.remove_app_shortcuts(["excel"]), [])

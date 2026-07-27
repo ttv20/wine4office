@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backend operations for the Wine 365 Manager."""
+"""Backend operations for the Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -20,30 +20,30 @@ from typing import Callable, Iterable
 
 APP_META = {
     "word": {
-        "name": "Microsoft Word (Wine 365)",
+        "name": "Microsoft Word (Wine4Office)",
         "exe": "WINWORD.EXE",
-        "icon": "wine365-word.svg",
+        "icon": "wine4office-word.svg",
         "categories": "Office;WordProcessor;",
         "mime": "application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;",
     },
     "excel": {
-        "name": "Microsoft Excel (Wine 365)",
+        "name": "Microsoft Excel (Wine4Office)",
         "exe": "EXCEL.EXE",
-        "icon": "wine365-excel.svg",
+        "icon": "wine4office-excel.svg",
         "categories": "Office;Spreadsheet;",
         "mime": "application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;",
     },
     "powerpoint": {
-        "name": "Microsoft PowerPoint (Wine 365)",
+        "name": "Microsoft PowerPoint (Wine4Office)",
         "exe": "POWERPNT.EXE",
-        "icon": "wine365-powerpoint.svg",
+        "icon": "wine4office-powerpoint.svg",
         "categories": "Office;Presentation;",
         "mime": "application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.presentationml.presentation;",
     },
     "outlook": {
-        "name": "Microsoft Outlook (Wine 365)",
+        "name": "Microsoft Outlook (Wine4Office)",
         "exe": "OUTLOOK.EXE",
-        "icon": "wine365-outlook.svg",
+        "icon": "wine4office-outlook.svg",
         "categories": "Office;Email;Network;",
         "mime": "x-scheme-handler/mailto;",
     },
@@ -75,11 +75,11 @@ def cache_home() -> Path:
 
 
 def config_path() -> Path:
-    return config_home() / "wine365/config.json"
+    return config_home() / "wine4office/config.json"
 
 
 def installed_root() -> Path | None:
-    configured = os.environ.get("WINE365_MANAGER_ROOT")
+    configured = os.environ.get("WINE4OFFICE_MANAGER_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
     here = Path(__file__).resolve().parent
@@ -104,7 +104,7 @@ def configured_update_url() -> str:
 
 def default_config() -> dict:
     return {
-        "prefix": str(Path.home() / ".wine365"),
+        "prefix": str(Path.home() / ".wine4office"),
         "wine": detect_wine(),
         "desktop_copy": False,
         "update_url": configured_update_url(),
@@ -113,11 +113,11 @@ def default_config() -> dict:
 
 def detect_wine() -> str:
     candidates: list[Path] = []
-    if os.environ.get("WINE365_WINE"):
-        candidates.append(Path(os.environ["WINE365_WINE"]).expanduser())
-    candidates.append(data_home() / "wine365/runner/bin/wine")
+    if os.environ.get("WINE4OFFICE_WINE"):
+        candidates.append(Path(os.environ["WINE4OFFICE_WINE"]).expanduser())
+    candidates.append(data_home() / "wine4office/runner/bin/wine")
 
-    bottles = data_home() / "bottles/bottles/Wine365/bottle.yml"
+    bottles = data_home() / "bottles/bottles/Wine4Office/bottle.yml"
     if bottles.is_file():
         match = re.search(r"^Runner:\s*(\S+)\s*$", bottles.read_text(errors="replace"), re.MULTILINE)
         if match:
@@ -129,7 +129,7 @@ def detect_wine() -> str:
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate.resolve())
-    return str(data_home() / "wine365/runner/bin/wine")
+    return str(data_home() / "wine4office/runner/bin/wine")
 
 
 def load_config() -> dict:
@@ -255,7 +255,7 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
     backup: Path | None = None
     if recreate and prefix.exists():
         stop_wine(str(prefix), str(wine))
-        backup = prefix.with_name(f".{prefix.name}.wine365-backup-{int(time.time())}")
+        backup = prefix.with_name(f".{prefix.name}.wine4office-backup-{int(time.time())}")
         if backup.exists():
             raise FileExistsError(f"Backup path already exists: {backup}")
         output(f"Moving the current environment to {backup}")
@@ -566,7 +566,7 @@ def extract_office_icon(executable: Path, destination: Path) -> Path:
         import pefile
     except ImportError as error:
         raise RuntimeError(
-            "Office icon extraction requires pefile. Install the Wine 365 GUI dependencies."
+            "Office icon extraction requires pefile. Install the Wine4Office GUI dependencies."
         ) from error
 
     pe = pefile.PE(str(executable), fast_load=True)
@@ -603,12 +603,12 @@ def extract_office_icon(executable: Path, destination: Path) -> Path:
 
 
 def app_icon_path(app: str, executable: Path) -> Path:
-    return extract_office_icon(executable, data_home() / "icons/wine365" / f"{app}.ico")
+    return extract_office_icon(executable, data_home() / "icons/wine4office" / f"{app}.ico")
 
 
 def _owned_desktop_file(path: Path) -> bool:
     try:
-        return "X-Wine365-Managed=true" in path.read_text(errors="replace")
+        return "X-Wine4Office-Managed=true" in path.read_text(errors="replace")
     except OSError:
         return False
 
@@ -629,7 +629,7 @@ def write_desktop_file(path: Path, name: str, comment: str, command: list[str], 
     ]
     if mime:
         lines.append(f"MimeType={mime}")
-    lines.append("X-Wine365-Managed=true")
+    lines.append("X-Wine4Office-Managed=true")
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(lines) + "\n")
     temporary.chmod(0o755)
@@ -648,7 +648,7 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str
     prefix = validate_prefix(prefix_value)
     wine = normalize_path(wine_value)
     if not launcher.is_file():
-        raise FileNotFoundError(f"Wine 365 application launcher is missing: {launcher}")
+        raise FileNotFoundError(f"Wine4Office application launcher is missing: {launcher}")
     created: list[str] = []
     for app in apps:
         if app not in APP_META:
@@ -656,7 +656,7 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str
         meta = APP_META[app]
         icon = app_icon_path(app, installed_app_executable(prefix, app))
         command = [str(launcher), "--prefix", str(prefix), "--wine", str(wine), app, "%F"]
-        filename = f"wine365-{app}.desktop"
+        filename = f"wine4office-{app}.desktop"
         menu_file = data_home() / "applications" / filename
         write_desktop_file(menu_file, meta["name"], f"Launch {meta['name']} in {prefix}", command,
                            icon, meta["categories"], meta["mime"])
@@ -677,7 +677,7 @@ def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
     for app in apps:
         if app not in APP_META:
             raise ValueError(f"Unknown Office application: {app}")
-        filename = f"wine365-{app}.desktop"
+        filename = f"wine4office-{app}.desktop"
         for path in (data_home() / "applications" / filename, desktop_directory() / filename):
             if path.is_file() and _owned_desktop_file(path):
                 path.unlink()
@@ -687,9 +687,9 @@ def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
 
 
 def install_manager_shortcut(manager_launcher: Path, icons: Path) -> Path:
-    path = data_home() / "applications/wine365-manager.desktop"
-    write_desktop_file(path, "Wine 365 Manager", "Manage Wine 365 environments and shortcuts",
-                       [str(manager_launcher)], icons / "wine365-manager.svg", "Utility;Settings;")
+    path = data_home() / "applications/wine4office-manager.desktop"
+    write_desktop_file(path, "Wine4Office Manager", "Manage Wine4Office environments and shortcuts",
+                       [str(manager_launcher)], icons / "wine4office-manager.svg", "Utility;Settings;")
     refresh_desktop_database()
     return path
 
@@ -709,13 +709,13 @@ def _https_url(value: str, description: str) -> str:
     return value
 
 
-def update_wine365(update_url: str, output: Output, cancel_event=None,
+def update_wine4office(update_url: str, output: Output, cancel_event=None,
                    process_callback=None) -> str:
     if not update_url.strip():
         raise ValueError("No update address is configured yet.")
     manifest_url = _https_url(update_url, "Update manifest address")
     output(f"Checking {manifest_url}")
-    request = urllib.request.Request(manifest_url, headers={"User-Agent": "Wine365-Manager/1"})
+    request = urllib.request.Request(manifest_url, headers={"User-Agent": "Wine4Office-Manager/1"})
     with urllib.request.urlopen(request, timeout=30) as response:
         manifest_bytes = response.read(1_048_577)
     if len(manifest_bytes) > 1_048_576:
@@ -731,20 +731,20 @@ def update_wine365(update_url: str, output: Output, cancel_event=None,
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version):
         raise ValueError("Update manifest has an invalid version.")
     if version == current_version():
-        return f"Wine 365 {version} is already installed."
+        return f"Wine4Office {version} is already installed."
     installer_url = urllib.parse.urljoin(manifest_url, str(manifest.get("installer_url", "")).strip())
     installer_url = _https_url(installer_url, "Installer address")
     expected = str(manifest.get("sha256", "")).lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("Update manifest has an invalid SHA-256 digest.")
 
-    download_dir = cache_home() / "wine365/updates"
+    download_dir = cache_home() / "wine4office/updates"
     download_dir.mkdir(parents=True, exist_ok=True)
-    installer = download_dir / f"wine365-{version}.run.part"
+    installer = download_dir / f"wine4office-{version}.run.part"
     digest = hashlib.sha256()
     downloaded = 0
-    output(f"Downloading Wine 365 {version}")
-    request = urllib.request.Request(installer_url, headers={"User-Agent": "Wine365-Manager/1"})
+    output(f"Downloading Wine4Office {version}")
+    request = urllib.request.Request(installer_url, headers={"User-Agent": "Wine4Office-Manager/1"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response, installer.open("wb") as destination:
             size_header = response.headers.get("Content-Length")
@@ -769,18 +769,18 @@ def update_wine365(update_url: str, output: Output, cancel_event=None,
                         cancel_event=cancel_event, process_callback=process_callback)
     finally:
         installer.unlink(missing_ok=True)
-    return f"Wine 365 {version} installed. Restart the manager to use the update."
+    return f"Wine4Office {version} installed. Restart the manager to use the update."
 
 
-def remove_wine365(prefix_value: str, remove_prefix: bool, output: Output) -> str:
+def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -> str:
     root = installed_root()
     if root is None:
-        raise RuntimeError("Removal is available only from an installed Wine 365 Manager.")
-    uninstaller = root / "bin/wine365-uninstall"
+        raise RuntimeError("Removal is available only from an installed Wine4Office Manager.")
+    uninstaller = root / "bin/wine4office-uninstall"
     if not uninstaller.is_file() or not os.access(uninstaller, os.X_OK):
-        raise FileNotFoundError(f"Wine 365 uninstaller is missing: {uninstaller}")
+        raise FileNotFoundError(f"Wine4Office uninstaller is missing: {uninstaller}")
     command = [str(uninstaller), "--purge-runner"]
     if remove_prefix:
         command.extend(["--remove-prefix", str(validate_prefix(prefix_value))])
     _stream_command(command, os.environ.copy(), output)
-    return "Wine 365 removed. You may close this browser tab."
+    return "Wine4Office removed. You may close this browser tab."

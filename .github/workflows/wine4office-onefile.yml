@@ -1,4 +1,4 @@
-name: Build Wine 365 one-file installer
+name: Build Wine4Office one-file installer
 
 on:
   workflow_dispatch:
@@ -17,13 +17,13 @@ on:
         type: string
   push:
     tags:
-      - "wine365-v*"
+      - "wine4office-v*"
 
 permissions:
   contents: write
 
 concurrency:
-  group: wine365-onefile-${{ github.ref }}
+  group: wine4office-onefile-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -31,10 +31,10 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 360
     env:
-      CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE365_UPDATE_MANIFEST_URL }}
-      CONFIGURED_INSTALLER_URL: ${{ inputs.installer_url || vars.WINE365_INSTALLER_URL }}
+      CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE4OFFICE_UPDATE_MANIFEST_URL }}
+      CONFIGURED_INSTALLER_URL: ${{ inputs.installer_url || vars.WINE4OFFICE_INSTALLER_URL }}
     steps:
-      - name: Check out Wine 365
+      - name: Check out Wine4Office
         uses: actions/checkout@v4
 
       - name: Install Wine build dependencies when permitted
@@ -97,21 +97,21 @@ jobs:
           requested=${REQUESTED_VERSION:-}
           if [[ -n "$requested" ]]; then
             version=$requested
-          elif [[ $GITHUB_REF == refs/tags/wine365-v* ]]; then
-            version=${GITHUB_REF_NAME#wine365-v}
+          elif [[ $GITHUB_REF == refs/tags/wine4office-v* ]]; then
+            version=${GITHUB_REF_NAME#wine4office-v}
           else
             version="0.0.0-${GITHUB_SHA:0:12}"
           fi
           [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Configure and build Wine 365
+      - name: Configure and build Wine4Office
         run: |
           set -euo pipefail
           mkdir -p build stage
           cd build
           ../configure \
-            --prefix=/opt/wine365 \
+            --prefix=/opt/wine4office \
             --enable-archs=i386,x86_64 \
             --disable-tests
           echo "Building with $(nproc) parallel jobs"
@@ -123,31 +123,31 @@ jobs:
           set -euo pipefail
           python3 -m venv manager-qt-venv
           manager-qt-venv/bin/python -m pip install --disable-pip-version-check \
-            -r tools/wine365-manager/requirements-build.txt
+            -r tools/wine4office-manager/requirements-build.txt
           mkdir -p release
           PYTHON="$PWD/manager-qt-venv/bin/python" \
-            tools/wine365-manager/packaging/build-qt-binary.sh \
-            release/wine365-manager-qt
-          QT_QPA_PLATFORM=offscreen WINE365_MANAGER_ROOT="$PWD/tools/wine365-manager" \
-            release/wine365-manager-qt --smoke-test
+            tools/wine4office-manager/packaging/build-qt-binary.sh \
+            release/wine4office-manager-qt
+          QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
+            release/wine4office-manager-qt --smoke-test
 
       - name: Build self-extracting installer and manifest
         run: |
           set -euo pipefail
           mkdir -p release
-          tools/wine365-manager/packaging/build-onefile.sh \
-            stage/opt/wine365 \
-            release/wine365-${{ steps.version.outputs.version }}-x86_64.run \
+          tools/wine4office-manager/packaging/build-onefile.sh \
+            stage/opt/wine4office \
+            release/wine4office-${{ steps.version.outputs.version }}-x86_64.run \
             '${{ steps.version.outputs.version }}' \
             "${CONFIGURED_UPDATE_URL:-}" \
             "${CONFIGURED_INSTALLER_URL:-}" \
-            release/wine365-manager-qt
+            release/wine4office-manager-qt
 
       - name: Build WineCharm WoW64 runner backup
         run: |
           set -euo pipefail
-          runner="stage/opt/wine365"
-          runner_name="wine365-${{ steps.version.outputs.version }}-wow64-x86_64"
+          runner="stage/opt/wine4office"
+          runner_name="wine4office-${{ steps.version.outputs.version }}-wow64-x86_64"
           archive="release/${runner_name}.tar.zst"
 
           [[ -x "$runner/bin/wine" ]]
@@ -183,7 +183,7 @@ jobs:
       - name: Upload CI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wine365-${{ steps.version.outputs.version }}-wow64-x86_64
+          name: wine4office-${{ steps.version.outputs.version }}-wow64-x86_64
           path: |
             release/*.run
             release/*.tar.zst
@@ -193,7 +193,7 @@ jobs:
           compression-level: 0
 
       - name: Publish tagged GitHub release
-        if: startsWith(github.ref, 'refs/tags/wine365-v')
+        if: startsWith(github.ref, 'refs/tags/wine4office-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

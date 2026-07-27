@@ -1,4 +1,4 @@
-# Wine 365 Hebrew additions to Tahoma
+# Wine4Office Hebrew additions to Tahoma
 
 Wine's metric-compatible Tahoma files did not contain Hebrew glyphs.  Some
 Office UI paths ask a Tahoma `IDWriteFontFace` for glyph indices directly, so

@@ -1,9 +1,9 @@
-# Wine365
+# Wine4Office
 
-Wine365 is an experimental [Wine](https://www.winehq.org/) fork for running
+Wine4Office is an experimental [Wine](https://www.winehq.org/) fork for running
 modern Microsoft Word and Excel on Linux without a Windows virtual machine.
 
-> Every Wine365 investigation, code change, test, and document was produced with
+> Every Wine4Office investigation, code change, test, and document was produced with
 > AI, primarily **ChatGPT-5.6-sol** and **Grok 4.5**. I directed and tested the
 > work, but **I do not know C** and cannot independently audit the C/C++ code.
 
@@ -16,7 +16,7 @@ modern Microsoft Word and Excel on Linux without a Windows virtual machine.
   KMS, MAK, VL, perpetual, retail, device, shared-computer, and other licensing
   methods remain untested.
 
-This is a narrow experiment, not a promise that Wine365 will work with another
+This is a narrow experiment, not a promise that Wine4Office will work with another
 machine, Office edition, account, or Wine prefix.
 
 ## What worked
@@ -47,7 +47,7 @@ state:
 > material of that LLM respects our Clean Room Guidelines, or that its output is
 > compatible with the LGPL.
 
-Wine365 was produced with AI, so it cannot meet this rule. These changes will
+Wine4Office was produced with AI, so it cannot meet this rule. These changes will
 **not** be pushed or submitted to the official WineHQ repository.
 
 ---
@@ -56,9 +56,9 @@ Wine365 was produced with AI, so it cannot meet this rule. These changes will
 
 ### Base
 
-Wine365 is based on **Wine 11.12**
+Wine4Office is based on **Wine 11.12**
 ([`996020f410e`](https://gitlab.winehq.org/wine/wine/-/commit/996020f410e7a1aa2dd6b44cf740854ea524d31a))
-with Wine365 compatibility changes through this branch. Relative to that base,
+with Wine4Office compatibility changes through this branch. Relative to that base,
 the branch changes 151 paths with about 15,938 insertions and 691 deletions.
 
 ### Main changes
@@ -74,18 +74,18 @@ the branch changes 151 paths with about 15,938 insertions and 691 deletions.
   update downloads through ranged BITS and an Office-compatible Delivery
   Optimization service, plus `CoCancelCall`, COM teardown, WinHTTP/WinINet
   compatibility, WAM/OneAuth objects, and federated MSHTML navigation.
-- **OAuth:** `wine365auth.exe` runs inside the prefix, uses PKCE, handles federated
+- **OAuth:** `wine4officeauth.exe` runs inside the prefix, uses PKCE, handles federated
   returns, and stores WAM state with DPAPI under
-  `%LOCALAPPDATA%\Wine365\WAM` without logging tokens.
+  `%LOCALAPPDATA%\Wine4Office\WAM` without logging tokens.
 
 Wine's metric-compatible Tahoma fonts were extended with the RTL glyph ranges
 used by Office. Font generation and licensing details are in
-[`fonts/README.wine365-tahoma-hebrew.md`](fonts/README.wine365-tahoma-hebrew.md)
+[`fonts/README.wine4office-tahoma-hebrew.md`](fonts/README.wine4office-tahoma-hebrew.md)
 and [`fonts/LICENSE.Liberation`](fonts/LICENSE.Liberation).
 
 ### Software Protection Platform (SPP/SPPC)
 
-Wine365 implements the `sppc.dll` subset Office uses for local Grace checks. It
+Wine4Office implements the `sppc.dll` subset Office uses for local Grace checks. It
 selects the first valid installed SKU from Click-to-Run's `ProductReleaseIds`
 and `Licenses16` XML/XRM metadata, with x64, x86, and multi-product support.
 
@@ -96,14 +96,14 @@ See [`dlls/sppc/sppc.c`](dlls/sppc/sppc.c).
 
 ### Microsoft 365 subscription licensing
 
-SPP handles local checks; WAM/OneAuth handles the subscription. `wine365auth.exe`
+SPP handles local checks; WAM/OneAuth handles the subscription. `wine4officeauth.exe`
 uses OAuth/PKCE and stores tokens with DPAPI. The tested organizational
 subscription remained activated after restarts. KMS, MAK, VL, perpetual, retail,
 device, shared-computer, and offline activation remain untested.
 
 ### Delivery Optimization
 
-Wine365 exposes Office's legacy Delivery Optimization COM interfaces through
+Wine4Office exposes Office's legacy Delivery Optimization COM interfaces through
 `qmgr`, backed by Wine's BITS and WinHTTP transfer engine. It supports file and
 `IStream` sinks, file/job properties, swarm statistics, and arbitrary CDN byte
 ranges. COM proxy security blankets and generated 32/64-bit proxy/stub code let
@@ -122,8 +122,8 @@ Use an out-of-tree build after installing Wine's normal dependencies:
 
 ```sh
 SOURCE="$PWD"
-mkdir -p ../wine365-build
-cd ../wine365-build
+mkdir -p ../wine4office-build
+cd ../wine4office-build
 "$SOURCE/configure" --enable-archs=i386,x86_64
 make -j"$(nproc)"
 sudo make install
@@ -145,8 +145,8 @@ More details are in
 
 ### License
 
-Wine365 retains Wine's GNU LGPL 2.1-or-later license. See [`LICENSE`](LICENSE)
+Wine4Office retains Wine's GNU LGPL 2.1-or-later license. See [`LICENSE`](LICENSE)
 and [`COPYING.LIB`](COPYING.LIB). Liberation Sans glyph material uses the SIL
 Open Font License.
 
-Wine365 is not affiliated with or endorsed by WineHQ or Microsoft.
+Wine4Office is not affiliated with or endorsed by WineHQ or Microsoft.

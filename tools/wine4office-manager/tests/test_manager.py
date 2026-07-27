@@ -10,8 +10,8 @@ from unittest import mock
 
 MANAGER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MANAGER_DIR))
-import wine365_backend as backend
-import wine365_manager as manager
+import wine4office_backend as backend
+import wine4office_manager as manager
 
 
 class ManagerTests(unittest.TestCase):
@@ -31,8 +31,8 @@ class ManagerTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_manager_uses_native_qt_without_web_server(self):
-        entrypoint = (MANAGER_DIR / "wine365_manager.py").read_text()
-        qt_source = (MANAGER_DIR / "wine365_qt.py").read_text()
+        entrypoint = (MANAGER_DIR / "wine4office_manager.py").read_text()
+        qt_source = (MANAGER_DIR / "wine4office_qt.py").read_text()
         self.assertIn("from PySide6.QtWidgets import", qt_source)
         self.assertNotIn("http.server", entrypoint)
         self.assertNotIn("webbrowser", entrypoint)
@@ -65,8 +65,8 @@ class ManagerTests(unittest.TestCase):
         self.assertIn("ERROR: visible failure", snapshot["log"])
 
     def test_installed_root_honors_standalone_binary_environment(self):
-        root = self.home / ".local/share/wine365"
-        with mock.patch.dict(os.environ, {"WINE365_MANAGER_ROOT": str(root)}):
+        root = self.home / ".local/share/wine4office"
+        with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": str(root)}):
             self.assertEqual(backend.installed_root(), root.resolve())
 
     def _wait(self, state):

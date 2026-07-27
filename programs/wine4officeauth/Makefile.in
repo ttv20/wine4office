@@ -1,7 +1,7 @@
-MODULE    = wine365auth.exe
+MODULE    = wine4officeauth.exe
 IMPORTS   = $(CXX_PE_LIBS) uuid urlmon winhttp wininet crypt32 bcrypt shell32 oleaut32 ole32 user32
 
 EXTRADLLFLAGS = -mwindows -municode
 
 SOURCES = \
-	wine365auth.cpp
+	wine4officeauth.cpp

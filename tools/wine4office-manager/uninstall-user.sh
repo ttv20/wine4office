@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Remove Wine 365 from the current user. Prefix deletion requires an explicit option.
+# Remove Wine4Office from the current user. Prefix deletion requires an explicit option.
 set -euo pipefail
 
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-ROOT=${WINE365_MANAGER_HOME:-$DATA_HOME/wine365}
-BIN_HOME=${WINE365_BIN_HOME:-$HOME/.local/bin}
+ROOT=${WINE4OFFICE_MANAGER_HOME:-$DATA_HOME/wine4office}
+BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
 PURGE_RUNNER=false
 REMOVE_PREFIX=
 
@@ -24,19 +24,19 @@ done
 
 # Validate and stop the selected prefix while the installed backend is available.
 if [[ -n $REMOVE_PREFIX ]]; then
-    [[ -f "$ROOT/lib/wine365_backend.py" ]] || {
+    [[ -f "$ROOT/lib/wine4office_backend.py" ]] || {
         echo "Cannot safely validate the prefix because the installed backend is missing." >&2
         exit 1
     }
     REMOVE_PREFIX=$(PYTHONPATH="$ROOT/lib" python3 - "$REMOVE_PREFIX" <<'PY'
 import sys
-import wine365_backend as backend
+import wine4office_backend as backend
 print(backend.validate_prefix(sys.argv[1]))
 PY
 )
     PYTHONPATH="$ROOT/lib" python3 - "$REMOVE_PREFIX" <<'PY' || true
 import sys
-import wine365_backend as backend
+import wine4office_backend as backend
 config = backend.load_config()
 try:
     backend.stop_wine(sys.argv[1], config["wine"])
@@ -45,16 +45,16 @@ except (FileNotFoundError, OSError):
 PY
 fi
 
-if [[ -f "$ROOT/lib/wine365_backend.py" ]]; then
+if [[ -f "$ROOT/lib/wine4office_backend.py" ]]; then
     PYTHONPATH="$ROOT/lib" python3 - <<'PY' || true
-import wine365_backend as backend
+import wine4office_backend as backend
 backend.remove_app_shortcuts(backend.APP_META)
 PY
 fi
-for file in "$DATA_HOME/applications/wine365-manager.desktop" "${XDG_DESKTOP_DIR:-$HOME/Desktop}/wine365-manager.desktop"; do
-    if [[ -f "$file" ]] && grep -q '^X-Wine365-Managed=true$' "$file"; then rm -f "$file"; fi
+for file in "$DATA_HOME/applications/wine4office-manager.desktop" "${XDG_DESKTOP_DIR:-$HOME/Desktop}/wine4office-manager.desktop"; do
+    if [[ -f "$file" ]] && grep -q '^X-Wine4Office-Managed=true$' "$file"; then rm -f "$file"; fi
 done
-for link in "$BIN_HOME/wine365-manager" "$BIN_HOME/wine365-launcher"; do
+for link in "$BIN_HOME/wine4office-manager" "$BIN_HOME/wine4office-launcher"; do
     if [[ -L "$link" ]] && [[ $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f "$link"; fi
 done
 
@@ -63,17 +63,17 @@ if [[ -n $REMOVE_PREFIX ]]; then
     printf 'Removed Wine environment: %s\n' "$REMOVE_PREFIX"
 fi
 rm -rf "$ROOT/lib" "$ROOT/icons"
-rm -f "$ROOT/bin/wine365-manager" "$ROOT/bin/wine365-launcher"
+rm -f "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher"
 if $PURGE_RUNNER; then
     rm -rf "$ROOT/runner"
     rm -f "$ROOT/VERSION" "$ROOT/UPDATE_URL" "$ROOT/install.json"
-    rm -rf "$CONFIG_HOME/wine365"
+    rm -rf "$CONFIG_HOME/wine4office"
 fi
-rm -f "$ROOT/bin/wine365-uninstall"
+rm -f "$ROOT/bin/wine4office-uninstall"
 rmdir "$ROOT/bin" "$ROOT" 2>/dev/null || true
 
 if $PURGE_RUNNER; then
-    echo "Wine 365 runner, manager, shortcuts, and configuration removed."
+    echo "Wine4Office runner, manager, shortcuts, and configuration removed."
 else
-    printf 'Wine 365 Manager removed. Prefixes, configuration, and any runner in %s/runner were preserved.\n' "$ROOT"
+    printf 'Wine4Office Manager removed. Prefixes, configuration, and any runner in %s/runner were preserved.\n' "$ROOT"
 fi

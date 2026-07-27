@@ -6,8 +6,8 @@ set -eu
 prefix=${WINEPREFIX:-$HOME/.wine}
 fonts_dir="$prefix/drive_c/windows/Fonts"
 tmp=${TMPDIR:-/tmp}
-font_list="$tmp/wine365-office-cloud-fonts.$$"
-reg_file="$tmp/wine365-office-cloud-fonts.$$.reg"
+font_list="$tmp/wine4office-office-cloud-fonts.$$"
+reg_file="$tmp/wine4office-office-cloud-fonts.$$.reg"
 trap 'rm -f "$font_list" "$reg_file"' EXIT INT TERM
 
 find "$prefix/drive_c/users" -type f \( \
@@ -17,11 +17,11 @@ find "$prefix/drive_c/users" -type f \( \
     \) -print 2>/dev/null | LC_ALL=C sort -u > "$font_list" || true
 
 [ -s "$font_list" ] || {
-    echo "wine365: no Office cloud fonts found; leaving Wine fonts unchanged"
+    echo "wine4office: no Office cloud fonts found; leaving Wine fonts unchanged"
     exit 0
 }
 command -v fc-scan >/dev/null 2>&1 || {
-    echo "wine365: fc-scan is required to register Office cloud fonts" >&2
+    echo "wine4office: fc-scan is required to register Office cloud fonts" >&2
     exit 1
 }
 
@@ -50,4 +50,4 @@ mkdir -p "$fonts_dir"
 
 wine regedit /S "$(winepath -w "$reg_file")"
 count=$(wc -l < "$font_list" | tr -d ' ')
-echo "wine365: registered $count Office cloud font files in C:\\windows\\Fonts"
+echo "wine4office: registered $count Office cloud font files in C:\\windows\\Fonts"

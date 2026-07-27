@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Package a compiled Wine runner and Wine 365 Manager as one executable .run file.
+# Package a compiled Wine runner and Wine4Office Manager as one executable .run file.
 set -euo pipefail
 
 usage() {
@@ -36,7 +36,7 @@ cp -a "$RUNNER/." "$STAGE/payload/runner/"
 tar -C "$HERE" --exclude='tests' --exclude='packaging' --exclude='__pycache__' --exclude='*.pyc' \
     -cf - . | tar -C "$STAGE/payload/manager" -xf -
 if [[ -n $QT_MANAGER ]]; then
-    install -m 0755 "$QT_MANAGER" "$STAGE/payload/manager/wine365-manager-qt"
+    install -m 0755 "$QT_MANAGER" "$STAGE/payload/manager/wine4office-manager-qt"
 fi
 printf '%s\n' "$VERSION" > "$STAGE/payload/VERSION"
 printf '%s\n' "$UPDATE_URL" > "$STAGE/payload/UPDATE_URL"
@@ -45,11 +45,11 @@ tar -C "$STAGE" -cf - payload | \
 
 cat > "$OUTPUT" <<EOF
 #!/bin/sh
-# Wine 365 self-extracting user installer. Generated; do not edit.
+# Wine4Office self-extracting user installer. Generated; do not edit.
 set -eu
 BUNDLE_VERSION='$VERSION'
 
-fail() { echo "wine365-installer: \$*" >&2; exit 1; }
+fail() { echo "wine4office-installer: \$*" >&2; exit 1; }
 usage() {
     echo "Usage: \$0 [--install|--update|--uninstall|--version|--extract DIRECTORY]" >&2
     exit 2
@@ -65,21 +65,21 @@ esac
 [ \$# -eq 0 ] || usage
 [ "\$MODE" != --version ] || { echo "\$BUNDLE_VERSION"; exit 0; }
 DATA_HOME=\${XDG_DATA_HOME:-\$HOME/.local/share}
-ROOT=\${WINE365_MANAGER_HOME:-\$DATA_HOME/wine365}
+ROOT=\${WINE4OFFICE_MANAGER_HOME:-\$DATA_HOME/wine4office}
 if [ "\$MODE" = --uninstall ]; then
-    [ -x "\$ROOT/bin/wine365-uninstall" ] || fail "Wine 365 is not installed at \$ROOT"
-    exec "\$ROOT/bin/wine365-uninstall" --purge-runner
+    [ -x "\$ROOT/bin/wine4office-uninstall" ] || fail "Wine4Office is not installed at \$ROOT"
+    exec "\$ROOT/bin/wine4office-uninstall" --purge-runner
 fi
 [ "\$(id -u)" -ne 0 ] || fail "do not run this installer as root"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v zstd >/dev/null 2>&1 || fail "zstd is required"
 case \$ROOT in "\$HOME"/*) ;; *) fail "install root must be inside your home directory: \$ROOT";; esac
-PAYLOAD_LINE=\$(awk '/^__WINE365_PAYLOAD_BELOW__\$/ { print NR + 1; exit }' "\$0")
+PAYLOAD_LINE=\$(awk '/^__WINE4OFFICE_PAYLOAD_BELOW__\$/ { print NR + 1; exit }' "\$0")
 [ -n "\$PAYLOAD_LINE" ] || fail "embedded payload marker is missing"
 if [ "\$MODE" = --extract ]; then
     mkdir -p "\$EXTRACT_DIR"
     tail -n +"\$PAYLOAD_LINE" "\$0" | zstd -d -q -c | tar -xf - -C "\$EXTRACT_DIR"
-    echo "Extracted Wine 365 \$BUNDLE_VERSION to \$EXTRACT_DIR"
+    echo "Extracted Wine4Office \$BUNDLE_VERSION to \$EXTRACT_DIR"
     exit 0
 fi
 TMP=\$(mktemp -d)
@@ -93,7 +93,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 mkdir -p "\$ROOT"
-mkdir "\$ROOT/.install-lock" 2>/dev/null || fail "another Wine 365 install or update is running"
+mkdir "\$ROOT/.install-lock" 2>/dev/null || fail "another Wine4Office install or update is running"
 LOCK_CREATED=true
 tail -n +"\$PAYLOAD_LINE" "\$0" | zstd -d -q -c | tar -xf - -C "\$TMP"
 [ -x "\$TMP/payload/runner/bin/wine" ] || fail "payload runner is invalid"
@@ -104,29 +104,29 @@ OLD="\$ROOT/.runner.old.\$\$"
 cp -a "\$TMP/payload/runner" "\$NEW"
 if [ -e "\$ROOT/runner" ]; then mv "\$ROOT/runner" "\$OLD"; fi
 mv "\$NEW" "\$ROOT/runner"; NEW=
-if ! WINE365_MANAGER_HOME="\$ROOT" WINE365_WINE="\$ROOT/runner/bin/wine" \
-     WINE365_VERSION="\$VERSION" WINE365_UPDATE_URL="\$UPDATE_URL" \
+if ! WINE4OFFICE_MANAGER_HOME="\$ROOT" WINE4OFFICE_WINE="\$ROOT/runner/bin/wine" \
+     WINE4OFFICE_VERSION="\$VERSION" WINE4OFFICE_UPDATE_URL="\$UPDATE_URL" \
      "\$TMP/payload/manager/install-user.sh"; then
     rm -rf "\$ROOT/runner"
     [ ! -e "\$OLD" ] || mv "\$OLD" "\$ROOT/runner"
     fail "manager installation failed; previous runner restored"
 fi
 rm -rf "\$OLD"; OLD=
-WINE365_ROOT="\$ROOT" WINE365_VERSION="\$VERSION" WINE365_UPDATE_URL="\$UPDATE_URL" python3 - <<'PY'
+WINE4OFFICE_ROOT="\$ROOT" WINE4OFFICE_VERSION="\$VERSION" WINE4OFFICE_UPDATE_URL="\$UPDATE_URL" python3 - <<'PY'
 import json, os
 from pathlib import Path
-root = Path(os.environ["WINE365_ROOT"])
+root = Path(os.environ["WINE4OFFICE_ROOT"])
 data = {
-    "version": os.environ["WINE365_VERSION"],
-    "update_manifest_url": os.environ["WINE365_UPDATE_URL"],
+    "version": os.environ["WINE4OFFICE_VERSION"],
+    "update_manifest_url": os.environ["WINE4OFFICE_UPDATE_URL"],
     "install_scope": "user",
 }
 (root / "install.json").write_text(json.dumps(data, indent=2) + "\\n")
 PY
-echo "Wine 365 \$VERSION installed for the current user."
-echo "Open Wine 365 Manager from the application menu."
+echo "Wine4Office \$VERSION installed for the current user."
+echo "Open Wine4Office Manager from the application menu."
 exit 0
-__WINE365_PAYLOAD_BELOW__
+__WINE4OFFICE_PAYLOAD_BELOW__
 EOF
 cat "$STAGE/payload.tar.zst" >> "$OUTPUT"
 chmod 0755 "$OUTPUT"

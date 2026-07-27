@@ -15,9 +15,9 @@ sys.path.insert(0, str(MANAGER_DIR))
 try:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QListWidget, QStackedWidget, QTreeWidget
-    import wine365_backend as backend
-    import wine365_manager as manager
-    from wine365_qt import ManagerWindow
+    import wine4office_backend as backend
+    import wine4office_manager as manager
+    from wine4office_qt import ManagerWindow
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -27,7 +27,7 @@ except ImportError:
 class QtManagerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.application = QApplication.instance() or QApplication(["wine365-manager-test"])
+        cls.application = QApplication.instance() or QApplication(["wine4office-manager-test"])
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -40,7 +40,7 @@ class QtManagerTests(unittest.TestCase):
         })
         self.environment.start()
         self.config = {
-            "prefix": str(self.home / ".wine365"),
+            "prefix": str(self.home / ".wine4office"),
             "wine": str(self.home / "runner/bin/wine"),
             "desktop_copy": False,
             "update_url": "",
@@ -60,7 +60,7 @@ class QtManagerTests(unittest.TestCase):
         self.state = manager.ManagerState()
         self.window = ManagerWindow(
             self.state,
-            MANAGER_DIR / "wine365-launcher",
+            MANAGER_DIR / "wine4office-launcher",
             MANAGER_DIR / "icons",
             MANAGER_DIR / "register-office-cloud-fonts.sh",
         )

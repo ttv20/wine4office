@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native Qt Widgets interface for Wine 365 Manager."""
+"""Native Qt Widgets interface for Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import wine365_backend as backend
+import wine4office_backend as backend
 
 
 class ManagerWindow(QMainWindow):
@@ -55,8 +55,8 @@ class ManagerWindow(QMainWindow):
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
 
-        self.setWindowTitle("Wine 365 Manager")
-        self.setWindowIcon(QIcon(str(icons / "wine365-manager.svg")))
+        self.setWindowTitle("Wine4Office Manager")
+        self.setWindowIcon(QIcon(str(icons / "wine4office-manager.svg")))
         self.setMinimumSize(820, 620)
         self.resize(960, 700)
         self._build_ui()
@@ -73,7 +73,7 @@ class ManagerWindow(QMainWindow):
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
-        toolbar.addAction(QIcon(str(self.icons / "wine365-manager.svg")), "Wine 365 Manager")
+        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.svg")), "Wine4Office Manager")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -166,13 +166,13 @@ class ManagerWindow(QMainWindow):
     def _environment_page(self) -> QWidget:
         page, layout = self._new_page(
             "Wine environment",
-            "Choose the Wine 365 runner and the isolated environment used for Microsoft Office.",
+            "Choose the Wine4Office runner and the isolated environment used for Microsoft Office.",
         )
         environment = QGroupBox("Environment paths")
         environment_layout = QVBoxLayout(environment)
         form = self._form()
         self.prefix_edit = QLineEdit()
-        self.prefix_edit.setPlaceholderText(str(Path.home() / ".wine365"))
+        self.prefix_edit.setPlaceholderText(str(Path.home() / ".wine4office"))
         self.prefix_edit.setAccessibleName("Wine environment path")
         form.addRow("Environment:", self._path_row(self.prefix_edit, self.browse_prefix, True))
         self.wine_edit = QLineEdit()
@@ -316,7 +316,7 @@ class ManagerWindow(QMainWindow):
     def _maintenance_page(self) -> QWidget:
         page, layout = self._new_page(
             "Maintenance",
-            "Update Wine 365 from a verified release manifest or remove the local installation.",
+            "Update Wine4Office from a verified release manifest or remove the local installation.",
         )
         update = QGroupBox("Update")
         update_layout = QVBoxLayout(update)
@@ -346,7 +346,7 @@ class ManagerWindow(QMainWindow):
         remove_buttons = QHBoxLayout()
         remove_buttons.addStretch()
         self.remove_button = self._action_button(
-            "Remove Wine 365…", self.remove_wine365, QStyle.StandardPixmap.SP_TrashIcon
+            "Remove Wine4Office…", self.remove_wine4office, QStyle.StandardPixmap.SP_TrashIcon
         )
         remove_buttons.addWidget(self.remove_button)
         removal_layout.addLayout(remove_buttons)
@@ -563,7 +563,7 @@ class ManagerWindow(QMainWindow):
             self.show_error("No update address is configured yet.")
             return
         result = QMessageBox.question(
-            self, "Update Wine 365", "Download, verify and install the available Wine 365 update?",
+            self, "Update Wine4Office", "Download, verify and install the available Wine4Office update?",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
             QMessageBox.StandardButton.Cancel,
         )
@@ -576,7 +576,7 @@ class ManagerWindow(QMainWindow):
                 self.state.output("Stopped the selected Wine environment before updating.")
             except (FileNotFoundError, OSError):
                 pass
-            return backend.update_wine365(config["update_url"], self.state.output,
+            return backend.update_wine4office(config["update_url"], self.state.output,
                                           self.state.cancel_event, self.state.set_process)
 
         try:
@@ -586,7 +586,7 @@ class ManagerWindow(QMainWindow):
         except Exception as error:
             self.show_error(error)
 
-    def remove_wine365(self) -> None:
+    def remove_wine4office(self) -> None:
         config = self.save_config()
         if not config:
             return
@@ -594,7 +594,7 @@ class ManagerWindow(QMainWindow):
         detail = (f"This also permanently deletes {config['prefix']} and everything inside it."
                   if remove_prefix else "The Wine environment and Office files will be preserved.")
         result = QMessageBox.warning(
-            self, "Remove Wine 365", f"Remove the Wine 365 runner, manager and shortcuts?\n\n{detail}",
+            self, "Remove Wine4Office", f"Remove the Wine4Office runner, manager and shortcuts?\n\n{detail}",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
             QMessageBox.StandardButton.Cancel,
         )
@@ -603,7 +603,7 @@ class ManagerWindow(QMainWindow):
         try:
             self.state.start_task(
                 "remove",
-                lambda: backend.remove_wine365(config["prefix"], remove_prefix, self.state.output),
+                lambda: backend.remove_wine4office(config["prefix"], remove_prefix, self.state.output),
             )
             self.notify("Removal started.")
             self.refresh_state()
@@ -618,7 +618,7 @@ class ManagerWindow(QMainWindow):
         self.statusBar().showMessage(message, 5000)
 
     def show_error(self, error) -> None:
-        QMessageBox.critical(self, "Wine 365 Manager", str(error))
+        QMessageBox.critical(self, "Wine4Office Manager", str(error))
 
     def refresh_state(self) -> None:
         try:
@@ -686,9 +686,9 @@ class ManagerWindow(QMainWindow):
 def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 smoke_test: bool = False, screenshot: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName("Wine 365 Manager")
-    app.setOrganizationName("Wine 365")
-    app.setDesktopFileName("wine365-manager")
+    app.setApplicationName("Wine4Office Manager")
+    app.setOrganizationName("Wine4Office")
+    app.setDesktopFileName("wine4office-manager")
     window = ManagerWindow(state, launcher, icons, font_helper)
     window.show()
 

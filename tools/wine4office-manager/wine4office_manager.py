@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native Qt entry point and task state for Wine 365 Manager."""
+"""Native Qt entry point and task state for Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import wine365_backend as backend  # noqa: E402
+import wine4office_backend as backend  # noqa: E402
 
 
 def install_root() -> Path:
-    configured = os.environ.get("WINE365_MANAGER_ROOT")
+    configured = os.environ.get("WINE4OFFICE_MANAGER_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
     if HERE.name == "lib":
@@ -27,7 +27,7 @@ def install_root() -> Path:
 
 
 INSTALL_ROOT = install_root()
-LAUNCHER = INSTALL_ROOT / "bin/wine365-launcher" if INSTALL_ROOT != HERE else HERE / "wine365-launcher"
+LAUNCHER = INSTALL_ROOT / "bin/wine4office-launcher" if INSTALL_ROOT != HERE else HERE / "wine4office-launcher"
 ICONS = INSTALL_ROOT / "icons" if INSTALL_ROOT != HERE else HERE / "icons"
 FONT_HELPER = (INSTALL_ROOT / "lib/register-office-cloud-fonts.sh"
                if INSTALL_ROOT != HERE else HERE / "register-office-cloud-fonts.sh")
@@ -96,7 +96,7 @@ class ManagerState:
                     self.task["running"] = False
                     self.process = None
 
-        threading.Thread(target=worker, name=f"wine365-{kind}", daemon=True).start()
+        threading.Thread(target=worker, name=f"wine4office-{kind}", daemon=True).start()
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -110,7 +110,7 @@ class ManagerState:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Wine 365 Manager")
+    parser = argparse.ArgumentParser(description="Wine4Office Manager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--screenshot", metavar="PATH", help=argparse.SUPPRESS)
@@ -118,16 +118,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.install_shortcut:
-        path = backend.install_manager_shortcut(LAUNCHER.with_name("wine365-manager"), ICONS)
+        path = backend.install_manager_shortcut(LAUNCHER.with_name("wine4office-manager"), ICONS)
         print(path)
         return 0
 
     try:
-        from wine365_qt import run_manager
+        from wine4office_qt import run_manager
     except ImportError as error:
         if error.name and error.name.startswith("PySide6"):
             parser.error(
-                "PySide6 is required for the native Qt interface. Install the packaged Wine 365 "
+                "PySide6 is required for the native Qt interface. Install the packaged Wine4Office "
                 "release or run: python3 -m pip install --user PySide6"
             )
         raise

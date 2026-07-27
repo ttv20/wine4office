@@ -1,5 +1,5 @@
 /*
- * Wine 365 organizational OAuth helper.
+ * Wine4Office organizational OAuth helper.
  *
  * Hosts Microsoft authentication in an owner-window MSHTML control inside the
  * Wine prefix, exchanges the public-client PKCE code, and stores the resulting
@@ -311,7 +311,7 @@ static std::wstring cache_directory(void)
                                     NULL, SHGFP_TYPE_CURRENT, path))) return {};
     }
     std::wstring directory = path;
-    directory += L"\\Wine365";
+    directory += L"\\Wine4Office";
     CreateDirectoryW(directory.c_str(), NULL);
     directory += L"\\WAM";
     CreateDirectoryW(directory.c_str(), NULL);
@@ -335,7 +335,7 @@ static bool protected_write(const WCHAR *name, const std::string &value)
     if (path.empty()) return false;
     input.cbData = value.size();
     input.pbData = (BYTE *)value.data();
-    if (!CryptProtectData(&input, L"Wine 365 WAM", NULL, NULL, NULL,
+    if (!CryptProtectData(&input, L"Wine4Office WAM", NULL, NULL, NULL,
                           CRYPTPROTECT_UI_FORBIDDEN, &output)) return false;
     temporary = path + L".tmp";
     file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
@@ -393,9 +393,9 @@ static bool http_post(const WCHAR *host, const WCHAR *path, const std::string &b
     DWORD status = 0, status_size = sizeof(status), available, read;
     bool success = false;
     response.clear();
-    session = WinHttpOpen(L"Wine365-WAM/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    session = WinHttpOpen(L"Wine4Office-WAM/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) session = WinHttpOpen(L"Wine365-WAM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    if (!session) session = WinHttpOpen(L"Wine4Office-WAM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) goto done;
     WinHttpSetTimeouts(session, 30000, 30000, 30000, 30000);
@@ -437,7 +437,7 @@ static bool internet_post_redirect(const WCHAR *host, const WCHAR *path,
     const WCHAR *accept[] = {L"text/html", L"application/xhtml+xml", NULL};
     DWORD status = 0, status_size = sizeof(status), index = 0;
     bool success = false;
-    session = InternetOpenW(L"Wine365-WAM/1.0", INTERNET_OPEN_TYPE_PRECONFIG,
+    session = InternetOpenW(L"Wine4Office-WAM/1.0", INTERNET_OPEN_TYPE_PRECONFIG,
                             NULL, NULL, 0);
     if (!session || !(connection = InternetConnectW(session, host, INTERNET_DEFAULT_HTTPS_PORT,
                                                      NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0)))
@@ -507,9 +507,9 @@ static bool http_get(const WCHAR *host, const WCHAR *path, std::string &response
     DWORD status = 0, status_size = sizeof(status), available, read;
     bool success = false;
     response.clear();
-    session = WinHttpOpen(L"Wine365-WAM/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    session = WinHttpOpen(L"Wine4Office-WAM/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) session = WinHttpOpen(L"Wine365-WAM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    if (!session) session = WinHttpOpen(L"Wine4Office-WAM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) goto done;
     WinHttpSetTimeouts(session, 30000, 30000, 30000, 30000);
@@ -1028,7 +1028,7 @@ static void center_window(HWND window, HWND owner)
 static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &login_hint,
                             std::string &verifier)
 {
-    static const WCHAR class_name[] = L"Wine365OAuthBroker";
+    static const WCHAR class_name[] = L"Wine4OfficeOAuthBroker";
     BrowserSite *site;
     WNDCLASSW window_class = {};
     BYTE random[64], challenge_hash[32];
