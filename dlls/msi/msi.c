@@ -3388,7 +3388,9 @@ static UINT MSI_ProvideQualifiedComponentEx(LPCWSTR szComponent,
     UINT ret;
     INSTALLSTATE state;
 
-    if (MSIREG_OpenUserComponentsKey( szComponent, &hkey, FALSE )) return ERROR_UNKNOWN_COMPONENT;
+    if (MSIREG_OpenUserComponentsKey( szComponent, &hkey, FALSE ))
+        return msi_office_c2r_get_qualified_component_path( szComponent, szQualifier, szProduct,
+                                                            lpPathBuf, pcchPathBuf );
 
     desc = reg_get_multisz( hkey, szQualifier );
     RegCloseKey(hkey);

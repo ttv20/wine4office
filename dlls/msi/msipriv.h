@@ -769,6 +769,7 @@ typedef struct {
 } awcstring;
 
 UINT msi_strcpy_to_awstring(const WCHAR *, int, awstring *, DWORD *);
+UINT msi_office_c2r_get_qualified_component_path(const WCHAR *, const WCHAR *, const WCHAR *, awstring *, DWORD *);
 
 /* msi server interface */
 extern MSIHANDLE msi_get_remote(MSIHANDLE handle);

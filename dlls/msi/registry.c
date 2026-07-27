@@ -1498,6 +1498,289 @@ static UINT enum_office_c2r_ui_qualifiers( const WCHAR *component, DWORD index, 
     return app_ret == ERROR_SUCCESS ? ret : app_ret;
 }
 
+static BOOL get_xml_attribute( const WCHAR *tag, const WCHAR *end, const WCHAR *name,
+                               WCHAR *value, DWORD value_size )
+{
+    const WCHAR *start, *stop;
+    SIZE_T name_len = wcslen( name ), len;
+
+    for (start = tag; (start = wcsstr( start, name )) && start < end; start += name_len)
+    {
+        if (start + name_len + 2 >= end || start[name_len] != '=' || start[name_len + 1] != '"')
+            continue;
+        start += name_len + 2;
+        if (!(stop = wcschr( start, '"' )) || stop > end) return FALSE;
+        len = stop - start;
+        if (len >= value_size) return FALSE;
+        memcpy( value, start, len * sizeof(WCHAR) );
+        value[len] = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL find_office_c2r_manifest_qualifier( const WCHAR *filename, const WCHAR *component,
+                                                DWORD wanted_index, DWORD *found, WCHAR *qualifier,
+                                                DWORD qualifier_size, WCHAR *appdata, DWORD appdata_size )
+{
+    WCHAR component_id[GUID_SIZE], *buffer, *tag, *end;
+    LARGE_INTEGER size;
+    DWORD read;
+    HANDLE file;
+    BOOL ret = FALSE;
+
+    file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!GetFileSizeEx( file, &size ) || size.QuadPart < sizeof(WCHAR) ||
+        size.QuadPart > 16 * 1024 * 1024 || (size.QuadPart & 1) ||
+        !(buffer = malloc( size.QuadPart + sizeof(WCHAR) )))
+    {
+        CloseHandle( file );
+        return FALSE;
+    }
+    if (!ReadFile( file, buffer, size.QuadPart, &read, NULL ) || read != size.QuadPart)
+        goto done;
+    buffer[read / sizeof(WCHAR)] = 0;
+    tag = buffer[0] == 0xfeff ? buffer + 1 : buffer;
+    if (tag[0] == 0xfffe) goto done;
+
+    while ((tag = wcsstr( tag, L"<PublishComponent ")))
+    {
+        if (!(end = wcschr( tag, '>' ))) break;
+        if (get_xml_attribute( tag, end, L"PublishComponentId", component_id,
+                               ARRAY_SIZE(component_id) ) && !wcsicmp( component_id, component ))
+        {
+            if ((*found)++ == wanted_index)
+            {
+                if (!get_xml_attribute( tag, end, L"Qualifier", qualifier, qualifier_size )) break;
+                if (!get_xml_attribute( tag, end, L"AppData", appdata, appdata_size )) appdata[0] = 0;
+                ret = TRUE;
+                break;
+            }
+        }
+        tag = end + 1;
+    }
+
+done:
+    free( buffer );
+    CloseHandle( file );
+    return ret;
+}
+
+/* C2R keeps MSI PublishComponent records in generated UTF-16 manifests instead
+ * of the normal Installer registry keys.  App-V exposes those records to MSI
+ * clients on Windows; use the manifests when that virtual registry is absent. */
+static UINT enum_office_c2r_manifest_qualifiers( const WCHAR *component, DWORD index,
+                                                 awstring *qual_buf, DWORD *qual_size,
+                                                 awstring *app_buf, DWORD *app_size )
+{
+    static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
+    WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], search[MAX_PATH], filename[MAX_PATH];
+    WCHAR qualifier[256], appdata[512];
+    WIN32_FIND_DATAW data;
+    DWORD size, found = 0;
+    HANDLE find;
+    HKEY key;
+    UINT ret, app_ret;
+
+    if (open_office_c2r_key( c2r_path, &key )) return ERROR_UNKNOWN_COMPONENT;
+    size = sizeof(package_guid);
+    if (RegGetValueW( key, NULL, L"PackageGUID", RRF_RT_REG_SZ, NULL, package_guid, &size ))
+    {
+        RegCloseKey( key );
+        return ERROR_UNKNOWN_COMPONENT;
+    }
+    RegCloseKey( key );
+    size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
+    if (!size || size >= ARRAY_SIZE(program_data)) return ERROR_UNKNOWN_COMPONENT;
+
+    if (package_guid[0] == '{')
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\%s\\C2RManifest*.xml",
+                  program_data, package_guid );
+    else
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\{%s}\\C2RManifest*.xml",
+                  program_data, package_guid );
+    if ((find = FindFirstFileW( search, &data )) == INVALID_HANDLE_VALUE)
+        return ERROR_UNKNOWN_COMPONENT;
+
+    *wcsrchr( search, '\\' ) = 0;
+    do
+    {
+        swprintf( filename, ARRAY_SIZE(filename), L"%s\\%s", search, data.cFileName );
+        if (find_office_c2r_manifest_qualifier( filename, component, index, &found, qualifier,
+                                                ARRAY_SIZE(qualifier), appdata, ARRAY_SIZE(appdata) ))
+        {
+            FindClose( find );
+            TRACE( "providing Office C2R manifest qualifier %s for component %s\n",
+                   debugstr_w(qualifier), debugstr_w(component) );
+            ret = msi_strcpy_to_awstring( qualifier, -1, qual_buf, qual_size );
+            app_ret = msi_strcpy_to_awstring( appdata, -1, app_buf, app_size );
+            return app_ret == ERROR_SUCCESS ? ret : app_ret;
+        }
+    } while (FindNextFileW( find, &data));
+    FindClose( find );
+    return found ? ERROR_NO_MORE_ITEMS : ERROR_UNKNOWN_COMPONENT;
+}
+
+static BOOL expand_office_c2r_keypath( const WCHAR *keypath, WCHAR *path, DWORD path_size )
+{
+    static const struct
+    {
+        const WCHAR *token;
+        const WCHAR *environment;
+    } replacements[] =
+    {
+        {L"%SFT_PROGRAM_FILES_X64%", L"ProgramW6432"},
+        {L"%SFT_PROGRAM_FILES_X86%", L"ProgramFiles(x86)"},
+        {L"%SFT_PROGRAM_FILES_COMMON_X64%", L"CommonProgramW6432"},
+        {L"%SFT_PROGRAM_FILES_COMMON_X86%", L"CommonProgramFiles(x86)"},
+    };
+    WCHAR base[MAX_PATH];
+    DWORD i, len, base_len;
+
+    for (i = 0; i < ARRAY_SIZE(replacements); i++)
+    {
+        len = wcslen( replacements[i].token );
+        if (wcsncmp( keypath, replacements[i].token, len )) continue;
+        base_len = GetEnvironmentVariableW( replacements[i].environment, base, ARRAY_SIZE(base) );
+        if (!base_len || base_len >= ARRAY_SIZE(base))
+        {
+            if (i == 0) base_len = GetEnvironmentVariableW( L"ProgramFiles", base, ARRAY_SIZE(base) );
+            else if (i == 2) base_len = GetEnvironmentVariableW( L"CommonProgramFiles", base, ARRAY_SIZE(base) );
+        }
+        if (!base_len || base_len >= ARRAY_SIZE(base) ||
+            base_len + wcslen( keypath + len ) >= path_size) return FALSE;
+        lstrcpyW( path, base );
+        lstrcatW( path, keypath + len );
+        return TRUE;
+    }
+    len = ExpandEnvironmentStringsW( keypath, path, path_size );
+    return len && len <= path_size;
+}
+
+static BOOL find_office_c2r_manifest_path( const WCHAR *filename, const WCHAR *component,
+                                           const WCHAR *qualifier, const WCHAR *product,
+                                           WCHAR *path, DWORD path_size )
+{
+    WCHAR component_id[GUID_SIZE], product_code[GUID_SIZE], found_qualifier[256], keypath[1024];
+    WCHAR *buffer, *tag, *end, *component_tag, *component_end;
+    LARGE_INTEGER size;
+    DWORD read;
+    HANDLE file;
+    BOOL ret = FALSE;
+
+    file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!GetFileSizeEx( file, &size ) || size.QuadPart < sizeof(WCHAR) ||
+        size.QuadPart > 16 * 1024 * 1024 || (size.QuadPart & 1) ||
+        !(buffer = malloc( size.QuadPart + sizeof(WCHAR) )))
+    {
+        CloseHandle( file );
+        return FALSE;
+    }
+    if (!ReadFile( file, buffer, size.QuadPart, &read, NULL ) || read != size.QuadPart)
+        goto done;
+    buffer[read / sizeof(WCHAR)] = 0;
+    tag = buffer[0] == 0xfeff ? buffer + 1 : buffer;
+    if (tag[0] == 0xfffe || !(tag = wcsstr( tag, L"<Package " )) ||
+        !(end = wcschr( tag, '>' )) ||
+        !get_xml_attribute( tag, end, L"ProductCode", product_code, ARRAY_SIZE(product_code) ) ||
+        (product && wcsicmp( product, product_code ))) goto done;
+
+    while ((tag = wcsstr( tag, L"<PublishComponent ")))
+    {
+        if (!(end = wcschr( tag, '>' ))) break;
+        if (get_xml_attribute( tag, end, L"PublishComponentId", component_id,
+                               ARRAY_SIZE(component_id) ) && !wcsicmp( component_id, component ) &&
+            get_xml_attribute( tag, end, L"Qualifier", found_qualifier,
+                               ARRAY_SIZE(found_qualifier) ) && !wcscmp( found_qualifier, qualifier ))
+        {
+            for (component_tag = tag; component_tag > buffer; component_tag--)
+                if (*component_tag == '<' && !wcsncmp( component_tag, L"<Component ", 11 )) break;
+            if (component_tag == buffer || !(component_end = wcschr( component_tag, '>' )) ||
+                component_end > tag || !get_xml_attribute( component_tag, component_end, L"KeyPath",
+                                                            keypath, ARRAY_SIZE(keypath) )) break;
+            ret = expand_office_c2r_keypath( keypath, path, path_size );
+            break;
+        }
+        tag = end + 1;
+    }
+
+done:
+    free( buffer );
+    CloseHandle( file );
+    return ret;
+}
+
+UINT msi_office_c2r_get_qualified_component_path( const WCHAR *component, const WCHAR *qualifier,
+                                                  const WCHAR *product, awstring *path, DWORD *path_size )
+{
+    static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
+    WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], search[MAX_PATH], filename[MAX_PATH];
+    WCHAR component_path[1024], physical_path[1024], package_folder[MAX_PATH], *suffix;
+    WIN32_FIND_DATAW data;
+    DWORD size;
+    HANDLE find;
+    HKEY key;
+
+    if (!component || !qualifier || !path_size || open_office_c2r_key( c2r_path, &key ))
+        return ERROR_UNKNOWN_COMPONENT;
+    size = sizeof(package_guid);
+    if (RegGetValueW( key, NULL, L"PackageGUID", RRF_RT_REG_SZ, NULL, package_guid, &size ))
+    {
+        RegCloseKey( key );
+        return ERROR_UNKNOWN_COMPONENT;
+    }
+    RegCloseKey( key );
+    size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
+    if (!size || size >= ARRAY_SIZE(program_data)) return ERROR_UNKNOWN_COMPONENT;
+
+    if (package_guid[0] == '{')
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\%s\\C2RManifest*.xml",
+                  program_data, package_guid );
+    else
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\{%s}\\C2RManifest*.xml",
+                  program_data, package_guid );
+    if ((find = FindFirstFileW( search, &data )) == INVALID_HANDLE_VALUE)
+        return ERROR_UNKNOWN_COMPONENT;
+
+    *wcsrchr( search, '\\' ) = 0;
+    do
+    {
+        swprintf( filename, ARRAY_SIZE(filename), L"%s\\%s", search, data.cFileName );
+        if (find_office_c2r_manifest_path( filename, component, qualifier, product,
+                                           component_path, ARRAY_SIZE(component_path) ))
+        {
+            FindClose( find );
+            if (GetFileAttributesW( component_path ) == INVALID_FILE_ATTRIBUTES &&
+                (suffix = StrStrIW( component_path, L"\\Microsoft Office\\" )) &&
+                !open_office_c2r_key( c2r_path, &key ))
+            {
+                size = sizeof(package_folder);
+                if (!RegGetValueW( key, NULL, L"PackageFolder", RRF_RT_REG_SZ, NULL,
+                                   package_folder, &size ))
+                {
+                    suffix += wcslen( L"\\Microsoft Office\\" );
+                    swprintf( physical_path, ARRAY_SIZE(physical_path), L"%s\\root\\%s",
+                              package_folder, suffix );
+                    if (GetFileAttributesW( physical_path ) != INVALID_FILE_ATTRIBUTES)
+                        lstrcpyW( component_path, physical_path );
+                }
+                RegCloseKey( key );
+            }
+            if (GetFileAttributesW( component_path ) == INVALID_FILE_ATTRIBUTES)
+                return ERROR_FILE_NOT_FOUND;
+            TRACE( "providing Office C2R manifest path %s for component %s qualifier %s\n",
+                   debugstr_w(component_path), debugstr_w(component), debugstr_w(qualifier) );
+            return msi_strcpy_to_awstring( component_path, -1, path, path_size );
+        }
+    } while (FindNextFileW( find, &data));
+    FindClose( find );
+    return ERROR_UNKNOWN_COMPONENT;
+}
+
 static UINT MSI_EnumComponentQualifiers( const WCHAR *szComponent, DWORD iIndex, awstring *lpQualBuf,
                                          DWORD *pcchQual, awstring *lpAppBuf, DWORD *pcchAppBuf )
 {
@@ -1513,7 +1796,12 @@ static UINT MSI_EnumComponentQualifiers( const WCHAR *szComponent, DWORD iIndex,
 
     r = MSIREG_OpenUserComponentsKey( szComponent, &key, FALSE );
     if (r != ERROR_SUCCESS)
-        return enum_office_c2r_ui_qualifiers( szComponent, iIndex, lpQualBuf, pcchQual, lpAppBuf, pcchAppBuf );
+    {
+        r = enum_office_c2r_ui_qualifiers( szComponent, iIndex, lpQualBuf, pcchQual, lpAppBuf, pcchAppBuf );
+        if (r != ERROR_UNKNOWN_COMPONENT) return r;
+        return enum_office_c2r_manifest_qualifiers( szComponent, iIndex, lpQualBuf, pcchQual,
+                                                    lpAppBuf, pcchAppBuf );
+    }
 
     /* figure out how big the name is we want to return */
     name_max = 0x10;
