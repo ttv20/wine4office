@@ -67,7 +67,7 @@ jobs:
             libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
             libcups2-dev libdbus-1-dev libfontconfig-dev \
             libegl1 libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
-            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev libpython3-dev \
             libpcap-dev libpcsclite-dev libpulse-dev libsane-dev libsdl2-dev \
             libswresample-dev libswscale-dev libudev-dev libunwind-dev \
             libusb-1.0-0-dev libv4l-dev libvulkan-dev libwayland-dev \
