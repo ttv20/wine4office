@@ -111,14 +111,27 @@ static struct rxkb_context *rxkb_context;
 static HKL keyboard_hkl; /* the HKL matching the currently active xkb group */
 static LANGID keyboard_lang; /* the language matching the currently active xkb group */
 
+static BOOL keyboard_language_uses_ime(void)
+{
+    switch (PRIMARYLANGID(keyboard_lang))
+    {
+    case LANG_CHINESE:
+    case LANG_JAPANESE:
+    case LANG_KOREAN:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 void activate_keyboard_hkl(HWND hwnd, BOOL ime)
 {
     HKL hkl = keyboard_hkl;
 
-    if (ime && !is_ime_hkl(hkl))
+    if (ime && keyboard_language_uses_ime() && !is_ime_hkl(hkl))
         hkl = get_ime_hkl(keyboard_lang ? keyboard_lang : LOWORD(hkl));
     TRACE("Changing keyboard layout to %p\n", hkl);
-    NtUserPostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, 0 /*FIXME*/, (LPARAM)hkl);
+    NtUserPostMessage(hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0, (LPARAM)hkl);
 }
 
 static void xkb_layout_addref(struct layout *layout)
@@ -810,7 +823,7 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     keyboard->focused_hwnd = hwnd;
     pthread_mutex_unlock(&keyboard->mutex);
 
-    NtUserPostMessage(keyboard->focused_hwnd, WM_INPUTLANGCHANGEREQUEST, 0 /*FIXME*/,
+    NtUserPostMessage(keyboard->focused_hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0,
                       (LPARAM)keyboard_hkl);
 
     if (!(data = wayland_win_data_get(hwnd))) return;
@@ -1002,6 +1015,51 @@ void wayland_keyboard_deinit(void)
         rxkb_context_unref(rxkb_context);
         rxkb_context = NULL;
     }
+}
+
+/***********************************************************************
+ *    ActivateKeyboardLayout (WAYLANDDRV.@)
+ */
+BOOL WAYLAND_ActivateKeyboardLayout(HKL hkl, UINT flags)
+{
+    if (!keyboard_hkl) return TRUE;
+    if (hkl == keyboard_hkl) return TRUE;
+    if (is_ime_hkl(hkl) && LOWORD(hkl) == LOWORD(keyboard_hkl)) return TRUE;
+
+    TRACE("Ignoring layout %p while host layout is %p\n", hkl, keyboard_hkl);
+    return FALSE;
+}
+
+/***********************************************************************
+ *    GetKeyboardLayoutList (WAYLANDDRV.@)
+ */
+UINT WAYLAND_GetKeyboardLayoutList(INT size, HKL *layouts)
+{
+    struct layout *layout;
+    UINT count = 0;
+
+    TRACE("%d, %p\n", size, layouts);
+
+    pthread_mutex_lock(&xkb_layouts_mutex);
+    if (list_empty(&xkb_layouts))
+    {
+        pthread_mutex_unlock(&xkb_layouts_mutex);
+        return ~0u;
+    }
+    LIST_FOR_EACH_ENTRY(layout, &xkb_layouts, struct layout, entry)
+    {
+        if (layouts)
+        {
+            if (count >= size) break;
+            layouts[count] = get_layout_hkl(layout);
+            TRACE("\t%u: %p\n", count, layouts[count]);
+        }
+        count++;
+    }
+    pthread_mutex_unlock(&xkb_layouts_mutex);
+
+    TRACE("returning %u\n", count);
+    return count;
 }
 
 /***********************************************************************

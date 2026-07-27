@@ -70,6 +70,7 @@ enum wayland_window_message
     WM_WAYLAND_INIT_DISPLAY_DEVICES = WM_WINE_FIRST_DRIVER_MSG,
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
+    WM_WAYLAND_SET_KEYBOARD_LAYOUT,
 };
 
 enum wayland_surface_config_state
@@ -413,6 +414,8 @@ void ensure_window_surface_contents(HWND hwnd);
 
 void wayland_keyboard_init(struct wl_keyboard *wl_keyboard);
 void wayland_keyboard_deinit(void);
+BOOL WAYLAND_ActivateKeyboardLayout(HKL hkl, UINT flags);
+UINT WAYLAND_GetKeyboardLayoutList(INT size, HKL *layouts);
 const KBDTABLES *WAYLAND_KbdLayerDescriptor(HKL hkl);
 void WAYLAND_ReleaseKbdTables(const KBDTABLES *);
 void activate_keyboard_hkl(HWND hwnd, BOOL ime);
