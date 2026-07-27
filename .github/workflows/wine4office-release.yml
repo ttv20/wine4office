@@ -72,7 +72,7 @@ jobs:
             libswresample-dev libswscale-dev libudev-dev libunwind-dev \
             libusb-1.0-0-dev libv4l-dev libvulkan-dev libwayland-dev \
             libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev \
-            libxinerama-dev libxkbcommon-dev libxrandr-dev libxrender-dev \
+            libxinerama-dev libxkbcommon-dev libxkbregistry-dev libxrandr-dev libxrender-dev \
             libxxf86vm-dev ocl-icd-opencl-dev samba-dev unixodbc-dev \
             wayland-protocols
 
@@ -127,7 +127,7 @@ jobs:
           make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install
           test -f "$GITHUB_WORKSPACE/stage/opt/wine4office/lib/wine/x86_64-unix/winewayland.so" || {
-            echo "Wine Wayland driver was not built; check wayland-protocols and build dependencies." >&2
+            echo "Wine Wayland driver was not built; check libwayland, libxkbcommon, libxkbregistry, and protocol dependencies." >&2
             exit 1
           }
 
