@@ -3,15 +3,16 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 RUNNER_DIR OUTPUT.run VERSION [UPDATE_MANIFEST_URL] [INSTALLER_URL]" >&2
+    echo "Usage: $0 RUNNER_DIR OUTPUT.run VERSION [UPDATE_MANIFEST_URL] [INSTALLER_URL] [QT_MANAGER_BINARY]" >&2
     exit 2
 }
-[[ $# -ge 3 && $# -le 5 ]] || usage
+[[ $# -ge 3 && $# -le 6 ]] || usage
 RUNNER=$(cd "$1" && pwd)
 OUTPUT=$2
 VERSION=$3
 UPDATE_URL=${4:-}
 INSTALLER_URL=${5:-}
+QT_MANAGER=${6:-}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 [[ -x "$RUNNER/bin/wine" ]] || { echo "Runner has no executable bin/wine: $RUNNER" >&2; exit 1; }
@@ -23,6 +24,9 @@ fi
 if [[ -n $INSTALLER_URL && $INSTALLER_URL != https://* ]]; then
     echo "Installer address must use HTTPS." >&2; exit 1
 fi
+if [[ -n $QT_MANAGER && ! -x $QT_MANAGER ]]; then
+    echo "Qt manager binary is missing or not executable: $QT_MANAGER" >&2; exit 1
+fi
 mkdir -p "$(dirname "$OUTPUT")"
 OUTPUT=$(cd "$(dirname "$OUTPUT")" && pwd)/$(basename "$OUTPUT")
 STAGE=$(mktemp -d)
@@ -31,6 +35,9 @@ mkdir -p "$STAGE/payload/runner" "$STAGE/payload/manager"
 cp -a "$RUNNER/." "$STAGE/payload/runner/"
 tar -C "$HERE" --exclude='tests' --exclude='packaging' --exclude='__pycache__' --exclude='*.pyc' \
     -cf - . | tar -C "$STAGE/payload/manager" -xf -
+if [[ -n $QT_MANAGER ]]; then
+    install -m 0755 "$QT_MANAGER" "$STAGE/payload/manager/wine365-manager-qt"
+fi
 printf '%s\n' "$VERSION" > "$STAGE/payload/VERSION"
 printf '%s\n' "$UPDATE_URL" > "$STAGE/payload/UPDATE_URL"
 tar -C "$STAGE" -cf - payload | \

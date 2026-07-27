@@ -47,6 +47,8 @@ ROOT="$XDG_DATA_HOME/wine365"
 [[ $("$ROOT/runner/bin/wine") == one ]]
 [[ $(<"$ROOT/VERSION") == 1.0.0 ]]
 [[ -x "$ROOT/bin/wine365-manager" ]]
+[[ -f "$ROOT/lib/wine365_qt.py" ]]
+[[ ! -e "$ROOT/lib/ui.html" ]]
 [[ -x "$ROOT/bin/wine365-uninstall" ]]
 [[ -f "$XDG_DATA_HOME/applications/wine365-manager.desktop" ]]
 PYTHONPATH="$ROOT/lib" python3 - <<'PY'

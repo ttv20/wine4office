@@ -178,6 +178,13 @@ touch "$WINEPREFIX/system.reg"
         self.assertIn("mshtml=", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
         self.assertNotIn("mshtml=b", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
 
+    def test_shortcut_creation_rejects_missing_application_launcher(self):
+        with self.assertRaisesRegex(FileNotFoundError, "application launcher is missing"):
+            backend.create_app_shortcuts(
+                ["word"], str(self.home / ".wine365"), str(self.wine),
+                self.home / "missing-launcher", self.home / "icons", False,
+            )
+
     def test_shortcut_removal_does_not_delete_unowned_file(self):
         path = backend.data_home() / "applications/wine365-excel.desktop"
         path.parent.mkdir(parents=True)

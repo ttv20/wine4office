@@ -56,7 +56,7 @@ jobs:
           "${elevate[@]}" dpkg --add-architecture i386
           "${elevate[@]}" apt-get update
           "${elevate[@]}" apt-get install -y --no-install-recommends \
-            autoconf bison build-essential ca-certificates flex zstd \
+            autoconf bison build-essential ca-certificates flex python3-pip python3-venv zstd \
             gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
             g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
             libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
@@ -118,6 +118,19 @@ jobs:
           make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install
 
+      - name: Build standalone native Qt manager
+        run: |
+          set -euo pipefail
+          python3 -m venv manager-qt-venv
+          manager-qt-venv/bin/python -m pip install --disable-pip-version-check \
+            -r tools/wine365-manager/requirements-build.txt
+          mkdir -p release
+          PYTHON="$PWD/manager-qt-venv/bin/python" \
+            tools/wine365-manager/packaging/build-qt-binary.sh \
+            release/wine365-manager-qt
+          QT_QPA_PLATFORM=offscreen WINE365_MANAGER_ROOT="$PWD/tools/wine365-manager" \
+            release/wine365-manager-qt --smoke-test
+
       - name: Build self-extracting installer and manifest
         run: |
           set -euo pipefail
@@ -127,7 +140,8 @@ jobs:
             release/wine365-${{ steps.version.outputs.version }}-x86_64.run \
             '${{ steps.version.outputs.version }}' \
             "${CONFIGURED_UPDATE_URL:-}" \
-            "${CONFIGURED_INSTALLER_URL:-}"
+            "${CONFIGURED_INSTALLER_URL:-}" \
+            release/wine365-manager-qt
 
       - name: Build WineCharm WoW64 runner backup
         run: |

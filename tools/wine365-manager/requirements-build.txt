@@ -1,0 +1,2 @@
+PyInstaller>=6.10,<7
+PySide6>=6.8,<7

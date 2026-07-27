@@ -12,8 +12,14 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 mkdir -p "$LIB" "$ROOT/bin" "$ROOT/icons" "$BIN_HOME" "$DATA_HOME/applications"
 install -m 0644 "$HERE/wine365_backend.py" "$LIB/wine365_backend.py"
 install -m 0755 "$HERE/wine365_manager.py" "$LIB/wine365_manager.py"
-install -m 0644 "$HERE/ui.html" "$LIB/ui.html"
+install -m 0644 "$HERE/wine365_qt.py" "$LIB/wine365_qt.py"
 install -m 0755 "$HERE/register-office-cloud-fonts.sh" "$LIB/register-office-cloud-fonts.sh"
+rm -f "$LIB/ui.html"
+if [[ -x "$HERE/wine365-manager-qt" ]]; then
+    install -m 0755 "$HERE/wine365-manager-qt" "$LIB/wine365-manager-qt"
+else
+    rm -f "$LIB/wine365-manager-qt"
+fi
 install -m 0755 "$HERE/wine365-launcher" "$ROOT/bin/wine365-launcher"
 install -m 0755 "$HERE/uninstall-user.sh" "$ROOT/bin/wine365-uninstall"
 install -m 0644 "$HERE"/icons/*.svg "$ROOT/icons/"
@@ -22,6 +28,15 @@ cat >"$ROOT/bin/wine365-manager" <<'EOF'
 #!/bin/sh
 SELF=$(readlink -f "$0")
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+export WINE365_MANAGER_ROOT="$ROOT"
+if [ -x "$ROOT/lib/wine365-manager-qt" ]; then
+    exec "$ROOT/lib/wine365-manager-qt" "$@"
+fi
+if ! python3 -c 'import PySide6' >/dev/null 2>&1; then
+    echo "wine365-manager: PySide6 is required for the native Qt interface." >&2
+    echo "Install it with: python3 -m pip install --user PySide6" >&2
+    exit 1
+fi
 exec python3 "$ROOT/lib/wine365_manager.py" "$@"
 EOF
 chmod 0755 "$ROOT/bin/wine365-manager"

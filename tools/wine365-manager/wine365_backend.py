@@ -78,6 +78,9 @@ def config_path() -> Path:
 
 
 def installed_root() -> Path | None:
+    configured = os.environ.get("WINE365_MANAGER_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
     here = Path(__file__).resolve().parent
     return here.parent if here.name == "lib" else None
 
@@ -515,6 +518,8 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str
                          icons: Path, copy_to_desktop: bool) -> list[str]:
     prefix = validate_prefix(prefix_value)
     wine = normalize_path(wine_value)
+    if not launcher.is_file():
+        raise FileNotFoundError(f"Wine 365 application launcher is missing: {launcher}")
     created: list[str] = []
     for app in apps:
         if app not in APP_META:
