@@ -15456,6 +15456,74 @@ static void test_resource_map(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_copy_subresource_region_to_staging(void)
+{
+    D3D11_TEXTURE2D_DESC desc = {0};
+    D3D11_SUBRESOURCE_DATA data = {0};
+    D3D11_MAPPED_SUBRESOURCE map;
+    D3D11_BOX box = {2, 3, 0, 6, 7, 1};
+    ID3D11DeviceContext *context;
+    ID3D11Texture2D *src, *dst;
+    ID3D11Device *device;
+    DWORD pixels[8 * 8];
+    unsigned int x, y;
+    HRESULT hr;
+
+    if (!(device = create_device(NULL)))
+    {
+        skip("Failed to create a D3D11 device.\n");
+        return;
+    }
+    ID3D11Device_GetImmediateContext(device, &context);
+
+    for (y = 0; y < 8; ++y)
+        for (x = 0; x < 8; ++x)
+            pixels[y * 8 + x] = 0xff000000u | (y << 8) | x;
+
+    desc.Width = 8;
+    desc.Height = 8;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    data.pSysMem = pixels;
+    data.SysMemPitch = 8 * sizeof(*pixels);
+    hr = ID3D11Device_CreateTexture2D(device, &desc, &data, &src);
+    ok(hr == S_OK, "Failed to create source texture, hr %#lx.\n", hr);
+
+    desc.Width = 32;
+    desc.Height = 32;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &dst);
+    ok(hr == S_OK, "Failed to create staging texture, hr %#lx.\n", hr);
+
+    ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)dst, 0,
+            10, 11, 0, (ID3D11Resource *)src, 0, &box);
+    hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)dst, 0, D3D11_MAP_READ, 0, &map);
+    ok(hr == S_OK, "Failed to map staging texture, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        for (y = 0; y < 4; ++y)
+            for (x = 0; x < 4; ++x)
+            {
+                DWORD value = *(DWORD *)((BYTE *)map.pData + (11 + y) * map.RowPitch + (10 + x) * sizeof(DWORD));
+                ok(value == pixels[(3 + y) * 8 + 2 + x],
+                        "Pixel %u,%u has value %#lx, expected %#lx.\n",
+                        x, y, value, pixels[(3 + y) * 8 + 2 + x]);
+            }
+        ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)dst, 0);
+    }
+
+    ID3D11Texture2D_Release(dst);
+    ID3D11Texture2D_Release(src);
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+}
+
 #define check_resource_cpu_access(a, b, c, d, e) check_resource_cpu_access_(__LINE__, a, b, c, d, e)
 static void check_resource_cpu_access_(unsigned int line, ID3D11DeviceContext *context,
         ID3D11Resource *resource, D3D11_USAGE usage, UINT bind_flags, UINT cpu_access)
@@ -37616,6 +37684,7 @@ START_TEST(d3d11)
     queue_test(test_copy_subresource_region_1d);
     queue_test(test_copy_subresource_region_3d);
     queue_test(test_resource_map);
+    queue_test(test_copy_subresource_region_to_staging);
     queue_for_each_feature_level(test_resource_access);
     queue_test(test_check_multisample_quality_levels);
     queue_for_each_feature_level(test_swapchain_formats);

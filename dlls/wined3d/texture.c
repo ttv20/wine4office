@@ -28,6 +28,8 @@ WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 #define WINED3D_TEXTURE_DYNAMIC_MAP_THRESHOLD 50
 
+static LONG next_texture_object_id;
+
 struct wined3d_texture_idx
 {
     struct wined3d_texture *texture;
@@ -165,8 +167,8 @@ void wined3d_texture_validate_location(struct wined3d_texture *texture,
     TRACE("New locations flags are %s.\n", wined3d_debug_location(sub_resource->locations));
 }
 
-void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
-        unsigned int sub_resource_idx, uint32_t location)
+static void wined3d_texture_invalidate_location_internal(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, uint32_t location, const RECT *rect)
 {
     struct wined3d_texture_sub_resource *sub_resource;
     DWORD previous_locations;
@@ -178,6 +180,13 @@ void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
         wined3d_texture_set_dirty(texture);
 
     sub_resource = &texture->sub_resources[sub_resource_idx];
+    if (location & texture->resource.map_binding)
+    {
+        if (rect)
+            wined3d_texture_record_gpu_dirty_rect(texture, sub_resource_idx, rect);
+        else
+            sub_resource->gpu_dirty_full = true;
+    }
     previous_locations = sub_resource->locations;
     sub_resource->locations &= ~location;
     if (previous_locations != WINED3D_LOCATION_SYSMEM && sub_resource->locations == WINED3D_LOCATION_SYSMEM)
@@ -188,6 +197,47 @@ void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
     if (!sub_resource->locations)
         ERR("Sub-resource %u of texture %p does not have any up to date location.\n",
                 sub_resource_idx, texture);
+}
+
+void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, uint32_t location)
+{
+    wined3d_texture_invalidate_location_internal(texture, sub_resource_idx, location, NULL);
+}
+
+void wined3d_texture_invalidate_location_box(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, uint32_t location, const RECT *rect)
+{
+    wined3d_texture_invalidate_location_internal(texture, sub_resource_idx, location, rect);
+}
+
+void wined3d_texture_record_gpu_dirty_rect(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, const RECT *rect)
+{
+    struct wined3d_texture_sub_resource *sub_resource = &texture->sub_resources[sub_resource_idx];
+    unsigned int level = sub_resource_idx % texture->level_count;
+    RECT bounds, clipped, expanded;
+
+    if (!rect)
+    {
+        sub_resource->gpu_dirty_full = true;
+        return;
+    }
+
+    SetRect(&bounds, 0, 0, wined3d_texture_get_level_width(texture, level),
+            wined3d_texture_get_level_height(texture, level));
+    expanded = *rect;
+    InflateRect(&expanded, 1, 1);
+    if (!IntersectRect(&clipped, &bounds, &expanded))
+        return;
+
+    if (!sub_resource->gpu_dirty_valid)
+        sub_resource->gpu_dirty_rect = clipped;
+    else
+        UnionRect(&sub_resource->gpu_dirty_rect, &sub_resource->gpu_dirty_rect, &clipped);
+    sub_resource->gpu_dirty_valid = true;
+    if (EqualRect(&sub_resource->gpu_dirty_rect, &bounds))
+        sub_resource->gpu_dirty_full = true;
 }
 
 void wined3d_texture_get_bo_address(const struct wined3d_texture *texture,
@@ -1343,6 +1393,8 @@ HRESULT wined3d_texture_init(struct wined3d_texture *texture, const struct wined
     if (!desc->width || !desc->height || !desc->depth)
         return WINED3DERR_INVALIDCALL;
 
+    texture->object_id = InterlockedIncrement(&next_texture_object_id);
+
     if (desc->resource_type == WINED3D_RTYPE_TEXTURE_3D && layer_count != 1)
     {
         ERR("Invalid layer count for volume texture.\n");
@@ -1984,6 +2036,7 @@ void wined3d_texture_upload_from_texture(struct wined3d_texture *dst_texture, un
     unsigned int src_level, dst_level;
     struct wined3d_context *context;
     struct wined3d_bo_address data;
+    RECT dst_rect;
 
     TRACE("dst_texture %p, dst_sub_resource_idx %u, dst_x %u, dst_y %u, dst_z %u, "
             "src_texture %p, src_sub_resource_idx %u, src_box %s.\n",
@@ -2016,19 +2069,20 @@ void wined3d_texture_upload_from_texture(struct wined3d_texture *dst_texture, un
 
     context_release(context);
 
+    SetRect(&dst_rect, dst_x, dst_y, dst_x + update_w, dst_y + update_h);
     wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, WINED3D_LOCATION_TEXTURE_RGB);
-    wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~WINED3D_LOCATION_TEXTURE_RGB);
+    wined3d_texture_invalidate_location_box(dst_texture, dst_sub_resource_idx,
+            ~WINED3D_LOCATION_TEXTURE_RGB, &dst_rect);
 }
 
-/* Partial downloads are not supported. */
 void wined3d_texture_download_from_texture(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
-        struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx)
+        unsigned int dst_x, unsigned int dst_y, unsigned int dst_z,
+        struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, const struct wined3d_box *src_box)
 {
-    unsigned int src_level, dst_level, dst_row_pitch, dst_slice_pitch;
+    unsigned int dst_level, dst_row_pitch, dst_slice_pitch;
     unsigned int dst_location = dst_texture->resource.map_binding;
     struct wined3d_context *context;
     struct wined3d_bo_address data;
-    struct wined3d_box src_box;
     unsigned int src_location;
 
     context = context_acquire(src_texture->resource.device, NULL, 0);
@@ -2040,14 +2094,12 @@ void wined3d_texture_download_from_texture(struct wined3d_texture *dst_texture, 
         src_location = WINED3D_LOCATION_TEXTURE_RGB;
     else
         src_location = WINED3D_LOCATION_TEXTURE_SRGB;
-    src_level = src_sub_resource_idx % src_texture->level_count;
-    wined3d_texture_get_level_box(src_texture, src_level, &src_box);
 
     dst_level = dst_sub_resource_idx % dst_texture->level_count;
     wined3d_texture_get_pitch(dst_texture, dst_level, &dst_row_pitch, &dst_slice_pitch);
 
     src_texture->texture_ops->texture_download_data(context, src_texture, src_sub_resource_idx, src_location,
-            &src_box, &data, dst_texture->resource.format, 0, 0, 0, dst_row_pitch, dst_slice_pitch);
+            src_box, &data, dst_texture->resource.format, dst_x, dst_y, dst_z, dst_row_pitch, dst_slice_pitch);
 
     context_release(context);
 

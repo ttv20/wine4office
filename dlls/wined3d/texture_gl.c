@@ -234,7 +234,8 @@ static void ffp_blitter_clear_rendertargets(struct wined3d_device *device, unsig
             }
 
             wined3d_rendertarget_view_validate_location(rtv, rtv->resource->draw_binding);
-            wined3d_rendertarget_view_invalidate_location(rtv, ~rtv->resource->draw_binding);
+            wined3d_rendertarget_view_invalidate_location_box(rtv,
+                    ~rtv->resource->draw_binding, draw_rect);
         }
 
         if (!gl_info->supported[ARB_FRAMEBUFFER_SRGB] && needs_srgb_write(context->d3d_info, state, fb))
@@ -594,7 +595,7 @@ static DWORD raw_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
     checkGLcall("copy image data");
 
     wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, location);
-    wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~location);
+    wined3d_texture_invalidate_location_box(dst_texture, dst_sub_resource_idx, ~location, dst_rect);
     if (!wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_location))
         ERR("Failed to load the destination sub-resource into %s.\n", wined3d_debug_location(dst_location));
 
@@ -1892,7 +1893,7 @@ static void wined3d_texture_gl_download_data(struct wined3d_context *context,
     const struct wined3d_format_gl *format_gl;
     uint8_t *offset = dst_bo_addr->addr;
     struct wined3d_bo *dst_bo;
-    bool srgb = false;
+    bool srgb = false, boxed;
     GLenum target;
 
     TRACE("context %p, src_texture %p, src_sub_resource_idx %u, src_location %s, src_box %s, dst_bo_addr %s, "
@@ -1915,18 +1916,8 @@ static void wined3d_texture_gl_download_data(struct wined3d_context *context,
     src_width = wined3d_texture_get_level_width(src_texture, src_level);
     src_height = wined3d_texture_get_level_height(src_texture, src_level);
     src_depth = wined3d_texture_get_level_depth(src_texture, src_level);
-    if (src_box->left || src_box->top || src_box->right != src_width || src_box->bottom != src_height
-            || src_box->front || src_box->back != src_depth)
-    {
-        FIXME("Unhandled source box %s.\n", debug_box(src_box));
-        return;
-    }
-
-    if (dst_x || dst_y || dst_z)
-    {
-        FIXME("Unhandled destination (%u, %u, %u).\n", dst_x, dst_y, dst_z);
-        return;
-    }
+    boxed = src_box->left || src_box->top || src_box->right != src_width
+            || src_box->bottom != src_height || src_box->front || src_box->back != src_depth;
 
     if (dst_format->id != src_texture->resource.format->id)
     {
@@ -1936,18 +1927,53 @@ static void wined3d_texture_gl_download_data(struct wined3d_context *context,
         return;
     }
 
+    format_gl = wined3d_format_gl(src_texture->resource.format);
+    target = wined3d_texture_gl_get_sub_resource_target(src_texture_gl, src_sub_resource_idx);
     wined3d_texture_get_pitch(src_texture, src_level, &src_row_pitch, &src_slice_pitch);
-    if (src_row_pitch != dst_row_pitch || src_slice_pitch != dst_slice_pitch)
+
+    if (boxed || dst_x || dst_y || dst_z
+            || src_row_pitch != dst_row_pitch || src_slice_pitch != dst_slice_pitch)
     {
-        FIXME("Unhandled destination pitches %u/%u (source pitches %u/%u).\n",
-                dst_row_pitch, dst_slice_pitch, src_row_pitch, src_slice_pitch);
+        if (src_texture->resource.type != WINED3D_RTYPE_TEXTURE_2D
+                || src_box->front || src_box->back != 1
+                || src_texture->resource.format_attrs & WINED3D_FORMAT_ATTR_COMPRESSED
+                || format_gl->f.conv_byte_count || src_texture->flags & WINED3D_TEXTURE_CONVERTED)
+        {
+            FIXME("Unhandled boxed texture download %s to (%u, %u, %u).\n",
+                    debug_box(src_box), dst_x, dst_y, dst_z);
+            return;
+        }
+
+        wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_READ_FRAMEBUFFER,
+                &src_texture->resource, src_sub_resource_idx, NULL, 0, src_location);
+        gl_info->gl_ops.gl.p_glReadBuffer(wined3d_context_gl_get_offscreen_gl_buffer(context_gl));
+        wined3d_context_gl_check_fbo_status(context_gl, GL_READ_FRAMEBUFFER);
+
+        if ((dst_bo = dst_bo_addr->buffer_object))
+        {
+            GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, wined3d_bo_gl(dst_bo)->id));
+            offset += dst_bo->buffer_offset;
+        }
+        else
+        {
+            GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, 0));
+        }
+        offset += dst_z * dst_slice_pitch + dst_y * dst_row_pitch + dst_x * format_gl->f.byte_count;
+        gl_info->gl_ops.gl.p_glPixelStorei(GL_PACK_ROW_LENGTH, dst_row_pitch / format_gl->f.byte_count);
+        gl_info->gl_ops.gl.p_glReadPixels(src_box->left, src_box->top,
+                src_box->right - src_box->left, src_box->bottom - src_box->top,
+                format_gl->format, format_gl->type, offset);
+        gl_info->gl_ops.gl.p_glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        if (dst_bo)
+        {
+            GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, 0));
+            wined3d_context_gl_reference_bo(context_gl, wined3d_bo_gl(dst_bo));
+        }
+        checkGLcall("boxed glReadPixels");
         return;
     }
 
     wined3d_texture_gl_bind_and_dirtify(src_texture_gl, context_gl, srgb);
-
-    format_gl = wined3d_format_gl(src_texture->resource.format);
-    target = wined3d_texture_gl_get_sub_resource_target(src_texture_gl, src_sub_resource_idx);
 
     if ((src_texture->resource.type == WINED3D_RTYPE_TEXTURE_2D
             && (target == GL_TEXTURE_2D_ARRAY || format_gl->f.conv_byte_count

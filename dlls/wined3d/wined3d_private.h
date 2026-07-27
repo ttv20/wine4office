@@ -3404,6 +3404,7 @@ struct wined3d_texture
 
     unsigned int row_pitch;
     unsigned int slice_pitch;
+    unsigned int object_id;
 
     struct wined3d_shader_resource_view *identity_srv;
 
@@ -3460,6 +3461,16 @@ struct wined3d_texture
         uint32_t map_flags;
         DWORD locations;
         struct wined3d_bo *bo;
+
+        /* GPU writes not yet reflected in a paired CPU staging shadow. */
+        RECT gpu_dirty_rect;
+        bool gpu_dirty_valid;
+        bool gpu_dirty_full;
+        bool staging_multi_consumer;
+        unsigned int staging_source_id;
+        unsigned int staging_destination_id;
+        unsigned int staging_source_sub_resource_idx;
+
         union
         {
             struct wined3d_color colour;
@@ -3544,7 +3555,8 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
 
 void wined3d_texture_cleanup(struct wined3d_texture *texture);
 void wined3d_texture_download_from_texture(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
-        struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx);
+        unsigned int dst_x, unsigned int dst_y, unsigned int dst_z,
+        struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, const struct wined3d_box *src_box);
 void wined3d_texture_get_bo_address(const struct wined3d_texture *texture,
         unsigned int sub_resource_idx, struct wined3d_bo_address *data, uint32_t location);
 void wined3d_texture_get_memory(struct wined3d_texture *texture, unsigned int sub_resource_idx,
@@ -3555,6 +3567,10 @@ HRESULT wined3d_texture_init(struct wined3d_texture *texture, const struct wined
         const struct wined3d_texture_ops *texture_ops);
 void wined3d_texture_invalidate_location(struct wined3d_texture *texture,
         unsigned int sub_resource_idx, uint32_t location);
+void wined3d_texture_invalidate_location_box(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, uint32_t location, const RECT *rect);
+void wined3d_texture_record_gpu_dirty_rect(struct wined3d_texture *texture,
+        unsigned int sub_resource_idx, const RECT *rect);
 void wined3d_texture_load(struct wined3d_texture *texture,
         struct wined3d_context *context, BOOL srgb);
 BOOL wined3d_texture_load_location(struct wined3d_texture *texture,
@@ -3994,6 +4010,8 @@ void wined3d_rendertarget_view_get_box(struct wined3d_rendertarget_view *view,
         struct wined3d_box *box);
 void wined3d_rendertarget_view_invalidate_location(struct wined3d_rendertarget_view *view,
         uint32_t location);
+void wined3d_rendertarget_view_invalidate_location_box(struct wined3d_rendertarget_view *view,
+        uint32_t location, const RECT *rect);
 bool wined3d_rendertarget_view_is_full_clear(const struct wined3d_rendertarget_view *rtv,
         const RECT *draw_rect, const RECT *clear_rect);
 void wined3d_rendertarget_view_load_location(struct wined3d_rendertarget_view *view,

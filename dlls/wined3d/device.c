@@ -4598,6 +4598,7 @@ HRESULT CDECL wined3d_device_context_map(struct wined3d_device_context *context,
     const struct wined3d_format *format = resource->format;
     struct wined3d_sub_resource_desc desc;
     struct wined3d_box b;
+    bool unlock_read_map;
     HRESULT hr;
 
     TRACE("context %p, resource %p, sub_resource_idx %u, map_desc %p, box %s, flags %#x.\n",
@@ -4644,7 +4645,16 @@ HRESULT CDECL wined3d_device_context_map(struct wined3d_device_context *context,
     }
 
     wined3d_device_context_lock(context);
+    /* A read-only staging map may wait for a GPU download. The command stream
+     * serializes the resource work; keeping the process-wide mutex held here
+     * only blocks independent devices from completing their own downloads. */
+    unlock_read_map = resource->type != WINED3D_RTYPE_BUFFER && !resource->bind_flags
+            && (flags & (WINED3D_MAP_READ | WINED3D_MAP_WRITE)) == WINED3D_MAP_READ;
+    if (unlock_read_map)
+        wined3d_device_context_unlock(context);
     hr = wined3d_device_context_emit_map(context, resource, sub_resource_idx, map_desc, box, flags);
+    if (unlock_read_map)
+        wined3d_device_context_lock(context);
     if (format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
     {
         unsigned int height = box->bottom - box->top;
