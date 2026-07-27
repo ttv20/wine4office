@@ -2599,6 +2599,40 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static BOOL get_office_net_ui_ltr_capture_clip( HWND hwnd, RECT *rect )
+{
+    static const WCHAR net_ui_hwnd[] = {'N','e','t','U','I','H','W','N','D',0};
+    static const WCHAR net_ui_tool[] =
+        {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    HWND parent;
+    INT len;
+
+    if ((get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
+        (len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    if (wcscmp( buffer, net_ui_hwnd ) ||
+        !(parent = NtUserGetAncestor( hwnd, GA_PARENT )) ||
+        !(get_window_long( parent, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL))
+        return FALSE;
+
+    name.Length = 0;
+    if ((len = NtUserGetClassName( parent, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    if (wcscmp( buffer, net_ui_tool ) ||
+        !get_window_rect( parent, rect, get_thread_dpi() ))
+        return FALSE;
+
+    /* Convert the physically visible popup interval to coordinates of the
+     * monitor-wide LTR capture child. */
+    map_window_points( 0, hwnd, (POINT *)rect, 2, get_thread_dpi() );
+
+    return TRUE;
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2728,7 +2762,19 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             /* coordinates don't get translated while tracking a menu */
             /* FIXME: should differentiate popups and top-level menus */
             if (!(info.flags & GUI_INMENUMODE))
+            {
+                RECT clip;
+
                 screen_to_client( msg->hwnd, &pt );
+                /* Office positions LTR NetUI capture children inside RTL
+                 * gallery parents seven pixels to the right of their hit-test
+                 * interval. Keep screen cursor placement intact while
+                 * aligning the delivered client coordinate. */
+                if (info.hwndCapture &&
+                    get_office_net_ui_ltr_capture_clip( msg->hwnd, &clip ) &&
+                    pt.x >= clip.left && pt.x < clip.right)
+                    pt.x -= 7;
+            }
         }
     }
     msg->lParam = MAKELONG( pt.x, pt.y );

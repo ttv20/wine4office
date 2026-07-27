@@ -2068,7 +2068,7 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
 {
     MONITORINFO monitor;
     RECT rect;
-    int left, available;
+    int left, right, available, minimum;
 
     if ((winpos->flags & SWP_NOSIZE) || winpos->cx <= 0 ||
         !(NtUserGetWindowLongW( winpos->hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
@@ -2078,6 +2078,37 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
         return;
 
     monitor = monitor_info_from_window( winpos->hwnd, MONITOR_DEFAULTTONEAREST );
+
+    /* A narrow RTL list leaves only one digit beside NetUI's custom scroll
+     * gutter. Keep its right-hand ribbon anchor, but provide enough client
+     * width for the complete two-digit entries. */
+    if (winpos->cy >= 330 && winpos->cy <= 420 && winpos->cx < 80)
+    {
+        right = (winpos->flags & SWP_NOMOVE) ? rect.right : winpos->x + winpos->cx;
+        if (right > monitor.rcWork.right) right = monitor.rcWork.right;
+        if (right <= monitor.rcWork.left) return;
+        winpos->flags &= ~SWP_NOMOVE;
+        winpos->x = max( monitor.rcWork.left, right - 80 );
+        winpos->cx = right - winpos->x;
+        return;
+    }
+
+    /* Tall Hebrew NetUI galleries and lists need more width than the narrow
+     * space to the right of the ribbon anchor. Office identifies this case by
+     * requesting an unbounded width; preserve a usable width and grow left. */
+    left = (winpos->flags & SWP_NOMOVE) ? rect.left : winpos->x;
+    available = monitor.rcWork.right - left;
+    minimum = winpos->cy >= 330 && winpos->cy <= 420 ? 320 :
+              winpos->cy > 420 && winpos->cy <= 700 ? 640 : 0;
+    if (minimum && winpos->cx > monitor.rcWork.right - monitor.rcWork.left &&
+        available > 0 && available < minimum)
+    {
+        winpos->flags &= ~SWP_NOMOVE;
+        winpos->x = monitor.rcWork.right - minimum;
+        winpos->cx = minimum;
+        return;
+    }
+
     /* Keep the existing ribbon anchor instead of accepting Office's
      * monitor-wide fallback after its unbounded sizing pass. */
     if (!(winpos->flags & SWP_NOMOVE) && winpos->x <= monitor.rcWork.left &&
