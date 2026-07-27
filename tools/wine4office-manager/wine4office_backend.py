@@ -101,6 +101,16 @@ def installed_root() -> Path | None:
     configured = os.environ.get("WINE4OFFICE_MANAGER_ROOT")
     if configured:
         return Path(configured).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        executable = Path(sys.executable).expanduser().resolve()
+        candidate = executable.parent.parent
+        marker = candidate / "STANDALONE"
+        if executable.name == "Wine4OfficeManager" and executable.parent.name == "bin":
+            try:
+                if marker.read_text(errors="replace").strip() == "Wine4OfficeManager":
+                    return candidate
+            except OSError:
+                pass
     here = Path(__file__).resolve().parent
     return here.parent if here.name == "lib" else None
 
@@ -1377,11 +1387,11 @@ def safe_extract_wine_archive(archive: Path, destination: Path) -> Path:
 
 
 def manager_update_target() -> Path | None:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
     root = installed_root()
     if root is not None:
         return root / "lib/wine4office-manager-qt"
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve()
     return None
 
 

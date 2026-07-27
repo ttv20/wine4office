@@ -69,13 +69,15 @@ tools/wine4office-manager/packaging/build-release-artifacts.sh \
   stable
 ```
 
-The release directory contains exactly:
+The release directory contains:
 
 - `Wine4OfficeManager-1.0.0-x86_64`
 - `Wine4OfficeManager-1.0.0-x86_64.sha256`
 - `wine4office-1.0.0-x86_64.tar.zst`
 - `wine4office-1.0.0-x86_64.tar.zst.sha256`
 - `release.json`
+
+The workflow also publishes the repository's verified `install.sh` beside these generated artifacts.
 
 The generic Zstandard Wine archive has one root, `wine4office-1.0.0-x86_64/`. Packaging reads the staged runner without changing it, does not add a `bin/wine64` compatibility link, and does not use consumer-specific archive naming.
 
@@ -108,9 +110,9 @@ Artifact URLs may be absolute HTTPS URLs or paths relative to `metadata_url`. A 
 
 ## GitHub CI/CD
 
-`.github/workflows/wine4office-release.yml` runs manually and for `wine4office-v*` tags on a `self-hosted`, `linux`, `x64` GitHub Actions runner. It reuses the Wine configure/build/install staging process, builds Wine4OfficeManager as a separate PyInstaller binary, and packages the five files above. The manager pair, Wine pair, and `release.json` are uploaded as separate CI artifacts.
+`.github/workflows/wine4office-release.yml` runs manually and for `wine4office-v*` tags on a `self-hosted`, `linux`, `x64` GitHub Actions runner. It reuses the Wine configure/build/install staging process, builds Wine4OfficeManager as a separate PyInstaller binary, packages the manager and Wine artifacts, and publishes `install.sh`. The manager pair, Wine pair, and release metadata plus installer are uploaded as separate CI artifacts.
 
-Tagged runs use the workflow's `contents: write` permission and `GITHUB_TOKEN` to create the GitHub Release when needed, then upload all five files with `gh release upload --clobber`. Reruns replace matching assets instead of creating duplicates.
+Tagged runs use the workflow's `contents: write` permission and `GITHUB_TOKEN` to create the GitHub Release when needed, then upload the manager pair, Wine pair, `install.sh`, and finally `release.json` with `gh release upload --clobber`. Publishing `release.json` last keeps it as the feed commit marker. Reruns replace matching assets instead of creating duplicates.
 
 Manual `metadata_url`, `release_base_url`, and `channel` inputs override repository variables `WINE4OFFICE_METADATA_URL`, `WINE4OFFICE_RELEASE_BASE_URL`, and `WINE4OFFICE_RELEASE_CHANNEL`. Metadata defaults to `https://github.com/ttv20/wine4office/releases/latest/download/release.json`, and artifacts default to the adjacent GitHub latest-release download directory. The standalone manager embeds the selected channel and rejects metadata from another channel. Set the URL variables to canonical project-hosted HTTPS addresses later without changing the workflow or application.
 
@@ -135,5 +137,6 @@ The manager UI provides both removal modes and requires explicit confirmation be
 ```bash
 python3 -m unittest discover -s tools/wine4office-manager/tests -v
 tools/wine4office-manager/tests/test_release_artifacts.sh
+tools/wine4office-manager/tests/test_curl_install.sh
 QT_QPA_PLATFORM=offscreen python3 tools/wine4office-manager/wine4office_manager.py --smoke-test
 ```

@@ -19,6 +19,16 @@ modern Microsoft Word and Excel on Linux without a Windows virtual machine.
 This is a narrow experiment, not a promise that Wine4Office will work with another
 machine, Office edition, account, or Wine prefix.
 
+## Quick install
+
+Install the latest stable Wine4OfficeManager and verified Wine runner without root:
+
+```sh
+curl -fsSL https://github.com/ttv20/wine4office/releases/latest/download/install.sh | bash
+```
+
+The installer verifies the release metadata, declared sizes, and SHA-256 digests before atomically replacing the per-user manager and runner. It installs `Wine4OfficeManager` in `~/.local/bin` and creates the application-menu shortcut. The default Wine environment remains `~/.wine4office`.
+
 ## What worked
 
 In the tested installation, Word can:

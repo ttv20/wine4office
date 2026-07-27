@@ -66,7 +66,7 @@ jobs:
             g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
             libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
             libcups2-dev libdbus-1-dev libfontconfig-dev \
-            libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
+            libegl1 libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
             libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev \
             libpcap-dev libpcsclite-dev libpulse-dev libsane-dev libsdl2-dev \
             libswresample-dev libswscale-dev libudev-dev libunwind-dev \
@@ -110,6 +110,9 @@ jobs:
           [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Test verified curl installer
+        run: tools/wine4office-manager/tests/test_curl_install.sh
+
       - name: Configure and build Wine4Office
         run: |
           set -euo pipefail
@@ -148,6 +151,7 @@ jobs:
             "$CONFIGURED_METADATA_URL" \
             "$CONFIGURED_RELEASE_BASE_URL" \
             "$CONFIGURED_RELEASE_CHANNEL"
+          install -m 0755 install.sh release/install.sh
 
       - name: Upload Wine4OfficeManager CI artifact
         uses: actions/upload-artifact@v4
@@ -169,11 +173,13 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      - name: Upload release metadata CI artifact
+      - name: Upload release metadata and installer CI artifact
         uses: actions/upload-artifact@v4
         with:
           name: wine4office-release-metadata-${{ steps.version.outputs.version }}
-          path: release/release.json
+          path: |
+            release/release.json
+            release/install.sh
           if-no-files-found: error
 
       - name: Publish tagged GitHub release
@@ -189,6 +195,7 @@ jobs:
             "release/Wine4OfficeManager-${version}-x86_64.sha256"
             "release/wine4office-${version}-x86_64.tar.zst"
             "release/wine4office-${version}-x86_64.tar.zst.sha256"
+            "release/install.sh"
             "release/release.json"
           )
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \

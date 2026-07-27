@@ -480,6 +480,35 @@ class UpdaterTests(unittest.TestCase):
              mock.patch.object(backend.sys, "executable", str(outer)):
             self.assertEqual(backend.manager_update_target(), outer)
 
+    def test_installer_layout_is_discovered_by_frozen_manager(self):
+        root = self.root / "custom-install"
+        executable = root / "bin/Wine4OfficeManager"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"manager")
+        (root / "STANDALONE").write_text("Wine4OfficeManager\n")
+        (root / "UPDATE_URL").write_text("https://updates.example/release.json\n")
+        with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": ""}), \
+             mock.patch.object(backend.sys, "frozen", True, create=True), \
+             mock.patch.object(backend.sys, "executable", str(executable)):
+            self.assertEqual(backend.installed_root(), root.resolve())
+            self.assertEqual(backend.manager_update_target(), executable.resolve())
+            self.assertEqual(backend.runner_update_target(), root.resolve() / "runner")
+            self.assertEqual(
+                backend.configured_update_url(),
+                "https://updates.example/release.json",
+            )
+
+    def test_frozen_manager_requires_installer_marker_for_root_discovery(self):
+        root = self.root / "unmarked-install"
+        executable = root / "bin/Wine4OfficeManager"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"manager")
+        with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": ""}), \
+             mock.patch.object(backend, "__file__", str(self.root / "bundle/backend.py")), \
+             mock.patch.object(backend.sys, "frozen", True, create=True), \
+             mock.patch.object(backend.sys, "executable", str(executable)):
+            self.assertIsNone(backend.installed_root())
+
     def test_standalone_update_persists_version_for_concurrent_revalidation(self):
         outer = self.root / "Wine4OfficeManager"
         outer.write_bytes(b"old-manager")
