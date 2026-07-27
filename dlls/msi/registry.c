@@ -1714,14 +1714,48 @@ done:
     return ret;
 }
 
+INSTALLSTATE msi_office_c2r_query_feature_state( const WCHAR *product, const WCHAR *feature )
+{
+    static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
+    WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], registered_product[GUID_SIZE], search[MAX_PATH];
+    WIN32_FIND_DATAW data;
+    DWORD size;
+    HANDLE find;
+    HKEY key;
+
+    if (wcscmp( feature, L"OfficeMSProof6" ) || open_office_c2r_key( c2r_path, &key ))
+        return INSTALLSTATE_UNKNOWN;
+    size = sizeof(package_guid);
+    if (RegGetValueW( key, NULL, L"PackageGUID", RRF_RT_REG_SZ, NULL, package_guid, &size ))
+    {
+        RegCloseKey( key );
+        return INSTALLSTATE_UNKNOWN;
+    }
+    RegCloseKey( key );
+    if (package_guid[0] == '{') lstrcpyW( registered_product, package_guid );
+    else swprintf( registered_product, ARRAY_SIZE(registered_product), L"{%s}", package_guid );
+    if (wcsicmp( product, registered_product )) return INSTALLSTATE_UNKNOWN;
+
+    size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
+    if (!size || size >= ARRAY_SIZE(program_data)) return INSTALLSTATE_UNKNOWN;
+    swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\%s\\C2RManifest.Proof.Culture.msi.16.*.xml",
+              program_data, registered_product );
+    if ((find = FindFirstFileW( search, &data )) == INVALID_HANDLE_VALUE)
+        return INSTALLSTATE_UNKNOWN;
+    FindClose( find );
+    TRACE( "reporting installed Office C2R proofing feature for product %s\n", debugstr_w(product) );
+    return INSTALLSTATE_LOCAL;
+}
+
 UINT msi_office_c2r_get_qualified_component_path( const WCHAR *component, const WCHAR *qualifier,
                                                   const WCHAR *product, awstring *path, DWORD *path_size )
 {
     static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
     WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], search[MAX_PATH], filename[MAX_PATH];
-    WCHAR component_path[1024], physical_path[1024], package_folder[MAX_PATH], *suffix;
+    WCHAR component_path[1024], physical_path[1024], package_folder[MAX_PATH], expected_product[GUID_SIZE];
+    WCHAR *suffix, *qualifier_end;
     WIN32_FIND_DATAW data;
-    DWORD size;
+    DWORD size, lcid;
     HANDLE find;
     HKEY key;
 
@@ -1778,6 +1812,34 @@ UINT msi_office_c2r_get_qualified_component_path( const WCHAR *component, const 
         }
     } while (FindNextFileW( find, &data));
     FindClose( find );
+
+    /* Office asks for this shared spelling service alongside each language's
+     * dictionary component, but C2R does not include it as a PublishComponent
+     * record in the per-culture manifests. */
+    lcid = wcstoul( qualifier, &qualifier_end, 10 );
+    swprintf( expected_product, ARRAY_SIZE(expected_product),
+              L"{90160000-001F-%04lX-1000-0000000FF1CE}", lcid );
+    if (!wcsicmp( component, L"{4510D426-CB00-423B-AE0A-01B94BE773FD}" ) &&
+        qualifier_end != qualifier && !wcscmp( qualifier_end, L"\\Normal" ) &&
+        (!product || !wcsicmp( product, expected_product )) &&
+        !open_office_c2r_key( c2r_path, &key ))
+    {
+        size = sizeof(package_folder);
+        if (!RegGetValueW( key, NULL, L"PackageFolder", RRF_RT_REG_SZ, NULL,
+                           package_folder, &size ))
+        {
+            swprintf( component_path, ARRAY_SIZE(component_path),
+                      L"%s\\root\\Office16\\PROOF\\msspell7.dll", package_folder );
+            if (GetFileAttributesW( component_path ) != INVALID_FILE_ATTRIBUTES)
+            {
+                RegCloseKey( key );
+                TRACE( "providing Office C2R shared spelling service %s for qualifier %s\n",
+                       debugstr_w(component_path), debugstr_w(qualifier) );
+                return msi_strcpy_to_awstring( component_path, -1, path, path_size );
+            }
+        }
+        RegCloseKey( key );
+    }
     return ERROR_UNKNOWN_COMPONENT;
 }
 
