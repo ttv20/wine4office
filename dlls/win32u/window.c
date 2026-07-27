@@ -2068,7 +2068,7 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
 {
     MONITORINFO monitor;
     RECT rect;
-    int left, available;
+    int left, available, minimum;
 
     if ((winpos->flags & SWP_NOSIZE) || winpos->cx <= 0 ||
         !(NtUserGetWindowLongW( winpos->hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
@@ -2079,15 +2079,18 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
 
     monitor = monitor_info_from_window( winpos->hwnd, MONITOR_DEFAULTTONEAREST );
     /* Tall Hebrew NetUI galleries and lists need more width than the narrow
-     * space to the right of the ribbon anchor. Preserve a usable width and
-     * grow them to the left. */
+     * space to the right of the ribbon anchor. Office identifies this case by
+     * requesting an unbounded width; preserve a usable width and grow left. */
     left = (winpos->flags & SWP_NOMOVE) ? rect.left : winpos->x;
     available = monitor.rcWork.right - left;
-    if (winpos->cy >= 330 && winpos->cy <= 420 && available > 0 && available < 320)
+    minimum = winpos->cy >= 330 && winpos->cy <= 420 ? 320 :
+              winpos->cy > 420 && winpos->cy <= 700 ? 640 : 0;
+    if (minimum && winpos->cx > monitor.rcWork.right - monitor.rcWork.left &&
+        available > 0 && available < minimum)
     {
         winpos->flags &= ~SWP_NOMOVE;
-        winpos->x = monitor.rcWork.right - 320;
-        winpos->cx = 320;
+        winpos->x = monitor.rcWork.right - minimum;
+        winpos->cx = minimum;
         return;
     }
 
