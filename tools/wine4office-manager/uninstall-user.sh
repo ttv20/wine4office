@@ -54,6 +54,7 @@ fi
 for file in "$DATA_HOME/applications/wine4office-manager.desktop" "${XDG_DESKTOP_DIR:-$HOME/Desktop}/wine4office-manager.desktop"; do
     if [[ -f "$file" ]] && grep -q '^X-Wine4Office-Managed=true$' "$file"; then rm -f "$file"; fi
 done
+rm -f "$DATA_HOME/icons/hicolor/scalable/apps/wine4office-manager.svg"
 for link in "$BIN_HOME/wine4office-manager" "$BIN_HOME/wine4office-launcher"; do
     if [[ -L "$link" ]] && [[ $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f "$link"; fi
 done
@@ -66,7 +67,7 @@ rm -rf "$ROOT/lib" "$ROOT/icons"
 rm -f "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher"
 if $PURGE_RUNNER; then
     rm -rf "$ROOT/runner"
-    rm -f "$ROOT/VERSION" "$ROOT/UPDATE_URL" "$ROOT/install.json"
+    rm -f "$ROOT/VERSION" "$ROOT/UPDATE_URL" "$ROOT/UPDATE_CHANNEL" "$ROOT/install.json"
     rm -rf "$CONFIG_HOME/wine4office"
 fi
 rm -f "$ROOT/bin/wine4office-uninstall"
@@ -75,5 +76,5 @@ rmdir "$ROOT/bin" "$ROOT" 2>/dev/null || true
 if $PURGE_RUNNER; then
     echo "Wine4Office runner, manager, shortcuts, and configuration removed."
 else
-    printf 'Wine4Office Manager removed. Prefixes, configuration, and any runner in %s/runner were preserved.\n' "$ROOT"
+    printf 'Wine4OfficeManager removed. Prefixes, configuration, and any runner in %s/runner were preserved.\n' "$ROOT"
 fi

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 
-import hashlib
-import io
-import json
 import os
 import stat
 import sys
@@ -35,8 +32,8 @@ class BackendTests(unittest.TestCase):
         self._script("wineserver", "#!/bin/sh\nexit 0\n")
         self._script("wineboot", """#!/bin/sh
 if [ "${WINE4OFFICE_TEST_FAIL:-}" = 1 ]; then exit 9; fi
-mkdir -p "$WINEPREFIX"
-touch "$WINEPREFIX/system.reg"
+mkdir -p "$WINEPREFIX/drive_c" "$WINEPREFIX/dosdevices"
+touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 """)
         self.wine = self.runner / "wine"
 
@@ -50,56 +47,34 @@ touch "$WINEPREFIX/system.reg"
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
+    def _make_prefix(self, path, registry="registry"):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "system.reg").write_text(registry)
+        (path / "user.reg").write_text(registry)
+        (path / "drive_c").mkdir(exist_ok=True)
+        (path / "dosdevices").mkdir(exist_ok=True)
+        return path
+
     def test_default_prefix_is_home_wine4office(self):
         config = backend.default_config()
         self.assertEqual(config["prefix"], str(self.home / ".wine4office"))
-        self.assertEqual(config["update_url"], "")
+        self.assertEqual(config["update_url"], backend.DEFAULT_METADATA_URL)
 
-    def test_update_without_address_is_explicitly_disabled(self):
-        with self.assertRaisesRegex(ValueError, "No update address"):
-            backend.update_wine4office("", lambda line: None)
-
-    def test_update_downloads_and_verifies_onefile_installer(self):
-        installer = b"#!/bin/sh\necho update-ran\nexit 0\n"
-        manifest = json.dumps({
-            "version": "2.0.0",
-            "installer_url": "https://updates.example/wine4office-2.0.0.run",
-            "sha256": hashlib.sha256(installer).hexdigest(),
-        }).encode()
-
-        class Response(io.BytesIO):
-            def __init__(self, value):
-                super().__init__(value)
-                self.headers = {"Content-Length": str(len(value))}
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                self.close()
-
-        output = []
-        with mock.patch.object(backend.urllib.request, "urlopen",
-                               side_effect=[Response(manifest), Response(installer)]), \
-             mock.patch.object(backend, "current_version", return_value="1.0.0"):
-            result = backend.update_wine4office("https://updates.example/manifest.json", output.append)
-        self.assertIn("2.0.0 installed", result)
-        self.assertIn("update-ran", output)
-        self.assertFalse(list((backend.cache_home() / "wine4office/updates").glob("*.part")))
 
     def test_rejects_dangerous_prefixes(self):
-        for value in ("/", str(self.home), ""):
+        for value in ("/", "/usr", "/var", str(self.home), ""):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 backend.validate_prefix(value)
 
     def test_create_environment(self):
         prefix = self.home / ".wine4office"
         message = backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
-        self.assertTrue((prefix / "system.reg").is_file())
+        self.assertTrue(backend.has_wine_prefix_layout(prefix))
         self.assertIn(str(prefix), message)
 
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
-        prefix.mkdir()
-        (prefix / "system.reg").write_text("old")
+        self._make_prefix(prefix, "old")
         (prefix / "keep-me").write_text("important")
         with mock.patch.dict(os.environ, {"WINE4OFFICE_TEST_FAIL": "1"}):
             with self.assertRaises(Exception):
@@ -109,8 +84,7 @@ touch "$WINEPREFIX/system.reg"
 
     def test_launches_exe_in_selected_environment_with_arguments(self):
         prefix = self.home / ".wine4office"
-        prefix.mkdir()
-        (prefix / "system.reg").write_text("registry")
+        self._make_prefix(prefix)
         installer = self.home / "Downloads/Office Setup.exe"
         installer.parent.mkdir()
         installer.write_bytes(b"MZ")
@@ -125,8 +99,7 @@ touch "$WINEPREFIX/system.reg"
 
     def test_executable_launcher_rejects_non_exe(self):
         prefix = self.home / ".wine4office"
-        prefix.mkdir()
-        (prefix / "system.reg").write_text("registry")
+        self._make_prefix(prefix)
         document = self.home / "Downloads/readme.txt"
         document.parent.mkdir()
         document.write_text("not an exe")
@@ -196,6 +169,24 @@ touch "$WINEPREFIX/system.reg"
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
 
+    def test_manager_shortcut_installs_a_persistent_icon(self):
+        launcher = self.root / "Wine4OfficeManager"
+        launcher.write_bytes(b"manager")
+        launcher.chmod(0o755)
+        bundled_icons = self.root / "transient-bundle/icons"
+        bundled_icons.mkdir(parents=True)
+        source_icon = bundled_icons / "wine4office-manager.svg"
+        source_icon.write_text("<svg/>")
+
+        shortcut = backend.install_manager_shortcut(launcher, bundled_icons)
+        installed_icon = (
+            backend.data_home() / "icons/hicolor/scalable/apps/wine4office-manager.svg"
+        )
+        text = shortcut.read_text()
+        self.assertEqual(installed_icon.read_text(), "<svg/>")
+        self.assertIn(f"Icon={installed_icon}", text)
+        self.assertNotIn(str(bundled_icons), text)
+
     def test_outlook_first_run_sets_language_and_safe_launch_options(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
@@ -232,6 +223,146 @@ touch "$WINEPREFIX/system.reg"
         path.write_text("[Desktop Entry]\nName=Someone else\n")
         self.assertEqual(backend.remove_app_shortcuts(["excel"]), [])
         self.assertTrue(path.exists())
+
+    def test_classifies_every_environment_target(self):
+        missing = self.home / "missing"
+        empty = self.home / "empty"
+        valid = self.home / "valid"
+        unsafe = self.home / "unsafe"
+        empty.mkdir()
+        self._make_prefix(valid)
+        unsafe.mkdir()
+        (unsafe / "personal-file").write_text("do not delete")
+
+        self.assertEqual(backend.classify_prefix(str(missing)), "missing")
+        self.assertEqual(backend.classify_prefix(str(empty)), "empty")
+        self.assertEqual(backend.classify_prefix(str(valid)), "valid")
+        self.assertEqual(backend.classify_prefix(str(unsafe)), "unsafe")
+
+    def test_path_equivalence_resolves_symlinks_and_same_inode(self):
+        prefix = self.home / "real-prefix"
+        prefix.mkdir()
+        alias = self.home / "prefix-alias"
+        alias.symlink_to(prefix, target_is_directory=True)
+
+        self.assertTrue(backend.paths_equivalent(str(prefix), str(alias)))
+        self.assertTrue(backend.paths_equivalent(str(prefix), f"  {prefix}  "))
+        with mock.patch.object(os.path, "samefile", return_value=True) as samefile:
+            self.assertTrue(backend.paths_equivalent(str(prefix), str(self.home / "./real-prefix")))
+        samefile.assert_called_once()
+
+    def test_deletion_rejects_aliases_nested_paths_and_unsafe_roots(self):
+        old = self.home / "container/old-prefix"
+        self._make_prefix(old)
+        alias = self.home / "old-alias"
+        alias.symlink_to(old, target_is_directory=True)
+
+        for target in (alias, old / "nested", old.parent):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "overlapping"):
+                backend.validate_environment_deletion(str(old), str(target))
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            backend.validate_environment_deletion(str(old), str(self.home))
+
+    def test_staged_deletion_stops_only_the_old_prefix(self):
+        old = self.home / "old-prefix"
+        new = self.home / "new-prefix"
+        for prefix in (old, new):
+            self._make_prefix(prefix)
+
+        with mock.patch.object(backend, "stop_wine") as stop:
+            staged = backend.stage_environment_deletion(
+                str(old), str(new), str(self.wine), lambda line: None
+            )
+        stop.assert_called_once_with(str(old.resolve()), str(self.wine))
+        self.assertFalse(old.exists())
+        self.assertTrue(staged.exists())
+        backend.restore_staged_environment(staged, str(old))
+        self.assertTrue((old / "system.reg").is_file())
+
+    def test_prefix_classification_requires_every_layout_marker(self):
+        markers = {
+            "system.reg": False,
+            "user.reg": False,
+            "drive_c": True,
+            "dosdevices": True,
+        }
+        for marker, is_directory in markers.items():
+            with self.subTest(marker=marker):
+                prefix = self._make_prefix(self.home / f"missing-{marker}")
+                path = prefix / marker
+                path.rmdir() if is_directory else path.unlink()
+                self.assertEqual(backend.classify_prefix(str(prefix)), "unsafe")
+
+    def test_recursive_deletion_rejects_directory_with_only_system_registry(self):
+        ordinary = self.home / "ordinary-directory"
+        ordinary.mkdir()
+        (ordinary / "system.reg").write_text("not enough")
+        important = ordinary / "important"
+        important.write_text("preserve")
+
+        self.assertEqual(backend.classify_prefix(str(ordinary)), "unsafe")
+        with mock.patch.object(backend.shutil, "rmtree") as rmtree:
+            with self.assertRaisesRegex(ValueError, "not a Wine prefix"):
+                backend.discard_initialized_environment(str(ordinary), lambda line: None)
+            with self.assertRaisesRegex(ValueError, "not a Wine prefix"):
+                backend.finish_staged_environment_deletion(ordinary, lambda line: None)
+        rmtree.assert_not_called()
+        self.assertEqual(important.read_text(), "preserve")
+
+    def test_uninstaller_authorizes_prefix_removal_only_for_complete_layout(self):
+        root = self.home / "installed"
+        uninstaller = root / "bin/wine4office-uninstall"
+        uninstaller.parent.mkdir(parents=True)
+        uninstaller.write_text("#!/bin/sh\n")
+        uninstaller.chmod(uninstaller.stat().st_mode | stat.S_IXUSR)
+        ordinary = self.home / "ordinary-removal-target"
+        ordinary.mkdir()
+        (ordinary / "system.reg").write_text("not enough")
+
+        with mock.patch.object(backend, "installed_root", return_value=root), \
+             mock.patch.object(backend, "_stream_command") as stream:
+            with self.assertRaisesRegex(ValueError, "not a Wine prefix"):
+                backend.remove_wine4office(str(ordinary), True, lambda line: None)
+            stream.assert_not_called()
+
+            self._make_prefix(ordinary)
+            backend.remove_wine4office(str(ordinary), True, lambda line: None)
+
+        self.assertEqual(
+            stream.call_args.args[0],
+            [str(uninstaller), "--purge-runner", "--remove-prefix", str(ordinary.resolve())],
+        )
+
+    def test_initialization_cancellation_removes_only_the_new_target(self):
+        prefix = self.home / "cancelled-prefix"
+        cancel = mock.Mock()
+        cancel.is_set.return_value = True
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            backend.create_environment(
+                str(prefix), str(self.wine), False, lambda line: None, cancel
+            )
+        self.assertFalse(prefix.exists())
+
+    def test_nonempty_invalid_target_is_never_initialized(self):
+        target = self.home / "documents"
+        target.mkdir()
+        important = target / "important"
+        important.write_text("keep")
+
+        with self.assertRaisesRegex(FileExistsError, "not a Wine prefix"):
+            backend.create_environment(str(target), str(self.wine), False, lambda line: None)
+        self.assertEqual(important.read_text(), "keep")
+
+    def test_successful_commands_must_still_produce_a_valid_prefix(self):
+        target = self.home / "empty-target"
+        target.mkdir()
+
+        with mock.patch.object(backend, "_stream_command"), \
+             self.assertRaisesRegex(RuntimeError, "did not create a valid prefix"):
+            backend.create_environment(str(target), str(self.wine), False, lambda line: None)
+
+        self.assertFalse(target.exists())
 
 if __name__ == "__main__":
     unittest.main()

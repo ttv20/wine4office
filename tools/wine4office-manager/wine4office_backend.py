@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Backend operations for the Wine4Office Manager."""
+"""Backend operations for Wine4OfficeManager."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -12,10 +13,15 @@ import shutil
 import signal
 import subprocess
 import struct
+import tarfile
+import tempfile
+import sys
 import time
+import uuid
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 APP_META = {
@@ -60,6 +66,19 @@ TOOL_META = {
 }
 
 Output = Callable[[str], None]
+DEFAULT_METADATA_URL = (
+    "https://github.com/ttv20/wine4office/releases/latest/download/release.json"
+)
+
+MAX_METADATA_SIZE = 1_048_576
+MAX_MANAGER_SIZE = 1024**3
+MAX_WINE_SIZE = 8 * 1024**3
+MAX_WINE_ARCHIVE_MEMBERS = 100_000
+MAX_WINE_FILE_SIZE = 4 * 1024**3
+MAX_WINE_EXTRACTED_SIZE = 16 * 1024**3
+DEFAULT_UPDATE_CHANNEL = "stable"
+VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+_STANDALONE_VERSION_CACHE = None
 
 
 def data_home() -> Path:
@@ -85,21 +104,105 @@ def installed_root() -> Path | None:
     here = Path(__file__).resolve().parent
     return here.parent if here.name == "lib" else None
 
+def standalone_manager_version_path(target: Path | None = None) -> Path | None:
+    if target is None:
+        if not getattr(sys, "frozen", False):
+            return None
+        target = Path(sys.executable).resolve()
+    return target.with_name(f"{target.name}.version")
+
+
+def _bound_standalone_version(target: Path) -> str | None:
+    sidecar = standalone_manager_version_path(target)
+    try:
+        payload = json.loads(sidecar.read_text())
+        version = payload["version"]
+        expected_digest = payload["sha256"]
+        if (not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version)
+                or not isinstance(expected_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)):
+            return None
+        target_stat = target.stat()
+        sidecar_stat = sidecar.stat()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    key = (
+        target_stat.st_dev, target_stat.st_ino, target_stat.st_size, target_stat.st_mtime_ns,
+        sidecar_stat.st_dev, sidecar_stat.st_ino, sidecar_stat.st_size, sidecar_stat.st_mtime_ns,
+    )
+    global _STANDALONE_VERSION_CACHE
+    if _STANDALONE_VERSION_CACHE and _STANDALONE_VERSION_CACHE[0] == key:
+        return _STANDALONE_VERSION_CACHE[1]
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as executable:
+            for chunk in iter(lambda: executable.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    result = version if digest.hexdigest() == expected_digest else None
+    _STANDALONE_VERSION_CACHE = (key, result)
+    return result
+
 
 def current_version() -> str:
+    """Return the independently installed Wine4OfficeManager version."""
     root = installed_root()
-    version = root / "VERSION" if root else None
-    if version and version.is_file():
-        value = version.read_text(errors="replace").strip()
-        if value:
-            return value
+    candidates = [root / "VERSION"] if root else []
+    for version_file in candidates:
+        if version_file.is_file():
+            value = version_file.read_text(errors="replace").strip()
+            if value:
+                return value
+    if getattr(sys, "frozen", False):
+        persisted = _bound_standalone_version(Path(sys.executable).resolve())
+        if persisted:
+            return persisted
+        embedded = Path(__file__).resolve().parent / "VERSION"
+        if embedded.is_file():
+            value = embedded.read_text(errors="replace").strip()
+            if value:
+                return value
+    return "development"
+
+
+def current_wine_version() -> str:
+    """Return the runner version, including legacy combined installations."""
+    root = installed_root()
+    candidates = [root / "WINE_VERSION", root / "VERSION"] if root else [
+        data_home() / "wine4office/WINE_VERSION"
+    ]
+    for version in candidates:
+        if version.is_file():
+            value = version.read_text(errors="replace").strip()
+            if value:
+                return value
     return "development"
 
 
 def configured_update_url() -> str:
     root = installed_root()
     address = root / "UPDATE_URL" if root else None
-    return address.read_text(errors="replace").strip() if address and address.is_file() else ""
+    if address and address.is_file():
+        value = address.read_text(errors="replace").strip()
+        if value:
+            return value
+    return DEFAULT_METADATA_URL
+
+
+def configured_update_channel() -> str:
+    root = installed_root()
+    candidates = [root / "UPDATE_CHANNEL"] if root else []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(__file__).resolve().parent / "CHANNEL")
+    for channel_path in candidates:
+        if not channel_path.is_file():
+            continue
+        channel = channel_path.read_text(errors="replace").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", channel):
+            raise ValueError("Configured update channel is invalid.")
+        return channel
+    return DEFAULT_UPDATE_CHANNEL
 
 
 def default_config() -> dict:
@@ -108,6 +211,7 @@ def default_config() -> dict:
         "wine": detect_wine(),
         "desktop_copy": False,
         "update_url": configured_update_url(),
+        "skipped_updates": {},
     }
 
 
@@ -141,6 +245,8 @@ def load_config() -> dict:
             if isinstance(saved, dict):
                 for key in result:
                     if key in saved:
+                        if key == "update_url" and not str(saved[key]).strip():
+                            continue
                         result[key] = saved[key]
         except (OSError, ValueError):
             pass
@@ -157,7 +263,7 @@ def save_config(config: dict) -> None:
 
 
 def normalize_path(value: str) -> Path:
-    return Path(os.path.expandvars(value)).expanduser().resolve(strict=False)
+    return Path(os.path.expandvars(value.strip())).expanduser().resolve(strict=False)
 
 
 def validate_prefix(value: str) -> Path:
@@ -165,9 +271,107 @@ def validate_prefix(value: str) -> Path:
         raise ValueError("The Wine environment path is empty.")
     prefix = normalize_path(value)
     home = Path.home().resolve()
-    if prefix in (Path("/"), home):
+    unsafe_roots = {
+        Path("/"), home,
+        *(Path("/") / name for name in (
+            "bin", "boot", "dev", "etc", "home", "lib", "lib64", "media", "mnt",
+            "opt", "proc", "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var",
+        )),
+    }
+    if prefix in unsafe_roots:
         raise ValueError(f"Refusing unsafe Wine environment path: {prefix}")
     return prefix
+
+def paths_equivalent(first_value: str, second_value: str) -> bool:
+    """Return whether two configured paths identify the same filesystem object."""
+    if not first_value.strip() or not second_value.strip():
+        return first_value.strip() == second_value.strip()
+    first = Path(os.path.expandvars(first_value.strip())).expanduser()
+    second = Path(os.path.expandvars(second_value.strip())).expanduser()
+    try:
+        if first.exists() and second.exists() and os.path.samefile(first, second):
+            return True
+    except OSError:
+        pass
+    return first.resolve(strict=False) == second.resolve(strict=False)
+
+
+def has_wine_prefix_layout(prefix: Path) -> bool:
+    """Return whether all filesystem markers required for a Wine prefix exist."""
+    try:
+        return (
+            (prefix / "system.reg").is_file()
+            and (prefix / "user.reg").is_file()
+            and (prefix / "drive_c").is_dir()
+            and (prefix / "dosdevices").is_dir()
+        )
+    except OSError:
+        return False
+
+
+def classify_prefix(value: str) -> str:
+    """Classify an environment target without changing it."""
+    prefix = validate_prefix(value)
+    if not prefix.exists():
+        return "missing"
+    if not prefix.is_dir():
+        return "unsafe"
+    try:
+        if not any(prefix.iterdir()):
+            return "empty"
+    except OSError:
+        return "unsafe"
+    return "valid" if has_wine_prefix_layout(prefix) else "unsafe"
+
+
+def validate_environment_deletion(old_value: str, new_value: str) -> tuple[Path, Path]:
+    """Validate that deleting old cannot affect the replacement environment."""
+    old = validate_prefix(old_value)
+    new = validate_prefix(new_value)
+    if classify_prefix(str(old)) != "valid":
+        raise ValueError(f"Refusing to delete a non-prefix environment: {old}")
+    if paths_equivalent(str(old), str(new)) or old in new.parents or new in old.parents:
+        raise ValueError(
+            f"Refusing to delete overlapping Wine environments: {old} and {new}"
+        )
+    return old, new
+
+
+def stage_environment_deletion(old_value: str, new_value: str, wine_value: str,
+                               output: Output) -> Path:
+    """Atomically move an approved old prefix aside so it can still be restored."""
+    old, _ = validate_environment_deletion(old_value, new_value)
+    stop_wine(str(old), wine_value)
+    staged = old.with_name(
+        f".{old.name}.wine4office-delete-{os.getpid()}-{time.time_ns()}"
+    )
+    if staged.exists():
+        raise FileExistsError(f"Temporary deletion path already exists: {staged}")
+    output(f"Staging the old Wine environment for deletion: {old}")
+    old.rename(staged)
+    return staged
+
+
+def restore_staged_environment(staged: Path, old_value: str) -> None:
+    old = validate_prefix(old_value)
+    if old.exists():
+        raise FileExistsError(f"Cannot restore the old environment over: {old}")
+    staged.rename(old)
+
+
+def finish_staged_environment_deletion(staged: Path, output: Output) -> None:
+    approved = validate_prefix(str(staged))
+    if classify_prefix(str(approved)) != "valid":
+        raise ValueError(f"Refusing to delete staged data that is not a Wine prefix: {approved}")
+    output(f"Deleting the approved old Wine environment: {approved}")
+    shutil.rmtree(approved)
+
+def discard_initialized_environment(prefix_value: str, output: Output) -> None:
+    prefix = validate_prefix(prefix_value)
+    if classify_prefix(str(prefix)) != "valid":
+        raise ValueError(f"Refusing to discard a path that is not a Wine prefix: {prefix}")
+    output(f"Discarding the uncommitted Wine environment: {prefix}")
+    shutil.rmtree(prefix)
 
 
 def require_wine(value: str) -> Path:
@@ -246,10 +450,16 @@ def stop_wine(prefix_value: str, wine_value: str) -> None:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
 
 
-def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output) -> str:
+def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
+                       cancel_event=None, process_callback=None) -> str:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    if prefix.exists() and not recreate and any(prefix.iterdir()):
+    kind = classify_prefix(str(prefix))
+    if kind == "unsafe":
+        raise FileExistsError(
+            f"Refusing to initialize a nonempty directory that is not a Wine prefix: {prefix}"
+        )
+    if kind == "valid" and not recreate:
         raise FileExistsError(f"The environment already exists and is not empty: {prefix}")
 
     backup: Path | None = None
@@ -262,14 +472,22 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         prefix.rename(backup)
 
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
         prefix.parent.mkdir(parents=True, exist_ok=True)
         wineboot = sibling_tool(wine, "wineboot")
         command = [str(wineboot), "-u"] if wineboot else [str(wine), "wineboot.exe", "-u"]
-        _stream_command(command, wine_environment(prefix, wine), output)
+        _stream_command(
+            command, wine_environment(prefix, wine), output,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
         _stream_command([
             str(wine), "reg", "add", r"HKCU\Software\Wine\Drivers", "/v", "Graphics",
             "/d", "x11,wayland", "/f",
-        ], wine_environment(prefix, wine), output)
+        ], wine_environment(prefix, wine), output,
+            cancel_event=cancel_event, process_callback=process_callback)
+        if classify_prefix(str(prefix)) != "valid":
+            raise RuntimeError(f"Wine initialization did not create a valid prefix at: {prefix}")
     except Exception:
         if prefix.exists():
             shutil.rmtree(prefix, ignore_errors=True)
@@ -687,9 +905,23 @@ def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
 
 
 def install_manager_shortcut(manager_launcher: Path, icons: Path) -> Path:
+    source_icon = icons / "wine4office-manager.svg"
+    if not source_icon.is_file():
+        raise FileNotFoundError(f"Wine4OfficeManager icon is missing: {source_icon}")
+    installed_icon = data_home() / "icons/hicolor/scalable/apps/wine4office-manager.svg"
+    installed_icon.parent.mkdir(parents=True, exist_ok=True)
+    temporary_icon = installed_icon.with_name(
+        f".{installed_icon.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        shutil.copyfile(source_icon, temporary_icon)
+        temporary_icon.chmod(0o644)
+        os.replace(temporary_icon, installed_icon)
+    finally:
+        temporary_icon.unlink(missing_ok=True)
     path = data_home() / "applications/wine4office-manager.desktop"
-    write_desktop_file(path, "Wine4Office Manager", "Manage Wine4Office environments and shortcuts",
-                       [str(manager_launcher)], icons / "wine4office-manager.svg", "Utility;Settings;")
+    write_desktop_file(path, "Wine4OfficeManager", "Manage Wine4Office environments and shortcuts",
+                       [str(manager_launcher)], installed_icon, "Utility;Settings;")
     refresh_desktop_database()
     return path
 
@@ -702,85 +934,679 @@ def refresh_desktop_database() -> None:
 
 
 def _https_url(value: str, description: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{description} must be an HTTPS URL.")
     value = value.strip()
     parsed = urllib.parse.urlparse(value)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if (parsed.scheme != "https" or not parsed.netloc or parsed.username is not None
+            or parsed.password is not None or parsed.fragment):
         raise ValueError(f"{description} must be an HTTPS URL.")
     return value
 
 
-def update_wine4office(update_url: str, output: Output, cancel_event=None,
-                   process_callback=None) -> str:
-    if not update_url.strip():
-        raise ValueError("No update address is configured yet.")
-    manifest_url = _https_url(update_url, "Update manifest address")
-    output(f"Checking {manifest_url}")
-    request = urllib.request.Request(manifest_url, headers={"User-Agent": "Wine4Office-Manager/1"})
+def resolve_update_url(metadata_url: str, value: object, description: str) -> str:
+    base = _https_url(metadata_url, "Metadata address")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{description} is missing.")
+    return _https_url(urllib.parse.urljoin(base, value.strip()), description)
+
+
+def _parse_component(payload: object, name: str, metadata_url: str) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError(f"Release metadata {name} entry must be an object.")
+    version = payload.get("version")
+    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
+        raise ValueError(f"Release metadata has an invalid {name} version.")
+    digest = payload.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+        raise ValueError(f"Release metadata has an invalid {name} SHA-256 digest.")
+    size = payload.get("size")
+    maximum = MAX_MANAGER_SIZE if name == "manager" else MAX_WINE_SIZE
+    if type(size) is not int or size <= 0 or size > maximum:
+        raise ValueError(f"Release metadata has an invalid {name} size.")
+    if name == "wine" and payload.get("format") != "tar.zst":
+        raise ValueError("Release metadata Wine format must be 'tar.zst'.")
+    result = {
+        "version": version,
+        "url": resolve_update_url(metadata_url, payload.get("url"), f"{name.title()} artifact address"),
+        "sha256": digest.lower(),
+        "size": size,
+    }
+    if name == "wine":
+        result["format"] = "tar.zst"
+    return result
+
+
+def _expected_update_channel(expected_channel: str | None) -> str:
+    expected_channel = configured_update_channel() \
+        if expected_channel is None else expected_channel
+    if (not isinstance(expected_channel, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", expected_channel)):
+        raise ValueError("Expected update channel is invalid.")
+    return expected_channel
+
+
+def _validate_update_channel(metadata: dict, expected_channel: str | None) -> str:
+    expected_channel = _expected_update_channel(expected_channel)
+    channel = metadata.get("channel")
+    if not isinstance(channel, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", channel):
+        raise ValueError("Release metadata has an invalid channel.")
+    if channel != expected_channel:
+        raise ValueError(
+            f"Release metadata channel {channel!r} does not match expected "
+            f"channel {expected_channel!r}."
+        )
+    return channel
+
+
+def parse_release_metadata(payload: bytes | str | dict, source_url: str,
+                           expected_channel: str | None = None) -> dict:
+    """Validate and normalize provider-neutral schema-v1 release metadata."""
+    source_url = _https_url(source_url, "Metadata address")
+    if isinstance(payload, (bytes, str)):
+        try:
+            payload = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Release metadata is not valid JSON.") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Release metadata must be a JSON object.")
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ValueError("Release metadata schema_version must be 1.")
+    channel = _validate_update_channel(payload, expected_channel)
+    canonical_url = resolve_update_url(source_url, payload.get("metadata_url"), "Metadata address")
+    return {
+        "schema_version": 1,
+        "channel": channel,
+        "metadata_url": canonical_url,
+        "manager": _parse_component(payload.get("manager"), "manager", source_url),
+        "wine": _parse_component(payload.get("wine"), "wine", source_url),
+    }
+
+
+def fetch_release_metadata(metadata_url: str, output: Output | None = None,
+                           expected_channel: str | None = None) -> dict:
+    metadata_url = _https_url(metadata_url, "Metadata address")
+    if output:
+        output(f"Checking {metadata_url}")
+    request = urllib.request.Request(
+        metadata_url, headers={"User-Agent": "Wine4OfficeManager/1"}
+    )
     with urllib.request.urlopen(request, timeout=30) as response:
-        manifest_bytes = response.read(1_048_577)
-    if len(manifest_bytes) > 1_048_576:
-        raise ValueError("Update manifest is larger than 1 MiB.")
+        final_url = response.geturl() if hasattr(response, "geturl") else metadata_url
+        _https_url(final_url, "Final metadata address")
+        payload = response.read(MAX_METADATA_SIZE + 1)
+    if len(payload) > MAX_METADATA_SIZE:
+        raise ValueError("Release metadata is larger than 1 MiB.")
+    return parse_release_metadata(payload, metadata_url, expected_channel)
+
+
+def _split_version(value: str) -> tuple[list[tuple[int, object]], list[str] | None]:
+    if not isinstance(value, str) or not VERSION_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid version: {value!r}")
+    precedence = value.split("+", 1)[0]
+    release, separator, prerelease = precedence.partition("-")
+    release_parts: list[tuple[int, object]] = []
+    for token in re.findall(r"[0-9]+|[A-Za-z]+", release):
+        release_parts.append((1, int(token)) if token.isdigit() else (0, token.lower()))
+    return release_parts, prerelease.split(".") if separator else None
+
+
+def compare_versions(left: str, right: str) -> int:
+    """Compare release versions without lexicographic numeric mistakes."""
+    left_release, left_pre = _split_version(left)
+    right_release, right_pre = _split_version(right)
+    width = max(len(left_release), len(right_release))
+    for index in range(width):
+        left_part = left_release[index] if index < len(left_release) else (1, 0)
+        right_part = right_release[index] if index < len(right_release) else (1, 0)
+        if left_part != right_part:
+            return 1 if left_part > right_part else -1
+    if left_pre is None or right_pre is None:
+        if left_pre is right_pre:
+            return 0
+        return 1 if left_pre is None else -1
+    for index in range(max(len(left_pre), len(right_pre))):
+        if index >= len(left_pre):
+            return -1
+        if index >= len(right_pre):
+            return 1
+        left_part, right_part = left_pre[index], right_pre[index]
+        if left_part == right_part:
+            continue
+        left_numeric, right_numeric = left_part.isdigit(), right_part.isdigit()
+        if left_numeric and right_numeric:
+            return 1 if int(left_part) > int(right_part) else -1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return 1 if left_part.lower() > right_part.lower() else -1
+    return 0
+
+
+def available_updates(metadata: dict, skipped: dict | None = None,
+                      expected_channel: str | None = None) -> dict:
+    _validate_update_channel(metadata, expected_channel)
+    skipped = skipped if isinstance(skipped, dict) else {}
+    installed = {"manager": current_version(), "wine": current_wine_version()}
+    updates: dict[str, dict] = {}
+    for name in ("manager", "wine"):
+        candidate = metadata[name]
+        current = installed[name]
+        if str(skipped.get(name, "")) == candidate["version"]:
+            continue
+        if current == "development":
+            if name == "wine" and not runner_update_target().exists():
+                updates[name] = dict(candidate)
+            continue
+        if compare_versions(candidate["version"], current) <= 0:
+            continue
+        updates[name] = dict(candidate)
+    return updates
+
+
+def check_for_updates(metadata_url: str, skipped: dict | None = None,
+                      output: Output | None = None,
+                      expected_channel: str | None = None) -> dict:
+    metadata = fetch_release_metadata(metadata_url, output, expected_channel)
+    return {
+        "metadata": metadata,
+        "updates": available_updates(metadata, skipped, expected_channel),
+    }
+
+
+def _atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.",
+                                     delete=False) as temporary:
+        temporary.write(value)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
     try:
-        manifest = json.loads(manifest_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("Update manifest is not valid JSON.") from error
-    if not isinstance(manifest, dict):
-        raise ValueError("Update manifest must be a JSON object.")
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
-    version = str(manifest.get("version", "")).strip()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version):
-        raise ValueError("Update manifest has an invalid version.")
-    if version == current_version():
-        return f"Wine4Office {version} is already installed."
-    installer_url = urllib.parse.urljoin(manifest_url, str(manifest.get("installer_url", "")).strip())
-    installer_url = _https_url(installer_url, "Installer address")
-    expected = str(manifest.get("sha256", "")).lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", expected):
-        raise ValueError("Update manifest has an invalid SHA-256 digest.")
 
+def _atomic_write_bytes(path: Path, value: bytes, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.",
+                                     delete=False) as temporary:
+        temporary.write(value)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    temporary_path.chmod(mode)
+    try:
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def persist_metadata_url(metadata_url: str) -> str:
+    """Persist only a normalized URL that has already passed metadata validation."""
+    metadata_url = _https_url(metadata_url, "Metadata address")
+    root = installed_root()
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(root / "UPDATE_URL", metadata_url + "\n")
+    return metadata_url
+
+
+def _download_artifact(name: str, component: dict, cancel_event=None,
+                       output: Output | None = None) -> Path:
     download_dir = cache_home() / "wine4office/updates"
     download_dir.mkdir(parents=True, exist_ok=True)
-    installer = download_dir / f"wine4office-{version}.run.part"
+    destination = download_dir / f"{name}-{component['version']}.{uuid.uuid4().hex}.part"
+    request = urllib.request.Request(
+        component["url"], headers={"User-Agent": "Wine4OfficeManager/1"}
+    )
     digest = hashlib.sha256()
     downloaded = 0
-    output(f"Downloading Wine4Office {version}")
-    request = urllib.request.Request(installer_url, headers={"User-Agent": "Wine4Office-Manager/1"})
+    if output:
+        output(f"Downloading {name} {component['version']}")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, installer.open("wb") as destination:
-            size_header = response.headers.get("Content-Length")
-            if size_header and int(size_header) > 8 * 1024**3:
-                raise ValueError("Update installer is larger than 8 GiB.")
+        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as target:
+            final_url = response.geturl() if hasattr(response, "geturl") else component["url"]
+            _https_url(final_url, f"Final {name} artifact address")
+            headers = getattr(response, "headers", None)
+            content_length = headers.get("Content-Length") if headers is not None else None
+            if content_length is not None and int(content_length) != component["size"]:
+                raise ValueError(f"{name.title()} download size does not match release metadata.")
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("Operation cancelled.")
-                chunk = response.read(1024 * 1024)
+                chunk = response.read(min(1024 * 1024, component["size"] - downloaded + 1))
                 if not chunk:
                     break
                 downloaded += len(chunk)
-                if downloaded > 8 * 1024**3:
-                    raise ValueError("Update installer is larger than 8 GiB.")
+                if downloaded > component["size"]:
+                    raise ValueError(f"{name.title()} download is larger than release metadata.")
                 digest.update(chunk)
-                destination.write(chunk)
-        if digest.hexdigest() != expected:
-            raise ValueError("Downloaded installer failed SHA-256 verification.")
-        installer.chmod(0o700)
-        output(f"Verified {downloaded} bytes; installing update")
-        _stream_command([str(installer), "--update"], os.environ.copy(), output,
-                        cancel_event=cancel_event, process_callback=process_callback)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        if downloaded != component["size"]:
+            raise ValueError(f"{name.title()} download size does not match release metadata.")
+        if digest.hexdigest() != component["sha256"]:
+            raise ValueError(f"{name.title()} download failed SHA-256 verification.")
+        if output:
+            output(f"Verified {downloaded} bytes for {name} {component['version']}")
+        return destination
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _safe_archive_path(path: PurePosixPath, base: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if path.is_absolute():
+        raise ValueError("Wine archive contains an absolute path.")
+    parts = list(base)
+    for part in path.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not parts:
+                raise ValueError("Wine archive path escapes the runner.")
+            parts.pop()
+        else:
+            parts.append(part)
+    if not parts:
+        raise ValueError("Wine archive contains an empty path.")
+    return tuple(parts)
+
+
+def _validate_tar_member(member: tarfile.TarInfo) -> tuple[str, ...]:
+    path = _safe_archive_path(PurePosixPath(member.name))
+    if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+        raise ValueError(f"Wine archive contains an unsafe special file: {member.name}")
+    if member.size < 0:
+        raise ValueError(f"Wine archive contains a negative file size: {member.name}")
+    if member.isfile() and member.size > MAX_WINE_FILE_SIZE:
+        raise ValueError(f"Wine archive file exceeds the declared-size limit: {member.name}")
+    if member.issym():
+        _safe_archive_path(PurePosixPath(member.linkname), path[:-1])
+    elif member.islnk():
+        _safe_archive_path(PurePosixPath(member.linkname))
+    return path
+
+
+def _validated_tar_members(bundle):
+    count = 0
+    declared_size = 0
+    paths: set[tuple[str, ...]] = set()
+    for member in bundle:
+        count += 1
+        if count > MAX_WINE_ARCHIVE_MEMBERS:
+            raise ValueError("Wine archive exceeds the member-count limit.")
+        path = _validate_tar_member(member)
+        if path in paths:
+            raise ValueError(f"Wine archive contains a duplicate path: {member.name}")
+        paths.add(path)
+        if member.isfile():
+            declared_size += member.size
+            if declared_size > MAX_WINE_EXTRACTED_SIZE:
+                raise ValueError("Wine archive exceeds the total declared-size limit.")
+        yield member, path
+
+
+def _archive_target(destination: Path, path: tuple[str, ...]) -> Path:
+    target = destination.joinpath(*path)
+    destination_resolved = destination.resolve()
+    try:
+        target.parent.resolve().relative_to(destination_resolved)
+    except ValueError as error:
+        raise ValueError("Wine archive extraction path escapes the runner.") from error
+    return target
+
+
+def _extract_validated_tar(bundle, destination: Path) -> None:
+    extracted_size = 0
+    directory_modes: list[tuple[Path, int]] = []
+    pending_links: list[tuple[Path, tuple[str, ...]]] = []
+    for member, path in _validated_tar_members(bundle):
+        target = _archive_target(destination, path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if member.isdir():
+            target.mkdir(exist_ok=True)
+            directory_modes.append((target, member.mode & 0o777))
+            continue
+        if member.issym():
+            os.symlink(member.linkname, target)
+            continue
+        if member.islnk():
+            pending_links.append((
+                target, _safe_archive_path(PurePosixPath(member.linkname))
+            ))
+            continue
+        source = bundle.extractfile(member)
+        if source is None:
+            raise ValueError(f"Wine archive file has no data: {member.name}")
+        written = 0
+        try:
+            with target.open("xb") as extracted:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    extracted_size += len(chunk)
+                    if written > member.size or written > MAX_WINE_FILE_SIZE:
+                        raise ValueError(
+                            f"Wine archive file exceeds its declared size: {member.name}"
+                        )
+                    if extracted_size > MAX_WINE_EXTRACTED_SIZE:
+                        raise ValueError(
+                            "Wine archive exceeds the total extracted-size limit."
+                        )
+                    extracted.write(chunk)
+        finally:
+            source.close()
+        if written != member.size:
+            raise ValueError(f"Wine archive file size changed during extraction: {member.name}")
+        target.chmod(member.mode & 0o777)
+    for target, link_path in pending_links:
+        source = _archive_target(destination, link_path)
+        if not source.is_file():
+            raise ValueError(f"Wine archive hard link target is missing: {source}")
+        os.link(source, target)
+    for directory, mode in reversed(directory_modes):
+        directory.chmod(mode)
+
+
+def _open_zstd_tar(archive: Path):
+    try:
+        import zstandard
+    except ImportError as error:
+        raise RuntimeError(
+            "The zstandard Python package is required to install Wine runner updates."
+        ) from error
+    source = archive.open("rb")
+    reader = zstandard.ZstdDecompressor().stream_reader(source)
+    return source, reader, tarfile.open(fileobj=reader, mode="r|")
+
+
+def safe_extract_wine_archive(archive: Path, destination: Path) -> Path:
+    """Validate all limits before a second bounded streaming extraction pass."""
+    source, reader, bundle = _open_zstd_tar(archive)
+    try:
+        for _member, _path in _validated_tar_members(bundle):
+            pass
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError("Wine artifact is not a valid tar.zst archive.") from error
     finally:
-        installer.unlink(missing_ok=True)
-    return f"Wine4Office {version} installed. Restart the manager to use the update."
+        bundle.close()
+        reader.close()
+        source.close()
+
+    destination.mkdir(parents=True, exist_ok=False)
+    try:
+        source, reader, bundle = _open_zstd_tar(archive)
+        try:
+            _extract_validated_tar(bundle, destination)
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError("Wine artifact could not be safely extracted.") from error
+        finally:
+            bundle.close()
+            reader.close()
+            source.close()
+        direct = destination / "bin/wine"
+        if direct.is_file():
+            runner = destination
+        else:
+            candidates = [
+                child for child in destination.iterdir()
+                if child.is_dir() and (child / "bin/wine").is_file()
+            ]
+            if len(candidates) != 1 or any(
+                    child != candidates[0] for child in destination.iterdir()):
+                raise ValueError(
+                    "Wine archive must contain exactly one runner tree with bin/wine."
+                )
+            runner = candidates[0]
+        if not os.access(runner / "bin/wine", os.X_OK):
+            raise ValueError("Wine archive bin/wine is not executable.")
+        return runner
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
+def manager_update_target() -> Path | None:
+    root = installed_root()
+    if root is not None:
+        return root / "lib/wine4office-manager-qt"
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    return None
+
+
+def runner_update_target() -> Path:
+    root = installed_root()
+    return root / "runner" if root is not None else data_home() / "wine4office/runner"
+
+
+def _remove_update_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _stage_update_file(source: Path, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+            "wb", dir=target.parent, prefix=f".{target.name}.new.", delete=False
+    ) as temporary, source.open("rb") as payload:
+        shutil.copyfileobj(payload, temporary, 1024 * 1024)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        staged = Path(temporary.name)
+    staged.chmod(0o755)
+    return staged
+
+
+@contextmanager
+def _install_update_lock(root: Path | None, manager_target: Path | None,
+                         runner_target: Path):
+    lock_roots = [root] if root is not None else [runner_target.parent]
+    if root is None and manager_target is not None:
+        lock_roots.append(manager_target.parent)
+    unique_roots = sorted(
+        {path.resolve(strict=False) for path in lock_roots},
+        key=str,
+    )
+    locks = []
+    try:
+        for lock_root in unique_roots:
+            lock_root.mkdir(parents=True, exist_ok=True)
+            lock = (lock_root / ".wine4office-update.lock").open("a+b")
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            except BaseException:
+                lock.close()
+                raise
+            locks.append(lock)
+        yield
+    finally:
+        for lock in reversed(locks):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+
+
+def _commit_update_transaction(
+        replacements: list[tuple[Path, Path]],
+        text_updates: dict[Path, str],
+) -> None:
+    snapshots: dict[Path, tuple[bytes, int] | None] = {}
+    for path in text_updates:
+        if path.exists() or path.is_symlink():
+            snapshots[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
+        else:
+            snapshots[path] = None
+
+    states: list[dict] = []
+    try:
+        for staged, target in replacements:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            state = {
+                "target": target,
+                "backup": target.parent / f".{target.name}.old.{uuid.uuid4().hex}",
+                "had_target": target.exists() or target.is_symlink(),
+            }
+            states.append(state)
+            if state["had_target"]:
+                os.replace(target, state["backup"])
+            os.replace(staged, target)
+        for path, value in text_updates.items():
+            _atomic_write_text(path, value)
+    except BaseException as error:
+        rollback_error: BaseException | None = None
+        for path, snapshot in reversed(list(snapshots.items())):
+            try:
+                if snapshot is None:
+                    _remove_update_path(path)
+                else:
+                    _atomic_write_bytes(path, snapshot[0], snapshot[1])
+            except BaseException as restore_error:
+                rollback_error = rollback_error or restore_error
+        for state in reversed(states):
+            try:
+                backup_exists = (
+                    state["backup"].exists() or state["backup"].is_symlink()
+                )
+                if backup_exists:
+                    _remove_update_path(state["target"])
+                    os.replace(state["backup"], state["target"])
+                elif not state["had_target"]:
+                    _remove_update_path(state["target"])
+            except BaseException as restore_error:
+                rollback_error = rollback_error or restore_error
+        if rollback_error is not None:
+            raise RuntimeError("Update failed and rollback could not restore all files.") \
+                from rollback_error
+        raise error
+    else:
+        for state in states:
+            if state["backup"].exists() or state["backup"].is_symlink():
+                _remove_update_path(state["backup"])
+
+
+def install_release_updates(metadata: dict, components: Iterable[str], output: Output,
+                            cancel_event=None,
+                            expected_channel: str | None = None) -> str:
+    """Stage every selected payload, then commit all components transactionally."""
+    selected = list(dict.fromkeys(components))
+    if not selected or any(name not in ("manager", "wine") for name in selected):
+        raise ValueError("Select at least one valid update component.")
+    if not isinstance(metadata, dict):
+        raise ValueError("Release metadata must be a JSON object.")
+    expected_channel = _expected_update_channel(expected_channel)
+    metadata = parse_release_metadata(
+        metadata, metadata.get("metadata_url", ""), expected_channel
+    )
+    offered = available_updates(metadata, expected_channel=expected_channel)
+    if any(name not in offered for name in selected):
+        raise ValueError("Refusing an equal, older, or unknown-version component update.")
+
+    root = installed_root()
+    manager_target = manager_update_target() if "manager" in selected else None
+    runner_target = runner_update_target()
+    if "manager" in selected and manager_target is None:
+        raise RuntimeError(
+            "Wine4OfficeManager self-update requires a standalone or installed manager."
+        )
+
+    downloads: dict[str, Path] = {}
+    manager_staged: Path | None = None
+    extraction: Path | None = None
+    runner_staged: Path | None = None
+    try:
+        for name in selected:
+            downloads[name] = _download_artifact(
+                name, metadata[name], cancel_event, output
+            )
+        if manager_target is not None:
+            manager_staged = _stage_update_file(downloads["manager"], manager_target)
+        if "wine" in selected:
+            runner_target.parent.mkdir(parents=True, exist_ok=True)
+            extraction = Path(tempfile.mkdtemp(
+                prefix=".wine-update.", dir=runner_target.parent
+            ))
+            shutil.rmtree(extraction)
+            runner_staged = safe_extract_wine_archive(downloads["wine"], extraction)
+
+        with _install_update_lock(root, manager_target, runner_target):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.")
+            offered = available_updates(metadata, expected_channel=expected_channel)
+            if any(name not in offered for name in selected):
+                raise ValueError(
+                    "Refusing an equal, older, or unknown-version component update "
+                    "after another updater completed."
+                )
+
+            replacements: list[tuple[Path, Path]] = []
+            if manager_staged is not None and manager_target is not None:
+                replacements.append((manager_staged, manager_target))
+            if runner_staged is not None:
+                replacements.append((runner_staged, runner_target))
+
+            text_updates: dict[Path, str] = {}
+            version_root = root if root is not None else runner_target.parent
+            if manager_staged is not None and root is not None:
+                manager_version = root / "VERSION"
+                wine_version = root / "WINE_VERSION"
+                if (runner_target.exists() and not wine_version.exists()
+                        and not wine_version.is_symlink() and manager_version.is_file()):
+                    text_updates[wine_version] = manager_version.read_text()
+                text_updates[manager_version] = metadata["manager"]["version"] + "\n"
+            elif manager_staged is not None and manager_target is not None:
+                standalone_version = standalone_manager_version_path(manager_target)
+                if standalone_version is not None:
+                    text_updates[standalone_version] = json.dumps({
+                        "version": metadata["manager"]["version"],
+                        "sha256": metadata["manager"]["sha256"],
+                    }, sort_keys=True) + "\n"
+            if runner_staged is not None:
+                text_updates[version_root / "WINE_VERSION"] = \
+                    metadata["wine"]["version"] + "\n"
+            if root is not None:
+                text_updates[root / "UPDATE_URL"] = metadata["metadata_url"] + "\n"
+            _commit_update_transaction(replacements, text_updates)
+    finally:
+        for download in downloads.values():
+            download.unlink(missing_ok=True)
+        if manager_staged is not None:
+            manager_staged.unlink(missing_ok=True)
+        if extraction is not None:
+            shutil.rmtree(extraction, ignore_errors=True)
+
+    if "manager" in selected:
+        output(f"Installed Wine4OfficeManager {metadata['manager']['version']}.")
+    if "wine" in selected:
+        output(f"Installed Wine runner {metadata['wine']['version']}.")
+    suffix = " Restart Wine4OfficeManager to use the new manager." \
+        if "manager" in selected else ""
+    return "Selected updates installed." + suffix
 
 
 def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -> str:
     root = installed_root()
     if root is None:
-        raise RuntimeError("Removal is available only from an installed Wine4Office Manager.")
+        raise RuntimeError("Removal is available only from an installed Wine4OfficeManager.")
     uninstaller = root / "bin/wine4office-uninstall"
     if not uninstaller.is_file() or not os.access(uninstaller, os.X_OK):
         raise FileNotFoundError(f"Wine4Office uninstaller is missing: {uninstaller}")
     command = [str(uninstaller), "--purge-runner"]
     if remove_prefix:
-        command.extend(["--remove-prefix", str(validate_prefix(prefix_value))])
+        prefix = validate_prefix(prefix_value)
+        if classify_prefix(str(prefix)) != "valid":
+            raise ValueError(f"Refusing to remove a path that is not a Wine prefix: {prefix}")
+        command.extend(["--remove-prefix", str(prefix)])
     _stream_command(command, os.environ.copy(), output)
     return "Wine4Office removed. You may close this browser tab."

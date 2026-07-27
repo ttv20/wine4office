@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Wine4Office Manager for the current user. Never invokes sudo.
+# Install Wine4OfficeManager for the current user. Never invokes sudo.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -32,9 +32,9 @@ export WINE4OFFICE_MANAGER_ROOT="$ROOT"
 if [ -x "$ROOT/lib/wine4office-manager-qt" ]; then
     exec "$ROOT/lib/wine4office-manager-qt" "$@"
 fi
-if ! python3 -c 'import PySide6, pefile' >/dev/null 2>&1; then
-    echo "wine4office-manager: PySide6 and pefile are required for the native Qt interface." >&2
-    echo "Install them with: python3 -m pip install --user PySide6 pefile" >&2
+if ! python3 -c 'import PySide6, pefile, zstandard' >/dev/null 2>&1; then
+    echo "wine4office-manager: PySide6, pefile, and zstandard are required for the native interface and updates." >&2
+    echo "Install them with: python3 -m pip install --user PySide6 pefile zstandard" >&2
     exit 1
 fi
 exec python3 "$ROOT/lib/wine4office_manager.py" "$@"
@@ -45,12 +45,13 @@ ln -sfn "$ROOT/bin/wine4office-launcher" "$BIN_HOME/wine4office-launcher"
 
 if [[ -n ${WINE4OFFICE_VERSION:-} ]]; then printf '%s\n' "$WINE4OFFICE_VERSION" > "$ROOT/VERSION"; fi
 if [[ -n ${WINE4OFFICE_UPDATE_URL+x} ]]; then printf '%s\n' "$WINE4OFFICE_UPDATE_URL" > "$ROOT/UPDATE_URL"; fi
+if [[ -n ${WINE4OFFICE_UPDATE_CHANNEL+x} ]]; then printf '%s\n' "$WINE4OFFICE_UPDATE_CHANNEL" > "$ROOT/UPDATE_CHANNEL"; fi
 WINE4OFFICE_MANAGER_ROOT="$ROOT" PYTHONPATH="$LIB" python3 - <<'PY'
 import wine4office_backend as backend
 if not backend.config_path().exists():
     backend.save_config(backend.default_config())
 PY
 WINE4OFFICE_MANAGER_ROOT="$ROOT" python3 "$LIB/wine4office_manager.py" --install-shortcut >/dev/null
-printf 'Wine4Office Manager installed for %s.\n' "${USER:-$(id -un)}"
+printf 'Wine4OfficeManager installed for %s.\n' "${USER:-$(id -un)}"
 printf 'Application shortcut: %s/applications/wine4office-manager.desktop\n' "$DATA_HOME"
 printf 'Command: %s/wine4office-manager\n' "$BIN_HOME"

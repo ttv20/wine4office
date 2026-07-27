@@ -1,18 +1,22 @@
-name: Build Wine4Office one-file installer
+name: Build Wine4Office release artifacts
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Bundle version (blank uses the commit)"
+        description: "Release version (blank uses the commit)"
         required: false
         type: string
-      update_manifest_url:
-        description: "HTTPS update manifest embedded in the install (blank disables updates)"
+      metadata_url:
+        description: "Canonical HTTPS release.json URL"
         required: false
         type: string
-      installer_url:
-        description: "HTTPS .run URL written to the generated manifest (blank for now)"
+      release_base_url:
+        description: "HTTPS artifact base URL, or a path relative to release.json"
+        required: false
+        type: string
+      channel:
+        description: "Release channel"
         required: false
         type: string
   push:
@@ -23,21 +27,22 @@ permissions:
   contents: write
 
 concurrency:
-  group: wine4office-onefile-${{ github.ref }}
-  cancel-in-progress: true
+  group: wine4office-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 360
     env:
-      CONFIGURED_UPDATE_URL: ${{ inputs.update_manifest_url || vars.WINE4OFFICE_UPDATE_MANIFEST_URL }}
-      CONFIGURED_INSTALLER_URL: ${{ inputs.installer_url || vars.WINE4OFFICE_INSTALLER_URL }}
+      CONFIGURED_METADATA_URL: ${{ inputs.metadata_url || vars.WINE4OFFICE_METADATA_URL || 'https://github.com/ttv20/wine4office/releases/latest/download/release.json' }}
+      CONFIGURED_RELEASE_BASE_URL: ${{ inputs.release_base_url || vars.WINE4OFFICE_RELEASE_BASE_URL || 'https://github.com/ttv20/wine4office/releases/latest/download' }}
+      CONFIGURED_RELEASE_CHANNEL: ${{ inputs.channel || vars.WINE4OFFICE_RELEASE_CHANNEL || 'stable' }}
     steps:
       - name: Check out Wine4Office
         uses: actions/checkout@v4
 
-      - name: Install Wine build dependencies when permitted
+      - name: Install build dependencies when permitted
         shell: bash
         run: |
           set -euo pipefail
@@ -56,7 +61,7 @@ jobs:
           "${elevate[@]}" dpkg --add-architecture i386
           "${elevate[@]}" apt-get update
           "${elevate[@]}" apt-get install -y --no-install-recommends \
-            autoconf bison build-essential ca-certificates flex python3-pip python3-venv zstd \
+            autoconf bison build-essential ca-certificates flex gh python3-pip python3-venv zstd \
             gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
             g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
             libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
@@ -74,7 +79,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar zstd)
+          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar zstd gh)
           missing=()
           for command in "${required[@]}"; do
             command -v "$command" >/dev/null || missing+=("$command")
@@ -87,7 +92,7 @@ jobs:
           echo "Available build cores: $(nproc)"
           df -h .
 
-      - name: Select bundle version
+      - name: Select release version
         id: version
         shell: bash
         env:
@@ -118,86 +123,76 @@ jobs:
           make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install
 
-      - name: Build standalone native Qt manager
+      - name: Build standalone Wine4OfficeManager
         run: |
           set -euo pipefail
           python3 -m venv manager-qt-venv
           manager-qt-venv/bin/python -m pip install --disable-pip-version-check \
             -r tools/wine4office-manager/requirements-build.txt
-          mkdir -p release
           PYTHON="$PWD/manager-qt-venv/bin/python" \
             tools/wine4office-manager/packaging/build-qt-binary.sh \
-            release/wine4office-manager-qt
-          QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
-            release/wine4office-manager-qt --smoke-test
-
-      - name: Build self-extracting installer and manifest
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          tools/wine4office-manager/packaging/build-onefile.sh \
-            stage/opt/wine4office \
-            release/wine4office-${{ steps.version.outputs.version }}-x86_64.run \
+            build/manager/Wine4OfficeManager \
             '${{ steps.version.outputs.version }}' \
-            "${CONFIGURED_UPDATE_URL:-}" \
-            "${CONFIGURED_INSTALLER_URL:-}" \
-            release/wine4office-manager-qt
+            "$CONFIGURED_RELEASE_CHANNEL"
+          QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
+            build/manager/Wine4OfficeManager --smoke-test
 
-      - name: Build WineCharm WoW64 runner backup
+      - name: Package separate release artifacts
         run: |
           set -euo pipefail
-          runner="stage/opt/wine4office"
-          runner_name="wine4office-${{ steps.version.outputs.version }}-wow64-x86_64"
-          archive="release/${runner_name}.tar.zst"
+          tools/wine4office-manager/packaging/build-release-artifacts.sh \
+            stage/opt/wine4office \
+            build/manager/Wine4OfficeManager \
+            release \
+            '${{ steps.version.outputs.version }}' \
+            "$CONFIGURED_METADATA_URL" \
+            "$CONFIGURED_RELEASE_BASE_URL" \
+            "$CONFIGURED_RELEASE_CHANNEL"
 
-          [[ -x "$runner/bin/wine" ]]
-          [[ -d "$runner/lib/wine/i386-windows" ]]
-          [[ -d "$runner/lib/wine/x86_64-windows" ]]
-
-          # WineCharm recognizes this as a combined 64-bit WoW64 runner by its
-          # name and bin/wine64. The staged tree is disposable at this point.
-          rm -f "$runner/bin/wine64"
-          ln -s wine "$runner/bin/wine64"
-
-          # tar --zstd uses zstd's default level (3). Level 19 plus a 128 MiB
-          # window produces a smaller release archive while remaining portable.
-          tar -C "$runner" \
-            --transform="flags=r;s|^\\.|$runner_name|" \
-            -cf - . | zstd -T0 -19 --long=27 --no-progress -o "$archive"
-
-          mapfile -t roots < <(tar --zstd -tf "$archive" | sed 's|/.*||' | sort -u)
-          [[ ${#roots[@]} -eq 1 && ${roots[0]} == "$runner_name" ]]
-          tar --zstd -tf "$archive" | grep -Fx "$runner_name/bin/wine" >/dev/null
-          tar --zstd -tf "$archive" | grep "^$runner_name/lib/wine/i386-windows/" >/dev/null
-          tar --zstd -tf "$archive" | grep "^$runner_name/lib/wine/x86_64-windows/" >/dev/null
-
-          verify_dir=$(mktemp -d)
-          trap 'rm -rf "$verify_dir"' EXIT
-          tar --zstd -xf "$archive" -C "$verify_dir" "$runner_name/bin/wine64"
-          [[ -L "$verify_dir/$runner_name/bin/wine64" ]]
-          [[ $(readlink "$verify_dir/$runner_name/bin/wine64") == wine ]]
-
-          sha256=$(sha256sum "$archive" | awk '{print $1}')
-          printf '%s  %s\n' "$sha256" "$(basename "$archive")" > "$archive.sha256"
-
-      - name: Upload CI artifact
+      - name: Upload Wine4OfficeManager CI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wine4office-${{ steps.version.outputs.version }}-wow64-x86_64
+          name: Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64
           path: |
-            release/*.run
-            release/*.tar.zst
-            release/*.sha256
-            release/*.manifest.json
+            release/Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64
+            release/Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64.sha256
           if-no-files-found: error
           compression-level: 0
 
+      - name: Upload Wine CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine4office-${{ steps.version.outputs.version }}-x86_64
+          path: |
+            release/wine4office-${{ steps.version.outputs.version }}-x86_64.tar.zst
+            release/wine4office-${{ steps.version.outputs.version }}-x86_64.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload release metadata CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine4office-release-metadata-${{ steps.version.outputs.version }}
+          path: release/release.json
+          if-no-files-found: error
+
       - name: Publish tagged GitHub release
         if: startsWith(github.ref, 'refs/tags/wine4office-v')
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          version='${{ steps.version.outputs.version }}'
+          artifacts=(
+            "release/Wine4OfficeManager-${version}-x86_64"
+            "release/Wine4OfficeManager-${version}-x86_64.sha256"
+            "release/wine4office-${version}-x86_64.tar.zst"
+            "release/wine4office-${version}-x86_64.tar.zst.sha256"
+            "release/release.json"
+          )
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "${artifacts[@]}" \
+            --repo "$GITHUB_REPOSITORY" --clobber

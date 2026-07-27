@@ -1,35 +1,50 @@
 #!/usr/bin/env bash
-# Build a standalone native Qt Wine4Office Manager with PyInstaller.
+# Build the standalone native Qt Wine4OfficeManager with PyInstaller.
 set -euo pipefail
 
-[[ $# -eq 1 ]] || { echo "Usage: $0 OUTPUT" >&2; exit 2; }
+[[ $# -ge 1 && $# -le 3 ]] || { echo "Usage: $0 OUTPUT [VERSION] [CHANNEL]" >&2; exit 2; }
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUTPUT=$1
+VERSION=${2:-${VERSION:-development}}
+CHANNEL=${3:-${CHANNEL:-stable}}
 PYTHON=${PYTHON:-python3}
 
-"$PYTHON" -c 'import PyInstaller, PySide6, pefile' >/dev/null 2>&1 || {
-    echo "PyInstaller, PySide6, and pefile are required; install requirements-build.txt" >&2
+"$PYTHON" -c 'import PyInstaller, PySide6, pefile, zstandard' >/dev/null 2>&1 || {
+    echo "PyInstaller, PySide6, pefile, and zstandard are required; install requirements-build.txt" >&2
+    exit 1
+}
+[[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
+    echo "Unsafe Wine4OfficeManager version: $VERSION" >&2
+    exit 1
+}
+[[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || {
+    echo "Unsafe Wine4OfficeManager channel: $CHANNEL" >&2
     exit 1
 }
 mkdir -p "$(dirname "$OUTPUT")"
 OUTPUT=$(cd "$(dirname "$OUTPUT")" && pwd)/$(basename "$OUTPUT")
 BUILD=$(mktemp -d)
 trap 'rm -rf "$BUILD"' EXIT
+printf '%s\n' "$VERSION" > "$BUILD/VERSION"
+printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
 
 "$PYTHON" -m PyInstaller \
     --clean \
     --noconfirm \
     --noupx \
     --onefile \
-    --name wine4office-manager-qt \
+    --name Wine4OfficeManager \
     --distpath "$BUILD/dist" \
     --workpath "$BUILD/work" \
     --specpath "$BUILD/spec" \
     --paths "$HERE" \
     --add-data "$HERE/icons:icons" \
     --add-data "$HERE/register-office-cloud-fonts.sh:." \
+    --add-data "$BUILD/VERSION:." \
+    --add-data "$BUILD/CHANNEL:." \
     --hidden-import wine4office_backend \
     --hidden-import wine4office_qt \
+    --hidden-import zstandard \
     "$HERE/wine4office_manager.py"
-install -m 0755 "$BUILD/dist/wine4office-manager-qt" "$OUTPUT"
-printf 'Created native Qt manager: %s (%s bytes)\n' "$OUTPUT" "$(stat -c '%s' "$OUTPUT")"
+install -m 0755 "$BUILD/dist/Wine4OfficeManager" "$OUTPUT"
+printf 'Created standalone Wine4OfficeManager: %s (%s bytes)\n' "$OUTPUT" "$(stat -c '%s' "$OUTPUT")"

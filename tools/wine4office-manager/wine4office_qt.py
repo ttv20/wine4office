@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native Qt Widgets interface for Wine4Office Manager."""
+"""Native Qt Widgets interface for Wine4OfficeManager."""
 
 from __future__ import annotations
 
@@ -52,10 +52,16 @@ class ManagerWindow(QMainWindow):
         self.initialized = False
         self.last_log = ""
         self.last_task_state = ""
+        self.pending_environment_transition = False
+        self._close_when_idle = False
+        self._automatic_close = False
+        self.handled_offer_id = ""
+        self.manual_update_check = False
+        self.reported_update_error = ""
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
 
-        self.setWindowTitle("Wine4Office Manager")
+        self.setWindowTitle("Wine4OfficeManager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.svg")))
         self.setMinimumSize(820, 620)
         self.resize(960, 700)
@@ -65,6 +71,7 @@ class ManagerWindow(QMainWindow):
         self.timer.timeout.connect(self.refresh_state)
         self.timer.start(1200)
         self.refresh_state()
+        QTimer.singleShot(0, self.start_background_update_check)
 
     def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(icon)
@@ -73,7 +80,7 @@ class ManagerWindow(QMainWindow):
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
-        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.svg")), "Wine4Office Manager")
+        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.svg")), "Wine4OfficeManager")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -316,22 +323,22 @@ class ManagerWindow(QMainWindow):
     def _maintenance_page(self) -> QWidget:
         page, layout = self._new_page(
             "Maintenance",
-            "Update Wine4Office from a verified release manifest or remove the local installation.",
+            "Update Wine4OfficeManager and its Wine runner from verified release metadata.",
         )
-        update = QGroupBox("Update")
+        update = QGroupBox("Updates")
         update_layout = QVBoxLayout(update)
         update_form = self._form()
         self.update_edit = QLineEdit()
-        self.update_edit.setPlaceholderText("No update manifest configured")
-        self.update_edit.setAccessibleName("Update manifest address")
-        self.version_label = QLabel("development")
-        update_form.addRow("Installed version:", self.version_label)
-        update_form.addRow("Manifest URL:", self.update_edit)
+        self.update_edit.setPlaceholderText("HTTPS release metadata URL")
+        self.update_edit.setAccessibleName("Release metadata address")
+        self.version_label = QLabel("Manager: development; Wine: development")
+        update_form.addRow("Installed versions:", self.version_label)
+        update_form.addRow("Metadata URL:", self.update_edit)
         update_layout.addLayout(update_form)
         update_buttons = QHBoxLayout()
         update_buttons.addStretch()
         self.update_button = self._action_button(
-            "Check and install update…", self.start_update, QStyle.StandardPixmap.SP_BrowserReload
+            "Check for updates…", self.start_update, QStyle.StandardPixmap.SP_BrowserReload
         )
         update_buttons.addWidget(self.update_button)
         update_layout.addLayout(update_buttons)
@@ -381,15 +388,116 @@ class ManagerWindow(QMainWindow):
             "update_url": self.update_edit.text(),
         }
 
+    def _set_config_fields(self, config: dict) -> None:
+        self.prefix_edit.setText(config["prefix"])
+        self.wine_edit.setText(config["wine"])
+        self.update_edit.setText(config["update_url"])
+        self.desktop_copy.setChecked(config["desktop_copy"])
+
+    def _restore_config_fields(self) -> None:
+        with self.state.lock:
+            config = dict(self.state.config)
+        self._set_config_fields(config)
+
+    def _prompt_old_environment_disposition(self, old_prefix: str) -> bool | None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Old Wine environment")
+        dialog.setText(
+            f"The currently configured Wine environment is:\n{old_prefix}\n\n"
+            "Preserve it, or delete it permanently after the replacement is ready?"
+        )
+        preserve_button = dialog.addButton(
+            "Preserve", QMessageBox.ButtonRole.AcceptRole
+        )
+        delete_button = dialog.addButton(
+            "Delete permanently", QMessageBox.ButtonRole.DestructiveRole
+        )
+        dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(preserve_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is delete_button:
+            return True
+        if clicked is preserve_button:
+            return False
+        return None
+
+
     def save_config(self, show: bool = False) -> dict | None:
+        values = self.config_values()
+        old_prefix = self.state.configured_prefix()
+        if backend.paths_equivalent(old_prefix, values["prefix"]):
+            try:
+                config = self.state.update_config(values)
+                if show:
+                    self.notify("Settings saved.")
+                return config
+            except Exception as error:
+                self._restore_config_fields()
+                self.show_error(error)
+                return None
+
+        if not self.ensure_idle():
+            self._restore_config_fields()
+            return None
+
         try:
-            config = self.state.update_config(self.config_values())
-            if show:
-                self.notify("Settings saved.")
-            return config
+            target_kind = backend.classify_prefix(values["prefix"])
         except Exception as error:
+            self._restore_config_fields()
             self.show_error(error)
             return None
+        if target_kind == "unsafe":
+            target = backend.validate_prefix(values["prefix"])
+            self._restore_config_fields()
+            self.show_error(
+                f"Refusing to initialize or use a nonempty directory that is not a valid "
+                f"Wine prefix:\n{target}"
+            )
+            return None
+
+        initialize = False
+        if target_kind in ("missing", "empty"):
+            target = backend.validate_prefix(values["prefix"])
+            result = QMessageBox.question(
+                self,
+                "Initialize Wine environment",
+                f"The selected Wine environment is {target_kind}:\n{target}\n\n"
+                "Initialize it before switching?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                self._restore_config_fields()
+                return None
+            initialize = True
+
+        delete_old = False
+        try:
+            old_is_valid = backend.classify_prefix(old_prefix) == "valid"
+        except (OSError, ValueError):
+            old_is_valid = False
+        if old_is_valid:
+            delete_old = self._prompt_old_environment_disposition(old_prefix)
+            if delete_old is None:
+                self._restore_config_fields()
+                return None
+
+        try:
+            if delete_old:
+                backend.validate_environment_deletion(old_prefix, values["prefix"])
+            self.pending_environment_transition = True
+            self.state.start_environment_transition(values, initialize, delete_old)
+            self.pages.setCurrentIndex(3)
+            self.navigation.setCurrentRow(3)
+            self.notify("Wine environment transition started.")
+            self.refresh_state()
+        except Exception as error:
+            self.pending_environment_transition = False
+            self._restore_config_fields()
+            self.show_error(error)
+        return None
 
     def selected_apps(self) -> list[str]:
         selected_items = set(self.app_tree.selectedItems())
@@ -555,36 +663,66 @@ class ManagerWindow(QMainWindow):
         if filename:
             self.wine_edit.setText(filename)
 
+    def start_background_update_check(self) -> None:
+        self.state.start_update_check()
+
     def start_update(self) -> None:
         config = self.save_config()
         if not config:
             return
         if not config["update_url"]:
-            self.show_error("No update address is configured yet.")
+            self.show_error("Configure an HTTPS release metadata address first.")
             return
-        result = QMessageBox.question(
-            self, "Update Wine4Office", "Download, verify and install the available Wine4Office update?",
-            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if result != QMessageBox.StandardButton.Yes:
-            return
-
-        def update() -> str:
-            try:
-                backend.stop_wine(config["prefix"], config["wine"])
-                self.state.output("Stopped the selected Wine environment before updating.")
-            except (FileNotFoundError, OSError):
-                pass
-            return backend.update_wine4office(config["update_url"], self.state.output,
-                                          self.state.cancel_event, self.state.set_process)
-
+        self.handled_offer_id = ""
+        self.manual_update_check = True
         try:
-            self.state.start_task("update", update)
-            self.notify("Update started.")
-            self.refresh_state()
+            started = self.state.start_update_check()
+            self.notify("Checking for updates…" if started else "An update check is already running.")
         except Exception as error:
             self.show_error(error)
+
+    def prompt_update_offer(self, offer: dict) -> None:
+        if self._close_when_idle or self._automatic_close:
+            return
+        selected: list[str] = []
+        skipped: list[str] = []
+        labels = {
+            "manager": "Wine4OfficeManager",
+            "wine": "Wine runner",
+        }
+        for name in ("manager", "wine"):
+            component = offer["updates"].get(name)
+            if not component:
+                continue
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setWindowTitle(f"{labels[name]} update available")
+            dialog.setText(f"{labels[name]} {component['version']} is available.")
+            dialog.setInformativeText(
+                "The artifact will download only after you approve this component."
+            )
+            install_button = dialog.addButton(
+                "Download and install", QMessageBox.ButtonRole.AcceptRole
+            )
+            later_button = dialog.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+            skip_button = dialog.addButton(
+                f"Skip {component['version']}", QMessageBox.ButtonRole.DestructiveRole
+            )
+            dialog.setDefaultButton(later_button)
+            dialog.exec()
+            if dialog.clickedButton() is install_button:
+                selected.append(name)
+            elif dialog.clickedButton() is skip_button:
+                skipped.append(name)
+        if skipped:
+            self.state.skip_offered_updates(skipped)
+        if selected:
+            try:
+                self.state.start_offered_update(selected)
+                self.notify("Downloading the approved updates…")
+                self.refresh_state()
+            except Exception as error:
+                self.show_error(error)
 
     def remove_wine4office(self) -> None:
         config = self.save_config()
@@ -618,7 +756,7 @@ class ManagerWindow(QMainWindow):
         self.statusBar().showMessage(message, 5000)
 
     def show_error(self, error) -> None:
-        QMessageBox.critical(self, "Wine4Office Manager", str(error))
+        QMessageBox.critical(self, "Wine4OfficeManager", str(error))
 
     def refresh_state(self) -> None:
         try:
@@ -631,11 +769,7 @@ class ManagerWindow(QMainWindow):
             return
 
         if not self.initialized:
-            config = snapshot["config"]
-            self.prefix_edit.setText(config["prefix"])
-            self.wine_edit.setText(config["wine"])
-            self.update_edit.setText(config["update_url"])
-            self.desktop_copy.setChecked(config["desktop_copy"])
+            self._set_config_fields(snapshot["config"])
             self.initialized = True
 
         status = snapshot["status"]
@@ -662,31 +796,74 @@ class ManagerWindow(QMainWindow):
                 else QStyle.StandardPixmap.SP_MessageBoxInformation
             ))
 
-        self.version_label.setText(snapshot["version"])
+        self.version_label.setText(
+            f"Manager: {snapshot['version']}; Wine: {snapshot['wine_version']}"
+        )
+        updater = snapshot["updater"]
+        if (updater["checked"] and not updater["checking"]
+                and not self.update_edit.hasFocus()):
+            self.update_edit.setText(snapshot["config"]["update_url"])
+        if updater["checked"] and not updater["checking"] and self.manual_update_check:
+            if updater["error"]:
+                self.notify(f"Update check unavailable: {updater['error']}")
+            elif not updater["offer"]:
+                self.notify("Wine4OfficeManager and Wine are up to date.")
+            self.manual_update_check = False
+        offer = updater.get("offer")
+        if (offer and offer["id"] != self.handled_offer_id
+                and not snapshot["task"]["running"]
+                and not self._close_when_idle and not self._automatic_close):
+            self.handled_offer_id = offer["id"]
+            QTimer.singleShot(0, lambda current=offer: self.prompt_update_offer(current))
         task = snapshot["task"]
         self.task_label.setText(f"{task['kind']}: running" if task["running"] else task["status"].capitalize())
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])
         self.cancel_button.setEnabled(task["running"])
+        if (self.pending_environment_transition
+                and task["kind"] == "environment-switch" and not task["running"]):
+            self._set_config_fields(snapshot["config"])
+            self.pending_environment_transition = False
         if task["log"] != self.last_log:
             self.log.setPlainText(task["log"] or "No operation running.")
             self.log.moveCursor(QTextCursor.MoveOperation.End)
             self.last_log = task["log"]
         task_state = f"{task['running']}:{task['status']}"
         if self.last_task_state.endswith(":running") and not task["running"]:
-            self.notify("Operation completed." if task["status"] == "completed" else "Operation failed; see the log.")
+            if task["status"] == "completed":
+                self.notify("Operation completed.")
+            elif task["status"] == "cancelled":
+                self.notify("Operation cancelled; settings restored.")
+            else:
+                self.notify("Operation failed; settings restored. See the log.")
         self.last_task_state = task_state
+        if self._close_when_idle and not task["running"] and not self._automatic_close:
+            self._close_when_idle = False
+            self._automatic_close = True
+            self.timer.stop()
+            QTimer.singleShot(0, self.close)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        with self.state.lock:
+            running = bool(self.state.task["running"])
+        if running:
+            self._close_when_idle = True
+            self._automatic_close = False
+            self.state.cancel()
+            self.timer.start(100)
+            self.notify("Cancellation requested; closing after the operation rolls back.")
+            event.ignore()
+            return
         self.timer.stop()
-        self.state.cancel()
+        self._close_when_idle = False
+        self._automatic_close = False
         event.accept()
 
 
 def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 smoke_test: bool = False, screenshot: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName("Wine4Office Manager")
+    app.setApplicationName("Wine4OfficeManager")
     app.setOrganizationName("Wine4Office")
     app.setDesktopFileName("wine4office-manager")
     window = ManagerWindow(state, launcher, icons, font_helper)
