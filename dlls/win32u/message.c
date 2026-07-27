@@ -2766,21 +2766,14 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                 RECT clip;
 
                 screen_to_client( msg->hwnd, &pt );
-                /* Office uses a monitor-wide LTR capture child inside a
-                 * constrained RTL gallery.  Keep compatibility adjustments
-                 * limited to the proven Insert Table geometry. */
+                /* Office positions LTR NetUI capture children inside RTL
+                 * gallery parents seven pixels to the right of their hit-test
+                 * interval. Keep screen cursor placement intact while
+                 * aligning the delivered client coordinate. */
                 if (info.hwndCapture &&
                     get_office_net_ui_ltr_capture_clip( msg->hwnd, &clip ) &&
                     pt.x >= clip.left && pt.x < clip.right)
-                {
-                    /* NetUI paints the expanded Hebrew Insert Table grid seven
-                     * pixels to the right of the capture child's hit-test
-                     * interval.  Keep screen cursor placement intact while
-                     * aligning the delivered client coordinate. */
-                    if (clip.right - clip.left >= 300 && clip.bottom - clip.top >= 330 &&
-                        clip.bottom - clip.top <= 420)
-                        pt.x -= 7;
-                }
+                    pt.x -= 7;
             }
         }
     }

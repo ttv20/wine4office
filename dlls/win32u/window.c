@@ -2078,8 +2078,9 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
         return;
 
     monitor = monitor_info_from_window( winpos->hwnd, MONITOR_DEFAULTTONEAREST );
-    /* The Hebrew Insert Table grid needs more width than the narrow space to
-     * the right of the ribbon anchor. Preserve a usable grid and grow it left. */
+    /* Tall Hebrew NetUI galleries and lists need more width than the narrow
+     * space to the right of the ribbon anchor. Preserve a usable width and
+     * grow them to the left. */
     left = (winpos->flags & SWP_NOMOVE) ? rect.left : winpos->x;
     available = monitor.rcWork.right - left;
     if (winpos->cy >= 330 && winpos->cy <= 420 && available > 0 && available < 320)
