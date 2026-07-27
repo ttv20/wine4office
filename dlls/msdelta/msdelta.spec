@@ -1,11 +1,11 @@
 @ stub ApplyDeltaA
-@ stub ApplyDeltaB
+@ stdcall ApplyDeltaB(int64 ptr long long ptr long long ptr)
 @ stub ApplyDeltaProvidedB
 @ stub ApplyDeltaW
 @ stub CreateDeltaA
 @ stub CreateDeltaB
 @ stub CreateDeltaW
-@ stub DeltaFree
+@ stdcall DeltaFree(ptr)
 @ stub DeltaNormalizeProvidedB
 @ stub GetDeltaInfoA
 @ stub GetDeltaInfoB
