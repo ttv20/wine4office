@@ -7,25 +7,33 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QCloseEvent, QIcon, QPixmap, QTextCursor
+from PySide6.QtGui import QCloseEvent, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QCommandLinkButton,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
-    QStatusBar,
+    QSplitter,
+    QStackedWidget,
+    QStyle,
+    QToolBar,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -43,116 +51,83 @@ class ManagerWindow(QMainWindow):
         self.initialized = False
         self.last_log = ""
         self.last_task_state = ""
-        self.task_sensitive_buttons: list[QPushButton] = []
+        self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
 
         self.setWindowTitle("Wine 365 Manager")
         self.setWindowIcon(QIcon(str(icons / "wine365-manager.svg")))
-        self.setMinimumSize(780, 640)
-        self.resize(980, 820)
-        self.setObjectName("managerWindow")
+        self.setMinimumSize(820, 620)
+        self.resize(960, 700)
         self._build_ui()
-        self._apply_style()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_state)
         self.timer.start(1200)
         self.refresh_state()
 
-    def _apply_style(self) -> None:
-        self.setStyleSheet("""
-            QMainWindow#managerWindow { background: #f4f6fa; }
-            QFrame#hero { background: #ffffff; border: 1px solid #dfe4ec; border-radius: 14px; }
-            QLabel#title { color: #172033; font-size: 22px; font-weight: 700; }
-            QLabel#subtitle, QLabel#hint, QLabel#appStatus { color: #667085; }
-            QLabel#healthReady { color: #087a3e; background: #e9f8ef; border-radius: 12px;
-                                 padding: 6px 11px; font-weight: 600; }
-            QLabel#healthMissing { color: #9a3412; background: #fff2e8; border-radius: 12px;
-                                   padding: 6px 11px; font-weight: 600; }
-            QGroupBox { background: #ffffff; border: 1px solid #dfe4ec; border-radius: 12px;
-                        margin-top: 13px; padding: 14px 12px 12px 12px; font-weight: 650; }
-            QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; color: #253047; }
-            QLineEdit, QPlainTextEdit { background: #ffffff; border: 1px solid #cfd6e1;
-                                      border-radius: 7px; padding: 7px; selection-background-color: #2563eb; }
-            QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #2563eb; }
-            QPushButton { min-height: 30px; padding: 2px 12px; border: 1px solid #cbd3df;
-                          border-radius: 7px; background: #ffffff; color: #263247; }
-            QPushButton:hover { background: #f1f5ff; border-color: #7da2ef; }
-            QPushButton:pressed { background: #e5edff; }
-            QPushButton:disabled { color: #98a2b3; background: #f4f5f7; }
-            QPushButton#primaryButton { color: #ffffff; background: #2563eb; border-color: #2563eb;
-                                        font-weight: 650; }
-            QPushButton#primaryButton:hover { background: #1d4ed8; }
-            QPushButton#dangerButton { color: #b42318; }
-            QPlainTextEdit#operationLog { color: #d7deea; background: #111827; border: 0;
-                                          font-family: monospace; }
-            QScrollArea { border: 0; background: transparent; }
-            QStatusBar { background: #ffffff; border-top: 1px solid #dfe4ec; }
-        """)
+    def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
+        return self.style().standardIcon(icon)
 
     def _build_ui(self) -> None:
-        root = QWidget(self)
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(18, 18, 18, 12)
-        root_layout.setSpacing(14)
-
-        hero = QFrame()
-        hero.setObjectName("hero")
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(18, 14, 18, 14)
-        logo = QLabel()
-        logo.setFixedSize(52, 52)
-        pixmap = QPixmap(str(self.icons / "wine365-manager.svg"))
-        if not pixmap.isNull():
-            logo.setPixmap(pixmap.scaled(52, 52, Qt.AspectRatioMode.KeepAspectRatio,
-                                         Qt.TransformationMode.SmoothTransformation))
-        titles = QVBoxLayout()
-        title = QLabel("Wine 365 Manager")
-        title.setObjectName("title")
-        subtitle = QLabel("Office environments, applications and Wine tools")
-        subtitle.setObjectName("subtitle")
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(28, 28))
+        toolbar.addAction(QIcon(str(self.icons / "wine365-manager.svg")), "Wine 365 Manager")
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        self.health_icon = QLabel()
+        self.health_icon.setFixedWidth(26)
         self.health = QLabel("Checking…")
-        self.health.setObjectName("healthMissing")
-        self.health.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_layout.addWidget(logo)
-        hero_layout.addSpacing(7)
-        hero_layout.addLayout(titles)
-        hero_layout.addStretch()
-        hero_layout.addWidget(self.health)
-        root_layout.addWidget(hero)
+        toolbar.addWidget(self.health_icon)
+        toolbar.addWidget(self.health)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(toolbar)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(1, 1, 1, 8)
-        content_layout.setSpacing(13)
-        content_layout.addWidget(self._environment_group())
-        content_layout.addWidget(self._installer_group())
-        content_layout.addWidget(self._office_group())
-        content_layout.addWidget(self._tools_group())
-        content_layout.addWidget(self._maintenance_group())
-        content_layout.addStretch()
-        scroll.setWidget(content)
-        root_layout.addWidget(scroll, 1)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        self.navigation = QListWidget()
+        self.navigation.setIconSize(QSize(24, 24))
+        self.navigation.setSpacing(3)
+        self.navigation.setMinimumWidth(180)
+        self.navigation.setMaximumWidth(230)
+        self.navigation.setAccessibleName("Manager sections")
+        self.pages = QStackedWidget()
 
-        self.setCentralWidget(root)
-        self.setStatusBar(QStatusBar())
+        sections = [
+            ("Environment", QStyle.StandardPixmap.SP_DriveHDIcon, self._environment_page()),
+            ("Applications", QStyle.StandardPixmap.SP_FileDialogListView, self._applications_page()),
+            ("Wine tools", QStyle.StandardPixmap.SP_ComputerIcon, self._tools_page()),
+            ("Maintenance", QStyle.StandardPixmap.SP_BrowserReload, self._maintenance_page()),
+        ]
+        for title, icon, page in sections:
+            self.navigation.addItem(QListWidgetItem(self._standard_icon(icon), title))
+            self.pages.addWidget(page)
+        self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.navigation.setCurrentRow(0)
+
+        splitter.addWidget(self.navigation)
+        splitter.addWidget(self.pages)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([190, 760])
+        self.setCentralWidget(splitter)
         self.statusBar().showMessage("Ready")
 
-    def _path_row(self, edit: QLineEdit, browse_slot, directory: bool = False) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(7)
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(browse_slot)
-        browse.setProperty("directoryPicker", directory)
-        layout.addWidget(edit, 1)
-        layout.addWidget(browse)
-        return row
+    def _new_page(self, title: str, description: str) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(14)
+        heading = QLabel(title)
+        heading_font = QFont(heading.font())
+        heading_font.setPointSize(heading_font.pointSize() + 5)
+        heading_font.setBold(True)
+        heading.setFont(heading_font)
+        layout.addWidget(heading)
+        summary = QLabel(description)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        return page, layout
 
     def _form(self) -> QFormLayout:
         form = QFormLayout()
@@ -161,164 +136,230 @@ class ManagerWindow(QMainWindow):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         return form
 
-    def _button(self, text: str, slot, role: str = "", object_name: str = "",
-                task_sensitive: bool = True) -> QPushButton:
+    def _path_row(self, edit: QLineEdit, browse_slot, directory: bool = False) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        browse = QToolButton()
+        browse.setText("Browse…")
+        browse.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        browse.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        browse.setToolTip("Choose a directory" if directory else "Choose a file")
+        browse.clicked.connect(browse_slot)
+        layout.addWidget(edit, 1)
+        layout.addWidget(browse)
+        return row
+
+    def _action_button(self, text: str, slot, icon: QStyle.StandardPixmap | None = None,
+                       task_sensitive: bool = True) -> QPushButton:
         button = QPushButton(text)
-        if role == "primary":
-            button.setObjectName("primaryButton")
-        elif role == "danger":
-            button.setObjectName("dangerButton")
-        if object_name:
-            button.setAccessibleName(object_name)
+        if icon is not None:
+            button.setIcon(self._standard_icon(icon))
         button.clicked.connect(slot)
         if task_sensitive:
             self.task_sensitive_buttons.append(button)
         return button
 
-    def _environment_group(self) -> QGroupBox:
-        group = QGroupBox("Wine environment")
-        layout = QVBoxLayout(group)
+    def _environment_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Wine environment",
+            "Choose the Wine 365 runner and the isolated environment used for Microsoft Office.",
+        )
+        environment = QGroupBox("Environment paths")
+        environment_layout = QVBoxLayout(environment)
         form = self._form()
         self.prefix_edit = QLineEdit()
         self.prefix_edit.setPlaceholderText(str(Path.home() / ".wine365"))
         self.prefix_edit.setAccessibleName("Wine environment path")
-        form.addRow("Environment path", self._path_row(self.prefix_edit, self.browse_prefix, True))
+        form.addRow("Environment:", self._path_row(self.prefix_edit, self.browse_prefix, True))
         self.wine_edit = QLineEdit()
         self.wine_edit.setAccessibleName("Wine executable path")
-        form.addRow("Wine 365 executable", self._path_row(self.wine_edit, self.browse_wine))
-        layout.addLayout(form)
-        buttons = QHBoxLayout()
-        self.create_button = self._button("Create environment", lambda: self.environment_action(False),
-                                          "primary", "Create environment")
-        self.recreate_button = self._button("Recreate environment", lambda: self.environment_action(True),
-                                            "danger", "Recreate environment")
-        buttons.addWidget(self.create_button)
-        buttons.addWidget(self.recreate_button)
-        buttons.addWidget(self._button("Stop Wine processes", lambda: self.launch_tool("stop")))
-        buttons.addWidget(self._button("Save paths", lambda: self.save_config(True)))
-        buttons.addStretch()
-        layout.addLayout(buttons)
-        return group
+        form.addRow("Wine executable:", self._path_row(self.wine_edit, self.browse_wine))
+        environment_layout.addLayout(form)
+        environment_buttons = QHBoxLayout()
+        self.create_button = self._action_button(
+            "Create", lambda: self.environment_action(False), QStyle.StandardPixmap.SP_DialogApplyButton
+        )
+        self.recreate_button = self._action_button(
+            "Recreate…", lambda: self.environment_action(True), QStyle.StandardPixmap.SP_BrowserReload
+        )
+        environment_buttons.addWidget(self.create_button)
+        environment_buttons.addWidget(self.recreate_button)
+        environment_buttons.addWidget(self._action_button(
+            "Stop Wine", lambda: self.launch_tool("stop"), QStyle.StandardPixmap.SP_MediaStop
+        ))
+        environment_buttons.addStretch()
+        environment_buttons.addWidget(self._action_button(
+            "Save paths", lambda: self.save_config(True), QStyle.StandardPixmap.SP_DialogSaveButton
+        ))
+        environment_layout.addLayout(environment_buttons)
+        layout.addWidget(environment)
 
-    def _installer_group(self) -> QGroupBox:
-        group = QGroupBox("Run an Office installer or Windows EXE")
-        layout = QVBoxLayout(group)
-        form = self._form()
+        installer = QGroupBox("Run a Windows executable")
+        installer_layout = QVBoxLayout(installer)
+        installer_form = self._form()
         self.exe_edit = QLineEdit()
         self.exe_edit.setPlaceholderText(str(Path.home() / "Downloads/OfficeSetup.exe"))
         self.exe_edit.setAccessibleName("Windows executable path")
-        form.addRow("Local EXE path", self._path_row(self.exe_edit, self.browse_executable))
+        installer_form.addRow("Executable:", self._path_row(self.exe_edit, self.browse_executable))
         self.arguments_edit = QLineEdit()
         self.arguments_edit.setPlaceholderText('Example: /configure "/home/user/office.xml"')
         self.arguments_edit.setAccessibleName("Executable arguments")
-        form.addRow("Optional arguments", self.arguments_edit)
-        layout.addLayout(form)
-        hint = QLabel("The executable runs directly in the selected Wine environment; no browser upload or copy is used.")
-        hint.setObjectName("hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self._button("Choose EXE…", self.choose_and_run_executable))
-        buttons.addWidget(self._button("Run EXE", self.run_executable, "primary", "Run executable"))
-        buttons.addStretch()
-        layout.addLayout(buttons)
-        return group
+        installer_form.addRow("Arguments:", self.arguments_edit)
+        installer_layout.addLayout(installer_form)
+        installer_buttons = QHBoxLayout()
+        installer_buttons.addStretch()
+        installer_buttons.addWidget(self._action_button(
+            "Choose and run…", self.choose_and_run_executable, QStyle.StandardPixmap.SP_DialogOpenButton
+        ))
+        installer_buttons.addWidget(self._action_button(
+            "Run", self.run_executable, QStyle.StandardPixmap.SP_MediaPlay
+        ))
+        installer_layout.addLayout(installer_buttons)
+        layout.addWidget(installer)
+        layout.addStretch()
+        return page
 
-    def _office_group(self) -> QGroupBox:
-        group = QGroupBox("Office applications and shortcuts")
-        layout = QVBoxLayout(group)
-        apps = QGridLayout()
-        apps.setHorizontalSpacing(14)
-        self.app_checks: dict[str, QCheckBox] = {}
-        self.app_status: dict[str, QLabel] = {}
-        names = {"word": "Word", "excel": "Excel", "powerpoint": "PowerPoint", "outlook": "Outlook"}
-        for column, (app, name) in enumerate(names.items()):
-            cell = QFrame()
-            cell_layout = QHBoxLayout(cell)
-            cell_layout.setContentsMargins(6, 5, 6, 5)
-            check = QCheckBox(name)
-            check.setIcon(QIcon(str(self.icons / backend.APP_META[app]["icon"])))
-            check.setIconSize(QSize(25, 25))
-            check.setAccessibleName(f"Select {name}")
-            status = QLabel("Not detected")
-            status.setObjectName("appStatus")
-            cell_layout.addWidget(check)
-            cell_layout.addStretch()
-            cell_layout.addWidget(status)
-            apps.addWidget(cell, column // 2, column % 2)
-            self.app_checks[app] = check
-            self.app_status[app] = status
-        layout.addLayout(apps)
-        self.desktop_copy = QCheckBox("Also copy selected shortcuts to the visible Desktop")
+    def _applications_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Office applications",
+            "Create desktop integration for installed Office applications or launch one directly.",
+        )
+        self.app_tree = QTreeWidget()
+        self.app_tree.setHeaderLabels(["Application", "Installation status"])
+        self.app_tree.setRootIsDecorated(False)
+        self.app_tree.setAlternatingRowColors(True)
+        self.app_tree.setUniformRowHeights(True)
+        self.app_tree.setAccessibleName("Office applications")
+        header = self.app_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.app_items: dict[str, QTreeWidgetItem] = {}
+        names = {"word": "Microsoft Word", "excel": "Microsoft Excel",
+                 "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook"}
+        for app, name in names.items():
+            item = QTreeWidgetItem([name, "Checking…"])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            item.setIcon(0, QIcon(str(self.icons / backend.APP_META[app]["icon"])))
+            self.app_tree.addTopLevelItem(item)
+            self.app_items[app] = item
+        self.app_tree.itemDoubleClicked.connect(self.launch_tree_item)
+        layout.addWidget(self.app_tree, 1)
+
+        self.desktop_copy = QCheckBox("Also place shortcuts on the Desktop")
         layout.addWidget(self.desktop_copy)
         buttons = QHBoxLayout()
-        buttons.addWidget(self._button("Create/update selected", lambda: self.shortcut_action(True), "primary"))
-        buttons.addWidget(self._button("Remove selected", lambda: self.shortcut_action(False), "danger"))
-        buttons.addWidget(self._button("Launch selected", self.launch_selected))
+        buttons.addWidget(self._action_button(
+            "Create or update shortcuts", lambda: self.shortcut_action(True),
+            QStyle.StandardPixmap.SP_DialogApplyButton
+        ))
+        buttons.addWidget(self._action_button(
+            "Remove shortcuts", lambda: self.shortcut_action(False), QStyle.StandardPixmap.SP_TrashIcon
+        ))
         buttons.addStretch()
+        buttons.addWidget(self._action_button(
+            "Launch selected", self.launch_selected, QStyle.StandardPixmap.SP_MediaPlay
+        ))
         layout.addLayout(buttons)
-        return group
+        return page
 
-    def _tools_group(self) -> QGroupBox:
-        group = QGroupBox("Wine tools")
-        grid = QGridLayout(group)
-        tools = [
-            ("Configuration", "winecfg"), ("Registry Editor", "regedit"),
-            ("Control Panel", "control"), ("File Explorer", "explorer"),
-            ("Command Prompt", "cmd"), ("Task Manager", "taskmgr"),
-            ("Uninstaller", "uninstaller"), ("Stop Wine", "stop"),
-        ]
-        for index, (label, tool) in enumerate(tools):
-            role = "danger" if tool == "stop" else ""
-            grid.addWidget(self._button(label, lambda checked=False, value=tool: self.launch_tool(value), role),
-                           index // 4, index % 4)
-        return group
-
-    def _maintenance_group(self) -> QGroupBox:
-        group = QGroupBox("Update or remove Wine 365")
-        layout = QVBoxLayout(group)
-        version_row = QHBoxLayout()
-        version_row.addWidget(QLabel("Update manifest address"))
-        version_row.addStretch()
-        self.version_label = QLabel("Version: development")
-        self.version_label.setObjectName("hint")
-        version_row.addWidget(self.version_label)
-        layout.addLayout(version_row)
-        self.update_edit = QLineEdit()
-        self.update_edit.setPlaceholderText("Not configured yet")
-        self.update_edit.setAccessibleName("Update manifest address")
-        layout.addWidget(self.update_edit)
-        hint = QLabel("Updates use an HTTPS manifest and verify the installer SHA-256 before execution.")
-        hint.setObjectName("hint")
-        layout.addWidget(hint)
-        self.remove_prefix = QCheckBox(
-            "When removing Wine 365, also permanently delete the selected environment and Office installation"
+    def _tools_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Wine tools",
+            "Open diagnostic and configuration tools in the selected Wine environment.",
         )
-        layout.addWidget(self.remove_prefix)
-        buttons = QHBoxLayout()
-        self.update_button = self._button("Update Wine 365", self.start_update)
-        self.remove_button = self._button("Remove Wine 365", self.remove_wine365, "danger")
-        self.cancel_button = self._button("Cancel operation", self.cancel_task, task_sensitive=False)
-        self.cancel_button.setEnabled(False)
-        buttons.addWidget(self.update_button)
-        buttons.addWidget(self.remove_button)
-        buttons.addWidget(self.cancel_button)
-        buttons.addStretch()
-        layout.addLayout(buttons)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+        tools = [
+            ("Wine Configuration", "Change display, audio and Windows compatibility settings.", "winecfg",
+             QStyle.StandardPixmap.SP_ComputerIcon),
+            ("Registry Editor", "Inspect and edit the selected Wine registry.", "regedit",
+             QStyle.StandardPixmap.SP_FileDialogDetailedView),
+            ("Control Panel", "Open installed applets and system settings.", "control",
+             QStyle.StandardPixmap.SP_FileDialogInfoView),
+            ("File Explorer", "Browse files using Wine's file manager.", "explorer",
+             QStyle.StandardPixmap.SP_DirOpenIcon),
+            ("Command Prompt", "Open a Windows command shell.", "cmd",
+             QStyle.StandardPixmap.SP_CommandLink),
+            ("Task Manager", "Inspect processes running in this environment.", "taskmgr",
+             QStyle.StandardPixmap.SP_DesktopIcon),
+            ("Uninstaller", "Add or remove Windows applications.", "uninstaller",
+             QStyle.StandardPixmap.SP_TrashIcon),
+            ("Stop Wine", "Stop every Wine process in the selected environment.", "stop",
+             QStyle.StandardPixmap.SP_MediaStop),
+        ]
+        for index, (title, description, tool, icon) in enumerate(tools):
+            button = QCommandLinkButton(title, description)
+            button.setIcon(self._standard_icon(icon))
+            button.clicked.connect(lambda checked=False, value=tool: self.launch_tool(value))
+            self.task_sensitive_buttons.append(button)
+            grid.addWidget(button, index // 2, index % 2)
+        layout.addLayout(grid)
+        layout.addStretch()
+        return page
+
+    def _maintenance_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Maintenance",
+            "Update Wine 365 from a verified release manifest or remove the local installation.",
+        )
+        update = QGroupBox("Update")
+        update_layout = QVBoxLayout(update)
+        update_form = self._form()
+        self.update_edit = QLineEdit()
+        self.update_edit.setPlaceholderText("No update manifest configured")
+        self.update_edit.setAccessibleName("Update manifest address")
+        self.version_label = QLabel("development")
+        update_form.addRow("Installed version:", self.version_label)
+        update_form.addRow("Manifest URL:", self.update_edit)
+        update_layout.addLayout(update_form)
+        update_buttons = QHBoxLayout()
+        update_buttons.addStretch()
+        self.update_button = self._action_button(
+            "Check and install update…", self.start_update, QStyle.StandardPixmap.SP_BrowserReload
+        )
+        update_buttons.addWidget(self.update_button)
+        update_layout.addLayout(update_buttons)
+        layout.addWidget(update)
+
+        removal = QGroupBox("Removal")
+        removal_layout = QVBoxLayout(removal)
+        self.remove_prefix = QCheckBox(
+            "Also permanently delete the selected Wine environment and its Office installation"
+        )
+        removal_layout.addWidget(self.remove_prefix)
+        remove_buttons = QHBoxLayout()
+        remove_buttons.addStretch()
+        self.remove_button = self._action_button(
+            "Remove Wine 365…", self.remove_wine365, QStyle.StandardPixmap.SP_TrashIcon
+        )
+        remove_buttons.addWidget(self.remove_button)
+        removal_layout.addLayout(remove_buttons)
+        layout.addWidget(removal)
+
         log_header = QHBoxLayout()
         log_header.addWidget(QLabel("Operation log"))
         log_header.addStretch()
         self.task_label = QLabel("Idle")
-        self.task_label.setObjectName("hint")
         log_header.addWidget(self.task_label)
         layout.addLayout(log_header)
         self.log = QPlainTextEdit("No operation running.")
-        self.log.setObjectName("operationLog")
         self.log.setReadOnly(True)
-        self.log.setMinimumHeight(170)
-        self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.log)
-        return group
+        self.log.setMinimumHeight(130)
+        layout.addWidget(self.log, 1)
+        log_buttons = QHBoxLayout()
+        log_buttons.addStretch()
+        self.cancel_button = self._action_button(
+            "Cancel operation", self.cancel_task, QStyle.StandardPixmap.SP_DialogCancelButton,
+            task_sensitive=False,
+        )
+        self.cancel_button.setEnabled(False)
+        log_buttons.addWidget(self.cancel_button)
+        layout.addLayout(log_buttons)
+        return page
 
     def config_values(self) -> dict:
         return {
@@ -339,7 +380,8 @@ class ManagerWindow(QMainWindow):
             return None
 
     def selected_apps(self) -> list[str]:
-        return [app for app, check in self.app_checks.items() if check.isChecked()]
+        return [app for app, item in self.app_items.items()
+                if item.checkState(0) == Qt.CheckState.Checked]
 
     def ensure_idle(self) -> bool:
         with self.state.lock:
@@ -378,6 +420,8 @@ class ManagerWindow(QMainWindow):
                 "environment",
                 lambda: backend.create_environment(config["prefix"], config["wine"], recreate, self.state.output),
             )
+            self.pages.setCurrentIndex(3)
+            self.navigation.setCurrentRow(3)
             self.notify("Environment operation started.")
             self.refresh_state()
         except Exception as error:
@@ -401,6 +445,12 @@ class ManagerWindow(QMainWindow):
             self.refresh_state()
         except Exception as error:
             self.show_error(error)
+
+    def launch_tree_item(self, item: QTreeWidgetItem, column: int) -> None:
+        for app_item in self.app_items.values():
+            app_item.setCheckState(0, Qt.CheckState.Unchecked)
+        item.setCheckState(0, Qt.CheckState.Checked)
+        self.launch_selected()
 
     def launch_selected(self) -> None:
         if not self.ensure_idle():
@@ -557,9 +607,8 @@ class ManagerWindow(QMainWindow):
             snapshot = self.state.snapshot()
         except Exception as error:
             self.health.setText("Status unavailable")
-            self.health.setObjectName("healthMissing")
-            self.health.style().unpolish(self.health)
-            self.health.style().polish(self.health)
+            self.health_icon.setPixmap(self._standard_icon(
+                QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(20, 20))
             self.statusBar().showMessage(str(error), 4000)
             return
 
@@ -574,23 +623,26 @@ class ManagerWindow(QMainWindow):
         status = snapshot["status"]
         healthy = status["prefix_exists"] and status["wine_exists"]
         if healthy:
-            text, object_name = "●  Environment ready", "healthReady"
+            health_text = "Environment ready"
+            health_icon = QStyle.StandardPixmap.SP_DialogApplyButton
         elif not status["wine_exists"]:
-            text, object_name = "●  Wine runner missing", "healthMissing"
+            health_text = "Wine runner missing"
+            health_icon = QStyle.StandardPixmap.SP_MessageBoxWarning
         else:
-            text, object_name = "●  Environment not created", "healthMissing"
-        if self.health.text() != text or self.health.objectName() != object_name:
-            self.health.setText(text)
-            self.health.setObjectName(object_name)
-            self.health.style().unpolish(self.health)
-            self.health.style().polish(self.health)
+            health_text = "Environment not created"
+            health_icon = QStyle.StandardPixmap.SP_MessageBoxWarning
+        self.health.setText(health_text)
+        self.health_icon.setPixmap(self._standard_icon(health_icon).pixmap(20, 20))
 
         for app, installed in status["apps"].items():
-            label = self.app_status[app]
-            label.setText("Installed" if installed else "Not detected")
-            label.setStyleSheet("color: #087a3e; font-weight: 600;" if installed else "")
+            item = self.app_items[app]
+            item.setText(1, "Installed" if installed else "Not detected")
+            item.setIcon(1, self._standard_icon(
+                QStyle.StandardPixmap.SP_DialogApplyButton if installed
+                else QStyle.StandardPixmap.SP_MessageBoxInformation
+            ))
 
-        self.version_label.setText(f"Version: {snapshot['version']}")
+        self.version_label.setText(snapshot["version"])
         task = snapshot["task"]
         self.task_label.setText(f"{task['kind']}: running" if task["running"] else task["status"].capitalize())
         for button in self.task_sensitive_buttons:

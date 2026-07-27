@@ -13,7 +13,8 @@ MANAGER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MANAGER_DIR))
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QListWidget, QStackedWidget, QTreeWidget
     import wine365_backend as backend
     import wine365_manager as manager
     from wine365_qt import ManagerWindow
@@ -72,8 +73,15 @@ class QtManagerTests(unittest.TestCase):
         self.environment.stop()
         self.temp.cleanup()
 
+    def test_ui_uses_system_theme_and_native_navigation_controls(self):
+        self.assertEqual(self.window.styleSheet(), "")
+        self.assertIsInstance(self.window.navigation, QListWidget)
+        self.assertIsInstance(self.window.pages, QStackedWidget)
+        self.assertIsInstance(self.window.app_tree, QTreeWidget)
+        self.assertEqual(self.window.navigation.count(), 4)
+
     def test_slow_application_launch_does_not_block_qt_and_gates_actions(self):
-        self.window.app_checks["word"].setChecked(True)
+        self.window.app_items["word"].setCheckState(0, Qt.CheckState.Checked)
 
         def slow_launch(*args, **kwargs):
             time.sleep(0.35)
