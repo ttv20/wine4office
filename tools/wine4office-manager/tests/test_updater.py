@@ -75,6 +75,17 @@ class UpdaterTests(unittest.TestCase):
             },
         }
 
+    def test_frozen_https_uses_bundled_certificate_store(self):
+        context = object()
+        certifi = types.SimpleNamespace(where=lambda: "/bundle/cacert.pem")
+        with mock.patch.dict(sys.modules, {"certifi": certifi}), \
+             mock.patch.object(backend.sys, "frozen", True, create=True), \
+             mock.patch.object(
+                 backend.ssl, "create_default_context", return_value=context
+             ) as create:
+            self.assertIs(backend._https_context(), context)
+        create.assert_called_once_with(cafile="/bundle/cacert.pem")
+
     def test_schema_v1_resolves_artifacts_and_canonical_metadata_url(self):
         parsed = backend.parse_release_metadata(
             self.metadata(), "https://current.example/downloads/release.json"

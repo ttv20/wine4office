@@ -9,8 +9,8 @@ VERSION=${2:-${VERSION:-development}}
 CHANNEL=${3:-${CHANNEL:-stable}}
 PYTHON=${PYTHON:-python3}
 
-"$PYTHON" -c 'import PyInstaller, PySide6, pefile, zstandard' >/dev/null 2>&1 || {
-    echo "PyInstaller, PySide6, pefile, and zstandard are required; install requirements-build.txt" >&2
+"$PYTHON" -c 'import certifi, PyInstaller, PySide6, pefile, zstandard' >/dev/null 2>&1 || {
+    echo "certifi, PyInstaller, PySide6, pefile, and zstandard are required; install requirements-build.txt" >&2
     exit 1
 }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {

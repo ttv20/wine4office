@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import struct
+import ssl
 import tarfile
 import tempfile
 import sys
@@ -1034,6 +1035,19 @@ def parse_release_metadata(payload: bytes | str | dict, source_url: str,
     }
 
 
+def _https_context() -> ssl.SSLContext:
+    """Use a bundled public CA store when running as a portable executable."""
+    if getattr(sys, "frozen", False):
+        try:
+            import certifi
+        except ImportError as error:
+            raise RuntimeError(
+                "The standalone manager is missing its certificate authority bundle."
+            ) from error
+        return ssl.create_default_context(cafile=certifi.where())
+    return ssl.create_default_context()
+
+
 def fetch_release_metadata(metadata_url: str, output: Output | None = None,
                            expected_channel: str | None = None) -> dict:
     metadata_url = _https_url(metadata_url, "Metadata address")
@@ -1042,7 +1056,9 @@ def fetch_release_metadata(metadata_url: str, output: Output | None = None,
     request = urllib.request.Request(
         metadata_url, headers={"User-Agent": "Wine4OfficeManager/1"}
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(
+            request, timeout=30, context=_https_context()
+    ) as response:
         final_url = response.geturl() if hasattr(response, "geturl") else metadata_url
         _https_url(final_url, "Final metadata address")
         payload = response.read(MAX_METADATA_SIZE + 1)
@@ -1176,7 +1192,9 @@ def _download_artifact(name: str, component: dict, cancel_event=None,
     if output:
         output(f"Downloading {name} {component['version']}")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as target:
+        with urllib.request.urlopen(
+                request, timeout=60, context=_https_context()
+        ) as response, destination.open("wb") as target:
             final_url = response.geturl() if hasattr(response, "geturl") else component["url"]
             _https_url(final_url, f"Final {name} artifact address")
             headers = getattr(response, "headers", None)
