@@ -133,24 +133,65 @@ touch "$WINEPREFIX/system.reg"
         with self.assertRaisesRegex(ValueError, "Only .exe"):
             backend.launch_executable(str(prefix), str(self.wine), str(document))
 
+    def test_command_prompt_opens_in_system_terminal(self):
+        prefix = self.home / ".wine365"
+        process = mock.Mock(pid=8765)
+
+        def which(name, path=None):
+            return "/usr/bin/konsole" if name == "konsole" else None
+
+        with mock.patch.object(backend.shutil, "which", side_effect=which), \
+             mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+            pid = backend.launch_tool(str(prefix), str(self.wine), "cmd")
+
+        self.assertEqual(pid, 8765)
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["/usr/bin/konsole", "--hold", "-e", str(self.wine), "cmd.exe"],
+        )
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], str(prefix))
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
+
+    def test_command_prompt_reports_missing_system_terminal(self):
+        with mock.patch.object(backend.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(FileNotFoundError, "No supported system terminal"):
+                backend.launch_tool(str(self.home / ".wine365"), str(self.wine), "cmd")
+
     def test_office_detection_and_shortcut_lifecycle(self):
         prefix = self.home / ".wine365"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         (office / "WINWORD.EXE").write_bytes(b"exe")
+        (office / "EXCEL.EXE").write_bytes(b"exe")
+        (office / "POWERPNT.EXE").write_bytes(b"exe")
+        status = backend.environment_status(str(prefix), str(self.wine))
+        self.assertTrue(status["apps"]["word"])
+        self.assertTrue(status["apps"]["excel"])
+        self.assertTrue(status["apps"]["powerpoint"])
         self.assertEqual(backend.find_office_app(str(prefix), "word"), office / "WINWORD.EXE")
         launcher = self.home / ".local/share/wine365/bin/wine365-launcher"
         launcher.parent.mkdir(parents=True)
         launcher.write_text("launcher")
-        icons = self.home / ".local/share/wine365/icons"
-        icons.mkdir(parents=True)
-        created = backend.create_app_shortcuts(["word"], str(prefix), str(self.wine), launcher, icons, True)
+
+        def fake_extract(executable, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"icon")
+            return destination
+
+        with mock.patch.object(backend, "extract_office_icon", side_effect=fake_extract) as extract:
+            created = backend.create_app_shortcuts(
+                ["word"], str(prefix), str(self.wine), launcher, True,
+            )
         self.assertEqual(len(created), 2)
+        extract.assert_called_once_with(
+            office / "WINWORD.EXE", backend.data_home() / "icons/wine365/word.ico",
+        )
         menu = backend.data_home() / "applications/wine365-word.desktop"
         text = menu.read_text()
         self.assertIn("X-Wine365-Managed=true", text)
         self.assertIn("%F", text)
         self.assertIn('"' + str(prefix) + '"', text)
+        self.assertIn(f"Icon={backend.data_home() / 'icons/wine365/word.ico'}", text)
         removed = backend.remove_app_shortcuts(["word"])
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
@@ -182,7 +223,7 @@ touch "$WINEPREFIX/system.reg"
         with self.assertRaisesRegex(FileNotFoundError, "application launcher is missing"):
             backend.create_app_shortcuts(
                 ["word"], str(self.home / ".wine365"), str(self.wine),
-                self.home / "missing-launcher", self.home / "icons", False,
+                self.home / "missing-launcher", False,
             )
 
     def test_shortcut_removal_does_not_delete_unowned_file(self):

@@ -80,6 +80,20 @@ class QtManagerTests(unittest.TestCase):
         self.assertIsInstance(self.window.app_tree, QTreeWidget)
         self.assertEqual(self.window.navigation.count(), 4)
 
+    def test_selected_rows_are_used_for_shortcut_actions(self):
+        self.window.app_items["excel"].setSelected(True)
+        self.window.app_items["powerpoint"].setSelected(True)
+        self.assertEqual(self.window.selected_apps(), ["excel", "powerpoint"])
+
+    def test_shortcut_creation_defaults_to_every_installed_application(self):
+        self.window.app_tree.clearSelection()
+        for item in self.window.app_items.values():
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.window.installed_apps = {"word", "excel", "powerpoint"}
+        with mock.patch.object(backend, "create_app_shortcuts", return_value=["one", "two", "three"]) as create:
+            self.window.shortcut_action(True)
+        self.assertEqual(create.call_args.args[0], ["word", "excel", "powerpoint"])
+
     def test_slow_application_launch_does_not_block_qt_and_gates_actions(self):
         self.window.app_items["word"].setCheckState(0, Qt.CheckState.Checked)
 

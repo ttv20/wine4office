@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QCloseEvent, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QCommandLinkButton,
@@ -52,6 +53,7 @@ class ManagerWindow(QMainWindow):
         self.last_log = ""
         self.last_task_state = ""
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
+        self.installed_apps: set[str] = set()
 
         self.setWindowTitle("Wine 365 Manager")
         self.setWindowIcon(QIcon(str(icons / "wine365-manager.svg")))
@@ -226,12 +228,16 @@ class ManagerWindow(QMainWindow):
             "Office applications",
             "Create desktop integration for installed Office applications or launch one directly.",
         )
+        self.apps_environment_label = QLabel()
+        self.apps_environment_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.apps_environment_label)
         self.app_tree = QTreeWidget()
         self.app_tree.setHeaderLabels(["Application", "Installation status"])
         self.app_tree.setRootIsDecorated(False)
         self.app_tree.setAlternatingRowColors(True)
         self.app_tree.setUniformRowHeights(True)
         self.app_tree.setAccessibleName("Office applications")
+        self.app_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         header = self.app_tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -247,6 +253,12 @@ class ManagerWindow(QMainWindow):
             self.app_items[app] = item
         self.app_tree.itemDoubleClicked.connect(self.launch_tree_item)
         layout.addWidget(self.app_tree, 1)
+        selection_hint = QLabel(
+            "Check or select one or more applications. With nothing selected, shortcut creation uses every "
+            "installed application in this environment."
+        )
+        selection_hint.setWordWrap(True)
+        layout.addWidget(selection_hint)
 
         self.desktop_copy = QCheckBox("Also place shortcuts on the Desktop")
         layout.addWidget(self.desktop_copy)
@@ -380,8 +392,9 @@ class ManagerWindow(QMainWindow):
             return None
 
     def selected_apps(self) -> list[str]:
+        selected_items = set(self.app_tree.selectedItems())
         return [app for app, item in self.app_items.items()
-                if item.checkState(0) == Qt.CheckState.Checked]
+                if item.checkState(0) == Qt.CheckState.Checked or item in selected_items]
 
     def ensure_idle(self) -> bool:
         with self.state.lock:
@@ -430,14 +443,19 @@ class ManagerWindow(QMainWindow):
     def shortcut_action(self, create: bool) -> None:
         if not self.ensure_idle():
             return
-        apps = self.require_selected_apps()
+        apps = self.selected_apps()
+        if create and not apps:
+            apps = [app for app in self.app_items if app in self.installed_apps]
+        if not apps:
+            self.show_error("Select at least one Office application.")
+            return
         config = self.save_config()
         if not apps or not config:
             return
         try:
             if create:
                 files = backend.create_app_shortcuts(apps, config["prefix"], config["wine"],
-                                                     self.launcher, self.icons, config["desktop_copy"])
+                                                     self.launcher, config["desktop_copy"])
                 self.notify(f"Created {len(files)} shortcut file(s).")
             else:
                 files = backend.remove_app_shortcuts(apps)
@@ -634,9 +652,11 @@ class ManagerWindow(QMainWindow):
         self.health.setText(health_text)
         self.health_icon.setPixmap(self._standard_icon(health_icon).pixmap(20, 20))
 
+        self.apps_environment_label.setText(f"Selected environment: {snapshot['config']['prefix']}")
+        self.installed_apps = {app for app, installed in status["apps"].items() if installed}
         for app, installed in status["apps"].items():
             item = self.app_items[app]
-            item.setText(1, "Installed" if installed else "Not detected")
+            item.setText(1, "Installed" if installed else "Not installed in selected environment")
             item.setIcon(1, self._standard_icon(
                 QStyle.StandardPixmap.SP_DialogApplyButton if installed
                 else QStyle.StandardPixmap.SP_MessageBoxInformation

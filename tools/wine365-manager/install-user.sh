@@ -32,9 +32,9 @@ export WINE365_MANAGER_ROOT="$ROOT"
 if [ -x "$ROOT/lib/wine365-manager-qt" ]; then
     exec "$ROOT/lib/wine365-manager-qt" "$@"
 fi
-if ! python3 -c 'import PySide6' >/dev/null 2>&1; then
-    echo "wine365-manager: PySide6 is required for the native Qt interface." >&2
-    echo "Install it with: python3 -m pip install --user PySide6" >&2
+if ! python3 -c 'import PySide6, pefile' >/dev/null 2>&1; then
+    echo "wine365-manager: PySide6 and pefile are required for the native Qt interface." >&2
+    echo "Install them with: python3 -m pip install --user PySide6 pefile" >&2
     exit 1
 fi
 exec python3 "$ROOT/lib/wine365_manager.py" "$@"

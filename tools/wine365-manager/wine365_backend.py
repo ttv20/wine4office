@@ -11,6 +11,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import struct
 import time
 import urllib.parse
 import urllib.request
@@ -442,6 +443,38 @@ def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
     return process.pid
 
 
+def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
+    candidates: list[list[str]] = []
+    configured = os.environ.get("TERMINAL", "").strip()
+    if configured:
+        candidates.append(shlex.split(configured))
+    candidates.extend([[name] for name in (
+        "konsole", "ptyxis", "kgx", "gnome-terminal", "xfce4-terminal",
+        "kitty", "alacritty", "foot", "x-terminal-emulator", "xterm",
+    )])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate[0] in seen:
+            continue
+        seen.add(candidate[0])
+        executable = shutil.which(candidate[0], path=env.get("PATH"))
+        if not executable:
+            continue
+        arguments = [executable, *candidate[1:]]
+        name = Path(executable).name.lower()
+        if name == "konsole":
+            return [*arguments, "--hold", "-e", *command]
+        if name in {"ptyxis", "kgx", "gnome-terminal"}:
+            return [*arguments, "--", *command]
+        if name == "xfce4-terminal":
+            return [*arguments, "--hold", "--command", shlex.join(command)]
+        return [*arguments, "-e", *command]
+    raise FileNotFoundError(
+        "No supported system terminal was found. Install Konsole, GNOME Terminal, or xterm."
+    )
+
+
 def launch_tool(prefix_value: str, wine_value: str, tool: str) -> int | None:
     if tool == "stop":
         stop_wine(prefix_value, wine_value)
@@ -450,14 +483,20 @@ def launch_tool(prefix_value: str, wine_value: str, tool: str) -> int | None:
         raise ValueError(f"Unknown Wine tool: {tool}")
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
+    env = wine_environment(prefix, wine)
+    env.setdefault("WINEDEBUG", "-all")
+    if tool == "cmd":
+        terminal = host_terminal_command([str(wine), "cmd.exe"], env)
+        process = subprocess.Popen(terminal, env=env, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        return process.pid
     binary_name, arguments = TOOL_META[tool]
     binary = wine if binary_name == "wine" else sibling_tool(wine, binary_name)
     if binary is None:
         arguments = [f"{binary_name}.exe", *arguments]
         binary = wine
-    process = subprocess.Popen([str(binary), *arguments], env=wine_environment(prefix, wine),
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               start_new_session=True)
+    process = subprocess.Popen([str(binary), *arguments], env=env, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
     return process.pid
 
 
@@ -482,6 +521,89 @@ def desktop_directory() -> Path:
             value = match.group(1).replace("$HOME", str(Path.home()))
             return normalize_path(value)
     return Path.home() / "Desktop"
+
+
+def _resource_data(pe, entry) -> bytes:
+    language = entry.directory.entries[0]
+    data = language.data.struct
+    return pe.get_data(data.OffsetToData, data.Size)
+
+
+def _build_ico(group_data: bytes, images: dict[int, bytes]) -> bytes:
+    if len(group_data) < 6:
+        raise ValueError("Icon group resource is truncated.")
+    reserved, icon_type, count = struct.unpack_from("<HHH", group_data)
+    if reserved != 0 or icon_type != 1 or count == 0:
+        raise ValueError("Executable has an invalid icon group resource.")
+    if len(group_data) < 6 + count * 14:
+        raise ValueError("Icon group entries are truncated.")
+
+    entries: list[bytes] = []
+    payloads: list[bytes] = []
+    offset = 6 + count * 16
+    for index in range(count):
+        width, height, colors, entry_reserved, planes, bit_count, _, resource_id = \
+            struct.unpack_from("<BBBBHHIH", group_data, 6 + index * 14)
+        image = images.get(resource_id)
+        if not image:
+            raise ValueError(f"Icon image resource {resource_id} is missing.")
+        entries.append(struct.pack(
+            "<BBBBHHII", width, height, colors, entry_reserved, planes, bit_count,
+            len(image), offset,
+        ))
+        payloads.append(image)
+        offset += len(image)
+    return struct.pack("<HHH", 0, 1, count) + b"".join(entries) + b"".join(payloads)
+
+
+def extract_office_icon(executable: Path, destination: Path) -> Path:
+    executable = normalize_path(executable)
+    destination = normalize_path(destination)
+    if destination.is_file() and destination.stat().st_size > 6 \
+            and destination.stat().st_mtime_ns >= executable.stat().st_mtime_ns:
+        return destination
+    try:
+        import pefile
+    except ImportError as error:
+        raise RuntimeError(
+            "Office icon extraction requires pefile. Install the Wine 365 GUI dependencies."
+        ) from error
+
+    pe = pefile.PE(str(executable), fast_load=True)
+    try:
+        pe.parse_data_directories(
+            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]]
+        )
+        resources = getattr(pe, "DIRECTORY_ENTRY_RESOURCE", None)
+        if resources is None:
+            raise ValueError("Executable has no resource directory.")
+        resource_types = {entry.id: entry for entry in resources.entries if entry.id is not None}
+        group_type = resource_types.get(14)
+        image_type = resource_types.get(3)
+        if group_type is None or image_type is None:
+            raise ValueError("Executable has no Windows icon resources.")
+        group_entry = group_type.directory.entries[0]
+        group_data = _resource_data(pe, group_entry)
+        images = {
+            entry.id: _resource_data(pe, entry)
+            for entry in image_type.directory.entries
+            if entry.id is not None
+        }
+        icon_data = _build_ico(group_data, images)
+    except (AttributeError, IndexError, KeyError, OSError, struct.error, ValueError) as error:
+        raise RuntimeError(f"Could not extract the application icon from {executable}: {error}") from error
+    finally:
+        pe.close()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_bytes(icon_data)
+    os.replace(temporary, destination)
+    return destination
+
+
+def app_icon_path(app: str, executable: Path) -> Path:
+    return extract_office_icon(executable, data_home() / "icons/wine365" / f"{app}.ico")
 
 
 def _owned_desktop_file(path: Path) -> bool:
@@ -514,8 +636,15 @@ def write_desktop_file(path: Path, name: str, comment: str, command: list[str], 
     os.replace(temporary, path)
 
 
+def installed_app_executable(prefix: Path, app: str) -> Path:
+    executable = find_office_app(str(prefix), app)
+    if executable is None:
+        raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    return executable
+
+
 def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str, launcher: Path,
-                         icons: Path, copy_to_desktop: bool) -> list[str]:
+                         copy_to_desktop: bool) -> list[str]:
     prefix = validate_prefix(prefix_value)
     wine = normalize_path(wine_value)
     if not launcher.is_file():
@@ -525,16 +654,17 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str
         if app not in APP_META:
             raise ValueError(f"Unknown Office application: {app}")
         meta = APP_META[app]
+        icon = app_icon_path(app, installed_app_executable(prefix, app))
         command = [str(launcher), "--prefix", str(prefix), "--wine", str(wine), app, "%F"]
         filename = f"wine365-{app}.desktop"
         menu_file = data_home() / "applications" / filename
         write_desktop_file(menu_file, meta["name"], f"Launch {meta['name']} in {prefix}", command,
-                           icons / meta["icon"], meta["categories"], meta["mime"])
+                           icon, meta["categories"], meta["mime"])
         created.append(str(menu_file))
         desktop_file = desktop_directory() / filename
         if copy_to_desktop:
             write_desktop_file(desktop_file, meta["name"], f"Launch {meta['name']} in {prefix}", command,
-                               icons / meta["icon"], meta["categories"], meta["mime"])
+                               icon, meta["categories"], meta["mime"])
             created.append(str(desktop_file))
         elif _owned_desktop_file(desktop_file):
             desktop_file.unlink()

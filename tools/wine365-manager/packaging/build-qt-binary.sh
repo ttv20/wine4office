@@ -7,8 +7,8 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 OUTPUT=$1
 PYTHON=${PYTHON:-python3}
 
-"$PYTHON" -c 'import PyInstaller, PySide6' >/dev/null 2>&1 || {
-    echo "PyInstaller and PySide6 are required; install requirements-build.txt" >&2
+"$PYTHON" -c 'import PyInstaller, PySide6, pefile' >/dev/null 2>&1 || {
+    echo "PyInstaller, PySide6, and pefile are required; install requirements-build.txt" >&2
     exit 1
 }
 mkdir -p "$(dirname "$OUTPUT")"
