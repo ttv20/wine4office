@@ -316,6 +316,44 @@ def environment_status(prefix_value: str, wine_value: str) -> dict:
         return {"prefix_exists": False, "wine_exists": False, "apps": {app: False for app in APP_META}}
 
 
+def prepare_office_building_blocks(prefix: Path) -> int:
+    """Seed Word's per-user gallery when Wine does not expose the built-in template."""
+    office_roots = [
+        prefix / "drive_c/Program Files/Microsoft Office/root/Office16",
+        prefix / "drive_c/Program Files (x86)/Microsoft Office/root/Office16",
+        prefix / "drive_c/Program Files/Microsoft Office/Office16",
+        prefix / "drive_c/Program Files (x86)/Microsoft Office/Office16",
+    ]
+    users_root = prefix / "drive_c/users"
+    if not users_root.is_dir():
+        return 0
+
+    ignored_users = {"all users", "default", "default user", "public"}
+    sources: list[tuple[str, Path]] = []
+    for office_root in office_roots:
+        document_parts = office_root / "Document Parts"
+        if not document_parts.is_dir():
+            continue
+        for source in document_parts.glob("*/16/Built-In Building Blocks.dotx"):
+            if source.is_file():
+                sources.append((source.parent.parent.name, source))
+
+    copied = 0
+    for user in users_root.iterdir():
+        if not user.is_dir() or user.name.lower() in ignored_users:
+            continue
+        for locale, source in sources:
+            target = (user / "AppData/Roaming/Microsoft/Document Building Blocks" /
+                      locale / "16/Building Blocks.dotx")
+            # Never replace a user's custom Building Blocks gallery.
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied += 1
+    return copied
+
+
 def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None) -> None:
     candidates = [prefix / "register-office-cloud-fonts.sh"]
     if helper:
@@ -368,6 +406,8 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     executable = find_office_app(str(prefix), app)
     if not executable:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    if app == "word":
+        prepare_office_building_blocks(prefix)
     register_cloud_fonts(prefix, wine, helper)
     arguments = list(documents)
     env = wine_environment(prefix, wine)
