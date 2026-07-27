@@ -1049,7 +1049,11 @@ NTSYSAPI WORD         WINAPI RtlQueryDepthSList(PSLIST_HEADER);
 #define HEAP_SHARED                     0x04000000
 
 typedef enum _HEAP_INFORMATION_CLASS {
-    HeapCompatibilityInformation,
+    HeapCompatibilityInformation = 0,
+    HeapEnableTerminationOnCorruption = 1,
+    HeapExtendedInformation = 2,
+    HeapOptimizeResources = 3,
+    HeapTag = 7,
 } HEAP_INFORMATION_CLASS;
 
 /* Processor feature flags.  */
