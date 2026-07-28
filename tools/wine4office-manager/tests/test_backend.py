@@ -169,6 +169,26 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
 
+    def test_shortcut_creation_accepts_path_environment_and_wine(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        (office / "WINWORD.EXE").write_bytes(b"exe")
+        launcher = self.home / ".local/bin/wine4office-launcher"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("launcher")
+        icon = backend.data_home() / "icons/wine4office/word.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        created = backend.create_app_shortcuts(
+            ["word"], prefix, self.wine, launcher, False,
+        )
+
+        menu = backend.data_home() / "applications/wine4office-word.desktop"
+        self.assertEqual(created, [str(menu)])
+        self.assertIn(f'"--prefix" "{prefix}"', menu.read_text())
+
     def test_manager_shortcut_installs_a_persistent_icon(self):
         launcher = self.root / "Wine4OfficeManager"
         launcher.write_bytes(b"manager")

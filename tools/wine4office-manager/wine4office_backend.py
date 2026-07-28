@@ -25,6 +25,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
+PathValue = str | os.PathLike[str]
+
 APP_META = {
     "word": {
         "name": "Microsoft Word (Wine4Office)",
@@ -273,14 +275,16 @@ def save_config(config: dict) -> None:
     os.replace(temporary, path)
 
 
-def normalize_path(value: str) -> Path:
-    return Path(os.path.expandvars(value.strip())).expanduser().resolve(strict=False)
+def normalize_path(value: PathValue) -> Path:
+    raw_value = value.strip() if isinstance(value, str) else os.fspath(value)
+    return Path(os.path.expandvars(raw_value)).expanduser().resolve(strict=False)
 
 
-def validate_prefix(value: str) -> Path:
-    if not value.strip():
+def validate_prefix(value: PathValue) -> Path:
+    raw_value = value.strip() if isinstance(value, str) else os.fspath(value)
+    if not raw_value:
         raise ValueError("The Wine environment path is empty.")
-    prefix = normalize_path(value)
+    prefix = normalize_path(raw_value)
     home = Path.home().resolve()
     unsafe_roots = {
         Path("/"), home,
@@ -872,8 +876,8 @@ def installed_app_executable(prefix: Path, app: str) -> Path:
     return executable
 
 
-def create_app_shortcuts(apps: Iterable[str], prefix_value: str, wine_value: str, launcher: Path,
-                         copy_to_desktop: bool) -> list[str]:
+def create_app_shortcuts(apps: Iterable[str], prefix_value: PathValue, wine_value: PathValue,
+                         launcher: Path, copy_to_desktop: bool) -> list[str]:
     prefix = validate_prefix(prefix_value)
     wine = normalize_path(wine_value)
     if not launcher.is_file():
