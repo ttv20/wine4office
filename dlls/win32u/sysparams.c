@@ -7522,6 +7522,9 @@ ULONG_PTR WINAPI NtUserCallNoParam( ULONG code )
         display_mode_changed( FALSE );
         return TRUE;
 
+    case NtUserCallNoParam_GetHostColorScheme:
+        return get_host_color_scheme();
+
     /* temporary exports */
     case NtUserExitingThread:
         exiting_thread_id = GetCurrentThreadId();

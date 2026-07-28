@@ -788,6 +788,79 @@ static DWORD WINAPI display_settings_restorer_thread( void *param )
     return 0;
 }
 
+#define HOST_THEME_TIMER 0x5748
+#define HOST_THEME_EXPLICIT ((DWORD)~0u)
+
+static BOOL sync_host_theme_value( HKEY personalize, HKEY wine_theme, const WCHAR *name,
+                                   const WCHAR *marker_name, DWORD desired )
+{
+    DWORD value = 0, marker = 0, value_size = sizeof(value), marker_size = sizeof(marker);
+    DWORD value_type = 0, marker_type = 0;
+    BOOL value_valid, marker_valid;
+
+    value_valid = !RegQueryValueExW( personalize, name, NULL, &value_type, (BYTE *)&value, &value_size ) &&
+                  value_type == REG_DWORD && value_size == sizeof(value);
+    marker_valid = !RegQueryValueExW( wine_theme, marker_name, NULL, &marker_type,
+                                     (BYTE *)&marker, &marker_size ) &&
+                   marker_type == REG_DWORD && marker_size == sizeof(marker);
+
+    if (marker_valid && marker == HOST_THEME_EXPLICIT) return FALSE;
+
+    if ((!marker_valid && value_valid && value != 1) ||
+        (marker_valid && marker <= 1 && value_valid && value != marker) ||
+        (marker_valid && marker > 1))
+    {
+        marker = HOST_THEME_EXPLICIT;
+        RegSetValueExW( wine_theme, marker_name, 0, REG_DWORD, (BYTE *)&marker, sizeof(marker) );
+        return FALSE;
+    }
+
+    marker = desired;
+    RegSetValueExW( wine_theme, marker_name, 0, REG_DWORD, (BYTE *)&marker, sizeof(marker) );
+    if (value_valid && value == desired) return FALSE;
+
+    RegSetValueExW( personalize, name, 0, REG_DWORD, (BYTE *)&desired, sizeof(desired) );
+    return TRUE;
+}
+
+static void sync_host_theme(void)
+{
+    static const WCHAR personalize_path[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    static const WCHAR wine_theme_path[] = L"Software\\Wine\\Theme";
+    static const WCHAR immersive_color_set[] = L"ImmersiveColorSet";
+    HKEY personalize, wine_theme;
+    unsigned int scheme;
+    DWORD desired;
+    BOOL changed;
+
+    scheme = NtUserCallNoParam( NtUserCallNoParam_GetHostColorScheme );
+    if (scheme != 1 && scheme != 2) return;
+    desired = scheme == 2;
+
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, personalize_path, 0, NULL, 0,
+                         KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &personalize, NULL ))
+        return;
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, wine_theme_path, 0, NULL, 0,
+                         KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &wine_theme, NULL ))
+    {
+        RegCloseKey( personalize );
+        return;
+    }
+
+    changed = sync_host_theme_value( personalize, wine_theme, L"AppsUseLightTheme",
+                                     L"HostAppsUseLightTheme", desired );
+    changed |= sync_host_theme_value( personalize, wine_theme, L"SystemUsesLightTheme",
+                                      L"HostSystemUsesLightTheme", desired );
+    RegCloseKey( wine_theme );
+    RegCloseKey( personalize );
+
+    if (!changed) return;
+    SendNotifyMessageW( HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)immersive_color_set );
+    SendNotifyMessageW( HWND_BROADCAST, WM_THEMECHANGED, 0, 0 );
+}
+
+
 static WNDPROC desktop_orig_wndproc;
 
 /* window procedure for the desktop window */
@@ -797,6 +870,14 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
 
     switch(message)
     {
+    case WM_TIMER:
+        if (wp == HOST_THEME_TIMER)
+        {
+            sync_host_theme();
+            return 0;
+        }
+        break;
+
     case WM_SYSCOMMAND:
         switch(wp & 0xfff0)
         {
@@ -1280,6 +1361,8 @@ void manage_desktop( WCHAR *arg )
 
         desktop_orig_wndproc = (WNDPROC)SetWindowLongPtrW( hwnd, GWLP_WNDPROC,
             (LONG_PTR)desktop_wnd_proc );
+        sync_host_theme();
+        SetTimer( hwnd, HOST_THEME_TIMER, 2000, NULL );
         SendMessageW( hwnd, WM_SETICON, ICON_BIG, (LPARAM)LoadIconW( 0, MAKEINTRESOURCEW(OIC_WINLOGO)));
         if (name) set_desktop_window_title( hwnd, name );
         SetWindowPos( hwnd, 0, GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),

@@ -1074,6 +1074,7 @@ enum
     /* temporary exports */
     NtUserExitingThread,
     NtUserThreadDetach,
+    NtUserCallNoParam_GetHostColorScheme,
 };
 
 static inline HWND NtUserGetDesktopWindow(void)

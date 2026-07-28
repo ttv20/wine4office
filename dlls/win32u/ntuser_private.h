@@ -206,6 +206,9 @@ extern BOOL is_cache_dc( HDC hdc );
 extern void check_for_events( UINT flags );
 extern UINT get_send_message_flags(void);
 
+/* host_theme.c */
+extern unsigned int get_host_color_scheme(void);
+
 /* systray.c */
 extern LRESULT system_tray_call( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, void *data );
 

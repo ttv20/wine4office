@@ -500,6 +500,10 @@ static void on_theme_changed(HWND dialog) {
                       L"AppsUseLightTheme", !index);
     set_reg_key_dword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
                       L"SystemUsesLightTheme", !index);
+    set_reg_key_dword(HKEY_CURRENT_USER, L"Software\\Wine\\Theme",
+                      L"HostAppsUseLightTheme", ~0u);
+    set_reg_key_dword(HKEY_CURRENT_USER, L"Software\\Wine\\Theme",
+                      L"HostSystemUsesLightTheme", ~0u);
 
     theme_dirty = TRUE;
 }
