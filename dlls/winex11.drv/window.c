@@ -3258,6 +3258,10 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     UINT ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ), new_style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
     struct window_rects old_rects;
     BOOL is_managed, was_fullscreen, activate = !(swp_flags & SWP_NOACTIVATE), fullscreen = !!(swp_flags & WINE_SWP_FULLSCREEN);
+    COLORREF key;
+    BYTE alpha;
+    DWORD layered_flags;
+    BOOL fully_transparent = FALSE;
 
     if ((is_managed = is_window_managed( hwnd, swp_flags, fullscreen ))) make_owner_managed( hwnd );
 
@@ -3281,11 +3285,18 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         new_style |= WS_VISIBLE;
     }
 
-    /* layered windows are mapped only once their attributes are set */
+    if ((ex_style & WS_EX_LAYERED) && data->layered &&
+        NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha, &layered_flags ) &&
+        (layered_flags & LWA_ALPHA) && !alpha)
+        fully_transparent = TRUE;
+
+    /* Layered windows are mapped only once their attributes are set and
+     * indicate that the window can contribute visible content. */
     if (data->pending_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
-        (ex_style & WS_EX_LAYERED) && !data->layered && !IsRectEmpty( &new_rects->window ))
+        (ex_style & WS_EX_LAYERED) && (!data->layered || fully_transparent) &&
+        !IsRectEmpty( &new_rects->window ))
     {
-        WARN( "win %p/%lx is layered, delaying mapping\n", hwnd, data->whole_window );
+        WARN( "win %p/%lx is layered and not visible, delaying mapping\n", hwnd, data->whole_window );
         new_style &= ~WS_VISIBLE;
     }
 
