@@ -3246,6 +3246,22 @@ static BOOL get_desired_wm_state( DWORD style, const struct window_rects *rects 
     }
     return WithdrawnState;
 }
+void window_surface_presented( HWND hwnd )
+{
+    struct x11drv_win_data *data;
+    DWORD style;
+
+    if (!(data = get_win_data( hwnd ))) return;
+    style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
+    if (data->map_after_first_paint)
+    {
+        data->map_after_first_paint = FALSE;
+        window_set_wm_state( data, get_desired_wm_state( style, &data->rects ), data->map_activate );
+        XFlush( data->display );
+    }
+    release_win_data( data );
+}
+
 
 
 /***********************************************************************
@@ -3258,10 +3274,10 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     UINT ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE ), new_style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
     struct window_rects old_rects;
     BOOL is_managed, was_fullscreen, activate = !(swp_flags & SWP_NOACTIVATE), fullscreen = !!(swp_flags & WINE_SWP_FULLSCREEN);
+    BOOL fully_transparent = FALSE, no_class_brush;
     COLORREF key;
     BYTE alpha;
     DWORD layered_flags;
-    BOOL fully_transparent = FALSE;
 
     if ((is_managed = is_window_managed( hwnd, swp_flags, fullscreen ))) make_owner_managed( hwnd );
 
@@ -3284,19 +3300,28 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         WARN( "win %p/%lx not yet hidden, delaying unmapping\n", hwnd, data->whole_window );
         new_style |= WS_VISIBLE;
     }
+    if (!(new_style & WS_VISIBLE)) data->map_after_first_paint = FALSE;
+
 
     if ((ex_style & WS_EX_LAYERED) && data->layered &&
         NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha, &layered_flags ) &&
         (layered_flags & LWA_ALPHA) && !alpha)
         fully_transparent = TRUE;
 
-    /* Layered windows are mapped only once their attributes are set and
-     * indicate that the window can contribute visible content. */
+    /* Layered windows are mapped only once their attributes can contribute
+     * visible content. Likewise, windows without a class background brush
+     * wait for their first actual surface presentation instead of exposing
+     * undefined X11 backing pixels. */
+    no_class_brush = !NtUserGetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND );
     if (data->pending_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
-        (ex_style & WS_EX_LAYERED) && (!data->layered || fully_transparent) &&
+        (((ex_style & WS_EX_LAYERED) && (!data->layered || fully_transparent)) ||
+         (no_class_brush && !data->map_after_first_paint)) &&
         !IsRectEmpty( &new_rects->window ))
     {
-        WARN( "win %p/%lx is layered and not visible, delaying mapping\n", hwnd, data->whole_window );
+        data->map_after_first_paint = no_class_brush &&
+                                      (!(ex_style & WS_EX_LAYERED) || (data->layered && !fully_transparent));
+        data->map_activate = activate;
+        WARN( "win %p/%lx has no initialized contents, delaying mapping\n", hwnd, data->whole_window );
         new_style &= ~WS_VISIBLE;
     }
 

@@ -412,8 +412,12 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
     client_surface_update_geometry( hwnd, surface );
     client_surface_update_offscreen( hwnd, surface );
+    if (!hdc)
+    {
+        window_surface_presented( toplevel );
+        return;
+    }
 
-    if (!hdc) return;
     if (NtUserGetPresentRect( toplevel, &rect_dst, -1 /* raw dpi */ ))
     {
         region = 0; /* window is exclusive fullscreen, ignore everything else */
@@ -453,6 +457,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
 done:
     if (region) NtGdiDeleteObjectApp( region );
+    window_surface_presented( toplevel );
 }
 
 static const struct client_surface_funcs x11drv_client_surface_funcs =
