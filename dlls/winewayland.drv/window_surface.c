@@ -445,6 +445,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
+    wayland_window_surface_presented(window_surface->hwnd);
     flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region);
     wl_display_flush(process_wayland.wl_display);
 

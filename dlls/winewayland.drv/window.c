@@ -276,6 +276,8 @@ static void reapply_cursor_clipping(void)
     NtUserSetThreadDpiAwarenessContext(context);
 }
 
+static void wayland_win_data_update_wayland_state(struct wayland_win_data *data);
+
 static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data, struct wayland_surface *owner_surface)
 {
     struct wayland_surface *surface;
@@ -298,6 +300,14 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     if (visible && (exstyle & WS_EX_LAYERED) &&
         NtUserGetLayeredWindowAttributes(data->hwnd, &key, &alpha, &flags) &&
         (flags & LWA_ALPHA) && !alpha)
+        visible = FALSE;
+
+    /* A newly visible toplevel without a class background brush has no
+     * application-defined contents yet. Keep it role-less until the first
+     * software flush or GPU presentation instead of exposing the driver's
+     * generic initialization buffer. */
+    if (visible && !owner_surface && !data->contents_presented &&
+        !NtUserGetClassLongPtrW(data->hwnd, GCLP_HBRBACKGROUND))
         visible = FALSE;
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
@@ -359,6 +369,18 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     data->wayland_surface = surface;
     return TRUE;
 }
+void wayland_window_surface_presented(HWND hwnd)
+{
+    struct wayland_win_data *data;
+
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    data->contents_presented = TRUE;
+    if ((!data->wayland_surface || data->wayland_surface->role == WAYLAND_SURFACE_ROLE_NONE) &&
+        wayland_win_data_create_wayland_surface(data, NULL))
+        wayland_win_data_update_wayland_state(data);
+    wayland_win_data_release(data);
+}
+
 
 static void wayland_surface_update_state_toplevel(struct wayland_surface *surface)
 {

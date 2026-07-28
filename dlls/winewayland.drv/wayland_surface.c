@@ -1287,6 +1287,7 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
 
     TRACE("client %p hwnd %p tracked toplevel %p attached toplevel %p subsurface %p\n",
             surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);
+    wayland_window_surface_presented(toplevel);
     ensure_window_surface_contents(toplevel);
     set_client_surface(hwnd, surface);
 }

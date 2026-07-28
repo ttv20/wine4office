@@ -395,6 +395,7 @@ struct wayland_win_data
     BOOL managed;
     BOOL layered_attribs_set;
     BOOL defer_cursor_clip;
+    BOOL contents_presented;
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);
@@ -408,6 +409,7 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *client);
 BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region);
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
 void ensure_window_surface_contents(HWND hwnd);
+void wayland_window_surface_presented(HWND hwnd);
 
 /**********************************************************************
  *          Wayland Keyboard
