@@ -227,15 +227,15 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         launcher.chmod(0o755)
         bundled_icons = self.root / "transient-bundle/icons"
         bundled_icons.mkdir(parents=True)
-        source_icon = bundled_icons / "wine4office-manager.svg"
-        source_icon.write_text("<svg/>")
+        source_icon = bundled_icons / "wine4office-manager.png"
+        source_icon.write_bytes(b"\x89PNG\r\n\x1a\nmanager")
 
         shortcut = backend.install_manager_shortcut(launcher, bundled_icons)
         installed_icon = (
-            backend.data_home() / "icons/hicolor/scalable/apps/wine4office-manager.svg"
+            backend.data_home() / "icons/wine4office/wine4office-manager.png"
         )
         text = shortcut.read_text()
-        self.assertEqual(installed_icon.read_text(), "<svg/>")
+        self.assertEqual(installed_icon.read_bytes(), b"\x89PNG\r\n\x1a\nmanager")
         self.assertIn(f"Icon={installed_icon}", text)
         self.assertNotIn(str(bundled_icons), text)
 

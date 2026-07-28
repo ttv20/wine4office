@@ -62,7 +62,7 @@ class ManagerWindow(QMainWindow):
         self.installed_apps: set[str] = set()
 
         self.setWindowTitle("Wine4OfficeManager")
-        self.setWindowIcon(QIcon(str(icons / "wine4office-manager.svg")))
+        self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
         self.setMinimumSize(820, 620)
         self.resize(960, 700)
         self._build_ui()
@@ -80,7 +80,7 @@ class ManagerWindow(QMainWindow):
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
-        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.svg")), "Wine4OfficeManager")
+        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.png")), "Wine4OfficeManager")
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)

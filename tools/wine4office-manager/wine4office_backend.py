@@ -929,10 +929,10 @@ def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
 
 
 def install_manager_shortcut(manager_launcher: Path, icons: Path) -> Path:
-    source_icon = icons / "wine4office-manager.svg"
+    source_icon = icons / "wine4office-manager.png"
     if not source_icon.is_file():
         raise FileNotFoundError(f"Wine4OfficeManager icon is missing: {source_icon}")
-    installed_icon = data_home() / "icons/hicolor/scalable/apps/wine4office-manager.svg"
+    installed_icon = data_home() / "icons/wine4office/wine4office-manager.png"
     installed_icon.parent.mkdir(parents=True, exist_ok=True)
     temporary_icon = installed_icon.with_name(
         f".{installed_icon.name}.{os.getpid()}.{time.time_ns()}.tmp"

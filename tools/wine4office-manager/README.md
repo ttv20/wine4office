@@ -1,5 +1,7 @@
 # Wine4OfficeManager
 
+![Wine4Office banner](banner.png)
+
 Wine4OfficeManager is included in the Wine4Office source tree at `tools/wine4office-manager`. It manages a prebuilt Wine4Office runner, prefixes, Office shortcuts, verified updates, and removal.
 
 The interface is a native Qt Widgets desktop application. It does not start an HTTP server, embed a web view, or open a browser. Releases provide a standalone Wine4OfficeManager binary, so end users do not need to install Python packages.

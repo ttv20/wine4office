@@ -54,7 +54,7 @@ fi
 for file in "$DATA_HOME/applications/wine4office-manager.desktop" "${XDG_DESKTOP_DIR:-$HOME/Desktop}/wine4office-manager.desktop"; do
     if [[ -f "$file" ]] && grep -q '^X-Wine4Office-Managed=true$' "$file"; then rm -f "$file"; fi
 done
-rm -f "$DATA_HOME/icons/hicolor/scalable/apps/wine4office-manager.svg"
+rm -f "$DATA_HOME/icons/wine4office/wine4office-manager.png"
 for link in "$BIN_HOME/wine4office-manager" "$BIN_HOME/wine4office-launcher"; do
     if [[ -L "$link" ]] && [[ $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f "$link"; fi
 done
