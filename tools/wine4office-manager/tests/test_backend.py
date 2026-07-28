@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import subprocess
 import stat
 import sys
 import tempfile
@@ -238,6 +239,37 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(installed_icon.read_bytes(), b"\x89PNG\r\n\x1a\nmanager")
         self.assertIn(f"Icon={installed_icon}", text)
         self.assertNotIn(str(bundled_icons), text)
+
+    def test_cloud_font_registration_skips_unchanged_registry_import(self):
+        prefix = self.home / ".wine4office"
+        cloud_font = (
+            prefix / "drive_c/users/tester/AppData/Local/Microsoft/FontCache/4"
+            / "CloudFonts/Aptos/aptos.ttf"
+        )
+        cloud_font.parent.mkdir(parents=True)
+        cloud_font.write_bytes(b"first font revision")
+        log = self.root / "wine.log"
+        self._script("fc-scan", "#!/bin/sh\nprintf 'Aptos\\n'\n")
+        self._script("winepath", "#!/bin/sh\nprintf 'Z:\\\\tmp\\\\fonts.reg\\n'\n")
+        self._script("wine", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WINE4OFFICE_TEST_LOG\"\n")
+        helper = Path(__file__).resolve().parents[1] / "register-office-cloud-fonts.sh"
+        env = os.environ.copy()
+        env.update({
+            "PATH": f"{self.runner}:{env['PATH']}",
+            "WINEPREFIX": str(prefix),
+            "WINE4OFFICE_TEST_LOG": str(log),
+        })
+
+        subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
+        subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(log.read_text().splitlines(), ["regedit /S Z:\\tmp\\fonts.reg"])
+
+        cloud_font.write_bytes(b"second font revision")
+        subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(
+            log.read_text().splitlines(),
+            ["regedit /S Z:\\tmp\\fonts.reg", "regedit /S Z:\\tmp\\fonts.reg"],
+        )
 
     def test_launch_app_converts_host_document_paths_for_office(self):
         prefix = self.home / ".wine4office"

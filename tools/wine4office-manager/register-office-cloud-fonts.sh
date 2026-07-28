@@ -8,7 +8,9 @@ fonts_dir="$prefix/drive_c/windows/Fonts"
 tmp=${TMPDIR:-/tmp}
 font_list="$tmp/wine4office-office-cloud-fonts.$$"
 reg_file="$tmp/wine4office-office-cloud-fonts.$$.reg"
-trap 'rm -f "$font_list" "$reg_file"' EXIT INT TERM
+state_file="$prefix/.wine4office-cloud-fonts.sha256"
+state_tmp="$prefix/.wine4office-cloud-fonts.sha256.$$"
+trap 'rm -f "$font_list" "$reg_file" "$state_tmp"' EXIT INT TERM
 
 find "$prefix/drive_c/users" -type f \( \
     -ipath '*/AppData/Local/Microsoft/FontCache/*/CloudFonts/*.ttf' -o \
@@ -48,6 +50,14 @@ mkdir -p "$fonts_dir"
     done < "$font_list"
 } > "$reg_file"
 
+reg_hash=$(sha256sum "$reg_file" | awk '{print $1}')
+if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$reg_hash" ]; then
+    echo "wine4office: Office cloud font registration is already current"
+    exit 0
+fi
+
 wine regedit /S "$(winepath -w "$reg_file")"
+printf '%s\n' "$reg_hash" > "$state_tmp"
+mv -f "$state_tmp" "$state_file"
 count=$(wc -l < "$font_list" | tr -d ' ')
 echo "wine4office: registered $count Office cloud font files in C:\\windows\\Fonts"
