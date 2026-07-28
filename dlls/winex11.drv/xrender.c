@@ -828,40 +828,6 @@ static AA_Type aa_type_from_flags( UINT aa_flags )
     }
 }
 
-static UINT get_xft_aa_flags( const LOGFONTW *lf )
-{
-    char *value, *p;
-    UINT ret = 0;
-
-    switch (lf->lfQuality)
-    {
-    case NONANTIALIASED_QUALITY:
-    case ANTIALIASED_QUALITY:
-        break;
-    default:
-        if (!(value = XGetDefault( gdi_display, "Xft", "antialias" ))) break;
-        TRACE( "got antialias '%s'\n", value );
-        for (p = value; *p; p++) if ('A' <= *p && *p <= 'Z') *p += 'a' - 'A'; /* to lower */
-        if (value[0] == 'f' || value[0] == 'n' || value[0] == '0' || !strcmp( value, "off" ))
-        {
-            ret = GGO_BITMAP;
-            break;
-        }
-        ret = GGO_GRAY4_BITMAP;
-        /* fall through */
-    case CLEARTYPE_QUALITY:
-    case CLEARTYPE_NATURAL_QUALITY:
-        if (!(value = XGetDefault( gdi_display, "Xft", "rgba" ))) break;
-        TRACE( "got rgba '%s'\n", value );
-        if (!strcmp( value, "rgb" )) ret = WINE_GGO_HRGB_BITMAP;
-        else if (!strcmp( value, "bgr" )) ret = WINE_GGO_HBGR_BITMAP;
-        else if (!strcmp( value, "vrgb" )) ret = WINE_GGO_VRGB_BITMAP;
-        else if (!strcmp( value, "vbgr" )) ret = WINE_GGO_VBGR_BITMAP;
-        else if (!strcmp( value, "none" )) ret = GGO_GRAY4_BITMAP;
-        break;
-    }
-    return ret;
-}
 
 /**********************************************************************
  *	     xrenderdrv_SelectFont
@@ -875,7 +841,6 @@ static HFONT xrenderdrv_SelectFont( PHYSDEV dev, HFONT hfont, UINT *aa_flags )
     HFONT ret;
 
     NtGdiExtGetObjectW( hfont, sizeof(lfsz.lf), &lfsz.lf );
-    if (!*aa_flags) *aa_flags = get_xft_aa_flags( &lfsz.lf );
 
     ret = next->funcs->pSelectFont( next, hfont, aa_flags );
     if (!ret) return 0;
