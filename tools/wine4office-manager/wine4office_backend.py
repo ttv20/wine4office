@@ -56,6 +56,13 @@ APP_META = {
         "categories": "Office;Email;Network;",
         "mime": "x-scheme-handler/mailto;",
     },
+    "setlang": {
+        "name": "Microsoft Office Language Preferences (Wine4Office)",
+        "exe": "SETLANG.EXE",
+        "icon": "wine4office-setlang.svg",
+        "categories": "Office;Settings;",
+        "mime": "",
+    },
 }
 
 TOOL_META = {
@@ -888,7 +895,9 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: PathValue, wine_valu
             raise ValueError(f"Unknown Office application: {app}")
         meta = APP_META[app]
         icon = app_icon_path(app, installed_app_executable(prefix, app))
-        command = [str(launcher), "--prefix", str(prefix), "--wine", str(wine), app, "%F"]
+        command = [str(launcher), "--prefix", str(prefix), "--wine", str(wine), app]
+        if meta["mime"]:
+            command.append("%F")
         filename = f"wine4office-{app}.desktop"
         menu_file = data_home() / "applications" / filename
         write_desktop_file(menu_file, meta["name"], f"Launch {meta['name']} in {prefix}", command,

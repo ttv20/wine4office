@@ -250,7 +250,8 @@ class ManagerWindow(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.app_items: dict[str, QTreeWidgetItem] = {}
         names = {"word": "Microsoft Word", "excel": "Microsoft Excel",
-                 "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook"}
+                 "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook",
+                 "setlang": "Microsoft Office Language Preferences"}
         for app, name in names.items():
             item = QTreeWidgetItem([name, "Checking…"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)

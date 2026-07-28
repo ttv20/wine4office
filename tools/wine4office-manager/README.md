@@ -49,7 +49,7 @@ The manager defaults to:
 
 - Create or rollback-safely recreate a selected Wine prefix.
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
-- Create/update/remove Word, Excel, PowerPoint, and Outlook shortcuts.
+- Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4OfficeManager and Wine runner updates.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.

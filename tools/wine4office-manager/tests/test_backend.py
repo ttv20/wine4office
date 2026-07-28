@@ -189,6 +189,38 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(created, [str(menu)])
         self.assertIn(f'"--prefix" "{prefix}"', menu.read_text())
 
+    def test_setlang_detection_shortcut_and_launch(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        setlang = office / "SETLANG.EXE"
+        setlang.write_bytes(b"exe")
+        launcher = self.home / ".local/bin/wine4office-launcher"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("launcher")
+        icon = backend.data_home() / "icons/wine4office/setlang.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        status = backend.environment_status(str(prefix), str(self.wine))
+        self.assertTrue(status["apps"]["setlang"])
+        created = backend.create_app_shortcuts(
+            ["setlang"], prefix, self.wine, launcher, False,
+        )
+
+        menu = backend.data_home() / "applications/wine4office-setlang.desktop"
+        self.assertEqual(created, [str(menu)])
+        shortcut = menu.read_text()
+        self.assertIn('"setlang"', shortcut)
+        self.assertNotIn("%F", shortcut)
+        self.assertNotIn("MimeType=", shortcut)
+
+        process = mock.Mock(pid=3210)
+        with mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+            pid = backend.launch_app(str(prefix), str(self.wine), "setlang")
+        self.assertEqual(pid, 3210)
+        self.assertEqual(popen.call_args.args[0], [str(self.wine), str(setlang)])
+
     def test_manager_shortcut_installs_a_persistent_icon(self):
         launcher = self.root / "Wine4OfficeManager"
         launcher.write_bytes(b"manager")
