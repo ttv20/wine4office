@@ -283,11 +283,22 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     BOOL visible;
     DWORD exstyle = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
     struct wl_region *input_region;
+    COLORREF key;
+    BYTE alpha;
+    DWORD flags;
 
     TRACE("hwnd=%p\n", data->hwnd);
 
     visible = ((NtUserGetWindowLongW(data->hwnd, GWL_STYLE) & WS_VISIBLE) == WS_VISIBLE) &&
                (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
+
+    /* A global alpha of zero means that the window must not be mapped. This
+     * also preserves the contract on compositors without alpha-modifier
+     * support, where attaching a buffer would otherwise expose its contents. */
+    if (visible && (exstyle & WS_EX_LAYERED) &&
+        NtUserGetLayeredWindowAttributes(data->hwnd, &key, &alpha, &flags) &&
+        (flags & LWA_ALPHA) && !alpha)
+        visible = FALSE;
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
