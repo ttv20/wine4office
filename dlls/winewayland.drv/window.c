@@ -147,6 +147,50 @@ void wayland_win_data_release(struct wayland_win_data *data)
     pthread_mutex_unlock(&win_data_mutex);
 }
 
+static HWND *build_hwnd_list(HWND hwnd, BOOL children);
+
+/* The caller holds win_data_mutex. Rebuild the GPU client hierarchy in
+ * Win32 child Z-order. Client surfaces are Wayland siblings regardless of
+ * their HWND ancestry, so creation or presentation order cannot be used for
+ * stacking when Office switches between workbook and full-page startup UI. */
+void wayland_win_data_restack_client_surfaces(HWND toplevel)
+{
+    struct wayland_win_data *data, *toplevel_data;
+    struct wayland_surface *toplevel_surface;
+    struct wayland_client_surface *client;
+    HWND *list;
+    UINT i;
+
+    if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) ||
+        !(toplevel_surface = toplevel_data->wayland_surface))
+        return;
+
+    /* NtUserBuildHwndList returns descendants from top to bottom. Placing
+     * each surface immediately above its attached ancestor in that order
+     * leaves later (lower) siblings below the earlier (higher) ones. */
+    if ((list = build_hwnd_list(toplevel, TRUE)))
+    {
+        for (i = 0; list[i] != HWND_BOTTOM; ++i)
+        {
+            if (!(data = wayland_win_data_get_nolock(list[i])) ||
+                !(client = data->client_surface) || !client->wl_subsurface ||
+                client->toplevel != toplevel)
+                continue;
+            wl_subsurface_place_above(client->wl_subsurface,
+                                      wayland_client_surface_get_parent(toplevel_surface, client));
+        }
+        free(list);
+    }
+
+    /* The root client is the base content below all child HWND surfaces. */
+    client = toplevel_data->client_surface;
+    if (client && client->wl_subsurface && client->toplevel == toplevel)
+        wl_subsurface_place_above(client->wl_subsurface, toplevel_surface->wl_surface);
+
+    /* Subsurface stacking state is applied by committing the parent. */
+    wl_surface_commit(toplevel_surface->wl_surface);
+}
+
 /* The caller holds win_data_mutex. Keep all visible owner-relative popups
  * above every GPU client surface attached to the owner. Rebuild the two
  * groups relative to the owner surface instead of repeatedly positioning a
@@ -156,7 +200,6 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
 {
     struct wayland_win_data *data, *toplevel_data;
     struct wayland_surface *toplevel_surface, *popup;
-    struct wayland_client_surface *client;
     BOOL popup_found = FALSE;
     RECT intersection;
     DWORD style;
@@ -188,19 +231,8 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
     }
     if (!popup_found) return;
 
-    /* Then rebuild the GPU client hierarchy above the owner. Since the popups
-     * were positioned first, these clients stay below the popup group while
-     * child GPU surfaces remain above their attached HWND ancestors. */
-    RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
-    {
-        client = data->client_surface;
-        if (!client || !client->wl_subsurface || client->toplevel != toplevel) continue;
-        wl_subsurface_place_above(client->wl_subsurface,
-                                  wayland_client_surface_get_parent(toplevel_surface, client));
-    }
-
-    /* Subsurface stacking state is applied by committing the parent. */
-    wl_surface_commit(toplevel_surface->wl_surface);
+    /* Rebuild clients in Win32 Z-order below the popup group. */
+    wayland_win_data_restack_client_surfaces(toplevel);
 }
 
 static void wayland_win_data_get_config(struct wayland_win_data *data,
@@ -399,7 +431,7 @@ static BOOL is_managed(HWND hwnd)
     return ret;
 }
 
-static HWND *build_hwnd_list(void)
+static HWND *build_hwnd_list(HWND hwnd, BOOL children)
 {
     NTSTATUS status;
     HWND *list;
@@ -408,7 +440,7 @@ static HWND *build_hwnd_list(void)
     for (;;)
     {
         if (!(list = malloc(count * sizeof(*list)))) return NULL;
-        status = NtUserBuildHwndList(0, 0, 0, 0, 0, count, list, &count);
+        status = NtUserBuildHwndList(0, hwnd, children, FALSE, 0, count, list, &count);
         if (!status) return list;
         free(list);
         if (status != STATUS_BUFFER_TOO_SMALL) return NULL;
@@ -421,7 +453,7 @@ static BOOL has_owned_popups(HWND hwnd)
     UINT i;
     BOOL ret = FALSE;
 
-    if (!(list = build_hwnd_list())) return FALSE;
+    if (!(list = build_hwnd_list(0, FALSE))) return FALSE;
 
     for (i = 0; list[i] != HWND_BOTTOM; i++)
     {
@@ -627,6 +659,9 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         wayland_surface_set_toplevel_parent(data->wayland_surface, transient_parent_surface);
         wayland_win_data_update_wayland_state(data);
     }
+    if (data->client_surface && data->client_surface->wl_subsurface &&
+        (!(swp_flags & SWP_NOZORDER) || (swp_flags & SWP_SHOWWINDOW)))
+        wayland_win_data_restack_client_surfaces(data->client_surface->toplevel);
 
     wayland_win_data_release(data);
 }

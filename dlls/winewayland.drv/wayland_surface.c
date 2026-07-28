@@ -1407,7 +1407,10 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
     }
 
     wayland_surface_reconfigure_client(surface, client, client_rect, new_subsurface);
-    wayland_win_data_restack_owned_popups(toplevel);
+    if (new_subsurface)
+        wayland_win_data_restack_client_surfaces(toplevel);
+    else
+        wayland_win_data_restack_owned_popups(toplevel);
     /* Recommit the client surface in case destroying its previous subsurface
      * role unmapped an existing EGL buffer. Then apply the new subsurface
      * position atomically through the parent. */
