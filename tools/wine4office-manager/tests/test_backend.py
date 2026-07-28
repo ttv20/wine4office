@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import os
 import subprocess
 import stat
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import wine4office_backend as backend
@@ -97,6 +99,65 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         command = popen.call_args.args[0]
         self.assertEqual(command, [str(self.wine), str(installer), "/configure", "/home/user/office.xml"])
         self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], str(prefix))
+
+    def test_executable_launcher_forwards_valid_working_directory(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        installer = self.home / "Downloads/Office Setup.exe"
+        installer.parent.mkdir()
+        installer.write_bytes(b"MZ")
+        working_directory = self.home / "installer files"
+        working_directory.mkdir()
+
+        with mock.patch.object(
+            backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
+        ) as popen:
+            backend.launch_executable(
+                str(prefix),
+                str(self.wine),
+                str(installer),
+                working_directory=str(working_directory),
+            )
+
+        self.assertEqual(popen.call_args.kwargs["cwd"], working_directory.resolve())
+
+    def test_executable_launcher_empty_working_directory_defaults_to_executable_folder(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        installer = self.home / "Downloads/Office Setup.exe"
+        installer.parent.mkdir()
+        installer.write_bytes(b"MZ")
+
+        with mock.patch.object(
+            backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
+        ) as popen:
+            backend.launch_executable(
+                str(prefix),
+                str(self.wine),
+                str(installer),
+                working_directory="   ",
+            )
+
+        self.assertEqual(popen.call_args.kwargs["cwd"], installer.parent.resolve())
+
+    def test_executable_launcher_rejects_missing_working_directory(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        installer = self.home / "Downloads/Office Setup.exe"
+        installer.parent.mkdir()
+        installer.write_bytes(b"MZ")
+        missing = self.home / "missing working folder"
+
+        with mock.patch.object(backend.subprocess, "Popen") as popen, \
+             self.assertRaisesRegex(NotADirectoryError, "Working directory was not found"):
+            backend.launch_executable(
+                str(prefix),
+                str(self.wine),
+                str(installer),
+                working_directory=str(missing),
+            )
+
+        popen.assert_not_called()
 
     def test_executable_launcher_rejects_non_exe(self):
         prefix = self.home / ".wine4office"
@@ -483,6 +544,280 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend.create_environment(str(target), str(self.wine), False, lambda line: None)
 
         self.assertFalse(target.exists())
+
+    def test_office_language_separators_are_normalized(self):
+        self.assertEqual(
+            backend.validate_office_languages(" EN-us,\tde-DE; fr-FR\npt-BR "),
+            ["en-us", "de-de", "fr-fr", "pt-br"],
+        )
+
+    def test_office_languages_reject_unknown_and_duplicate_identifiers(self):
+        for languages, message in (
+            ("en-US, xx-XX", "Unsupported"),
+            ("en-US; EN-us", "Duplicate"),
+        ):
+            with self.subTest(languages=languages), self.assertRaisesRegex(ValueError, message):
+                backend.validate_office_languages(languages)
+
+    def test_generated_office_configuration_uses_product_channel_and_languages(self):
+        cases = (
+            ("O365ProPlusRetail", "Current", ["en-us", "de-de"]),
+            ("ProPlus2024Volume", "PerpetualVL2024", ["fr-fr"]),
+        )
+        for product_id, channel, languages in cases:
+            with self.subTest(product_id=product_id):
+                root = ET.fromstring(
+                    backend.build_office_configuration(product_id, languages)
+                )
+                add = root.find("Add")
+                self.assertIsNotNone(add)
+                self.assertEqual(
+                    add.attrib,
+                    {"OfficeClientEdition": "64", "Channel": channel},
+                )
+                product = add.find("Product")
+                self.assertIsNotNone(product)
+                self.assertEqual(product.attrib, {"ID": product_id})
+                self.assertEqual(
+                    [language.attrib for language in product.findall("Language")],
+                    [{"ID": language} for language in languages],
+                )
+                display = root.find("Display")
+                self.assertIsNotNone(display)
+                self.assertEqual(display.attrib, {"Level": "Full"})
+                self.assertNotIn("AcceptEULA", display.attrib)
+
+    def test_custom_office_configuration_is_preserved_byte_for_byte(self):
+        configuration = self.home / "custom deployment.xml"
+        payload = (
+            b'\xef\xbb\xbf<Configuration><Add SourcePath="Z:\\\\Office">'
+            b'<Product ID="ProjectPro2024Volume" /></Add></Configuration>'
+        )
+        configuration.write_bytes(payload)
+
+        validated = backend.validate_office_configuration(configuration)
+
+        self.assertEqual(validated, configuration.resolve())
+        self.assertEqual(configuration.read_bytes(), payload)
+
+    def test_load_office_configuration_returns_exact_payload_and_digest(self):
+        configuration = self.home / "loaded deployment.xml"
+        payload = (
+            b'\xef\xbb\xbf<Configuration><Add Channel="Current" />'
+            b"<Display Level=\"Full\" /></Configuration>"
+        )
+        configuration.write_bytes(payload)
+
+        loaded_path, loaded_payload, digest = backend.load_office_configuration(
+            configuration
+        )
+
+        self.assertEqual(loaded_path, configuration.resolve())
+        self.assertIsInstance(loaded_payload, bytes)
+        self.assertEqual(loaded_payload, payload)
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+
+    def test_office_configuration_rejects_unsafe_root_and_doctype(self):
+        configuration = self.home / "unsafe.xml"
+        for payload, message in (
+            ("<NotConfiguration />", "root must be Configuration"),
+            (
+                '<!DOCTYPE Configuration [<!ENTITY secret SYSTEM "file:///etc/passwd">]>'
+                "<Configuration />",
+                "document type or entities",
+            ),
+        ):
+            with self.subTest(message=message):
+                configuration.write_text(payload, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, message):
+                    backend.validate_office_configuration(configuration)
+
+    def test_office_configuration_rejects_destructive_directives(self):
+        configuration = self.home / "destructive.xml"
+        cases = (
+            (
+                '<Configuration xmlns="urn:office"><Remove /></Configuration>',
+                "destructive Remove directives",
+            ),
+            (
+                "<Configuration><RemoveMSI /></Configuration>",
+                "destructive RemoveMSI directives",
+            ),
+            (
+                '<Configuration xmlns:odt="urn:office">'
+                '<Add odt:MigrateArch="TrUe" /></Configuration>',
+                "destructive architecture migration",
+            ),
+            (
+                "<Configuration>"
+                '<Property NAME="forceappshutdown" Value="TRUE" />'
+                "</Configuration>",
+                "force running Office applications to close",
+            ),
+        )
+        for payload, message in cases:
+            with self.subTest(message=message):
+                configuration.write_text(payload, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, message):
+                    backend.validate_office_configuration(configuration)
+
+    def test_office_configuration_atomic_delete_removes_unchanged_file(self):
+        configuration = self.home / "unchanged deployment.xml"
+        payload = b"<Configuration />"
+        configuration.write_bytes(payload)
+
+        deleted, preserved = backend.delete_office_configuration_if_unchanged(
+            configuration, hashlib.sha256(payload).hexdigest()
+        )
+
+        self.assertTrue(deleted)
+        self.assertIsNone(preserved)
+        self.assertFalse(configuration.exists())
+        self.assertFalse(
+            list(configuration.parent.glob(
+                f".{configuration.name}.wine4office-preserved-*"
+            ))
+        )
+
+    def test_office_configuration_atomic_delete_restores_changed_file_when_path_is_free(self):
+        configuration = self.home / "changed deployment.xml"
+        approved_payload = b"<Configuration />"
+        changed_payload = b"<Configuration><Display Level=\"Full\" /></Configuration>"
+        configuration.write_bytes(changed_payload)
+
+        deleted, preserved = backend.delete_office_configuration_if_unchanged(
+            configuration, hashlib.sha256(approved_payload).hexdigest()
+        )
+
+        self.assertFalse(deleted)
+        self.assertEqual(preserved, configuration.resolve())
+        self.assertEqual(configuration.read_bytes(), changed_payload)
+        self.assertFalse(
+            list(configuration.parent.glob(
+                f".{configuration.name}.wine4office-preserved-*"
+            ))
+        )
+
+    def test_office_configuration_atomic_delete_preserves_tombstone_beside_replacement(self):
+        configuration = self.home / "replaced deployment.xml"
+        approved_payload = b"<Configuration />"
+        changed_payload = b"<Configuration><Add /></Configuration>"
+        replacement_payload = b"<Configuration><Product /></Configuration>"
+        configuration.write_bytes(changed_payload)
+        real_rename = backend.os.rename
+
+        def rename_and_replace(source, destination):
+            real_rename(source, destination)
+            Path(source).write_bytes(replacement_payload)
+
+        with mock.patch.object(
+            backend.os, "rename", side_effect=rename_and_replace
+        ):
+            deleted, preserved = backend.delete_office_configuration_if_unchanged(
+                configuration, hashlib.sha256(approved_payload).hexdigest()
+            )
+
+        self.assertFalse(deleted)
+        self.assertIsNotNone(preserved)
+        self.assertNotEqual(preserved, configuration.resolve())
+        self.assertEqual(configuration.read_bytes(), replacement_payload)
+        self.assertEqual(preserved.read_bytes(), changed_payload)
+        self.assertEqual(
+            list(configuration.parent.glob(
+                f".{configuration.name}.wine4office-preserved-*"
+            )),
+            [preserved],
+        )
+
+    def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        configuration = self.home / "office deployment.xml"
+        original_payload = b"<Configuration><Add /></Configuration>"
+        changed_payload = b"<Configuration><Display /></Configuration>"
+        configuration.write_bytes(original_payload)
+        odt = self.root / "officedeploymenttool.exe"
+        odt.write_bytes(b"MZ")
+        setup = self.root / "setup.exe"
+        environment = {"WINEPREFIX": str(prefix)}
+        converted_paths = []
+        snapshot_payloads = []
+        odt_url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+
+        def resolve_latest(cancel_event):
+            configuration.write_bytes(changed_payload)
+            return odt_url
+
+        def convert(document, wine, env):
+            path = Path(document)
+            converted_paths.append(path)
+            if path.name == "configuration.xml":
+                snapshot_payloads.append(path.read_bytes())
+                return r"Z:\private configuration.xml"
+            return r"Z:\odt extraction"
+
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", side_effect=resolve_latest
+        ) as resolve, mock.patch.object(
+            backend, "_download_odt", return_value=odt
+        ) as download, mock.patch.object(
+            backend, "wine_environment", return_value=environment
+        ), mock.patch.object(
+            backend, "_windows_document_path", side_effect=convert
+        ), mock.patch.object(
+            backend, "_require_extracted_setup", return_value=setup
+        ) as require_setup, mock.patch.object(
+            backend, "_stream_command"
+        ) as stream:
+            result = backend.install_office_with_odt(
+                str(prefix),
+                str(self.wine),
+                configuration,
+                lambda line: None,
+                configuration_payload=original_payload,
+            )
+
+        self.assertEqual(result, "Office installation completed successfully.")
+        resolve.assert_called_once_with(None)
+        download.assert_called_once_with(odt_url, mock.ANY, None)
+        self.assertEqual(len(stream.call_args_list), 2)
+        extraction_directory = stream.call_args_list[0].kwargs["cwd"]
+        self.assertEqual(
+            stream.call_args_list[0].args[:3],
+            (
+                [
+                    str(self.wine),
+                    str(odt),
+                    "/quiet",
+                    r"/extract:Z:\odt extraction",
+                ],
+                environment,
+                mock.ANY,
+            ),
+        )
+        require_setup.assert_called_once_with(extraction_directory)
+        self.assertEqual(
+            stream.call_args_list[1].args[:3],
+            (
+                [
+                    str(self.wine),
+                    str(setup),
+                    "/configure",
+                    r"Z:\private configuration.xml",
+                ],
+                environment,
+                mock.ANY,
+            ),
+        )
+        self.assertEqual(stream.call_args_list[1].kwargs["cwd"], extraction_directory)
+        self.assertEqual(converted_paths[0], extraction_directory)
+        self.assertEqual(converted_paths[1].name, "configuration.xml")
+        self.assertEqual(converted_paths[1].parent, extraction_directory.parent)
+        self.assertNotEqual(converted_paths[1], configuration.resolve())
+        self.assertEqual(snapshot_payloads, [original_payload])
+        self.assertTrue(configuration.is_file())
+        self.assertEqual(configuration.read_bytes(), changed_payload)
+        self.assertFalse(odt.exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,13 +6,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QCloseEvent, QFont, QIcon, QTextCursor
+from PySide6.QtCore import QSize, QTimer, Qt, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QFont, QIcon, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
     QCommandLinkButton,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -60,6 +61,7 @@ class ManagerWindow(QMainWindow):
         self.reported_update_error = ""
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
+        self.pending_odt_xml: tuple[Path, bytes, str] | None = None
 
         self.setWindowTitle("Wine4OfficeManager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
@@ -104,6 +106,7 @@ class ManagerWindow(QMainWindow):
 
         sections = [
             ("Environment", QStyle.StandardPixmap.SP_DriveHDIcon, self._environment_page()),
+            ("Install Office", QStyle.StandardPixmap.SP_ArrowDown, self._office_install_page()),
             ("Applications", QStyle.StandardPixmap.SP_FileDialogListView, self._applications_page()),
             ("Wine tools", QStyle.StandardPixmap.SP_ComputerIcon, self._tools_page()),
             ("Maintenance", QStyle.StandardPixmap.SP_BrowserReload, self._maintenance_page()),
@@ -216,6 +219,13 @@ class ManagerWindow(QMainWindow):
         self.arguments_edit.setPlaceholderText('Example: /configure "/home/user/office.xml"')
         self.arguments_edit.setAccessibleName("Executable arguments")
         installer_form.addRow("Arguments:", self.arguments_edit)
+        self.working_directory_edit = QLineEdit()
+        self.working_directory_edit.setPlaceholderText("Optional; defaults to the executable's folder")
+        self.working_directory_edit.setAccessibleName("Windows executable working folder")
+        installer_form.addRow(
+            "Working folder:",
+            self._path_row(self.working_directory_edit, self.browse_working_directory, True),
+        )
         installer_layout.addLayout(installer_form)
         installer_buttons = QHBoxLayout()
         installer_buttons.addStretch()
@@ -229,6 +239,211 @@ class ManagerWindow(QMainWindow):
         layout.addWidget(installer)
         layout.addStretch()
         return page
+
+    def _office_install_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Install Microsoft Office",
+            "Install a supported 64-bit Office product with Microsoft's Office Deployment Tool.",
+        )
+        installer = QGroupBox("Office Deployment Tool")
+        installer_layout = QVBoxLayout(installer)
+        explanation = QLabel(
+            "Choose one product and one or more Office languages. The deployment tool and Office "
+            "files download only after you click an install button."
+        )
+        explanation.setWordWrap(True)
+        installer_layout.addWidget(explanation)
+
+        form = self._form()
+        self.office_product_combo = QComboBox()
+        self.office_product_combo.setAccessibleName("Office product")
+        for product in backend.OFFICE_PRODUCTS:
+            self.office_product_combo.addItem(product["label"], product)
+        self.office_product_combo.currentIndexChanged.connect(self.update_office_product_details)
+        form.addRow("Product:", self.office_product_combo)
+
+        self.office_languages_edit = QLineEdit()
+        self.office_languages_edit.setText("en-US")
+        self.office_languages_edit.setPlaceholderText("Example: en-US, de-DE")
+        self.office_languages_edit.setAccessibleName("Office installation languages")
+        form.addRow("Languages:", self.office_languages_edit)
+        installer_layout.addLayout(form)
+
+        self.office_product_details = QLabel()
+        self.office_product_details.setWordWrap(True)
+        self.office_product_details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        installer_layout.addWidget(self.office_product_details)
+        self.update_office_product_details()
+
+        language_hint = QLabel(
+            "Enter supported language tags separated by commas, semicolons, or spaces. "
+            "The first language becomes the primary Office language."
+        )
+        language_hint.setWordWrap(True)
+        installer_layout.addWidget(language_hint)
+
+        customization = QCommandLinkButton(
+            "Create a custom configuration",
+            "Open Microsoft's Office Customization Tool, then export its deployment XML.",
+        )
+        customization.setAccessibleName("Open Microsoft Office Customization Tool")
+        customization.clicked.connect(self.open_office_customization)
+        installer_layout.addWidget(customization)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(self._action_button(
+            "Install from custom XML…", self.install_office_from_custom_xml,
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+        ))
+        buttons.addWidget(self._action_button(
+            "Generate XML and install…", self.install_office_from_generated_xml,
+            QStyle.StandardPixmap.SP_ArrowDown,
+        ))
+        installer_layout.addLayout(buttons)
+        layout.addWidget(installer)
+        layout.addStretch()
+        return page
+
+    def update_office_product_details(self) -> None:
+        product = self.office_product_combo.currentData()
+        if not product:
+            self.office_product_details.setText("No supported Office products are available.")
+            return
+        self.office_product_details.setText(
+            f"Deployment product: {product['product_id']} · Update channel: {product['channel']}"
+        )
+
+    def open_office_customization(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(backend.OFFICE_CUSTOMIZATION_URL)):
+            self.show_error(
+                f"Could not open the Office Customization Tool:\n{backend.OFFICE_CUSTOMIZATION_URL}"
+            )
+
+    def install_office_from_generated_xml(self) -> None:
+        if not self.ensure_idle():
+            return
+        product = self.office_product_combo.currentData()
+        if not product:
+            self.show_error("Choose a supported Office product first.")
+            return
+        try:
+            languages = backend.validate_office_languages(self.office_languages_edit.text())
+            xml = backend.build_office_configuration(product["product_id"], languages)
+        except Exception as error:
+            self.show_error(error)
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Office deployment configuration",
+            str(Path.home() / "office-deployment.xml"),
+            "Office deployment XML (*.xml);;All files (*)",
+        )
+        if not filename:
+            return
+        config_path = Path(filename)
+        try:
+            config_path.write_text(xml, encoding="utf-8")
+        except Exception as error:
+            self.show_error(f"Could not save the Office deployment configuration:\n{error}")
+            return
+        self._start_office_install(config_path)
+
+    def install_office_from_custom_xml(self) -> None:
+        if not self.ensure_idle():
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose an Office deployment configuration",
+            str(Path.home()),
+            "Office deployment XML (*.xml);;All files (*)",
+        )
+        if filename:
+            self._start_office_install(Path(filename))
+
+    def _start_office_install(self, config_path: Path) -> None:
+        try:
+            validated_path, configuration_payload, config_digest = (
+                backend.load_office_configuration(config_path)
+            )
+        except Exception as error:
+            self.show_error(error)
+            return
+        config = self.save_config()
+        if not config:
+            return
+        try:
+            self.state.start_task(
+                "odt-install",
+                lambda payload=configuration_payload: backend.install_office_with_odt(
+                    config["prefix"],
+                    config["wine"],
+                    validated_path,
+                    self.state.output,
+                    cancel_event=self.state.cancel_event,
+                    process_callback=self.state.set_process,
+                    configuration_payload=payload,
+                ),
+            )
+            self.pending_odt_xml = (validated_path, configuration_payload, config_digest)
+            self.pages.setCurrentIndex(4)
+            self.navigation.setCurrentRow(4)
+            self.notify("Office installation started.")
+            self.refresh_state()
+        except Exception as error:
+            self.show_error(error)
+
+    def prompt_office_xml_cleanup(self, config_path: Path, expected_digest: str) -> None:
+        def configuration_is_unchanged() -> bool:
+            try:
+                return backend.office_configuration_digest(config_path) == expected_digest
+            except Exception:
+                return False
+
+        if not configuration_is_unchanged():
+            QMessageBox.information(
+                self,
+                "Deployment configuration changed",
+                f"The original deployment configuration is missing, invalid, or changed:\n"
+                f"{config_path}\n\nIt will not be deleted.",
+            )
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Office installation completed")
+        dialog.setText(f"Keep the deployment configuration?\n{config_path}")
+        dialog.setInformativeText(
+            "Keeping the XML is the safe choice and allows you to reuse or inspect the exact configuration."
+        )
+        keep_button = dialog.addButton("Keep", QMessageBox.ButtonRole.AcceptRole)
+        delete_button = dialog.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        dialog.setDefaultButton(keep_button)
+        dialog.setEscapeButton(keep_button)
+        dialog.exec()
+        if dialog.clickedButton() is not delete_button:
+            self.notify("Office deployment XML kept.")
+            return
+        try:
+            deleted, preserved_path = backend.delete_office_configuration_if_unchanged(
+                config_path, expected_digest
+            )
+        except Exception as error:
+            self.show_error(f"Could not safely delete the Office deployment XML:\n{error}")
+            return
+        if deleted:
+            self.notify("Office deployment XML deleted.")
+            return
+        if preserved_path is None:
+            location = f"No recoverable configuration remains at:\n{config_path}"
+        else:
+            location = f"The configuration was safely preserved at:\n{preserved_path}"
+        QMessageBox.warning(
+            self,
+            "Deployment configuration not deleted",
+            f"The XML changed or could not be safely removed, so no further deletion was attempted.\n\n"
+            f"{location}",
+        )
 
     def _applications_page(self) -> QWidget:
         page, layout = self._new_page(
@@ -490,8 +705,8 @@ class ManagerWindow(QMainWindow):
                 backend.validate_environment_deletion(old_prefix, values["prefix"])
             self.pending_environment_transition = True
             self.state.start_environment_transition(values, initialize, delete_old)
-            self.pages.setCurrentIndex(3)
-            self.navigation.setCurrentRow(3)
+            self.pages.setCurrentIndex(4)
+            self.navigation.setCurrentRow(4)
             self.notify("Wine environment transition started.")
             self.refresh_state()
         except Exception as error:
@@ -542,8 +757,8 @@ class ManagerWindow(QMainWindow):
                 "environment",
                 lambda: backend.create_environment(config["prefix"], config["wine"], recreate, self.state.output),
             )
-            self.pages.setCurrentIndex(3)
-            self.navigation.setCurrentRow(3)
+            self.pages.setCurrentIndex(4)
+            self.navigation.setCurrentRow(4)
             self.notify("Environment operation started.")
             self.refresh_state()
         except Exception as error:
@@ -627,8 +842,10 @@ class ManagerWindow(QMainWindow):
             self.show_error("Choose a local .exe file first.")
             return
         try:
-            pid = backend.launch_executable(config["prefix"], config["wine"], executable,
-                                            self.arguments_edit.text())
+            pid = backend.launch_executable(
+                config["prefix"], config["wine"], executable, self.arguments_edit.text(),
+                working_directory=self.working_directory_edit.text().strip() or None,
+            )
             self.notify(f"Executable started (PID {pid}).")
         except Exception as error:
             self.show_error(error)
@@ -649,6 +866,15 @@ class ManagerWindow(QMainWindow):
         )
         if filename:
             self.exe_edit.setText(filename)
+
+    def browse_working_directory(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Choose executable working folder",
+            self.working_directory_edit.text() or str(Path.home()),
+        )
+        if directory:
+            self.working_directory_edit.setText(directory)
 
     def browse_prefix(self) -> None:
         directory = QFileDialog.getExistingDirectory(
@@ -817,6 +1043,16 @@ class ManagerWindow(QMainWindow):
             self.handled_offer_id = offer["id"]
             QTimer.singleShot(0, lambda current=offer: self.prompt_update_offer(current))
         task = snapshot["task"]
+        if (self.pending_odt_xml is not None
+                and task["kind"] == "odt-install" and not task["running"]):
+            config_path, _configuration_payload, expected_digest = self.pending_odt_xml
+            self.pending_odt_xml = None
+            if task["status"] == "completed":
+                QTimer.singleShot(
+                    0,
+                    lambda current=config_path, digest=expected_digest:
+                    self.prompt_office_xml_cleanup(current, digest),
+                )
         self.task_label.setText(f"{task['kind']}: running" if task["running"] else task["status"].capitalize())
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])

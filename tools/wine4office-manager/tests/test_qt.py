@@ -92,7 +92,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertIsInstance(self.window.navigation, QListWidget)
         self.assertIsInstance(self.window.pages, QStackedWidget)
         self.assertIsInstance(self.window.app_tree, QTreeWidget)
-        self.assertEqual(self.window.navigation.count(), 4)
+        self.assertEqual(self.window.navigation.count(), 5)
 
     def test_selected_rows_are_used_for_shortcut_actions(self):
         self.window.app_items["excel"].setSelected(True)
@@ -405,6 +405,301 @@ class QtManagerTests(unittest.TestCase):
             self.application.processEvents()
             automatic_close.assert_called_once_with()
             update_prompt.assert_not_called()
+
+    def test_office_install_page_defaults_and_product_metadata(self):
+        self.assertEqual(self.window.office_languages_edit.text(), "en-US")
+        self.assertEqual(
+            self.window.office_product_combo.count(),
+            len(backend.OFFICE_PRODUCTS),
+        )
+
+        for index, product in enumerate(backend.OFFICE_PRODUCTS):
+            with self.subTest(product_id=product["product_id"]):
+                self.assertEqual(
+                    self.window.office_product_combo.itemText(index),
+                    product["label"],
+                )
+                self.assertEqual(
+                    self.window.office_product_combo.itemData(index),
+                    product,
+                )
+                self.window.office_product_combo.setCurrentIndex(index)
+                details = self.window.office_product_details.text()
+                self.assertIn(product["product_id"], details)
+                self.assertIn(product["channel"], details)
+
+    def test_generated_office_install_waits_for_save_selection(self):
+        configuration = self.home / "generated deployment.xml"
+        generated_xml = "<Configuration><Add /></Configuration>\n"
+        configuration_payload = generated_xml.encode("utf-8")
+        config_digest = "a" * 64
+
+        with mock.patch.object(
+            qt_module.QFileDialog,
+            "getSaveFileName",
+            side_effect=[("", ""), (str(configuration), "Office deployment XML (*.xml)")],
+        ), mock.patch.object(
+            backend, "validate_office_languages", return_value=["en-us"]
+        ) as validate_languages, mock.patch.object(
+            backend, "build_office_configuration", return_value=generated_xml
+        ) as build, mock.patch.object(
+            backend,
+            "load_office_configuration",
+            return_value=(
+                configuration.resolve(),
+                configuration_payload,
+                config_digest,
+            ),
+        ) as load, mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            self.state, "start_task"
+        ) as start:
+            self.window.install_office_from_generated_xml()
+            start.assert_not_called()
+            load.assert_not_called()
+            self.assertFalse(configuration.exists())
+
+            self.window.install_office_from_generated_xml()
+
+        validate_languages.assert_called_with("en-US")
+        load.assert_called_once_with(configuration)
+        build.assert_called_with("O365ProPlusRetail", ["en-us"])
+        self.assertEqual(configuration.read_text(encoding="utf-8"), generated_xml)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0], "odt-install")
+        self.assertEqual(
+            self.window.pending_odt_xml,
+            (configuration.resolve(), configuration_payload, config_digest),
+        )
+
+    def test_custom_office_install_waits_for_open_selection(self):
+        configuration = self.home / "custom deployment.xml"
+        configuration.write_text("<Configuration />", encoding="utf-8")
+        configuration_payload = configuration.read_bytes()
+        changed_payload = b"<Configuration><Display Level=\"Full\" /></Configuration>"
+        config_digest = "b" * 64
+
+        with mock.patch.object(
+            qt_module.QFileDialog,
+            "getOpenFileName",
+            side_effect=[("", ""), (str(configuration), "Office deployment XML (*.xml)")],
+        ), mock.patch.object(
+            backend,
+            "load_office_configuration",
+            return_value=(
+                configuration.resolve(),
+                configuration_payload,
+                config_digest,
+            ),
+        ) as load, mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            backend, "install_office_with_odt", return_value="installed"
+        ) as install, mock.patch.object(
+            self.state, "start_task"
+        ) as start:
+            self.window.install_office_from_custom_xml()
+            start.assert_not_called()
+            load.assert_not_called()
+
+            self.window.install_office_from_custom_xml()
+            configuration.write_bytes(changed_payload)
+            start.call_args.args[1]()
+
+        load.assert_called_once_with(configuration)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0], "odt-install")
+        self.assertEqual(
+            install.call_args.kwargs["configuration_payload"],
+            configuration_payload,
+        )
+        self.assertEqual(install.call_args.args[2], configuration.resolve())
+        self.assertEqual(configuration.read_bytes(), changed_payload)
+        self.assertEqual(
+            self.window.pending_odt_xml,
+            (configuration.resolve(), configuration_payload, config_digest),
+        )
+
+    def test_completed_odt_install_offers_xml_cleanup_once(self):
+        configuration = self.home / "completed deployment.xml"
+        configuration.write_text("<Configuration />", encoding="utf-8")
+        config_digest = "c" * 64
+        self.window.pending_odt_xml = (
+            configuration,
+            configuration.read_bytes(),
+            config_digest,
+        )
+        with self.state.lock:
+            self.state.task = {
+                "running": False,
+                "kind": "odt-install",
+                "status": "completed",
+                "log": "Office installation completed successfully.\n",
+            }
+
+        with mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            self.window, "prompt_office_xml_cleanup"
+        ) as cleanup:
+            self.window.refresh_state()
+            self.window.refresh_state()
+            single_shot.assert_called_once()
+            single_shot.call_args.args[1]()
+
+        cleanup.assert_called_once_with(configuration, config_digest)
+        self.assertIsNone(self.window.pending_odt_xml)
+        self.assertTrue(configuration.exists())
+
+    def test_office_xml_cleanup_defaults_to_keep_and_deletes_only_on_explicit_choice(self):
+        for choice in ("Keep", "Delete"):
+            with self.subTest(choice=choice):
+                configuration = self.home / f"{choice.lower()} deployment.xml"
+                configuration.write_text("<Configuration />", encoding="utf-8")
+                expected_digest = ("a" if choice == "Keep" else "b") * 64
+                dialog = mock.Mock()
+                keep_button = object()
+                delete_button = object()
+                dialog.addButton.side_effect = [keep_button, delete_button]
+                dialog.clickedButton.return_value = (
+                    keep_button if choice == "Keep" else delete_button
+                )
+
+                with mock.patch.object(
+                    backend, "office_configuration_digest", return_value=expected_digest
+                ), mock.patch.object(
+                    backend,
+                    "delete_office_configuration_if_unchanged",
+                    return_value=(True, None),
+                ) as delete, mock.patch.object(
+                    qt_module, "QMessageBox"
+                ) as message_box:
+                    message_box.Icon = QMessageBox.Icon
+                    message_box.ButtonRole = QMessageBox.ButtonRole
+                    message_box.return_value = dialog
+                    self.window.prompt_office_xml_cleanup(
+                        configuration, expected_digest
+                    )
+
+                self.assertEqual(
+                    dialog.addButton.call_args_list,
+                    [
+                        mock.call("Keep", QMessageBox.ButtonRole.AcceptRole),
+                        mock.call("Delete", QMessageBox.ButtonRole.DestructiveRole),
+                    ],
+                )
+                dialog.setDefaultButton.assert_called_once_with(keep_button)
+                dialog.setEscapeButton.assert_called_once_with(keep_button)
+                dialog.exec.assert_called_once_with()
+                if choice == "Keep":
+                    delete.assert_not_called()
+                else:
+                    delete.assert_called_once_with(configuration, expected_digest)
+                self.assertTrue(configuration.exists())
+
+    def test_office_xml_cleanup_refuses_changed_or_missing_configuration(self):
+        expected_digest = "d" * 64
+        cases = (
+            ("changed", "e" * 64),
+            ("missing", FileNotFoundError("configuration is missing")),
+        )
+        for condition, digest_result in cases:
+            with self.subTest(condition=condition):
+                configuration = self.home / f"{condition} deployment.xml"
+                if condition == "changed":
+                    configuration.write_text("<Configuration />", encoding="utf-8")
+                digest = (
+                    mock.patch.object(
+                        backend,
+                        "office_configuration_digest",
+                        side_effect=digest_result,
+                    )
+                    if isinstance(digest_result, Exception)
+                    else mock.patch.object(
+                        backend,
+                        "office_configuration_digest",
+                        return_value=digest_result,
+                    )
+                )
+
+                with digest, mock.patch.object(
+                    QMessageBox, "information"
+                ) as information, mock.patch.object(
+                    backend, "delete_office_configuration_if_unchanged"
+                ) as delete:
+                    self.window.prompt_office_xml_cleanup(
+                        configuration, expected_digest
+                    )
+
+                information.assert_called_once()
+                self.assertEqual(
+                    information.call_args.args[1],
+                    "Deployment configuration changed",
+                )
+                self.assertIn(
+                    str(configuration),
+                    information.call_args.args[2],
+                )
+                delete.assert_not_called()
+                if condition == "changed":
+                    self.assertTrue(configuration.exists())
+
+    def test_failed_or_cancelled_odt_install_keeps_xml_without_prompt(self):
+        for status in ("failed", "cancelled"):
+            with self.subTest(status=status):
+                configuration = self.home / f"{status} deployment.xml"
+                configuration.write_text("<Configuration />", encoding="utf-8")
+                config_digest = status[0] * 64
+                self.window.pending_odt_xml = (
+                    configuration,
+                    configuration.read_bytes(),
+                    config_digest,
+                )
+                with self.state.lock:
+                    self.state.task = {
+                        "running": False,
+                        "kind": "odt-install",
+                        "status": status,
+                        "log": f"{status}\n",
+                    }
+
+                with mock.patch.object(
+                    qt_module.QTimer, "singleShot"
+                ) as single_shot, mock.patch.object(
+                    self.window, "prompt_office_xml_cleanup"
+                ) as cleanup:
+                    self.window.refresh_state()
+
+                single_shot.assert_not_called()
+                cleanup.assert_not_called()
+                self.assertTrue(configuration.exists())
+                self.assertIsNone(self.window.pending_odt_xml)
+
+    def test_executable_runner_passes_optional_working_directory(self):
+        self.window.exe_edit.setText(str(self.home / "Office Setup.exe"))
+        self.window.arguments_edit.setText("/configure office.xml")
+
+        for working_directory, expected in (
+            (str(self.home / "installer files"), str(self.home / "installer files")),
+            ("", None),
+        ):
+            with self.subTest(working_directory=working_directory):
+                self.window.working_directory_edit.setText(working_directory)
+                with mock.patch.object(
+                    self.window, "save_config", return_value=dict(self.config)
+                ), mock.patch.object(
+                    backend, "launch_executable", return_value=4321
+                ) as launch:
+                    self.window.run_executable()
+
+                launch.assert_called_once_with(
+                    self.config["prefix"],
+                    self.config["wine"],
+                    str(self.home / "Office Setup.exe"),
+                    "/configure office.xml",
+                    working_directory=expected,
+                )
 
 
 if __name__ == "__main__":

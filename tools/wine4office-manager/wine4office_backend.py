@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import stat
 import struct
 import ssl
 import tarfile
@@ -22,6 +24,7 @@ import uuid
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
+import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
@@ -64,6 +67,50 @@ APP_META = {
         "mime": "",
     },
 }
+
+OFFICE_CUSTOMIZATION_URL = "https://config.office.com/deploymentsettings"
+OFFICE_PRODUCTS = (
+    {
+        "label": "Microsoft 365 Apps for enterprise",
+        "product_id": "O365ProPlusRetail",
+        "channel": "Current",
+    },
+    {
+        "label": "Microsoft 365 Apps for business",
+        "product_id": "O365BusinessRetail",
+        "channel": "Current",
+    },
+    {
+        "label": "Office LTSC Professional Plus 2024",
+        "product_id": "ProPlus2024Volume",
+        "channel": "PerpetualVL2024",
+    },
+    {
+        "label": "Office LTSC Standard 2024",
+        "product_id": "Standard2024Volume",
+        "channel": "PerpetualVL2024",
+    },
+)
+
+_OFFICE_PRODUCT_BY_ID = {record["product_id"]: record for record in OFFICE_PRODUCTS}
+_OFFICE_LANGUAGE_IDS = frozenset({
+    "ar-sa", "bg-bg", "zh-cn", "zh-tw", "hr-hr", "cs-cz", "da-dk", "nl-nl",
+    "en-us", "et-ee", "fi-fi", "fr-fr", "de-de", "el-gr", "he-il", "hi-in",
+    "hu-hu", "id-id", "it-it", "ja-jp", "kk-kz", "ko-kr", "lv-lv", "lt-lt",
+    "ms-my", "nb-no", "pl-pl", "pt-br", "pt-pt", "ro-ro", "ru-ru",
+    "sr-latn-rs", "sk-sk", "sl-si", "es-es", "sv-se", "th-th", "tr-tr",
+    "uk-ua", "vi-vn",
+})
+_ODT_DOWNLOAD_PAGE = "https://www.microsoft.com/en-us/download/details.aspx?id=49117"
+_ODT_PAGE_HOSTS = frozenset({"www.microsoft.com"})
+_ODT_DOWNLOAD_HOSTS = frozenset({"download.microsoft.com"})
+_ODT_LINK_PATTERN = re.compile(
+    r"/officedeploymenttool_[0-9]{4,6}-[0-9]{4,6}\.exe$", re.IGNORECASE
+)
+MAX_OFFICE_XML_SIZE = 1024 * 1024
+MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
+MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
+MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
 
 TOOL_META = {
     "winecfg": ("winecfg", []),
@@ -680,7 +727,8 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
 
 
 def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
-                      arguments: str | Iterable[str] = ()) -> int:
+                      arguments: str | Iterable[str] = (),
+                      working_directory: PathValue | None = None) -> int:
     prefix = validate_prefix(prefix_value)
     if not (prefix / "system.reg").is_file():
         raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
@@ -690,9 +738,17 @@ def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
         raise FileNotFoundError(f"Windows executable was not found: {executable}")
     if executable.suffix.lower() != ".exe":
         raise ValueError("Only .exe files can be launched from this control.")
+    cwd = executable.parent
+    if working_directory is not None:
+        raw_directory = (working_directory.strip() if isinstance(working_directory, str)
+                         else os.fspath(working_directory))
+        if raw_directory:
+            cwd = normalize_path(raw_directory)
+            if not cwd.is_dir():
+                raise NotADirectoryError(f"Working directory was not found: {cwd}")
     parsed_arguments = shlex.split(arguments) if isinstance(arguments, str) else list(arguments)
     process = subprocess.Popen([str(wine), str(executable), *parsed_arguments],
-                               env=wine_environment(prefix, wine),
+                               cwd=cwd, env=wine_environment(prefix, wine),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     return process.pid
@@ -1195,6 +1251,492 @@ def _atomic_write_bytes(path: Path, value: bytes, mode: int = 0o644) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+def _validate_office_language_list(values: Iterable[str]) -> list[str]:
+    languages: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("Office language identifiers must be text.")
+        language = value.strip().lower()
+        if not language or language not in _OFFICE_LANGUAGE_IDS:
+            raise ValueError(f"Unsupported Office language identifier: {value!r}")
+        if language in seen:
+            raise ValueError(f"Duplicate Office language identifier: {value!r}")
+        seen.add(language)
+        languages.append(language)
+    if not languages:
+        raise ValueError("Enter at least one Office language identifier.")
+    return languages
+
+
+def validate_office_languages(value) -> list[str]:
+    """Parse Office language identifiers separated by commas, semicolons, or whitespace."""
+    if not isinstance(value, str):
+        raise ValueError("Office languages must be a separated text value.")
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("Enter at least one Office language identifier.")
+    if len(value) > 512:
+        raise ValueError("The Office language list is too long.")
+    return _validate_office_language_list(re.split(r"[,;\s]+", stripped))
+
+
+def build_office_configuration(product_id, languages) -> str:
+    """Build a deterministic 64-bit Office Deployment Tool configuration."""
+    if not isinstance(product_id, str) or product_id not in _OFFICE_PRODUCT_BY_ID:
+        raise ValueError(f"Unsupported Office product: {product_id!r}")
+    if isinstance(languages, str):
+        validated_languages = validate_office_languages(languages)
+    else:
+        try:
+            validated_languages = _validate_office_language_list(languages)
+        except TypeError as error:
+            raise ValueError("Office languages must be an iterable of identifiers.") from error
+    product = _OFFICE_PRODUCT_BY_ID[product_id]
+    lines = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        "<Configuration>",
+        f'  <Add OfficeClientEdition="64" Channel="{product["channel"]}">',
+        f'    <Product ID="{product["product_id"]}">',
+    ]
+    lines.extend(f'      <Language ID="{language}" />' for language in validated_languages)
+    lines.extend([
+        "    </Product>",
+        "  </Add>",
+        '  <Display Level="Full" />',
+        "</Configuration>",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _xml_local_name(name: str) -> str:
+    return name.rsplit("}", 1)[-1]
+
+
+def _validate_office_configuration_payload(payload: bytes) -> None:
+    if not isinstance(payload, bytes):
+        raise ValueError("Office configuration payload must be immutable bytes.")
+    if not payload:
+        raise ValueError("Office configuration XML is empty.")
+    if len(payload) > MAX_OFFICE_XML_SIZE:
+        raise ValueError("Office configuration XML is larger than 1 MiB.")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("Office configuration XML must be UTF-8.") from error
+    upper_text = text.upper()
+    if "<!DOCTYPE" in upper_text or "<!ENTITY" in upper_text:
+        raise ValueError("Office configuration XML cannot contain a document type or entities.")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as error:
+        raise ValueError("Office configuration XML is malformed.") from error
+    if _xml_local_name(root.tag) != "Configuration":
+        raise ValueError("Office configuration XML root must be Configuration.")
+    stack = [(root, 1)]
+    element_count = 0
+    while stack:
+        element, depth = stack.pop()
+        element_count += 1
+        if element_count > 10_000:
+            raise ValueError("Office configuration XML contains too many elements.")
+        if depth > 64:
+            raise ValueError("Office configuration XML is nested too deeply.")
+        local_name = _xml_local_name(element.tag)
+        folded_local_name = local_name.casefold()
+        attributes = {
+            _xml_local_name(name).casefold(): value.strip()
+            for name, value in element.attrib.items()
+        }
+        if folded_local_name in {"remove", "removemsi"}:
+            raise ValueError(
+                f"Office configuration XML cannot contain destructive {local_name} directives."
+            )
+        if (folded_local_name == "add"
+                and attributes.get("migratearch", "").casefold() == "true"):
+            raise ValueError(
+                "Office configuration XML cannot enable destructive architecture migration."
+            )
+        if (folded_local_name == "property"
+                and attributes.get("name", "").casefold() == "forceappshutdown"
+                and attributes.get("value", "").casefold() == "true"):
+            raise ValueError(
+                "Office configuration XML cannot force running Office applications to close."
+            )
+        stack.extend((child, depth + 1) for child in element)
+
+
+def load_office_configuration(path) -> tuple[Path, bytes, str]:
+    """Read and validate an Office Configuration once, returning immutable bytes."""
+    configuration = normalize_path(path)
+    if not configuration.is_file():
+        raise FileNotFoundError(f"Office configuration XML was not found: {configuration}")
+    size = configuration.stat().st_size
+    if size <= 0:
+        raise ValueError("Office configuration XML is empty.")
+    if size > MAX_OFFICE_XML_SIZE:
+        raise ValueError("Office configuration XML is larger than 1 MiB.")
+    with configuration.open("rb") as source:
+        payload = source.read(MAX_OFFICE_XML_SIZE + 1)
+    _validate_office_configuration_payload(payload)
+    return configuration, payload, hashlib.sha256(payload).hexdigest()
+
+
+def validate_office_configuration(path) -> Path:
+    """Validate a bounded, non-destructive ODT Configuration without changing it."""
+    configuration, _, _ = load_office_configuration(path)
+    return configuration
+
+
+def office_configuration_digest(path) -> str:
+    """Return the SHA-256 digest of a validated Office Configuration document."""
+    _, _, digest = load_office_configuration(path)
+    return digest
+
+
+def _restore_office_configuration_tombstone(tombstone: Path,
+                                             configuration: Path) -> Path | None:
+    try:
+        os.link(tombstone, configuration, follow_symlinks=False)
+    except OSError:
+        if os.path.lexists(tombstone):
+            return tombstone
+        return configuration if os.path.lexists(configuration) else None
+    try:
+        os.unlink(tombstone)
+    except OSError:
+        return tombstone
+    return configuration
+
+
+def delete_office_configuration_if_unchanged(path, digest) -> tuple[bool, Path | None]:
+    """Atomically isolate and delete only the exact configuration the user approved."""
+    try:
+        raw_path = path.strip() if isinstance(path, str) else os.fspath(path)
+        if not raw_path:
+            return False, None
+        expanded = os.path.expandvars(raw_path)
+        configuration = Path(os.path.abspath(Path(expanded).expanduser()))
+    except (TypeError, ValueError, OSError):
+        return False, None
+    try:
+        initial_stat = os.lstat(configuration)
+    except FileNotFoundError:
+        return False, None
+    except OSError:
+        return False, configuration
+    if not stat.S_ISREG(initial_stat.st_mode):
+        return False, configuration
+    if (not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None):
+        return False, configuration
+    tombstone = configuration.with_name(
+        f".{configuration.name}.wine4office-preserved-{uuid.uuid4().hex}"
+    )
+    try:
+        os.rename(configuration, tombstone)
+    except OSError:
+        return False, configuration if os.path.lexists(configuration) else None
+
+    file_descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        file_descriptor = os.open(tombstone, flags)
+        moved_stat = os.fstat(file_descriptor)
+        if (not stat.S_ISREG(moved_stat.st_mode)
+                or moved_stat.st_size <= 0
+                or moved_stat.st_size > MAX_OFFICE_XML_SIZE):
+            preserved = _restore_office_configuration_tombstone(
+                tombstone, configuration
+            )
+            return False, preserved
+        calculated = hashlib.sha256()
+        read_size = 0
+        while True:
+            chunk = os.read(file_descriptor, min(64 * 1024, MAX_OFFICE_XML_SIZE - read_size + 1))
+            if not chunk:
+                break
+            read_size += len(chunk)
+            if read_size > MAX_OFFICE_XML_SIZE:
+                preserved = _restore_office_configuration_tombstone(
+                    tombstone, configuration
+                )
+                return False, preserved
+            calculated.update(chunk)
+        current_stat = os.lstat(tombstone)
+        if ((current_stat.st_dev, current_stat.st_ino)
+                != (moved_stat.st_dev, moved_stat.st_ino)):
+            return False, tombstone if os.path.lexists(tombstone) else None
+        if calculated.hexdigest().lower() != digest.lower():
+            preserved = _restore_office_configuration_tombstone(
+                tombstone, configuration
+            )
+            return False, preserved
+        try:
+            os.unlink(tombstone)
+        except OSError:
+            return False, tombstone
+        return True, None
+    except OSError:
+        preserved = _restore_office_configuration_tombstone(tombstone, configuration)
+        return False, preserved
+    finally:
+        if file_descriptor is not None:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+
+
+def _trusted_microsoft_url(value: str, hosts: frozenset[str], description: str) -> str:
+    value = _https_url(value, description)
+    parsed = urllib.parse.urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"{description} has an invalid port.") from error
+    if parsed.hostname is None or parsed.hostname.lower() not in hosts or port not in (None, 443):
+        raise ValueError(f"{description} is not on a trusted Microsoft host.")
+    return value
+
+
+class _MicrosoftRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, hosts: frozenset[str]):
+        super().__init__()
+        self._hosts = hosts
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        _trusted_microsoft_url(new_url, self._hosts, "Microsoft redirect address")
+        return super().redirect_request(
+            request, file_pointer, code, message, headers, new_url
+        )
+
+
+def _microsoft_opener(hosts: frozenset[str]):
+    return urllib.request.build_opener(
+        _MicrosoftRedirectHandler(hosts),
+        urllib.request.HTTPSHandler(context=_https_context()),
+    )
+
+
+class _OdtLinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != "a":
+            return
+        for name, value in attrs:
+            if name.lower() == "href" and isinstance(value, str):
+                self.links.append(value)
+
+
+def _read_bounded_response(response, maximum: int, description: str,
+                           cancel_event=None) -> bytes:
+    headers = getattr(response, "headers", None)
+    declared_size = headers.get("Content-Length") if headers is not None else None
+    if declared_size is not None:
+        try:
+            declared_size = int(declared_size)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{description} has an invalid Content-Length.") from error
+        if declared_size < 0 or declared_size > maximum:
+            raise ValueError(f"{description} is larger than the allowed limit.")
+    payload = bytearray()
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        chunk = response.read(min(1024 * 1024, maximum - len(payload) + 1))
+        if not chunk:
+            break
+        payload.extend(chunk)
+        if len(payload) > maximum:
+            raise ValueError(f"{description} is larger than the allowed limit.")
+    if declared_size is not None and len(payload) != declared_size:
+        raise ValueError(f"{description} size does not match Content-Length.")
+    return bytes(payload)
+
+def _copy_bounded_response(response, target, maximum: int, description: str,
+                           cancel_event=None) -> tuple[int, bytes]:
+    headers = getattr(response, "headers", None)
+    declared_size = headers.get("Content-Length") if headers is not None else None
+    if declared_size is not None:
+        try:
+            declared_size = int(declared_size)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{description} has an invalid Content-Length.") from error
+        if declared_size < 0 or declared_size > maximum:
+            raise ValueError(f"{description} is larger than the allowed limit.")
+    downloaded = 0
+    signature = bytearray()
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        chunk = response.read(min(1024 * 1024, maximum - downloaded + 1))
+        if not chunk:
+            break
+        downloaded += len(chunk)
+        if downloaded > maximum:
+            raise ValueError(f"{description} is larger than the allowed limit.")
+        if len(signature) < 2:
+            signature.extend(chunk[:2 - len(signature)])
+        target.write(chunk)
+    if declared_size is not None and downloaded != declared_size:
+        raise ValueError(f"{description} size does not match Content-Length.")
+    return downloaded, bytes(signature)
+
+
+def _resolve_latest_odt_url(cancel_event=None) -> str:
+    page_url = _trusted_microsoft_url(
+        _ODT_DOWNLOAD_PAGE, _ODT_PAGE_HOSTS, "Office Deployment Tool page"
+    )
+    request = urllib.request.Request(
+        page_url, headers={"User-Agent": "Wine4OfficeManager/1"}
+    )
+    with _microsoft_opener(_ODT_PAGE_HOSTS).open(request, timeout=30) as response:
+        final_page_url = response.geturl() if hasattr(response, "geturl") else page_url
+        final_page_url = _trusted_microsoft_url(
+            final_page_url, _ODT_PAGE_HOSTS, "Final Office Deployment Tool page"
+        )
+        payload = _read_bounded_response(
+            response, MAX_ODT_PAGE_SIZE, "Office Deployment Tool page", cancel_event
+        )
+    try:
+        page = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("Office Deployment Tool page is not valid UTF-8.") from error
+    parser = _OdtLinkParser()
+    try:
+        parser.feed(page)
+        parser.close()
+    except Exception as error:
+        raise ValueError("Office Deployment Tool page contains malformed HTML.") from error
+    candidates: set[str] = set()
+    for link in parser.links:
+        candidate = urllib.parse.urljoin(final_page_url, link)
+        try:
+            candidate = _trusted_microsoft_url(
+                candidate, _ODT_DOWNLOAD_HOSTS, "Office Deployment Tool download"
+            )
+        except ValueError:
+            continue
+        if _ODT_LINK_PATTERN.search(urllib.parse.urlparse(candidate).path):
+            candidates.add(candidate)
+    if len(candidates) != 1:
+        raise ValueError(
+            "Microsoft's Office Deployment Tool page did not contain one trusted download."
+        )
+    return candidates.pop()
+
+
+
+
+def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
+    url = _trusted_microsoft_url(url, _ODT_DOWNLOAD_HOSTS, "Office Deployment Tool download")
+    download_dir = cache_home() / "wine4office/odt"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    destination = download_dir / f"officedeploymenttool-{uuid.uuid4().hex}.exe"
+    request = urllib.request.Request(url, headers={"User-Agent": "Wine4OfficeManager/1"})
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "wb", dir=download_dir, prefix=".officedeploymenttool-",
+                suffix=".part", delete=False) as target:
+            temporary_path = Path(target.name)
+            output(f"Downloading Office Deployment Tool from {url}")
+            with _microsoft_opener(_ODT_DOWNLOAD_HOSTS).open(
+                    request, timeout=60) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                _trusted_microsoft_url(
+                    final_url, _ODT_DOWNLOAD_HOSTS, "Final Office Deployment Tool download"
+                )
+                downloaded, signature = _copy_bounded_response(
+                    response, target, MAX_ODT_DOWNLOAD_SIZE,
+                    "Office Deployment Tool download", cancel_event,
+                )
+            if downloaded < 1024 or signature != b"MZ":
+                raise ValueError("Office Deployment Tool download is not a valid Windows executable.")
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = None
+        return destination
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _require_extracted_setup(path: Path) -> Path:
+    candidates = (path / "setup.exe", path / "Setup.exe")
+    for candidate in candidates:
+        try:
+            size = candidate.stat().st_size
+            if candidate.is_file() and 1024 <= size <= MAX_ODT_SETUP_SIZE:
+                with candidate.open("rb") as source:
+                    if source.read(2) == b"MZ":
+                        return candidate
+        except OSError:
+            continue
+    raise FileNotFoundError("Office Deployment Tool did not extract a valid setup.exe.")
+
+
+def install_office_with_odt(prefix, wine, config_path, output,
+                            cancel_event=None, process_callback=None, *,
+                            configuration_payload=None) -> str:
+    """Snapshot configuration, fetch current ODT, then run setup /configure."""
+    prefix_path = validate_prefix(prefix)
+    if not (prefix_path / "system.reg").is_file():
+        raise FileNotFoundError(f"Wine environment is not initialized: {prefix_path}")
+    wine_path = require_wine(str(wine))
+    if configuration_payload is None:
+        _, configuration_payload, _ = load_office_configuration(config_path)
+    else:
+        _validate_office_configuration_payload(configuration_payload)
+    environment = wine_environment(prefix_path, wine_path)
+    odt: Path | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="wine4office-odt-") as temporary:
+            work_directory = Path(temporary)
+            configuration_snapshot = work_directory / "configuration.xml"
+            _atomic_write_bytes(configuration_snapshot, configuration_payload, mode=0o400)
+            extraction_directory = work_directory / "extract"
+            extraction_directory.mkdir(mode=0o700)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.")
+            output("Resolving the latest Office Deployment Tool from Microsoft.")
+            odt_url = _resolve_latest_odt_url(cancel_event)
+            odt = _download_odt(odt_url, output, cancel_event)
+            windows_extraction_directory = _windows_document_path(
+                str(extraction_directory), wine_path, environment
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.")
+            output("Extracting the Office Deployment Tool.")
+            _stream_command(
+                [str(wine_path), str(odt), "/quiet",
+                 f"/extract:{windows_extraction_directory}"],
+                environment, output, cwd=extraction_directory,
+                cancel_event=cancel_event, process_callback=process_callback,
+            )
+            setup = _require_extracted_setup(extraction_directory)
+            windows_configuration = _windows_document_path(
+                str(configuration_snapshot), wine_path, environment
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.")
+            output("Installing Office with the selected configuration.")
+            _stream_command(
+                [str(wine_path), str(setup), "/configure", windows_configuration],
+                environment, output, cwd=extraction_directory,
+                cancel_event=cancel_event, process_callback=process_callback,
+            )
+    finally:
+        if odt is not None:
+            odt.unlink(missing_ok=True)
+    return "Office installation completed successfully."
 
 
 def persist_metadata_url(metadata_url: str) -> str:
