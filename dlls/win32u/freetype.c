@@ -3878,6 +3878,11 @@ static UINT freetype_get_kerning_pairs( struct gdi_font *font, KERNINGPAIR **pai
     return count;
 }
 
+static UINT freetype_get_default_aa_flags(void)
+{
+    return default_aa_flags;
+}
+
 static const struct font_backend_funcs font_funcs =
 {
     freetype_load_fonts,
@@ -3887,6 +3892,7 @@ static const struct font_backend_funcs font_funcs =
     freetype_load_font,
     freetype_get_font_data,
     freetype_get_aa_flags,
+    freetype_get_default_aa_flags,
     freetype_get_glyph_index,
     freetype_get_default_glyph,
     freetype_get_glyph_outline,

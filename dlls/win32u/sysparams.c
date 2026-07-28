@@ -5878,6 +5878,7 @@ void sysparams_init(void)
     WCHAR buffer[MAX_PATH+16], *p, *appname;
     char *app_compat_flags = NULL;
     DWORD i, dispos, dpi_scaling;
+    UINT font_smoothing, font_smoothing_type, font_smoothing_orientation;
     WCHAR layout[KL_NAMELENGTH];
     pthread_mutexattr_t attr;
     HKEY hkey, appkey = 0;
@@ -5931,6 +5932,12 @@ void sysparams_init(void)
 
     /* FIXME: what do the DpiScalingVer flags mean? */
     get_dword_entry( (union sysparam_all_entry *)&entry_DPISCALINGVER, 0, &dpi_scaling, 0 );
+
+    get_host_font_smoothing_options( &font_smoothing, &font_smoothing_type,
+                                     &font_smoothing_orientation );
+    entry_FONTSMOOTHING.uint.val = font_smoothing;
+    entry_FONTSMOOTHINGTYPE.dword.val = font_smoothing_type;
+    entry_FONTSMOOTHINGORIENTATION.dword.val = font_smoothing_orientation;
 
     if (volatile_base_key && dispos == REG_CREATED_NEW_KEY)  /* first process, initialize entries */
     {

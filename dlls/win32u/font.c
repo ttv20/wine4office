@@ -193,6 +193,15 @@ static const WCHAR font_assoc_keyW[] =
 
 static UINT font_smoothing = GGO_BITMAP;
 static UINT subpixel_orientation = GGO_GRAY4_BITMAP;
+static UINT font_smoothing_setting = 2;
+static UINT font_smoothing_type = FE_FONTSMOOTHINGSTANDARD;
+static UINT font_smoothing_orientation = FE_FONTSMOOTHINGORIENTATIONRGB;
+static BOOL font_smoothing_setting_set;
+static BOOL font_smoothing_type_set;
+static BOOL font_smoothing_orientation_set;
+static UINT host_font_smoothing_setting = 2;
+static UINT host_font_smoothing_type = FE_FONTSMOOTHINGSTANDARD;
+static UINT host_font_smoothing_orientation = FE_FONTSMOOTHINGORIENTATIONRGB;
 static BOOL antialias_fakes = TRUE;
 static struct font_gamma_ramp font_gamma_ramp;
 
@@ -4713,6 +4722,55 @@ static BOOL get_key_value( HKEY key, const char *name, DWORD *value )
     return !!count;
 }
 
+static BOOL is_subpixel_aa( UINT aa_flags )
+{
+    return aa_flags == WINE_GGO_HRGB_BITMAP || aa_flags == WINE_GGO_HBGR_BITMAP ||
+           aa_flags == WINE_GGO_VRGB_BITMAP || aa_flags == WINE_GGO_VBGR_BITMAP;
+}
+
+static void init_host_font_options( UINT aa_flags )
+{
+    if (aa_flags == GGO_BITMAP)
+        host_font_smoothing_setting = 0;
+    else if (is_subpixel_aa( aa_flags ))
+    {
+        host_font_smoothing_type = FE_FONTSMOOTHINGCLEARTYPE;
+        if (aa_flags == WINE_GGO_HBGR_BITMAP || aa_flags == WINE_GGO_VBGR_BITMAP)
+            host_font_smoothing_orientation = FE_FONTSMOOTHINGORIENTATIONBGR;
+    }
+
+    if (!font_smoothing_setting_set)
+        font_smoothing_setting = host_font_smoothing_setting;
+    if (!font_smoothing_type_set)
+        font_smoothing_type = host_font_smoothing_type;
+    if (!font_smoothing_orientation_set)
+        font_smoothing_orientation = host_font_smoothing_orientation;
+
+    if (!font_smoothing_orientation_set && is_subpixel_aa( aa_flags ))
+        subpixel_orientation = aa_flags;
+    else if (font_smoothing_orientation == FE_FONTSMOOTHINGORIENTATIONBGR)
+        subpixel_orientation = WINE_GGO_HBGR_BITMAP;
+    else
+        subpixel_orientation = WINE_GGO_HRGB_BITMAP;
+
+    if (!font_smoothing_setting)
+        font_smoothing = GGO_BITMAP;
+    else if (font_smoothing_type == FE_FONTSMOOTHINGCLEARTYPE)
+        font_smoothing = subpixel_orientation;
+    else
+        font_smoothing = GGO_GRAY4_BITMAP;
+
+    TRACE( "host aa flags %#x, smoothing %u type %u orientation %u\n", aa_flags,
+           font_smoothing_setting, font_smoothing_type, font_smoothing_orientation );
+}
+
+void get_host_font_smoothing_options( UINT *setting, UINT *type, UINT *orientation )
+{
+    *setting = host_font_smoothing_setting;
+    *type = host_font_smoothing_type;
+    *orientation = host_font_smoothing_orientation;
+}
+
 static UINT init_font_options(void)
 {
     char value_buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[20 * sizeof(WCHAR)])];
@@ -4730,25 +4788,20 @@ static UINT init_font_options(void)
 
     if ((key = reg_open_hkcu_key( "Control Panel\\Desktop" )))
     {
-        /* FIXME: handle vertical orientations even though Windows doesn't */
         if (get_key_value( key, "FontSmoothingOrientation", &val ))
         {
-            switch (val)
-            {
-            case 0: /* FE_FONTSMOOTHINGORIENTATIONBGR */
-                subpixel_orientation = WINE_GGO_HBGR_BITMAP;
-                break;
-            case 1: /* FE_FONTSMOOTHINGORIENTATIONRGB */
-                subpixel_orientation = WINE_GGO_HRGB_BITMAP;
-                break;
-            }
+            font_smoothing_orientation = val;
+            font_smoothing_orientation_set = TRUE;
         }
-        if (get_key_value( key, "FontSmoothing", &val ) && val /* enabled */)
+        if (get_key_value( key, "FontSmoothing", &val ))
         {
-            if (get_key_value( key, "FontSmoothingType", &val ) && val == 2 /* FE_FONTSMOOTHINGCLEARTYPE */)
-                font_smoothing = subpixel_orientation;
-            else
-                font_smoothing = GGO_GRAY4_BITMAP;
+            font_smoothing_setting = val;
+            font_smoothing_setting_set = TRUE;
+        }
+        if (get_key_value( key, "FontSmoothingType", &val ))
+        {
+            font_smoothing_type = val;
+            font_smoothing_type_set = TRUE;
         }
         if (get_key_value( key, "FontSmoothingGamma", &val ) && val)
         {
@@ -6860,6 +6913,8 @@ UINT font_init(void)
 
     if (!(font_funcs = init_freetype_lib()))
         return dpi;
+
+    init_host_font_options( font_funcs->get_default_aa_flags() );
 
     load_system_bitmap_fonts();
     load_file_system_fonts();

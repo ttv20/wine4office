@@ -327,6 +327,7 @@ struct font_backend_funcs
     BOOL  (*load_font)( struct gdi_font *gdi_font );
     UINT  (*get_font_data)( struct gdi_font *gdi_font, UINT table, UINT offset, void *buf, UINT count );
     UINT  (*get_aa_flags)( struct gdi_font *font, UINT aa_flags, BOOL antialias_fakes );
+    UINT  (*get_default_aa_flags)(void);
     BOOL  (*get_glyph_index)( struct gdi_font *gdi_font, UINT *glyph, BOOL use_encoding );
     UINT  (*get_default_glyph)( struct gdi_font *gdi_font );
     UINT  (*get_glyph_outline)( struct gdi_font *font, UINT glyph, UINT format,
@@ -346,6 +347,7 @@ extern int add_gdi_face( const WCHAR *family_name, const WCHAR *second_name,
                          DWORD ntmflags, DWORD weight, DWORD version, DWORD flags,
                          const struct bitmap_font_size *size );
 extern UINT font_init(void);
+extern void get_host_font_smoothing_options( UINT *setting, UINT *type, UINT *orientation );
 extern const struct font_backend_funcs *init_freetype_lib(void);
 
 /* opentype.c */
