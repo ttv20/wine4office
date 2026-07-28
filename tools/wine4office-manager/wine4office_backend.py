@@ -643,6 +643,21 @@ def prepare_outlook_first_run(prefix: Path, wine: Path, env: dict[str, str]) -> 
     )
 
 
+def _windows_document_path(document: str, wine: Path, env: dict[str, str]) -> str:
+    winepath = sibling_tool(wine, "winepath")
+    command = ([str(winepath), "-w", document] if winepath
+               else [str(wine), "winepath.exe", "-w", document])
+    result = subprocess.run(
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, timeout=30, check=True,
+    )
+    converted = result.stdout.rstrip("\r\n")
+    if not converted:
+        raise RuntimeError(f"Wine could not convert document path: {document}")
+    return converted
+
+
+
 def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
                documents: Iterable[str] = ()) -> int:
     prefix = validate_prefix(prefix_value)
@@ -653,8 +668,8 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     if app == "word":
         prepare_office_building_blocks(prefix)
     register_cloud_fonts(prefix, wine, helper)
-    arguments = list(documents)
     env = wine_environment(prefix, wine)
+    arguments = [_windows_document_path(document, wine, env) for document in documents]
     if app == "outlook":
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)

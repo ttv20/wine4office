@@ -239,6 +239,42 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn(f"Icon={installed_icon}", text)
         self.assertNotIn(str(bundled_icons), text)
 
+    def test_launch_app_converts_host_document_paths_for_office(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        word = office / "WINWORD.EXE"
+        word.write_bytes(b"exe")
+        winepath = self._script("winepath", "#!/bin/sh\nexit 0\n")
+        documents = [
+            self.home / "Documents/Report with spaces.docx",
+            self.home / "Documents/מסמך שני.docx",
+        ]
+        converted = [
+            "Z:\\home\\Documents\\Report with spaces.docx\n",
+            "Z:\\home\\Documents\\מסמך שני.docx\n",
+        ]
+        process = mock.Mock(pid=7654)
+        with mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=[mock.Mock(stdout=value) for value in converted],
+        ) as run, mock.patch.object(
+            backend.subprocess, "Popen", return_value=process,
+        ) as popen:
+            pid = backend.launch_app(
+                str(prefix), str(self.wine), "word", documents=map(str, documents),
+            )
+
+        self.assertEqual(pid, 7654)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [[str(winepath), "-w", str(document)] for document in documents],
+        )
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(self.wine), str(word), *(value.rstrip("\n") for value in converted)],
+        )
+
     def test_outlook_first_run_sets_language_and_safe_launch_options(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
