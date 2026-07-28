@@ -2800,7 +2800,7 @@ static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT f
         if (matrices)
             pFT_Outline_Transform( &glyph->outline, &matrices[matrix_vert] );
 
-        pFT_Render_Glyph( glyph, render_mode );
+        if (pFT_Render_Glyph( glyph, render_mode )) return GDI_ERROR;
 
         src_pitch = glyph->bitmap.pitch;
         src_width = glyph->bitmap.width;
