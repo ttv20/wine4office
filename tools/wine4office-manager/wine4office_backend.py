@@ -513,10 +513,23 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
 def stop_wine(prefix_value: str, wine_value: str) -> None:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
+    env = wine_environment(prefix, wine)
+
+    subprocess.run(
+        [str(wine), "wine4officeclose.exe"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=20,
+        check=True,
+    )
+
     wineserver = sibling_tool(wine, "wineserver")
     if wineserver:
-        subprocess.run([str(wineserver), "-k"], env=wine_environment(prefix, wine),
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+        subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=False)
+        subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=True)
 
 
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,

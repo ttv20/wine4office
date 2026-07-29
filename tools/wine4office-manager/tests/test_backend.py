@@ -75,6 +75,23 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(backend.has_wine_prefix_layout(prefix))
         self.assertIn(str(prefix), message)
 
+
+    def test_stop_wine_gracefully_closes_windows_before_server(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(backend.subprocess, "run") as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.wine), "wine4officeclose.exe"],
+                [str(self.runner / "wineserver"), "-k"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+        self.assertTrue(run.call_args_list[0].kwargs["check"])
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 20)
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")
