@@ -168,6 +168,104 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         with self.assertRaisesRegex(ValueError, "Only .exe"):
             backend.launch_executable(str(prefix), str(self.wine), str(document))
 
+    def test_existing_prefix_office_launches_enable_smooth_monochrome_text_last(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        executable = prefix / "drive_c/Office/APP.EXE"
+        process = mock.Mock(pid=4321)
+        events = []
+        registry_command = [
+            str(self.wine), "reg", "add", r"HKCU\Software\Wine\Fonts",
+            "/v", "SmoothMonochromeText", "/t", "REG_SZ", "/d", "Y", "/f",
+        ]
+
+        with mock.patch.object(
+            backend, "find_office_app", return_value=executable,
+        ), mock.patch.object(
+            backend, "prepare_office_building_blocks",
+            side_effect=lambda prefix: events.append("building-blocks"),
+        ), mock.patch.object(
+            backend, "register_cloud_fonts",
+            side_effect=lambda prefix, wine, helper: events.append("font-registration"),
+        ), mock.patch.object(
+            backend, "prepare_outlook_first_run",
+            side_effect=lambda prefix, wine, env: events.append("outlook-preparation"),
+        ), mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=lambda *args, **kwargs: (
+                events.append("registry-update") or mock.Mock(returncode=0)
+            ),
+        ) as run, mock.patch.object(
+            backend.subprocess, "Popen",
+            side_effect=lambda *args, **kwargs: events.append("launch") or process,
+        ) as popen:
+            for app in backend.APP_META:
+                with self.subTest(app=app):
+                    events.clear()
+                    run.reset_mock()
+                    popen.reset_mock()
+
+                    self.assertEqual(
+                        backend.launch_app(str(prefix), str(self.wine), app),
+                        process.pid,
+                    )
+
+                    expected_events = ["font-registration"]
+                    if app == "word":
+                        expected_events.insert(0, "building-blocks")
+                    if app == "outlook":
+                        expected_events.append("outlook-preparation")
+                    expected_events.extend(["registry-update", "launch"])
+                    self.assertEqual(events, expected_events)
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.args[0], registry_command)
+                    self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+                    self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+                    self.assertEqual(run.call_args.kwargs["timeout"], 30)
+                    self.assertIs(run.call_args.kwargs["check"], True)
+                    self.assertEqual(
+                        run.call_args.kwargs["env"]["WINEPREFIX"], str(prefix),
+                    )
+                    self.assertIs(
+                        run.call_args.kwargs["env"], popen.call_args.kwargs["env"],
+                    )
+
+    def test_office_launch_propagates_smoothing_registry_failure(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        executable = prefix / "drive_c/Office/EXCEL.EXE"
+        failure = subprocess.CalledProcessError(5, [str(self.wine), "reg", "add"])
+
+        with mock.patch.object(
+            backend, "find_office_app", return_value=executable,
+        ), mock.patch.object(
+            backend, "register_cloud_fonts",
+        ), mock.patch.object(
+            backend.subprocess, "run", side_effect=failure,
+        ), mock.patch.object(
+            backend.subprocess, "Popen",
+        ) as popen, self.assertRaises(subprocess.CalledProcessError) as raised:
+            backend.launch_app(str(prefix), str(self.wine), "excel")
+
+        self.assertIs(raised.exception, failure)
+        popen.assert_not_called()
+
+    def test_arbitrary_executable_and_tool_launches_do_not_update_smoothing_registry(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        installer = self.home / "Downloads/Office Setup.exe"
+        installer.parent.mkdir()
+        installer.write_bytes(b"MZ")
+
+        with mock.patch.object(backend.subprocess, "run") as run, \
+             mock.patch.object(
+                 backend.subprocess, "Popen", return_value=mock.Mock(pid=4321),
+             ):
+            backend.launch_executable(str(prefix), str(self.wine), str(installer))
+            backend.launch_tool(str(prefix), str(self.wine), "winecfg")
+
+        run.assert_not_called()
+
     def test_command_prompt_opens_in_system_terminal(self):
         prefix = self.home / ".wine4office"
         process = mock.Mock(pid=8765)
@@ -278,7 +376,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertNotIn("MimeType=", shortcut)
 
         process = mock.Mock(pid=3210)
-        with mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+        with mock.patch.object(backend.subprocess, "run"), \
+             mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
             pid = backend.launch_app(str(prefix), str(self.wine), "setlang")
         self.assertEqual(pid, 3210)
         self.assertEqual(popen.call_args.args[0], [str(self.wine), str(setlang)])
@@ -350,7 +449,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         process = mock.Mock(pid=7654)
         with mock.patch.object(
             backend.subprocess, "run",
-            side_effect=[mock.Mock(stdout=value) for value in converted],
+            side_effect=[
+                *[mock.Mock(stdout=value) for value in converted],
+                mock.Mock(returncode=0),
+            ],
         ) as run, mock.patch.object(
             backend.subprocess, "Popen", return_value=process,
         ) as popen:
@@ -360,7 +462,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertEqual(pid, 7654)
         self.assertEqual(
-            [call.args[0] for call in run.call_args_list],
+            [call.args[0] for call in run.call_args_list[:len(documents)]],
             [[str(winepath), "-w", str(document)] for document in documents],
         )
         self.assertEqual(
@@ -378,6 +480,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         run_results = [
             mock.Mock(returncode=1, stdout=""),
             mock.Mock(returncode=0, stdout="Locale    REG_SZ    0000040d\n"),
+            mock.Mock(returncode=0, stdout=""),
             mock.Mock(returncode=0, stdout=""),
         ]
         with mock.patch.object(backend.subprocess, "run", side_effect=run_results) as run, \

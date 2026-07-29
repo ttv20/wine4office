@@ -656,6 +656,15 @@ def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None) -
             return
 
 
+def enable_smooth_monochrome_text(wine: Path, env: dict[str, str]) -> None:
+    subprocess.run(
+        [str(wine), "reg", "add", r"HKCU\Software\Wine\Fonts",
+         "/v", "SmoothMonochromeText", "/t", "REG_SZ", "/d", "Y", "/f"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=30, check=True,
+    )
+
+
 def _outlook_environment(env: dict[str, str]) -> dict[str, str]:
     result = env.copy()
     overrides = [item for item in result.get("WINEDLLOVERRIDES", "").split(";")
@@ -720,6 +729,7 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     if app == "outlook":
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)
+    enable_smooth_monochrome_text(wine, env)
     process = subprocess.Popen([str(wine), str(executable), *arguments], env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
