@@ -838,125 +838,6 @@ BOOL WINAPI NtGdiMaskBlt( HDC hdcDest, INT nXDest, INT nYDest, INT nWidth, INT n
     return TRUE;
 }
 
-static BOOL is_stock_font( HFONT font )
-{
-    static const int stock_fonts[] =
-    {
-        OEM_FIXED_FONT, ANSI_FIXED_FONT, ANSI_VAR_FONT, SYSTEM_FONT,
-        DEVICE_DEFAULT_FONT, SYSTEM_FIXED_FONT, DEFAULT_GUI_FONT
-    };
-    unsigned int i;
-
-    for (i = 0; i < ARRAY_SIZE(stock_fonts); i++)
-        if (font == GetStockObject( stock_fonts[i] )) return TRUE;
-    return FALSE;
-}
-
-static BOOL is_monochrome_text_source( const DC *dc )
-{
-    BITMAPOBJ *bitmap;
-    BOOL ret = FALSE;
-
-    if (is_stock_font( dc->hFont )) return FALSE;
-    if ((bitmap = GDI_GetObjPtr( dc->hBitmap, NTGDI_OBJ_BITMAP )))
-    {
-        ret = bitmap->dib.dsBm.bmPlanes == 1 && bitmap->dib.dsBm.bmBitsPixel == 1;
-        GDI_ReleaseObj( dc->hBitmap );
-    }
-    return ret;
-}
-
-static BOOL is_32bpp_destination( HDC hdc )
-{
-    HBITMAP handle = NtGdiGetDCObject( hdc, NTGDI_OBJ_SURF );
-    BITMAPOBJ *bitmap;
-    BOOL ret = FALSE;
-
-    if ((bitmap = GDI_GetObjPtr( handle, NTGDI_OBJ_BITMAP )))
-    {
-        ret = bitmap->dib.dsBm.bmPlanes == 1 && bitmap->dib.dsBm.bmBitsPixel == 32;
-        GDI_ReleaseObj( handle );
-    }
-    return ret;
-}
-
-
-static BYTE *get_bottom_up_dib_row( BYTE *bits, SIZE_T stride, int height, int y )
-{
-    return bits + (height - 1 - y) * stride;
-}
-
-static void smooth_monochrome_row( const BYTE *src, BYTE *dst, int width )
-{
-    SIZE_T x, left, right;
-    int component;
-
-    for (x = 0; x < (SIZE_T)width; x++)
-    {
-        left = x ? x - 1 : x;
-        right = x + 1 < (SIZE_T)width ? x + 1 : x;
-
-        for (component = 0; component < 3; component++)
-            dst[x * 3 + component] = (src[left * 3 + component] +
-                                      2 * src[x * 3 + component] +
-                                      src[right * 3 + component] + 2) / 4;
-    }
-}
-
-static BOOL smooth_monochrome_dib( void *bits, int width, int height, UINT transparent )
-{
-    BYTE *rows, *dst, *pixel, *prev, *current, *next;
-    BYTE transparent_blue = GetBValue( transparent );
-    BYTE transparent_green = GetGValue( transparent );
-    BYTE transparent_red = GetRValue( transparent );
-    SIZE_T row_size, stride, alloc_size, i, x;
-    int component, y;
-
-    if (!bits || width <= 0 || height <= 0) return FALSE;
-    if ((SIZE_T)width > ((SIZE_T)-1 - 3) / 3) return FALSE;
-    row_size = (SIZE_T)width * 3;
-    stride = (row_size + 3) & ~(SIZE_T)3;
-    if ((SIZE_T)height > (SIZE_T)-1 / stride || row_size > (SIZE_T)-1 / 3) return FALSE;
-    alloc_size = row_size * 3;
-    if (!(rows = malloc( alloc_size ))) return FALSE;
-
-    /* Clamped edges and normalized weights keep constant-color neighborhoods
-       exact. Pixels matching the color key must remain transparent. */
-
-    smooth_monochrome_row( get_bottom_up_dib_row( bits, stride, height, 0 ), rows, width );
-    if (height > 1)
-        smooth_monochrome_row( get_bottom_up_dib_row( bits, stride, height, 1 ),
-                               rows + row_size, width );
-
-    for (y = 0; y < height; y++)
-    {
-        prev = rows + (SIZE_T)(y ? (y - 1) % 3 : y) * row_size;
-        current = rows + (SIZE_T)(y % 3) * row_size;
-        next = rows + (SIZE_T)(y + 1 < height ? (y + 1) % 3 : y % 3) * row_size;
-        dst = get_bottom_up_dib_row( bits, stride, height, y );
-
-        for (x = 0; x < (SIZE_T)width; x++)
-        {
-            pixel = dst + x * 3;
-            if (pixel[0] == transparent_blue && pixel[1] == transparent_green &&
-                pixel[2] == transparent_red)
-                continue;
-
-            i = x * 3;
-            for (component = 0; component < 3; component++)
-                pixel[component] = (prev[i + component] + 2 * current[i + component] +
-                                    next[i + component] + 2) / 4;
-        }
-
-        if (y + 2 < height)
-            smooth_monochrome_row( get_bottom_up_dib_row( bits, stride, height, y + 2 ),
-                                   rows + (SIZE_T)((y + 2) % 3) * row_size, width );
-    }
-
-    free( rows );
-    return TRUE;
-}
-
 /******************************************************************************
  *           NtGdiTransparentBlt    (win32u.@)
  */
@@ -976,9 +857,6 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
     int oldStretchMode;
     DC *dc_src;
     DC *dc_work;
-    BOOL smooth_monochrome = FALSE;
-    void *work_bits = NULL;
-    int dest_bpp;
 
     if(widthDest < 0 || heightDest < 0 || widthSrc < 0 || heightSrc < 0) {
         TRACE("Cannot mirror\n");
@@ -995,12 +873,7 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
     if (oldStretchMode == BLACKONWHITE || oldStretchMode == WHITEONBLACK)
         dc_src->attr->stretch_blt_mode = COLORONCOLOR;
     hdcWork = NtGdiCreateCompatibleDC( hdcDest );
-    dest_bpp = NtGdiGetDeviceCaps( hdcDest, BITSPIXEL );
-    if (dest_bpp == 32 && widthDest == widthSrc && heightDest == heightSrc &&
-        is_smooth_monochrome_text_enabled() && is_32bpp_destination( hdcDest ) &&
-        is_monochrome_text_source( dc_src ))
-        smooth_monochrome = TRUE;
-    if (dest_bpp == 32)
+    if (NtGdiGetDeviceCaps( hdcDest, BITSPIXEL ) == 32)
     {
         /* the alpha channel should be ignored. use a 24-bpp bitmap as copy */
         BITMAPINFO info;
@@ -1010,8 +883,7 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 24;
         info.bmiHeader.biCompression = BI_RGB;
-        bmpWork = NtGdiCreateDIBSection( 0, NULL, 0, &info, DIB_RGB_COLORS, 0, 0, 0,
-                                         smooth_monochrome ? &work_bits : NULL );
+        bmpWork = NtGdiCreateDIBSection( 0, NULL, 0, &info, DIB_RGB_COLORS, 0, 0, 0, NULL );
     }
     else bmpWork = NtGdiCreateCompatibleBitmap( hdcDest, widthDest, heightDest );
     oldWork = NtGdiSelectBitmap(hdcWork, bmpWork);
@@ -1026,8 +898,6 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
         TRACE("Failed to stretch\n");
         goto error;
     }
-    if (smooth_monochrome)
-        smooth_monochrome_dib( work_bits, widthDest, heightDest, crTransparent );
     NtGdiGetAndSetDCDword( hdcWork, NtGdiSetBkColor, crTransparent, NULL );
 
     /* Create mask */

@@ -203,8 +203,6 @@ static UINT host_font_smoothing_setting = 2;
 static UINT host_font_smoothing_type = FE_FONTSMOOTHINGSTANDARD;
 static UINT host_font_smoothing_orientation = FE_FONTSMOOTHINGORIENTATIONRGB;
 static BOOL antialias_fakes = TRUE;
-/* Process-lifetime cache populated once by font_init(). */
-static BOOL smooth_monochrome_text;
 static struct font_gamma_ramp font_gamma_ramp;
 
 static void add_face_to_cache( struct gdi_font_face *face );
@@ -4773,11 +4771,6 @@ void get_host_font_smoothing_options( UINT *setting, UINT *type, UINT *orientati
     *orientation = host_font_smoothing_orientation;
 }
 
-BOOL is_smooth_monochrome_text_enabled(void)
-{
-    return smooth_monochrome_text;
-}
-
 static UINT init_font_options(void)
 {
     char value_buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data[20 * sizeof(WCHAR)])];
@@ -4791,14 +4784,6 @@ static UINT init_font_options(void)
     {
         static const WCHAR valsW[] = {'y','Y','t','T','1',0};
         antialias_fakes = (wcschr( valsW, *(const WCHAR *)info->Data ) != NULL);
-    }
-    if (query_reg_ascii_value( wine_fonts_key, "SmoothMonochromeText",
-                               info, sizeof(value_buffer) ) && info->Type == REG_SZ &&
-        info->DataLength >= sizeof(WCHAR))
-    {
-        static const WCHAR valsW[] = {'y','Y','t','T','1',0};
-        smooth_monochrome_text = *(const WCHAR *)info->Data &&
-                                 wcschr( valsW, *(const WCHAR *)info->Data ) != NULL;
     }
 
     if ((key = reg_open_hkcu_key( "Control Panel\\Desktop" )))

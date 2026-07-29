@@ -348,8 +348,6 @@ extern int add_gdi_face( const WCHAR *family_name, const WCHAR *second_name,
                          const struct bitmap_font_size *size );
 extern UINT font_init(void);
 extern void get_host_font_smoothing_options( UINT *setting, UINT *type, UINT *orientation );
-extern BOOL is_smooth_monochrome_text_enabled(void);
-
 extern const struct font_backend_funcs *init_freetype_lib(void);
 
 /* opentype.c */
