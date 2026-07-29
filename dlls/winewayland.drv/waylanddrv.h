@@ -302,7 +302,7 @@ struct wayland_surface
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
 
     struct wayland_surface_config pending, requested, processing, current;
-    BOOL resizing;
+    BOOL resizing, stacked;
     struct wayland_window_config window;
     int content_width, content_height;
     HCURSOR hcursor;

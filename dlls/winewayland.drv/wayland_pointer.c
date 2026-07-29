@@ -234,6 +234,11 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
+    pthread_mutex_lock(&pointer->mutex);
+    pointer->button_serial = state == WL_POINTER_BUTTON_STATE_PRESSED ?
+                             serial : 0;
+    pthread_mutex_unlock(&pointer->mutex);
+
 
     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
 
@@ -259,10 +264,6 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     if (state == WL_POINTER_BUTTON_STATE_RELEASED) input.mi.dwFlags <<= 1;
 
-    pthread_mutex_lock(&pointer->mutex);
-    pointer->button_serial = state == WL_POINTER_BUTTON_STATE_PRESSED ?
-                             serial : 0;
-    pthread_mutex_unlock(&pointer->mutex);
 
     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
 

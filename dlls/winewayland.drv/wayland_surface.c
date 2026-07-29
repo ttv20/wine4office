@@ -474,6 +474,8 @@ err:
  */
 void wayland_surface_clear_role(struct wayland_surface *surface)
 {
+    BOOL detach_buffer = surface->role != WAYLAND_SURFACE_ROLE_NONE ||
+                         surface->content_width || surface->content_height;
     TRACE("surface=%p\n", surface);
 
     /* some objects are shared between several roles */
@@ -527,10 +529,16 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
     memset(&surface->requested, 0, sizeof(surface->requested));
     memset(&surface->processing, 0, sizeof(surface->processing));
     memset(&surface->current, 0, sizeof(surface->current));
+    surface->stacked = FALSE;
 
-    /* Ensure no buffer is attached, otherwise future role assignments may fail. */
-    wl_surface_attach(surface->wl_surface, NULL, 0, 0);
-    wl_surface_commit(surface->wl_surface);
+    /* Ensure no buffer is attached, otherwise future role assignments may fail.
+     * A fresh role-less surface has never had a buffer, so there is nothing to
+     * detach or commit. */
+    if (detach_buffer)
+    {
+        wl_surface_attach(surface->wl_surface, NULL, 0, 0);
+        wl_surface_commit(surface->wl_surface);
+    }
 
     surface->content_width = 0;
     surface->content_height = 0;
@@ -760,8 +768,7 @@ struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *sur
  */
 static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
                                                struct wayland_client_surface *client,
-                                               const RECT *client_rect,
-                                               BOOL restack)
+                                               const RECT *client_rect)
 {
     struct wayland_window_config *window = &surface->window;
     RECT rect = *client_rect;
@@ -776,14 +783,6 @@ static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
     if (client->wl_subsurface)
     {
         wl_subsurface_set_position(client->wl_subsurface, rect.left, rect.top);
-        /* Repositioning an existing subsurface relative to the parent would
-         * reorder overlapping GPU siblings on every present. On initial
-         * attachment, place a child GPU surface above the nearest attached
-         * ancestor surface so the result doesn't depend on sibling creation
-         * order. */
-        if (restack)
-            wl_subsurface_place_above(client->wl_subsurface,
-                                      wayland_client_surface_get_parent(surface, client));
     }
 
     if (rect.left != rect.right && rect.top != rect.bottom)
@@ -857,11 +856,15 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
         TRACE("hwnd=%p rect=%s\n", surface->hwnd, wine_dbgstr_rect(&rect));
 
         wl_subsurface_set_position(surface->wl_subsurface, rect.left, rect.top);
-        if (owner_data->client_surface && owner_data->client_surface->wl_subsurface)
-            wl_subsurface_place_above(surface->wl_subsurface, owner_data->client_surface->wl_surface);
-        else
-            wl_subsurface_place_above(surface->wl_subsurface, owner_surface->wl_surface);
-        wayland_win_data_restack_owned_popups(surface->owner_hwnd);
+        if (!surface->stacked)
+        {
+            if (owner_data->client_surface && owner_data->client_surface->wl_subsurface)
+                wl_subsurface_place_above(surface->wl_subsurface, owner_data->client_surface->wl_surface);
+            else
+                wl_subsurface_place_above(surface->wl_subsurface, owner_surface->wl_surface);
+            wayland_win_data_restack_owned_popups(surface->owner_hwnd);
+            surface->stacked = TRUE;
+        }
         wl_surface_commit(owner_surface->wl_surface);
 
         memset(&surface->processing, 0, sizeof(surface->processing));
@@ -887,13 +890,13 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
     switch (surface->role)
     {
     case WAYLAND_SURFACE_ROLE_NONE:
-        break;
+        return FALSE;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
-        if (!surface->xdg_surface) break; /* surface role has been cleared */
+        if (!surface->xdg_surface) return FALSE; /* surface role has been cleared */
         if (!wayland_surface_reconfigure_xdg(surface, rect)) return FALSE;
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
-        if (!surface->wl_subsurface) break; /* surface role has been cleared */
+        if (!surface->wl_subsurface) return FALSE; /* surface role has been cleared */
         wayland_surface_reconfigure_subsurface(surface);
         break;
     }
@@ -1363,7 +1366,6 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
 {
     struct wayland_win_data *toplevel_data;
     struct wayland_surface *surface;
-    BOOL new_subsurface = FALSE;
     HWND hwnd = client->client.hwnd;
 
     TRACE("client %p hwnd %p old toplevel %p new toplevel %p subsurface %p\n",
@@ -1386,6 +1388,12 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         wayland_client_surface_attach(client, NULL, NULL);
         return;
     }
+    if (surface->role == WAYLAND_SURFACE_ROLE_NONE)
+    {
+        wayland_client_surface_attach(client, NULL, NULL);
+        return;
+    }
+
 
     if (client->toplevel != toplevel)
     {
@@ -1404,19 +1412,15 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         wl_subsurface_set_desync(client->wl_subsurface);
 
         client->toplevel = toplevel;
-        new_subsurface = TRUE;
     }
 
-    wayland_surface_reconfigure_client(surface, client, client_rect, new_subsurface);
-    if (new_subsurface)
-        wayland_win_data_restack_client_surfaces(toplevel);
-    else
-        wayland_win_data_restack_owned_popups(toplevel);
+    wayland_surface_reconfigure_client(surface, client, client_rect);
     /* Recommit the client surface in case destroying its previous subsurface
-     * role unmapped an existing EGL buffer. Then apply the new subsurface
-     * position atomically through the parent. */
+     * role unmapped an existing EGL buffer. Apply the new subsurface position
+     * atomically through a roleful parent once it has received a configure. */
     wl_surface_commit(client->wl_surface);
-    wl_surface_commit(surface->wl_surface);
+    if (surface->processing.serial || surface->current.serial)
+        wl_surface_commit(surface->wl_surface);
 }
 
 static void dummy_buffer_release(void *data, struct wl_buffer *buffer)
