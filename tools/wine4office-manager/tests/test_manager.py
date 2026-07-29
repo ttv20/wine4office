@@ -54,10 +54,17 @@ class ManagerTests(unittest.TestCase):
         }):
             state = manager.ManagerState()
             original_prefix = state.config["prefix"]
-            updated = state.update_config({"prefix": original_prefix, "desktop_copy": True})
+            updated = state.update_config({
+                "prefix": original_prefix,
+                "desktop_copy": True,
+                "use_x11": False,
+            })
             snapshot = state.snapshot()
         self.assertEqual(updated["prefix"], original_prefix)
         self.assertTrue(updated["desktop_copy"])
+        self.assertFalse(updated["use_x11"])
+        self.assertFalse(snapshot["config"]["use_x11"])
+        self.assertFalse(backend.load_config()["use_x11"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
     def test_background_task_completion_and_failure_are_visible(self):
@@ -78,6 +85,17 @@ class ManagerTests(unittest.TestCase):
         root = self.home / ".local/share/wine4office"
         with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": str(root)}):
             self.assertEqual(backend.installed_root(), root.resolve())
+
+    def test_standalone_manager_launcher_uses_current_display_mode(self):
+        config = backend.default_config()
+        config["use_x11"] = False
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(backend, "launch_app") as launch, \
+             mock.patch.object(sys, "argv", ["Wine4OfficeManager", "word"]):
+            result = manager.main()
+
+        self.assertEqual(result, 0)
+        self.assertFalse(launch.call_args.kwargs["use_x11"])
 
     def test_equivalent_symlink_edit_updates_without_a_transition(self):
         state = manager.ManagerState()

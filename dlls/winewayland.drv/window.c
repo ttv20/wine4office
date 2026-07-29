@@ -1047,6 +1047,7 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
 {
     BOOL move_resize_started = FALSE;
     LRESULT ret = -1;
+    HWND button_hwnd;
     WPARAM command = wparam & 0xfff0;
     uint32_t button_serial;
     struct wl_seat *wl_seat;
@@ -1057,10 +1058,8 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
           (long)command, hwnd, (long)wparam, lparam);
 
     pthread_mutex_lock(&process_wayland.pointer.mutex);
-    if (process_wayland.pointer.focused_hwnd == hwnd)
-        button_serial = process_wayland.pointer.button_serial;
-    else
-        button_serial = 0;
+    button_hwnd = process_wayland.pointer.button_hwnd;
+    button_serial = button_hwnd == hwnd ? process_wayland.pointer.button_serial : 0;
     pthread_mutex_unlock(&process_wayland.pointer.mutex);
 
     if (command == SC_MOVE || command == SC_SIZE)
@@ -1069,8 +1068,13 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
         {
             pthread_mutex_lock(&process_wayland.seat.mutex);
             wl_seat = process_wayland.seat.wl_seat;
-            if (wl_seat && (surface = data->wayland_surface) &&
-                wayland_surface_is_toplevel(surface) && button_serial)
+            surface = data->wayland_surface;
+            TRACE("move/resize gate hwnd=%p button_hwnd=%p serial=%u seat=%p surface=%p role=%u edge=%lu\n",
+                  hwnd, button_hwnd, button_serial, wl_seat, surface,
+                  surface ? surface->role : WAYLAND_SURFACE_ROLE_NONE,
+                  (long)(wparam & 0x0f));
+            if (wl_seat && surface && wayland_surface_is_toplevel(surface) &&
+                button_serial)
             {
                 if (command == SC_MOVE)
                 {

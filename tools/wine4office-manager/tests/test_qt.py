@@ -46,6 +46,7 @@ class QtManagerTests(unittest.TestCase):
             "prefix": str(self.home / ".wine4office"),
             "wine": str(self.home / "runner/bin/wine"),
             "desktop_copy": False,
+            "use_x11": True,
             "update_url": "",
         }
         self.old_prefix = self._make_prefix(Path(self.config["prefix"]))
@@ -94,6 +95,17 @@ class QtManagerTests(unittest.TestCase):
         self.assertIsInstance(self.window.app_tree, QTreeWidget)
         self.assertEqual(self.window.navigation.count(), 5)
 
+    def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
+        self.assertTrue(self.window.use_x11.isChecked())
+        self.assertIn("X11", self.window.use_x11.text())
+        self.assertIn("native Wayland", self.window.use_x11.text())
+
+        self.window.use_x11.setChecked(False)
+        saved = self.window.save_config()
+
+        self.assertFalse(saved["use_x11"])
+        self.assertFalse(self.state.snapshot()["config"]["use_x11"])
+
     def test_selected_rows_are_used_for_shortcut_actions(self):
         self.window.app_items["excel"].setSelected(True)
         self.window.app_items["powerpoint"].setSelected(True)
@@ -110,12 +122,13 @@ class QtManagerTests(unittest.TestCase):
 
     def test_slow_application_launch_does_not_block_qt_and_gates_actions(self):
         self.window.app_items["word"].setCheckState(0, Qt.CheckState.Checked)
+        self.window.use_x11.setChecked(False)
 
         def slow_launch(*args, **kwargs):
             time.sleep(0.35)
             return 4321
 
-        with mock.patch.object(backend, "launch_app", side_effect=slow_launch):
+        with mock.patch.object(backend, "launch_app", side_effect=slow_launch) as launch:
             started = time.monotonic()
             self.window.launch_selected()
             elapsed = time.monotonic() - started
@@ -131,6 +144,18 @@ class QtManagerTests(unittest.TestCase):
         task = self.state.snapshot()["task"]
         self.assertEqual(task["status"], "completed")
         self.assertIn("Application started (PID 4321)", task["log"])
+        self.assertFalse(launch.call_args.kwargs["use_x11"])
+
+    def test_wine_tool_launch_propagates_native_wayland_choice(self):
+        self.window.use_x11.setChecked(False)
+        with mock.patch.object(backend, "launch_tool", return_value=5678) as launch:
+            self.window.launch_tool("winecfg")
+            deadline = time.monotonic() + 2
+            while self.state.snapshot()["task"]["running"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        launch.assert_called_once()
+        self.assertFalse(launch.call_args.kwargs["use_x11"])
 
     def test_equivalent_symlink_path_saves_without_prompts(self):
         alias = self.home / "prefix-alias"
@@ -699,6 +724,7 @@ class QtManagerTests(unittest.TestCase):
                     str(self.home / "Office Setup.exe"),
                     "/configure office.xml",
                     working_directory=expected,
+                    use_x11=self.config["use_x11"],
                 )
 
 

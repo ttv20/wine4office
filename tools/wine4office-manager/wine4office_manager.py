@@ -57,8 +57,9 @@ class ManagerState:
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
-        if "desktop_copy" in payload:
-            candidate["desktop_copy"] = bool(payload["desktop_copy"])
+        for key in ("desktop_copy", "use_x11"):
+            if key in payload:
+                candidate[key] = bool(payload[key])
         return candidate
 
     def configured_prefix(self) -> str:
@@ -239,7 +240,10 @@ class ManagerState:
         def install() -> str:
             if "wine" in selected:
                 try:
-                    backend.stop_wine(config["prefix"], config["wine"])
+                    backend.stop_wine(
+                        config["prefix"], config["wine"],
+                        use_x11=config.get("use_x11", True),
+                    )
                     self.output("Stopped the selected Wine environment before updating.")
                 except (FileNotFoundError, OSError):
                     pass
@@ -341,12 +345,15 @@ def main() -> int:
         defaults = backend.load_config()
         prefix = args.prefix or defaults["prefix"]
         wine = args.wine or defaults["wine"]
+        use_x11 = defaults["use_x11"]
         if args.target in backend.APP_META:
-            backend.launch_app(prefix, wine, args.target, FONT_HELPER, args.documents)
+            backend.launch_app(
+                prefix, wine, args.target, FONT_HELPER, args.documents, use_x11=use_x11
+            )
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
-            backend.launch_tool(prefix, wine, args.target)
+            backend.launch_tool(prefix, wine, args.target, use_x11=use_x11)
         return 0
 
     if args.install_shortcut:

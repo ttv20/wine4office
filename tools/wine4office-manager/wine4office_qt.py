@@ -189,6 +189,11 @@ class ManagerWindow(QMainWindow):
         self.wine_edit.setAccessibleName("Wine executable path")
         form.addRow("Wine executable:", self._path_row(self.wine_edit, self.browse_wine))
         environment_layout.addLayout(form)
+        self.use_x11 = QCheckBox(
+            "Launch Wine4Office through X11 (uncheck for native Wayland)"
+        )
+        self.use_x11.setAccessibleName("Launch Wine4Office through X11")
+        environment_layout.addWidget(self.use_x11)
         environment_buttons = QHBoxLayout()
         self.create_button = self._action_button(
             "Create", lambda: self.environment_action(False), QStyle.StandardPixmap.SP_DialogApplyButton
@@ -601,6 +606,7 @@ class ManagerWindow(QMainWindow):
             "prefix": self.prefix_edit.text(),
             "wine": self.wine_edit.text(),
             "desktop_copy": self.desktop_copy.isChecked(),
+            "use_x11": self.use_x11.isChecked(),
             "update_url": self.update_edit.text(),
         }
 
@@ -609,6 +615,7 @@ class ManagerWindow(QMainWindow):
         self.wine_edit.setText(config["wine"])
         self.update_edit.setText(config["update_url"])
         self.desktop_copy.setChecked(config["desktop_copy"])
+        self.use_x11.setChecked(config["use_x11"])
 
     def _restore_config_fields(self) -> None:
         with self.state.lock:
@@ -803,7 +810,10 @@ class ManagerWindow(QMainWindow):
             return
 
         def launch() -> str:
-            pid = backend.launch_app(config["prefix"], config["wine"], apps[0], self.font_helper)
+            pid = backend.launch_app(
+                config["prefix"], config["wine"], apps[0], self.font_helper,
+                use_x11=config["use_x11"],
+            )
             return f"Application started (PID {pid})."
 
         try:
@@ -821,7 +831,9 @@ class ManagerWindow(QMainWindow):
             return
 
         def launch() -> str:
-            pid = backend.launch_tool(config["prefix"], config["wine"], tool)
+            pid = backend.launch_tool(
+                config["prefix"], config["wine"], tool, use_x11=config["use_x11"]
+            )
             return "Wine processes stopped." if pid is None else f"Tool started (PID {pid})."
 
         try:
@@ -845,6 +857,7 @@ class ManagerWindow(QMainWindow):
             pid = backend.launch_executable(
                 config["prefix"], config["wine"], executable, self.arguments_edit.text(),
                 working_directory=self.working_directory_edit.text().strip() or None,
+                use_x11=config["use_x11"],
             )
             self.notify(f"Executable started (PID {pid}).")
         except Exception as error:

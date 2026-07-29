@@ -113,8 +113,10 @@ struct wayland_pointer
     struct zwp_relative_pointer_v1 *zwp_relative_pointer_v1;
     struct wp_cursor_shape_device_v1 *wp_cursor_shape_device_v1;
     HWND focused_hwnd;
+    HWND button_hwnd;
     HWND constraint_hwnd;
     BOOL pending_warp;
+    BOOL edge_resize;
     uint32_t enter_serial;
     uint32_t button_serial;
     struct wayland_cursor cursor;

@@ -29,11 +29,16 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.target in backend.APP_META:
-            backend.launch_app(args.prefix, args.wine, args.target, HELPER, args.documents)
+            backend.launch_app(
+                args.prefix, args.wine, args.target, HELPER, args.documents,
+                use_x11=defaults["use_x11"],
+            )
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
-            backend.launch_tool(args.prefix, args.wine, args.target)
+            backend.launch_tool(
+                args.prefix, args.wine, args.target, use_x11=defaults["use_x11"]
+            )
     except Exception as error:
         print(f"wine4office-launcher: {error}", file=sys.stderr)
         return 1

@@ -277,6 +277,7 @@ def default_config() -> dict:
         "prefix": str(Path.home() / ".wine4office"),
         "wine": detect_wine(),
         "desktop_copy": False,
+        "use_x11": True,
         "update_url": configured_update_url(),
         "skipped_updates": {},
     }
@@ -450,7 +451,8 @@ def require_wine(value: str) -> Path:
     return wine
 
 
-def wine_environment(prefix: str | Path, wine: str | Path) -> dict[str, str]:
+def wine_environment(prefix: str | Path, wine: str | Path,
+                     use_x11: bool = True) -> dict[str, str]:
     env = os.environ.copy()
     env.update({
         "WINEPREFIX": str(prefix),
@@ -459,7 +461,9 @@ def wine_environment(prefix: str | Path, wine: str | Path) -> dict[str, str]:
     })
     wine_bin = str(Path(wine).parent)
     env["PATH"] = wine_bin + os.pathsep + env.get("PATH", "")
-    if env.get("WAYLAND_DISPLAY"):
+    if use_x11:
+        env.pop("WAYLAND_DISPLAY", None)
+    elif env.get("WAYLAND_DISPLAY"):
         env.pop("DISPLAY", None)
     return env
 
@@ -510,10 +514,10 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
         raise subprocess.CalledProcessError(process.returncode, command)
 
 
-def stop_wine(prefix_value: str, wine_value: str) -> None:
+def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    env = wine_environment(prefix, wine)
+    env = wine_environment(prefix, wine, use_x11)
 
     subprocess.run(
         [str(wine), "wine4officeclose.exe"],
@@ -658,14 +662,16 @@ def prepare_office_building_blocks(prefix: Path) -> int:
     return copied
 
 
-def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None) -> None:
+def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None,
+                         use_x11: bool = True) -> None:
     candidates = [prefix / "register-office-cloud-fonts.sh"]
     if helper:
         candidates.append(helper)
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            subprocess.run([str(candidate)], env=wine_environment(prefix, wine), check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+            subprocess.run([str(candidate)], env=wine_environment(prefix, wine, use_x11),
+                           check=False, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=120)
             return
 
 
@@ -719,7 +725,7 @@ def _windows_document_path(document: str, wine: Path, env: dict[str, str]) -> st
 
 
 def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
-               documents: Iterable[str] = ()) -> int:
+               documents: Iterable[str] = (), use_x11: bool = True) -> int:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     executable = find_office_app(str(prefix), app)
@@ -727,8 +733,8 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
     if app == "word":
         prepare_office_building_blocks(prefix)
-    register_cloud_fonts(prefix, wine, helper)
-    env = wine_environment(prefix, wine)
+    register_cloud_fonts(prefix, wine, helper, use_x11)
+    env = wine_environment(prefix, wine, use_x11)
     arguments = [_windows_document_path(document, wine, env) for document in documents]
     if app == "outlook":
         prepare_outlook_first_run(prefix, wine, env)
@@ -741,7 +747,8 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
 
 def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
                       arguments: str | Iterable[str] = (),
-                      working_directory: PathValue | None = None) -> int:
+                      working_directory: PathValue | None = None,
+                      use_x11: bool = True) -> int:
     prefix = validate_prefix(prefix_value)
     if not (prefix / "system.reg").is_file():
         raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
@@ -761,7 +768,7 @@ def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
                 raise NotADirectoryError(f"Working directory was not found: {cwd}")
     parsed_arguments = shlex.split(arguments) if isinstance(arguments, str) else list(arguments)
     process = subprocess.Popen([str(wine), str(executable), *parsed_arguments],
-                               cwd=cwd, env=wine_environment(prefix, wine),
+                               cwd=cwd, env=wine_environment(prefix, wine, use_x11),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     return process.pid
@@ -799,15 +806,16 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
     )
 
 
-def launch_tool(prefix_value: str, wine_value: str, tool: str) -> int | None:
+def launch_tool(prefix_value: str, wine_value: str, tool: str,
+                use_x11: bool = True) -> int | None:
     if tool == "stop":
-        stop_wine(prefix_value, wine_value)
+        stop_wine(prefix_value, wine_value, use_x11)
         return None
     if tool not in TOOL_META:
         raise ValueError(f"Unknown Wine tool: {tool}")
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    env = wine_environment(prefix, wine)
+    env = wine_environment(prefix, wine, use_x11)
     env.setdefault("WINEDEBUG", "-all")
     if tool == "cmd":
         terminal = host_terminal_command([str(wine), "cmd.exe"], env)

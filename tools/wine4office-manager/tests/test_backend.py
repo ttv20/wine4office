@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import runpy
 import subprocess
 import stat
 import sys
@@ -62,6 +63,44 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         config = backend.default_config()
         self.assertEqual(config["prefix"], str(self.home / ".wine4office"))
         self.assertEqual(config["update_url"], backend.DEFAULT_METADATA_URL)
+        self.assertTrue(config["use_x11"])
+
+    def test_config_without_use_x11_loads_x11_default(self):
+        path = backend.config_path()
+        path.parent.mkdir(parents=True)
+        path.write_text('{"desktop_copy": true}\n')
+
+        config = backend.load_config()
+
+        self.assertTrue(config["use_x11"])
+        self.assertTrue(config["desktop_copy"])
+
+    def test_native_wayland_choice_is_persisted(self):
+        config = backend.default_config()
+        config["use_x11"] = False
+
+        backend.save_config(config)
+
+        self.assertFalse(backend.load_config()["use_x11"])
+
+    def test_wine_environment_applies_display_precedence_for_both_modes(self):
+        with mock.patch.dict(
+            os.environ, {"DISPLAY": ":7", "WAYLAND_DISPLAY": "wayland-7"}
+        ):
+            x11 = backend.wine_environment("/tmp/prefix", self.wine, True)
+            wayland = backend.wine_environment("/tmp/prefix", self.wine, False)
+
+        self.assertEqual(x11["DISPLAY"], ":7")
+        self.assertNotIn("WAYLAND_DISPLAY", x11)
+        self.assertEqual(wayland["WAYLAND_DISPLAY"], "wayland-7")
+        self.assertNotIn("DISPLAY", wayland)
+
+    def test_native_mode_keeps_display_when_wayland_is_unavailable(self):
+        with mock.patch.dict(os.environ, {"DISPLAY": ":7"}, clear=False):
+            os.environ.pop("WAYLAND_DISPLAY", None)
+            environment = backend.wine_environment("/tmp/prefix", self.wine, False)
+
+        self.assertEqual(environment["DISPLAY"], ":7")
 
 
     def test_rejects_dangerous_prefixes(self):
@@ -116,6 +155,32 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         command = popen.call_args.args[0]
         self.assertEqual(command, [str(self.wine), str(installer), "/configure", "/home/user/office.xml"])
         self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], str(prefix))
+
+    def test_all_backend_launch_paths_apply_selected_display_mode(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        (office / "EXCEL.EXE").write_bytes(b"exe")
+        executable = self.home / "Downloads/Setup.exe"
+        executable.parent.mkdir()
+        executable.write_bytes(b"MZ")
+
+        with mock.patch.dict(
+            os.environ, {"DISPLAY": ":8", "WAYLAND_DISPLAY": "wayland-8"}
+        ), mock.patch.object(
+            backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
+        ) as popen:
+            backend.launch_app(str(prefix), str(self.wine), "excel", use_x11=False)
+            backend.launch_tool(str(prefix), str(self.wine), "winecfg", use_x11=False)
+            backend.launch_executable(
+                str(prefix), str(self.wine), str(executable), use_x11=False
+            )
+
+        self.assertEqual(len(popen.call_args_list), 3)
+        for call in popen.call_args_list:
+            environment = call.kwargs["env"]
+            self.assertEqual(environment["WAYLAND_DISPLAY"], "wayland-8")
+            self.assertNotIn("DISPLAY", environment)
 
     def test_executable_launcher_forwards_valid_working_directory(self):
         prefix = self.home / ".wine4office"
@@ -247,6 +312,25 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         removed = backend.remove_app_shortcuts(["word"])
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
+
+    def test_generated_launcher_uses_current_configured_display_mode(self):
+        launcher = Path(__file__).resolve().parents[1] / "wine4office-launcher"
+        namespace = runpy.run_path(str(launcher))
+        config = backend.default_config()
+        config["use_x11"] = False
+
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(backend, "launch_app") as launch_app, \
+             mock.patch.object(sys, "argv", [str(launcher), "word"]):
+            app_result = namespace["main"]()
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(backend, "launch_tool") as launch_tool, \
+             mock.patch.object(sys, "argv", [str(launcher), "winecfg"]):
+            tool_result = namespace["main"]()
+
+        self.assertEqual((app_result, tool_result), (0, 0))
+        self.assertFalse(launch_app.call_args.kwargs["use_x11"])
+        self.assertFalse(launch_tool.call_args.kwargs["use_x11"])
 
     def test_shortcut_creation_accepts_path_environment_and_wine(self):
         prefix = self.home / ".wine4office"

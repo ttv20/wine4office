@@ -567,7 +567,8 @@ class UpdaterTests(unittest.TestCase):
              mock.patch.object(backend, "launch_app", return_value=1234) as launch:
             self.assertEqual(manager.main(), 0)
         launch.assert_called_once_with(
-            prefix, wine, "word", manager.FONT_HELPER, [str(self.home / "document.docx")]
+            prefix, wine, "word", manager.FONT_HELPER, [str(self.home / "document.docx")],
+            use_x11=True,
         )
 
     def _wait_for(self, predicate):
