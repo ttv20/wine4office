@@ -2798,7 +2798,9 @@ def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -
 PRELOAD_UNIT = "wine4office-preload.service"
 AUTOMATIC_UPDATE_SERVICE = "wine4office-update-check.service"
 AUTOMATIC_UPDATE_TIMER = "wine4office-update-check.timer"
-PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
+PRELOAD_COMPONENTS = ("ClickToRunSvc",)
+_LEGACY_PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
+_PRELOAD_COMPONENT_IMAGES = {"ClickToRunSvc": "OfficeClickToRun.exe"}
 _PRELOAD_SCHEMA = 1
 _PRELOAD_HEARTBEAT_SCHEMA = 1
 _PRELOAD_SYSTEMCTL_TIMEOUT = 8
@@ -2879,7 +2881,14 @@ def _validate_preload_binding(payload: object) -> dict:
     expected_keys = {"schema", "prefix", "wine", "use_x11", "components"}
     if set(payload) != expected_keys or payload.get("schema") != _PRELOAD_SCHEMA:
         raise ValueError("The preload binding schema is invalid.")
-    if payload.get("components") != list(PRELOAD_COMPONENTS):
+    components = payload.get("components")
+    if (
+        not isinstance(components, list)
+        or (
+            components != list(PRELOAD_COMPONENTS)
+            and components != list(_LEGACY_PRELOAD_COMPONENTS)
+        )
+    ):
         raise ValueError("The preload component binding is invalid.")
     if not isinstance(payload.get("use_x11"), bool):
         raise ValueError("The preload display binding is invalid.")
@@ -3225,7 +3234,7 @@ def _preload_unit_text(binding_path: Path, status_path: Path) -> str:
     return (
         f"{_PRELOAD_UNIT_MARKER}\n"
         "[Unit]\n"
-        "Description=Wine4Office background preload\n\n"
+        "Description=Wine4Office Click-to-Run preload\n\n"
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={arguments}\n"
@@ -3386,6 +3395,51 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
     return preload_service_status(prefix_value, wine_value, use_x11)
 
 
+def _preload_component_process_running(
+    binding: dict, component: str, proc_root: Path = Path("/proc")
+) -> bool | None:
+    """Detect a component before a Wine command can auto-start it.
+
+    ``sc query`` starts Wine's service infrastructure and may auto-start
+    ClickToRunSvc. Looking at the existing Linux process first lets the worker
+    retain ownership of a service that its first query caused to start.
+    ``None`` is conservative: a matching process existed but its environment
+    could not be inspected.
+    """
+    expected_image = _PRELOAD_COMPONENT_IMAGES.get(component)
+    if expected_image is None:
+        return None
+    try:
+        processes = tuple(proc_root.iterdir())
+    except OSError:
+        return None
+
+    matching_unknown = False
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        try:
+            arguments = process.joinpath("cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if not arguments or not arguments[0]:
+            continue
+        image = re.split(r"[\\/]", os.fsdecode(arguments[0]))[-1]
+        if image.casefold() != expected_image.casefold():
+            continue
+        try:
+            environment = process.joinpath("environ").read_bytes().split(b"\0")
+        except OSError:
+            matching_unknown = True
+            continue
+        prefix_entry = f"WINEPREFIX={binding['prefix']}".encode(
+            sys.getfilesystemencoding(), "surrogateescape"
+        )
+        if prefix_entry in environment:
+            return True
+    return None if matching_unknown else False
+
+
 def _preload_component_state(binding: dict, component: str) -> tuple[str, str]:
     try:
         completed = subprocess.run(
@@ -3472,8 +3526,9 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     restart_attempts = {name: 0 for name in PRELOAD_COMPONENTS}
     try:
         for component in PRELOAD_COMPONENTS:
+            preexisting = _preload_component_process_running(binding, component)
             state, detail = _preload_component_state(binding, component)
-            owned = False
+            owned = preexisting is False and state == "running"
             if state == "stopped":
                 started, start_detail = _preload_component_action(binding, "start", component)
                 if started:

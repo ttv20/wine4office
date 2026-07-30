@@ -66,6 +66,9 @@ The manager defaults to:
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Apply curated per-prefix Office compatibility and privacy policies without
   exposing Windows-only Group Policy infrastructure.
+- Optionally enable a per-user login service that keeps Office Click-to-Run ready
+  for faster first launches. It never starts Word and typically uses 100–200 MB
+  of background RAM.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4Office Manager and Wine runner updates.
 - Optionally check for updates at login and every 24 hours, with one-click

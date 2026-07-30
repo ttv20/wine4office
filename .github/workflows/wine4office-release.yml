@@ -119,13 +119,22 @@ jobs:
           set -euo pipefail
           mkdir -p build stage
           cd build
-          ../configure \
+          CPPFLAGS="-I$GITHUB_WORKSPACE/tools/wine4office-manager/packaging/linux-uapi" \
+            ../configure \
             --prefix=/opt/wine4office \
             --enable-archs=i386,x86_64 \
             --disable-tests
+          grep -q '^#define HAVE_LINUX_NTSYNC_H 1$' include/config.h || {
+            echo "Wine configure did not enable NTSYNC support." >&2
+            exit 1
+          }
           echo "Building with $(nproc) parallel jobs"
           make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install
+          grep -aq '/dev/ntsync' "$GITHUB_WORKSPACE/stage/opt/wine4office/bin/wineserver" || {
+            echo "Built wineserver does not contain NTSYNC support." >&2
+            exit 1
+          }
           test -f "$GITHUB_WORKSPACE/stage/opt/wine4office/lib/wine/x86_64-unix/winewayland.so" || {
             echo "Wine Wayland driver was not built; check libwayland, libxkbcommon, libxkbregistry, and protocol dependencies." >&2
             exit 1

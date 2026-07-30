@@ -236,9 +236,18 @@ class ManagerWindow(QMainWindow):
         environment_layout.addLayout(environment_buttons)
         layout.addWidget(environment)
 
-        preload = self.preload_group = QGroupBox("Background preload")
+        preload = self.preload_group = QGroupBox("Click-to-Run preload")
         preload_layout = QVBoxLayout(preload)
+        preload_layout.setSpacing(2)
+        self.preload_notice_label = QLabel(
+            "Optional: start the Office Click-to-Run service at login for faster launches. "
+            "Uses about 100–200 MB of background RAM."
+        )
+        self.preload_notice_label.setAccessibleName("Click-to-Run preload memory notice")
+        self.preload_notice_label.setWordWrap(True)
+        preload_layout.addWidget(self.preload_notice_label)
         preload_form = self._form()
+        preload_form.setVerticalSpacing(2)
         self.preload_selected_label = QLabel("Checking…")
         self.preload_selected_label.setAccessibleName("Selected preload environment")
         self.preload_selected_label.setTextInteractionFlags(
@@ -254,11 +263,11 @@ class ManagerWindow(QMainWindow):
         preload_layout.addLayout(preload_form)
 
         self.preload_state_label = QLabel("Checking preload service status…")
-        self.preload_state_label.setAccessibleName("Background preload state")
+        self.preload_state_label.setAccessibleName("Click-to-Run preload state")
         self.preload_state_label.setWordWrap(True)
         preload_layout.addWidget(self.preload_state_label)
         self.preload_detail_label = QLabel()
-        self.preload_detail_label.setAccessibleName("Background preload details")
+        self.preload_detail_label.setAccessibleName("Click-to-Run preload details")
         self.preload_detail_label.setWordWrap(True)
         self.preload_detail_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -271,17 +280,18 @@ class ManagerWindow(QMainWindow):
             lambda: self.preload_action("enable"),
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        self.preload_enable_button.setAccessibleName("Enable background preload at login")
+        self.preload_enable_button.setAccessibleName("Enable Click-to-Run preload at login")
         self.preload_enable_button.setToolTip(
-            "Bind the selected environment and enable its user service for future logins. "
-            "This does not start the preload worker now."
+            "Opt in for the selected environment and enable its Click-to-Run user service "
+            "for future logins. It typically uses 100–200 MB of background RAM. "
+            "This does not start Word or the preload worker now."
         )
         self.preload_disable_button = self._action_button(
             "Disable at login",
             lambda: self.preload_action("disable"),
             QStyle.StandardPixmap.SP_DialogCancelButton,
         )
-        self.preload_disable_button.setAccessibleName("Disable background preload at login")
+        self.preload_disable_button.setAccessibleName("Disable Click-to-Run preload at login")
         self.preload_disable_button.setToolTip(
             "Disable automatic startup at login. This does not stop a running preload "
             "worker or Microsoft Office."
@@ -291,7 +301,7 @@ class ManagerWindow(QMainWindow):
             lambda: self.preload_action("start"),
             QStyle.StandardPixmap.SP_MediaPlay,
         )
-        self.preload_start_button.setAccessibleName("Start background preload now")
+        self.preload_start_button.setAccessibleName("Start Click-to-Run preload now")
         self.preload_start_button.setToolTip(
             "Start the preload worker now for the bound environment. "
             "This does not enable startup at login."
@@ -301,7 +311,7 @@ class ManagerWindow(QMainWindow):
             lambda: self.preload_action("stop"),
             QStyle.StandardPixmap.SP_MediaStop,
         )
-        self.preload_stop_button.setAccessibleName("Stop background preload now")
+        self.preload_stop_button.setAccessibleName("Stop Click-to-Run preload now")
         self.preload_stop_button.setToolTip(
             "Stop only the preload worker and components it owns after Office is closed. "
             "This never stops Microsoft Office."
@@ -365,10 +375,10 @@ class ManagerWindow(QMainWindow):
             if result != QMessageBox.StandardButton.Yes:
                 return
         messages = {
-            "enable": "Enabling background preload at login; it will not start now.",
-            "disable": "Disabling background preload at login; a running worker will not stop.",
-            "start": "Starting background preload for this session…",
-            "stop": "Stopping background preload without stopping Office…",
+            "enable": "Enabling Click-to-Run preload at login; it will not start now.",
+            "disable": "Disabling Click-to-Run preload at login; a running worker will not stop.",
+            "start": "Starting Click-to-Run preload for this session…",
+            "stop": "Stopping Click-to-Run preload without stopping Office…",
         }
         try:
             self.state.start_preload_action(action)
@@ -432,11 +442,10 @@ class ManagerWindow(QMainWindow):
         if not isinstance(components, dict):
             components = {}
         click_to_run = self._preload_component_state(components.get("ClickToRunSvc"))
-        rpc = self._preload_component_state(components.get("RpcSs"))
         self.preload_state_label.setText(
             f"{overall} — Login: {'enabled' if enabled else 'disabled'}; "
             f"Worker: {'running' if active else 'stopped'}; "
-            f"ClickToRunSvc: {click_to_run}; RpcSs: {rpc}."
+            f"ClickToRunSvc: {click_to_run}."
         )
 
         detail = str(preload.get("detail") or "").strip()
@@ -464,8 +473,8 @@ class ManagerWindow(QMainWindow):
             detail = "Checking the optional user service without blocking the Manager."
         elif not installed:
             detail = detail or (
-                "Opt in with Enable at login. Enabling creates the user service but "
-                "does not start it now."
+                "Opt in with Enable at login. Enabling creates the Click-to-Run user "
+                "service but does not start it now or run Word."
             )
         elif active and not enabled:
             detail = detail or (
