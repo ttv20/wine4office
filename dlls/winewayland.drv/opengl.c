@@ -59,28 +59,18 @@ static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawa
     return CONTAINING_RECORD(base, struct wayland_gl_drawable, base);
 }
 
-static BOOL needs_client_window_clipping(HWND hwnd)
+static BOOL has_visible_descendant(HWND hwnd)
 {
-    RECT rect, client;
-    UINT ret = 0;
-    HRGN region;
-    HDC hdc;
+    HWND child;
 
-    if (NtUserGetPresentRect(hwnd, &client, 0)) return FALSE;
-    if (!NtUserGetClientRect(hwnd, &client, NtUserGetDpiForWindow(hwnd))) return FALSE;
-    OffsetRect(&client, -client.left, -client.top);
-
-    if (!(hdc = NtUserGetDCEx(hwnd, 0, DCX_CACHE | DCX_USESTYLE))) return FALSE;
-    if ((region = NtGdiCreateRectRgn(0, 0, 0, 0)))
+    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
+         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
     {
-        ret = NtGdiGetRandomRgn(hdc, region, SYSRGN);
-        if (ret > 0 && (ret = NtGdiGetRgnBox(region, &rect)) < NULLREGION) ret = 0;
-        if (ret == SIMPLEREGION && EqualRect(&rect, &client)) ret = 0;
-        NtGdiDeleteObjectApp(region);
+        if (NtUserIsWindowVisible(child) || has_visible_descendant(child))
+            return TRUE;
     }
-    NtUserReleaseDC(hwnd, hdc);
 
-    return ret > 0;
+    return FALSE;
 }
 
 static void wayland_drawable_destroy(struct opengl_drawable *base)
@@ -111,7 +101,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     struct wgl_pixel_format desc;
-    BOOL clipped, described;
+    BOOL described, visible_descendant;
     EGLConfig config = egl_config_for_format(format);
     EGLint attribs[4], *attrib = attribs;
     struct wayland_gl_drawable *gl;
@@ -120,16 +110,16 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
 
-    clipped = needs_client_window_clipping(client->hwnd);
+    visible_descendant = has_visible_descendant(client->hwnd);
     described = describe_pixel_format(format, &desc);
-    TRACE("client=%s format=%d described=%u flags=%#x clipped=%u\n",
+    TRACE("client=%s format=%d described=%u flags=%#x visible_descendant=%u\n",
           debugstr_client_surface(client), format, described,
-          described ? desc.pfd.dwFlags : 0, clipped);
+          described ? desc.pfd.dwFlags : 0, visible_descendant);
 
-    /* Native Wayland subsurfaces cannot reproduce the clipping needed when
-     * Win32 child HWNDs overlap a GL client. Render those clients offscreen
-     * and composite through their USER-clipped HDC, as the X11 driver does. */
-    if (clipped)
+    /* Native Wayland subsurfaces cannot reproduce the stacking needed when
+     * visible Win32 descendants paint above a GL client. Render those clients
+     * offscreen and composite through their USER-clipped HDC, as X11 does. */
+    if (visible_descendant)
     {
         InterlockedExchange(&client->offscreen, TRUE);
         return offscreen_surface_create(client, format, drawable);
