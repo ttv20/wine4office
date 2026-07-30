@@ -87,6 +87,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     struct wgl_pixel_format desc;
+    BOOL child, described;
     EGLConfig config = egl_config_for_format(format);
     EGLint attribs[4], *attrib = attribs;
     struct wayland_gl_drawable *gl;
@@ -95,8 +96,17 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
 
-    if (describe_pixel_format(format, &desc) &&
-        (desc.pfd.dwFlags & PFD_SUPPORT_GDI))
+    child = NtUserGetAncestor(client->hwnd, GA_PARENT) != NtUserGetDesktopWindow();
+    described = describe_pixel_format(format, &desc);
+    TRACE("client=%s format=%d described=%u flags=%#lx child=%u\n",
+          debugstr_client_surface(client), format, described,
+          described ? desc.pfd.dwFlags : 0, child);
+
+    /* Native Wayland subsurfaces cannot reproduce Win32 child-window
+     * clipping and stacking. Render child GL windows offscreen and composite
+     * them through their clipped HDC, as the X11 driver does. Also preserve
+     * the same semantics for formats which explicitly advertise GDI support. */
+    if (child || (described && (desc.pfd.dwFlags & PFD_SUPPORT_GDI)))
     {
         InterlockedExchange(&client->offscreen, TRUE);
         return offscreen_surface_create(client, format, drawable);
