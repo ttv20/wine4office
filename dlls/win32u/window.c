@@ -2213,11 +2213,14 @@ static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
 static void update_surface_region( HWND hwnd )
 {
     WND *win = get_win_ptr( hwnd );
-    HRGN region, shape = 0;
+    struct window_surface *surface = NULL;
+    HRGN clip = 0, region, shape = 0;
     RECT visible;
 
     if (!win || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return;
     if (!win->surface) goto done;
+    surface = win->surface;
+    window_surface_add_ref( surface );
 
     if (get_window_region( hwnd, FALSE, &shape, &visible )) goto done;
     if (shape)
@@ -2235,21 +2238,28 @@ static void update_surface_region( HWND hwnd )
             NtGdiDeleteObjectApp( region );
         }
     }
-    window_surface_set_shape( win->surface, shape );
 
-    if (get_window_region( hwnd, TRUE, &region, &visible )) goto done;
-    if (!region) window_surface_set_clip( win->surface, shape );
-    else
+    if (get_window_region( hwnd, TRUE, &clip, &visible )) goto done;
+    if (clip)
     {
-        NtGdiOffsetRgn( region, -visible.left, -visible.top );
-        if (shape) NtGdiCombineRgn( region, region, shape, RGN_AND );
-        window_surface_set_clip( win->surface, region );
-        NtGdiDeleteObjectApp( region );
+        NtGdiOffsetRgn( clip, -visible.left, -visible.top );
+        if (shape) NtGdiCombineRgn( clip, clip, shape, RGN_AND );
     }
 
-done:
-    if (shape) NtGdiDeleteObjectApp( shape );
+    /* A Wayland surface flush can enter the user driver while holding the
+     * surface mutex. Drop user_mutex before taking that mutex here, otherwise
+     * first-paint and shape updates can deadlock in opposite lock order. Keep
+     * the surface alive across the unlocked section with our reference. */
     release_win_ptr( win );
+    win = NULL;
+    window_surface_set_shape( surface, shape );
+    window_surface_set_clip( surface, clip ? clip : shape );
+
+done:
+    if (clip) NtGdiDeleteObjectApp( clip );
+    if (shape) NtGdiDeleteObjectApp( shape );
+    if (surface) window_surface_release( surface );
+    if (win) release_win_ptr( win );
 }
 
 
