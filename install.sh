@@ -15,6 +15,35 @@ fail() {
 warn() {
     printf 'wine4office install warning: %s\n' "$*" >&2
 }
+prompt_and_launch_manager() {
+    local manager=$1 answer
+    if [[ -v WINE4OFFICE_LAUNCH_MANAGER ]]; then
+        answer=$WINE4OFFICE_LAUNCH_MANAGER
+    elif [[ -t 0 ]]; then
+        read -r -p 'Launch Wine4Office Manager now? [Y/n] ' answer || answer=n
+    elif [[ -t 1 ]]; then
+        if ! read -r -p 'Launch Wine4Office Manager now? [Y/n] ' answer </dev/tty; then
+            printf '\nRun: %s\n' "$manager"
+            return
+        fi
+    else
+        printf 'Run: %s\n' "$manager"
+        return
+    fi
+    case ${answer,,} in
+        ""|y|yes)
+            printf 'Launching Wine4Office Manager…\n'
+            nohup "$manager" </dev/null >/dev/null 2>&1 9>&- &
+            ;;
+        n|no)
+            printf 'Run later: %s\n' "$manager"
+            ;;
+        *)
+            warn "unknown launch choice '$answer'; not launching"
+            printf 'Run later: %s\n' "$manager"
+            ;;
+    esac
+}
 
 for command in curl flock install python3 sha256sum stat zstd; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required"
@@ -404,4 +433,4 @@ XDG_DATA_HOME="$DATA_HOME" "$MANAGER_TARGET" --install-shortcut >/dev/null || \
     warn "manager installed, but the application-menu shortcut could not be created"
 
 printf 'Installed Wine4Office Manager %s and Wine runner %s.\n' "$MANAGER_VERSION" "$WINE_VERSION"
-printf 'Run: %s\n' "$BIN_HOME/Wine4OfficeManager"
+prompt_and_launch_manager "$BIN_HOME/Wine4OfficeManager"

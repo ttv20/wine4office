@@ -33,7 +33,9 @@ Don't want to wrestle with builds? Use the **Wine4Office Manager**:
 curl -fsSL https://github.com/ttv20/wine4office/releases/latest/download/install.sh | bash
 ```
 
-It installs `Wine4OfficeManager` in `~/.local/bin` and creates the application-menu shortcut. The default Wine environment remains `~/.wine4office`.
+It installs `Wine4OfficeManager` in `~/.local/bin`, creates the application-menu
+shortcut, and asks whether to launch **Wine4Office Manager** immediately
+(default: Yes). The default Wine environment remains `~/.wine4office`.
 
 ---
 

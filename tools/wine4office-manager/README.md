@@ -25,6 +25,10 @@ python3 -m pip install --user -r tools/wine4office-manager/requirements-gui.txt
 ./tools/wine4office-manager/install-user.sh
 ```
 
+The installer asks whether to launch **Wine4Office Manager** when installation
+finishes. Press Enter to accept the default, **Yes**. Set
+`WINE4OFFICE_LAUNCH_MANAGER=yes` or `no` for non-interactive automation.
+
 A standalone development binary can be built in a virtual environment:
 
 ```bash

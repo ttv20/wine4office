@@ -17,6 +17,13 @@ printf 'runner payload\n' > "$RELEASE/runner/identity"
 tar -C "$RELEASE" -cf - runner | zstd -q -o "$RELEASE/wine.tar.zst"
 cat > "$RELEASE/Wine4OfficeManager" <<'SH'
 #!/bin/sh
+if [ -n "${WINE4OFFICE_TEST_MANAGER_LOG:-}" ]; then
+    if [ "$#" -eq 0 ]; then
+        printf '<launch>\n' >> "$WINE4OFFICE_TEST_MANAGER_LOG"
+    else
+        printf '%s\n' "$*" >> "$WINE4OFFICE_TEST_MANAGER_LOG"
+    fi
+fi
 if [ "${1:-}" = --install-shortcut ]; then
     mkdir -p "$XDG_DATA_HOME"
     printf 'installed\n' > "$XDG_DATA_HOME/shortcut-installed"
@@ -87,6 +94,7 @@ export WINE4OFFICE_BIN_HOME=$HOME_DIR/bin
 export WINE4OFFICE_HOME=$HOME_DIR/data/wine4office
 export WINE4OFFICE_METADATA_URL=https://example.invalid/release.json
 export FAKE_RELEASE=$RELEASE
+export WINE4OFFICE_TEST_MANAGER_LOG=$TMP/manager.log
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
 
 [[ -x $WINE4OFFICE_HOME/bin/Wine4OfficeManager ]]
@@ -99,6 +107,17 @@ PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_URL") == https://example.invalid/release.json ]]
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == stable ]]
 [[ $(cat "$WINE4OFFICE_HOME/STANDALONE") == Wine4OfficeManager ]]
+[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
+
+WINE4OFFICE_LAUNCH_MANAGER=no PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
+WINE4OFFICE_LAUNCH_MANAGER= PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+for _ in {1..20}; do
+    [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]] && break
+    sleep 0.05
+done
+[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]]
+
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null &
 FIRST_INSTALL=$!
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null &

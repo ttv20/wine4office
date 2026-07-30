@@ -8,6 +8,37 @@ ROOT=${WINE4OFFICE_MANAGER_HOME:-$DATA_HOME/wine4office}
 BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
 LIB=$ROOT/lib
 
+prompt_and_launch_manager() {
+    local manager=$1 answer
+    if [[ -v WINE4OFFICE_LAUNCH_MANAGER ]]; then
+        answer=$WINE4OFFICE_LAUNCH_MANAGER
+    elif [[ -t 0 ]]; then
+        read -r -p 'Launch Wine4Office Manager now? [Y/n] ' answer || answer=n
+    elif [[ -t 1 ]]; then
+        if ! read -r -p 'Launch Wine4Office Manager now? [Y/n] ' answer </dev/tty; then
+            printf '\nCommand: %s\n' "$manager"
+            return
+        fi
+    else
+        printf 'Command: %s\n' "$manager"
+        return
+    fi
+    case ${answer,,} in
+        ""|y|yes)
+            printf 'Launching Wine4Office Manager…\n'
+            nohup "$manager" </dev/null >/dev/null 2>&1 &
+            ;;
+        n|no)
+            printf 'Run later: %s\n' "$manager"
+            ;;
+        *)
+            printf 'wine4office install warning: unknown launch choice %q; not launching\n' \
+                "$answer" >&2
+            printf 'Run later: %s\n' "$manager"
+            ;;
+    esac
+}
+
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 mkdir -p "$LIB" "$ROOT/bin" "$ROOT/icons" "$BIN_HOME" "$DATA_HOME/applications"
 install -m 0644 "$HERE/wine4office_backend.py" "$LIB/wine4office_backend.py"
@@ -55,4 +86,4 @@ PY
 WINE4OFFICE_MANAGER_ROOT="$ROOT" python3 "$LIB/wine4office_manager.py" --install-shortcut >/dev/null
 printf 'Wine4Office Manager installed for %s.\n' "${USER:-$(id -un)}"
 printf 'Application shortcut: %s/applications/wine4office-manager.desktop\n' "$DATA_HOME"
-printf 'Command: %s/wine4office-manager\n' "$BIN_HOME"
+prompt_and_launch_manager "$BIN_HOME/wine4office-manager"
