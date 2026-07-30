@@ -125,8 +125,11 @@ class QtManagerTests(unittest.TestCase):
     def test_background_preload_controls_are_explicit_and_accessible(self):
         self.assertEqual(self.window.preload_group.title(), "Click-to-Run preload")
         notice = self.window.preload_notice_label.text()
-        self.assertIn("100–300 MB", notice)
-        self.assertIn("Word is not started", notice)
+        self.assertEqual(
+            notice,
+            "Optional: start the Office Click-to-Run service at login for faster launches. "
+            "Uses about 100–200 MB of background RAM.",
+        )
         self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (
             (self.window.preload_enable_button, "Enable at login"),

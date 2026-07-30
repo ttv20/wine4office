@@ -53,7 +53,7 @@ The manager defaults to:
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Optionally enable a per-user login service that keeps Office Click-to-Run ready
-  for faster first launches. It never starts Word and typically uses 100–300 MB
+  for faster first launches. It never starts Word and typically uses 100–200 MB
   of background RAM.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4OfficeManager and Wine runner updates.

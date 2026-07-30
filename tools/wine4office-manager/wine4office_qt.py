@@ -234,9 +234,8 @@ class ManagerWindow(QMainWindow):
         preload_layout = QVBoxLayout(preload)
         preload_layout.setSpacing(2)
         self.preload_notice_label = QLabel(
-            "Optional: start Microsoft Office Click-to-Run at login for faster first "
-            "launches. This keeps Wine support processes in the background and typically "
-            "uses about 100–300 MB of RAM. Word is not started or kept running."
+            "Optional: start the Office Click-to-Run service at login for faster launches. "
+            "Uses about 100–200 MB of background RAM."
         )
         self.preload_notice_label.setAccessibleName("Click-to-Run preload memory notice")
         self.preload_notice_label.setWordWrap(True)
@@ -278,7 +277,7 @@ class ManagerWindow(QMainWindow):
         self.preload_enable_button.setAccessibleName("Enable Click-to-Run preload at login")
         self.preload_enable_button.setToolTip(
             "Opt in for the selected environment and enable its Click-to-Run user service "
-            "for future logins. It typically uses 100–300 MB of background RAM. "
+            "for future logins. It typically uses 100–200 MB of background RAM. "
             "This does not start Word or the preload worker now."
         )
         self.preload_disable_button = self._action_button(
