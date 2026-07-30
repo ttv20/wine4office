@@ -442,10 +442,11 @@ class ManagerWindow(QMainWindow):
         if not isinstance(components, dict):
             components = {}
         click_to_run = self._preload_component_state(components.get("ClickToRunSvc"))
+        appv = self._preload_component_state(components.get("AppV"))
         self.preload_state_label.setText(
             f"{overall} — Login: {'enabled' if enabled else 'disabled'}; "
             f"Worker: {'running' if active else 'stopped'}; "
-            f"ClickToRunSvc: {click_to_run}."
+            f"Click-to-Run: {click_to_run}; App-V: {appv}."
         )
 
         detail = str(preload.get("detail") or "").strip()

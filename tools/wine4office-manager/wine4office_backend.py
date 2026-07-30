@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -2799,12 +2800,16 @@ PRELOAD_UNIT = "wine4office-preload.service"
 AUTOMATIC_UPDATE_SERVICE = "wine4office-update-check.service"
 AUTOMATIC_UPDATE_TIMER = "wine4office-update-check.timer"
 PRELOAD_COMPONENTS = ("ClickToRunSvc",)
+PRELOAD_APPV_COMPONENT = "AppV"
+PRELOAD_APPV_HELPER = "wine4office-appv-preload.exe"
 _LEGACY_PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
 _PRELOAD_COMPONENT_IMAGES = {"ClickToRunSvc": "OfficeClickToRun.exe"}
 _PRELOAD_SCHEMA = 1
 _PRELOAD_HEARTBEAT_SCHEMA = 1
 _PRELOAD_SYSTEMCTL_TIMEOUT = 8
 _PRELOAD_WINE_TIMEOUT = 12
+_PRELOAD_APPV_TIMEOUT = 15
+_PRELOAD_APPV_STOP_TIMEOUT = 5
 _PRELOAD_HEARTBEAT_MAX_AGE = 20
 _PRELOAD_UNIT_MARKER = "# Managed by Wine4OfficeManager: preload-service-v1"
 _AUTOMATIC_UPDATE_UNIT_MARKER = (
@@ -3488,6 +3493,103 @@ def _preload_component_action(binding: dict, action: str, component: str) -> tup
     return completed.returncode == 0, detail or f"exit {completed.returncode}"
 
 
+def _stop_preload_appv(process: subprocess.Popen[str]) -> tuple[bool, str]:
+    if process.poll() is not None:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+        return True, f"exited with status {process.returncode}"
+    try:
+        if process.stdin is not None:
+            process.stdin.write("\n")
+            process.stdin.flush()
+            process.stdin.close()
+        process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+        return True, "stopped"
+    except (BrokenPipeError, OSError):
+        pass
+    except subprocess.TimeoutExpired:
+        pass
+
+    process.terminate()
+    try:
+        process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+        return True, "terminated"
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+            return True, "killed"
+        except subprocess.TimeoutExpired:
+            return False, "App-V preload helper did not exit."
+
+
+def _start_preload_appv(binding: dict) -> tuple[subprocess.Popen[str] | None, str]:
+    runner = Path(binding["wine"]).resolve().parent.parent
+    helper_candidates = (
+        runner / "lib/wine/x86_64-windows" / PRELOAD_APPV_HELPER,
+        runner / "lib64/wine/x86_64-windows" / PRELOAD_APPV_HELPER,
+    )
+    helper = next((path for path in helper_candidates if path.is_file()), None)
+    if helper is None:
+        return None, f"The selected Wine runner does not contain {PRELOAD_APPV_HELPER}."
+
+    environment = wine_environment(
+        binding["prefix"], binding["wine"], binding["use_x11"]
+    )
+    environment["WINEDEBUG"] = "-all"
+    try:
+        process = subprocess.Popen(
+            [binding["wine"], str(helper)],
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as error:
+        return None, str(error)
+
+    assert process.stdout is not None
+    deadline = time.monotonic() + _PRELOAD_APPV_TIMEOUT
+    output: list[str] = []
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select([process.stdout], [], [], remaining)
+        if not readable:
+            break
+        line = process.stdout.readline()
+        if not line:
+            continue
+        line = line.strip()
+        output.append(line)
+        if line.startswith("READY "):
+            process.stdout.close()
+            return process, line
+
+    if process.poll() is None:
+        reason = "App-V preload helper timed out."
+    else:
+        reason = f"App-V preload helper exited with status {process.returncode}."
+    stopped, stop_detail = _stop_preload_appv(process)
+    detail = " | ".join(output[-3:])
+    if detail:
+        reason += " " + detail
+    if not stopped:
+        reason += " " + stop_detail
+    return None, reason
+
+
 def _write_preload_heartbeat(path: Path, components: dict, state: str,
                              detail: str = "") -> None:
     _preload_json_write(path, {
@@ -3524,6 +3626,8 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     previous_int = signal.signal(signal.SIGINT, request_stop)
     components: dict[str, dict] = {}
     restart_attempts = {name: 0 for name in PRELOAD_COMPONENTS}
+    appv_process: subprocess.Popen[str] | None = None
+    appv_restart_attempts = 0
     try:
         for component in PRELOAD_COMPONENTS:
             preexisting = _preload_component_process_running(binding, component)
@@ -3543,6 +3647,21 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             }
             _write_preload_heartbeat(status, components, "starting")
 
+        components[PRELOAD_APPV_COMPONENT] = {
+            "state": "stopped",
+            "owned": False,
+            "detail": "Waiting for Click-to-Run.",
+        }
+        if components["ClickToRunSvc"]["state"] == "running":
+            appv_restart_attempts += 1
+            appv_process, detail = _start_preload_appv(binding)
+            components[PRELOAD_APPV_COMPONENT] = {
+                "state": "running" if appv_process is not None else "stopped",
+                "owned": appv_process is not None,
+                "detail": detail,
+            }
+        _write_preload_heartbeat(status, components, "starting")
+
         while not stopping:
             degraded: list[str] = []
             for component in PRELOAD_COMPONENTS:
@@ -3561,6 +3680,31 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                     degraded.append(component)
                 record["state"] = state
                 record["detail"] = detail
+
+            appv_record = components[PRELOAD_APPV_COMPONENT]
+            if appv_process is not None and appv_process.poll() is not None:
+                _stop_preload_appv(appv_process)
+                appv_record["state"] = "stopped"
+                appv_record["owned"] = False
+                appv_record["detail"] = (
+                    f"App-V preload helper exited with status {appv_process.returncode}."
+                )
+                appv_process = None
+            if (
+                appv_process is None
+                and components["ClickToRunSvc"]["state"] == "running"
+                and appv_restart_attempts < 3
+            ):
+                appv_restart_attempts += 1
+                appv_process, detail = _start_preload_appv(binding)
+                appv_record["state"] = (
+                    "running" if appv_process is not None else "stopped"
+                )
+                appv_record["owned"] = appv_process is not None
+                appv_record["detail"] = detail
+            if appv_process is None:
+                degraded.append(PRELOAD_APPV_COMPONENT)
+
             _write_preload_heartbeat(
                 status, components, "degraded" if degraded else "running",
                 "Not running: " + ", ".join(degraded) if degraded else "",
@@ -3570,6 +3714,17 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                     break
                 time.sleep(0.5)
 
+        cleanup_failed: list[str] = []
+        if appv_process is not None:
+            stopped, detail = _stop_preload_appv(appv_process)
+            appv_record = components[PRELOAD_APPV_COMPONENT]
+            appv_record["state"] = "stopped" if stopped else "unknown"
+            appv_record["owned"] = not stopped
+            appv_record["detail"] = detail
+            if not stopped:
+                cleanup_failed.append(PRELOAD_APPV_COMPONENT)
+            _write_preload_heartbeat(status, components, "stopping")
+
         try:
             active_office = preload_office_processes(
                 binding["prefix"], binding["wine"], binding["use_x11"]
@@ -3577,7 +3732,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
         except RuntimeError as error:
             _write_preload_heartbeat(
                 status, components, "stop-refused",
-                f"Process state unknown; owned components were preserved: {error}",
+                f"Process state unknown; owned services were preserved: {error}",
             )
             return 1
         if active_office:
@@ -3587,7 +3742,6 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 + ", ".join(active_office),
             )
             return 1
-        cleanup_failed: list[str] = []
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
             if not record["owned"]:

@@ -189,6 +189,7 @@ class QtManagerTests(unittest.TestCase):
                     "selected_matches": True,
                     "components": {
                         "ClickToRunSvc": {"state": "running", "owned": True, "detail": ""},
+                        "AppV": {"state": "running", "owned": True, "detail": ""},
                     },
                 },
                 "Active",
@@ -204,6 +205,7 @@ class QtManagerTests(unittest.TestCase):
                     "selected_matches": True,
                     "components": {
                         "ClickToRunSvc": {"state": "failed", "owned": True, "detail": "failed"},
+                        "AppV": {"state": "stopped", "owned": False, "detail": "failed"},
                     },
                 },
                 "Needs attention",
@@ -226,7 +228,8 @@ class QtManagerTests(unittest.TestCase):
                 )
         self.assertIn("Login: enabled", self.window.preload_state_label.text())
         self.assertIn("Worker: running", self.window.preload_state_label.text())
-        self.assertIn("ClickToRunSvc: failed", self.window.preload_state_label.text())
+        self.assertIn("Click-to-Run: failed", self.window.preload_state_label.text())
+        self.assertIn("App-V: stopped", self.window.preload_state_label.text())
         self.assertNotIn("RpcSs", self.window.preload_state_label.text())
 
     def test_background_preload_binding_mismatch_shows_both_environments(self):

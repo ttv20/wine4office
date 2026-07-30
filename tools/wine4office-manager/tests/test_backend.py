@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import hashlib
+import io
 import os
 import shlex
 import subprocess
@@ -1754,6 +1755,53 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend._preload_component_process_running(binding, "unknown", proc_root)
         )
 
+    def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
+        binding = self._preload_binding()
+        helper = (
+            Path(binding["wine"]).resolve().parent.parent
+            / "lib/wine/x86_64-windows"
+            / backend.PRELOAD_APPV_HELPER
+        )
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"helper")
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdout = io.StringIO("READY appv_ms=3512\n")
+        process.stdin = mock.Mock()
+
+        with mock.patch.object(
+            backend.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            backend.select, "select", return_value=([process.stdout], [], [])
+        ):
+            started, detail = backend._start_preload_appv(binding)
+
+        self.assertIs(started, process)
+        self.assertEqual(detail, "READY appv_ms=3512")
+        self.assertEqual(
+            popen.call_args.args[0],
+            [binding["wine"], str(helper)],
+        )
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
+        self.assertTrue(process.stdout.closed)
+
+    def test_appv_helper_stops_by_closing_its_input(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdin.closed = False
+        process.stdout.closed = False
+
+        stopped, detail = backend._stop_preload_appv(process)
+
+        self.assertTrue(stopped)
+        self.assertEqual(detail, "stopped")
+        process.stdin.write.assert_called_once_with("\n")
+        process.stdin.close.assert_called_once()
+        process.wait.assert_called_once_with(
+            timeout=backend._PRELOAD_APPV_STOP_TIMEOUT
+        )
+        process.terminate.assert_not_called()
+
     def test_worker_starts_and_stops_owned_clicktorun(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
@@ -1761,6 +1809,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         states = {"ClickToRunSvc": "stopped"}
         actions = []
         handlers = {}
+        appv_process = mock.Mock()
+        appv_process.poll.return_value = None
 
         def component_state(_binding, component):
             return states[component], states[component]
@@ -1787,6 +1837,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ) as office, mock.patch.object(
+            backend, "_start_preload_appv",
+            return_value=(appv_process, "READY appv_ms=3512"),
+        ) as appv_start, mock.patch.object(
+            backend, "_stop_preload_appv", return_value=(True, "stopped")
+        ) as appv_stop, mock.patch.object(
             backend.signal, "signal", side_effect=install_signal
         ), mock.patch.object(
             backend.time, "sleep", side_effect=stop_sleep
@@ -1803,10 +1858,13 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [("start", "ClickToRunSvc"), ("stop", "ClickToRunSvc")],
         )
         office.assert_called_once()
+        appv_start.assert_called_once_with(binding)
+        appv_stop.assert_called_once_with(appv_process)
         broad_kill.assert_not_called()
         heartbeat = __import__("json").loads(status_path.read_text())
         self.assertEqual(heartbeat["state"], "stopped")
         self.assertTrue(heartbeat["components"]["ClickToRunSvc"]["owned"])
+        self.assertEqual(heartbeat["components"]["AppV"]["state"], "stopped")
 
     def test_worker_owns_clicktorun_auto_started_by_first_query(self):
         binding = self._preload_binding()
