@@ -98,7 +98,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 
     child = NtUserGetAncestor(client->hwnd, GA_PARENT) != NtUserGetDesktopWindow();
     described = describe_pixel_format(format, &desc);
-    TRACE("client=%s format=%d described=%u flags=%#lx child=%u\n",
+    TRACE("client=%s format=%d described=%u flags=%#x child=%u\n",
           debugstr_client_surface(client), format, described,
           described ? desc.pfd.dwFlags : 0, child);
 

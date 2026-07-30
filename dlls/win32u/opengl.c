@@ -449,7 +449,8 @@ static BOOL framebuffer_surface_swap( struct opengl_drawable *drawable )
     const struct opengl_funcs *funcs = &display_funcs;
     struct framebuffer_surface *surface = CONTAINING_RECORD( drawable, struct framebuffer_surface, base );
     BITMAPINFO info = {0};
-    GLint old_pack_alignment, old_read_buffer;
+    GLint old_pack_alignment, old_read_fbo;
+    GLenum error;
     RECT rect;
     size_t size;
     HDC hdc;
@@ -472,13 +473,18 @@ static BOOL framebuffer_surface_swap( struct opengl_drawable *drawable )
     }
 
     funcs->p_glGetIntegerv( GL_PACK_ALIGNMENT, &old_pack_alignment );
-    funcs->p_glGetIntegerv( GL_READ_BUFFER, &old_read_buffer );
+    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &old_read_fbo );
     funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, 4 );
+    funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, drawable->read_fbo );
     funcs->p_glReadBuffer( drawable->buffer_map[(drawable->doublebuffer ?
                                                  GL_BACK : GL_FRONT) - GL_FRONT_LEFT] );
+    memset( surface->bits, 0, size );
     funcs->p_glReadPixels( 0, 0, rect.right - rect.left, rect.bottom - rect.top,
                           GL_BGRA, GL_UNSIGNED_BYTE, surface->bits );
-    funcs->p_glReadBuffer( old_read_buffer );
+    if ((error = funcs->p_glGetError()))
+        WARN( "OpenGL readback failed for %s, error %#x\n",
+              debugstr_opengl_drawable( drawable ), error );
+    funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, old_read_fbo );
     funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, old_pack_alignment );
 
     info.bmiHeader.biSize = sizeof(info.bmiHeader);
