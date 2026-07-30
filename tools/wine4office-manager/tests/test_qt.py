@@ -19,6 +19,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QDialog,
         QListWidget,
         QMessageBox,
         QStackedWidget,
@@ -438,7 +439,13 @@ class QtManagerTests(unittest.TestCase):
         self.assertIsInstance(self.window.navigation, QListWidget)
         self.assertIsInstance(self.window.pages, QStackedWidget)
         self.assertIsInstance(self.window.app_tree, QTreeWidget)
-        self.assertEqual(self.window.navigation.count(), 5)
+        self.assertEqual(self.window.navigation.count(), 6)
+        self.assertEqual(
+            self.window.navigation.item(
+                self.window.OFFICE_SETTINGS_PAGE
+            ).text(),
+            "Office settings",
+        )
 
     def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
         self.assertTrue(self.window.use_x11.isChecked())
@@ -451,25 +458,33 @@ class QtManagerTests(unittest.TestCase):
         self.assertFalse(saved["use_x11"])
         self.assertFalse(self.state.snapshot()["config"]["use_x11"])
 
-    def test_office_telemetry_checkbox_is_opt_in_accessible_and_persisted(self):
-        checkbox = self.window.disable_office_telemetry
+    def test_privacy_dialog_is_accessible_and_persists_telemetry(self):
+        dialog, checkbox = self.window._privacy_settings_dialog(self.state.config)
         self.assertFalse(checkbox.isChecked())
-        self.assertIn("Disable Microsoft Office telemetry", checkbox.text())
         self.assertIn("telemetry policy", checkbox.accessibleName().lower())
         self.assertIn("Neither", checkbox.accessibleDescription())
         self.assertIn("Required service data", checkbox.toolTip())
-
         checkbox.setChecked(True)
-        with mock.patch.object(backend, "apply_office_telemetry_policy") as apply:
-            saved = self.window.save_config()
+        dialog.exec = mock.Mock(return_value=QDialog.DialogCode.Accepted)
 
-        self.assertTrue(backend.office_telemetry_disabled(saved))
+        with mock.patch.object(
+            self.window, "_privacy_settings_dialog",
+            return_value=(dialog, checkbox),
+        ), mock.patch.object(
+            backend, "apply_office_telemetry_policy"
+        ) as apply:
+            self.window.configure_privacy_settings()
+
         self.assertTrue(
             backend.office_telemetry_disabled(self.state.snapshot()["config"])
         )
         apply.assert_called_once()
+        self.assertIn(
+            "Telemetry disabled",
+            self.window.privacy_settings_button.description(),
+        )
 
-    def test_office_telemetry_checkbox_tracks_selected_environment(self):
+    def test_office_policy_summaries_track_selected_environment(self):
         enabled = self._make_prefix(self.home / "telemetry-disabled-prefix")
         other = self._make_prefix(self.home / "default-policy-prefix")
         self.state.config = backend.set_office_telemetry_disabled(
@@ -477,9 +492,42 @@ class QtManagerTests(unittest.TestCase):
         )
 
         self.window.prefix_edit.setText(str(enabled))
-        self.assertTrue(self.window.disable_office_telemetry.isChecked())
+        self.assertIn(
+            "Telemetry disabled",
+            self.window.privacy_settings_button.description(),
+        )
         self.window.prefix_edit.setText(str(other))
-        self.assertFalse(self.window.disable_office_telemetry.isChecked())
+        self.assertIn(
+            "Office default",
+            self.window.privacy_settings_button.description(),
+        )
+
+    def test_compatibility_dialog_applies_curated_per_prefix_settings(self):
+        current = backend.office_compatibility_settings(self.state.config)
+        dialog, by_id = self.window._compatibility_settings_dialog(current)
+        by_id["disable_animations"].setChecked(True)
+        by_id["skip_start_screen"].setChecked(True)
+        dialog.exec = mock.Mock(return_value=QDialog.DialogCode.Accepted)
+
+        with mock.patch.object(
+            self.window, "_compatibility_settings_dialog",
+            return_value=(dialog, by_id),
+        ), mock.patch.object(
+            backend, "apply_office_compatibility_policies"
+        ) as apply:
+            self.window.configure_compatibility_settings()
+
+        saved = backend.office_compatibility_settings(
+            self.state.snapshot()["config"]
+        )
+        self.assertTrue(saved["disable_animations"])
+        self.assertTrue(saved["skip_start_screen"])
+        self.assertFalse(saved["disable_hardware_acceleration"])
+        apply.assert_called_once()
+        self.assertIn(
+            "2 managed",
+            self.window.compatibility_settings_button.description(),
+        )
 
     def test_environment_creation_reapplies_checked_telemetry_policy(self):
         prefix = Path(self.config["prefix"])
@@ -500,14 +548,19 @@ class QtManagerTests(unittest.TestCase):
         )
 
     def test_telemetry_policy_failure_is_shown_and_not_saved(self):
-        self.window.disable_office_telemetry.setChecked(True)
+        dialog, checkbox = self.window._privacy_settings_dialog(self.state.config)
+        checkbox.setChecked(True)
+        dialog.exec = mock.Mock(return_value=QDialog.DialogCode.Accepted)
+
         with mock.patch.object(
             backend, "apply_office_telemetry_policy",
             side_effect=RuntimeError("policy command failed"),
+        ), mock.patch.object(
+            self.window, "_privacy_settings_dialog",
+            return_value=(dialog, checkbox),
         ), mock.patch.object(self.window, "show_error") as show_error:
-            saved = self.window.save_config()
+            self.window.configure_privacy_settings()
 
-        self.assertIsNone(saved)
         self.assertFalse(backend.office_telemetry_disabled(self.state.config))
         show_error.assert_called_once()
         self.assertIn("policy command failed", str(show_error.call_args.args[0]))

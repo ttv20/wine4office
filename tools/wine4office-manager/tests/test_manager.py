@@ -113,6 +113,92 @@ class ManagerTests(unittest.TestCase):
         save.assert_not_called()
         self.assertFalse(backend.office_telemetry_disabled(state.config, prefix))
 
+    def test_state_applies_owned_office_compatibility_policies(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+        desired = {
+            policy_id: policy_id in {"disable_animations", "skip_start_screen"}
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+
+        with mock.patch.object(
+            backend, "apply_office_compatibility_policies"
+        ) as apply:
+            updated = state.update_config({
+                "prefix": str(prefix),
+                "office_compatibility_settings": desired,
+            })
+
+        self.assertEqual(
+            backend.office_compatibility_settings(updated, prefix), desired
+        )
+        apply.assert_called_once_with(
+            str(prefix), updated["wine"], desired,
+            {policy_id: False for policy_id in desired},
+            use_x11=True,
+        )
+
+    def test_compatibility_policy_failure_does_not_save_enabled_state(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+        desired = {
+            policy_id: policy_id == "disable_animations"
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+
+        with mock.patch.object(
+            backend, "apply_office_compatibility_policies",
+            side_effect=RuntimeError("registry write failed"),
+        ), mock.patch.object(backend, "save_config") as save:
+            with self.assertRaisesRegex(RuntimeError, "registry write failed"):
+                state.update_config({
+                    "prefix": str(prefix),
+                    "office_compatibility_settings": desired,
+                })
+
+        save.assert_not_called()
+        self.assertFalse(any(
+            backend.office_compatibility_settings(state.config, prefix).values()
+        ))
+
+    def test_config_save_failure_rolls_back_only_changed_compatibility_values(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+        before = {
+            policy_id: True
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        desired = {
+            policy_id: False
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        state.config = backend.set_office_compatibility_settings(
+            state.config, prefix, before
+        )
+
+        with mock.patch.object(
+            backend, "apply_office_compatibility_policies",
+            side_effect=[["disable_animations"], ["disable_animations"]],
+        ) as apply, mock.patch.object(
+            backend, "save_config", side_effect=OSError("disk full")
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                state.update_config({
+                    "prefix": str(prefix),
+                    "office_compatibility_settings": desired,
+                })
+
+        rollback = dict(desired)
+        rollback["disable_animations"] = True
+        self.assertEqual(apply.call_count, 2)
+        self.assertEqual(apply.call_args_list[1], mock.call(
+            str(prefix), state.config["wine"], rollback, desired,
+            use_x11=True,
+        ))
+
     def test_environment_switch_keeps_telemetry_choice_per_prefix(self):
         state = manager.ManagerState()
         old = Path(state.config["prefix"])
@@ -159,6 +245,40 @@ class ManagerTests(unittest.TestCase):
         apply.assert_called_once_with(
             str(new), state.config["wine"], True,
             remove_managed=False, use_x11=True,
+        )
+
+    def test_initialized_environment_applies_saved_compatibility_policies(self):
+        state = manager.ManagerState()
+        old = Path(state.config["prefix"])
+        self._make_prefix(old)
+        new = self.home / "initialized-prefix"
+        desired = {
+            policy_id: policy_id == "disable_animations"
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        state.config = backend.set_office_compatibility_settings(
+            state.config, new, desired
+        )
+
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+            self._make_prefix(Path(prefix))
+            return "ready"
+
+        with mock.patch.object(
+            backend, "create_environment", side_effect=initialize
+        ), mock.patch.object(
+            backend, "apply_office_compatibility_policies"
+        ) as apply:
+            state.start_environment_transition(
+                {"prefix": str(new)}, True, False
+            )
+            self._wait(state)
+
+        self.assertEqual(state.snapshot()["task"]["status"], "completed")
+        apply.assert_called_once_with(
+            str(new), state.config["wine"], desired,
+            {policy_id: False for policy_id in desired},
+            use_x11=True,
         )
 
     def test_background_task_completion_and_failure_are_visible(self):

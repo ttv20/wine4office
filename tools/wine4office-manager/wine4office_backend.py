@@ -36,6 +36,32 @@ OFFICE_TELEMETRY_POLICY_KEY = (
 )
 OFFICE_TELEMETRY_POLICY_VALUE = "SendTelemetry"
 OFFICE_TELEMETRY_DISABLED = "3"
+OFFICE_COMPATIBILITY_POLICIES = {
+    "disable_animations": {
+        "label": "Disable Office animations",
+        "key": r"HKCU\Software\Policies\Microsoft\Office\16.0\Common\Graphics",
+        "value": "DisableAnimations",
+        "data": 1,
+    },
+    "disable_hardware_acceleration": {
+        "label": "Disable hardware graphics acceleration",
+        "key": r"HKCU\Software\Policies\Microsoft\Office\16.0\Common\Graphics",
+        "value": "DisableHardwareAcceleration",
+        "data": 1,
+    },
+    "skip_first_run": {
+        "label": "Skip Office First Run",
+        "key": r"HKCU\Software\Policies\Microsoft\Office\16.0\FirstRun",
+        "value": "BootedRTM",
+        "data": 1,
+    },
+    "skip_start_screen": {
+        "label": "Skip the Office Start screen",
+        "key": r"HKCU\Software\Policies\Microsoft\Office\16.0\Common\General",
+        "value": "DisableBootToOfficeStart",
+        "data": 1,
+    },
+}
 
 
 APP_META = {
@@ -287,6 +313,7 @@ def default_config() -> dict:
         "desktop_copy": False,
         "use_x11": True,
         "office_telemetry_disabled": {},
+        "office_compatibility_policies": {},
         "update_url": configured_update_url(),
         "skipped_updates": {},
     }
@@ -368,6 +395,48 @@ def set_office_telemetry_disabled(config: dict, prefix_value: PathValue,
     else:
         policies.pop(key, None)
     result["office_telemetry_disabled"] = policies
+    return result
+
+
+def office_compatibility_settings(
+        config: dict, prefix_value: PathValue | None = None) -> dict[str, bool]:
+    """Return manager-owned compatibility policies for one Wine prefix."""
+    environments = config.get("office_compatibility_policies", {})
+    prefix = config.get("prefix", "") if prefix_value is None else prefix_value
+    try:
+        saved = environments.get(environment_config_key(prefix), {}) \
+            if isinstance(environments, dict) else {}
+    except (TypeError, ValueError):
+        saved = {}
+    return {
+        policy_id: bool(saved.get(policy_id) is True)
+        for policy_id in OFFICE_COMPATIBILITY_POLICIES
+    }
+
+
+def set_office_compatibility_settings(
+        config: dict, prefix_value: PathValue,
+        settings: dict[str, bool]) -> dict:
+    """Copy config and replace manager ownership for one prefix."""
+    unknown = set(settings) - set(OFFICE_COMPATIBILITY_POLICIES)
+    if unknown:
+        raise ValueError(
+            f"Unknown Office compatibility policy: {sorted(unknown)[0]}"
+        )
+    result = dict(config)
+    saved = result.get("office_compatibility_policies", {})
+    environments = dict(saved) if isinstance(saved, dict) else {}
+    key = environment_config_key(prefix_value)
+    enabled = {
+        policy_id: True
+        for policy_id in OFFICE_COMPATIBILITY_POLICIES
+        if settings.get(policy_id) is True
+    }
+    if enabled:
+        environments[key] = enabled
+    else:
+        environments.pop(key, None)
+    result["office_compatibility_policies"] = environments
     return result
 
 
@@ -509,21 +578,22 @@ def wine_environment(prefix: str | Path, wine: str | Path,
     return env
 
 
-def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: bool,
-                                  *, remove_managed: bool = False,
-                                  use_x11: bool = True) -> bool:
-    """Set or remove only Office's official SendTelemetry user policy value."""
+def _apply_managed_office_dword(
+        prefix_value: str, wine_value: str, key: str, value: str, data: int,
+        enabled: bool, *, remove_managed: bool = False,
+        use_x11: bool = True) -> bool:
+    """Set a DWORD or remove it only when it still has our expected value."""
     prefix = validate_prefix(prefix_value)
     if classify_prefix(str(prefix)) != "valid":
-        raise ValueError(f"Office telemetry policy requires a valid Wine prefix: {prefix}")
+        raise ValueError(f"Office policy requires a valid Wine prefix: {prefix}")
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
-    if disabled:
+    if enabled:
         subprocess.run(
             [
-                str(wine), "reg", "add", OFFICE_TELEMETRY_POLICY_KEY,
-                "/v", OFFICE_TELEMETRY_POLICY_VALUE, "/t", "REG_DWORD",
-                "/d", OFFICE_TELEMETRY_DISABLED, "/f",
+                str(wine), "reg", "add", key,
+                "/v", value, "/t", "REG_DWORD",
+                "/d", str(data), "/f",
             ],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             timeout=30, check=True,
@@ -533,8 +603,7 @@ def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: 
         return False
 
     query_command = [
-        str(wine), "reg", "query", OFFICE_TELEMETRY_POLICY_KEY,
-        "/v", OFFICE_TELEMETRY_POLICY_VALUE,
+        str(wine), "reg", "query", key, "/v", value,
     ]
     query = subprocess.run(
         query_command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -546,17 +615,68 @@ def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: 
         raise subprocess.CalledProcessError(
             query.returncode, query_command, output=query.stdout, stderr=query.stderr
         )
-    if not re.search(r"\bREG_DWORD\s+(?:0x0*3|3)\b", query.stdout, re.IGNORECASE):
+    match = re.search(
+        r"\bREG_DWORD\s+(0x[0-9a-f]+|\d+)\b", query.stdout, re.IGNORECASE
+    )
+    if not match or int(match.group(1), 0) != data:
         return False
     subprocess.run(
         [
-            str(wine), "reg", "delete", OFFICE_TELEMETRY_POLICY_KEY,
-            "/v", OFFICE_TELEMETRY_POLICY_VALUE, "/f",
+            str(wine), "reg", "delete", key, "/v", value, "/f",
         ],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         timeout=30, check=True,
     )
     return True
+
+
+def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: bool,
+                                  *, remove_managed: bool = False,
+                                  use_x11: bool = True) -> bool:
+    """Set or remove only Office's official SendTelemetry user policy value."""
+    return _apply_managed_office_dword(
+        prefix_value, wine_value,
+        OFFICE_TELEMETRY_POLICY_KEY, OFFICE_TELEMETRY_POLICY_VALUE,
+        int(OFFICE_TELEMETRY_DISABLED), disabled,
+        remove_managed=remove_managed, use_x11=use_x11,
+    )
+
+
+def apply_office_compatibility_policies(
+        prefix_value: str, wine_value: str, desired: dict[str, bool],
+        previously_managed: dict[str, bool], use_x11: bool = True) -> list[str]:
+    """Apply a compatibility-policy batch and roll back completed changes on failure."""
+    unknown = (set(desired) | set(previously_managed)) \
+        - set(OFFICE_COMPATIBILITY_POLICIES)
+    if unknown:
+        raise ValueError(
+            f"Unknown Office compatibility policy: {sorted(unknown)[0]}"
+        )
+    completed: list[tuple[str, bool, bool]] = []
+    try:
+        for policy_id, spec in OFFICE_COMPATIBILITY_POLICIES.items():
+            before = previously_managed.get(policy_id) is True
+            after = desired.get(policy_id) is True
+            if before == after:
+                continue
+            changed = _apply_managed_office_dword(
+                prefix_value, wine_value, spec["key"], spec["value"], spec["data"],
+                after, remove_managed=before, use_x11=use_x11,
+            )
+            if changed:
+                completed.append((policy_id, before, after))
+    except Exception:
+        for policy_id, before, after in reversed(completed):
+            spec = OFFICE_COMPATIBILITY_POLICIES[policy_id]
+            try:
+                _apply_managed_office_dword(
+                    prefix_value, wine_value, spec["key"], spec["value"], spec["data"],
+                    before, remove_managed=after, use_x11=use_x11,
+                )
+            except Exception:
+                pass
+        raise
+    return [policy_id for policy_id, _before, _after in completed]
 
 
 def sibling_tool(wine: Path, name: str) -> Path | None:

@@ -91,6 +91,15 @@ class ManagerState:
         candidate["office_telemetry_disabled"] = (
             dict(saved_policies) if isinstance(saved_policies, dict) else {}
         )
+        saved_compatibility = candidate.get("office_compatibility_policies", {})
+        candidate["office_compatibility_policies"] = (
+            {
+                str(prefix): dict(settings)
+                for prefix, settings in saved_compatibility.items()
+                if isinstance(settings, dict)
+            }
+            if isinstance(saved_compatibility, dict) else {}
+        )
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
@@ -100,6 +109,13 @@ class ManagerState:
         if "disable_office_telemetry" in payload:
             candidate = backend.set_office_telemetry_disabled(
                 candidate, candidate["prefix"], bool(payload["disable_office_telemetry"])
+            )
+        if "office_compatibility_settings" in payload:
+            settings = payload["office_compatibility_settings"]
+            if not isinstance(settings, dict):
+                raise ValueError("Office compatibility settings must be a mapping.")
+            candidate = backend.set_office_compatibility_settings(
+                candidate, candidate["prefix"], settings,
             )
         return candidate
 
@@ -119,18 +135,40 @@ class ManagerState:
                 self.config, candidate["prefix"]
             )
             policy_disabled = backend.office_telemetry_disabled(candidate)
+            compatibility_before = backend.office_compatibility_settings(
+                self.config, candidate["prefix"]
+            )
+            compatibility_after = backend.office_compatibility_settings(candidate)
+            valid_prefix = backend.classify_prefix(candidate["prefix"]) == "valid"
             policy_applied = False
-            if ((policy_disabled or policy_was_disabled)
-                    and backend.classify_prefix(candidate["prefix"]) == "valid"):
-                backend.apply_office_telemetry_policy(
-                    candidate["prefix"], candidate["wine"], policy_disabled,
-                    remove_managed=policy_was_disabled,
-                    use_x11=candidate.get("use_x11", True),
-                )
-                policy_applied = True
+            compatibility_changed: list[str] = []
             try:
+                if (policy_disabled or policy_was_disabled) and valid_prefix:
+                    policy_applied = backend.apply_office_telemetry_policy(
+                        candidate["prefix"], candidate["wine"], policy_disabled,
+                        remove_managed=policy_was_disabled,
+                        use_x11=candidate.get("use_x11", True),
+                    )
+                if compatibility_after != compatibility_before and valid_prefix:
+                    compatibility_changed = backend.apply_office_compatibility_policies(
+                        candidate["prefix"], candidate["wine"],
+                        compatibility_after, compatibility_before,
+                        use_x11=candidate.get("use_x11", True),
+                    )
                 backend.save_config(candidate)
             except Exception:
+                if compatibility_changed:
+                    try:
+                        rollback_settings = dict(compatibility_after)
+                        for policy_id in compatibility_changed:
+                            rollback_settings[policy_id] = compatibility_before[policy_id]
+                        backend.apply_office_compatibility_policies(
+                            candidate["prefix"], candidate["wine"],
+                            rollback_settings, compatibility_after,
+                            use_x11=candidate.get("use_x11", True),
+                        )
+                    except Exception:
+                        pass
                 if policy_applied and policy_disabled != policy_was_disabled:
                     backend.apply_office_telemetry_policy(
                         candidate["prefix"], candidate["wine"], policy_was_disabled,
@@ -165,6 +203,12 @@ class ManagerState:
                 backend.validate_environment_deletion(old_prefix, new_prefix)
             policy_was_disabled = backend.office_telemetry_disabled(original, new_prefix)
             policy_disabled = backend.office_telemetry_disabled(candidate, new_prefix)
+            compatibility_before = backend.office_compatibility_settings(
+                original, new_prefix
+            )
+            compatibility_after = backend.office_compatibility_settings(
+                candidate, new_prefix
+            )
 
 
         def transition() -> str:
@@ -172,6 +216,7 @@ class ManagerState:
             staged: Path | None = None
             committed = False
             policy_applied = False
+            compatibility_changed: list[str] = []
             try:
                 if initialize:
                     backend.create_environment(
@@ -191,6 +236,19 @@ class ManagerState:
                         use_x11=candidate.get("use_x11", True),
                     )
                     policy_applied = True
+                registry_compatibility_before = (
+                    {
+                        policy_id: False
+                        for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+                    }
+                    if initialized else compatibility_before
+                )
+                if compatibility_after != registry_compatibility_before:
+                    compatibility_changed = backend.apply_office_compatibility_policies(
+                        new_prefix, candidate["wine"],
+                        compatibility_after, registry_compatibility_before,
+                        use_x11=candidate.get("use_x11", True),
+                    )
                 if self.cancel_event.is_set():
                     raise RuntimeError("Operation cancelled.")
                 if delete_old:
@@ -207,6 +265,9 @@ class ManagerState:
                     if delete_old:
                         committed_candidate = backend.set_office_telemetry_disabled(
                             committed_candidate, old_prefix, False
+                        )
+                        committed_candidate = backend.set_office_compatibility_settings(
+                            committed_candidate, old_prefix, {}
                         )
                     backend.save_config(committed_candidate)
                     self.config = committed_candidate
@@ -225,6 +286,22 @@ class ManagerState:
                         self.output(
                             "WARNING: Could not restore the replacement environment's "
                             f"telemetry policy: {rollback_error}"
+                        )
+                if (compatibility_changed and not initialized
+                        and compatibility_after != compatibility_before):
+                    try:
+                        rollback_settings = dict(compatibility_after)
+                        for policy_id in compatibility_changed:
+                            rollback_settings[policy_id] = compatibility_before[policy_id]
+                        backend.apply_office_compatibility_policies(
+                            new_prefix, candidate["wine"],
+                            rollback_settings, compatibility_after,
+                            use_x11=candidate.get("use_x11", True),
+                        )
+                    except Exception as rollback_error:
+                        self.output(
+                            "WARNING: Could not restore the replacement environment's "
+                            f"Office compatibility policies: {rollback_error}"
                         )
                 if initialized and not committed:
                     try:
@@ -502,6 +579,15 @@ class ManagerState:
             telemetry = config.get("office_telemetry_disabled", {})
             config["office_telemetry_disabled"] = (
                 dict(telemetry) if isinstance(telemetry, dict) else {}
+            )
+            compatibility = config.get("office_compatibility_policies", {})
+            config["office_compatibility_policies"] = (
+                {
+                    str(prefix): dict(settings)
+                    for prefix, settings in compatibility.items()
+                    if isinstance(settings, dict)
+                }
+                if isinstance(compatibility, dict) else {}
             )
             task = dict(self.task)
             updater = dict(self.updater)

@@ -170,6 +170,91 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                     str(prefix), str(self.wine), True
                 )
 
+    def test_compatibility_policies_persist_per_environment(self):
+        first = self.home / "first-prefix"
+        second = self.home / "second-prefix"
+        config = backend.set_office_compatibility_settings(
+            backend.default_config(), first, {
+                "disable_animations": True,
+                "skip_start_screen": True,
+            },
+        )
+        backend.save_config(config)
+        loaded = backend.load_config()
+
+        first_settings = backend.office_compatibility_settings(loaded, first)
+        second_settings = backend.office_compatibility_settings(loaded, second)
+        self.assertTrue(first_settings["disable_animations"])
+        self.assertTrue(first_settings["skip_start_screen"])
+        self.assertFalse(first_settings["disable_hardware_acceleration"])
+        self.assertFalse(any(second_settings.values()))
+
+    def test_compatibility_policy_uses_exact_official_registry_value(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        desired = {
+            policy_id: policy_id == "disable_animations"
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        previous = {policy_id: False for policy_id in desired}
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=completed
+        ) as run:
+            changed = backend.apply_office_compatibility_policies(
+                str(prefix), str(self.wine), desired, previous,
+            )
+
+        self.assertEqual(changed, ["disable_animations"])
+        self.assertEqual(run.call_args.args[0], [
+            str(self.wine), "reg", "add",
+            r"HKCU\Software\Policies\Microsoft\Office\16.0\Common\Graphics",
+            "/v", "DisableAnimations", "/t", "REG_DWORD", "/d", "1", "/f",
+        ])
+
+    def test_compatibility_policy_preserves_externally_changed_value(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        previous = {
+            policy_id: policy_id == "disable_animations"
+            for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        desired = {policy_id: False for policy_id in previous}
+        external = mock.Mock(
+            returncode=0, stdout="DisableAnimations REG_DWORD 0x2\n", stderr=""
+        )
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=external
+        ) as run:
+            changed = backend.apply_office_compatibility_policies(
+                str(prefix), str(self.wine), desired, previous,
+            )
+
+        self.assertEqual(changed, [])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][2], "query")
+
+    def test_compatibility_policy_batch_rolls_back_completed_changes(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        previous = {
+            policy_id: False for policy_id in backend.OFFICE_COMPATIBILITY_POLICIES
+        }
+        desired = dict(previous)
+        desired["disable_animations"] = True
+        desired["disable_hardware_acceleration"] = True
+        failure = subprocess.CalledProcessError(5, ["wine", "reg", "add"])
+        with mock.patch.object(
+            backend, "_apply_managed_office_dword",
+            side_effect=[True, failure, True],
+        ) as apply:
+            with self.assertRaises(subprocess.CalledProcessError):
+                backend.apply_office_compatibility_policies(
+                    str(prefix), str(self.wine), desired, previous,
+                )
+
+        self.assertEqual(apply.call_count, 3)
+        rollback = apply.call_args_list[2]
+        self.assertFalse(rollback.args[5])
+        self.assertTrue(rollback.kwargs["remove_managed"])
+
     def test_wine_environment_applies_display_precedence_for_both_modes(self):
         with mock.patch.dict(
             os.environ, {"DISPLAY": ":7", "WAYLAND_DISPLAY": "wayland-7"}

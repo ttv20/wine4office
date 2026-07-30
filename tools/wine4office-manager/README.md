@@ -56,6 +56,8 @@ The manager defaults to:
 - Create or rollback-safely recreate a selected Wine prefix.
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
+- Apply curated per-prefix Office compatibility and privacy policies without
+  exposing Windows-only Group Policy infrastructure.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4Office Manager and Wine runner updates.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.
@@ -65,6 +67,16 @@ a shortcut atomically writes a manager-owned launcher under
 `${XDG_DATA_HOME:-~/.local/share}/wine4office/shortcut-launchers/`. The launcher
 applies the selected display mode and Office-specific setup before replacing
 itself with Wine. Removing the shortcut also removes its generated launcher.
+
+The **Office settings** page keeps policy controls out of the already dense
+environment page. Compatibility controls can disable animations or hardware
+acceleration and suppress First Run or the Office Start screen. Hardware
+acceleration remains enabled by default. Privacy currently exposes the
+ownership-safe Office telemetry policy while leaving connected experiences
+enabled. Security explains why Internet macro blocking is not offered until
+Linux download provenance can be bridged to Wine's `Zone.Identifier` handling.
+All implemented settings are stored per prefix, and removal deletes a registry
+value only when it still matches the value written by Wine4Office.
 
 After a manager update, the newly installed binary runs versioned post-install
 hooks. The current hook migrates only existing Wine4Office-owned Office

@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QCommandLinkButton,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -46,6 +48,13 @@ import wine4office_backend as backend
 
 
 class ManagerWindow(QMainWindow):
+    ENVIRONMENT_PAGE = 0
+    INSTALL_PAGE = 1
+    APPLICATIONS_PAGE = 2
+    OFFICE_SETTINGS_PAGE = 3
+    TOOLS_PAGE = 4
+    MAINTENANCE_PAGE = 5
+
     def __init__(self, state, launcher: Path, icons: Path, font_helper: Path,
                  restart_command: list[str] | None = None) -> None:
         super().__init__()
@@ -117,6 +126,8 @@ class ManagerWindow(QMainWindow):
             ("Environment", QStyle.StandardPixmap.SP_DriveHDIcon, self._environment_page()),
             ("Install Office", QStyle.StandardPixmap.SP_ArrowDown, self._office_install_page()),
             ("Applications", QStyle.StandardPixmap.SP_FileDialogListView, self._applications_page()),
+            ("Office settings", QStyle.StandardPixmap.SP_FileDialogContentsView,
+             self._office_settings_page()),
             ("Wine tools", QStyle.StandardPixmap.SP_ComputerIcon, self._tools_page()),
             ("Maintenance", QStyle.StandardPixmap.SP_BrowserReload, self._maintenance_page()),
         ]
@@ -203,21 +214,7 @@ class ManagerWindow(QMainWindow):
         )
         self.use_x11.setAccessibleName("Launch Wine4Office through X11")
         environment_layout.addWidget(self.use_x11)
-        self.disable_office_telemetry = QCheckBox(
-            "Disable Microsoft Office telemetry (policy)"
-        )
-        self.disable_office_telemetry.setAccessibleName(
-            "Disable Microsoft Office telemetry policy"
-        )
-        telemetry_help = (
-            "Sets Microsoft's per-user Office diagnostic-data policy to Neither in the "
-            "selected Wine environment. Required service data is not disabled."
-        )
-        self.disable_office_telemetry.setAccessibleDescription(telemetry_help)
-        self.disable_office_telemetry.setToolTip(telemetry_help)
-        self.disable_office_telemetry.setStatusTip(telemetry_help)
-        environment_layout.addWidget(self.disable_office_telemetry)
-        self.prefix_edit.textChanged.connect(self._sync_office_telemetry_field)
+        self.prefix_edit.textChanged.connect(self._sync_office_settings_summary)
 
         environment_buttons = QHBoxLayout()
         self.create_button = self._action_button(
@@ -650,8 +647,8 @@ class ManagerWindow(QMainWindow):
                 ),
             )
             self.pending_odt_xml = (validated_path, configuration_payload, config_digest)
-            self.pages.setCurrentIndex(4)
-            self.navigation.setCurrentRow(4)
+            self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
+            self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
             self.notify("Office installation started.")
             self.refresh_state()
         except Exception as error:
@@ -764,6 +761,213 @@ class ManagerWindow(QMainWindow):
         layout.addLayout(buttons)
         return page
 
+    def _office_settings_page(self) -> QWidget:
+        page, layout = self._new_page(
+            "Office settings",
+            "Apply curated Microsoft Office policies to the selected Wine environment "
+            "without exposing thousands of Windows-only Group Policy entries.",
+        )
+        selected = QGroupBox("Selected environment")
+        selected_layout = QVBoxLayout(selected)
+        self.office_settings_environment_label = QLabel("Checking…")
+        self.office_settings_environment_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        selected_layout.addWidget(self.office_settings_environment_label)
+        layout.addWidget(selected)
+
+        self.compatibility_settings_button = QCommandLinkButton(
+            "Compatibility", "Default Office rendering and startup behavior"
+        )
+        self.compatibility_settings_button.setIcon(
+            self._standard_icon(QStyle.StandardPixmap.SP_ComputerIcon)
+        )
+        self.compatibility_settings_button.clicked.connect(
+            self.configure_compatibility_settings
+        )
+        self.task_sensitive_buttons.append(self.compatibility_settings_button)
+        layout.addWidget(self.compatibility_settings_button)
+
+        self.security_settings_button = QCommandLinkButton(
+            "Security",
+            "Standard Office behavior · Internet-download protection needs Linux integration",
+        )
+        self.security_settings_button.setIcon(
+            self._standard_icon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+        )
+        self.security_settings_button.clicked.connect(self.show_security_settings)
+        layout.addWidget(self.security_settings_button)
+
+        self.privacy_settings_button = QCommandLinkButton(
+            "Privacy & cloud", "Telemetry uses the Office default"
+        )
+        self.privacy_settings_button.setIcon(
+            self._standard_icon(QStyle.StandardPixmap.SP_DialogHelpButton)
+        )
+        self.privacy_settings_button.clicked.connect(self.configure_privacy_settings)
+        self.task_sensitive_buttons.append(self.privacy_settings_button)
+        layout.addWidget(self.privacy_settings_button)
+
+        hint = QLabel(
+            "These choices are stored per Wine environment. Wine4Office removes only "
+            "registry values it owns and leaves externally changed values untouched."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
+        return page
+
+    def _office_settings_config(self) -> dict | None:
+        with self.state.lock:
+            config = dict(self.state.config)
+        entered_prefix = self.prefix_edit.text()
+        try:
+            matches = backend.paths_equivalent(config["prefix"], entered_prefix)
+        except (TypeError, ValueError):
+            matches = False
+        if not matches:
+            self.show_error(
+                "Save or switch to the entered Wine environment before changing "
+                "its Office settings."
+            )
+            return None
+        if backend.classify_prefix(config["prefix"]) != "valid":
+            self.show_error(
+                "Create the selected Wine environment before changing Office settings."
+            )
+            return None
+        return config
+
+    def _compatibility_settings_dialog(
+            self, current: dict[str, bool]) -> tuple[QDialog, dict[str, QCheckBox]]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Office compatibility")
+        dialog.setMinimumWidth(520)
+        dialog_layout = QVBoxLayout(dialog)
+        intro = QLabel(
+            "Choose targeted workarounds for this Wine environment. Hardware "
+            "acceleration remains enabled unless you explicitly disable it."
+        )
+        intro.setWordWrap(True)
+        dialog_layout.addWidget(intro)
+        checkboxes: dict[str, QCheckBox] = {}
+        descriptions = {
+            "disable_animations": "Reduce compositor and rendering glitches.",
+            "disable_hardware_acceleration": (
+                "Troubleshooting option for display corruption or GPU-driver problems."
+            ),
+            "skip_first_run": "Avoid the Office First Run experience.",
+            "skip_start_screen": "Open directly to a document instead of the Start screen.",
+        }
+        for policy_id, spec in backend.OFFICE_COMPATIBILITY_POLICIES.items():
+            checkbox = QCheckBox(spec["label"])
+            checkbox.setChecked(current[policy_id])
+            checkbox.setToolTip(descriptions[policy_id])
+            checkbox.setAccessibleDescription(descriptions[policy_id])
+            dialog_layout.addWidget(checkbox)
+            detail = QLabel(descriptions[policy_id])
+            detail.setWordWrap(True)
+            detail.setContentsMargins(24, 0, 0, 6)
+            dialog_layout.addWidget(detail)
+            checkboxes[policy_id] = checkbox
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+        return dialog, checkboxes
+
+    def configure_compatibility_settings(self) -> None:
+        if not self.ensure_idle():
+            return
+        config = self._office_settings_config()
+        if config is None:
+            return
+        current = backend.office_compatibility_settings(config)
+        dialog, checkboxes = self._compatibility_settings_dialog(current)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        desired = {
+            policy_id: checkbox.isChecked()
+            for policy_id, checkbox in checkboxes.items()
+        }
+        try:
+            self.state.update_config({
+                "prefix": config["prefix"],
+                "office_compatibility_settings": desired,
+            })
+        except Exception as error:
+            self.show_error(error)
+            self._sync_office_settings_summary(config["prefix"])
+            return
+        self._sync_office_settings_summary(config["prefix"])
+        self.notify("Office compatibility settings applied.")
+
+    def _privacy_settings_dialog(
+            self, config: dict) -> tuple[QDialog, QCheckBox]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Office privacy & cloud")
+        dialog.setMinimumWidth(520)
+        dialog_layout = QVBoxLayout(dialog)
+        telemetry = QCheckBox("Disable Microsoft Office telemetry (policy)")
+        telemetry.setChecked(backend.office_telemetry_disabled(config))
+        telemetry_help = (
+            "Sets Microsoft's Office diagnostic-data policy to Neither. Required "
+            "service data is not disabled."
+        )
+        telemetry.setAccessibleName("Disable Microsoft Office telemetry policy")
+        telemetry.setAccessibleDescription(telemetry_help)
+        telemetry.setToolTip(telemetry_help)
+        dialog_layout.addWidget(telemetry)
+        detail = QLabel(
+            f"{telemetry_help}\n\nConnected experiences and online content remain "
+            "enabled so sign-in, cloud fonts, templates, and add-ins keep working."
+        )
+        detail.setWordWrap(True)
+        dialog_layout.addWidget(detail)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+        return dialog, telemetry
+
+    def configure_privacy_settings(self) -> None:
+        if not self.ensure_idle():
+            return
+        config = self._office_settings_config()
+        if config is None:
+            return
+        dialog, telemetry = self._privacy_settings_dialog(config)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.state.update_config({
+                "prefix": config["prefix"],
+                "disable_office_telemetry": telemetry.isChecked(),
+            })
+        except Exception as error:
+            self.show_error(error)
+            self._sync_office_settings_summary(config["prefix"])
+            return
+        self._sync_office_settings_summary(config["prefix"])
+        self.notify("Office privacy settings applied.")
+
+    def show_security_settings(self) -> None:
+        QMessageBox.information(
+            self,
+            "Office security",
+            "Wine4Office does not yet claim that Internet macro blocking works on "
+            "Linux.\n\nOffice normally relies on Windows Zone.Identifier metadata, "
+            "which Linux downloads do not consistently provide. Security controls "
+            "will be added after that provenance bridge is implemented and tested; "
+            "broad Trusted Locations will not be used as a workaround.",
+        )
+
     def _tools_page(self) -> QWidget:
         page, layout = self._new_page(
             "Wine tools",
@@ -866,15 +1070,30 @@ class ManagerWindow(QMainWindow):
             "wine": self.wine_edit.text(),
             "desktop_copy": self.desktop_copy.isChecked(),
             "use_x11": self.use_x11.isChecked(),
-            "disable_office_telemetry": self.disable_office_telemetry.isChecked(),
             "update_url": self.update_edit.text(),
         }
 
-    def _sync_office_telemetry_field(self, prefix: str) -> None:
+    def _sync_office_settings_summary(self, prefix: str) -> None:
+        if not hasattr(self, "office_settings_environment_label"):
+            return
         with self.state.lock:
             config = dict(self.state.config)
-        self.disable_office_telemetry.setChecked(
-            backend.office_telemetry_disabled(config, prefix)
+        self.office_settings_environment_label.setText(
+            str(prefix).strip() or "No Wine environment selected"
+        )
+        compatibility = backend.office_compatibility_settings(config, prefix)
+        enabled = [
+            backend.OFFICE_COMPATIBILITY_POLICIES[policy_id]["label"]
+            for policy_id, value in compatibility.items() if value
+        ]
+        self.compatibility_settings_button.setDescription(
+            "Default Office rendering and startup behavior"
+            if not enabled else f"{len(enabled)} managed: " + ", ".join(enabled)
+        )
+        self.privacy_settings_button.setDescription(
+            "Telemetry disabled · connected experiences unchanged"
+            if backend.office_telemetry_disabled(config, prefix)
+            else "Telemetry uses the Office default · connected experiences unchanged"
         )
 
 
@@ -884,9 +1103,7 @@ class ManagerWindow(QMainWindow):
         self.update_edit.setText(config["update_url"])
         self.desktop_copy.setChecked(config["desktop_copy"])
         self.use_x11.setChecked(config["use_x11"])
-        self.disable_office_telemetry.setChecked(
-            backend.office_telemetry_disabled(config)
-        )
+        self._sync_office_settings_summary(config["prefix"])
 
 
     def _restore_config_fields(self) -> None:
@@ -984,8 +1201,8 @@ class ManagerWindow(QMainWindow):
                 backend.validate_environment_deletion(old_prefix, values["prefix"])
             self.pending_environment_transition = True
             self.state.start_environment_transition(values, initialize, delete_old)
-            self.pages.setCurrentIndex(4)
-            self.navigation.setCurrentRow(4)
+            self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
+            self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
             self.notify("Wine environment transition started.")
             self.refresh_state()
         except Exception as error:
@@ -1024,6 +1241,13 @@ class ManagerWindow(QMainWindow):
                 config["prefix"], config["wine"], True,
                 use_x11=config.get("use_x11", True),
             )
+        compatibility = backend.office_compatibility_settings(config)
+        if any(compatibility.values()):
+            backend.apply_office_compatibility_policies(
+                config["prefix"], config["wine"], compatibility,
+                {policy_id: False for policy_id in compatibility},
+                use_x11=config.get("use_x11", True),
+            )
         return result
 
 
@@ -1048,8 +1272,8 @@ class ManagerWindow(QMainWindow):
                 "environment",
                 lambda: self._create_environment(config, recreate),
             )
-            self.pages.setCurrentIndex(4)
-            self.navigation.setCurrentRow(4)
+            self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
+            self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
             self.notify("Environment operation started.")
             self.refresh_state()
         except Exception as error:
