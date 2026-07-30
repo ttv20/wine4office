@@ -110,6 +110,30 @@ class PostInstallTests(unittest.TestCase):
         office_refresh.assert_called_once()
         manager_refresh.assert_called_once()
 
+    def test_post_install_refreshes_opted_in_update_schedule(self):
+        config = {
+            **self.config,
+            "automatic_update_checks": True,
+            "automatic_update_checks_prompted": True,
+        }
+        with mock.patch.object(
+            backend, "current_version", return_value="2.4.0"
+        ), mock.patch.object(
+            backend, "refresh_managed_app_shortcuts",
+            return_value={"updated": [], "skipped": {}},
+        ), mock.patch.object(
+            backend, "refresh_manager_shortcut",
+            return_value={"updated": False, "path": "/manager.desktop"},
+        ), mock.patch.object(
+            backend, "install_automatic_update_schedule"
+        ) as install:
+            post_install.run_post_install(
+                config, self.helper, self.manager_command, self.icons,
+                lambda _line: None,
+            )
+
+        install.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

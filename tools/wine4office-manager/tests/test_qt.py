@@ -57,6 +57,8 @@ class QtManagerTests(unittest.TestCase):
             "use_x11": True,
             "update_url": "",
             "office_telemetry_disabled": {},
+            "automatic_update_checks": False,
+            "automatic_update_checks_prompted": True,
         }
 
         self.old_prefix = self._make_prefix(Path(self.config["prefix"]))
@@ -79,6 +81,7 @@ class QtManagerTests(unittest.TestCase):
             MANAGER_DIR / "icons",
             MANAGER_DIR / "register-office-cloud-fonts.sh",
         )
+        self.application.processEvents()
 
     def tearDown(self):
         self.window.close()
@@ -446,6 +449,54 @@ class QtManagerTests(unittest.TestCase):
             ).text(),
             "Office settings",
         )
+
+    def test_first_launch_asks_before_enabling_background_update_checks(self):
+        with self.state.lock:
+            self.state.config["automatic_update_checks_prompted"] = False
+        enabled = {
+            **self.state.config,
+            "automatic_update_checks": True,
+            "automatic_update_checks_prompted": True,
+        }
+        with mock.patch.object(
+            QMessageBox, "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ) as question, mock.patch.object(
+            self.state, "set_automatic_update_checks", return_value=enabled
+        ) as set_checks:
+            self.window.prompt_automatic_update_checks_on_first_launch()
+
+        set_checks.assert_called_once_with(True, prompted=True)
+        self.assertEqual(
+            question.call_args.args[-1], QMessageBox.StandardButton.No
+        )
+        self.assertIn("whenever you open it", question.call_args.args[2])
+        self.assertTrue(self.window.automatic_update_checks.isChecked())
+
+    def test_background_update_checkbox_explains_manager_open_check_remains(self):
+        self.assertFalse(self.window.automatic_update_checks.isChecked())
+        self.assertIn(
+            "still checks whenever you open it",
+            self.window.automatic_update_checks.toolTip(),
+        )
+        enabled = {
+            **self.state.config,
+            "automatic_update_checks": True,
+            "automatic_update_checks_prompted": True,
+        }
+        with mock.patch.object(
+            self.state, "set_automatic_update_checks", return_value=enabled
+        ) as set_checks:
+            self.window.automatic_update_checks.setChecked(True)
+
+        set_checks.assert_called_once_with(True, prompted=True)
+
+    def test_manager_open_check_runs_even_when_background_schedule_is_disabled(self):
+        with self.state.lock:
+            self.state.config["automatic_update_checks"] = False
+        with mock.patch.object(self.state, "start_update_check") as check:
+            self.window.start_background_update_check()
+        check.assert_called_once_with()
 
     def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
         self.assertTrue(self.window.use_x11.isChecked())

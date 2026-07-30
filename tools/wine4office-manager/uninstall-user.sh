@@ -30,10 +30,14 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import wine4office_backend as backend
 backend.uninstall_preload_service()
+if hasattr(backend, "uninstall_automatic_update_schedule"):
+    backend.uninstall_automatic_update_schedule()
 PY
 elif [[ -e "$CONFIG_HOME/systemd/user/wine4office-preload.service" ||
-        -e "$CONFIG_HOME/wine4office/preload-service.json" ]]; then
-    echo "Cannot safely remove the preload service because the installed backend is missing." >&2
+        -e "$CONFIG_HOME/wine4office/preload-service.json" ||
+        -e "$CONFIG_HOME/systemd/user/wine4office-update-check.service" ||
+        -e "$CONFIG_HOME/systemd/user/wine4office-update-check.timer" ]]; then
+    echo "Cannot safely remove Wine4Office user services because the installed backend is missing." >&2
     exit 1
 fi
 

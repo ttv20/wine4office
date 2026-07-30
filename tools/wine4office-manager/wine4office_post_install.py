@@ -13,7 +13,7 @@ from typing import Callable
 import wine4office_backend as backend
 
 
-POST_INSTALL_SCHEMA = 2
+POST_INSTALL_SCHEMA = 3
 Output = Callable[[str], None]
 
 
@@ -81,9 +81,21 @@ def _refresh_manager_shortcut(context: PostInstallContext) -> dict:
     return result
 
 
+def _refresh_automatic_update_schedule(context: PostInstallContext) -> dict:
+    enabled = context.config.get("automatic_update_checks") is True
+    if enabled:
+        backend.install_automatic_update_schedule()
+    context.output(
+        "Post-install: automatic background update schedule "
+        + ("refreshed." if enabled else "not enabled; left unchanged.")
+    )
+    return {"enabled": enabled}
+
+
 POST_INSTALL_HOOKS = (
     _migrate_managed_shortcuts,
     _refresh_manager_shortcut,
+    _refresh_automatic_update_schedule,
 )
 
 

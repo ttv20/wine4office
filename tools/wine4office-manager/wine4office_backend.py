@@ -316,6 +316,8 @@ def default_config() -> dict:
         "office_compatibility_policies": {},
         "update_url": configured_update_url(),
         "skipped_updates": {},
+        "automatic_update_checks": False,
+        "automatic_update_checks_prompted": False,
     }
 
 
@@ -1726,6 +1728,87 @@ def check_for_updates(metadata_url: str, skipped: dict | None = None,
     }
 
 
+def show_automatic_update_notification(updates: dict[str, dict]) -> str:
+    """Show an actionable desktop notification and return the selected action."""
+    notify_send = shutil.which("notify-send")
+    if not notify_send:
+        raise RuntimeError(
+            "notify-send is required for background update notifications."
+        )
+    labels = {
+        "manager": "Wine4Office Manager",
+        "wine": "Wine runner",
+    }
+    available = [
+        f"{labels.get(name, name)} {component['version']}"
+        for name, component in sorted(updates.items())
+    ]
+    result = subprocess.run(
+        [
+            notify_send,
+            "--app-name=Wine4Office Manager",
+            "--icon=wine4office-manager",
+            "--urgency=normal",
+            "--expire-time=60000",
+            "--wait",
+            "--action=update=Update",
+            "--action=disable=Disable automatic checks",
+            "Wine4Office updates available",
+            "\n".join(available),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=70,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "Could not show the update notification.")
+    return result.stdout.strip()
+
+
+def run_scheduled_update_check() -> dict:
+    """Check for updates only when the user opted into the systemd schedule."""
+    config = load_config()
+    if config.get("automatic_update_checks") is not True:
+        return {"checked": False, "updates": {}, "action": ""}
+    metadata_url = str(config.get("update_url", "")).strip()
+    if not metadata_url:
+        return {"checked": False, "updates": {}, "action": ""}
+
+    result = check_for_updates(
+        metadata_url, dict(config.get("skipped_updates", {}))
+    )
+    canonical_url = result["metadata"]["metadata_url"]
+    candidate = dict(config)
+    candidate["update_url"] = canonical_url
+    save_config(candidate)
+    persist_metadata_url(canonical_url)
+    updates = result["updates"]
+    if not updates:
+        return {"checked": True, "updates": {}, "action": ""}
+
+    action = show_automatic_update_notification(updates)
+    if action == "disable":
+        candidate["automatic_update_checks"] = False
+        candidate["automatic_update_checks_prompted"] = True
+        save_config(candidate)
+        disable_automatic_update_schedule()
+    elif action == "update":
+        subprocess.Popen(
+            [str(_preload_manager_executable()), "--open-maintenance"],
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return {"checked": True, "updates": updates, "action": action}
+
+
 def _atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.",
@@ -2713,6 +2796,8 @@ def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -
 
 
 PRELOAD_UNIT = "wine4office-preload.service"
+AUTOMATIC_UPDATE_SERVICE = "wine4office-update-check.service"
+AUTOMATIC_UPDATE_TIMER = "wine4office-update-check.timer"
 PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
 _PRELOAD_SCHEMA = 1
 _PRELOAD_HEARTBEAT_SCHEMA = 1
@@ -2720,6 +2805,9 @@ _PRELOAD_SYSTEMCTL_TIMEOUT = 8
 _PRELOAD_WINE_TIMEOUT = 12
 _PRELOAD_HEARTBEAT_MAX_AGE = 20
 _PRELOAD_UNIT_MARKER = "# Managed by Wine4OfficeManager: preload-service-v1"
+_AUTOMATIC_UPDATE_UNIT_MARKER = (
+    "# Managed by Wine4OfficeManager: automatic-update-check-v1"
+)
 
 
 def preload_binding_path() -> Path:
@@ -2728,6 +2816,14 @@ def preload_binding_path() -> Path:
 
 def preload_unit_path() -> Path:
     return config_home() / "systemd/user" / PRELOAD_UNIT
+
+
+def automatic_update_service_path() -> Path:
+    return config_home() / "systemd/user" / AUTOMATIC_UPDATE_SERVICE
+
+
+def automatic_update_timer_path() -> Path:
+    return config_home() / "systemd/user" / AUTOMATIC_UPDATE_TIMER
 
 
 def preload_runtime_status_path() -> Path:
@@ -3007,6 +3103,117 @@ def _preload_manager_executable() -> Path:
     if not manager.is_absolute() or not manager.is_file() or not os.access(manager, os.X_OK):
         raise FileNotFoundError(f"Wine4Office Manager executable is unavailable: {manager}")
     return manager
+
+
+def _automatic_update_service_text() -> str:
+    arguments = " ".join(
+        _systemd_quote(value) for value in (
+            _preload_manager_executable(), "--scheduled-update-check"
+        )
+    )
+    return (
+        f"{_AUTOMATIC_UPDATE_UNIT_MARKER}\n"
+        "[Unit]\n"
+        "Description=Check for Wine4Office updates\n"
+        "After=graphical-session.target network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={arguments}\n"
+        "TimeoutStartSec=10min\n"
+    )
+
+
+def _automatic_update_timer_text() -> str:
+    return (
+        f"{_AUTOMATIC_UPDATE_UNIT_MARKER}\n"
+        "[Unit]\n"
+        "Description=Check for Wine4Office updates at startup and daily\n\n"
+        "[Timer]\n"
+        "OnBootSec=2min\n"
+        "OnUnitActiveSec=24h\n"
+        "Persistent=true\n"
+        f"Unit={AUTOMATIC_UPDATE_SERVICE}\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+def _owned_automatic_update_unit(path: Path) -> bool:
+    try:
+        return path.read_text(encoding="utf-8").startswith(
+            _AUTOMATIC_UPDATE_UNIT_MARKER + "\n"
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def install_automatic_update_schedule() -> None:
+    supported, reason = _systemd_user_capability()
+    if not supported:
+        raise RuntimeError(reason)
+    paths = {
+        automatic_update_service_path(): _automatic_update_service_text(),
+        automatic_update_timer_path(): _automatic_update_timer_text(),
+    }
+    for path in paths:
+        if path.exists() and not _owned_automatic_update_unit(path):
+            raise RuntimeError(
+                f"Refusing to replace an unowned user systemd unit: {path}"
+            )
+    snapshots = {path: _snapshot_file(path) for path in paths}
+    try:
+        for path, text in paths.items():
+            _preload_atomic_write(path, text, 0o644)
+        _systemctl_user(["daemon-reload"])
+        _systemctl_user(["enable", "--now", AUTOMATIC_UPDATE_TIMER])
+    except BaseException:
+        try:
+            _systemctl_user(
+                ["disable", "--now", AUTOMATIC_UPDATE_TIMER], check=False
+            )
+        except RuntimeError:
+            pass
+        for path, snapshot in snapshots.items():
+            _restore_file(path, snapshot)
+        try:
+            _systemctl_user(["daemon-reload"], check=False)
+        except RuntimeError:
+            pass
+        raise
+
+
+def disable_automatic_update_schedule() -> None:
+    timer = automatic_update_timer_path()
+    service = automatic_update_service_path()
+    owned = [
+        path for path in (timer, service)
+        if path.exists() and _owned_automatic_update_unit(path)
+    ]
+    if not owned:
+        return
+    supported, reason = _systemd_user_capability()
+    if not supported:
+        raise RuntimeError(reason)
+    _systemctl_user(["disable", "--now", AUTOMATIC_UPDATE_TIMER], check=False)
+
+
+def uninstall_automatic_update_schedule() -> None:
+    paths = (automatic_update_timer_path(), automatic_update_service_path())
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return
+    if any(not _owned_automatic_update_unit(path) for path in existing):
+        raise RuntimeError("Refusing to remove an unowned automatic-update unit.")
+    supported, reason = _systemd_user_capability()
+    if not supported:
+        raise RuntimeError(
+            f"Cannot safely remove the automatic-update schedule: {reason}"
+        )
+    _systemctl_user(["disable", "--now", AUTOMATIC_UPDATE_TIMER], check=False)
+    for path in existing:
+        path.unlink(missing_ok=True)
+    _systemctl_user(["daemon-reload"])
 
 
 def _preload_unit_text(binding_path: Path, status_path: Path) -> str:

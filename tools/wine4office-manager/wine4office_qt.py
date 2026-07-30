@@ -89,6 +89,7 @@ class ManagerWindow(QMainWindow):
         self.timer.start(1200)
         self.refresh_state()
         QTimer.singleShot(0, self.start_background_update_check)
+        QTimer.singleShot(0, self.prompt_automatic_update_checks_on_first_launch)
 
     def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(icon)
@@ -1019,6 +1020,22 @@ class ManagerWindow(QMainWindow):
         update_form.addRow("Installed versions:", self.version_label)
         update_form.addRow("Metadata URL:", self.update_edit)
         update_layout.addLayout(update_form)
+        self.automatic_update_checks = QCheckBox(
+            "Check in the background at login and every 24 hours"
+        )
+        self.automatic_update_checks.setAccessibleName(
+            "Automatic background update checks"
+        )
+        automatic_help = (
+            "Opt in to a per-user systemd timer. The Manager still checks whenever "
+            "you open it, even when this background schedule is disabled."
+        )
+        self.automatic_update_checks.setToolTip(automatic_help)
+        self.automatic_update_checks.setAccessibleDescription(automatic_help)
+        self.automatic_update_checks.toggled.connect(
+            self.set_automatic_update_checks
+        )
+        update_layout.addWidget(self.automatic_update_checks)
         update_buttons = QHBoxLayout()
         update_buttons.addStretch()
         self.update_button = self._action_button(
@@ -1416,6 +1433,57 @@ class ManagerWindow(QMainWindow):
     def start_background_update_check(self) -> None:
         self.state.start_update_check()
 
+    def prompt_automatic_update_checks_on_first_launch(self) -> None:
+        with self.state.lock:
+            config = dict(self.state.config)
+        if config.get("automatic_update_checks_prompted") is True:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Automatic update checks",
+            "Check for Wine4Office updates in the background at login and every "
+            "24 hours?\n\nThe Manager will still check whenever you open it. "
+            "No update is downloaded or installed without your approval.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self._apply_automatic_update_checks(
+            answer == QMessageBox.StandardButton.Yes, prompted=True
+        )
+
+    def set_automatic_update_checks(self, enabled: bool) -> None:
+        if not self.initialized:
+            return
+        self._apply_automatic_update_checks(bool(enabled), prompted=True)
+
+    def _apply_automatic_update_checks(self, enabled: bool,
+                                       *, prompted: bool) -> None:
+        try:
+            config = self.state.set_automatic_update_checks(
+                enabled, prompted=prompted
+            )
+        except Exception as error:
+            self.automatic_update_checks.blockSignals(True)
+            with self.state.lock:
+                current = self.state.config.get("automatic_update_checks") is True
+            self.automatic_update_checks.setChecked(current)
+            self.automatic_update_checks.blockSignals(False)
+            self.show_error(
+                f"Could not {'enable' if enabled else 'disable'} automatic "
+                f"update checks: {error}"
+            )
+            return
+        self.automatic_update_checks.blockSignals(True)
+        self.automatic_update_checks.setChecked(
+            config.get("automatic_update_checks") is True
+        )
+        self.automatic_update_checks.blockSignals(False)
+        self.notify(
+            "Background update checks enabled."
+            if enabled else
+            "Background update checks disabled; checks on Manager open remain enabled."
+        )
+
     def start_update(self) -> None:
         config = self.save_config()
         if not config:
@@ -1458,12 +1526,24 @@ class ManagerWindow(QMainWindow):
             skip_button = dialog.addButton(
                 f"Skip {component['version']}", QMessageBox.ButtonRole.DestructiveRole
             )
+            with self.state.lock:
+                automatic_enabled = (
+                    self.state.config.get("automatic_update_checks") is True
+                )
+            disable_button = (
+                dialog.addButton(
+                    "Disable automatic checks", QMessageBox.ButtonRole.ActionRole
+                )
+                if automatic_enabled else None
+            )
             dialog.setDefaultButton(later_button)
             dialog.exec()
             if dialog.clickedButton() is install_button:
                 selected.append(name)
             elif dialog.clickedButton() is skip_button:
                 skipped.append(name)
+            elif disable_button is not None and dialog.clickedButton() is disable_button:
+                self._apply_automatic_update_checks(False, prompted=True)
         if skipped:
             self.state.skip_offered_updates(skipped)
         if selected:
@@ -1587,6 +1667,13 @@ class ManagerWindow(QMainWindow):
             f"Manager: {snapshot['version']}; Wine: {snapshot['wine_version']}"
         )
         updater = snapshot["updater"]
+        automatic_enabled = (
+            snapshot["config"].get("automatic_update_checks") is True
+        )
+        if self.automatic_update_checks.isChecked() != automatic_enabled:
+            self.automatic_update_checks.blockSignals(True)
+            self.automatic_update_checks.setChecked(automatic_enabled)
+            self.automatic_update_checks.blockSignals(False)
         if (updater["checked"] and not updater["checking"]
                 and not self.update_edit.hasFocus()):
             self.update_edit.setText(snapshot["config"]["update_url"])
@@ -1683,7 +1770,8 @@ class ManagerWindow(QMainWindow):
 
 def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 restart_command: list[str] | None = None,
-                smoke_test: bool = False, screenshot: Path | None = None) -> int:
+                smoke_test: bool = False, screenshot: Path | None = None,
+                open_maintenance: bool = False) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Wine4Office Manager")
     app.setOrganizationName("Wine4Office")
@@ -1691,6 +1779,8 @@ def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
     window = ManagerWindow(
         state, launcher, icons, font_helper, restart_command=restart_command,
     )
+    if open_maintenance:
+        window.navigation.setCurrentRow(window.MAINTENANCE_PAGE)
     window.show()
 
     if screenshot:

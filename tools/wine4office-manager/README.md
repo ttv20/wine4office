@@ -16,7 +16,15 @@ chmod +x Wine4OfficeManager-1.0.0-x86_64
 ./Wine4OfficeManager-1.0.0-x86_64
 ```
 
-Wine4Office Manager checks the configured `release.json` asynchronously. It does not download Wine or a manager update until the user explicitly approves it.
+Wine4Office Manager checks the configured `release.json` asynchronously whenever
+the Manager opens. It does not download Wine or a manager update until the user
+explicitly approves it.
+
+On first launch, the Manager separately asks whether to enable background checks
+at user login and every 24 hours. This opt-in installs a per-user systemd timer;
+declining or disabling it does not turn off the check when the Manager opens.
+Background update notifications include **Update**, which opens the Manager
+directly on **Maintenance**, and **Disable automatic checks** actions.
 
 For development only, install PySide6 and then install the manager from the Wine source root:
 
@@ -60,6 +68,8 @@ The manager defaults to:
   exposing Windows-only Group Policy infrastructure.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4Office Manager and Wine runner updates.
+- Optionally check for updates at login and every 24 hours, with one-click
+  disablement from the desktop notification.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.
 
 Office desktop files do not restart the standalone manager. Creating or updating

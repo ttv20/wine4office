@@ -84,6 +84,118 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertFalse(backend.load_config()["use_x11"])
 
+    def test_automatic_update_checks_are_opt_in_by_default(self):
+        config = backend.default_config()
+        self.assertFalse(config["automatic_update_checks"])
+        self.assertFalse(config["automatic_update_checks_prompted"])
+
+    def test_automatic_update_timer_checks_at_login_and_every_24_hours(self):
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            backend.install_automatic_update_schedule()
+
+        service = backend.automatic_update_service_path().read_text()
+        timer = backend.automatic_update_timer_path().read_text()
+        self.assertIn("--scheduled-update-check", service)
+        self.assertIn("OnBootSec=2min", timer)
+        self.assertIn("OnUnitActiveSec=24h", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertEqual(commands, [
+            ["daemon-reload"],
+            ["enable", "--now", backend.AUTOMATIC_UPDATE_TIMER],
+        ])
+
+    def test_scheduled_update_notification_can_disable_future_checks(self):
+        config = backend.default_config()
+        config["automatic_update_checks"] = True
+        config["automatic_update_checks_prompted"] = True
+        backend.save_config(config)
+        result = {
+            "metadata": {"metadata_url": config["update_url"]},
+            "updates": {"manager": {"version": "9.0.0"}},
+        }
+
+        with mock.patch.object(
+            backend, "check_for_updates", return_value=result
+        ), mock.patch.object(
+            backend, "persist_metadata_url"
+        ), mock.patch.object(
+            backend, "show_automatic_update_notification", return_value="disable"
+        ), mock.patch.object(
+            backend, "disable_automatic_update_schedule"
+        ) as disable:
+            checked = backend.run_scheduled_update_check()
+
+        self.assertEqual(checked["action"], "disable")
+        self.assertFalse(backend.load_config()["automatic_update_checks"])
+        disable.assert_called_once_with()
+
+    def test_background_notification_has_update_and_disable_actions(self):
+        completed = mock.Mock(returncode=0, stdout="update\n", stderr="")
+        with mock.patch.object(
+            backend.shutil, "which", return_value="/usr/bin/notify-send"
+        ), mock.patch.object(
+            backend.subprocess, "run", return_value=completed
+        ) as run:
+            action = backend.show_automatic_update_notification({
+                "manager": {"version": "9.0.0"},
+            })
+
+        self.assertEqual(action, "update")
+        command = run.call_args.args[0]
+        self.assertIn("--action=update=Update", command)
+        self.assertIn(
+            "--action=disable=Disable automatic checks", command
+        )
+
+    def test_notification_update_action_opens_manager_on_maintenance(self):
+        config = backend.default_config()
+        config["automatic_update_checks"] = True
+        config["automatic_update_checks_prompted"] = True
+        backend.save_config(config)
+        result = {
+            "metadata": {"metadata_url": config["update_url"]},
+            "updates": {"manager": {"version": "9.0.0"}},
+        }
+        executable = self.root / "Wine4OfficeManager"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+
+        with mock.patch.object(
+            backend, "check_for_updates", return_value=result
+        ), mock.patch.object(
+            backend, "persist_metadata_url"
+        ), mock.patch.object(
+            backend, "show_automatic_update_notification", return_value="update"
+        ), mock.patch.object(
+            backend, "_preload_manager_executable", return_value=executable
+        ), mock.patch.object(
+            backend.subprocess, "Popen"
+        ) as popen:
+            checked = backend.run_scheduled_update_check()
+
+        self.assertEqual(checked["action"], "update")
+        self.assertEqual(
+            popen.call_args.args[0],
+            [str(executable), "--open-maintenance"],
+        )
+
+    def test_scheduled_update_check_is_noop_without_opt_in(self):
+        backend.save_config(backend.default_config())
+        with mock.patch.object(backend, "check_for_updates") as check:
+            result = backend.run_scheduled_update_check()
+        self.assertFalse(result["checked"])
+        check.assert_not_called()
+
     def test_office_telemetry_policy_defaults_off_and_persists_per_environment(self):
         first = self.home / "first-prefix"
         second = self.home / "second-prefix"

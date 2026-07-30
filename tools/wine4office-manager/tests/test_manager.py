@@ -68,6 +68,38 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(backend.load_config()["use_x11"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
+    def test_state_enables_and_disables_automatic_update_schedule(self):
+        state = manager.ManagerState()
+        with mock.patch.object(
+            backend, "install_automatic_update_schedule"
+        ) as install, mock.patch.object(
+            backend, "disable_automatic_update_schedule"
+        ) as disable:
+            enabled = state.set_automatic_update_checks(True)
+            disabled = state.set_automatic_update_checks(False)
+
+        self.assertTrue(enabled["automatic_update_checks"])
+        self.assertTrue(enabled["automatic_update_checks_prompted"])
+        self.assertFalse(disabled["automatic_update_checks"])
+        install.assert_called_once_with()
+        disable.assert_called_once_with()
+
+    def test_automatic_update_preference_rolls_back_schedule_on_save_failure(self):
+        state = manager.ManagerState()
+        with mock.patch.object(
+            backend, "install_automatic_update_schedule"
+        ) as install, mock.patch.object(
+            backend, "disable_automatic_update_schedule"
+        ) as disable, mock.patch.object(
+            backend, "save_config", side_effect=OSError("disk full")
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                state.set_automatic_update_checks(True)
+
+        install.assert_called_once_with()
+        disable.assert_called_once_with()
+        self.assertFalse(state.config["automatic_update_checks"])
+
     def test_state_applies_and_removes_owned_office_telemetry_policy(self):
         state = manager.ManagerState()
         prefix = Path(state.config["prefix"])

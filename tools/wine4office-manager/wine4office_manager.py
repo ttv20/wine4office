@@ -179,6 +179,38 @@ class ManagerState:
             self.config = candidate
             return dict(self.config)
 
+    def set_automatic_update_checks(self, enabled: bool,
+                                    *, prompted: bool = True) -> dict:
+        """Persist consent and reconcile the per-user update timer."""
+        if not isinstance(enabled, bool):
+            raise ValueError("Automatic update checks must be enabled or disabled.")
+        with self.lock:
+            was_enabled = self.config.get("automatic_update_checks") is True
+            candidate = dict(self.config)
+            candidate["automatic_update_checks"] = enabled
+            candidate["automatic_update_checks_prompted"] = bool(prompted)
+            if enabled == was_enabled:
+                backend.save_config(candidate)
+                self.config = candidate
+                return dict(self.config)
+            try:
+                if enabled:
+                    backend.install_automatic_update_schedule()
+                else:
+                    backend.disable_automatic_update_schedule()
+                backend.save_config(candidate)
+            except Exception:
+                try:
+                    if was_enabled:
+                        backend.install_automatic_update_schedule()
+                    else:
+                        backend.disable_automatic_update_schedule()
+                except Exception:
+                    pass
+                raise
+            self.config = candidate
+            return dict(self.config)
+
 
     def start_environment_transition(self, payload: dict, initialize: bool,
                                      delete_old: bool) -> None:
@@ -670,6 +702,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Wine4Office Manager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--post-update", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--scheduled-update-check", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--open-maintenance", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--screenshot", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
@@ -697,6 +731,27 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.scheduled_update_check:
+        if (args.target or args.documents or args.preload_service or args.preload_worker
+                or args.install_shortcut or args.post_update
+                or args.disable_office_telemetry
+                or args.restore_office_telemetry_default or args.smoke_test
+                or args.screenshot or args.prefix or args.wine
+                or args.open_maintenance):
+            parser.error("--scheduled-update-check cannot be combined with another operation.")
+        try:
+            result = backend.run_scheduled_update_check()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"wine4office scheduled update check: {error}", file=sys.stderr)
+            return 1
+        print(__import__("json").dumps(result, sort_keys=True))
+        return 0
+    if args.open_maintenance and (
+            args.target or args.documents or args.preload_service
+            or args.preload_worker or args.install_shortcut or args.post_update
+            or args.disable_office_telemetry
+            or args.restore_office_telemetry_default):
+        parser.error("--open-maintenance cannot be combined with another operation.")
     if args.post_update:
         if (args.target or args.documents or args.preload_service or args.preload_worker
                 or args.install_shortcut or args.disable_office_telemetry
@@ -825,6 +880,7 @@ def main() -> int:
         restart_command=MANAGER_RESTART_COMMAND,
         smoke_test=args.smoke_test,
         screenshot=Path(args.screenshot).expanduser() if args.screenshot else None,
+        open_maintenance=args.open_maintenance,
     )
 
 
