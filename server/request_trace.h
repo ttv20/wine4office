@@ -1168,6 +1168,52 @@ static void dump_get_key_value_reply( const struct get_key_value_reply *req )
     dump_varargs_bytes( ", data=", cur_size );
 }
 
+static void dump_create_key_value_query_request( const struct create_key_value_query_request *req )
+{
+    fprintf( stderr, " hkey=%04x", req->hkey );
+    fprintf( stderr, ", count=%08x", req->count );
+}
+
+static void dump_create_key_value_query_reply( const struct create_key_value_query_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_append_key_value_query_request( const struct append_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    dump_uint64( ", offset=", &req->offset );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_execute_key_value_query_request( const struct execute_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", count=%08x", req->count );
+    fprintf( stderr, ", length=%u", req->length );
+}
+
+static void dump_execute_key_value_query_reply( const struct execute_key_value_query_reply *req )
+{
+    fprintf( stderr, " status=%08x", req->status );
+    fprintf( stderr, ", used=%u", req->used );
+    fprintf( stderr, ", required=%u", req->required );
+    fprintf( stderr, ", count=%08x", req->count );
+}
+
+static void dump_read_key_value_query_request( const struct read_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", which=%08x", req->which );
+    fprintf( stderr, ", offset=%u", req->offset );
+}
+
+static void dump_read_key_value_query_reply( const struct read_key_value_query_reply *req )
+{
+    fprintf( stderr, " total=%u", req->total );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
 static void dump_enum_key_value_request( const struct enum_key_value_request *req )
 {
     fprintf( stderr, " hkey=%04x", req->hkey );
@@ -3621,6 +3667,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_enum_key_request,
     (dump_func)dump_set_key_value_request,
     (dump_func)dump_get_key_value_request,
+    (dump_func)dump_create_key_value_query_request,
+    (dump_func)dump_append_key_value_query_request,
+    (dump_func)dump_execute_key_value_query_request,
+    (dump_func)dump_read_key_value_query_request,
     (dump_func)dump_enum_key_value_request,
     (dump_func)dump_delete_key_value_request,
     (dump_func)dump_load_registry_request,
@@ -3932,6 +3982,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_enum_key_reply,
     NULL,
     (dump_func)dump_get_key_value_reply,
+    (dump_func)dump_create_key_value_query_reply,
+    NULL,
+    (dump_func)dump_execute_key_value_query_reply,
+    (dump_func)dump_read_key_value_query_reply,
     (dump_func)dump_enum_key_value_reply,
     NULL,
     NULL,
@@ -4243,6 +4297,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "enum_key",
     "set_key_value",
     "get_key_value",
+    "create_key_value_query",
+    "append_key_value_query",
+    "execute_key_value_query",
+    "read_key_value_query",
     "enum_key_value",
     "delete_key_value",
     "load_registry",
@@ -4514,6 +4572,7 @@ static const struct
     { "INFO_LENGTH_MISMATCH",        STATUS_INFO_LENGTH_MISMATCH },
     { "INSTANCE_NOT_AVAILABLE",      STATUS_INSTANCE_NOT_AVAILABLE },
     { "INSUFFICIENT_RESOURCES",      STATUS_INSUFFICIENT_RESOURCES },
+    { "INTEGER_OVERFLOW",            STATUS_INTEGER_OVERFLOW },
     { "INVALID_ACL",                 STATUS_INVALID_ACL },
     { "INVALID_ADDRESS",             STATUS_INVALID_ADDRESS },
     { "INVALID_ADDRESS_COMPONENT",   STATUS_INVALID_ADDRESS_COMPONENT },

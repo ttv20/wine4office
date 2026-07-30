@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -51,16 +52,42 @@ class ManagerState:
             "offer": None,
             "error": "",
         }
+        self.preload = {
+            "supported": False,
+            "reason": "",
+            "installed": False,
+            "enabled": False,
+            "active": False,
+            "state": "checking",
+            "binding": None,
+            "selected_matches": False,
+            "components": {},
+            "detail": "Checking per-user service support.",
+            "checking": False,
+        }
+        self._preload_generation = 0
+        self._preload_request_key = None
+        self._preload_checked_at = 0.0
+        self._refresh_preload_status_async()
 
     def _candidate_config(self, payload: dict) -> dict:
         candidate = dict(self.config)
+        saved_policies = candidate.get("office_telemetry_disabled", {})
+        candidate["office_telemetry_disabled"] = (
+            dict(saved_policies) if isinstance(saved_policies, dict) else {}
+        )
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
         for key in ("desktop_copy", "use_x11"):
             if key in payload:
                 candidate[key] = bool(payload[key])
+        if "disable_office_telemetry" in payload:
+            candidate = backend.set_office_telemetry_disabled(
+                candidate, candidate["prefix"], bool(payload["disable_office_telemetry"])
+            )
         return candidate
+
 
     def configured_prefix(self) -> str:
         with self.lock:
@@ -73,9 +100,32 @@ class ManagerState:
                 raise ValueError(
                     "The Wine environment path must be switched through a validated transition."
                 )
-            backend.save_config(candidate)
+            policy_was_disabled = backend.office_telemetry_disabled(
+                self.config, candidate["prefix"]
+            )
+            policy_disabled = backend.office_telemetry_disabled(candidate)
+            policy_applied = False
+            if ((policy_disabled or policy_was_disabled)
+                    and backend.classify_prefix(candidate["prefix"]) == "valid"):
+                backend.apply_office_telemetry_policy(
+                    candidate["prefix"], candidate["wine"], policy_disabled,
+                    remove_managed=policy_was_disabled,
+                    use_x11=candidate.get("use_x11", True),
+                )
+                policy_applied = True
+            try:
+                backend.save_config(candidate)
+            except Exception:
+                if policy_applied and policy_disabled != policy_was_disabled:
+                    backend.apply_office_telemetry_policy(
+                        candidate["prefix"], candidate["wine"], policy_was_disabled,
+                        remove_managed=policy_disabled,
+                        use_x11=candidate.get("use_x11", True),
+                    )
+                raise
             self.config = candidate
             return dict(self.config)
+
 
     def start_environment_transition(self, payload: dict, initialize: bool,
                                      delete_old: bool) -> None:
@@ -98,11 +148,15 @@ class ManagerState:
                 raise ValueError("An existing valid Wine prefix must not be initialized again.")
             if delete_old:
                 backend.validate_environment_deletion(old_prefix, new_prefix)
+            policy_was_disabled = backend.office_telemetry_disabled(original, new_prefix)
+            policy_disabled = backend.office_telemetry_disabled(candidate, new_prefix)
+
 
         def transition() -> str:
             initialized = False
             staged: Path | None = None
             committed = False
+            policy_applied = False
             try:
                 if initialize:
                     backend.create_environment(
@@ -115,6 +169,13 @@ class ManagerState:
                         f"The replacement is not a valid Wine prefix: {new_prefix}"
                     )
 
+                if policy_disabled or policy_was_disabled:
+                    backend.apply_office_telemetry_policy(
+                        new_prefix, candidate["wine"], policy_disabled,
+                        remove_managed=policy_was_disabled,
+                        use_x11=candidate.get("use_x11", True),
+                    )
+                    policy_applied = True
                 if self.cancel_event.is_set():
                     raise RuntimeError("Operation cancelled.")
                 if delete_old:
@@ -128,12 +189,28 @@ class ManagerState:
                     if not backend.paths_equivalent(self.config["prefix"], old_prefix):
                         raise RuntimeError("The configured environment changed during the transition.")
                     committed_candidate = self._candidate_config(payload)
+                    if delete_old:
+                        committed_candidate = backend.set_office_telemetry_disabled(
+                            committed_candidate, old_prefix, False
+                        )
                     backend.save_config(committed_candidate)
                     self.config = committed_candidate
                     committed = True
             except Exception:
                 if staged and staged.exists():
                     backend.restore_staged_environment(staged, old_prefix)
+                if policy_applied and not initialized and policy_disabled != policy_was_disabled:
+                    try:
+                        backend.apply_office_telemetry_policy(
+                            new_prefix, candidate["wine"], policy_was_disabled,
+                            remove_managed=policy_disabled,
+                            use_x11=candidate.get("use_x11", True),
+                        )
+                    except Exception as rollback_error:
+                        self.output(
+                            "WARNING: Could not restore the replacement environment's "
+                            f"telemetry policy: {rollback_error}"
+                        )
                 if initialized and not committed:
                     try:
                         backend.discard_initialized_environment(new_prefix, self.output)
@@ -262,10 +339,121 @@ class ManagerState:
         with self.lock:
             self.updater["offer"] = None
 
+    def _preload_status(self, config: dict) -> dict:
+        status = backend.preload_service_status(
+            config["prefix"], config["wine"], config.get("use_x11", True)
+        )
+        status["checking"] = False
+        return status
+
+    def _refresh_preload_status_async(self, force: bool = False) -> bool:
+        with self.lock:
+            config = dict(self.config)
+            key = (
+                str(config["prefix"]),
+                str(config["wine"]),
+                bool(config.get("use_x11", True)),
+            )
+            now = time.monotonic()
+            if not force:
+                if self.preload.get("checking") and self._preload_request_key == key:
+                    return False
+                if (
+                    self._preload_request_key == key
+                    and now - self._preload_checked_at < 5
+                ):
+                    return False
+            self._preload_generation += 1
+            generation = self._preload_generation
+            self._preload_request_key = key
+            self.preload["checking"] = True
+
+        def check() -> None:
+            try:
+                status = self._preload_status(config)
+            except Exception as error:
+                status = {
+                    "supported": False,
+                    "reason": str(error),
+                    "installed": False,
+                    "enabled": False,
+                    "active": False,
+                    "state": "unsupported",
+                    "binding": None,
+                    "selected_matches": False,
+                    "components": {},
+                    "detail": str(error),
+                    "checking": False,
+                }
+            with self.lock:
+                if generation == self._preload_generation:
+                    self.preload = status
+                    self._preload_checked_at = time.monotonic()
+
+        threading.Thread(
+            target=check, name="wine4office-preload-status", daemon=True
+        ).start()
+        return True
+
+    def start_preload_action(self, action: str) -> None:
+        if action not in {"enable", "disable", "start", "stop"}:
+            raise ValueError(f"Unknown preload service action: {action}")
+        with self.lock:
+            if self.task["running"]:
+                raise RuntimeError("Another operation is already running.")
+            config = dict(self.config)
+            self.preload["checking"] = True
+            self._preload_generation += 1
+            generation = self._preload_generation
+            self._preload_request_key = (
+                str(config["prefix"]),
+                str(config["wine"]),
+                bool(config.get("use_x11", True)),
+            )
+
+        def operation() -> str:
+            try:
+                if action == "enable":
+                    backend.install_preload_service(
+                        config["prefix"], config["wine"], config.get("use_x11", True)
+                    )
+                else:
+                    backend.manage_preload_service(
+                        action, config["prefix"], config["wine"],
+                        config.get("use_x11", True),
+                    )
+                return {
+                    "enable": "Preload enabled for login; it was not started.",
+                    "disable": "Preload disabled for login; a running service was not stopped.",
+                    "start": "Preload service started without enabling login startup.",
+                    "stop": "Preload service stopped without disabling login startup.",
+                }[action]
+            finally:
+                try:
+                    status = self._preload_status(config)
+                except Exception as error:
+                    status = dict(self.preload)
+                    status.update({
+                        "reason": str(error),
+                        "detail": str(error),
+                        "checking": False,
+                    })
+                with self.lock:
+                    if generation == self._preload_generation:
+                        self.preload = status
+                        self._preload_checked_at = time.monotonic()
+
+        self.start_task(f"preload-{action}", operation)
+
     def snapshot(self) -> dict:
+        self._refresh_preload_status_async()
         with self.lock:
             config = dict(self.config)
             config["skipped_updates"] = dict(config.get("skipped_updates", {}))
+            telemetry = config.get("office_telemetry_disabled", {})
+            config["office_telemetry_disabled"] = (
+                dict(telemetry) if isinstance(telemetry, dict) else {}
+            )
             task = dict(self.task)
             updater = dict(self.updater)
             if updater.get("offer"):
@@ -274,6 +462,17 @@ class ManagerState:
                     "metadata": dict(updater["offer"]["metadata"]),
                     "updates": dict(updater["offer"]["updates"]),
                 }
+            preload = {
+                **self.preload,
+                "binding": (
+                    dict(self.preload["binding"])
+                    if isinstance(self.preload.get("binding"), dict) else None
+                ),
+                "components": {
+                    name: dict(value) for name, value in self.preload.get("components", {}).items()
+                    if isinstance(value, dict)
+                },
+            }
         return {
             "config": config,
             "status": backend.environment_status(config["prefix"], config["wine"]),
@@ -281,6 +480,7 @@ class ManagerState:
             "wine_version": backend.current_wine_version(),
             "task": task,
             "updater": updater,
+            "preload": preload,
         }
 
     def output(self, line: str) -> None:
@@ -336,10 +536,87 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prefix", help=argparse.SUPPRESS)
     parser.add_argument("--wine", help=argparse.SUPPRESS)
+    telemetry_policy = parser.add_mutually_exclusive_group()
+    telemetry_policy.add_argument(
+        "--disable-office-telemetry", action="store_true",
+        help="Set Microsoft's Office diagnostic-data policy to Neither for the selected prefix.",
+    )
+    telemetry_policy.add_argument(
+        "--restore-office-telemetry-default", action="store_true",
+        help="Remove the Office telemetry value previously managed for the selected prefix.",
+    )
+
+    parser.add_argument(
+        "--preload-service", choices=("status", "enable", "disable", "start", "stop"),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--preload-worker", nargs=2, metavar=("SNAPSHOT", "STATUS"),
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("target", nargs="?", choices=[*backend.APP_META, *backend.TOOL_META, "stop"],
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.preload_worker:
+        if (args.target or args.documents or args.preload_service
+                or args.disable_office_telemetry or args.restore_office_telemetry_default):
+            parser.error("--preload-worker cannot be combined with another operation.")
+
+        try:
+            return backend.run_preload_worker(*args.preload_worker)
+        except Exception as error:
+            print(f"wine4office preload worker: {error}", file=sys.stderr)
+            return 1
+
+    if args.disable_office_telemetry or args.restore_office_telemetry_default:
+        if args.target or args.documents or args.preload_service or args.install_shortcut:
+            parser.error("Office telemetry policy options cannot be combined with another operation.")
+        config = backend.load_config()
+        prefix = args.prefix or config["prefix"]
+        wine = args.wine or config["wine"]
+        was_disabled = backend.office_telemetry_disabled(config, prefix)
+        disable = args.disable_office_telemetry
+        try:
+            if disable or was_disabled:
+                backend.apply_office_telemetry_policy(
+                    prefix, wine, disable, remove_managed=was_disabled,
+                    use_x11=config.get("use_x11", True),
+                )
+            updated = backend.set_office_telemetry_disabled(config, prefix, disable)
+            backend.save_config(updated)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"wine4office Office telemetry policy: {error}", file=sys.stderr)
+            return 1
+        print(
+            "Microsoft Office telemetry policy disabled."
+            if disable else "Microsoft Office telemetry policy restored to its default."
+        )
+        return 0
+
+    if args.preload_service:
+        if args.target or args.documents:
+            parser.error("--preload-service cannot be combined with an app or tool.")
+        defaults = backend.load_config()
+        prefix = args.prefix or defaults["prefix"]
+        wine = args.wine or defaults["wine"]
+        use_x11 = defaults.get("use_x11", True)
+        try:
+            if args.preload_service == "status":
+                status = backend.preload_service_status(prefix, wine, use_x11)
+                print(__import__("json").dumps(status, sort_keys=True))
+                return 0 if status["supported"] else 3
+            if args.preload_service == "enable":
+                status = backend.install_preload_service(prefix, wine, use_x11)
+            else:
+                status = backend.manage_preload_service(
+                    args.preload_service, prefix, wine, use_x11
+                )
+            print(__import__("json").dumps(status, sort_keys=True))
+            return 0
+        except (OSError, RuntimeError, ValueError) as error:
+            print(f"wine4office preload service: {error}", file=sys.stderr)
+            return 1
 
     if args.target:
         defaults = backend.load_config()

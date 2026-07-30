@@ -585,6 +585,42 @@ static void ip_addr_string_init( IP_ADDR_STRING *s, const IN_ADDR *addr, const I
     s->Context = ctxt;
 }
 
+static DWORD calculate_adapters_info_size( DWORD if_count, DWORD uni_count, DWORD *needed )
+{
+    ULONGLONG total = (ULONGLONG)if_count * sizeof(IP_ADAPTER_INFO) +
+                      (ULONGLONG)uni_count * sizeof(IP_ADDR_STRING);
+
+    if (total > MAXDWORD) return ERROR_OUTOFMEMORY;
+    *needed = (DWORD)total;
+    return ERROR_SUCCESS;
+}
+
+static DWORD query_adapters_info_size( DWORD *needed )
+{
+    DWORD err, if_count, if_num = 0, uni_count = 0, i;
+    struct nsi_ndis_ifinfo_static *if_stat = NULL;
+
+    err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE,
+                                  NULL, 0, NULL, 0, NULL, 0,
+                                  (void **)&if_stat, sizeof(*if_stat), &if_count, 0 );
+    if (err) return err;
+
+    for (i = 0; i < if_count; i++)
+        if (if_stat[i].type != IF_TYPE_SOFTWARE_LOOPBACK) if_num++;
+
+    if (!if_num)
+        err = ERROR_NO_DATA;
+    else
+    {
+        err = NsiEnumerateObjectsAllParameters( 1, 0, &NPI_MS_IPV4_MODULEID, NSI_IP_UNICAST_TABLE,
+                                                NULL, 0, NULL, 0, NULL, 0, NULL, 0, &uni_count );
+        if (!err) err = calculate_adapters_info_size( if_num, uni_count, needed );
+    }
+
+    NsiFreeTable( NULL, NULL, NULL, if_stat );
+    return err;
+}
+
 /******************************************************************
  *    GetAdaptersInfo (IPHLPAPI.@)
  *
@@ -611,6 +647,14 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
     TRACE( "info %p, size %p\n", info, size );
     if (!size) return ERROR_INVALID_PARAMETER;
 
+    if (!info)
+    {
+        err = query_adapters_info_size( &needed );
+        if (err) return err;
+        *size = needed;
+        return ERROR_BUFFER_OVERFLOW;
+    }
+
     err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE,
                                   (void **)&if_keys, sizeof(*if_keys), (void **)&if_rw, sizeof(*if_rw),
                                   NULL, 0, (void **)&if_stat, sizeof(*if_stat), &if_count, 0 );
@@ -636,7 +680,7 @@ DWORD WINAPI GetAdaptersInfo( IP_ADAPTER_INFO *info, ULONG *size )
     /* Slightly overestimate the needed size by assuming that all
        unicast addresses require a separate IP_ADDR_STRING. */
 
-    needed = if_num * sizeof(*info) + uni_count * sizeof(IP_ADDR_STRING);
+    if ((err = calculate_adapters_info_size( if_num, uni_count, &needed ))) goto err;
     if (!info || *size < needed)
     {
         *size = needed;

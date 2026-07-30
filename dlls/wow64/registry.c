@@ -19,6 +19,7 @@
  */
 
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -29,6 +30,43 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wow);
+
+typedef struct
+{
+    ULONG ValueName;
+    ULONG DataLength;
+    ULONG DataOffset;
+    ULONG Type;
+} KEY_MULTIPLE_VALUE_INFORMATION32;
+C_ASSERT( sizeof(KEY_MULTIPLE_VALUE_INFORMATION32) == 16 );
+
+NTSTATUS WINAPI __wine_probe_for_write( void *ptr, ULONG size, ULONG alignment );
+NTSTATUS WINAPI __wine_create_key_value_query( HANDLE key, ULONG count, HANDLE *query );
+NTSTATUS WINAPI __wine_query_multiple_value_key( HANDLE query,
+                                                 KEY_MULTIPLE_VALUE_INFORMATION *info,
+                                                 ULONG count, void *buffer,
+                                                 ULONG *length, ULONG *retlen );
+
+static NTSTATUS wow64_read_memory( const void *src, void *dst, SIZE_T size )
+{
+    SIZE_T done = 0;
+    NTSTATUS status;
+
+    if (!size) return STATUS_SUCCESS;
+    status = NtReadVirtualMemory( NtCurrentProcess(), src, dst, size, &done );
+    return status || done != size ? STATUS_ACCESS_VIOLATION : STATUS_SUCCESS;
+}
+
+static NTSTATUS wow64_write_memory( void *dst, const void *src, SIZE_T size )
+{
+    SIZE_T done = 0;
+    NTSTATUS status;
+
+    if (!size) return STATUS_SUCCESS;
+    status = NtWriteVirtualMemory( NtCurrentProcess(), dst, src, size, &done );
+    return status || done != size ? STATUS_ACCESS_VIOLATION : STATUS_SUCCESS;
+}
+
 
 
 /**********************************************************************
@@ -366,14 +404,99 @@ NTSTATUS WINAPI wow64_NtQueryKey( UINT *args )
 NTSTATUS WINAPI wow64_NtQueryMultipleValueKey( UINT *args )
 {
     HANDLE handle = get_handle( &args );
-    KEY_MULTIPLE_VALUE_INFORMATION *info = get_ptr( &args );
+    KEY_MULTIPLE_VALUE_INFORMATION32 *info32 = get_ptr( &args );
     ULONG count = get_ulong( &args );
     void *ptr = get_ptr( &args );
-    ULONG len = get_ulong( &args );
+    ULONG *length = get_ptr( &args );
     ULONG *retlen = get_ptr( &args );
 
-    FIXME( "%p %p %lu %p %lu %p: stub\n", handle, info, count, ptr, len, retlen );
-    return STATUS_SUCCESS;
+    KEY_MULTIPLE_VALUE_INFORMATION32 *captured = NULL;
+    KEY_MULTIPLE_VALUE_INFORMATION *info = NULL;
+    UNICODE_STRING *names = NULL;
+    ULONG capacity, required = 0;
+    ULONG i, execute_count = 0;
+    NTSTATUS status, query_status, probe_status = STATUS_SUCCESS;
+    HANDLE query = 0;
+    void *allocation = NULL;
+
+    if ((status = __wine_create_key_value_query( handle, count, &query ))) return status;
+
+    if ((status = __wine_probe_for_write( length, sizeof(*length), sizeof(ULONG) )) ||
+        (status = wow64_read_memory( length, &capacity, sizeof(capacity) )))
+        goto done;
+    if (count > 0x10000)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if ((status = __wine_probe_for_write( info32, count * sizeof(*info32), sizeof(ULONG) )))
+        goto done;
+    if (retlen &&
+        (status = __wine_probe_for_write( retlen, sizeof(*retlen), sizeof(ULONG) )))
+        goto done;
+    if ((status = __wine_probe_for_write( ptr, capacity, sizeof(ULONG) ))) goto done;
+
+    if (count)
+    {
+        SIZE_T size = count * (sizeof(*captured) + sizeof(*info) + sizeof(*names));
+
+        if (!(allocation = RtlAllocateHeap( GetProcessHeap(), 0, size )))
+        {
+            status = STATUS_NO_MEMORY;
+            goto done;
+        }
+        captured = allocation;
+        info = (KEY_MULTIPLE_VALUE_INFORMATION *)(captured + count);
+        names = (UNICODE_STRING *)(info + count);
+        if ((status = wow64_read_memory( info32, captured, count * sizeof(*captured) ))) goto done;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        UNICODE_STRING32 name32;
+
+        if ((probe_status = wow64_read_memory( ULongToPtr( captured[i].ValueName ),
+                                               &name32, sizeof(name32) ))) break;
+        names[i].Length = name32.Length;
+        names[i].MaximumLength = name32.MaximumLength;
+        names[i].Buffer = ULongToPtr( name32.Buffer );
+        info[i].ValueName = &names[i];
+        info[i].DataLength = captured[i].DataLength;
+        info[i].DataOffset = captured[i].DataOffset;
+        info[i].Type = captured[i].Type;
+    }
+    execute_count = i;
+
+    query_status = __wine_query_multiple_value_key( query, info, execute_count,
+                                                    ptr, &capacity, &required );
+    NtClose( query );
+    query = 0;
+    for (i = 0; i < execute_count; i++)
+    {
+        captured[i].DataLength = info[i].DataLength;
+        captured[i].DataOffset = info[i].DataOffset;
+        captured[i].Type = info[i].Type;
+    }
+    if (count && (status = wow64_write_memory( info32, captured, count * sizeof(*captured) ))) goto done;
+
+    if (probe_status)
+        status = (query_status == STATUS_SUCCESS || query_status == STATUS_BUFFER_OVERFLOW ||
+                  query_status == STATUS_INTEGER_OVERFLOW) ? probe_status : query_status;
+    else
+    {
+        status = query_status;
+        if (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW)
+        {
+            if ((status = wow64_write_memory( length, &capacity, sizeof(capacity) ))) goto done;
+            if (retlen && (status = wow64_write_memory( retlen, &required, sizeof(required) ))) goto done;
+            status = query_status;
+        }
+    }
+
+done:
+    if (allocation) RtlFreeHeap( GetProcessHeap(), 0, allocation );
+    if (query) NtClose( query );
+    return status;
 }
 
 

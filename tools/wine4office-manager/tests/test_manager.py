@@ -67,6 +67,99 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(backend.load_config()["use_x11"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
+    def test_state_applies_and_removes_owned_office_telemetry_policy(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+
+        with mock.patch.object(backend, "apply_office_telemetry_policy") as apply:
+            updated = state.update_config({
+                "prefix": str(prefix),
+                "disable_office_telemetry": True,
+            })
+            self.assertTrue(backend.office_telemetry_disabled(updated, prefix))
+            apply.assert_called_once_with(
+                str(prefix), updated["wine"], True,
+                remove_managed=False, use_x11=True,
+            )
+
+            apply.reset_mock()
+            updated = state.update_config({
+                "prefix": str(prefix),
+                "disable_office_telemetry": False,
+            })
+            self.assertFalse(backend.office_telemetry_disabled(updated, prefix))
+            apply.assert_called_once_with(
+                str(prefix), updated["wine"], False,
+                remove_managed=True, use_x11=True,
+            )
+
+    def test_office_telemetry_apply_failure_does_not_save_enabled_state(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+
+        with mock.patch.object(
+            backend, "apply_office_telemetry_policy",
+            side_effect=RuntimeError("registry write failed"),
+        ), mock.patch.object(backend, "save_config") as save:
+            with self.assertRaisesRegex(RuntimeError, "registry write failed"):
+                state.update_config({
+                    "prefix": str(prefix),
+                    "disable_office_telemetry": True,
+                })
+
+        save.assert_not_called()
+        self.assertFalse(backend.office_telemetry_disabled(state.config, prefix))
+
+    def test_environment_switch_keeps_telemetry_choice_per_prefix(self):
+        state = manager.ManagerState()
+        old = Path(state.config["prefix"])
+        new = self.home / "other-prefix"
+        for prefix in (old, new):
+            self._make_prefix(prefix)
+        state.config = backend.set_office_telemetry_disabled(state.config, old, True)
+
+        with mock.patch.object(backend, "apply_office_telemetry_policy") as apply:
+            state.start_environment_transition({
+                "prefix": str(new),
+                "disable_office_telemetry": True,
+            }, False, False)
+            self._wait(state)
+
+        self.assertEqual(state.config["prefix"], str(new))
+        self.assertTrue(backend.office_telemetry_disabled(state.config, old))
+        self.assertTrue(backend.office_telemetry_disabled(state.config, new))
+        apply.assert_called_once_with(
+            str(new), state.config["wine"], True,
+            remove_managed=False, use_x11=True,
+        )
+
+    def test_initialized_environment_reapplies_selected_telemetry_policy(self):
+        state = manager.ManagerState()
+        old = Path(state.config["prefix"])
+        self._make_prefix(old)
+        new = self.home / "initialized-prefix"
+
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+            self._make_prefix(Path(prefix))
+            return "ready"
+
+        with mock.patch.object(
+            backend, "create_environment", side_effect=initialize
+        ), mock.patch.object(backend, "apply_office_telemetry_policy") as apply:
+            state.start_environment_transition({
+                "prefix": str(new),
+                "disable_office_telemetry": True,
+            }, True, False)
+            self._wait(state)
+
+        self.assertEqual(state.snapshot()["task"]["status"], "completed")
+        apply.assert_called_once_with(
+            str(new), state.config["wine"], True,
+            remove_managed=False, use_x11=True,
+        )
+
     def test_background_task_completion_and_failure_are_visible(self):
         state = manager.ManagerState()
         state.start_task("success", lambda: "native task completed")
@@ -96,6 +189,29 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertFalse(launch.call_args.kwargs["use_x11"])
+
+    def test_cli_manages_telemetry_policy_for_explicit_prefix(self):
+        prefix = self._make_prefix(self.home / "cli-prefix")
+        config = backend.default_config()
+        config["prefix"] = str(self.home / "different-prefix")
+        saved = []
+
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(backend, "apply_office_telemetry_policy") as apply, \
+             mock.patch.object(backend, "save_config", side_effect=saved.append), \
+             mock.patch("builtins.print"), \
+             mock.patch.object(sys, "argv", [
+                 "Wine4OfficeManager", "--prefix", str(prefix), "--wine",
+                 config["wine"], "--disable-office-telemetry",
+             ]):
+            result = manager.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(backend.office_telemetry_disabled(saved[0], prefix))
+        apply.assert_called_once_with(
+            str(prefix), config["wine"], True,
+            remove_managed=False, use_x11=True,
+        )
 
     def test_equivalent_symlink_edit_updates_without_a_transition(self):
         state = manager.ManagerState()
@@ -276,6 +392,142 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(state.config["prefix"], str(old))
         self.assertFalse(state.task["running"])
+
+    def test_preload_status_cache_refreshes_off_main_thread(self):
+        entered = __import__("threading").Event()
+        release = __import__("threading").Event()
+        main_thread = __import__("threading").current_thread()
+        callers = []
+        status = {
+            "supported": True, "reason": "", "installed": False,
+            "enabled": False, "active": False, "state": "uninstalled",
+            "binding": None, "selected_matches": False, "components": {},
+            "detail": "",
+        }
+
+        def blocking_status(*_args):
+            callers.append(__import__("threading").current_thread())
+            entered.set()
+            release.wait(1)
+            return dict(status)
+
+        with mock.patch.object(
+            backend, "preload_service_status", side_effect=blocking_status
+        ):
+            state = manager.ManagerState()
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(state.snapshot()["preload"]["checking"])
+            release.set()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertIsNot(callers[0], main_thread)
+        self.assertEqual(state.snapshot()["preload"]["state"], "uninstalled")
+
+    def test_preload_action_dispatches_async_and_surfaces_stop_refusal(self):
+        status = {
+            "supported": True, "reason": "", "installed": True,
+            "enabled": True, "active": True, "state": "active",
+            "binding": {}, "selected_matches": True, "components": {},
+            "detail": "",
+        }
+        with mock.patch.object(
+            backend, "preload_service_status", return_value=dict(status)
+        ), mock.patch.object(
+            backend, "manage_preload_service",
+            side_effect=RuntimeError("Office is active; refusing to stop preload"),
+        ) as manage:
+            state = manager.ManagerState()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            state.start_preload_action("stop")
+            self.assertEqual(state.snapshot()["task"]["kind"], "preload-stop")
+            self._wait(state)
+
+        task = state.snapshot()["task"]
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("Office is active; refusing", task["log"])
+        manage.assert_called_once_with(
+            "stop", state.config["prefix"], state.config["wine"],
+            state.config.get("use_x11", True),
+        )
+
+    def test_preload_enable_action_never_dispatches_start(self):
+        status = {
+            "supported": True, "reason": "", "installed": True,
+            "enabled": True, "active": False, "state": "inactive",
+            "binding": {}, "selected_matches": True, "components": {},
+            "detail": "",
+        }
+        with mock.patch.object(
+            backend, "preload_service_status", return_value=dict(status)
+        ), mock.patch.object(
+            backend, "install_preload_service", return_value=dict(status)
+        ) as install, mock.patch.object(
+            backend, "manage_preload_service"
+        ) as manage:
+            state = manager.ManagerState()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            state.start_preload_action("enable")
+            self._wait(state)
+
+        install.assert_called_once()
+        manage.assert_not_called()
+        self.assertIn("was not started", state.snapshot()["task"]["log"])
+
+    def test_preload_cli_routes_actions_and_exit_codes(self):
+        config = backend.default_config()
+        supported = {
+            "supported": True, "reason": "", "installed": False,
+            "enabled": False, "active": False, "state": "uninstalled",
+            "binding": None, "selected_matches": False, "components": {},
+            "detail": "",
+        }
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "preload_service_status", return_value=supported
+             ) as status, mock.patch("builtins.print"), \
+             mock.patch.object(
+                 sys, "argv", ["Wine4OfficeManager", "--preload-service", "status"]
+             ):
+            self.assertEqual(manager.main(), 0)
+        status.assert_called_once_with(
+            config["prefix"], config["wine"], config.get("use_x11", True)
+        )
+
+        unsupported = dict(supported, supported=False, reason="no user bus")
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "preload_service_status", return_value=unsupported
+             ), mock.patch("builtins.print"), \
+             mock.patch.object(
+                 sys, "argv", ["Wine4OfficeManager", "--preload-service", "status"]
+             ):
+            self.assertEqual(manager.main(), 3)
+
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "install_preload_service",
+                 side_effect=RuntimeError("enable failed"),
+             ), mock.patch("builtins.print"), \
+             mock.patch.object(
+                 sys, "argv", ["Wine4OfficeManager", "--preload-service", "enable"]
+             ):
+            self.assertEqual(manager.main(), 1)
+
+    def test_internal_worker_cli_uses_two_explicit_paths(self):
+        with mock.patch.object(
+            backend, "run_preload_worker", return_value=7
+        ) as worker, mock.patch.object(
+            sys, "argv",
+            ["Wine4OfficeManager", "--preload-worker", "/snapshot", "/status"],
+        ):
+            self.assertEqual(manager.main(), 7)
+        worker.assert_called_once_with("/snapshot", "/status")
 
     def _wait(self, state):
         deadline = time.monotonic() + 2

@@ -142,6 +142,8 @@ static NTSTATUS (WINAPI * pNtQueryKey)(HANDLE,KEY_INFORMATION_CLASS,PVOID,ULONG,
 static NTSTATUS (WINAPI * pNtQueryLicenseValue)(const UNICODE_STRING *,ULONG *,PVOID,ULONG,ULONG *);
 static NTSTATUS (WINAPI * pNtQueryObject)(HANDLE, OBJECT_INFORMATION_CLASS, void *, ULONG, ULONG *);
 static NTSTATUS (WINAPI * pNtQueryValueKey)(HANDLE,const UNICODE_STRING *,KEY_VALUE_INFORMATION_CLASS,void *,DWORD,DWORD *);
+static NTSTATUS (WINAPI * pNtQueryMultipleValueKey)(HANDLE,KEY_MULTIPLE_VALUE_INFORMATION*,ULONG,
+                                                     void*,ULONG*,ULONG*);
 static NTSTATUS (WINAPI * pNtSetValueKey)(HANDLE, const PUNICODE_STRING, ULONG,
                                ULONG, const void*, ULONG  );
 static NTSTATUS (WINAPI * pRtlFormatCurrentUserKeyPath)(PUNICODE_STRING);
@@ -196,6 +198,7 @@ static BOOL InitFunctionPtrs(void)
     NTDLL_GET_PROC(NtQueryKey)
     NTDLL_GET_PROC(NtQueryObject)
     NTDLL_GET_PROC(NtQueryValueKey)
+    NTDLL_GET_PROC(NtQueryMultipleValueKey)
     NTDLL_GET_PROC(NtSetValueKey)
     NTDLL_GET_PROC(NtOpenKey)
     NTDLL_GET_PROC(NtNotifyChangeKey)
@@ -797,6 +800,162 @@ static void test_NtQueryValueKey(void)
     ok(pi.Type == 0xff00ff00, "Type=%lx\n", pi.Type);
     ok(pi.DataLength == 0, "DataLength=%lu\n", pi.DataLength);
     pRtlFreeUnicodeString(&ValName);
+
+    pNtClose(key);
+}
+
+static void test_NtQueryMultipleValueKey(void)
+{
+    static const unsigned char one = 0x11;
+    static const unsigned char three[] = {0x31, 0x32, 0x33};
+    static const ULONG four = 0x44332211;
+    KEY_MULTIPLE_VALUE_INFORMATION entries[4];
+    UNICODE_STRING names[5];
+    OBJECT_ATTRIBUTES attr;
+    ULONG buffer[4], length, required;
+    NTSTATUS status;
+    HANDLE key;
+    unsigned int i;
+
+    status = pNtQueryMultipleValueKey(NULL, NULL, 0, NULL, NULL, NULL);
+    ok(status == STATUS_INVALID_HANDLE, "got status %#lx\n", status);
+
+    InitializeObjectAttributes(&attr, &winetestpath, 0, 0, 0);
+    status = pNtOpenKey(&key, KEY_QUERY_VALUE | KEY_SET_VALUE, &attr);
+    ok(status == STATUS_SUCCESS, "NtOpenKey failed: %#lx\n", status);
+    if (status) return;
+
+    pRtlInitUnicodeString(&names[0], L"multiple_one");
+    pRtlInitUnicodeString(&names[1], L"multiple_four");
+    pRtlInitUnicodeString(&names[2], L"multiple_zero");
+    pRtlInitUnicodeString(&names[3], L"multiple_three");
+    pRtlInitUnicodeString(&names[4], L"multiple_missing");
+
+    status = pNtSetValueKey(key, &names[0], 0, REG_BINARY, &one, sizeof(one));
+    ok(status == STATUS_SUCCESS, "NtSetValueKey failed: %#lx\n", status);
+    status = pNtSetValueKey(key, &names[1], 0, REG_DWORD, &four, sizeof(four));
+    ok(status == STATUS_SUCCESS, "NtSetValueKey failed: %#lx\n", status);
+    status = pNtSetValueKey(key, &names[2], 0, REG_NONE, NULL, 0);
+    ok(status == STATUS_SUCCESS, "NtSetValueKey failed: %#lx\n", status);
+    status = pNtSetValueKey(key, &names[3], 0, REG_BINARY, three, sizeof(three));
+    ok(status == STATUS_SUCCESS, "NtSetValueKey failed: %#lx\n", status);
+
+    for (i = 0; i < ARRAY_SIZE(entries); i++)
+    {
+        entries[i].ValueName = &names[i];
+        entries[i].DataLength = 0xdeadbeef;
+        entries[i].DataOffset = 0xdeadbeef;
+        entries[i].Type = 0xdeadbeef;
+    }
+    memset(buffer, 0xcc, sizeof(buffer));
+    length = sizeof(buffer);
+    required = 0xdeadbeef;
+    status = pNtQueryMultipleValueKey(key, entries, ARRAY_SIZE(entries),
+                                      buffer, &length, &required);
+    ok(status == STATUS_SUCCESS, "got status %#lx\n", status);
+    ok(length == 11, "got used length %lu\n", length);
+    ok(required == 11, "got required length %lu\n", required);
+    ok(entries[0].Type == REG_BINARY && entries[0].DataLength == 1 &&
+       entries[0].DataOffset == 0, "bad first result %lu/%lu/%lu\n",
+       entries[0].Type, entries[0].DataLength, entries[0].DataOffset);
+    ok(entries[1].Type == REG_DWORD && entries[1].DataLength == 4 &&
+       entries[1].DataOffset == 4, "bad second result %lu/%lu/%lu\n",
+       entries[1].Type, entries[1].DataLength, entries[1].DataOffset);
+    ok(entries[2].Type == REG_NONE && !entries[2].DataLength &&
+       entries[2].DataOffset == 8, "bad zero result %lu/%lu/%lu\n",
+       entries[2].Type, entries[2].DataLength, entries[2].DataOffset);
+    ok(entries[3].Type == REG_BINARY && entries[3].DataLength == 3 &&
+       entries[3].DataOffset == 8, "bad fourth result %lu/%lu/%lu\n",
+       entries[3].Type, entries[3].DataLength, entries[3].DataOffset);
+    ok(((unsigned char *)buffer)[0] == one, "bad first data %#x\n",
+       ((unsigned char *)buffer)[0]);
+    ok(*(ULONG *)((char *)buffer + 4) == four, "bad second data %#lx\n",
+       *(ULONG *)((char *)buffer + 4));
+    ok(!memcmp((char *)buffer + 8, three, sizeof(three)), "bad fourth data\n");
+
+    for (i = 0; i < ARRAY_SIZE(entries); i++)
+    {
+        entries[i].DataLength = 0xdeadbeef;
+        entries[i].DataOffset = 0xdeadbeef;
+        entries[i].Type = 0xdeadbeef;
+    }
+    memset(buffer, 0xcc, sizeof(buffer));
+    length = 5;
+    required = 0xdeadbeef;
+    status = pNtQueryMultipleValueKey(key, entries, ARRAY_SIZE(entries),
+                                      buffer, &length, &required);
+    ok(status == STATUS_BUFFER_OVERFLOW, "got status %#lx\n", status);
+    ok(length == 4, "got used length %lu\n", length);
+    ok(required == 11, "got required length %lu\n", required);
+    ok(entries[0].Type == REG_BINARY && entries[0].DataLength == 1 &&
+       entries[0].DataOffset == 0, "bad fitting result %lu/%lu/%lu\n",
+       entries[0].Type, entries[0].DataLength, entries[0].DataOffset);
+    ok(entries[1].Type == 0xdeadbeef && entries[1].DataLength == 0xdeadbeef &&
+       entries[1].DataOffset == 0xdeadbeef, "nonfitting result was modified\n");
+    ok(entries[2].Type == 0xdeadbeef && entries[3].Type == 0xdeadbeef,
+       "later results were modified\n");
+    ok(((unsigned char *)buffer)[0] == one, "bad fitting data %#x\n",
+       ((unsigned char *)buffer)[0]);
+
+    entries[0].ValueName = &names[0];
+    entries[1].ValueName = &names[1];
+    entries[2].ValueName = &names[4];
+    for (i = 0; i < 3; i++)
+    {
+        entries[i].DataLength = 0xdeadbeef;
+        entries[i].DataOffset = 0xdeadbeef;
+        entries[i].Type = 0xdeadbeef;
+    }
+    memset(buffer, 0xcc, sizeof(buffer));
+    length = 1;
+    required = 0xabcdef01;
+    status = pNtQueryMultipleValueKey(key, entries, 3, buffer, &length, &required);
+    ok(status == STATUS_OBJECT_NAME_NOT_FOUND, "got status %#lx\n", status);
+    ok(length == 1, "buffer length was committed: %lu\n", length);
+    ok(required == 0xabcdef01, "required length was committed: %#lx\n", required);
+    ok(entries[0].Type == REG_BINARY && entries[0].DataLength == 1 &&
+       entries[0].DataOffset == 0, "bad prefix result %lu/%lu/%lu\n",
+       entries[0].Type, entries[0].DataLength, entries[0].DataOffset);
+    ok(entries[1].Type == 0xdeadbeef && entries[2].Type == 0xdeadbeef,
+       "non-prefix result was modified\n");
+    ok(((unsigned char *)buffer)[0] == one, "bad prefix data %#x\n",
+       ((unsigned char *)buffer)[0]);
+
+    entries[0].ValueName = &names[0];
+    entries[1].ValueName = NULL;
+    for (i = 0; i < 2; i++)
+    {
+        entries[i].DataLength = 0xdeadbeef;
+        entries[i].DataOffset = 0xdeadbeef;
+        entries[i].Type = 0xdeadbeef;
+    }
+    memset(buffer, 0xcc, sizeof(buffer));
+    length = sizeof(buffer);
+    required = 0xabcdef01;
+    status = pNtQueryMultipleValueKey(key, entries, 2, buffer, &length, &required);
+    ok(status == STATUS_ACCESS_VIOLATION, "got status %#lx\n", status);
+    ok(length == sizeof(buffer), "buffer length was committed: %lu\n", length);
+    ok(required == 0xabcdef01, "required length was committed: %#lx\n", required);
+    ok(entries[0].Type == REG_BINARY && entries[0].DataLength == 1 &&
+       entries[0].DataOffset == 0, "bad fault prefix %lu/%lu/%lu\n",
+       entries[0].Type, entries[0].DataLength, entries[0].DataOffset);
+    ok(entries[1].Type == 0xdeadbeef, "faulting result was modified\n");
+    ok(((unsigned char *)buffer)[0] == one, "bad fault-prefix data %#x\n",
+       ((unsigned char *)buffer)[0]);
+
+    length = 0;
+    required = 0xdeadbeef;
+    status = pNtQueryMultipleValueKey(key, NULL, 0, NULL, &length, &required);
+    ok(status == STATUS_SUCCESS, "got status %#lx\n", status);
+    ok(!length, "got used length %lu\n", length);
+    ok(!required, "got required length %lu\n", required);
+
+    length = 0;
+    required = 0xdeadbeef;
+    status = pNtQueryMultipleValueKey(key, NULL, 0x10001, NULL, &length, &required);
+    ok(status == STATUS_INSUFFICIENT_RESOURCES, "got status %#lx\n", status);
+    ok(!length, "buffer length was modified: %lu\n", length);
+    ok(required == 0xdeadbeef, "required length was modified: %#lx\n", required);
 
     pNtClose(key);
 }
@@ -3176,6 +3335,7 @@ START_TEST(reg)
     test_NtQueryKey();
     test_NtQueryLicenseKey();
     test_NtQueryValueKey();
+    test_NtQueryMultipleValueKey();
     test_long_value_name();
     test_notify();
     test_RtlCreateRegistryKey();

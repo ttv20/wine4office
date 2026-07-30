@@ -4,6 +4,7 @@ import hashlib
 import os
 import runpy
 import subprocess
+import signal
 import stat
 import sys
 import tempfile
@@ -82,6 +83,92 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         backend.save_config(config)
 
         self.assertFalse(backend.load_config()["use_x11"])
+
+    def test_office_telemetry_policy_defaults_off_and_persists_per_environment(self):
+        first = self.home / "first-prefix"
+        second = self.home / "second-prefix"
+        config = backend.default_config()
+        self.assertFalse(backend.office_telemetry_disabled(config, first))
+
+        config = backend.set_office_telemetry_disabled(config, first, True)
+        backend.save_config(config)
+        loaded = backend.load_config()
+
+        self.assertTrue(backend.office_telemetry_disabled(loaded, first))
+        self.assertFalse(backend.office_telemetry_disabled(loaded, second))
+
+    def test_disabling_office_telemetry_uses_exact_official_policy_value(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(backend.subprocess, "run", return_value=completed) as run:
+            changed = backend.apply_office_telemetry_policy(
+                str(prefix), str(self.wine), True, use_x11=False
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(self.wine), "reg", "add",
+                r"HKCU\Software\Policies\Microsoft\Office\Common\ClientTelemetry",
+                "/v", "SendTelemetry", "/t", "REG_DWORD", "/d", "3", "/f",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["WINEPREFIX"], str(prefix.resolve()))
+        self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_unchecking_removes_only_managed_value_and_tolerates_absence(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        present = mock.Mock(returncode=0, stdout="SendTelemetry REG_DWORD 0x3\n", stderr="")
+        deleted = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            backend.subprocess, "run", side_effect=[present, deleted]
+        ) as run:
+            changed = backend.apply_office_telemetry_policy(
+                str(prefix), str(self.wine), False, remove_managed=True
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [call.args[0][2] for call in run.call_args_list], ["query", "delete"]
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                str(self.wine), "reg", "delete",
+                backend.OFFICE_TELEMETRY_POLICY_KEY,
+                "/v", backend.OFFICE_TELEMETRY_POLICY_VALUE, "/f",
+            ],
+        )
+
+        absent = mock.Mock(returncode=1, stdout="", stderr="not found")
+        with mock.patch.object(backend.subprocess, "run", return_value=absent) as run:
+            changed = backend.apply_office_telemetry_policy(
+                str(prefix), str(self.wine), False, remove_managed=True
+            )
+        self.assertFalse(changed)
+        run.assert_called_once()
+
+        externally_changed = mock.Mock(
+            returncode=0, stdout="SendTelemetry REG_DWORD 0x2\n", stderr=""
+        )
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=externally_changed
+        ) as run:
+            changed = backend.apply_office_telemetry_policy(
+                str(prefix), str(self.wine), False, remove_managed=True
+            )
+        self.assertFalse(changed)
+        run.assert_called_once()
+
+    def test_office_telemetry_registry_failures_propagate(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        failure = subprocess.CalledProcessError(5, [str(self.wine), "reg", "add"])
+        with mock.patch.object(backend.subprocess, "run", side_effect=failure):
+            with self.assertRaises(subprocess.CalledProcessError):
+                backend.apply_office_telemetry_policy(
+                    str(prefix), str(self.wine), True
+                )
 
     def test_wine_environment_applies_display_precedence_for_both_modes(self):
         with mock.patch.dict(
@@ -919,6 +1006,499 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(configuration.is_file())
         self.assertEqual(configuration.read_bytes(), changed_payload)
         self.assertFalse(odt.exists())
+
+    def _preload_binding(self):
+        prefix = self._make_prefix(self.home / "preload prefix")
+        return backend._preload_snapshot(str(prefix), str(self.wine), True)
+
+    def test_preload_xdg_paths_and_atomic_modes(self):
+        runtime = self.root / "runtime"
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
+            binding = self._preload_binding()
+            backend._preload_json_write(backend.preload_binding_path(), binding, 0o600)
+            backend._preload_atomic_write(
+                backend.preload_unit_path(), "owned unit\n", 0o644
+            )
+
+            self.assertEqual(
+                backend.preload_binding_path(),
+                self.home / ".config/wine4office/preload-service.json",
+            )
+            self.assertEqual(
+                backend.preload_unit_path(),
+                self.home / ".config/systemd/user/wine4office-preload.service",
+            )
+            self.assertEqual(
+                backend.preload_runtime_status_path(),
+                runtime / "wine4office/preload-service.json",
+            )
+            self.assertEqual(
+                stat.S_IMODE(backend.preload_binding_path().stat().st_mode), 0o600
+            )
+            self.assertEqual(
+                stat.S_IMODE(backend.preload_unit_path().stat().st_mode), 0o644
+            )
+
+    def test_preload_unit_is_exact_safe_and_enable_does_not_start(self):
+        binding = self._preload_binding()
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "disabled")
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ), mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "inactive"}
+        ):
+            backend.install_preload_service(
+                binding["prefix"], binding["wine"], binding["use_x11"]
+            )
+
+        exec_start = " ".join(
+            backend._systemd_quote(value) for value in (
+                backend._preload_manager_executable(),
+                "--preload-worker",
+                backend.preload_binding_path(),
+                backend.preload_runtime_status_path(),
+            )
+        )
+        expected = (
+            "# Managed by Wine4OfficeManager: preload-service-v1\n"
+            "[Unit]\n"
+            "Description=Wine4Office background preload\n\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={exec_start}\n"
+            "Restart=on-failure\n"
+            "KillMode=process\n"
+            "TimeoutStopSec=20\n\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+        self.assertEqual(backend.preload_unit_path().read_text(), expected)
+        self.assertIn("Type=simple\n", expected)
+        self.assertIn("Restart=on-failure\n", expected)
+        self.assertIn("KillMode=process\n", expected)
+        self.assertIn("TimeoutStopSec=20\n", expected)
+        self.assertIn("WantedBy=default.target\n", expected)
+        self.assertNotIn("/bin/sh", expected)
+        self.assertNotIn("wineserver", expected)
+        self.assertEqual(commands, [["daemon-reload"], ["enable", backend.PRELOAD_UNIT]])
+
+    def test_preload_unit_rejects_newline_in_argv(self):
+        with self.assertRaisesRegex(ValueError, "unsafe control"):
+            backend._systemd_quote("/tmp/manager\nExecStart=/bin/false")
+
+    def test_systemctl_user_timeout_is_bounded_and_uses_no_shell(self):
+        with mock.patch.object(
+            backend.shutil, "which", return_value="/usr/bin/systemctl"
+        ), mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["systemctl"], 8),
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                backend._systemctl_user(["show-environment"])
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/usr/bin/systemctl", "--user", "show-environment"],
+        )
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["timeout"], 8)
+
+    def test_enable_failure_rolls_back_binding_and_unit(self):
+        binding = self._preload_binding()
+
+        def fail_enable(command, check=True):
+            if command[0] == "enable":
+                raise RuntimeError("enable failed")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "disabled")
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=fail_enable
+        ):
+            with self.assertRaisesRegex(RuntimeError, "enable failed"):
+                backend.install_preload_service(
+                    binding["prefix"], binding["wine"], binding["use_x11"]
+                )
+        self.assertFalse(backend.preload_binding_path().exists())
+        self.assertFalse(backend.preload_unit_path().exists())
+
+    def test_preload_status_reports_exact_binding_mismatch(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[(True, "enabled"), (False, "inactive")],
+        ):
+            status = backend.preload_service_status(
+                str(self.home / "different"), binding["wine"], True
+            )
+        self.assertEqual(set(status), {
+            "supported", "reason", "installed", "enabled", "active", "state",
+            "binding", "selected_matches", "components", "detail",
+        })
+        self.assertEqual(status["state"], "mismatch")
+        self.assertFalse(status["selected_matches"])
+
+    def test_disable_and_start_actions_are_separate(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        commands = []
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(True, "enabled")
+        ), mock.patch.object(
+            backend, "_systemctl_user",
+            side_effect=lambda command, check=True: (
+                commands.append(list(command))
+                or mock.Mock(returncode=0, stdout="", stderr="")
+            ),
+        ), mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "inactive"}
+        ):
+            backend.manage_preload_service(
+                "disable", binding["prefix"], binding["wine"], True
+            )
+            backend.manage_preload_service(
+                "start", binding["prefix"], binding["wine"], True
+            )
+        self.assertEqual(
+            commands,
+            [["disable", backend.PRELOAD_UNIT], ["start", backend.PRELOAD_UNIT]],
+        )
+
+    def test_preload_status_merges_fresh_and_stale_heartbeat(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        components = {
+            name: {"state": "running", "owned": True, "detail": ""}
+            for name in backend.PRELOAD_COMPONENTS
+        }
+
+        def property_state(command):
+            return (True, "enabled" if command == "is-enabled" else "active")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", side_effect=property_state
+        ), mock.patch.object(backend.time, "time", return_value=100.0):
+            backend._write_preload_heartbeat(
+                backend.preload_runtime_status_path(), components, "running"
+            )
+            fresh = backend.preload_service_status(
+                binding["prefix"], binding["wine"], True
+            )
+        self.assertEqual(fresh["state"], "active")
+        self.assertEqual(fresh["components"], components)
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", side_effect=property_state
+        ), mock.patch.object(backend.time, "time", return_value=200.0):
+            stale = backend.preload_service_status(
+                binding["prefix"], binding["wine"], True
+            )
+        self.assertEqual(stale["state"], "degraded")
+        self.assertIn("stale", stale["detail"])
+
+    def test_disable_is_idempotent_when_already_disabled(self):
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "disabled")
+        ), mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl, mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "uninstalled"}
+        ):
+            result = backend.manage_preload_service("disable")
+        self.assertEqual(result["state"], "uninstalled")
+        systemctl.assert_not_called()
+
+    def test_office_detection_parses_csv_and_ignores_infrastructure(self):
+        binding = self._preload_binding()
+        output = (
+            '"WINWORD.EXE","101","Console","1","12 K"\n'
+            '"services.exe","102","Services","0","8 K"\n'
+            '"RpcSs.exe","103","Services","0","8 K"\n'
+        )
+        completed = mock.Mock(returncode=0, stdout=output, stderr="")
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=completed
+        ) as run:
+            found = backend.preload_office_processes(
+                binding["prefix"], binding["wine"], True
+            )
+        self.assertEqual(found, ["WINWORD.EXE"])
+        self.assertEqual(
+            run.call_args.args[0],
+            [binding["wine"], "tasklist.exe", "/FO", "CSV", "/NH"],
+        )
+        self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_stop_refuses_active_or_unknown_office_without_systemctl_stop(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=["EXCEL.EXE"]
+        ), mock.patch.object(backend, "_systemctl_user") as systemctl:
+            with self.assertRaisesRegex(RuntimeError, "Office is active"):
+                backend.manage_preload_service(
+                    "stop", binding["prefix"], binding["wine"], True
+                )
+        systemctl.assert_not_called()
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "preload_office_processes",
+            side_effect=RuntimeError("tasklist timeout"),
+        ), mock.patch.object(backend, "_systemctl_user") as systemctl:
+            with self.assertRaisesRegex(RuntimeError, "tasklist timeout"):
+                backend.manage_preload_service(
+                    "stop", binding["prefix"], binding["wine"], True
+                )
+        systemctl.assert_not_called()
+
+    def test_worker_preserves_preexisting_component_and_stops_owned_in_reverse(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        status_path = backend.preload_runtime_status_path()
+        states = {"ClickToRunSvc": "stopped", "RpcSs": "running"}
+        actions = []
+        handlers = {}
+
+        def component_state(_binding, component):
+            return states[component], states[component]
+
+        def component_action(_binding, action, component):
+            actions.append((action, component))
+            states[component] = "running" if action == "start" else "stopped"
+            return True, action
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_state", side_effect=component_state
+        ), mock.patch.object(
+            backend, "_preload_component_action", side_effect=component_action
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ) as office, mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_sleep
+        ), mock.patch.object(
+            backend.os, "kill"
+        ) as broad_kill:
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), status_path
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            actions,
+            [("start", "ClickToRunSvc"), ("stop", "ClickToRunSvc")],
+        )
+        office.assert_called_once()
+        broad_kill.assert_not_called()
+        heartbeat = __import__("json").loads(status_path.read_text())
+        self.assertEqual(heartbeat["state"], "stopped")
+        self.assertFalse(heartbeat["components"]["RpcSs"]["owned"])
+
+    def test_worker_refuses_signal_cleanup_when_activity_check_fails(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        handlers = {}
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_state", return_value=("running", "running")
+        ), mock.patch.object(
+            backend, "_preload_component_action"
+        ) as action, mock.patch.object(
+            backend, "preload_office_processes",
+            side_effect=RuntimeError("unknown"),
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+        self.assertEqual(result, 1)
+        action.assert_not_called()
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertEqual(heartbeat["state"], "stop-refused")
+
+    def test_worker_reports_degraded_component_without_claiming_ownership(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        handlers = {}
+        heartbeat_states = []
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            heartbeat_states.append(state)
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_state",
+            side_effect=lambda _binding, component: (
+                ("stopped", "stopped") if component == "ClickToRunSvc"
+                else ("running", "running")
+            ),
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(False, "start failed")
+        ) as action, mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+        self.assertEqual(result, 0)
+        self.assertIn("degraded", heartbeat_states)
+        self.assertEqual(action.call_args_list[0].args[1:], ("start", "ClickToRunSvc"))
+        self.assertFalse(
+            __import__("json").loads(
+                backend.preload_runtime_status_path().read_text()
+            )["components"]["ClickToRunSvc"]["owned"]
+        )
+
+    def test_uninstall_stops_then_disables_owned_service_before_removal(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(),
+            backend._PRELOAD_UNIT_MARKER + "\n[Service]\n",
+            0o644,
+        )
+        commands = []
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(True, "active")
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "inactive"}
+        ), mock.patch.object(
+            backend, "_systemctl_user",
+            side_effect=lambda command, check=True: (
+                commands.append(list(command))
+                or mock.Mock(returncode=0, stdout="", stderr="")
+            ),
+        ):
+            backend.uninstall_preload_service()
+        self.assertEqual(commands, [
+            ["stop", backend.PRELOAD_UNIT],
+            ["disable", backend.PRELOAD_UNIT],
+            ["daemon-reload"],
+        ])
+        self.assertFalse(backend.preload_unit_path().exists())
+        self.assertFalse(backend.preload_binding_path().exists())
+
+    def test_uninstall_never_deletes_or_controls_foreign_unit(self):
+        backend.preload_unit_path().parent.mkdir(parents=True)
+        backend.preload_unit_path().write_text("[Service]\nExecStart=/foreign\n")
+        with mock.patch.object(backend, "_systemctl_user") as systemctl:
+            backend.uninstall_preload_service()
+        systemctl.assert_not_called()
+        self.assertTrue(backend.preload_unit_path().exists())
+
+    def test_inactive_disabled_binding_can_be_explicitly_replaced(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        new_prefix = self._make_prefix(self.home / "new preload prefix")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "inactive")
+        ), mock.patch.object(
+            backend, "_systemctl_user",
+            return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+        ), mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "inactive"}
+        ):
+            backend.install_preload_service(str(new_prefix), str(self.wine), True)
+        self.assertEqual(
+            backend._read_preload_binding()["prefix"], str(new_prefix.resolve())
+        )
+
+    def test_enabled_mismatched_binding_cannot_be_replaced(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        new_prefix = self._make_prefix(self.home / "new preload prefix")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[(True, "enabled"), (False, "inactive")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Disable it at login"):
+                backend.install_preload_service(
+                    str(new_prefix), str(self.wine), True
+                )
+        self.assertEqual(backend._read_preload_binding(), old)
 
 if __name__ == "__main__":
     unittest.main()

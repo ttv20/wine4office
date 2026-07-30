@@ -16,7 +16,14 @@ sys.path.insert(0, str(MANAGER_DIR))
 try:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QCloseEvent
-    from PySide6.QtWidgets import QApplication, QListWidget, QMessageBox, QStackedWidget, QTreeWidget
+    from PySide6.QtWidgets import (
+        QApplication,
+        QCheckBox,
+        QListWidget,
+        QMessageBox,
+        QStackedWidget,
+        QTreeWidget,
+    )
     import wine4office_backend as backend
     import wine4office_manager as manager
     import wine4office_qt as qt_module
@@ -48,7 +55,9 @@ class QtManagerTests(unittest.TestCase):
             "desktop_copy": False,
             "use_x11": True,
             "update_url": "",
+            "office_telemetry_disabled": {},
         }
+
         self.old_prefix = self._make_prefix(Path(self.config["prefix"]))
         self.status = {
             "prefix_exists": True,
@@ -86,6 +95,299 @@ class QtManagerTests(unittest.TestCase):
         (path / "dosdevices").mkdir(exist_ok=True)
         return path
 
+    def _preload_snapshot(self, task=None, **changes):
+        snapshot = self.state.snapshot()
+        preload = {
+            "supported": True,
+            "reason": "",
+            "installed": False,
+            "enabled": False,
+            "active": False,
+            "state": "unbound",
+            "binding": None,
+            "selected_matches": False,
+            "components": {},
+            "detail": "",
+            "checking": False,
+        }
+        preload.update(changes)
+        snapshot["preload"] = preload
+        if task:
+            snapshot["task"] = {**snapshot["task"], **task}
+        return snapshot
+
+    def _refresh_preload(self, task=None, **changes):
+        snapshot = self._preload_snapshot(task=task, **changes)
+        with mock.patch.object(self.state, "snapshot", return_value=snapshot):
+            self.window.refresh_state()
+        return snapshot
+
+    def test_background_preload_controls_are_explicit_and_accessible(self):
+        self.assertEqual(self.window.preload_group.title(), "Background preload")
+        controls = (
+            (self.window.preload_enable_button, "Enable at login"),
+            (self.window.preload_disable_button, "Disable at login"),
+            (self.window.preload_start_button, "Start now"),
+            (self.window.preload_stop_button, "Stop now"),
+        )
+        for button, text in controls:
+            with self.subTest(text=text):
+                self.assertEqual(button.text(), text)
+                self.assertTrue(button.accessibleName())
+                self.assertTrue(button.toolTip())
+        self.assertIn("does not stop", self.window.preload_disable_button.toolTip())
+        self.assertTrue(self.window.preload_selected_label.accessibleName())
+        self.assertTrue(self.window.preload_binding_label.accessibleName())
+        self.assertTrue(self.window.preload_state_label.accessibleName())
+        self.assertFalse(any(
+            "immediate" in checkbox.text().lower()
+            for checkbox in self.window.preload_group.findChildren(QCheckBox)
+        ))
+
+    def test_background_preload_state_matrix_and_lifecycle_controls(self):
+        binding = {
+            "prefix": self.config["prefix"],
+            "wine": self.config["wine"],
+        }
+        cases = (
+            ("unbound", {}, "Not configured", (True, False, False, False)),
+            (
+                "disabled",
+                {"installed": True, "binding": binding, "selected_matches": True},
+                "Disabled",
+                (True, False, True, False),
+            ),
+            (
+                "enabled",
+                {
+                    "installed": True,
+                    "enabled": True,
+                    "binding": binding,
+                    "selected_matches": True,
+                },
+                "Enabled",
+                (False, True, True, False),
+            ),
+            (
+                "active",
+                {
+                    "installed": True,
+                    "enabled": True,
+                    "active": True,
+                    "binding": binding,
+                    "selected_matches": True,
+                    "components": {
+                        "ClickToRunSvc": {"state": "running", "owned": True, "detail": ""},
+                        "RpcSs": {"state": "running", "owned": True, "detail": ""},
+                    },
+                },
+                "Active",
+                (False, True, False, True),
+            ),
+            (
+                "degraded",
+                {
+                    "installed": True,
+                    "enabled": True,
+                    "active": True,
+                    "binding": binding,
+                    "selected_matches": True,
+                    "components": {
+                        "ClickToRunSvc": {"state": "failed", "owned": True, "detail": "failed"},
+                        "RpcSs": {"state": "running", "owned": True, "detail": ""},
+                    },
+                },
+                "Needs attention",
+                (False, True, False, True),
+            ),
+        )
+        buttons = (
+            self.window.preload_enable_button,
+            self.window.preload_disable_button,
+            self.window.preload_start_button,
+            self.window.preload_stop_button,
+        )
+        for state, values, text, enabled in cases:
+            with self.subTest(state=state):
+                self._refresh_preload(state=state, **values)
+                self.assertIn(text, self.window.preload_state_label.text())
+                self.assertEqual(
+                    tuple(button.isEnabled() for button in buttons),
+                    enabled,
+                )
+        self.assertIn("Login: enabled", self.window.preload_state_label.text())
+        self.assertIn("Worker: running", self.window.preload_state_label.text())
+        self.assertIn("ClickToRunSvc: failed", self.window.preload_state_label.text())
+        self.assertIn("RpcSs: running", self.window.preload_state_label.text())
+
+    def test_background_preload_binding_mismatch_shows_both_environments(self):
+        bound = str(self.home / "other-office")
+        self._refresh_preload(
+            state="binding_mismatch",
+            installed=True,
+            enabled=True,
+            active=True,
+            binding={"prefix": bound, "wine": "/other/wine"},
+            selected_matches=False,
+        )
+
+        self.assertEqual(self.window.preload_selected_label.text(), self.config["prefix"])
+        self.assertEqual(self.window.preload_binding_label.text(), bound)
+        self.assertIn("Different environment bound", self.window.preload_state_label.text())
+        self.assertIn(self.config["prefix"], self.window.preload_detail_label.text())
+        self.assertIn(bound, self.window.preload_detail_label.text())
+        self.assertIn("both disabled and stopped", self.window.preload_detail_label.text())
+        self.assertFalse(self.window.preload_enable_button.isEnabled())
+        self.assertTrue(self.window.preload_disable_button.isEnabled())
+        self.assertFalse(self.window.preload_start_button.isEnabled())
+        self.assertTrue(self.window.preload_stop_button.isEnabled())
+
+    def test_inactive_mismatch_rebind_requires_explicit_confirmation(self):
+        bound = str(self.home / "retired-office")
+        self._refresh_preload(
+            state="binding_mismatch",
+            installed=True,
+            enabled=False,
+            active=False,
+            binding={"prefix": bound, "wine": "/retired/wine"},
+            selected_matches=False,
+        )
+
+        self.assertTrue(self.window.preload_enable_button.isEnabled())
+        self.assertFalse(self.window.preload_disable_button.isEnabled())
+        self.assertFalse(self.window.preload_start_button.isEnabled())
+        self.assertFalse(self.window.preload_stop_button.isEnabled())
+        self.assertIn("explicit confirmation", self.window.preload_detail_label.text())
+        self.assertIn("will not start", self.window.preload_detail_label.text())
+
+        with mock.patch.object(
+            QMessageBox,
+            "question",
+            side_effect=(
+                QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            ),
+        ) as question, mock.patch.object(
+            self.state, "start_preload_action"
+        ) as start, mock.patch.object(
+            self.window, "refresh_state"
+        ):
+            self.window.preload_enable_button.click()
+            start.assert_not_called()
+            self.window.preload_enable_button.click()
+
+        start.assert_called_once_with("enable")
+        self.assertEqual(question.call_count, 2)
+        self.assertEqual(question.call_args.args[1], "Replace preload binding")
+        prompt = question.call_args.args[2]
+        self.assertIn(bound, prompt)
+        self.assertIn(self.config["prefix"], prompt)
+        self.assertIn("will not start it now", prompt)
+
+
+    def test_background_preload_unsupported_has_no_fallback_or_controls(self):
+        reason = "The systemd user manager is unavailable."
+        self._refresh_preload(
+            supported=False,
+            reason=reason,
+            state="unsupported",
+        )
+
+        self.assertIn("Unavailable", self.window.preload_state_label.text())
+        self.assertIn(reason, self.window.preload_detail_label.text())
+        self.assertIn("autostart or detached fallback", self.window.preload_detail_label.text())
+        self.assertTrue(all(
+            not button.isEnabled()
+            for button in (
+                self.window.preload_enable_button,
+                self.window.preload_disable_button,
+                self.window.preload_start_button,
+                self.window.preload_stop_button,
+            )
+        ))
+
+    def test_background_preload_controls_disable_during_checks_and_tasks(self):
+        values = {
+            "state": "active",
+            "installed": True,
+            "enabled": True,
+            "active": True,
+            "binding": {
+                "prefix": self.config["prefix"],
+                "wine": self.config["wine"],
+            },
+            "selected_matches": True,
+        }
+        buttons = (
+            self.window.preload_enable_button,
+            self.window.preload_disable_button,
+            self.window.preload_start_button,
+            self.window.preload_stop_button,
+        )
+        self._refresh_preload(checking=True, **values)
+        self.assertIn("Checking status", self.window.preload_state_label.text())
+        self.assertTrue(all(not button.isEnabled() for button in buttons))
+
+        self._refresh_preload(
+            task={"running": True, "kind": "other", "status": "running"},
+            **values,
+        )
+        self.assertTrue(all(not button.isEnabled() for button in buttons))
+
+    def test_background_preload_buttons_dispatch_exact_manager_actions(self):
+        controls = (
+            (self.window.preload_enable_button, "enable"),
+            (self.window.preload_disable_button, "disable"),
+            (self.window.preload_start_button, "start"),
+            (self.window.preload_stop_button, "stop"),
+        )
+        self.window.preload_rebind = None
+        with mock.patch.object(self.window, "refresh_state"):
+            for button, action in controls:
+                with self.subTest(action=action), mock.patch.object(
+                    self.state, "start_preload_action"
+                ) as start:
+                    button.setEnabled(True)
+                    button.click()
+                    start.assert_called_once_with(action)
+
+    def test_failed_preload_stop_is_visible_and_offers_safe_disable(self):
+        snapshot = self._preload_snapshot(
+            task={
+                "running": False,
+                "kind": "preload-stop",
+                "status": "failed",
+                "log": "ERROR: Office is active; refusing to stop preload",
+            },
+            state="degraded",
+            installed=True,
+            enabled=True,
+            active=True,
+            binding={
+                "prefix": self.config["prefix"],
+                "wine": self.config["wine"],
+            },
+            selected_matches=True,
+        )
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(
+            self.state, "snapshot", return_value=snapshot
+        ), mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            self.window, "show_error"
+        ) as show_error:
+            self.window.refresh_state()
+            single_shot.assert_called_once()
+            single_shot.call_args.args[1]()
+
+        show_error.assert_called_once()
+        message = str(show_error.call_args.args[0])
+        self.assertIn("Office is active", message)
+        self.assertIn("Disable at login", message)
+        self.assertIn("does not stop", message)
+
+
 
     def test_ui_uses_system_theme_and_native_navigation_controls(self):
         self.assertEqual(self.window.styleSheet(), "")
@@ -105,6 +407,67 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertFalse(saved["use_x11"])
         self.assertFalse(self.state.snapshot()["config"]["use_x11"])
+
+    def test_office_telemetry_checkbox_is_opt_in_accessible_and_persisted(self):
+        checkbox = self.window.disable_office_telemetry
+        self.assertFalse(checkbox.isChecked())
+        self.assertIn("Disable Microsoft Office telemetry", checkbox.text())
+        self.assertIn("telemetry policy", checkbox.accessibleName().lower())
+        self.assertIn("Neither", checkbox.accessibleDescription())
+        self.assertIn("Required service data", checkbox.toolTip())
+
+        checkbox.setChecked(True)
+        with mock.patch.object(backend, "apply_office_telemetry_policy") as apply:
+            saved = self.window.save_config()
+
+        self.assertTrue(backend.office_telemetry_disabled(saved))
+        self.assertTrue(
+            backend.office_telemetry_disabled(self.state.snapshot()["config"])
+        )
+        apply.assert_called_once()
+
+    def test_office_telemetry_checkbox_tracks_selected_environment(self):
+        enabled = self._make_prefix(self.home / "telemetry-disabled-prefix")
+        other = self._make_prefix(self.home / "default-policy-prefix")
+        self.state.config = backend.set_office_telemetry_disabled(
+            self.state.config, enabled, True
+        )
+
+        self.window.prefix_edit.setText(str(enabled))
+        self.assertTrue(self.window.disable_office_telemetry.isChecked())
+        self.window.prefix_edit.setText(str(other))
+        self.assertFalse(self.window.disable_office_telemetry.isChecked())
+
+    def test_environment_creation_reapplies_checked_telemetry_policy(self):
+        prefix = Path(self.config["prefix"])
+        config = backend.set_office_telemetry_disabled(self.config, prefix, True)
+        with mock.patch.object(
+            backend, "create_environment", return_value="environment ready"
+        ) as create, mock.patch.object(
+            backend, "apply_office_telemetry_policy"
+        ) as apply:
+            result = self.window._create_environment(config, True)
+
+        self.assertEqual(result, "environment ready")
+        create.assert_called_once_with(
+            config["prefix"], config["wine"], True, self.state.output
+        )
+        apply.assert_called_once_with(
+            config["prefix"], config["wine"], True, use_x11=True
+        )
+
+    def test_telemetry_policy_failure_is_shown_and_not_saved(self):
+        self.window.disable_office_telemetry.setChecked(True)
+        with mock.patch.object(
+            backend, "apply_office_telemetry_policy",
+            side_effect=RuntimeError("policy command failed"),
+        ), mock.patch.object(self.window, "show_error") as show_error:
+            saved = self.window.save_config()
+
+        self.assertIsNone(saved)
+        self.assertFalse(backend.office_telemetry_disabled(self.state.config))
+        show_error.assert_called_once()
+        self.assertIn("policy command failed", str(show_error.call_args.args[0]))
 
     def test_selected_rows_are_used_for_shortcut_actions(self):
         self.window.app_items["excel"].setSelected(True)

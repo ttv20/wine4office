@@ -279,6 +279,17 @@ struct hw_msg_source
     unsigned int    origin;
 };
 
+struct key_value_result
+{
+    unsigned int type;
+    data_size_t  length;
+    data_size_t  offset;
+    data_size_t  data_offset;
+};
+
+#define KEY_VALUE_QUERY_RESULTS 0
+#define KEY_VALUE_QUERY_DATA    1
+
 struct rawinput
 {
     int                  type;
@@ -2697,6 +2708,71 @@ struct get_key_value_reply
     int          type;
     data_size_t  total;
     /* VARARG(data,bytes); */
+};
+
+
+
+struct create_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t hkey;
+    unsigned int count;
+    char __pad_20[4];
+};
+struct create_key_value_query_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    char __pad_12[4];
+};
+
+
+
+struct append_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    file_pos_t   offset;
+    /* VARARG(data,bytes); */
+};
+struct append_key_value_query_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct execute_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    unsigned int count;
+    data_size_t  length;
+};
+struct execute_key_value_query_reply
+{
+    struct reply_header __header;
+    unsigned int status;
+    data_size_t  used;
+    data_size_t  required;
+    unsigned int count;
+};
+
+
+
+struct read_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    unsigned int which;
+    data_size_t  offset;
+};
+struct read_key_value_query_reply
+{
+    struct reply_header __header;
+    data_size_t  total;
+    /* VARARG(data,bytes); */
+    char __pad_12[4];
 };
 
 
@@ -6307,6 +6383,10 @@ enum request
     REQ_enum_key,
     REQ_set_key_value,
     REQ_get_key_value,
+    REQ_create_key_value_query,
+    REQ_append_key_value_query,
+    REQ_execute_key_value_query,
+    REQ_read_key_value_query,
     REQ_enum_key_value,
     REQ_delete_key_value,
     REQ_load_registry,
@@ -6621,6 +6701,10 @@ union generic_request
     struct enum_key_request enum_key_request;
     struct set_key_value_request set_key_value_request;
     struct get_key_value_request get_key_value_request;
+    struct create_key_value_query_request create_key_value_query_request;
+    struct append_key_value_query_request append_key_value_query_request;
+    struct execute_key_value_query_request execute_key_value_query_request;
+    struct read_key_value_query_request read_key_value_query_request;
     struct enum_key_value_request enum_key_value_request;
     struct delete_key_value_request delete_key_value_request;
     struct load_registry_request load_registry_request;
@@ -6933,6 +7017,10 @@ union generic_reply
     struct enum_key_reply enum_key_reply;
     struct set_key_value_reply set_key_value_reply;
     struct get_key_value_reply get_key_value_reply;
+    struct create_key_value_query_reply create_key_value_query_reply;
+    struct append_key_value_query_reply append_key_value_query_reply;
+    struct execute_key_value_query_reply execute_key_value_query_reply;
+    struct read_key_value_query_reply read_key_value_query_reply;
     struct enum_key_value_reply enum_key_value_reply;
     struct delete_key_value_reply delete_key_value_reply;
     struct load_registry_reply load_registry_reply;
@@ -7149,6 +7237,6 @@ union generic_reply
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 952
+#define SERVER_PROTOCOL_VERSION 954
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

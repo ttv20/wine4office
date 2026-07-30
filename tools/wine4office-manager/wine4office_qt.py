@@ -62,6 +62,7 @@ class ManagerWindow(QMainWindow):
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
+        self.preload_rebind: tuple[str, str] | None = None
 
         self.setWindowTitle("Wine4OfficeManager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
@@ -194,6 +195,22 @@ class ManagerWindow(QMainWindow):
         )
         self.use_x11.setAccessibleName("Launch Wine4Office through X11")
         environment_layout.addWidget(self.use_x11)
+        self.disable_office_telemetry = QCheckBox(
+            "Disable Microsoft Office telemetry (policy)"
+        )
+        self.disable_office_telemetry.setAccessibleName(
+            "Disable Microsoft Office telemetry policy"
+        )
+        telemetry_help = (
+            "Sets Microsoft's per-user Office diagnostic-data policy to Neither in the "
+            "selected Wine environment. Required service data is not disabled."
+        )
+        self.disable_office_telemetry.setAccessibleDescription(telemetry_help)
+        self.disable_office_telemetry.setToolTip(telemetry_help)
+        self.disable_office_telemetry.setStatusTip(telemetry_help)
+        environment_layout.addWidget(self.disable_office_telemetry)
+        self.prefix_edit.textChanged.connect(self._sync_office_telemetry_field)
+
         environment_buttons = QHBoxLayout()
         self.create_button = self._action_button(
             "Create", lambda: self.environment_action(False), QStyle.StandardPixmap.SP_DialogApplyButton
@@ -212,6 +229,87 @@ class ManagerWindow(QMainWindow):
         ))
         environment_layout.addLayout(environment_buttons)
         layout.addWidget(environment)
+
+        preload = self.preload_group = QGroupBox("Background preload")
+        preload_layout = QVBoxLayout(preload)
+        preload_form = self._form()
+        self.preload_selected_label = QLabel("Checking…")
+        self.preload_selected_label.setAccessibleName("Selected preload environment")
+        self.preload_selected_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.preload_binding_label = QLabel("Checking…")
+        self.preload_binding_label.setAccessibleName("Bound preload environment")
+        self.preload_binding_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        preload_form.addRow("Selected environment:", self.preload_selected_label)
+        preload_form.addRow("Bound environment:", self.preload_binding_label)
+        preload_layout.addLayout(preload_form)
+
+        self.preload_state_label = QLabel("Checking preload service status…")
+        self.preload_state_label.setAccessibleName("Background preload state")
+        self.preload_state_label.setWordWrap(True)
+        preload_layout.addWidget(self.preload_state_label)
+        self.preload_detail_label = QLabel()
+        self.preload_detail_label.setAccessibleName("Background preload details")
+        self.preload_detail_label.setWordWrap(True)
+        self.preload_detail_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        preload_layout.addWidget(self.preload_detail_label)
+
+        preload_buttons = QHBoxLayout()
+        self.preload_enable_button = self._action_button(
+            "Enable at login",
+            lambda: self.preload_action("enable"),
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+        )
+        self.preload_enable_button.setAccessibleName("Enable background preload at login")
+        self.preload_enable_button.setToolTip(
+            "Bind the selected environment and enable its user service for future logins. "
+            "This does not start the preload worker now."
+        )
+        self.preload_disable_button = self._action_button(
+            "Disable at login",
+            lambda: self.preload_action("disable"),
+            QStyle.StandardPixmap.SP_DialogCancelButton,
+        )
+        self.preload_disable_button.setAccessibleName("Disable background preload at login")
+        self.preload_disable_button.setToolTip(
+            "Disable automatic startup at login. This does not stop a running preload "
+            "worker or Microsoft Office."
+        )
+        self.preload_start_button = self._action_button(
+            "Start now",
+            lambda: self.preload_action("start"),
+            QStyle.StandardPixmap.SP_MediaPlay,
+        )
+        self.preload_start_button.setAccessibleName("Start background preload now")
+        self.preload_start_button.setToolTip(
+            "Start the preload worker now for the bound environment. "
+            "This does not enable startup at login."
+        )
+        self.preload_stop_button = self._action_button(
+            "Stop now",
+            lambda: self.preload_action("stop"),
+            QStyle.StandardPixmap.SP_MediaStop,
+        )
+        self.preload_stop_button.setAccessibleName("Stop background preload now")
+        self.preload_stop_button.setToolTip(
+            "Stop only the preload worker and components it owns after Office is closed. "
+            "This never stops Microsoft Office."
+        )
+        for button in (
+            self.preload_enable_button,
+            self.preload_disable_button,
+            self.preload_start_button,
+            self.preload_stop_button,
+        ):
+            preload_buttons.addWidget(button)
+        preload_buttons.addStretch()
+        preload_layout.addLayout(preload_buttons)
+        layout.addWidget(preload)
 
         installer = QGroupBox("Run a Windows executable")
         installer_layout = QVBoxLayout(installer)
@@ -244,6 +342,159 @@ class ManagerWindow(QMainWindow):
         layout.addWidget(installer)
         layout.addStretch()
         return page
+
+    def preload_action(self, action: str) -> None:
+        if action not in {"enable", "disable", "start", "stop"}:
+            raise ValueError(f"Unknown preload action: {action}")
+        if action == "enable" and self.preload_rebind is not None:
+            bound, selected = self.preload_rebind
+            result = QMessageBox.question(
+                self,
+                "Replace preload binding",
+                f"Replace the inactive preload binding for {bound} with {selected} "
+                "and enable it at login?\n\nThis will not start it now.",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return
+        messages = {
+            "enable": "Enabling background preload at login; it will not start now.",
+            "disable": "Disabling background preload at login; a running worker will not stop.",
+            "start": "Starting background preload for this session…",
+            "stop": "Stopping background preload without stopping Office…",
+        }
+        try:
+            self.state.start_preload_action(action)
+            self.notify(messages[action])
+            self.refresh_state()
+        except Exception as error:
+            detail = str(error)
+            if action == "stop":
+                detail += (
+                    "\n\nStop now was not performed. Close Office before trying again, "
+                    "or use Disable at login as the safe alternative. Disable at login "
+                    "does not stop the worker or Office."
+                )
+            self.show_error(detail)
+
+    @staticmethod
+    def _preload_component_state(component) -> str:
+        if not isinstance(component, dict):
+            return "unknown"
+        state = component.get("state")
+        if not isinstance(state, str) or not state.strip():
+            return "unknown"
+        labels = {
+            "inactive": "stopped",
+            "not_running": "stopped",
+            "not_found": "not found",
+        }
+        normalized = state.strip().lower()
+        return labels.get(normalized, normalized.replace("_", " "))
+
+    def _update_preload_status(self, snapshot: dict) -> None:
+        preload = snapshot["preload"]
+        selected = str(snapshot["config"]["prefix"])
+        binding = preload.get("binding")
+        bound = binding.get("prefix") if isinstance(binding, dict) else binding
+        bound_text = str(bound) if bound else "Not configured"
+        self.preload_selected_label.setText(selected)
+        self.preload_binding_label.setText(bound_text)
+
+        state = str(preload.get("state") or "unknown")
+        supported = bool(preload.get("supported"))
+        installed = bool(preload.get("installed"))
+        enabled = bool(preload.get("enabled"))
+        active = bool(preload.get("active"))
+        checking = bool(preload.get("checking"))
+        selected_matches = bool(preload.get("selected_matches"))
+        mismatch = bool(binding) and not selected_matches
+        state_names = {
+            "unsupported": "Unavailable",
+            "unbound": "Not configured",
+            "disabled": "Disabled",
+            "enabled": "Enabled",
+            "active": "Active",
+            "degraded": "Needs attention",
+            "binding_mismatch": "Different environment bound",
+        }
+        overall = "Checking status" if checking else state_names.get(
+            state, state.replace("_", " ").capitalize()
+        )
+        components = preload.get("components")
+        if not isinstance(components, dict):
+            components = {}
+        click_to_run = self._preload_component_state(components.get("ClickToRunSvc"))
+        rpc = self._preload_component_state(components.get("RpcSs"))
+        self.preload_state_label.setText(
+            f"{overall} — Login: {'enabled' if enabled else 'disabled'}; "
+            f"Worker: {'running' if active else 'stopped'}; "
+            f"ClickToRunSvc: {click_to_run}; RpcSs: {rpc}."
+        )
+
+        detail = str(preload.get("detail") or "").strip()
+        reason = str(preload.get("reason") or "").strip()
+        if not supported:
+            cause = reason or detail or "User services are unavailable."
+            detail = (
+                f"{cause} Wine4Office will not use an autostart or detached fallback."
+            )
+        elif mismatch:
+            if enabled or active:
+                detail = (
+                    f"A different environment is bound. Selected: {selected}. "
+                    f"Bound: {bound_text}. Disable at login and Stop now apply to the "
+                    "bound environment. Enable stays unavailable until that binding is "
+                    "both disabled and stopped."
+                )
+            else:
+                detail = (
+                    f"An inactive environment is bound. Selected: {selected}. "
+                    f"Bound: {bound_text}. Enable at login can replace it only after "
+                    "explicit confirmation, and will not start the worker now."
+                )
+        elif checking:
+            detail = "Checking the optional user service without blocking the Manager."
+        elif not installed:
+            detail = detail or (
+                "Opt in with Enable at login. Enabling creates the user service but "
+                "does not start it now."
+            )
+        elif active and not enabled:
+            detail = detail or (
+                "Running for this session only. It will not start at the next login."
+            )
+        elif enabled and not active:
+            detail = detail or (
+                "Enabled for the next login but not running now. Use Start now separately."
+            )
+        else:
+            detail = detail or (
+                "Disable at login changes future logins only; it does not stop a running worker."
+            )
+        self.preload_detail_label.setText(detail)
+        self.preload_rebind = (
+            (bound_text, selected)
+            if mismatch and installed and not enabled and not active
+            else None
+        )
+
+        task_running = bool(snapshot["task"]["running"])
+        available = supported and not checking and not task_running
+        self.preload_enable_button.setEnabled(
+            available and not enabled
+            and (not mismatch or (installed and not active))
+        )
+        self.preload_disable_button.setEnabled(
+            available and installed and enabled
+        )
+        self.preload_start_button.setEnabled(
+            available and installed and selected_matches and not active
+        )
+        self.preload_stop_button.setEnabled(
+            available and installed and active
+        )
 
     def _office_install_page(self) -> QWidget:
         page, layout = self._new_page(
@@ -607,8 +858,17 @@ class ManagerWindow(QMainWindow):
             "wine": self.wine_edit.text(),
             "desktop_copy": self.desktop_copy.isChecked(),
             "use_x11": self.use_x11.isChecked(),
+            "disable_office_telemetry": self.disable_office_telemetry.isChecked(),
             "update_url": self.update_edit.text(),
         }
+
+    def _sync_office_telemetry_field(self, prefix: str) -> None:
+        with self.state.lock:
+            config = dict(self.state.config)
+        self.disable_office_telemetry.setChecked(
+            backend.office_telemetry_disabled(config, prefix)
+        )
+
 
     def _set_config_fields(self, config: dict) -> None:
         self.prefix_edit.setText(config["prefix"])
@@ -616,6 +876,10 @@ class ManagerWindow(QMainWindow):
         self.update_edit.setText(config["update_url"])
         self.desktop_copy.setChecked(config["desktop_copy"])
         self.use_x11.setChecked(config["use_x11"])
+        self.disable_office_telemetry.setChecked(
+            backend.office_telemetry_disabled(config)
+        )
+
 
     def _restore_config_fields(self) -> None:
         with self.state.lock:
@@ -743,6 +1007,18 @@ class ManagerWindow(QMainWindow):
             return None
         return apps
 
+    def _create_environment(self, config: dict, recreate: bool) -> str:
+        result = backend.create_environment(
+            config["prefix"], config["wine"], recreate, self.state.output
+        )
+        if backend.office_telemetry_disabled(config):
+            backend.apply_office_telemetry_policy(
+                config["prefix"], config["wine"], True,
+                use_x11=config.get("use_x11", True),
+            )
+        return result
+
+
     def environment_action(self, recreate: bool) -> None:
         config = self.save_config()
         if not config:
@@ -762,7 +1038,7 @@ class ManagerWindow(QMainWindow):
         try:
             self.state.start_task(
                 "environment",
-                lambda: backend.create_environment(config["prefix"], config["wine"], recreate, self.state.output),
+                lambda: self._create_environment(config, recreate),
             )
             self.pages.setCurrentIndex(4)
             self.navigation.setCurrentRow(4)
@@ -1070,6 +1346,7 @@ class ManagerWindow(QMainWindow):
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])
         self.cancel_button.setEnabled(task["running"])
+        self._update_preload_status(snapshot)
         if (self.pending_environment_transition
                 and task["kind"] == "environment-switch" and not task["running"]):
             self._set_config_fields(snapshot["config"])
@@ -1086,6 +1363,20 @@ class ManagerWindow(QMainWindow):
                 self.notify("Operation cancelled; settings restored.")
             else:
                 self.notify("Operation failed; settings restored. See the log.")
+                task_kind = str(task.get("kind") or "")
+                if "preload" in task_kind:
+                    failure = (str(task.get("log") or "").strip()
+                               or "The background preload operation failed.")
+                    if "stop" in task_kind:
+                        failure += (
+                            "\n\nStop now was not performed. Close Office before trying "
+                            "again, or use Disable at login as the safe alternative. "
+                            "Disable at login changes future logins only and does not stop "
+                            "the worker or Office."
+                        )
+                    QTimer.singleShot(
+                        0, lambda current=failure: self.show_error(current)
+                    )
         self.last_task_state = task_state
         if self._close_when_idle and not task["running"] and not self._automatic_close:
             self._close_when_idle = False

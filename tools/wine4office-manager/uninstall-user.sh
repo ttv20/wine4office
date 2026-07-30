@@ -22,31 +22,50 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Remove the optional user service while its executable and backend still exist.
+# The backend is a no-op when the user never opted in.
+if [[ -f "$ROOT/lib/wine4office_backend.py" ]]; then
+    python3 -I - "$ROOT/lib" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import wine4office_backend as backend
+backend.uninstall_preload_service()
+PY
+elif [[ -e "$CONFIG_HOME/systemd/user/wine4office-preload.service" ||
+        -e "$CONFIG_HOME/wine4office/preload-service.json" ]]; then
+    echo "Cannot safely remove the preload service because the installed backend is missing." >&2
+    exit 1
+fi
+
 # Validate and stop the selected prefix while the installed backend is available.
 if [[ -n $REMOVE_PREFIX ]]; then
     [[ -f "$ROOT/lib/wine4office_backend.py" ]] || {
         echo "Cannot safely validate the prefix because the installed backend is missing." >&2
         exit 1
     }
-    REMOVE_PREFIX=$(PYTHONPATH="$ROOT/lib" python3 - "$REMOVE_PREFIX" <<'PY'
+    REMOVE_PREFIX=$(python3 -I - "$ROOT/lib" "$REMOVE_PREFIX" <<'PY'
 import sys
+sys.path.insert(0, sys.argv[1])
 import wine4office_backend as backend
-print(backend.validate_prefix(sys.argv[1]))
+print(backend.validate_prefix(sys.argv[2]))
 PY
 )
-    PYTHONPATH="$ROOT/lib" python3 - "$REMOVE_PREFIX" <<'PY' || true
+    python3 -I - "$ROOT/lib" "$REMOVE_PREFIX" <<'PY' || true
 import sys
+sys.path.insert(0, sys.argv[1])
 import wine4office_backend as backend
 config = backend.load_config()
 try:
-    backend.stop_wine(sys.argv[1], config["wine"])
+    backend.stop_wine(sys.argv[2], config["wine"])
 except (FileNotFoundError, OSError):
     pass
 PY
 fi
 
 if [[ -f "$ROOT/lib/wine4office_backend.py" ]]; then
-    PYTHONPATH="$ROOT/lib" python3 - <<'PY' || true
+    python3 -I - "$ROOT/lib" <<'PY' || true
+import sys
+sys.path.insert(0, sys.argv[1])
 import wine4office_backend as backend
 backend.remove_app_shortcuts(backend.APP_META)
 PY

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import fcntl
 import hashlib
 from html.parser import HTMLParser
@@ -29,6 +31,12 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 PathValue = str | os.PathLike[str]
+OFFICE_TELEMETRY_POLICY_KEY = (
+    r"HKCU\Software\Policies\Microsoft\Office\Common\ClientTelemetry"
+)
+OFFICE_TELEMETRY_POLICY_VALUE = "SendTelemetry"
+OFFICE_TELEMETRY_DISABLED = "3"
+
 
 APP_META = {
     "word": {
@@ -278,6 +286,7 @@ def default_config() -> dict:
         "wine": detect_wine(),
         "desktop_copy": False,
         "use_x11": True,
+        "office_telemetry_disabled": {},
         "update_url": configured_update_url(),
         "skipped_updates": {},
     }
@@ -328,6 +337,38 @@ def save_config(config: dict) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(safe, indent=2) + "\n")
     os.replace(temporary, path)
+
+
+def environment_config_key(prefix_value: PathValue) -> str:
+    """Return the stable per-prefix key used by manager-owned settings."""
+    return str(normalize_path(prefix_value))
+
+
+def office_telemetry_disabled(config: dict, prefix_value: PathValue | None = None) -> bool:
+    """Return whether Wine4Office owns the telemetry policy in one prefix."""
+    policies = config.get("office_telemetry_disabled", {})
+    if not isinstance(policies, dict):
+        return False
+    prefix = config.get("prefix", "") if prefix_value is None else prefix_value
+    try:
+        return policies.get(environment_config_key(prefix)) is True
+    except (TypeError, ValueError):
+        return False
+
+
+def set_office_telemetry_disabled(config: dict, prefix_value: PathValue,
+                                  disabled: bool) -> dict:
+    """Copy config and update only Wine4Office's ownership record for one prefix."""
+    result = dict(config)
+    saved = result.get("office_telemetry_disabled", {})
+    policies = dict(saved) if isinstance(saved, dict) else {}
+    key = environment_config_key(prefix_value)
+    if disabled:
+        policies[key] = True
+    else:
+        policies.pop(key, None)
+    result["office_telemetry_disabled"] = policies
+    return result
 
 
 def normalize_path(value: PathValue) -> Path:
@@ -466,6 +507,56 @@ def wine_environment(prefix: str | Path, wine: str | Path,
     elif env.get("WAYLAND_DISPLAY"):
         env.pop("DISPLAY", None)
     return env
+
+
+def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: bool,
+                                  *, remove_managed: bool = False,
+                                  use_x11: bool = True) -> bool:
+    """Set or remove only Office's official SendTelemetry user policy value."""
+    prefix = validate_prefix(prefix_value)
+    if classify_prefix(str(prefix)) != "valid":
+        raise ValueError(f"Office telemetry policy requires a valid Wine prefix: {prefix}")
+    wine = require_wine(wine_value)
+    env = wine_environment(prefix, wine, use_x11)
+    if disabled:
+        subprocess.run(
+            [
+                str(wine), "reg", "add", OFFICE_TELEMETRY_POLICY_KEY,
+                "/v", OFFICE_TELEMETRY_POLICY_VALUE, "/t", "REG_DWORD",
+                "/d", OFFICE_TELEMETRY_DISABLED, "/f",
+            ],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=30, check=True,
+        )
+        return True
+    if not remove_managed:
+        return False
+
+    query_command = [
+        str(wine), "reg", "query", OFFICE_TELEMETRY_POLICY_KEY,
+        "/v", OFFICE_TELEMETRY_POLICY_VALUE,
+    ]
+    query = subprocess.run(
+        query_command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False,
+    )
+    if query.returncode == 1:
+        return False
+    if query.returncode:
+        raise subprocess.CalledProcessError(
+            query.returncode, query_command, output=query.stdout, stderr=query.stderr
+        )
+    if not re.search(r"\bREG_DWORD\s+(?:0x0*3|3)\b", query.stdout, re.IGNORECASE):
+        return False
+    subprocess.run(
+        [
+            str(wine), "reg", "delete", OFFICE_TELEMETRY_POLICY_KEY,
+            "/v", OFFICE_TELEMETRY_POLICY_VALUE, "/f",
+        ],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=30, check=True,
+    )
+    return True
 
 
 def sibling_tool(wine: Path, name: str) -> Path | None:
@@ -2229,3 +2320,687 @@ def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -
         command.extend(["--remove-prefix", str(prefix)])
     _stream_command(command, os.environ.copy(), output)
     return "Wine4Office removed. You may close this browser tab."
+
+
+PRELOAD_UNIT = "wine4office-preload.service"
+PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
+_PRELOAD_SCHEMA = 1
+_PRELOAD_HEARTBEAT_SCHEMA = 1
+_PRELOAD_SYSTEMCTL_TIMEOUT = 8
+_PRELOAD_WINE_TIMEOUT = 12
+_PRELOAD_HEARTBEAT_MAX_AGE = 20
+_PRELOAD_UNIT_MARKER = "# Managed by Wine4OfficeManager: preload-service-v1"
+
+
+def preload_binding_path() -> Path:
+    return config_home() / "wine4office/preload-service.json"
+
+
+def preload_unit_path() -> Path:
+    return config_home() / "systemd/user" / PRELOAD_UNIT
+
+
+def preload_runtime_status_path() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if runtime:
+        return Path(runtime).expanduser() / "wine4office/preload-service.json"
+    return cache_home() / "wine4office/preload-service.json"
+
+
+def _preload_atomic_write(path: Path, payload: str, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _preload_json_write(path: Path, payload: dict, mode: int = 0o600) -> None:
+    _preload_atomic_write(path, json.dumps(payload, sort_keys=True, indent=2) + "\n", mode)
+
+
+def _preload_snapshot(prefix_value: str, wine_value: str,
+                      use_x11: bool = True) -> dict:
+    prefix = validate_prefix(prefix_value)
+    wine = require_wine(wine_value)
+    if not has_wine_prefix_layout(prefix):
+        raise ValueError(f"The preload binding is not a valid Wine environment: {prefix}")
+    return {
+        "schema": _PRELOAD_SCHEMA,
+        "prefix": str(prefix),
+        "wine": str(wine.resolve()),
+        "use_x11": bool(use_x11),
+        "components": list(PRELOAD_COMPONENTS),
+    }
+
+
+def _validate_preload_binding(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("The preload binding must be a JSON object.")
+    expected_keys = {"schema", "prefix", "wine", "use_x11", "components"}
+    if set(payload) != expected_keys or payload.get("schema") != _PRELOAD_SCHEMA:
+        raise ValueError("The preload binding schema is invalid.")
+    if payload.get("components") != list(PRELOAD_COMPONENTS):
+        raise ValueError("The preload component binding is invalid.")
+    if not isinstance(payload.get("use_x11"), bool):
+        raise ValueError("The preload display binding is invalid.")
+    prefix = validate_prefix(payload.get("prefix", ""))
+    wine = normalize_path(payload.get("wine", ""))
+    if str(prefix) != payload["prefix"] or str(wine) != payload["wine"]:
+        raise ValueError("The preload binding paths must be absolute and normalized.")
+    return {
+        "schema": _PRELOAD_SCHEMA,
+        "prefix": str(prefix),
+        "wine": str(wine),
+        "use_x11": payload["use_x11"],
+        "components": list(PRELOAD_COMPONENTS),
+    }
+
+
+def _read_preload_binding(path: Path | None = None) -> dict:
+    target = path or preload_binding_path()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Cannot read the preload binding: {error}") from error
+    return _validate_preload_binding(payload)
+
+
+def _systemctl_user(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    executable = shutil.which("systemctl")
+    if not executable:
+        raise RuntimeError("systemctl is not installed.")
+    try:
+        result = subprocess.run(
+            [executable, "--user", *command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_PRELOAD_SYSTEMCTL_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("The per-user systemd manager timed out.") from error
+    except OSError as error:
+        raise RuntimeError(f"Cannot run systemctl --user: {error}") from error
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or f"systemctl --user {' '.join(command)} failed.")
+    return result
+
+
+def _systemd_user_capability() -> tuple[bool, str]:
+    try:
+        _systemctl_user(["show-environment"])
+    except RuntimeError as error:
+        return False, str(error)
+    return True, ""
+
+
+def systemd_user_available() -> bool:
+    return _systemd_user_capability()[0]
+
+
+def _preload_selected_matches(binding: dict, prefix_value: str | None,
+                              wine_value: str | None, use_x11: bool | None) -> bool:
+    if prefix_value is None or wine_value is None:
+        return True
+    try:
+        prefix = validate_prefix(prefix_value)
+        wine = normalize_path(wine_value)
+    except (OSError, ValueError):
+        return False
+    return (
+        str(prefix) == binding["prefix"]
+        and str(wine) == binding["wine"]
+        and (use_x11 is None or bool(use_x11) == binding["use_x11"])
+    )
+
+
+def _systemctl_property(command: str) -> tuple[bool, str]:
+    result = _systemctl_user([command, PRELOAD_UNIT], check=False)
+    value = result.stdout.strip()
+    detail = value or result.stderr.strip()
+    if command == "is-enabled":
+        known = {
+            "enabled", "enabled-runtime", "linked", "linked-runtime", "alias",
+            "static", "indirect", "disabled", "masked", "masked-runtime",
+            "generated", "transient", "not-found",
+        }
+        if value not in known:
+            raise RuntimeError(detail or "Cannot determine whether the preload service is enabled.")
+        return value in {"enabled", "enabled-runtime"}, detail
+    known = {
+        "active", "reloading", "activating", "deactivating",
+        "inactive", "failed", "unknown",
+    }
+    if value not in known:
+        raise RuntimeError(detail or "Cannot determine whether the preload service is active.")
+    return value in {"active", "reloading", "activating", "deactivating"}, detail
+
+
+def _read_preload_heartbeat() -> tuple[dict | None, str]:
+    path = preload_runtime_status_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != _PRELOAD_HEARTBEAT_SCHEMA
+            or payload.get("binding") != str(preload_binding_path())
+            or not isinstance(payload.get("updated_at"), (int, float))
+            or not isinstance(payload.get("components"), dict)
+        ):
+            raise ValueError("invalid heartbeat schema")
+        return payload, ""
+    except FileNotFoundError:
+        return None, ""
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        return None, f"Cannot read preload heartbeat: {error}"
+
+
+def preload_service_status(prefix_value: str | None = None, wine_value: str | None = None,
+                           use_x11: bool | None = None) -> dict:
+    result = {
+        "supported": False,
+        "reason": "",
+        "installed": preload_unit_path().is_file(),
+        "enabled": False,
+        "active": False,
+        "state": "unsupported",
+        "binding": None,
+        "selected_matches": False,
+        "components": {},
+        "detail": "",
+    }
+    supported, reason = _systemd_user_capability()
+    result["supported"] = supported
+    result["reason"] = reason
+    if not supported:
+        result["detail"] = reason
+        return result
+
+    try:
+        result["enabled"], enabled_detail = _systemctl_property("is-enabled")
+        result["active"], active_detail = _systemctl_property("is-active")
+    except RuntimeError as error:
+        result["reason"] = str(error)
+        result["detail"] = str(error)
+        return result
+
+    try:
+        binding = _read_preload_binding()
+        result["binding"] = binding
+    except FileNotFoundError:
+        binding = None
+    except ValueError as error:
+        result["state"] = "binding-invalid"
+        result["detail"] = str(error)
+        return result
+
+    if not result["installed"]:
+        result["state"] = "uninstalled"
+        result["detail"] = enabled_detail or "The preload service is not installed."
+        return result
+    if binding is None:
+        result["state"] = "binding-invalid"
+        result["detail"] = "The preload binding is missing."
+        return result
+
+    result["selected_matches"] = _preload_selected_matches(
+        binding, prefix_value, wine_value, use_x11
+    )
+    heartbeat, heartbeat_error = _read_preload_heartbeat()
+    if heartbeat:
+        result["components"] = {
+            name: dict(value) for name, value in heartbeat["components"].items()
+            if name in PRELOAD_COMPONENTS and isinstance(value, dict)
+        }
+
+    if not result["selected_matches"]:
+        result["state"] = "mismatch"
+        result["detail"] = (
+            "The preload service is bound to a different Wine environment. "
+            "It was not rebound."
+        )
+    elif result["active"]:
+        fresh = bool(
+            heartbeat
+            and 0 <= time.time() - heartbeat["updated_at"] <= _PRELOAD_HEARTBEAT_MAX_AGE
+        )
+        healthy = fresh and all(
+            result["components"].get(name, {}).get("state") == "running"
+            for name in PRELOAD_COMPONENTS
+        )
+        result["state"] = "active" if healthy else "degraded"
+        result["detail"] = (
+            heartbeat.get("detail", "") if heartbeat
+            else heartbeat_error or "The service is active but has no fresh heartbeat."
+        )
+        if not fresh:
+            result["detail"] = heartbeat_error or "The preload heartbeat is stale."
+    else:
+        result["state"] = "inactive"
+        result["detail"] = active_detail or "The preload service is inactive."
+    return result
+
+
+def _systemd_quote(value: str | Path) -> str:
+    text = os.fspath(value)
+    if "\0" in text or "\n" in text or "\r" in text:
+        raise ValueError("A preload service path contains an unsafe control character.")
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("$", "$$").replace("%", "%%")
+    return f'"{escaped}"'
+
+
+def _preload_manager_executable() -> Path:
+    if getattr(sys, "frozen", False):
+        manager = Path(sys.executable).resolve()
+    else:
+        manager = Path(__file__).resolve().with_name("wine4office_manager.py")
+    if not manager.is_absolute() or not manager.is_file() or not os.access(manager, os.X_OK):
+        raise FileNotFoundError(f"Wine4OfficeManager executable is unavailable: {manager}")
+    return manager
+
+
+def _preload_unit_text(binding_path: Path, status_path: Path) -> str:
+    arguments = " ".join(
+        _systemd_quote(value) for value in (
+            _preload_manager_executable(), "--preload-worker", binding_path, status_path
+        )
+    )
+    return (
+        f"{_PRELOAD_UNIT_MARKER}\n"
+        "[Unit]\n"
+        "Description=Wine4Office background preload\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={arguments}\n"
+        "Restart=on-failure\n"
+        "KillMode=process\n"
+        "TimeoutStopSec=20\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _snapshot_file(path: Path) -> tuple[bytes, int] | None:
+    try:
+        return path.read_bytes(), stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return None
+
+
+def _restore_file(path: Path, snapshot: tuple[bytes, int] | None) -> None:
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+    else:
+        _atomic_write_bytes(path, snapshot[0], snapshot[1])
+
+
+def install_preload_service(prefix_value: str, wine_value: str,
+                            use_x11: bool = True) -> dict:
+    supported, reason = _systemd_user_capability()
+    if not supported:
+        raise RuntimeError(reason)
+    binding = _preload_snapshot(prefix_value, wine_value, use_x11)
+    binding_path = preload_binding_path()
+    unit_path = preload_unit_path()
+    if unit_path.exists() and not _owned_preload_unit():
+        raise RuntimeError(
+            f"Refusing to replace an unowned user service unit: {unit_path}"
+        )
+    try:
+        existing = _read_preload_binding(binding_path)
+    except FileNotFoundError:
+        existing = None
+    was_enabled, _ = _systemctl_property("is-enabled")
+    was_active, _ = _systemctl_property("is-active")
+    if existing is None and (was_enabled or was_active):
+        raise RuntimeError(
+            "The installed preload service has no valid binding; disable and stop it "
+            "before repairing it."
+        )
+    if existing is not None and existing != binding and (was_enabled or was_active):
+        raise RuntimeError(
+            "The existing preload service is bound to a different Wine environment. "
+            "Disable it at login and stop it before explicitly rebinding."
+        )
+
+    snapshots = {
+        binding_path: _snapshot_file(binding_path),
+        unit_path: _snapshot_file(unit_path),
+    }
+    try:
+        _preload_json_write(binding_path, binding, 0o600)
+        _preload_atomic_write(
+            unit_path, _preload_unit_text(binding_path, preload_runtime_status_path()), 0o644
+        )
+        _systemctl_user(["daemon-reload"])
+        _systemctl_user(["enable", PRELOAD_UNIT])
+    except BaseException:
+        if not was_enabled:
+            try:
+                _systemctl_user(["disable", PRELOAD_UNIT], check=False)
+            except RuntimeError:
+                pass
+        for path, snapshot in snapshots.items():
+            _restore_file(path, snapshot)
+        try:
+            _systemctl_user(["daemon-reload"], check=False)
+        except RuntimeError:
+            pass
+        raise
+    return preload_service_status(prefix_value, wine_value, use_x11)
+
+
+def preload_office_processes(prefix_value: str, wine_value: str,
+                             use_x11: bool = True) -> list[str]:
+    prefix = validate_prefix(prefix_value)
+    wine = require_wine(wine_value)
+    try:
+        completed = subprocess.run(
+            [str(wine), "tasklist.exe", "/FO", "CSV", "/NH"],
+            env=wine_environment(prefix, wine, use_x11),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_PRELOAD_WINE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Wine process detection timed out; refusing to stop preload.") from error
+    except OSError as error:
+        raise RuntimeError(f"Wine process detection failed; refusing to stop preload: {error}") from error
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"Wine process detection failed; refusing to stop preload: {detail or completed.returncode}"
+        )
+    office_names = {metadata["exe"].casefold() for metadata in APP_META.values()}
+    found: list[str] = []
+    try:
+        rows = csv.reader(io.StringIO(completed.stdout), strict=True)
+        for row in rows:
+            if not row:
+                continue
+            if len(row) < 2:
+                raise csv.Error("tasklist returned a non-CSV status line")
+            image = row[0].strip()
+            if image.casefold() in office_names and image.casefold() not in {
+                value.casefold() for value in found
+            }:
+                found.append(image)
+    except csv.Error as error:
+        raise RuntimeError(
+            f"Wine process output was invalid; refusing to stop preload: {error}"
+        ) from error
+    return found
+
+
+def manage_preload_service(action: str, prefix_value: str | None = None,
+                           wine_value: str | None = None,
+                           use_x11: bool | None = None) -> dict:
+    if action not in {"disable", "start", "stop"}:
+        raise ValueError(f"Unknown preload service action: {action}")
+    supported, reason = _systemd_user_capability()
+    if not supported:
+        raise RuntimeError(reason)
+
+    if action == "disable":
+        enabled, _ = _systemctl_property("is-enabled")
+        if enabled:
+            _systemctl_user(["disable", PRELOAD_UNIT])
+        return preload_service_status(prefix_value, wine_value, use_x11)
+
+    binding = _read_preload_binding()
+    if not preload_unit_path().is_file():
+        raise RuntimeError("The preload service is not installed.")
+    if not _preload_selected_matches(binding, prefix_value, wine_value, use_x11):
+        raise RuntimeError(
+            "The selected Wine environment does not match the fixed preload binding."
+        )
+    if action == "stop":
+        active_office = preload_office_processes(
+            binding["prefix"], binding["wine"], binding["use_x11"]
+        )
+        if active_office:
+            raise RuntimeError(
+                "Office is active; refusing to stop preload: " + ", ".join(active_office)
+            )
+    _systemctl_user([action, PRELOAD_UNIT])
+    return preload_service_status(prefix_value, wine_value, use_x11)
+
+
+def _preload_component_state(binding: dict, component: str) -> tuple[str, str]:
+    try:
+        completed = subprocess.run(
+            [binding["wine"], "sc.exe", "query", component],
+            env=wine_environment(
+                binding["prefix"], binding["wine"], binding["use_x11"]
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_PRELOAD_WINE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return "unknown", str(error)
+    output = f"{completed.stdout}\n{completed.stderr}"
+    match = re.search(r"\bSTATE\s*:\s*\d+\s+([A-Z_]+)", output, re.IGNORECASE)
+    if match:
+        state = match.group(1).casefold()
+        if state in {"running", "stopped"}:
+            return state, state
+        return "pending", state
+    if completed.returncode:
+        return "missing", output.strip() or f"exit {completed.returncode}"
+    return "unknown", output.strip() or "Wine returned no service state."
+
+
+def _preload_component_action(binding: dict, action: str, component: str) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            [binding["wine"], "sc.exe", action, component],
+            env=wine_environment(
+                binding["prefix"], binding["wine"], binding["use_x11"]
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_PRELOAD_WINE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+    detail = (completed.stdout or completed.stderr).strip()
+    return completed.returncode == 0, detail or f"exit {completed.returncode}"
+
+
+def _write_preload_heartbeat(path: Path, components: dict, state: str,
+                             detail: str = "") -> None:
+    _preload_json_write(path, {
+        "schema": _PRELOAD_HEARTBEAT_SCHEMA,
+        "binding": str(preload_binding_path()),
+        "pid": os.getpid(),
+        "updated_at": time.time(),
+        "state": state,
+        "components": components,
+        "detail": detail,
+    })
+
+
+def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
+    snapshot = normalize_path(snapshot_path)
+    status = normalize_path(status_path)
+    if snapshot != preload_binding_path().resolve(strict=False):
+        raise ValueError("The worker binding path is not the owned preload snapshot.")
+    if status != preload_runtime_status_path().resolve(strict=False):
+        raise ValueError("The worker status path is not the owned preload heartbeat.")
+    binding = _read_preload_binding(snapshot)
+    prefix = validate_prefix(binding["prefix"])
+    if not has_wine_prefix_layout(prefix):
+        raise ValueError(f"The bound Wine environment is invalid: {prefix}")
+    require_wine(binding["wine"])
+
+    stopping = False
+
+    def request_stop(_signum, _frame) -> None:
+        nonlocal stopping
+        stopping = True
+
+    previous_term = signal.signal(signal.SIGTERM, request_stop)
+    previous_int = signal.signal(signal.SIGINT, request_stop)
+    components: dict[str, dict] = {}
+    restart_attempts = {name: 0 for name in PRELOAD_COMPONENTS}
+    try:
+        for component in PRELOAD_COMPONENTS:
+            state, detail = _preload_component_state(binding, component)
+            owned = False
+            if state == "stopped":
+                started, start_detail = _preload_component_action(binding, "start", component)
+                if started:
+                    owned = True
+                    state, detail = _preload_component_state(binding, component)
+                else:
+                    detail = start_detail
+            components[component] = {
+                "state": state,
+                "owned": owned,
+                "detail": detail,
+            }
+            _write_preload_heartbeat(status, components, "starting")
+
+        while not stopping:
+            degraded: list[str] = []
+            for component in PRELOAD_COMPONENTS:
+                state, detail = _preload_component_state(binding, component)
+                record = components[component]
+                if state != "running" and record["owned"] and restart_attempts[component] < 3:
+                    restart_attempts[component] += 1
+                    restarted, restart_detail = _preload_component_action(
+                        binding, "start", component
+                    )
+                    if restarted:
+                        state, detail = _preload_component_state(binding, component)
+                    else:
+                        detail = restart_detail
+                if state != "running":
+                    degraded.append(component)
+                record["state"] = state
+                record["detail"] = detail
+            _write_preload_heartbeat(
+                status, components, "degraded" if degraded else "running",
+                "Not running: " + ", ".join(degraded) if degraded else "",
+            )
+            for _ in range(10):
+                if stopping:
+                    break
+                time.sleep(0.5)
+
+        try:
+            active_office = preload_office_processes(
+                binding["prefix"], binding["wine"], binding["use_x11"]
+            )
+        except RuntimeError as error:
+            _write_preload_heartbeat(
+                status, components, "stop-refused",
+                f"Process state unknown; owned components were preserved: {error}",
+            )
+            return 1
+        if active_office:
+            _write_preload_heartbeat(
+                status, components, "stop-refused",
+                "Office became active; owned components were preserved: "
+                + ", ".join(active_office),
+            )
+            return 1
+        cleanup_failed: list[str] = []
+        for component in reversed(PRELOAD_COMPONENTS):
+            record = components[component]
+            if not record["owned"]:
+                continue
+            stopped, detail = _preload_component_action(binding, "stop", component)
+            record["state"] = "stopped" if stopped else "unknown"
+            record["detail"] = detail
+            if not stopped:
+                cleanup_failed.append(component)
+            _write_preload_heartbeat(status, components, "stopping")
+        if cleanup_failed:
+            _write_preload_heartbeat(
+                status, components, "degraded",
+                "Could not stop owned components: " + ", ".join(cleanup_failed),
+            )
+            return 1
+        _write_preload_heartbeat(status, components, "stopped")
+        return 0
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+
+
+def _owned_preload_unit() -> bool:
+    try:
+        return preload_unit_path().read_text(encoding="utf-8").startswith(
+            _PRELOAD_UNIT_MARKER + "\n"
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def uninstall_preload_service() -> None:
+    binding_path = preload_binding_path()
+    unit_path = preload_unit_path()
+    status_path = preload_runtime_status_path()
+    if not any(path.exists() for path in (binding_path, unit_path, status_path)):
+        return
+    owned_unit = _owned_preload_unit()
+    try:
+        binding = _read_preload_binding(binding_path)
+    except (FileNotFoundError, ValueError):
+        binding = None
+    if owned_unit:
+        supported, reason = _systemd_user_capability()
+        if not supported:
+            raise RuntimeError(
+                f"Cannot safely remove the installed preload service: {reason}"
+            )
+        active, _ = _systemctl_property("is-active")
+        enabled, _ = _systemctl_property("is-enabled")
+        if active:
+            if binding is None:
+                raise RuntimeError(
+                    "Cannot safely stop preload because its binding is missing or invalid."
+                )
+            manage_preload_service(
+                "stop", binding["prefix"], binding["wine"], binding["use_x11"]
+            )
+        if enabled:
+            _systemctl_user(["disable", PRELOAD_UNIT])
+        unit_path.unlink(missing_ok=True)
+        _systemctl_user(["daemon-reload"])
+    if binding is not None:
+        binding_path.unlink(missing_ok=True)
+    heartbeat, _ = _read_preload_heartbeat()
+    if heartbeat is not None:
+        status_path.unlink(missing_ok=True)

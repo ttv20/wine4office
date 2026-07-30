@@ -53,6 +53,30 @@ struct wine_spawnvp_params
     int          wait;
 };
 
+struct wine_probe_for_write_params
+{
+    void         *ptr;
+    unsigned int  size;
+    unsigned int  alignment;
+};
+
+struct wine_create_key_value_query_params
+{
+    HANDLE        key;
+    unsigned int  count;
+    HANDLE       *query;
+};
+
+struct wine_query_multiple_value_key_params
+{
+    HANDLE                          query;
+    KEY_MULTIPLE_VALUE_INFORMATION *info;
+    unsigned int                    count;
+    void                           *buffer;
+    ULONG                          *length;
+    ULONG                          *retlen;
+};
+
 struct load_so_dll_params
 {
     UNICODE_STRING              nt_name;
@@ -75,6 +99,9 @@ enum ntdll_unix_funcs
     unix_wine_server_fd_to_handle,
     unix_wine_server_handle_to_fd,
     unix_wine_spawnvp,
+    unix_wine_probe_for_write,
+    unix_wine_create_key_value_query,
+    unix_wine_query_multiple_value_key,
     unix_system_time_precise,
 };
 

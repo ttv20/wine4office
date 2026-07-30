@@ -3418,6 +3418,31 @@ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
     return WINE_UNIX_CALL( unix_wine_spawnvp, &params );
 }
 
+NTSTATUS WINAPI __wine_probe_for_write( void *ptr, ULONG size, ULONG alignment )
+{
+    struct wine_probe_for_write_params params = { ptr, size, alignment };
+
+    return WINE_UNIX_CALL( unix_wine_probe_for_write, &params );
+}
+
+NTSTATUS WINAPI __wine_create_key_value_query( HANDLE key, ULONG count, HANDLE *query )
+{
+    struct wine_create_key_value_query_params params = { key, count, query };
+
+    return WINE_UNIX_CALL( unix_wine_create_key_value_query, &params );
+}
+
+NTSTATUS WINAPI __wine_query_multiple_value_key( HANDLE query,
+                                                 KEY_MULTIPLE_VALUE_INFORMATION *info,
+                                                 ULONG count, void *buffer,
+                                                 ULONG *length, ULONG *retlen )
+{
+    struct wine_query_multiple_value_key_params params =
+        { query, info, count, buffer, length, retlen };
+
+    return WINE_UNIX_CALL( unix_wine_query_multiple_value_key, &params );
+}
+
 
 /***********************************************************************
  *           wine_server_call

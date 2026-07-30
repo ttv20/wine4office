@@ -100,6 +100,10 @@ DECL_HANDLER(flush_key);
 DECL_HANDLER(enum_key);
 DECL_HANDLER(set_key_value);
 DECL_HANDLER(get_key_value);
+DECL_HANDLER(create_key_value_query);
+DECL_HANDLER(append_key_value_query);
+DECL_HANDLER(execute_key_value_query);
+DECL_HANDLER(read_key_value_query);
 DECL_HANDLER(enum_key_value);
 DECL_HANDLER(delete_key_value);
 DECL_HANDLER(load_registry);
@@ -411,6 +415,10 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_enum_key,
     (req_handler)req_set_key_value,
     (req_handler)req_get_key_value,
+    (req_handler)req_create_key_value_query,
+    (req_handler)req_append_key_value_query,
+    (req_handler)req_execute_key_value_query,
+    (req_handler)req_read_key_value_query,
     (req_handler)req_enum_key_value,
     (req_handler)req_delete_key_value,
     (req_handler)req_load_registry,
@@ -1232,6 +1240,29 @@ C_ASSERT( sizeof(struct get_key_value_request) == 16 );
 C_ASSERT( offsetof(struct get_key_value_reply, type) == 8 );
 C_ASSERT( offsetof(struct get_key_value_reply, total) == 12 );
 C_ASSERT( sizeof(struct get_key_value_reply) == 16 );
+C_ASSERT( offsetof(struct create_key_value_query_request, hkey) == 12 );
+C_ASSERT( offsetof(struct create_key_value_query_request, count) == 16 );
+C_ASSERT( sizeof(struct create_key_value_query_request) == 24 );
+C_ASSERT( offsetof(struct create_key_value_query_reply, handle) == 8 );
+C_ASSERT( sizeof(struct create_key_value_query_reply) == 16 );
+C_ASSERT( offsetof(struct append_key_value_query_request, handle) == 12 );
+C_ASSERT( offsetof(struct append_key_value_query_request, offset) == 16 );
+C_ASSERT( sizeof(struct append_key_value_query_request) == 24 );
+C_ASSERT( offsetof(struct execute_key_value_query_request, handle) == 12 );
+C_ASSERT( offsetof(struct execute_key_value_query_request, count) == 16 );
+C_ASSERT( offsetof(struct execute_key_value_query_request, length) == 20 );
+C_ASSERT( sizeof(struct execute_key_value_query_request) == 24 );
+C_ASSERT( offsetof(struct execute_key_value_query_reply, status) == 8 );
+C_ASSERT( offsetof(struct execute_key_value_query_reply, used) == 12 );
+C_ASSERT( offsetof(struct execute_key_value_query_reply, required) == 16 );
+C_ASSERT( offsetof(struct execute_key_value_query_reply, count) == 20 );
+C_ASSERT( sizeof(struct execute_key_value_query_reply) == 24 );
+C_ASSERT( offsetof(struct read_key_value_query_request, handle) == 12 );
+C_ASSERT( offsetof(struct read_key_value_query_request, which) == 16 );
+C_ASSERT( offsetof(struct read_key_value_query_request, offset) == 20 );
+C_ASSERT( sizeof(struct read_key_value_query_request) == 24 );
+C_ASSERT( offsetof(struct read_key_value_query_reply, total) == 8 );
+C_ASSERT( sizeof(struct read_key_value_query_reply) == 16 );
 C_ASSERT( offsetof(struct enum_key_value_request, hkey) == 12 );
 C_ASSERT( offsetof(struct enum_key_value_request, index) == 16 );
 C_ASSERT( offsetof(struct enum_key_value_request, info_class) == 20 );

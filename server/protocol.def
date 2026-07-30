@@ -295,6 +295,17 @@ struct hw_msg_source
     unsigned int    origin;        /* source origin (IMO_* values) */
 };
 
+struct key_value_result
+{
+    unsigned int type;         /* registry value type */
+    data_size_t  length;       /* value data length */
+    data_size_t  offset;       /* destination offset in the caller buffer */
+    data_size_t  data_offset;  /* source offset in the packed snapshot */
+};
+
+#define KEY_VALUE_QUERY_RESULTS 0
+#define KEY_VALUE_QUERY_DATA    1
+
 struct rawinput
 {
     int                  type;      /* rawinput data type (RIM_* values) */
@@ -2139,6 +2150,47 @@ struct process_info
     int          type;         /* value type */
     data_size_t  total;        /* total length needed for data */
     VARARG(data,bytes);        /* value data */
+@END
+
+
+/* Create a staged multiple-value registry query */
+@REQ(create_key_value_query)
+    obj_handle_t hkey;         /* handle to registry key */
+    unsigned int count;        /* number of value names */
+@REPLY
+    obj_handle_t handle;       /* query context handle */
+@END
+
+
+/* Append a bounded chunk of packed value names to a registry query */
+@REQ(append_key_value_query)
+    obj_handle_t handle;       /* query context handle */
+    file_pos_t   offset;       /* byte offset in the packed name stream */
+    VARARG(data,bytes);        /* packed name stream chunk */
+@END
+
+
+/* Execute all lookups and retain one atomic result snapshot */
+@REQ(execute_key_value_query)
+    obj_handle_t handle;       /* query context handle */
+    unsigned int count;        /* number of staged names to execute */
+    data_size_t  length;       /* caller value-buffer capacity */
+@REPLY
+    unsigned int status;       /* native query status */
+    data_size_t  used;         /* packed span used by fitting prefix */
+    data_size_t  required;     /* packed span required by all values */
+    unsigned int count;        /* number of fitting result records */
+@END
+
+
+/* Read a bounded portion of the retained query snapshot */
+@REQ(read_key_value_query)
+    obj_handle_t handle;       /* query context handle */
+    unsigned int which;        /* KEY_VALUE_QUERY_* snapshot section */
+    data_size_t  offset;       /* byte offset within snapshot section */
+@REPLY
+    data_size_t  total;        /* total size of snapshot section */
+    VARARG(data,bytes);        /* requested snapshot bytes */
 @END
 
 
