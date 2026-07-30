@@ -916,9 +916,10 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
     cb_data->is_curve = is_curve;
     cb_data->is_arc = is_arc;
     cb_data->antialias = context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
-    if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
+    if (!d2d_brush_fill_cb(brush, context->drawing_state.unitMode, &cb_data->colour_brush))
         WARN("Failed to initialize colour brush buffer.\n");
-    if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
+    if (!d2d_brush_fill_cb(opacity_brush, context->drawing_state.unitMode,
+            &cb_data->opacity_brush))
         WARN("Failed to initialize opacity brush buffer.\n");
 
     ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->ps_cb, 0);

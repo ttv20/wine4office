@@ -2559,7 +2559,7 @@ static void test_bitmap_brush(BOOL d3d11)
     ID2D1RectangleGeometry *rectangle_geometry;
     D2D1_MATRIX_3X2_F matrix, tmp_matrix;
     D2D1_BITMAP_PROPERTIES bitmap_desc;
-    ID2D1Bitmap *bitmap, *tmp_bitmap;
+    ID2D1Bitmap *bitmap, *pixel_bitmap, *tmp_bitmap;
     D2D1_RECT_F src_rect, dst_rect;
     struct d2d1_test_context ctx;
     D2D1_EXTEND_MODE extend_mode;
@@ -2729,6 +2729,39 @@ static void test_bitmap_brush(BOOL d3d11)
     ok(interpolation_mode == D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
             "Got unexpected interpolation mode %#x.\n", interpolation_mode);
     ID2D1BitmapBrush_Release(brush);
+
+    /* Bitmap brushes use pixel dimensions rather than DPI-adjusted DIP
+     * dimensions when the device context is in pixel unit mode. */
+    bitmap_desc.dpiX = bitmap_desc.dpiY = 192.0f;
+    hr = ID2D1RenderTarget_CreateBitmap(rt, size, bitmap_data,
+            4 * sizeof(*bitmap_data), &bitmap_desc, &pixel_bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1RenderTarget_CreateBitmapBrush(rt, pixel_bitmap, NULL, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1BitmapBrush_SetExtendModeX(brush, D2D1_EXTEND_MODE_MIRROR);
+    ID2D1BitmapBrush_SetExtendModeY(brush, D2D1_EXTEND_MODE_MIRROR);
+    ID2D1BitmapBrush_SetInterpolationMode(brush, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+    ID2D1DeviceContext_SetUnitMode(ctx.context, D2D1_UNIT_MODE_PIXELS);
+    set_matrix_identity(&matrix);
+    ID2D1RenderTarget_SetTransform(rt, &matrix);
+    ID2D1RenderTarget_BeginDraw(rt);
+    set_color(&color, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1RenderTarget_Clear(rt, &color);
+    set_rect(&dst_rect, 0.0f, 0.0f, 4.0f, 4.0f);
+    ID2D1RenderTarget_FillRectangle(rt, &dst_rect, (ID2D1Brush *)brush);
+    hr = ID2D1RenderTarget_EndDraw(rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    get_surface_readback(&ctx, &rb);
+    colour = get_readback_colour(&rb, 3, 0);
+    ok(compare_colour(colour, 0xff00ffff, 1), "Got unexpected colour 0x%08lx.\n", colour);
+    colour = get_readback_colour(&rb, 0, 3);
+    ok(compare_colour(colour, 0xffffffff, 1), "Got unexpected colour 0x%08lx.\n", colour);
+    colour = get_readback_colour(&rb, 3, 3);
+    ok(compare_colour(colour, 0xff000000, 1), "Got unexpected colour 0x%08lx.\n", colour);
+    release_resource_readback(&rb);
+    ID2D1DeviceContext_SetUnitMode(ctx.context, D2D1_UNIT_MODE_DIPS);
+    ID2D1BitmapBrush_Release(brush);
+    ID2D1Bitmap_Release(pixel_bitmap);
 
     hr = ID2D1RenderTarget_CreateBitmapBrush(rt, bitmap, NULL, NULL, &brush);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);

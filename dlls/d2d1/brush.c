@@ -1369,7 +1369,8 @@ static D3D11_TEXTURE_ADDRESS_MODE texture_address_mode_from_extend_mode(D2D1_EXT
     }
 }
 
-BOOL d2d_brush_fill_cb(const struct d2d_brush *brush, struct d2d_brush_cb *cb)
+BOOL d2d_brush_fill_cb(const struct d2d_brush *brush, D2D1_UNIT_MODE unit_mode,
+        struct d2d_brush_cb *cb)
 {
     float theta, sin_theta, cos_theta;
     float dpi_scale, d, s1, s2, t, u;
@@ -1468,12 +1469,16 @@ BOOL d2d_brush_fill_cb(const struct d2d_brush *brush, struct d2d_brush_cb *cb)
                 cb->type = D2D_BRUSH_TYPE_BITMAP;
             }
 
-            /* Scale for bitmap size and dpi. */
+            /* Scale for bitmap size in the current coordinate system. */
             b = brush->transform;
-            dpi_scale = bitmap->pixel_size.width * (96.0f / bitmap->dpi_x);
+            dpi_scale = bitmap->pixel_size.width;
+            if (unit_mode == D2D1_UNIT_MODE_DIPS)
+                dpi_scale *= 96.0f / bitmap->dpi_x;
             b._11 *= dpi_scale;
             b._21 *= dpi_scale;
-            dpi_scale = bitmap->pixel_size.height * (96.0f / bitmap->dpi_y);
+            dpi_scale = bitmap->pixel_size.height;
+            if (unit_mode == D2D1_UNIT_MODE_DIPS)
+                dpi_scale *= 96.0f / bitmap->dpi_y;
             b._12 *= dpi_scale;
             b._22 *= dpi_scale;
 
