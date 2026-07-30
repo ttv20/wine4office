@@ -44,6 +44,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
 static const struct opengl_drawable_funcs wayland_drawable_funcs;
+static BOOL (*offscreen_surface_create)(struct client_surface *, int,
+                                        struct opengl_drawable **);
+static BOOL (*describe_pixel_format)(int, struct wgl_pixel_format *);
 
 struct wayland_gl_drawable
 {
@@ -83,6 +86,7 @@ static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
 static BOOL wayland_opengl_surface_create(struct client_surface *client, int format, struct opengl_drawable **drawable)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
+    struct wgl_pixel_format desc;
     EGLConfig config = egl_config_for_format(format);
     EGLint attribs[4], *attrib = attribs;
     struct wayland_gl_drawable *gl;
@@ -90,6 +94,13 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     RECT rect;
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
+
+    if (describe_pixel_format(format, &desc) &&
+        (desc.pfd.dwFlags & PFD_SUPPORT_GDI))
+    {
+        InterlockedExchange(&client->offscreen, TRUE);
+        return offscreen_surface_create(client, format, drawable);
+    }
 
     NtUserGetClientRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd));
     if (rect.right == rect.left) rect.right = rect.left + 1;
@@ -250,6 +261,8 @@ UINT WAYLAND_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, c
 
     if (!opengl_funcs->egl_handle) return STATUS_NOT_SUPPORTED;
     funcs = opengl_funcs;
+    offscreen_surface_create = (*driver_funcs)->p_surface_create;
+    describe_pixel_format = (*driver_funcs)->p_describe_pixel_format;
 
     wayland_driver_funcs.p_get_proc_address = (*driver_funcs)->p_get_proc_address;
     wayland_driver_funcs.p_init_pixel_formats = (*driver_funcs)->p_init_pixel_formats;

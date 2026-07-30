@@ -1264,7 +1264,7 @@ static void wayland_client_surface_update(struct client_surface *client)
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
     if (!(data = wayland_win_data_get(hwnd))) return;
 
-    if (toplevel && visible)
+    if (toplevel && visible && !InterlockedCompareExchange(&client->offscreen, 0, 0))
         wayland_client_surface_attach(surface, toplevel, &client->monitor_rect);
     else
         wayland_client_surface_attach(surface, NULL, NULL);

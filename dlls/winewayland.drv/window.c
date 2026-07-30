@@ -1162,11 +1162,12 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     RECT rect = new_client->client.monitor_rect;
     struct wayland_client_surface *old_client;
     struct wayland_win_data *data;
-    BOOL visible = FALSE;
+    BOOL visible = FALSE, offscreen;
 
     /* ownership is shared with the callers, the last caller to release
      * its reference will also destroy it and clear our pointer. */
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
+    offscreen = InterlockedCompareExchange(&new_client->client.offscreen, 0, 0);
     if (!(data = wayland_win_data_get(hwnd))) return;
 
     TRACE("hwnd %p old client %p new client %p\n", hwnd, data->client_surface, new_client);
@@ -1178,13 +1179,14 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 
         if ((data->client_surface = new_client))
         {
-            if (toplevel && visible)
+            if (toplevel && visible && !offscreen)
                 wayland_client_surface_attach(new_client, toplevel, &rect);
             else
                 wayland_client_surface_attach(new_client, NULL, NULL);
         }
     }
-    else if (visible && (!new_client->wl_subsurface || new_client->toplevel != toplevel))
+    else if (visible && !offscreen &&
+             (!new_client->wl_subsurface || new_client->toplevel != toplevel))
     {
         /* The drawable may first be presented while its window is hidden. In
          * that case it is tracked above but deliberately left detached. Make
