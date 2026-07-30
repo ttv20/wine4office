@@ -4002,7 +4002,7 @@ static void d2d_software_image_apply_color_matrix(struct d2d_software_image *ima
         input[1] = pixel[1] / 255.0f;
         input[2] = pixel[blue] / 255.0f;
         input[3] = pixel[3] / 255.0f;
-        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT && input[3] > 0.0f)
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED && input[3] > 0.0f)
             for (x = 0; x < 3; ++x)
                 input[x] /= input[3];
 
@@ -4013,7 +4013,7 @@ static void d2d_software_image_apply_color_matrix(struct d2d_software_image *ima
                 output[y] += input[x] * matrix->m[x][y];
             output[y] = fminf(1.0f, fmaxf(0.0f, output[y]));
         }
-        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT)
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED)
             for (x = 0; x < 3; ++x)
                 output[x] *= output[3];
 

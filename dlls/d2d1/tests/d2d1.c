@@ -13609,7 +13609,7 @@ static void test_effect_command_list_output(BOOL d3d11)
     hr = ID2D1Effect_SetValue(color_matrix_effect, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
             D2D1_PROPERTY_TYPE_MATRIX_5X4, (const BYTE *)&matrix, sizeof(matrix));
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ID2D1Effect_SetInput(color_matrix_effect, 0, (ID2D1Image *)commands, FALSE);
+    ID2D1Effect_SetInput(color_matrix_effect, 0, (ID2D1Image *)mask_commands, FALSE);
     ID2D1Effect_GetOutput(color_matrix_effect, &matrix_output);
 
     ID2D1DeviceContext_BeginDraw(context);
@@ -13627,6 +13627,8 @@ static void test_effect_command_list_output(BOOL d3d11)
     red = (foreground >> 16) & 0xff;
     ok(green > red + 32 && green > blue + 32,
             "Color matrix output was not transformed, got %#lx.\n", foreground);
+    ok(green >= 48 && green <= 80,
+            "Premultiplied color matrix output has unexpected green %u, got %#lx.\n", green, foreground);
     release_resource_readback(&rb);
 
     ID2D1Image_Release(matrix_output);
