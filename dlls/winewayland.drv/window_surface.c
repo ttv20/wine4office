@@ -393,9 +393,17 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     {
         int width = wws->wayland_buffer_queue->width;
         int height = wws->wayland_buffer_queue->height;
+
         TRACE("recreating buffer queue with format %d\n", buffer_format);
         wayland_buffer_queue_destroy(wws->wayland_buffer_queue);
         wws->wayland_buffer_queue = wayland_buffer_queue_create(width, height, buffer_format);
+
+        /* Changing between opaque and alpha-capable buffers changes the
+         * effective contents outside the current paint bounds too. This is
+         * particularly visible when a window first acquires a shape: without
+         * full damage, compositors may retain opaque black pixels where the
+         * new ARGB buffer is transparent. */
+        NtGdiSetRectRgn(surface_damage_region, 0, 0, width, height);
     }
 
     wayland_buffer_queue_add_damage(wws->wayland_buffer_queue, surface_damage_region);
