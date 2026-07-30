@@ -150,7 +150,7 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(base->client);
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
-    GLint old_pack_alignment, old_read_buffer;
+    GLint old_pack_alignment, old_read_buffer, old_read_fbo;
     RECT rect;
     size_t size;
 
@@ -178,11 +178,14 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
         {
             funcs->p_glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
             funcs->p_glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+            funcs->p_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_fbo);
             funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
             funcs->p_glReadBuffer(base->doublebuffer ? GL_BACK : GL_FRONT);
             funcs->p_glReadPixels(0, 0, rect.right - rect.left, rect.bottom - rect.top,
                                   GL_BGRA, GL_UNSIGNED_BYTE, surface->offscreen_bits);
-            funcs->p_glReadBuffer(old_read_buffer);
+            funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read_fbo);
+            if (!old_read_fbo) funcs->p_glReadBuffer(old_read_buffer);
             funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
             surface->offscreen_width = rect.right - rect.left;
             surface->offscreen_height = rect.bottom - rect.top;
