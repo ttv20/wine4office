@@ -329,9 +329,10 @@ void wayland_output_use_xdg_extension(struct wayland_output *output);
  *          Wayland surface
  */
 
-struct wayland_surface *wayland_surface_create(HWND hwnd);
+struct wayland_surface *wayland_surface_create(HWND hwnd, BYTE layered_alpha,
+                                               DWORD layered_flags);
 void wayland_surface_destroy(struct wayland_surface *surface);
-void wayland_surface_make_toplevel(struct wayland_surface *surface);
+void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR *title);
 void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
                                          struct wayland_surface *parent);
 void wayland_surface_make_subsurface(struct wayland_surface *surface,

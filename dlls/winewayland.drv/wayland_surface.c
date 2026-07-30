@@ -182,7 +182,8 @@ static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener
  *
  * Creates a role-less wayland surface.
  */
-struct wayland_surface *wayland_surface_create(HWND hwnd)
+struct wayland_surface *wayland_surface_create(HWND hwnd, BYTE layered_alpha,
+                                               DWORD layered_flags)
 {
     struct wayland_surface *surface;
 
@@ -214,15 +215,9 @@ struct wayland_surface *wayland_surface_create(HWND hwnd)
     }
     if (process_wayland.wp_alpha_modifier_v1)
     {
-        COLORREF key;
-        DWORD flags;
-        BYTE alpha;
-
         surface->wp_alpha_modifier_surface_v1 =
             wp_alpha_modifier_v1_get_surface(process_wayland.wp_alpha_modifier_v1, surface->wl_surface);
-
-        if (!NtUserGetLayeredWindowAttributes(hwnd, &key, &alpha, &flags)) flags = 0;
-        wayland_surface_set_opacity(surface, alpha, flags);
+        wayland_surface_set_opacity(surface, layered_alpha, layered_flags);
     }
 
     surface->window.scale = 1.0;
@@ -325,10 +320,8 @@ static void wayland_surface_init_fractional_scale(struct wayland_surface *surfac
  *
  * Gives the toplevel role to a plain wayland surface.
  */
-void wayland_surface_make_toplevel(struct wayland_surface *surface)
+void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR *title)
 {
-    WCHAR text[1024];
-
     TRACE("surface=%p\n", surface);
 
     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_TOPLEVEL);
@@ -349,9 +342,7 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     if (process_name)
         xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
 
-    if (!NtUserInternalGetWindowText(surface->hwnd, text, ARRAY_SIZE(text)))
-        text[0] = 0;
-    wayland_surface_set_title(surface, text);
+    wayland_surface_set_title(surface, title);
 
     wayland_surface_assign_icon(surface);
 
