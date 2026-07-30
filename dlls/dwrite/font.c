@@ -7364,7 +7364,11 @@ HRESULT create_font_resource(IDWriteFactory7 *factory, IDWriteFontFile *file, UI
     resource->factory = factory;
     IDWriteFactory7_AddRef(resource->factory);
 
-    get_filestream_from_file(file, &stream_desc.stream);
+    if (FAILED(hr = get_filestream_from_file(file, &stream_desc.stream)))
+    {
+        IDWriteFontResource_Release(&resource->IDWriteFontResource_iface);
+        return hr;
+    }
     stream_desc.face_type = face_type;
     stream_desc.face_index = face_index;
 
@@ -7460,7 +7464,11 @@ static IDWriteLocalizedStrings * fontset_entry_get_property(struct dwrite_fontse
         return value;
     }
 
-    get_filestream_from_file(entry->file, &stream_desc.stream);
+    if (FAILED(get_filestream_from_file(entry->file, &stream_desc.stream)))
+    {
+        entry->props[property] = MISSING_SET_PROP;
+        return NULL;
+    }
     stream_desc.face_type = entry->face_type;
     stream_desc.face_index = entry->face_index;
 
