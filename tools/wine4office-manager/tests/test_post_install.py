@@ -30,6 +30,8 @@ class PostInstallTests(unittest.TestCase):
             "wine": str(self.home / "runner/bin/wine"),
         }
         self.helper = MANAGER_DIR / "register-office-cloud-fonts.sh"
+        self.manager_command = [str(self.home / "bin/Wine4OfficeManager")]
+        self.icons = MANAGER_DIR / "icons"
 
     def tearDown(self):
         self.environment.stop()
@@ -42,19 +44,25 @@ class PostInstallTests(unittest.TestCase):
             backend, "current_version", return_value="2.4.0"
         ), mock.patch.object(
             backend, "refresh_managed_app_shortcuts", return_value=refreshed
-        ) as refresh:
+        ) as office_refresh, mock.patch.object(
+            backend, "refresh_manager_shortcut",
+            return_value={"updated": True, "path": "/manager.desktop"},
+        ) as manager_refresh:
             first = post_install.run_post_install(
-                self.config, self.helper, output.append
+                self.config, self.helper, self.manager_command, self.icons,
+                output.append,
             )
             second = post_install.run_post_install(
-                self.config, self.helper, output.append
+                self.config, self.helper, self.manager_command, self.icons,
+                output.append,
             )
 
         self.assertTrue(first["ran"])
         self.assertFalse(second["ran"])
-        refresh.assert_called_once_with(
+        office_refresh.assert_called_once_with(
             self.config["prefix"], self.config["wine"], helper=self.helper,
         )
+        manager_refresh.assert_called_once_with(self.manager_command, self.icons)
         marker = json.loads(post_install.marker_path().read_text())
         self.assertEqual(marker, {
             "manager_version": "2.4.0",
@@ -72,7 +80,8 @@ class PostInstallTests(unittest.TestCase):
             for _ in range(2):
                 with self.assertRaisesRegex(RuntimeError, "migration failed"):
                     post_install.run_post_install(
-                        self.config, self.helper, lambda _line: None
+                        self.config, self.helper, self.manager_command, self.icons,
+                        lambda _line: None,
                     )
 
         self.assertEqual(refresh.call_count, 2)
@@ -88,13 +97,18 @@ class PostInstallTests(unittest.TestCase):
         ), mock.patch.object(
             backend, "refresh_managed_app_shortcuts",
             return_value={"updated": [], "skipped": {}},
-        ) as refresh:
+        ) as office_refresh, mock.patch.object(
+            backend, "refresh_manager_shortcut",
+            return_value={"updated": False, "path": "/manager.desktop"},
+        ) as manager_refresh:
             result = post_install.run_post_install(
-                self.config, self.helper, lambda _line: None, force=True
+                self.config, self.helper, self.manager_command, self.icons,
+                lambda _line: None, force=True,
             )
 
         self.assertTrue(result["ran"])
-        refresh.assert_called_once()
+        office_refresh.assert_called_once()
+        manager_refresh.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
-# Wine4OfficeManager
+# Wine4Office Manager
 
 ![Wine4Office banner](banner.png)
 
-Wine4OfficeManager is included in the Wine4Office source tree at `tools/wine4office-manager`. It manages a prebuilt Wine4Office runner, prefixes, Office shortcuts, verified updates, and removal.
+Wine4Office Manager is included in the Wine4Office source tree at `tools/wine4office-manager`. It manages a prebuilt Wine4Office runner, prefixes, Office shortcuts, verified updates, and removal.
 
-The interface is a native Qt Widgets desktop application. It does not start an HTTP server, embed a web view, or open a browser. Releases provide a standalone Wine4OfficeManager binary, so end users do not need to install Python packages.
+The interface is a native Qt Widgets desktop application. It does not start an HTTP server, embed a web view, or open a browser. Releases provide a standalone Wine4Office Manager binary, so end users do not need to install Python packages.
 
 ## Install
 
@@ -16,7 +16,7 @@ chmod +x Wine4OfficeManager-1.0.0-x86_64
 ./Wine4OfficeManager-1.0.0-x86_64
 ```
 
-Wine4OfficeManager checks the configured `release.json` asynchronously. It does not download Wine or a manager update until the user explicitly approves it.
+Wine4Office Manager checks the configured `release.json` asynchronously. It does not download Wine or a manager update until the user explicitly approves it.
 
 For development only, install PySide6 and then install the manager from the Wine source root:
 
@@ -35,7 +35,7 @@ PYTHON=$PWD/.venv-manager/bin/python \
 QT_QPA_PLATFORM=offscreen ./Wine4OfficeManager --smoke-test
 ```
 
-Open **Wine4OfficeManager** from the application menu, or run its installed compatibility launcher:
+Open **Wine4Office Manager** from the application menu, or run its installed compatibility launcher:
 
 ```bash
 ~/.local/bin/wine4office-manager
@@ -53,7 +53,7 @@ The manager defaults to:
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Open Wine configuration and maintenance utilities.
-- Download and atomically install separately verified Wine4OfficeManager and Wine runner updates.
+- Download and atomically install separately verified Wine4Office Manager and Wine runner updates.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.
 
 Office desktop files do not restart the standalone manager. Creating or updating
@@ -70,7 +70,7 @@ the update task finishes, the UI offers to restart into the new manager.
 
 ## Separate release artifacts
 
-`packaging/build-release-artifacts.sh` packages an already staged Wine runner and standalone Wine4OfficeManager without combining or modifying them:
+`packaging/build-release-artifacts.sh` packages an already staged Wine runner and standalone Wine4Office Manager without combining or modifying them:
 
 ```bash
 tools/wine4office-manager/packaging/build-release-artifacts.sh \
@@ -124,7 +124,7 @@ Artifact URLs may be absolute HTTPS URLs or paths relative to `metadata_url`. A 
 
 ## GitHub CI/CD
 
-`.github/workflows/wine4office-release.yml` runs manually and for `wine4office-v*` tags on a `self-hosted`, `linux`, `x64` GitHub Actions runner. It reuses the Wine configure/build/install staging process, builds Wine4OfficeManager as a separate PyInstaller binary, packages the manager and Wine artifacts, and publishes `install.sh`. The manager pair, Wine pair, and release metadata plus installer are uploaded as separate CI artifacts.
+`.github/workflows/wine4office-release.yml` runs manually and for `wine4office-v*` tags on a `self-hosted`, `linux`, `x64` GitHub Actions runner. It reuses the Wine configure/build/install staging process, builds Wine4Office Manager as a separate PyInstaller binary, packages the manager and Wine artifacts, and publishes `install.sh`. The manager pair, Wine pair, and release metadata plus installer are uploaded as separate CI artifacts.
 
 Tagged runs use the workflow's `contents: write` permission and `GITHUB_TOKEN` to create the GitHub Release when needed, then upload the manager pair, Wine pair, `install.sh`, and finally `release.json` with `gh release upload --clobber`. Publishing `release.json` last keeps it as the feed commit marker. Reruns replace matching assets instead of creating duplicates.
 

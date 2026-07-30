@@ -434,7 +434,7 @@ class QtManagerTests(unittest.TestCase):
 
     def test_ui_uses_system_theme_and_native_navigation_controls(self):
         self.assertEqual(self.window.styleSheet(), "")
-        self.assertEqual(self.window.windowTitle(), "Wine4OfficeManager")
+        self.assertEqual(self.window.windowTitle(), "Wine4Office Manager")
         self.assertIsInstance(self.window.navigation, QListWidget)
         self.assertIsInstance(self.window.pages, QStackedWidget)
         self.assertIsInstance(self.window.app_tree, QTreeWidget)

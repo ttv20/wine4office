@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native Qt Widgets interface for Wine4OfficeManager."""
+"""Native Qt Widgets interface for Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class ManagerWindow(QMainWindow):
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
         self.preload_rebind: tuple[str, str] | None = None
 
-        self.setWindowTitle("Wine4OfficeManager")
+        self.setWindowTitle("Wine4Office Manager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
         self.setMinimumSize(820, 620)
         self.resize(960, 700)
@@ -88,7 +88,10 @@ class ManagerWindow(QMainWindow):
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
-        toolbar.addAction(QIcon(str(self.icons / "wine4office-manager.png")), "Wine4OfficeManager")
+        toolbar.addAction(
+            QIcon(str(self.icons / "wine4office-manager.png")),
+            "Wine4Office Manager",
+        )
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -800,7 +803,7 @@ class ManagerWindow(QMainWindow):
     def _maintenance_page(self) -> QWidget:
         page, layout = self._new_page(
             "Maintenance",
-            "Update Wine4OfficeManager and its Wine runner from verified release metadata.",
+            "Update Wine4Office Manager and its Wine runner from verified release metadata.",
         )
         update = QGroupBox("Updates")
         update_layout = QVBoxLayout(update)
@@ -1210,7 +1213,7 @@ class ManagerWindow(QMainWindow):
         selected: list[str] = []
         skipped: list[str] = []
         labels = {
-            "manager": "Wine4OfficeManager",
+            "manager": "Wine4Office Manager",
             "wine": "Wine runner",
         }
         for name in ("manager", "wine"):
@@ -1251,15 +1254,15 @@ class ManagerWindow(QMainWindow):
 
     def prompt_manager_restart(self, update_succeeded: bool) -> None:
         detail = (
-            "The Wine4OfficeManager update and post-install steps completed."
+            "The Wine4Office Manager update and post-install steps completed."
             if update_succeeded else
             "The updated manager was installed, but a post-install step failed. "
             "Restarting will retry pending post-install work."
         )
         answer = QMessageBox.question(
             self,
-            "Restart Wine4OfficeManager",
-            f"{detail}\n\nRestart Wine4OfficeManager now?",
+            "Restart Wine4Office Manager",
+            f"{detail}\n\nRestart Wine4Office Manager now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -1278,7 +1281,7 @@ class ManagerWindow(QMainWindow):
                 close_fds=True,
             )
         except OSError as error:
-            self.show_error(f"Could not restart Wine4OfficeManager: {error}")
+            self.show_error(f"Could not restart Wine4Office Manager: {error}")
             return
         self._automatic_close = True
         self.timer.stop()
@@ -1316,7 +1319,7 @@ class ManagerWindow(QMainWindow):
         self.statusBar().showMessage(message, 5000)
 
     def show_error(self, error) -> None:
-        QMessageBox.critical(self, "Wine4OfficeManager", str(error))
+        QMessageBox.critical(self, "Wine4Office Manager", str(error))
 
     def refresh_state(self) -> None:
         try:
@@ -1367,7 +1370,7 @@ class ManagerWindow(QMainWindow):
             if updater["error"]:
                 self.notify(f"Update check unavailable: {updater['error']}")
             elif not updater["offer"]:
-                self.notify("Wine4OfficeManager and Wine are up to date.")
+                self.notify("Wine4Office Manager and Wine are up to date.")
             self.manual_update_check = False
         offer = updater.get("offer")
         if (offer and offer["id"] != self.handled_offer_id
@@ -1458,7 +1461,7 @@ def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 restart_command: list[str] | None = None,
                 smoke_test: bool = False, screenshot: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName("Wine4OfficeManager")
+    app.setApplicationName("Wine4Office Manager")
     app.setOrganizationName("Wine4Office")
     app.setDesktopFileName("wine4office-manager")
     window = ManagerWindow(

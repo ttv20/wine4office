@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Package Wine4OfficeManager and an unmodified Wine runner as separate release artifacts.
+# Package Wine4Office Manager and an unmodified Wine runner as separate release artifacts.
 set -euo pipefail
 
 usage() {
@@ -17,7 +17,7 @@ RELEASE_BASE_URL=${6:-}
 CHANNEL=${7:-stable}
 
 [[ -x "$RUNNER/bin/wine" ]] || { echo "Runner has no executable bin/wine: $RUNNER" >&2; exit 1; }
-[[ -x "$MANAGER" ]] || { echo "Wine4OfficeManager binary is missing or not executable: $MANAGER" >&2; exit 1; }
+[[ -x "$MANAGER" ]] || { echo "Wine4Office Manager binary is missing or not executable: $MANAGER" >&2; exit 1; }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
 command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
@@ -116,4 +116,4 @@ PY
 for artifact in "$MANAGER_NAME" "$MANAGER_NAME.sha256" "$WINE_NAME" "$WINE_NAME.sha256" release.json; do
     mv "$TMP/$artifact" "$OUTPUT_DIR/$artifact"
 done
-printf 'Created Wine4OfficeManager release artifacts in %s\n' "$OUTPUT_DIR"
+printf 'Created Wine4Office Manager release artifacts in %s\n' "$OUTPUT_DIR"

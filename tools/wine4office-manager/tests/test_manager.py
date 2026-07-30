@@ -209,6 +209,8 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(config["prefix"], prefix)
         self.assertEqual(config["wine"], wine)
         self.assertEqual(run.call_args.args[1], manager.FONT_HELPER)
+        self.assertEqual(run.call_args.args[2], manager.MANAGER_RESTART_COMMAND)
+        self.assertEqual(run.call_args.args[3], manager.ICONS)
         self.assertTrue(run.call_args.kwargs["force"])
 
     def test_cli_manages_telemetry_policy_for_explicit_prefix(self):

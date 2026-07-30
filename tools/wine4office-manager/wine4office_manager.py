@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native Qt entry point and task state for Wine4OfficeManager."""
+"""Native Qt entry point and task state for Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -363,7 +363,7 @@ class ManagerState:
         target = backend.manager_update_target()
         if target is None or not target.is_file() or not os.access(target, os.X_OK):
             raise FileNotFoundError(
-                "The updated Wine4OfficeManager executable is unavailable."
+                "The updated Wine4Office Manager executable is unavailable."
             )
         command = [
             str(target), "--post-update",
@@ -581,7 +581,7 @@ class ManagerState:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Wine4OfficeManager")
+    parser = argparse.ArgumentParser(description="Wine4Office Manager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--post-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
@@ -624,7 +624,8 @@ def main() -> int:
             config["wine"] = args.wine
         try:
             post_install.run_post_install(
-                config, FONT_HELPER, output=print, force=True,
+                config, FONT_HELPER, MANAGER_RESTART_COMMAND, ICONS,
+                output=print, force=True,
             )
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"wine4office post-install: {error}", file=sys.stderr)
@@ -714,7 +715,7 @@ def main() -> int:
 
     try:
         post_install.run_post_install(
-            backend.load_config(), FONT_HELPER,
+            backend.load_config(), FONT_HELPER, MANAGER_RESTART_COMMAND, ICONS,
             output=lambda line: print(line, file=sys.stderr),
         )
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:

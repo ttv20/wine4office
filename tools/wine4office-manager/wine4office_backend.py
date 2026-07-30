@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backend operations for Wine4OfficeManager."""
+"""Backend operations for Wine4Office Manager."""
 
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ def _bound_standalone_version(target: Path) -> str | None:
 
 
 def current_version() -> str:
-    """Return the independently installed Wine4OfficeManager version."""
+    """Return the independently installed Wine4Office Manager version."""
     root = installed_root()
     candidates = [root / "VERSION"] if root else []
     for version_file in candidates:
@@ -610,18 +610,32 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
 
-    subprocess.run(
-        [str(wine), "wine4officeclose.exe"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=20,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [str(wine), "wine4officeclose.exe"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # A hung window is exactly when the hard wineserver fallback is needed.
+        pass
 
     wineserver = sibling_tool(wine, "wineserver")
-    if wineserver:
+    if wineserver is None:
+        raise FileNotFoundError(
+            f"Cannot stop Wine because wineserver is missing beside {wine}"
+        )
+    try:
         subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=True)
+        subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        # Retry with an explicit SIGKILL, then verify that this prefix stopped.
+        subprocess.run([str(wineserver), "-k9"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=15, check=False)
         subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=15, check=True)
@@ -1344,11 +1358,15 @@ def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
     return removed
 
 
-def install_manager_shortcut(manager_launcher: Path, icons: Path) -> Path:
+def install_manager_shortcut(manager_launcher: Path | list[str], icons: Path) -> Path:
     source_icon = icons / "wine4office-manager.png"
     if not source_icon.is_file():
-        raise FileNotFoundError(f"Wine4OfficeManager icon is missing: {source_icon}")
-    installed_icon = data_home() / "icons/wine4office/wine4office-manager.png"
+        raise FileNotFoundError(f"Wine4Office Manager icon is missing: {source_icon}")
+    icon_digest = hashlib.sha256(source_icon.read_bytes()).hexdigest()[:16]
+    installed_icon = (
+        data_home() / "icons/wine4office"
+        / f"wine4office-manager-{icon_digest}.png"
+    )
     installed_icon.parent.mkdir(parents=True, exist_ok=True)
     temporary_icon = installed_icon.with_name(
         f".{installed_icon.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -1359,11 +1377,30 @@ def install_manager_shortcut(manager_launcher: Path, icons: Path) -> Path:
         os.replace(temporary_icon, installed_icon)
     finally:
         temporary_icon.unlink(missing_ok=True)
+    for stale_icon in installed_icon.parent.glob("wine4office-manager*.png"):
+        if stale_icon != installed_icon:
+            stale_icon.unlink(missing_ok=True)
+    command = (
+        [str(manager_launcher)]
+        if isinstance(manager_launcher, Path)
+        else [str(part) for part in manager_launcher]
+    )
     path = data_home() / "applications/wine4office-manager.desktop"
-    write_desktop_file(path, "Wine4OfficeManager", "Manage Wine4Office environments and shortcuts",
-                       [str(manager_launcher)], installed_icon, "Utility;Settings;")
+    write_desktop_file(path, "Wine4Office Manager",
+                       "Manage Wine4Office environments and shortcuts",
+                       command, installed_icon, "Utility;Settings;")
     refresh_desktop_database()
     return path
+
+
+def refresh_manager_shortcut(manager_launcher: Path | list[str],
+                             icons: Path) -> dict:
+    """Refresh the existing managed menu entry without recreating a removed one."""
+    path = data_home() / "applications/wine4office-manager.desktop"
+    if not path.is_file() or not _owned_desktop_file(path):
+        return {"updated": False, "path": str(path)}
+    install_manager_shortcut(manager_launcher, icons)
+    return {"updated": True, "path": str(path)}
 
 
 def refresh_desktop_database() -> None:
@@ -2461,7 +2498,7 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
     runner_target = runner_update_target()
     if "manager" in selected and manager_target is None:
         raise RuntimeError(
-            "Wine4OfficeManager self-update requires a standalone or installed manager."
+            "Wine4Office Manager self-update requires a standalone or installed manager."
         )
 
     downloads: dict[str, Path] = {}
@@ -2530,10 +2567,10 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
             shutil.rmtree(extraction, ignore_errors=True)
 
     if "manager" in selected:
-        output(f"Installed Wine4OfficeManager {metadata['manager']['version']}.")
+        output(f"Installed Wine4Office Manager {metadata['manager']['version']}.")
     if "wine" in selected:
         output(f"Installed Wine runner {metadata['wine']['version']}.")
-    suffix = " Restart Wine4OfficeManager to use the new manager." \
+    suffix = " Restart Wine4Office Manager to use the new manager." \
         if "manager" in selected else ""
     return "Selected updates installed." + suffix
 
@@ -2541,7 +2578,7 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
 def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -> str:
     root = installed_root()
     if root is None:
-        raise RuntimeError("Removal is available only from an installed Wine4OfficeManager.")
+        raise RuntimeError("Removal is available only from an installed Wine4Office Manager.")
     uninstaller = root / "bin/wine4office-uninstall"
     if not uninstaller.is_file() or not os.access(uninstaller, os.X_OK):
         raise FileNotFoundError(f"Wine4Office uninstaller is missing: {uninstaller}")
@@ -2848,7 +2885,7 @@ def _preload_manager_executable() -> Path:
     else:
         manager = Path(__file__).resolve().with_name("wine4office_manager.py")
     if not manager.is_absolute() or not manager.is_file() or not os.access(manager, os.X_OK):
-        raise FileNotFoundError(f"Wine4OfficeManager executable is unavailable: {manager}")
+        raise FileNotFoundError(f"Wine4Office Manager executable is unavailable: {manager}")
     return manager
 
 

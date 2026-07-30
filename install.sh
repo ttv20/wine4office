@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the latest verified Wine4OfficeManager and Wine runner for one user.
+# Install the latest verified Wine4Office Manager and Wine runner for one user.
 set -euo pipefail
 umask 077
 
@@ -180,7 +180,7 @@ WINE_SHA256=${RELEASE[6]}
 WINE_SIZE=${RELEASE[7]}
 CANONICAL_METADATA_URL=${RELEASE[8]}
 
-printf 'Downloading Wine4OfficeManager %s…\n' "$MANAGER_VERSION"
+printf 'Downloading Wine4Office Manager %s…\n' "$MANAGER_VERSION"
 fetch_limited "$MANAGER_URL" "$TMP/Wine4OfficeManager" "$MANAGER_SIZE"
 printf 'Downloading Wine runner %s…\n' "$WINE_VERSION"
 fetch_limited "$WINE_URL" "$TMP/wine.tar.zst" "$WINE_SIZE"
@@ -403,5 +403,5 @@ ln -sfn "$MANAGER_TARGET" "$BIN_HOME/Wine4OfficeManager" || \
 XDG_DATA_HOME="$DATA_HOME" "$MANAGER_TARGET" --install-shortcut >/dev/null || \
     warn "manager installed, but the application-menu shortcut could not be created"
 
-printf 'Installed Wine4OfficeManager %s and Wine runner %s.\n' "$MANAGER_VERSION" "$WINE_VERSION"
+printf 'Installed Wine4Office Manager %s and Wine runner %s.\n' "$MANAGER_VERSION" "$WINE_VERSION"
 printf 'Run: %s\n' "$BIN_HOME/Wine4OfficeManager"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the standalone native Qt Wine4OfficeManager with PyInstaller.
+# Build the standalone native Qt Wine4Office Manager with PyInstaller.
 set -euo pipefail
 
 [[ $# -ge 1 && $# -le 3 ]] || { echo "Usage: $0 OUTPUT [VERSION] [CHANNEL]" >&2; exit 2; }
@@ -14,11 +14,11 @@ PYTHON=${PYTHON:-python3}
     exit 1
 }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
-    echo "Unsafe Wine4OfficeManager version: $VERSION" >&2
+    echo "Unsafe Wine4Office Manager version: $VERSION" >&2
     exit 1
 }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || {
-    echo "Unsafe Wine4OfficeManager channel: $CHANNEL" >&2
+    echo "Unsafe Wine4Office Manager channel: $CHANNEL" >&2
     exit 1
 }
 mkdir -p "$(dirname "$OUTPUT")"
@@ -48,4 +48,4 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --hidden-import zstandard \
     "$HERE/wine4office_manager.py"
 install -m 0755 "$BUILD/dist/Wine4OfficeManager" "$OUTPUT"
-printf 'Created standalone Wine4OfficeManager: %s (%s bytes)\n' "$OUTPUT" "$(stat -c '%s' "$OUTPUT")"
+printf 'Created standalone Wine4Office Manager: %s (%s bytes)\n' "$OUTPUT" "$(stat -c '%s' "$OUTPUT")"

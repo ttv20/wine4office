@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Wine4OfficeManager for the current user. Never invokes sudo.
+# Install Wine4Office Manager for the current user. Never invokes sudo.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,7 +23,7 @@ else
 fi
 install -m 0755 "$HERE/wine4office-launcher" "$ROOT/bin/wine4office-launcher"
 install -m 0755 "$HERE/uninstall-user.sh" "$ROOT/bin/wine4office-uninstall"
-install -m 0644 "$HERE"/icons/*.svg "$ROOT/icons/"
+install -m 0644 "$HERE"/icons/* "$ROOT/icons/"
 
 cat >"$ROOT/bin/wine4office-manager" <<'EOF'
 #!/bin/sh
@@ -53,6 +53,6 @@ if not backend.config_path().exists():
     backend.save_config(backend.default_config())
 PY
 WINE4OFFICE_MANAGER_ROOT="$ROOT" python3 "$LIB/wine4office_manager.py" --install-shortcut >/dev/null
-printf 'Wine4OfficeManager installed for %s.\n' "${USER:-$(id -un)}"
+printf 'Wine4Office Manager installed for %s.\n' "${USER:-$(id -un)}"
 printf 'Application shortcut: %s/applications/wine4office-manager.desktop\n' "$DATA_HOME"
 printf 'Command: %s/wine4office-manager\n' "$BIN_HOME"

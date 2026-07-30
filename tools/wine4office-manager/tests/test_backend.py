@@ -218,6 +218,51 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(run.call_args_list[0].kwargs["check"])
         self.assertEqual(run.call_args_list[0].kwargs["timeout"], 20)
 
+    def test_stop_wine_hard_kills_when_graceful_close_fails(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=[
+                subprocess.CalledProcessError(2, "wine4officeclose.exe"),
+                mock.DEFAULT,
+                mock.DEFAULT,
+            ],
+        ) as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.wine), "wine4officeclose.exe"],
+                [str(self.runner / "wineserver"), "-k"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
+    def test_stop_wine_retries_sigkill_when_server_wait_times_out(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        timeout = subprocess.TimeoutExpired("wineserver -w", 15)
+        with mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=[mock.DEFAULT, mock.DEFAULT, timeout, mock.DEFAULT, mock.DEFAULT],
+        ) as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list][-2:],
+            [
+                [str(self.runner / "wineserver"), "-k9"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
+    def test_stop_wine_reports_missing_wineserver(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        (self.runner / "wineserver").unlink()
+
+        with self.assertRaisesRegex(FileNotFoundError, "wineserver is missing"):
+            backend.stop_wine(str(prefix), str(self.wine))
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")
@@ -622,12 +667,48 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         shortcut = backend.install_manager_shortcut(launcher, bundled_icons)
         installed_icon = (
-            backend.data_home() / "icons/wine4office/wine4office-manager.png"
+            backend.data_home() / "icons/wine4office"
+            / "wine4office-manager-003dc05195a67b77.png"
         )
         text = shortcut.read_text()
         self.assertEqual(installed_icon.read_bytes(), b"\x89PNG\r\n\x1a\nmanager")
+        self.assertIn("Name=Wine4Office Manager", text)
         self.assertIn(f"Icon={installed_icon}", text)
         self.assertNotIn(str(bundled_icons), text)
+
+    def test_manager_shortcut_refresh_updates_name_and_busts_icon_cache(self):
+        launcher = self.root / "Wine4OfficeManager"
+        launcher.write_bytes(b"manager")
+        launcher.chmod(0o755)
+        bundled_icons = self.root / "bundle/icons"
+        bundled_icons.mkdir(parents=True)
+        source_icon = bundled_icons / "wine4office-manager.png"
+        source_icon.write_bytes(b"old icon")
+        shortcut = backend.install_manager_shortcut(launcher, bundled_icons)
+        old_icon = Path(next(
+            line.removeprefix("Icon=") for line in shortcut.read_text().splitlines()
+            if line.startswith("Icon=")
+        ))
+
+        source_icon.write_bytes(b"new icon")
+        result = backend.refresh_manager_shortcut(
+            [str(launcher), "--manager"], bundled_icons
+        )
+
+        text = shortcut.read_text()
+        new_icon = Path(next(
+            line.removeprefix("Icon=") for line in text.splitlines()
+            if line.startswith("Icon=")
+        ))
+        self.assertTrue(result["updated"])
+        self.assertNotEqual(new_icon, old_icon)
+        self.assertFalse(old_icon.exists())
+        self.assertEqual(new_icon.read_bytes(), b"new icon")
+        self.assertIn("Name=Wine4Office Manager", text)
+        self.assertIn(
+            f'Exec="{launcher}" "--manager"',
+            text,
+        )
 
     def test_cloud_font_registration_skips_unchanged_registry_import(self):
         prefix = self.home / ".wine4office"
