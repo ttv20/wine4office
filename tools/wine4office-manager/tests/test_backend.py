@@ -2,7 +2,7 @@
 
 import hashlib
 import os
-import runpy
+import shlex
 import subprocess
 import signal
 import stat
@@ -373,9 +373,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(status["apps"]["excel"])
         self.assertTrue(status["apps"]["powerpoint"])
         self.assertEqual(backend.find_office_app(str(prefix), "word"), office / "WINWORD.EXE")
-        launcher = self.home / ".local/share/wine4office/bin/wine4office-launcher"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("launcher")
+        font_helper = self.root / "transient-bundle/register-office-cloud-fonts.sh"
+        font_helper.parent.mkdir(parents=True)
+        font_helper.write_text("#!/bin/sh\nexit 0\n")
+        font_helper.chmod(0o755)
 
         def fake_extract(executable, destination):
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -384,60 +385,144 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         with mock.patch.object(backend, "extract_office_icon", side_effect=fake_extract) as extract:
             created = backend.create_app_shortcuts(
-                ["word"], str(prefix), str(self.wine), launcher, True,
+                ["word"], str(prefix), str(self.wine), True, helper=font_helper,
             )
         self.assertEqual(len(created), 2)
         extract.assert_called_once_with(
             office / "WINWORD.EXE", backend.data_home() / "icons/wine4office/word.ico",
         )
         menu = backend.data_home() / "applications/wine4office-word.desktop"
+        launcher = backend.shortcut_launcher_path("word")
         text = menu.read_text()
         self.assertIn("X-Wine4Office-Managed=true", text)
         self.assertIn("%F", text)
-        self.assertIn('"' + str(prefix) + '"', text)
+        self.assertIn(f'Exec="{launcher}" %F', text)
         self.assertIn(f"Icon={backend.data_home() / 'icons/wine4office/word.ico'}", text)
+        self.assertTrue(os.access(launcher, os.X_OK))
+        launcher_text = launcher.read_text()
+        self.assertIn("# X-Wine4Office-Managed=true", launcher_text)
+        self.assertIn(f"prefix={shlex.quote(str(prefix))}", launcher_text)
+        self.assertNotIn("wine4office_manager.py", launcher_text)
+        installed_helper = (
+            backend.shortcut_launcher_directory() / "register-office-cloud-fonts.sh"
+        )
+        self.assertEqual(installed_helper.read_text(), font_helper.read_text())
         removed = backend.remove_app_shortcuts(["word"])
         self.assertEqual(len(removed), 2)
         self.assertFalse(menu.exists())
+        self.assertFalse(launcher.exists())
+        self.assertFalse(installed_helper.exists())
 
-    def test_generated_launcher_uses_current_configured_display_mode(self):
-        launcher = Path(__file__).resolve().parents[1] / "wine4office-launcher"
-        namespace = runpy.run_path(str(launcher))
+    def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        word = office / "WINWORD.EXE"
+        word.write_bytes(b"exe")
+        log = self.root / "launch.log"
+        self._script(
+            "wine",
+            "#!/bin/bash\n"
+            "printf 'DISPLAY=%s\\n' \"${DISPLAY-unset}\" > \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'WAYLAND_DISPLAY=%s\\n' \"${WAYLAND_DISPLAY-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n",
+        )
+        self._script("winepath", "#!/bin/bash\nprintf 'Z:\\\\converted\\\\%s\\n' \"${2##*/}\"\n")
+        icon = backend.data_home() / "icons/wine4office/word.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
         config = backend.default_config()
         config["use_x11"] = False
+        backend.save_config(config)
 
-        with mock.patch.object(backend, "load_config", return_value=config), \
-             mock.patch.object(backend, "launch_app") as launch_app, \
-             mock.patch.object(sys, "argv", [str(launcher), "word"]):
-            app_result = namespace["main"]()
-        with mock.patch.object(backend, "load_config", return_value=config), \
-             mock.patch.object(backend, "launch_tool") as launch_tool, \
-             mock.patch.object(sys, "argv", [str(launcher), "winecfg"]):
-            tool_result = namespace["main"]()
+        backend.create_app_shortcuts(["word"], prefix, self.wine, False)
+        launcher = backend.shortcut_launcher_path("word")
+        document = self.home / "Documents/מסמך with spaces.docx"
+        environment = os.environ.copy()
+        environment.update({
+            "DISPLAY": ":77",
+            "WAYLAND_DISPLAY": "wayland-77",
+            "WINE4OFFICE_TEST_LOG": str(log),
+        })
+        subprocess.run([str(launcher), str(document)], env=environment, check=True)
 
-        self.assertEqual((app_result, tool_result), (0, 0))
-        self.assertFalse(launch_app.call_args.kwargs["use_x11"])
-        self.assertFalse(launch_tool.call_args.kwargs["use_x11"])
+        output = log.read_text()
+        self.assertIn("DISPLAY=unset", output)
+        self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
+        self.assertIn(f"ARG={word}", output)
+        self.assertIn("ARG=Z:\\converted\\מסמך with spaces.docx", output)
+
+    def test_generated_outlook_launcher_initializes_language_and_overrides_mshtml(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        outlook = office / "OUTLOOK.EXE"
+        outlook.write_bytes(b"exe")
+        runner = self.root / "runner with spaces/bin"
+        runner.mkdir(parents=True)
+        wine = runner / "wine"
+        log = self.root / "outlook-launch.log"
+        wine.write_text(
+            "#!/bin/bash\n"
+            "if [[ ${1:-} == reg && ${2:-} == query && ${5:-} == LastUILanguage ]]; then\n"
+            "    exit 1\n"
+            "fi\n"
+            "if [[ ${1:-} == reg && ${2:-} == query && ${5:-} == Locale ]]; then\n"
+            "    printf 'Locale    REG_SZ    0000040d\\n'\n"
+            "    exit 0\n"
+            "fi\n"
+            "if [[ ${1:-} == reg && ${2:-} == add ]]; then\n"
+            "    printf 'REG=%s\\n' \"$*\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "    exit 0\n"
+            "fi\n"
+            "printf 'OVERRIDES=%s\\n' \"$WINEDLLOVERRIDES\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+        )
+        wine.chmod(0o755)
+        icon = backend.data_home() / "icons/wine4office/outlook.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        backend.create_app_shortcuts(["outlook"], prefix, wine, False)
+        environment = os.environ.copy()
+        environment.update({
+            "WINE4OFFICE_TEST_LOG": str(log),
+            "WINEDLLOVERRIDES": "riched20=n;mshtml=b;custom=n",
+        })
+        subprocess.run(
+            [str(backend.shortcut_launcher_path("outlook"))],
+            env=environment,
+            check=True,
+        )
+
+        output = log.read_text()
+        self.assertIn("/d 1037 /f", output)
+        self.assertIn("OVERRIDES=riched20=n;custom=n;mshtml=", output)
+        self.assertNotIn("mshtml=b", output)
+        self.assertIn(f"ARG={outlook}", output)
 
     def test_shortcut_creation_accepts_path_environment_and_wine(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         (office / "WINWORD.EXE").write_bytes(b"exe")
-        launcher = self.home / ".local/bin/wine4office-launcher"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("launcher")
         icon = backend.data_home() / "icons/wine4office/word.ico"
         icon.parent.mkdir(parents=True)
         icon.write_bytes(b"cached icon")
 
         created = backend.create_app_shortcuts(
-            ["word"], prefix, self.wine, launcher, False,
+            ["word"], prefix, self.wine, False,
         )
 
         menu = backend.data_home() / "applications/wine4office-word.desktop"
         self.assertEqual(created, [str(menu)])
-        self.assertIn(f'"--prefix" "{prefix}"', menu.read_text())
+        self.assertIn(
+            f'Exec="{backend.shortcut_launcher_path("word")}" %F', menu.read_text()
+        )
+        self.assertIn(
+            f"wine={shlex.quote(str(self.wine))}",
+            backend.shortcut_launcher_path("word").read_text(),
+        )
 
     def test_setlang_detection_shortcut_and_launch(self):
         prefix = self.home / ".wine4office"
@@ -445,9 +530,6 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         office.mkdir(parents=True)
         setlang = office / "SETLANG.EXE"
         setlang.write_bytes(b"exe")
-        launcher = self.home / ".local/bin/wine4office-launcher"
-        launcher.parent.mkdir(parents=True)
-        launcher.write_text("launcher")
         icon = backend.data_home() / "icons/wine4office/setlang.ico"
         icon.parent.mkdir(parents=True)
         icon.write_bytes(b"cached icon")
@@ -455,13 +537,13 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         status = backend.environment_status(str(prefix), str(self.wine))
         self.assertTrue(status["apps"]["setlang"])
         created = backend.create_app_shortcuts(
-            ["setlang"], prefix, self.wine, launcher, False,
+            ["setlang"], prefix, self.wine, False,
         )
 
         menu = backend.data_home() / "applications/wine4office-setlang.desktop"
         self.assertEqual(created, [str(menu)])
         shortcut = menu.read_text()
-        self.assertIn('"setlang"', shortcut)
+        self.assertIn(str(backend.shortcut_launcher_path("setlang")), shortcut)
         self.assertNotIn("%F", shortcut)
         self.assertNotIn("MimeType=", shortcut)
 
@@ -579,11 +661,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn("mshtml=", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
         self.assertNotIn("mshtml=b", popen.call_args.kwargs["env"]["WINEDLLOVERRIDES"].split(";"))
 
-    def test_shortcut_creation_rejects_missing_application_launcher(self):
-        with self.assertRaisesRegex(FileNotFoundError, "application launcher is missing"):
+    def test_shortcut_creation_rejects_missing_wine(self):
+        with self.assertRaisesRegex(FileNotFoundError, "Wine executable is missing"):
             backend.create_app_shortcuts(
-                ["word"], str(self.home / ".wine4office"), str(self.wine),
-                self.home / "missing-launcher", False,
+                ["word"], str(self.home / ".wine4office"),
+                str(self.home / "missing-wine"), False,
             )
 
     def test_shortcut_removal_does_not_delete_unowned_file(self):

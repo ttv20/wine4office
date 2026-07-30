@@ -1061,8 +1061,10 @@ class ManagerWindow(QMainWindow):
             return
         try:
             if create:
-                files = backend.create_app_shortcuts(apps, config["prefix"], config["wine"],
-                                                     self.launcher, config["desktop_copy"])
+                files = backend.create_app_shortcuts(
+                    apps, config["prefix"], config["wine"], config["desktop_copy"],
+                    helper=self.font_helper,
+                )
                 self.notify(f"Created {len(files)} shortcut file(s).")
             else:
                 files = backend.remove_app_shortcuts(apps)

@@ -56,6 +56,12 @@ The manager defaults to:
 - Download and atomically install separately verified Wine4OfficeManager and Wine runner updates.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.
 
+Office desktop files do not restart the standalone manager. Creating or updating
+a shortcut atomically writes a manager-owned launcher under
+`${XDG_DATA_HOME:-~/.local/share}/wine4office/shortcut-launchers/`. The launcher
+applies the selected display mode and Office-specific setup before replacing
+itself with Wine. Removing the shortcut also removes its generated launcher.
+
 ## Separate release artifacts
 
 `packaging/build-release-artifacts.sh` packages an already staged Wine runner and standalone Wine4OfficeManager without combining or modifying them:

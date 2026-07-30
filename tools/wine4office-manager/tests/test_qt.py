@@ -481,7 +481,13 @@ class QtManagerTests(unittest.TestCase):
         self.window.installed_apps = {"word", "excel", "powerpoint"}
         with mock.patch.object(backend, "create_app_shortcuts", return_value=["one", "two", "three"]) as create:
             self.window.shortcut_action(True)
-        self.assertEqual(create.call_args.args[0], ["word", "excel", "powerpoint"])
+        create.assert_called_once_with(
+            ["word", "excel", "powerpoint"],
+            self.config["prefix"],
+            self.config["wine"],
+            self.config["desktop_copy"],
+            helper=self.window.font_helper,
+        )
 
     def test_slow_application_launch_does_not_block_qt_and_gates_actions(self):
         self.window.app_items["word"].setCheckState(0, Qt.CheckState.Checked)
