@@ -454,7 +454,12 @@ static ULONG WINAPI global_options_Release(IGlobalOptions *iface)
 static HRESULT WINAPI global_options_Set(IGlobalOptions *iface, GLOBALOPT_PROPERTIES property, ULONG_PTR value)
 {
     WARN("GLOBALOPTIONS Set property %u value %Ix\n", property, value);
-    FIXME("%p, %u, %Ix.\n", iface, property, value);
+    TRACE("%p, %u, %Ix.\n", iface, property, value);
+
+    if (property < COMGLB_EXCEPTION_HANDLING || property > COMGLB_PROPERTIES_RESERVED3)
+        return E_INVALIDARG;
+
+    InterlockedExchangePointer((void *volatile *)&global_options[property], (void *)value);
 
     return S_OK;
 }
@@ -467,7 +472,8 @@ static HRESULT WINAPI global_options_Query(IGlobalOptions *iface, GLOBALOPT_PROP
     if (property < COMGLB_EXCEPTION_HANDLING || property > COMGLB_PROPERTIES_RESERVED3)
         return E_INVALIDARG;
 
-    *value = global_options[property];
+    *value = (ULONG_PTR)InterlockedCompareExchangePointer(
+            (void *volatile *)&global_options[property], NULL, NULL);
 
     return S_OK;
 }
