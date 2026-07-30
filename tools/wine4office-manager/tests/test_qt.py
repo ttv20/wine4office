@@ -387,6 +387,49 @@ class QtManagerTests(unittest.TestCase):
         self.assertIn("Disable at login", message)
         self.assertIn("does not stop", message)
 
+    def test_completed_manager_update_prompts_for_restart_once(self):
+        snapshot = self._preload_snapshot(task={
+            "running": False,
+            "kind": "update",
+            "status": "completed",
+            "restart_required": True,
+        })
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(
+            self.state, "snapshot", return_value=snapshot
+        ), mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            self.window, "prompt_manager_restart"
+        ) as prompt:
+            self.window.refresh_state()
+            restart_calls = [
+                call for call in single_shot.call_args_list
+                if call.args[1].__name__ == "<lambda>"
+            ]
+            restart_calls[-1].args[1]()
+            self.window.refresh_state()
+
+        prompt.assert_called_once_with(True)
+        self.assertTrue(self.window.restart_prompted)
+
+    def test_restart_now_starts_fresh_manager_and_closes_current_window(self):
+        command = ["/updated/Wine4OfficeManager"]
+        self.window.restart_command = command
+        with mock.patch.object(
+            qt_module.QMessageBox, "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(
+            qt_module.subprocess, "Popen"
+        ) as popen, mock.patch.object(
+            self.window, "close"
+        ) as close:
+            self.window.prompt_manager_restart(True)
+
+        self.assertEqual(popen.call_args.args[0], command)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        close.assert_called_once()
+
 
 
     def test_ui_uses_system_theme_and_native_navigation_controls(self):

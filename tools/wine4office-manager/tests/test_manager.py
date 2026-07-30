@@ -12,6 +12,7 @@ MANAGER_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MANAGER_DIR))
 import wine4office_backend as backend
 import wine4office_manager as manager
+import wine4office_post_install as post_install
 
 
 class ManagerTests(unittest.TestCase):
@@ -189,6 +190,26 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertFalse(launch.call_args.kwargs["use_x11"])
+
+    def test_post_update_cli_runs_new_version_hooks_with_explicit_paths(self):
+        prefix = str(self.home / "selected-prefix")
+        wine = str(self.home / "runner/bin/wine")
+        with mock.patch.object(
+            post_install, "run_post_install"
+        ) as run, mock.patch.object(
+            sys, "argv", [
+                "Wine4OfficeManager", "--post-update",
+                "--prefix", prefix, "--wine", wine,
+            ]
+        ):
+            result = manager.main()
+
+        self.assertEqual(result, 0)
+        config = run.call_args.args[0]
+        self.assertEqual(config["prefix"], prefix)
+        self.assertEqual(config["wine"], wine)
+        self.assertEqual(run.call_args.args[1], manager.FONT_HELPER)
+        self.assertTrue(run.call_args.kwargs["force"])
 
     def test_cli_manages_telemetry_policy_for_explicit_prefix(self):
         prefix = self._make_prefix(self.home / "cli-prefix")

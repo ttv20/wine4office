@@ -524,6 +524,64 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend.shortcut_launcher_path("word").read_text(),
         )
 
+    def test_post_install_refreshes_only_existing_managed_shortcuts(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        word = office / "WINWORD.EXE"
+        word.write_bytes(b"exe")
+        icon = backend.data_home() / "icons/wine4office/word.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+        legacy_manager = self.root / "Wine4OfficeManager"
+        menu = backend.data_home() / "applications/wine4office-word.desktop"
+        desktop = backend.desktop_directory() / "wine4office-word.desktop"
+        for path in (menu, desktop):
+            backend.write_desktop_file(
+                path, "Microsoft Word (Wine4Office)", "Legacy shortcut",
+                [str(legacy_manager), "--prefix", str(prefix), "word"],
+                icon, "Office;WordProcessor;", backend.APP_META["word"]["mime"],
+            )
+        unrelated = (
+            backend.data_home() / "applications/wine4office-powerpoint.desktop"
+        )
+        unrelated.parent.mkdir(parents=True, exist_ok=True)
+        unrelated.write_text("[Desktop Entry]\nName=User shortcut\n")
+
+        result = backend.refresh_managed_app_shortcuts(prefix, self.wine)
+
+        launcher = backend.shortcut_launcher_path("word")
+        self.assertEqual(set(result["updated"]), {str(menu), str(desktop)})
+        self.assertEqual(result["skipped"], {})
+        self.assertIn(f'Exec="{launcher}" %F', menu.read_text())
+        self.assertIn(f'Exec="{launcher}" %F', desktop.read_text())
+        self.assertTrue(launcher.is_file())
+        self.assertFalse(
+            (backend.data_home() / "applications/wine4office-excel.desktop").exists()
+        )
+        self.assertEqual(
+            unrelated.read_text(), "[Desktop Entry]\nName=User shortcut\n"
+        )
+
+    def test_post_install_keeps_managed_shortcut_when_office_app_is_missing(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        icon = self.root / "outlook.ico"
+        icon.write_bytes(b"cached icon")
+        menu = backend.data_home() / "applications/wine4office-outlook.desktop"
+        backend.write_desktop_file(
+            menu, "Microsoft Outlook (Wine4Office)", "Legacy shortcut",
+            ["/old/Wine4OfficeManager", "outlook"],
+            icon, "Office;Email;Network;", backend.APP_META["outlook"]["mime"],
+        )
+        original = menu.read_text()
+
+        result = backend.refresh_managed_app_shortcuts(prefix, self.wine)
+
+        self.assertEqual(result["updated"], [])
+        self.assertIn("outlook", result["skipped"])
+        self.assertEqual(menu.read_text(), original)
+        self.assertFalse(backend.shortcut_launcher_path("outlook").exists())
+
     def test_setlang_detection_shortcut_and_launch(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"

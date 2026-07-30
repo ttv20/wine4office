@@ -62,6 +62,12 @@ a shortcut atomically writes a manager-owned launcher under
 applies the selected display mode and Office-specific setup before replacing
 itself with Wine. Removing the shortcut also removes its generated launcher.
 
+After a manager update, the newly installed binary runs versioned post-install
+hooks. The current hook migrates only existing Wine4Office-owned Office
+shortcuts; shortcuts the user removed are not recreated. The manager records
+successful hook completion and retries pending hooks at the next startup. Once
+the update task finishes, the UI offers to restart into the new manager.
+
 ## Separate release artifacts
 
 `packaging/build-release-artifacts.sh` packages an already staged Wine runner and standalone Wine4OfficeManager without combining or modifying them:

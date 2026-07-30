@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,12 +46,14 @@ import wine4office_backend as backend
 
 
 class ManagerWindow(QMainWindow):
-    def __init__(self, state, launcher: Path, icons: Path, font_helper: Path) -> None:
+    def __init__(self, state, launcher: Path, icons: Path, font_helper: Path,
+                 restart_command: list[str] | None = None) -> None:
         super().__init__()
         self.state = state
         self.launcher = launcher
         self.icons = icons
         self.font_helper = font_helper
+        self.restart_command = list(restart_command or [str(launcher)])
         self.initialized = False
         self.last_log = ""
         self.last_task_state = ""
@@ -59,6 +63,7 @@ class ManagerWindow(QMainWindow):
         self.handled_offer_id = ""
         self.manual_update_check = False
         self.reported_update_error = ""
+        self.restart_prompted = False
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
@@ -1236,11 +1241,48 @@ class ManagerWindow(QMainWindow):
             self.state.skip_offered_updates(skipped)
         if selected:
             try:
+                if "manager" in selected:
+                    self.restart_prompted = False
                 self.state.start_offered_update(selected)
                 self.notify("Downloading the approved updates…")
                 self.refresh_state()
             except Exception as error:
                 self.show_error(error)
+
+    def prompt_manager_restart(self, update_succeeded: bool) -> None:
+        detail = (
+            "The Wine4OfficeManager update and post-install steps completed."
+            if update_succeeded else
+            "The updated manager was installed, but a post-install step failed. "
+            "Restarting will retry pending post-install work."
+        )
+        answer = QMessageBox.question(
+            self,
+            "Restart Wine4OfficeManager",
+            f"{detail}\n\nRestart Wine4OfficeManager now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.restart_manager()
+
+    def restart_manager(self) -> None:
+        try:
+            subprocess.Popen(
+                self.restart_command,
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as error:
+            self.show_error(f"Could not restart Wine4OfficeManager: {error}")
+            return
+        self._automatic_close = True
+        self.timer.stop()
+        self.close()
 
     def remove_wine4office(self) -> None:
         config = self.save_config()
@@ -1379,6 +1421,15 @@ class ManagerWindow(QMainWindow):
                     QTimer.singleShot(
                         0, lambda current=failure: self.show_error(current)
                     )
+            if (task.get("kind") == "update"
+                    and task.get("restart_required")
+                    and not self.restart_prompted):
+                self.restart_prompted = True
+                QTimer.singleShot(
+                    0,
+                    lambda succeeded=task["status"] == "completed":
+                    self.prompt_manager_restart(succeeded),
+                )
         self.last_task_state = task_state
         if self._close_when_idle and not task["running"] and not self._automatic_close:
             self._close_when_idle = False
@@ -1404,12 +1455,15 @@ class ManagerWindow(QMainWindow):
 
 
 def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
+                restart_command: list[str] | None = None,
                 smoke_test: bool = False, screenshot: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Wine4OfficeManager")
     app.setOrganizationName("Wine4Office")
     app.setDesktopFileName("wine4office-manager")
-    window = ManagerWindow(state, launcher, icons, font_helper)
+    window = ManagerWindow(
+        state, launcher, icons, font_helper, restart_command=restart_command,
+    )
     window.show()
 
     if screenshot:

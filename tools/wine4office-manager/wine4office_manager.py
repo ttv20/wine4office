@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import wine4office_backend as backend  # noqa: E402
+import wine4office_post_install as post_install  # noqa: E402
 
 
 def install_root() -> Path:
@@ -37,13 +38,27 @@ FONT_HELPER = (INSTALL_ROOT / "lib/register-office-cloud-fonts.sh"
                if INSTALL_ROOT != HERE else HERE / "register-office-cloud-fonts.sh")
 
 
+def manager_restart_command() -> list[str]:
+    if FROZEN:
+        return [str(Path(sys.executable).resolve())]
+    if INSTALL_ROOT != HERE:
+        return [str(INSTALL_ROOT / "bin/wine4office-manager")]
+    return [str(Path(sys.executable).resolve()), str(HERE / "wine4office_manager.py")]
+
+
+MANAGER_RESTART_COMMAND = manager_restart_command()
+
+
 class ManagerState:
     """Thread-safe bridge between the Qt event loop and blocking backend work."""
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.config = backend.load_config()
-        self.task = {"running": False, "kind": "", "status": "idle", "log": ""}
+        self.task = {
+            "running": False, "kind": "", "status": "idle", "log": "",
+            "restart_required": False,
+        }
         self.cancel_event = threading.Event()
         self.process: subprocess.Popen | None = None
         self.updater = {
@@ -333,11 +348,45 @@ class ManagerState:
                     candidate["wine"] = str(backend.runner_update_target() / "bin/wine")
                     backend.save_config(candidate)
                     self.config = candidate
+                    config.update(candidate)
+            if "manager" in selected:
+                with self.lock:
+                    self.task["restart_required"] = True
+                self._run_updated_manager_post_install(config)
             return result
 
         self.start_task("update", install)
         with self.lock:
             self.updater["offer"] = None
+
+    def _run_updated_manager_post_install(self, config: dict) -> None:
+        target = backend.manager_update_target()
+        if target is None or not target.is_file() or not os.access(target, os.X_OK):
+            raise FileNotFoundError(
+                "The updated Wine4OfficeManager executable is unavailable."
+            )
+        command = [
+            str(target), "--post-update",
+            "--prefix", str(config["prefix"]),
+            "--wine", str(config["wine"]),
+        ]
+        completed = subprocess.run(
+            command,
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        for line in completed.stdout.splitlines():
+            self.output(line)
+        if completed.returncode:
+            raise RuntimeError(
+                f"The new manager post-install hook exited with status "
+                f"{completed.returncode}. Restart the manager to retry it."
+            )
 
     def _preload_status(self, config: dict) -> dict:
         status = backend.preload_service_status(
@@ -496,7 +545,10 @@ class ManagerState:
         with self.lock:
             if self.task["running"]:
                 raise RuntimeError("Another operation is already running.")
-            self.task = {"running": True, "kind": kind, "status": "running", "log": ""}
+            self.task = {
+                "running": True, "kind": kind, "status": "running", "log": "",
+                "restart_required": False,
+            }
             self.cancel_event.clear()
 
         def worker() -> None:
@@ -531,6 +583,7 @@ class ManagerState:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wine4OfficeManager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--post-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--screenshot", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
@@ -558,6 +611,25 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.post_update:
+        if (args.target or args.documents or args.preload_service or args.preload_worker
+                or args.install_shortcut or args.disable_office_telemetry
+                or args.restore_office_telemetry_default or args.smoke_test
+                or args.screenshot):
+            parser.error("--post-update cannot be combined with another operation.")
+        config = backend.load_config()
+        if args.prefix:
+            config["prefix"] = args.prefix
+        if args.wine:
+            config["wine"] = args.wine
+        try:
+            post_install.run_post_install(
+                config, FONT_HELPER, output=print, force=True,
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"wine4office post-install: {error}", file=sys.stderr)
+            return 1
+        return 0
     if args.preload_worker:
         if (args.target or args.documents or args.preload_service
                 or args.disable_office_telemetry or args.restore_office_telemetry_default):
@@ -641,6 +713,14 @@ def main() -> int:
         return 0
 
     try:
+        post_install.run_post_install(
+            backend.load_config(), FONT_HELPER,
+            output=lambda line: print(line, file=sys.stderr),
+        )
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"wine4office post-install warning: {error}", file=sys.stderr)
+
+    try:
         from wine4office_qt import run_manager
     except ImportError as error:
         if error.name and error.name.startswith("PySide6"):
@@ -655,6 +735,7 @@ def main() -> int:
         launcher=LAUNCHER,
         icons=ICONS,
         font_helper=FONT_HELPER,
+        restart_command=MANAGER_RESTART_COMMAND,
         smoke_test=args.smoke_test,
         screenshot=Path(args.screenshot).expanduser() if args.screenshot else None,
     )

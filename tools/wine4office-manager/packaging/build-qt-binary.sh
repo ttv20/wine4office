@@ -43,6 +43,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --add-data "$BUILD/VERSION:." \
     --add-data "$BUILD/CHANNEL:." \
     --hidden-import wine4office_backend \
+    --hidden-import wine4office_post_install \
     --hidden-import wine4office_qt \
     --hidden-import zstandard \
     "$HERE/wine4office_manager.py"

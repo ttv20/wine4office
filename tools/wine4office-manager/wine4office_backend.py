@@ -1265,6 +1265,60 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: PathValue, wine_valu
     return created
 
 
+def managed_app_shortcut_paths(app: str) -> list[Path]:
+    if app not in APP_META:
+        raise ValueError(f"Unknown Office application: {app}")
+    filename = f"wine4office-{app}.desktop"
+    return [
+        path for path in (
+            data_home() / "applications" / filename,
+            desktop_directory() / filename,
+        )
+        if path.is_file() and _owned_desktop_file(path)
+    ]
+
+
+def refresh_managed_app_shortcuts(prefix_value: PathValue, wine_value: PathValue,
+                                  helper: Path | None = None) -> dict:
+    """Migrate only Office shortcuts that are already owned by Wine4Office."""
+    existing = {
+        app: managed_app_shortcut_paths(app)
+        for app in APP_META
+    }
+    existing = {app: paths for app, paths in existing.items() if paths}
+    result = {"updated": [], "skipped": {}}
+    if not existing:
+        return result
+
+    prefix = validate_prefix(prefix_value)
+    wine = require_wine(str(wine_value))
+    installed_helper = _install_shortcut_font_helper(helper)
+    for app, paths in existing.items():
+        meta = APP_META[app]
+        executable = find_office_app(str(prefix), app)
+        if executable is None:
+            result["skipped"][app] = (
+                f"{meta['exe']} is not installed in {prefix}"
+            )
+            continue
+        icon = app_icon_path(app, executable)
+        launcher = write_shortcut_launcher(
+            app, prefix, wine, executable, installed_helper
+        )
+        command = [str(launcher)]
+        if meta["mime"]:
+            command.append("%F")
+        for path in paths:
+            write_desktop_file(
+                path, meta["name"], f"Launch {meta['name']} in {prefix}",
+                command, icon, meta["categories"], meta["mime"],
+            )
+            result["updated"].append(str(path))
+    if result["updated"]:
+        refresh_desktop_database()
+    return result
+
+
 def remove_app_shortcuts(apps: Iterable[str]) -> list[str]:
     removed: list[str] = []
     for app in apps:

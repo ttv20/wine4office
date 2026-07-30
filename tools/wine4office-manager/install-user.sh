@@ -12,6 +12,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 mkdir -p "$LIB" "$ROOT/bin" "$ROOT/icons" "$BIN_HOME" "$DATA_HOME/applications"
 install -m 0644 "$HERE/wine4office_backend.py" "$LIB/wine4office_backend.py"
 install -m 0755 "$HERE/wine4office_manager.py" "$LIB/wine4office_manager.py"
+install -m 0644 "$HERE/wine4office_post_install.py" "$LIB/wine4office_post_install.py"
 install -m 0644 "$HERE/wine4office_qt.py" "$LIB/wine4office_qt.py"
 install -m 0755 "$HERE/register-office-cloud-fonts.sh" "$LIB/register-office-cloud-fonts.sh"
 rm -f "$LIB/ui.html"

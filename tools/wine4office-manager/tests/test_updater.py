@@ -202,7 +202,8 @@ class UpdaterTests(unittest.TestCase):
              mock.patch.object(backend, "check_for_updates", return_value=result), \
              mock.patch.object(backend, "save_config"), \
              mock.patch.object(backend, "persist_metadata_url"), \
-             mock.patch.object(backend, "install_release_updates", return_value="installed") as install:
+             mock.patch.object(backend, "install_release_updates", return_value="installed") as install, \
+             mock.patch.object(manager.ManagerState, "_run_updated_manager_post_install") as post_install:
             state = manager.ManagerState()
             self.assertTrue(state.start_update_check())
             self._wait_for(lambda: state.snapshot()["updater"]["checked"])
@@ -214,6 +215,50 @@ class UpdaterTests(unittest.TestCase):
             state.start_offered_update(["manager"])
             self._wait_for(lambda: not state.snapshot()["task"]["running"])
             install.assert_called_once()
+            post_install.assert_called_once()
+            post_config = post_install.call_args.args[0]
+            self.assertEqual(post_config["prefix"], config["prefix"])
+            self.assertEqual(post_config["wine"], config["wine"])
+            self.assertEqual(
+                post_config["update_url"],
+                "https://future.example/releases/release.json",
+            )
+            task = state.snapshot()["task"]
+            self.assertEqual(task["status"], "completed")
+            self.assertTrue(task["restart_required"])
+
+    def test_post_install_failure_still_offers_restart_for_retry(self):
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+        config = {
+            "prefix": str(self.home / ".wine4office"),
+            "wine": str(self.home / "runner/bin/wine"),
+            "desktop_copy": False,
+            "use_x11": True,
+            "update_url": "https://updates.example/release.json",
+            "skipped_updates": {},
+        }
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "install_release_updates", return_value="installed"
+             ), mock.patch.object(
+                 manager.ManagerState, "_run_updated_manager_post_install",
+                 side_effect=RuntimeError("hook failed"),
+             ):
+            state = manager.ManagerState()
+            state.updater["offer"] = {
+                "id": "manager:2.0.0",
+                "metadata": parsed,
+                "updates": {"manager": parsed["manager"]},
+            }
+            state.start_offered_update(["manager"])
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        task = state.snapshot()["task"]
+        self.assertEqual(task["status"], "failed")
+        self.assertTrue(task["restart_required"])
+        self.assertIn("hook failed", task["log"])
 
     def test_skipping_offer_persists_component_version_without_download(self):
         parsed = backend.parse_release_metadata(
