@@ -318,6 +318,7 @@ DECL_HANDLER(d3dkmt_share_objects);
 DECL_HANDLER(d3dkmt_object_open_name);
 DECL_HANDLER(d3dkmt_mutex_acquire);
 DECL_HANDLER(d3dkmt_mutex_release);
+DECL_HANDLER(alpc_create_port);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -633,6 +634,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_object_open_name,
     (req_handler)req_d3dkmt_mutex_acquire,
     (req_handler)req_d3dkmt_mutex_release,
+    (req_handler)req_alpc_create_port,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -668,6 +670,7 @@ C_ASSERT( sizeof(struct object_type_info) == 44 );
 C_ASSERT( sizeof(struct pe_image_info) == 96 );
 C_ASSERT( sizeof(struct process_info) == 40 );
 C_ASSERT( sizeof(struct property_data) == 16 );
+C_ASSERT( sizeof(struct ratio) == 4 );
 C_ASSERT( sizeof(struct rawinput_device) == 12 );
 C_ASSERT( sizeof(struct rectangle) == 16 );
 C_ASSERT( sizeof(struct startup_info_data) == 96 );
@@ -1608,12 +1611,11 @@ C_ASSERT( offsetof(struct get_window_tree_reply, last_child) == 36 );
 C_ASSERT( sizeof(struct get_window_tree_reply) == 40 );
 C_ASSERT( offsetof(struct set_window_pos_request, swp_flags) == 12 );
 C_ASSERT( offsetof(struct set_window_pos_request, paint_flags) == 14 );
-C_ASSERT( offsetof(struct set_window_pos_request, monitor_dpi) == 16 );
-C_ASSERT( offsetof(struct set_window_pos_request, handle) == 20 );
-C_ASSERT( offsetof(struct set_window_pos_request, previous) == 24 );
-C_ASSERT( offsetof(struct set_window_pos_request, window) == 28 );
-C_ASSERT( offsetof(struct set_window_pos_request, client) == 44 );
-C_ASSERT( sizeof(struct set_window_pos_request) == 64 );
+C_ASSERT( offsetof(struct set_window_pos_request, handle) == 16 );
+C_ASSERT( offsetof(struct set_window_pos_request, previous) == 20 );
+C_ASSERT( offsetof(struct set_window_pos_request, window) == 24 );
+C_ASSERT( offsetof(struct set_window_pos_request, client) == 40 );
+C_ASSERT( sizeof(struct set_window_pos_request) == 56 );
 C_ASSERT( offsetof(struct set_window_pos_reply, new_style) == 8 );
 C_ASSERT( offsetof(struct set_window_pos_reply, new_ex_style) == 12 );
 C_ASSERT( offsetof(struct set_window_pos_reply, surface_win) == 16 );
@@ -2416,3 +2418,8 @@ C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, key_value) == 20 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, fence_value) == 24 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, runtime_size) == 32 );
 C_ASSERT( sizeof(struct d3dkmt_mutex_release_request) == 40 );
+C_ASSERT( offsetof(struct alpc_create_port_request, flags) == 12 );
+C_ASSERT( offsetof(struct alpc_create_port_request, max_msg_len) == 16 );
+C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
+C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
+C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );

@@ -69,7 +69,7 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
      * able to flush before due to the lack of the initial configure. */
     if (initial_configure)
     {
-        NtUserExposeWindowSurface(hwnd, 0, NULL, 0);
+        NtUserExposeWindowSurface(hwnd, 0, NULL);
     }
 }
 
@@ -169,7 +169,7 @@ void wp_fractional_scale_handle_scale(void* user_data,
 
     wayland_win_data_release(data);
 
-    NtUserExposeWindowSurface(hwnd, 0, NULL, 0);
+    NtUserExposeWindowSurface(hwnd, 0, NULL);
 }
 
 static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener =
@@ -770,12 +770,9 @@ static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
                                                struct wayland_client_surface *client,
                                                const RECT *client_rect)
 {
-    struct wayland_window_config *window = &surface->window;
-    RECT rect = *client_rect;
+    RECT rect = client_rect ? *client_rect : client->rect;
 
     /* The offset of the client area origin relatively to the window origin. */
-    OffsetRect(&rect, window->client_rect.left - window->rect.left,
-               window->client_rect.top - window->rect.top);
     rect = map_rect_to_surface(surface, rect);
 
     TRACE("hwnd=%p rect=%s\n", surface->hwnd, wine_dbgstr_rect(&rect));
@@ -789,6 +786,8 @@ static void wayland_surface_reconfigure_client(struct wayland_surface *surface,
         wp_viewport_set_destination(client->wp_viewport, rect.right - rect.left, rect.bottom - rect.top);
     else /* We can't have a 0x0 destination, use 1x1 instead. */
         wp_viewport_set_destination(client->wp_viewport, 1, 1);
+
+    client->rect = *client_rect;
 }
 
 /**********************************************************************
@@ -844,9 +843,10 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
     struct wayland_win_data *owner_data;
     struct wayland_surface *owner_surface;
 
-    if (surface->processing.serial && surface->processing.processed &&
-        (owner_data = wayland_win_data_get_nolock(surface->owner_hwnd)) &&
-        (owner_surface = owner_data->wayland_surface))
+    if (!surface->processing.serial || !surface->processing.processed) return;
+    if (!(owner_data = wayland_win_data_get(surface->owner_hwnd))) return;
+
+    if ((owner_surface = owner_data->wayland_surface))
     {
         RECT rect = surface->window.rect;
 
@@ -869,6 +869,8 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
 
         memset(&surface->processing, 0, sizeof(surface->processing));
     }
+
+    wayland_win_data_release(owner_data);
 }
 
 /**********************************************************************
@@ -1265,18 +1267,14 @@ static void wayland_client_surface_update(struct client_surface *client)
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct wayland_win_data *data;
-    BOOL visible = toplevel && NtUserIsWindowVisible(hwnd);
-    RECT client_rect;
+    BOOL visible = FALSE;
 
     TRACE("%s\n", debugstr_client_surface(client));
-
-    if (visible)
-        wayland_client_surface_get_rect(surface, toplevel, &client_rect);
-
+    if(toplevel) visible = NtUserIsWindowVisible(hwnd);
     if (!(data = wayland_win_data_get(hwnd))) return;
 
-    if (visible)
-        wayland_client_surface_attach(surface, toplevel, &client_rect);
+    if (toplevel && visible)
+        wayland_client_surface_attach(surface, toplevel, &client->monitor_rect);
     else
         wayland_client_surface_attach(surface, NULL, NULL);
 
@@ -1287,11 +1285,31 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
+    struct wayland_surface *wayland_surface;
+    struct wayland_win_data *data;
 
     TRACE("client %p hwnd %p tracked toplevel %p attached toplevel %p subsurface %p\n",
             surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);
     wayland_window_surface_presented(toplevel);
-    ensure_window_surface_contents(toplevel);
+
+    if (!(data = wayland_win_data_get(toplevel))) return;
+
+    if ((wayland_surface = data->wayland_surface))
+    {
+        wayland_surface_ensure_contents(wayland_surface);
+
+        /* Handle any processed configure request, to ensure the related
+         * surface state is applied by the compositor. */
+        if (wayland_surface->processing.serial &&
+            wayland_surface->processing.processed &&
+            wayland_surface_reconfigure(wayland_surface))
+        {
+            wl_surface_commit(wayland_surface->wl_surface);
+        }
+    }
+
+    wayland_win_data_release(data);
+
     set_client_surface(hwnd, surface);
 }
 
@@ -1351,25 +1369,13 @@ err:
     return NULL;
 }
 
-void wayland_client_surface_get_rect(struct wayland_client_surface *client, HWND toplevel,
-                                     RECT *client_rect)
-{
-    HWND hwnd = client->client.hwnd;
-    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
-
-    NtUserGetClientRect(hwnd, client_rect, dpi);
-    NtUserMapWindowPoints(hwnd, toplevel, (POINT *)client_rect, 2, dpi);
-}
-
-void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel,
-                                   const RECT *client_rect)
+void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel, const RECT *rect)
 {
     struct wayland_win_data *toplevel_data;
     struct wayland_surface *surface;
-    HWND hwnd = client->client.hwnd;
 
     TRACE("client %p hwnd %p old toplevel %p new toplevel %p subsurface %p\n",
-            client, hwnd, client->toplevel, toplevel, client->wl_subsurface);
+            client, client->client.hwnd, client->toplevel, toplevel, client->wl_subsurface);
 
     if (!toplevel)
     {
@@ -1383,15 +1389,15 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         return;
     }
 
-    if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) || !(surface = toplevel_data->wayland_surface))
+    if (!(toplevel_data = wayland_win_data_get(toplevel)) || !(surface = toplevel_data->wayland_surface))
     {
-        wayland_client_surface_attach(client, NULL, NULL);
-        return;
+        if (toplevel_data) wayland_win_data_release(toplevel_data);
+        return wayland_client_surface_attach(client, NULL, NULL);
     }
     if (surface->role == WAYLAND_SURFACE_ROLE_NONE)
     {
-        wayland_client_surface_attach(client, NULL, NULL);
-        return;
+        wayland_win_data_release(toplevel_data);
+        return wayland_client_surface_attach(client, NULL, NULL);
     }
 
 
@@ -1403,24 +1409,24 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
             wl_subcompositor_get_subsurface(process_wayland.wl_subcompositor,
                                             client->wl_surface,
                                             surface->wl_surface);
-        if (!client->wl_subsurface)
-        {
-            ERR("Failed to create client wl_subsurface\n");
-            return;
-        }
+        if (!client->wl_subsurface) goto done;
+
         /* Present contents independently of the parent surface. */
         wl_subsurface_set_desync(client->wl_subsurface);
 
         client->toplevel = toplevel;
     }
 
-    wayland_surface_reconfigure_client(surface, client, client_rect);
+    wayland_surface_reconfigure_client(surface, client, rect);
     /* Recommit the client surface in case destroying its previous subsurface
      * role unmapped an existing EGL buffer. Apply the new subsurface position
      * atomically through a roleful parent once it has received a configure. */
     wl_surface_commit(client->wl_surface);
     if (surface->processing.serial || surface->current.serial)
         wl_surface_commit(surface->wl_surface);
+
+done:
+    wayland_win_data_release(toplevel_data);
 }
 
 static void dummy_buffer_release(void *data, struct wl_buffer *buffer)

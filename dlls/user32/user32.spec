@@ -632,21 +632,21 @@
 @ stdcall GetPointerDeviceProperties(ptr ptr ptr)
 @ stdcall GetPointerDeviceRects(ptr ptr ptr) NtUserGetPointerDeviceRects
 @ stdcall GetPointerDevices(ptr ptr)
-# @ stub GetPointerFrameInfo
-# @ stub GetPointerFrameInfoHistory
-# @ stub GetPointerFramePenInfo
-# @ stub GetPointerFramePenInfoHistory
+@ stdcall GetPointerFrameInfo(long ptr ptr)
+@ stdcall GetPointerFrameInfoHistory(long ptr ptr ptr)
+@ stdcall GetPointerFramePenInfo(long ptr ptr)
+@ stdcall GetPointerFramePenInfoHistory(long ptr ptr ptr)
 # @ stub GetPointerFrameTimes
-# @ stub GetPointerFrameTouchInfo
-# @ stub GetPointerFrameTouchInfoHistory
+@ stdcall GetPointerFrameTouchInfo(long ptr ptr)
+@ stdcall GetPointerFrameTouchInfoHistory(long ptr ptr ptr)
 @ stdcall GetPointerInfo(long ptr)
-# @ stub GetPointerInfoHistory
+@ stdcall GetPointerInfoHistory(long ptr ptr)
 # @ stub GetPointerInputTransform
 @ stdcall GetPointerPenInfo(long ptr)
-# @ stub GetPointerPenInfoHistory
+@ stdcall GetPointerPenInfoHistory(long ptr ptr)
 @ stdcall GetPointerTouchInfo(long ptr)
 @ stdcall GetPointerTouchInfoHistory(long ptr ptr)
-@ stdcall GetPointerType(long ptr)
+@ stdcall GetPointerType(long ptr) NtUserGetPointerType
 @ stdcall GetPriorityClipboardFormat(ptr long) NtUserGetPriorityClipboardFormat
 @ stdcall GetProcessDefaultLayout(ptr)
 @ stdcall GetProcessDpiAwarenessInternal(long ptr)

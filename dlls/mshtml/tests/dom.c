@@ -11066,6 +11066,7 @@ static void test_attr(IHTMLDocument2 *doc, IHTMLElement *elem)
     test_attr_specified(attr, VARIANT_FALSE);
     test_attr_expando(attr, VARIANT_FALSE);
     test_attr_node(attr, doc);
+    IHTMLDOMAttribute_Release(attr);
 
     for(i = 0; i < ARRAY_SIZE(elem_attr_props); i++) {
         BOOL has_attr = elem_has_attr((IUnknown*)elem, elem_attr_props[i]);
@@ -13591,6 +13592,7 @@ static void test_attribute_node_across_modes(void)
     IDispatchEx *dispex, *dispex_ie9;
     IHTMLDocument2 *doc, *doc_ie9;
     IHTMLElement *elem, *elem_ie9;
+    IOleDocumentView *doc_view;
     IPersistStreamInit *init;
     DISPPARAMS dp = { 0 };
     IHTMLDocument6 *doc6;
@@ -13628,6 +13630,8 @@ static void test_attribute_node_across_modes(void)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    doc_view = view;
+    view = NULL;
 
     notif_doc = doc_ie9 = create_document();
     if(!doc_ie9) {
@@ -13827,6 +13831,8 @@ end:
 
     set_client_site(doc_ie9, FALSE);
     IHTMLDocument2_Release(doc_ie9);
+
+    view = doc_view;
     set_client_site(doc, FALSE);
     IHTMLDocument2_Release(doc);
 }

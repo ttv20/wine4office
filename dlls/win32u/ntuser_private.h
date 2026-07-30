@@ -121,6 +121,9 @@ struct user_thread_info
     HIMC                          default_imc;            /* default input context */
     HKL                           kbd_layout;             /* Current keyboard layout */
     UINT                          kbd_layout_id;          /* Current keyboard layout ID */
+    struct raw_mouse              raw_mouse;              /* accumulated hardware raw mouse frames */
+    INPUT                         mouse_motion;           /* accumulated hardware mouse motion */
+    HWND                          mouse_hwnd;             /* hardware mouse motion target window */
     struct hardware_msg_data     *rawinput;               /* Current rawinput message data */
     UINT                          spy_indent;             /* Current spy indent */
     BOOL                          clipping_cursor;        /* thread is currently clipping */
@@ -128,6 +131,7 @@ struct user_thread_info
     struct session_thread_data   *session_data;           /* shared session thread data */
     struct mouse_tracking_info   *mouse_tracking_info;    /* NtUserTrackMouseEvent handling */
     struct opengl_thread_data    *opengl_data;            /* OpenGL private thread data */
+    struct list                   known_pointers;         /* list of known pointers */
 };
 
 extern struct user_thread_info *get_user_thread_info(void);

@@ -174,6 +174,8 @@ ULONG CDECL wined3d_swapchain_decref(struct wined3d_swapchain *swapchain)
         if (swapchain->dc)
             wined3d_release_dc(swapchain->win_handle, swapchain->dc);
 
+        CloseHandle(swapchain->frame_latency_semaphore);
+
         swapchain->parent_ops->wined3d_object_destroyed(swapchain->parent);
         swapchain->device->adapter->adapter_ops->adapter_destroy_swapchain(swapchain);
 
@@ -1404,10 +1406,56 @@ static void wined3d_swapchain_apply_sample_count_override(const struct wined3d_s
     *quality = 0;
 }
 
-void swapchain_set_max_frame_latency(struct wined3d_swapchain *swapchain, const struct wined3d_device *device)
+HRESULT CDECL wined3d_swapchain_set_max_frame_latency(struct wined3d_swapchain *swapchain, unsigned int latency)
 {
-    /* Subtract 1 for the implicit OpenGL latency. */
-    swapchain->max_frame_latency = device->max_frame_latency >= 2 ? device->max_frame_latency - 1 : 1;
+    TRACE("swapchain %p, latency %u.\n", swapchain, latency);
+
+    if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+        return WINED3DERR_INVALIDCALL;
+
+    if (!latency)
+        return WINED3DERR_INVALIDCALL;
+
+    if (latency > swapchain->max_frame_latency)
+    {
+        if (!ReleaseSemaphore(swapchain->frame_latency_semaphore, latency - swapchain->max_frame_latency, NULL))
+        {
+            ERR("Failed to release semaphore, error %lu.\n", GetLastError());
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+    }
+    swapchain->max_frame_latency = latency;
+    return WINED3D_OK;
+}
+
+HRESULT CDECL wined3d_swapchain_get_max_frame_latency(struct wined3d_swapchain *swapchain, unsigned int *latency)
+{
+    TRACE("swapchain %p, latency %p.\n", swapchain, latency);
+
+    if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+        return WINED3DERR_INVALIDCALL;
+
+    *latency = swapchain->max_frame_latency;
+    return WINED3D_OK;
+}
+
+HANDLE CDECL wined3d_swapchain_get_frame_latency_waitable_object(struct wined3d_swapchain *swapchain)
+{
+    HANDLE handle;
+
+    TRACE("swapchain %p.\n", swapchain);
+
+    if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+        return NULL;
+
+    if (!DuplicateHandle(GetCurrentProcess(), swapchain->frame_latency_semaphore, GetCurrentProcess(),
+            &handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        ERR("Failed to duplicate handle, error %lu.\n", GetLastError());
+        return NULL;
+    }
+
+    return handle;
 }
 
 static enum wined3d_format_id adapter_format_from_backbuffer_format(const struct wined3d_adapter *adapter,
@@ -1584,7 +1632,16 @@ static HRESULT wined3d_swapchain_init(struct wined3d_swapchain *swapchain, struc
     swapchain->ref = 1;
     swapchain->win_handle = window;
     swapchain->swap_interval = WINED3D_SWAP_INTERVAL_DEFAULT;
-    swapchain_set_max_frame_latency(swapchain, device);
+    if (desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT)
+        swapchain->max_frame_latency = 1;
+    else
+        swapchain->max_frame_latency = device->max_frame_latency;
+
+    if (!(swapchain->frame_latency_semaphore = CreateSemaphoreW(NULL, swapchain->max_frame_latency, LONG_MAX, NULL)))
+    {
+        ERR("Failed to create frame latency semaphore, error %lu.\n", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
 
     if (!(swapchain->dc = GetDCEx(swapchain->win_handle, 0, DCX_USESTYLE | DCX_CACHE)))
         WARN("Failed to retrieve device context, trying swapchain backup.\n");
@@ -1721,6 +1778,8 @@ err:
 
     if (swapchain->dc)
         wined3d_release_dc(swapchain->win_handle, swapchain->dc);
+
+    CloseHandle(swapchain->frame_latency_semaphore);
 
     wined3d_swapchain_state_cleanup(&swapchain->state);
     wined3d_mutex_unlock();
@@ -1971,7 +2030,8 @@ void wined3d_swapchain_activate(struct wined3d_swapchain *swapchain, BOOL activa
 
 HRESULT CDECL wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapchain, unsigned int buffer_count,
         unsigned int width, unsigned int height, enum wined3d_format_id format_id,
-        enum wined3d_multisample_type multisample_type, unsigned int multisample_quality)
+        enum wined3d_multisample_type multisample_type, unsigned int multisample_quality,
+        unsigned int flags)
 {
     struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
     bool recreate = false;
@@ -2035,6 +2095,13 @@ HRESULT CDECL wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapcha
         desc->multisample_type = multisample_type;
         desc->multisample_quality = multisample_quality;
         recreate = true;
+    }
+
+    if (flags)
+    {
+        if ((desc->flags ^ flags) & WINED3D_SWAPCHAIN_GDI_COMPATIBLE)
+            recreate = true;
+        desc->flags = flags;
     }
 
     if (recreate)

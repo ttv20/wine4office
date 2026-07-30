@@ -3714,10 +3714,8 @@ struct wined3d_cs
     struct list query_poll_list;
     BOOL queries_flushed;
 
-    HANDLE event, present_event;
+    HANDLE event;
     LONG waiting_for_event;
-    LONG waiting_for_present;
-    LONG pending_presents;
 };
 
 static inline void wined3d_device_context_lock(struct wined3d_device_context *context)
@@ -4135,6 +4133,7 @@ struct wined3d_swapchain
     RECT front_buffer_update;
     unsigned int swap_interval;
     unsigned int max_frame_latency;
+    HANDLE frame_latency_semaphore;
 
     /* Performance tracking */
     LARGE_INTEGER last_present_time;
@@ -4629,7 +4628,7 @@ struct wined3d_format
     UINT block_height;
     UINT block_byte_count;
 
-    enum wined3d_format_id plane_formats[2];
+    struct wined3d_format *plane_formats[2];
     unsigned int uv_width, uv_height;
 
     enum wined3d_ffp_emit_idx emit_idx;

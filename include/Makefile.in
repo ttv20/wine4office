@@ -67,6 +67,7 @@ SOURCES = \
 	bthsdpdef.h \
 	cderr.h \
 	cdosys.idl \
+	cfapi.h \
 	cfg.h \
 	cfgmgr32.h \
 	cguid.h \
@@ -803,6 +804,7 @@ SOURCES = \
 	powersetting.h \
 	powrprof.h \
 	prntvpt.h \
+	processsnapshot.h \
 	processthreadsapi.h \
 	profinfo.h \
 	proofofpossessioncookieinfo.idl \

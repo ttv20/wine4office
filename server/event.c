@@ -63,27 +63,14 @@ static int event_sync_signal( struct object *obj, unsigned int access, int signa
 
 static const struct object_ops event_sync_ops =
 {
-    sizeof(struct event_sync), /* size */
-    &no_type,                  /* type */
-    event_sync_dump,           /* dump */
-    add_queue,                 /* add_queue */
-    remove_queue,              /* remove_queue */
-    event_sync_signaled,       /* signaled */
-    event_sync_satisfied,      /* satisfied */
-    event_sync_signal,         /* signal */
-    no_get_fd,                 /* get_fd */
-    default_get_sync,          /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    default_get_full_name,     /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    directory_link_name,       /* link_name */
-    default_unlink_name,       /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    no_destroy                 /* destroy */
+    .size         = sizeof(struct event_sync),
+    .type         = &no_type,
+    .dump         = event_sync_dump,
+    .add_queue    = add_queue,
+    .remove_queue = remove_queue,
+    .signaled     = event_sync_signaled,
+    .satisfied    = event_sync_satisfied,
+    .signal       = event_sync_signal,
 };
 
 static struct object *create_event_sync( int manual, int signaled )
@@ -164,27 +151,13 @@ static void event_destroy( struct object *obj );
 
 static const struct object_ops event_ops =
 {
-    sizeof(struct event),      /* size */
-    &event_type,               /* type */
-    event_dump,                /* dump */
-    NULL,                      /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    event_signal,              /* signal */
-    no_get_fd,                 /* get_fd */
-    event_get_sync,            /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    default_get_full_name,     /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    directory_link_name,       /* link_name */
-    default_unlink_name,       /* unlink_name */
-    no_open_file,              /* open_file */
-    event_get_kernel_obj_list, /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    event_destroy,             /* destroy */
+    .size                = sizeof(struct event),
+    .type                = &event_type,
+    .dump                = event_dump,
+    .signal              = event_signal,
+    .get_sync            = event_get_sync,
+    .get_kernel_obj_list = event_get_kernel_obj_list,
+    .destroy             = event_destroy,
 };
 
 
@@ -212,27 +185,12 @@ static int keyed_event_signaled( struct object *obj, struct wait_queue_entry *en
 
 static const struct object_ops keyed_event_ops =
 {
-    sizeof(struct keyed_event),  /* size */
-    &keyed_event_type,           /* type */
-    keyed_event_dump,            /* dump */
-    add_queue,                   /* add_queue */
-    remove_queue,                /* remove_queue */
-    keyed_event_signaled,        /* signaled */
-    no_satisfied,                /* satisfied */
-    no_signal,                   /* signal */
-    no_get_fd,                   /* get_fd */
-    default_get_sync,            /* get_sync */
-    default_map_access,          /* map_access */
-    default_get_sd,              /* get_sd */
-    default_set_sd,              /* set_sd */
-    default_get_full_name,       /* get_full_name */
-    no_lookup_name,              /* lookup_name */
-    directory_link_name,         /* link_name */
-    default_unlink_name,         /* unlink_name */
-    no_open_file,                /* open_file */
-    no_kernel_obj_list,          /* get_kernel_obj_list */
-    no_close_handle,             /* close_handle */
-    no_destroy                   /* destroy */
+    .size         = sizeof(struct keyed_event),
+    .type         = &keyed_event_type,
+    .dump         = keyed_event_dump,
+    .add_queue    = add_queue,
+    .remove_queue = remove_queue,
+    .signaled     = keyed_event_signaled,
 };
 
 
