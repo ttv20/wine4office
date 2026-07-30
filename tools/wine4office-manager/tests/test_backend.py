@@ -498,7 +498,13 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         cloud_font.parent.mkdir(parents=True)
         cloud_font.write_bytes(b"first font revision")
         log = self.root / "wine.log"
-        self._script("fc-scan", "#!/bin/sh\nprintf 'Aptos\\n'\n")
+        fc_log = self.root / "fc-scan.log"
+        self._script(
+            "fc-scan",
+            "#!/bin/sh\n"
+            "printf 'scan\\n' >> \"$WINE4OFFICE_FC_LOG\"\n"
+            "printf 'Aptos\\n'\n",
+        )
         self._script("winepath", "#!/bin/sh\nprintf 'Z:\\\\tmp\\\\fonts.reg\\n'\n")
         self._script("wine", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WINE4OFFICE_TEST_LOG\"\n")
         helper = Path(__file__).resolve().parents[1] / "register-office-cloud-fonts.sh"
@@ -507,18 +513,21 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             "PATH": f"{self.runner}:{env['PATH']}",
             "WINEPREFIX": str(prefix),
             "WINE4OFFICE_TEST_LOG": str(log),
+            "WINE4OFFICE_FC_LOG": str(fc_log),
         })
 
         subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
         subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
         self.assertEqual(log.read_text().splitlines(), ["regedit /S Z:\\tmp\\fonts.reg"])
+        self.assertEqual(fc_log.read_text().splitlines(), ["scan"])
 
-        cloud_font.write_bytes(b"second font revision")
+        cloud_font.write_bytes(b"other font revision")
         subprocess.run([str(helper)], env=env, check=True, stdout=subprocess.PIPE, text=True)
         self.assertEqual(
             log.read_text().splitlines(),
             ["regedit /S Z:\\tmp\\fonts.reg", "regedit /S Z:\\tmp\\fonts.reg"],
         )
+        self.assertEqual(fc_log.read_text().splitlines(), ["scan", "scan"])
 
     def test_launch_app_converts_host_document_paths_for_office(self):
         prefix = self.home / ".wine4office"
