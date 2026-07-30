@@ -1160,11 +1160,14 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     wayland_win_data_release(data);
 }
 
-BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region)
+BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
+                                 BOOL *reapply_clip)
 {
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
-    BOOL committed = FALSE, reapply_clip = FALSE;
+    BOOL committed = FALSE;
+
+    *reapply_clip = FALSE;
 
     if (!(data = wayland_win_data_get(hwnd))) return FALSE;
 
@@ -1178,7 +1181,7 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
             if (data->defer_cursor_clip)
             {
                 data->defer_cursor_clip = FALSE;
-                reapply_clip = TRUE;
+                *reapply_clip = TRUE;
             }
         }
         else
@@ -1196,9 +1199,12 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
 
     wayland_win_data_release(data);
 
-    if (reapply_clip && hwnd == NtUserGetForegroundWindow()) reapply_cursor_clipping();
-
     return committed;
+}
+
+void wayland_reapply_cursor_clipping(HWND hwnd)
+{
+    if (hwnd == NtUserGetForegroundWindow()) reapply_cursor_clipping();
 }
 
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd)

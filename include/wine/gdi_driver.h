@@ -296,6 +296,7 @@ struct window_surface_funcs
                     const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
                     const BITMAPINFO *shape_info, const void *shape_bits );
     void  (*destroy)( struct window_surface *surface );
+    void  (*flush_done)( struct window_surface *surface );
 };
 
 struct window_surface

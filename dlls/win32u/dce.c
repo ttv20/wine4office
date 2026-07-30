@@ -643,6 +643,7 @@ void window_surface_flush( struct window_surface *surface )
     }
 
     window_surface_unlock( surface );
+    if (surface->funcs->flush_done) surface->funcs->flush_done( surface );
 }
 
 void window_surface_set_layered( struct window_surface *surface, COLORREF color_key, UINT alpha_bits, UINT alpha_mask )
