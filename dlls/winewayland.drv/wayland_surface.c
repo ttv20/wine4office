@@ -1238,6 +1238,7 @@ static void wayland_client_surface_destroy(struct client_surface *client)
         wl_subsurface_destroy(surface->wl_subsurface);
     if (surface->wl_surface)
         wl_surface_destroy(surface->wl_surface);
+    free(surface->offscreen_bits);
 }
 
 static void wayland_client_surface_detach(struct client_surface *client)
@@ -1258,10 +1259,18 @@ static void wayland_client_surface_update(struct client_surface *client)
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct wayland_win_data *data;
-    BOOL visible = FALSE;
+    BOOL offscreen = FALSE, visible = FALSE;
+    HWND child;
 
     TRACE("%s\n", debugstr_client_surface(client));
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
+    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
+         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
+    {
+        if ((offscreen = NtUserIsWindowVisible(child))) break;
+    }
+    if (InterlockedExchange(&client->offscreen, offscreen) != offscreen)
+        TRACE("client %p hwnd %p offscreen changed to %u\n", surface, hwnd, offscreen);
     if (!(data = wayland_win_data_get(hwnd))) return;
 
     if (toplevel && visible && !InterlockedCompareExchange(&client->offscreen, 0, 0))
@@ -1275,12 +1284,31 @@ static void wayland_client_surface_update(struct client_surface *client)
 static void wayland_client_surface_present(struct client_surface *client, HDC hdc)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
+    BITMAPINFO info = {0};
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
 
     TRACE("client %p hwnd %p tracked toplevel %p attached toplevel %p subsurface %p\n",
             surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);
+
+    if (hdc && surface->offscreen_bits &&
+        surface->offscreen_width > 0 && surface->offscreen_height > 0)
+    {
+        info.bmiHeader.biSize = sizeof(info.bmiHeader);
+        info.bmiHeader.biWidth = surface->offscreen_width;
+        info.bmiHeader.biHeight = surface->offscreen_height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        info.bmiHeader.biSizeImage = surface->offscreen_width *
+                                     surface->offscreen_height * 4;
+        NtGdiStretchDIBitsInternal(hdc, 0, 0, surface->offscreen_width,
+                                   surface->offscreen_height, 0, 0,
+                                   surface->offscreen_width, surface->offscreen_height,
+                                   surface->offscreen_bits, &info, DIB_RGB_COLORS,
+                                   SRCCOPY, sizeof(info), info.bmiHeader.biSizeImage, 0);
+    }
     wayland_window_surface_presented(toplevel);
 
     if (!(data = wayland_win_data_get(toplevel))) return;

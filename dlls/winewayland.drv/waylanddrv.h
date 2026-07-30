@@ -260,6 +260,10 @@ struct wayland_client_surface
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
     struct wp_viewport *wp_viewport;
+    void *offscreen_bits;
+    size_t offscreen_bits_size;
+    int offscreen_width;
+    int offscreen_height;
 };
 
 extern struct wayland_client_surface *impl_from_client_surface(struct client_surface *client);

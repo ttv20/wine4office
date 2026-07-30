@@ -242,8 +242,6 @@ static void make_client_context_current(void)
 struct framebuffer_surface
 {
     struct opengl_drawable base;
-    void *bits;
-    size_t bits_size;
 };
 
 static GLenum color_format_from_pfd( const struct wgl_pixel_format *desc )
@@ -397,7 +395,6 @@ static void destroy_framebuffer( struct opengl_drawable *drawable, const struct 
 
 static void framebuffer_surface_destroy( struct opengl_drawable *drawable )
 {
-    struct framebuffer_surface *surface = CONTAINING_RECORD( drawable, struct framebuffer_surface, base );
     struct wgl_pixel_format draw_desc = pixel_formats[drawable->format - 1], read_desc = draw_desc;
     read_desc.samples = read_desc.sample_buffers = 0;
 
@@ -410,7 +407,6 @@ static void framebuffer_surface_destroy( struct opengl_drawable *drawable )
     destroy_framebuffer( drawable, &read_desc, drawable->read_fbo );
 
     make_client_context_current();
-    free( surface->bits );
 }
 
 static void framebuffer_surface_resize( struct opengl_drawable *drawable )
@@ -446,64 +442,7 @@ static void framebuffer_surface_flush( struct opengl_drawable *drawable, UINT fl
 
 static BOOL framebuffer_surface_swap( struct opengl_drawable *drawable )
 {
-    const struct opengl_funcs *funcs = &display_funcs;
-    struct framebuffer_surface *surface = CONTAINING_RECORD( drawable, struct framebuffer_surface, base );
-    BITMAPINFO info = {0};
-    GLint old_pack_alignment, old_read_fbo;
-    GLenum error;
-    RECT rect;
-    size_t size;
-    HDC hdc;
-
     TRACE( "%s\n", debugstr_opengl_drawable( drawable ) );
-
-    if (!drawable->client || !drawable->client->offscreen) return TRUE;
-    if (!NtUserGetClientRect( drawable->client->hwnd, &rect,
-                              NtUserGetDpiForWindow( drawable->client->hwnd ) ))
-        return FALSE;
-    if (IsRectEmpty( &rect )) return TRUE;
-
-    size = (size_t)(rect.right - rect.left) * (rect.bottom - rect.top) * 4;
-    if (size > surface->bits_size)
-    {
-        void *bits = realloc( surface->bits, size );
-        if (!bits) return FALSE;
-        surface->bits = bits;
-        surface->bits_size = size;
-    }
-
-    funcs->p_glGetIntegerv( GL_PACK_ALIGNMENT, &old_pack_alignment );
-    funcs->p_glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &old_read_fbo );
-    funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, 4 );
-    funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, drawable->read_fbo );
-    funcs->p_glReadBuffer( drawable->buffer_map[(drawable->doublebuffer ?
-                                                 GL_BACK : GL_FRONT) - GL_FRONT_LEFT] );
-    memset( surface->bits, 0, size );
-    funcs->p_glReadPixels( 0, 0, rect.right - rect.left, rect.bottom - rect.top,
-                          GL_BGRA, GL_UNSIGNED_BYTE, surface->bits );
-    if ((error = funcs->p_glGetError()))
-        WARN( "OpenGL readback failed for %s, error %#x\n",
-              debugstr_opengl_drawable( drawable ), error );
-    funcs->p_glBindFramebuffer( GL_READ_FRAMEBUFFER, old_read_fbo );
-    funcs->p_glPixelStorei( GL_PACK_ALIGNMENT, old_pack_alignment );
-
-    info.bmiHeader.biSize = sizeof(info.bmiHeader);
-    info.bmiHeader.biWidth = rect.right - rect.left;
-    info.bmiHeader.biHeight = rect.bottom - rect.top;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-    info.bmiHeader.biSizeImage = size;
-
-    if ((hdc = NtUserGetDCEx( drawable->client->hwnd, 0, DCX_CACHE | DCX_USESTYLE )))
-    {
-        NtGdiStretchDIBitsInternal( hdc, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
-                                    0, 0, rect.right - rect.left, rect.bottom - rect.top,
-                                    surface->bits, &info, DIB_RGB_COLORS, SRCCOPY,
-                                    sizeof(info), size, 0 );
-        NtUserReleaseDC( drawable->client->hwnd, hdc );
-    }
-    client_surface_present( drawable->client );
     return TRUE;
 }
 

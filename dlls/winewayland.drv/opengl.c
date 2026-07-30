@@ -44,9 +44,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 static const struct egl_platform *egl;
 static const struct opengl_funcs *funcs;
 static const struct opengl_drawable_funcs wayland_drawable_funcs;
-static BOOL (*offscreen_surface_create)(struct client_surface *, int,
-                                        struct opengl_drawable **);
-static BOOL (*describe_pixel_format)(int, struct wgl_pixel_format *);
 
 struct wayland_gl_drawable
 {
@@ -57,20 +54,6 @@ struct wayland_gl_drawable
 static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
 {
     return CONTAINING_RECORD(base, struct wayland_gl_drawable, base);
-}
-
-static BOOL has_visible_descendant(HWND hwnd)
-{
-    HWND child;
-
-    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
-         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
-    {
-        if (NtUserIsWindowVisible(child) || has_visible_descendant(child))
-            return TRUE;
-    }
-
-    return FALSE;
 }
 
 static void wayland_drawable_destroy(struct opengl_drawable *base)
@@ -100,8 +83,6 @@ static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
 static BOOL wayland_opengl_surface_create(struct client_surface *client, int format, struct opengl_drawable **drawable)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
-    struct wgl_pixel_format desc;
-    BOOL described, visible_descendant;
     EGLConfig config = egl_config_for_format(format);
     EGLint attribs[4], *attrib = attribs;
     struct wayland_gl_drawable *gl;
@@ -109,21 +90,6 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     RECT rect;
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
-
-    visible_descendant = has_visible_descendant(client->hwnd);
-    described = describe_pixel_format(format, &desc);
-    TRACE("client=%s format=%d described=%u flags=%#x visible_descendant=%u\n",
-          debugstr_client_surface(client), format, described,
-          described ? desc.pfd.dwFlags : 0, visible_descendant);
-
-    /* Native Wayland subsurfaces cannot reproduce the stacking needed when
-     * visible Win32 descendants paint above a GL client. Render those clients
-     * offscreen and composite through their USER-clipped HDC, as X11 does. */
-    if (visible_descendant)
-    {
-        InterlockedExchange(&client->offscreen, TRUE);
-        return offscreen_surface_create(client, format, drawable);
-    }
 
     NtUserGetClientRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd));
     if (rect.right == rect.left) rect.right = rect.left + 1;
@@ -182,9 +148,47 @@ static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
 
 static BOOL wayland_drawable_swap(struct opengl_drawable *base)
 {
+    struct wayland_client_surface *surface = impl_from_client_surface(base->client);
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
+    GLint old_pack_alignment, old_read_buffer;
+    RECT rect;
+    size_t size;
 
     TRACE("drawable %p client %p EGL surface %p\n", gl, base->client, gl->base.surface);
+
+    if (InterlockedCompareExchange(&base->client->offscreen, 0, 0) &&
+        NtUserGetClientRect(base->client->hwnd, &rect,
+                            NtUserGetDpiForWindow(base->client->hwnd)) &&
+        !IsRectEmpty(&rect))
+    {
+        surface->offscreen_width = 0;
+        surface->offscreen_height = 0;
+        size = (size_t)(rect.right - rect.left) * (rect.bottom - rect.top) * 4;
+        if (size > surface->offscreen_bits_size)
+        {
+            void *bits = realloc(surface->offscreen_bits, size);
+            if (bits)
+            {
+                surface->offscreen_bits = bits;
+                surface->offscreen_bits_size = size;
+            }
+        }
+
+        if (surface->offscreen_bits_size >= size)
+        {
+            funcs->p_glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+            funcs->p_glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+            funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            funcs->p_glReadBuffer(base->doublebuffer ? GL_BACK : GL_FRONT);
+            funcs->p_glReadPixels(0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                                  GL_BGRA, GL_UNSIGNED_BYTE, surface->offscreen_bits);
+            funcs->p_glReadBuffer(old_read_buffer);
+            funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+            surface->offscreen_width = rect.right - rect.left;
+            surface->offscreen_height = rect.bottom - rect.top;
+        }
+    }
+
     client_surface_present(base->client);
     funcs->p_eglSwapBuffers(egl->display, gl->base.surface);
 
@@ -284,8 +288,6 @@ UINT WAYLAND_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, c
 
     if (!opengl_funcs->egl_handle) return STATUS_NOT_SUPPORTED;
     funcs = opengl_funcs;
-    offscreen_surface_create = (*driver_funcs)->p_surface_create;
-    describe_pixel_format = (*driver_funcs)->p_describe_pixel_format;
 
     wayland_driver_funcs.p_get_proc_address = (*driver_funcs)->p_get_proc_address;
     wayland_driver_funcs.p_init_pixel_formats = (*driver_funcs)->p_init_pixel_formats;
