@@ -1039,6 +1039,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 stat.S_IMODE(backend.preload_unit_path().stat().st_mode), 0o644
             )
 
+    def test_legacy_rpc_binding_is_normalized_to_clicktorun_only(self):
+        legacy = {
+            **self._preload_binding(),
+            "components": ["ClickToRunSvc", "RpcSs"],
+        }
+        normalized = backend._validate_preload_binding(legacy)
+        self.assertEqual(normalized["components"], ["ClickToRunSvc"])
+
     def test_preload_unit_is_exact_safe_and_enable_does_not_start(self):
         binding = self._preload_binding()
         commands = []
@@ -1071,7 +1079,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         expected = (
             "# Managed by Wine4OfficeManager: preload-service-v1\n"
             "[Unit]\n"
-            "Description=Wine4Office background preload\n\n"
+            "Description=Wine4Office Click-to-Run preload\n\n"
             "[Service]\n"
             "Type=simple\n"
             f"ExecStart={exec_start}\n"
@@ -1289,11 +1297,41 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 )
         systemctl.assert_not_called()
 
-    def test_worker_preserves_preexisting_component_and_stops_owned_in_reverse(self):
+    def test_clicktorun_process_detection_is_prefix_scoped(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = proc_root / "123"
+        process.mkdir(parents=True)
+        (process / "cmdline").write_bytes(
+            b"C:\\Program Files\\Common Files\\Microsoft Shared\\ClickToRun\\"
+            b"OfficeClickToRun.exe\0/service\0"
+        )
+        (process / "environ").write_bytes(
+            os.fsencode(f"WINEPREFIX={binding['prefix']}") + b"\0"
+        )
+
+        self.assertIs(
+            backend._preload_component_process_running(
+                binding, "ClickToRunSvc", proc_root
+            ),
+            True,
+        )
+        (process / "environ").write_bytes(b"WINEPREFIX=/other/prefix\0")
+        self.assertIs(
+            backend._preload_component_process_running(
+                binding, "ClickToRunSvc", proc_root
+            ),
+            False,
+        )
+        self.assertIsNone(
+            backend._preload_component_process_running(binding, "unknown", proc_root)
+        )
+
+    def test_worker_starts_and_stops_owned_clicktorun(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
         status_path = backend.preload_runtime_status_path()
-        states = {"ClickToRunSvc": "stopped", "RpcSs": "running"}
+        states = {"ClickToRunSvc": "stopped"}
         actions = []
         handlers = {}
 
@@ -1314,6 +1352,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             handlers[signal.SIGTERM](signal.SIGTERM, None)
 
         with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
             backend, "_preload_component_state", side_effect=component_state
         ), mock.patch.object(
             backend, "_preload_component_action", side_effect=component_action
@@ -1339,7 +1379,80 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         broad_kill.assert_not_called()
         heartbeat = __import__("json").loads(status_path.read_text())
         self.assertEqual(heartbeat["state"], "stopped")
-        self.assertFalse(heartbeat["components"]["RpcSs"]["owned"])
+        self.assertTrue(heartbeat["components"]["ClickToRunSvc"]["owned"])
+
+    def test_worker_owns_clicktorun_auto_started_by_first_query(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        handlers = {}
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_component_state", return_value=("running", "running")
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(True, "stopped")
+        ) as action, mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [call.args[1:] for call in action.call_args_list],
+            [("stop", "ClickToRunSvc")],
+        )
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertTrue(heartbeat["components"]["ClickToRunSvc"]["owned"])
+
+    def test_worker_preserves_preexisting_clicktorun(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        handlers = {}
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=True
+        ), mock.patch.object(
+            backend, "_preload_component_state", return_value=("running", "running")
+        ), mock.patch.object(
+            backend, "_preload_component_action"
+        ) as action, mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 0)
+        action.assert_not_called()
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertFalse(heartbeat["components"]["ClickToRunSvc"]["owned"])
 
     def test_worker_refuses_signal_cleanup_when_activity_check_fails(self):
         binding = self._preload_binding()
@@ -1355,6 +1468,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             handlers[signal.SIGTERM](signal.SIGTERM, None)
 
         with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
             backend, "_preload_component_state", return_value=("running", "running")
         ), mock.patch.object(
             backend, "_preload_component_action"
@@ -1395,11 +1510,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             real_heartbeat(path, components, state, detail)
 
         with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
             backend, "_preload_component_state",
-            side_effect=lambda _binding, component: (
-                ("stopped", "stopped") if component == "ClickToRunSvc"
-                else ("running", "running")
-            ),
+            return_value=("stopped", "stopped"),
         ), mock.patch.object(
             backend, "_preload_component_action", return_value=(False, "start failed")
         ) as action, mock.patch.object(

@@ -123,7 +123,11 @@ class QtManagerTests(unittest.TestCase):
         return snapshot
 
     def test_background_preload_controls_are_explicit_and_accessible(self):
-        self.assertEqual(self.window.preload_group.title(), "Background preload")
+        self.assertEqual(self.window.preload_group.title(), "Click-to-Run preload")
+        notice = self.window.preload_notice_label.text()
+        self.assertIn("100–300 MB", notice)
+        self.assertIn("Word is not started", notice)
+        self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (
             (self.window.preload_enable_button, "Enable at login"),
             (self.window.preload_disable_button, "Disable at login"),
@@ -178,7 +182,6 @@ class QtManagerTests(unittest.TestCase):
                     "selected_matches": True,
                     "components": {
                         "ClickToRunSvc": {"state": "running", "owned": True, "detail": ""},
-                        "RpcSs": {"state": "running", "owned": True, "detail": ""},
                     },
                 },
                 "Active",
@@ -194,7 +197,6 @@ class QtManagerTests(unittest.TestCase):
                     "selected_matches": True,
                     "components": {
                         "ClickToRunSvc": {"state": "failed", "owned": True, "detail": "failed"},
-                        "RpcSs": {"state": "running", "owned": True, "detail": ""},
                     },
                 },
                 "Needs attention",
@@ -218,7 +220,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertIn("Login: enabled", self.window.preload_state_label.text())
         self.assertIn("Worker: running", self.window.preload_state_label.text())
         self.assertIn("ClickToRunSvc: failed", self.window.preload_state_label.text())
-        self.assertIn("RpcSs: running", self.window.preload_state_label.text())
+        self.assertNotIn("RpcSs", self.window.preload_state_label.text())
 
     def test_background_preload_binding_mismatch_shows_both_environments(self):
         bound = str(self.home / "other-office")

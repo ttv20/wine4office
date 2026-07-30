@@ -423,10 +423,17 @@ class ManagerState:
                         config.get("use_x11", True),
                     )
                 return {
-                    "enable": "Preload enabled for login; it was not started.",
-                    "disable": "Preload disabled for login; a running service was not stopped.",
-                    "start": "Preload service started without enabling login startup.",
-                    "stop": "Preload service stopped without disabling login startup.",
+                    "enable": "Click-to-Run preload enabled for login; it was not started.",
+                    "disable": (
+                        "Click-to-Run preload disabled for login; a running service "
+                        "was not stopped."
+                    ),
+                    "start": (
+                        "Click-to-Run preload started without enabling login startup."
+                    ),
+                    "stop": (
+                        "Click-to-Run preload stopped without disabling login startup."
+                    ),
                 }[action]
             finally:
                 try:
