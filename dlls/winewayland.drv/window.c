@@ -328,11 +328,13 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         (state->layered_flags & LWA_ALPHA) && !state->layered_alpha)
         visible = FALSE;
 
-    /* A newly visible toplevel without a class background brush has no
-     * application-defined contents yet. Keep it role-less until the first
+    /* A newly visible unmanaged toplevel without a class background brush has
+     * no application-defined contents yet. Keep it role-less until the first
      * software flush or GPU presentation instead of exposing the driver's
-     * generic initialization buffer. */
-    if (visible && !owner_surface && !data->contents_presented && !state->has_background)
+     * generic initialization buffer. Managed application windows need their
+     * initial xdg configure before they can produce the first presentation. */
+    if (visible && !data->managed && !owner_surface &&
+        !data->contents_presented && !state->has_background)
         visible = FALSE;
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
