@@ -66,11 +66,12 @@ The manager defaults to:
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Apply curated per-prefix Office compatibility and privacy policies without
   exposing Windows-only Group Policy infrastructure.
-- Optionally enable a per-user login service that keeps Office Click-to-Run ready
-  and initializes App-V for faster first launches. It never starts Word and
-  typically uses 100–200 MB of background RAM.
+- Optionally start Office Click-to-Run and App-V background services at login
+  for faster first launches. They typically use 100–200 MB of RAM.
 - Open Wine configuration and maintenance utilities.
-- Download and atomically install separately verified Wine4Office Manager and Wine runner updates.
+- Download and atomically install separately verified Wine4Office Manager and
+  Wine runner updates. Runner updates refresh the prefix with `wineboot -u`,
+  then restore any background services that were running.
 - Optionally check for updates at login and every 24 hours, with one-click
   disablement from the desktop notification.
 - Remove the manager, runner, configuration, and shortcuts; prefix deletion requires separate explicit confirmation.

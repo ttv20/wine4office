@@ -764,6 +764,25 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
                        stderr=subprocess.DEVNULL, timeout=15, check=True)
 
 
+def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
+                       output: Output, cancel_event=None, process_callback=None) -> str:
+    """Update and start an existing prefix with a newly installed Wine runner."""
+    prefix = validate_prefix(prefix_value)
+    if not has_wine_prefix_layout(prefix):
+        raise ValueError(f"The Wine environment is invalid: {prefix}")
+    wine = require_wine(wine_value)
+    wineboot = sibling_tool(wine, "wineboot")
+    command = [str(wineboot), "-u"] if wineboot else [str(wine), "wineboot.exe", "-u"]
+    _stream_command(
+        command,
+        wine_environment(prefix, wine, use_x11),
+        output,
+        cancel_event=cancel_event,
+        process_callback=process_callback,
+    )
+    return f"Wine environment updated and restarted with {wine}"
+
+
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
                        cancel_event=None, process_callback=None) -> str:
     prefix = validate_prefix(prefix_value)
@@ -1037,7 +1056,12 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
                 use_x11: bool = True) -> int | None:
     if tool == "stop":
+        restart_preload = _preload_active_for_environment(
+            prefix_value, wine_value, use_x11
+        )
         stop_wine(prefix_value, wine_value, use_x11)
+        if restart_preload:
+            _systemctl_user(["restart", PRELOAD_UNIT])
         return None
     if tool not in TOOL_META:
         raise ValueError(f"Unknown Wine tool: {tool}")
@@ -3239,7 +3263,7 @@ def _preload_unit_text(binding_path: Path, status_path: Path) -> str:
     return (
         f"{_PRELOAD_UNIT_MARKER}\n"
         "[Unit]\n"
-        "Description=Wine4Office Click-to-Run preload\n\n"
+        "Description=Wine4Office background services\n\n"
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={arguments}\n"
@@ -3321,6 +3345,71 @@ def install_preload_service(prefix_value: str, wine_value: str,
     return preload_service_status(prefix_value, wine_value, use_x11)
 
 
+def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> dict | None:
+    """Pause an owned service bound to this prefix before replacing its runner."""
+    supported, _ = _systemd_user_capability()
+    if not supported or not _owned_preload_unit():
+        return None
+    try:
+        binding = _read_preload_binding()
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    prefix = validate_prefix(prefix_value)
+    if (
+        not paths_equivalent(binding["prefix"], str(prefix))
+        or binding["use_x11"] != bool(use_x11)
+    ):
+        return None
+    enabled, _ = _systemctl_property("is-enabled")
+    active, _ = _systemctl_property("is-active")
+    state = {
+        "binding": binding,
+        "enabled": enabled,
+        "active": active,
+    }
+    if active:
+        _systemctl_user(["stop", PRELOAD_UNIT])
+    return state
+
+
+def finish_preload_runner_update(state: dict, wine_value: str) -> None:
+    """Rebind a paused preload service and restore its previous running state."""
+    old_binding = _validate_preload_binding(state.get("binding"))
+    new_binding = _preload_snapshot(
+        old_binding["prefix"], wine_value, old_binding["use_x11"]
+    )
+    binding_path = preload_binding_path()
+    unit_path = preload_unit_path()
+    snapshots = {
+        binding_path: _snapshot_file(binding_path),
+        unit_path: _snapshot_file(unit_path),
+    }
+    try:
+        _preload_json_write(binding_path, new_binding, 0o600)
+        _preload_atomic_write(
+            unit_path, _preload_unit_text(binding_path, preload_runtime_status_path()), 0o644
+        )
+        _systemctl_user(["daemon-reload"])
+        if bool(state.get("active")):
+            _systemctl_user(["start", PRELOAD_UNIT])
+    except BaseException:
+        for path, snapshot in snapshots.items():
+            _restore_file(path, snapshot)
+        try:
+            _systemctl_user(["daemon-reload"], check=False)
+            if bool(state.get("active")):
+                _systemctl_user(["start", PRELOAD_UNIT], check=False)
+        except RuntimeError:
+            pass
+        raise
+
+
+def restore_preload_after_runner_update(state: dict) -> None:
+    """Resume the old service if runner installation failed after it was paused."""
+    if bool(state.get("active")):
+        _systemctl_user(["start", PRELOAD_UNIT])
+
+
 def preload_office_processes(prefix_value: str, wine_value: str,
                              use_x11: bool = True) -> list[str]:
     prefix = validate_prefix(prefix_value)
@@ -3384,7 +3473,10 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
     binding = _read_preload_binding()
     if not preload_unit_path().is_file():
         raise RuntimeError("The preload service is not installed.")
-    if not _preload_selected_matches(binding, prefix_value, wine_value, use_x11):
+    if (
+        action == "start"
+        and not _preload_selected_matches(binding, prefix_value, wine_value, use_x11)
+    ):
         raise RuntimeError(
             "The selected Wine environment does not match the fixed preload binding."
         )
@@ -3398,6 +3490,25 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
             )
     _systemctl_user([action, PRELOAD_UNIT])
     return preload_service_status(prefix_value, wine_value, use_x11)
+
+
+def _preload_active_for_environment(prefix_value: str, _wine_value: str,
+                                    use_x11: bool) -> bool:
+    supported, _ = _systemd_user_capability()
+    if not supported or not preload_unit_path().is_file():
+        return False
+    try:
+        binding = _read_preload_binding()
+        prefix = validate_prefix(prefix_value)
+        if (
+            not paths_equivalent(binding["prefix"], str(prefix))
+            or binding["use_x11"] != bool(use_x11)
+        ):
+            return False
+        active, _ = _systemctl_property("is-active")
+        return active
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _preload_component_process_running(
@@ -3667,6 +3778,8 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             for component in PRELOAD_COMPONENTS:
                 state, detail = _preload_component_state(binding, component)
                 record = components[component]
+                if state == "running":
+                    restart_attempts[component] = 0
                 if state != "running" and record["owned"] and restart_attempts[component] < 3:
                     restart_attempts[component] += 1
                     restarted, restart_detail = _preload_component_action(
@@ -3682,6 +3795,8 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 record["detail"] = detail
 
             appv_record = components[PRELOAD_APPV_COMPONENT]
+            if appv_process is not None and appv_process.poll() is None:
+                appv_restart_attempts = 0
             if appv_process is not None and appv_process.poll() is not None:
                 _stop_preload_appv(appv_process)
                 appv_record["state"] = "stopped"

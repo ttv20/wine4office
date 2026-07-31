@@ -260,6 +260,147 @@ class UpdaterTests(unittest.TestCase):
         self.assertTrue(task["restart_required"])
         self.assertIn("hook failed", task["log"])
 
+    def test_wine_update_rebinds_running_background_service_to_new_runner(self):
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+        config = {
+            "prefix": str(self.home / ".wine4office"),
+            "wine": str(self.home / "old-runner/bin/wine"),
+            "desktop_copy": False,
+            "use_x11": True,
+            "update_url": "https://updates.example/release.json",
+            "skipped_updates": {},
+        }
+        transition = {"binding": {"prefix": config["prefix"]}, "active": True}
+        new_runner = self.home / "installed-runner"
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "prepare_preload_runner_update", return_value=transition
+             ) as prepare, \
+             mock.patch.object(backend, "stop_wine"), \
+             mock.patch.object(
+                 backend, "install_release_updates", return_value="installed"
+             ), \
+             mock.patch.object(
+                 backend, "runner_update_target", return_value=new_runner
+             ), \
+             mock.patch.object(
+                 backend, "update_wine_prefix",
+                 return_value="Wine environment updated and restarted",
+             ) as wineboot, \
+             mock.patch.object(backend, "finish_preload_runner_update") as finish, \
+             mock.patch.object(backend, "restore_preload_after_runner_update") as restore, \
+             mock.patch.object(backend, "save_config"):
+            state = manager.ManagerState()
+            state.updater["offer"] = {
+                "id": "wine:11.2.0",
+                "metadata": parsed,
+                "updates": {"wine": parsed["wine"]},
+            }
+            state.start_offered_update(["wine"])
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        new_wine = str(new_runner / "bin/wine")
+        prepare.assert_called_once_with(config["prefix"], True)
+        wineboot.assert_called_once_with(
+            config["prefix"], new_wine, True, state.output,
+            state.cancel_event, state.set_process,
+        )
+        finish.assert_called_once_with(transition, new_wine)
+        restore.assert_not_called()
+        self.assertEqual(state.snapshot()["config"]["wine"], new_wine)
+        self.assertIn(
+            "Updated the background services",
+            state.snapshot()["task"]["log"],
+        )
+
+    def test_failed_wine_update_resumes_paused_background_service(self):
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+        config = {
+            "prefix": str(self.home / ".wine4office"),
+            "wine": str(self.home / "old-runner/bin/wine"),
+            "desktop_copy": False,
+            "use_x11": True,
+            "update_url": "https://updates.example/release.json",
+            "skipped_updates": {},
+        }
+        transition = {"binding": {"prefix": config["prefix"]}, "active": True}
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "prepare_preload_runner_update", return_value=transition
+             ), \
+             mock.patch.object(backend, "stop_wine"), \
+             mock.patch.object(
+                 backend, "install_release_updates",
+                 side_effect=RuntimeError("runner install failed"),
+             ), \
+             mock.patch.object(
+                 backend, "restore_preload_after_runner_update"
+             ) as restore:
+            state = manager.ManagerState()
+            state.updater["offer"] = {
+                "id": "wine:11.2.0",
+                "metadata": parsed,
+                "updates": {"wine": parsed["wine"]},
+            }
+            state.start_offered_update(["wine"])
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        restore.assert_called_once_with(transition)
+        self.assertEqual(state.snapshot()["task"]["status"], "failed")
+
+    def test_failed_prefix_self_update_does_not_switch_runner(self):
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+        config = {
+            "prefix": str(self.home / ".wine4office"),
+            "wine": str(self.home / "old-runner/bin/wine"),
+            "desktop_copy": False,
+            "use_x11": True,
+            "update_url": "https://updates.example/release.json",
+            "skipped_updates": {},
+        }
+        transition = {"binding": {"prefix": config["prefix"]}, "active": True}
+        new_runner = self.home / "installed-runner"
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "prepare_preload_runner_update", return_value=transition
+             ), \
+             mock.patch.object(backend, "stop_wine"), \
+             mock.patch.object(
+                 backend, "install_release_updates", return_value="installed"
+             ), \
+             mock.patch.object(
+                 backend, "runner_update_target", return_value=new_runner
+             ), \
+             mock.patch.object(
+                 backend, "update_wine_prefix",
+                 side_effect=RuntimeError("wineboot update failed"),
+             ), \
+             mock.patch.object(backend, "finish_preload_runner_update") as finish, \
+             mock.patch.object(
+                 backend, "restore_preload_after_runner_update"
+             ) as restore, \
+             mock.patch.object(backend, "save_config") as save:
+            state = manager.ManagerState()
+            state.updater["offer"] = {
+                "id": "wine:11.2.0",
+                "metadata": parsed,
+                "updates": {"wine": parsed["wine"]},
+            }
+            state.start_offered_update(["wine"])
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        finish.assert_not_called()
+        restore.assert_called_once_with(transition)
+        save.assert_not_called()
+        self.assertEqual(state.snapshot()["config"]["wine"], config["wine"])
+        self.assertIn("wineboot update failed", state.snapshot()["task"]["log"])
+
     def test_skipping_offer_persists_component_version_without_download(self):
         parsed = backend.parse_release_metadata(
             self.metadata(), "https://updates.example/release.json"

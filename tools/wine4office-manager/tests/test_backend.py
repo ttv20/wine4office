@@ -461,6 +461,20 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         with self.assertRaisesRegex(FileNotFoundError, "wineserver is missing"):
             backend.stop_wine(str(prefix), str(self.wine))
 
+    def test_update_wine_prefix_runs_new_runner_wineboot_update(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(backend, "_stream_command") as stream:
+            result = backend.update_wine_prefix(
+                str(prefix), str(self.wine), False, lambda _line: None
+            )
+
+        command, environment, output = stream.call_args.args
+        self.assertEqual(command, [str(self.runner / "wineboot"), "-u"])
+        self.assertEqual(environment["WINEPREFIX"], str(prefix.resolve()))
+        self.assertNotIn("DISPLAY", environment)
+        self.assertTrue(callable(output))
+        self.assertIn("updated and restarted", result)
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")
@@ -1507,7 +1521,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         expected = (
             "# Managed by Wine4OfficeManager: preload-service-v1\n"
             "[Unit]\n"
-            "Description=Wine4Office Click-to-Run preload\n\n"
+            "Description=Wine4Office background services\n\n"
             "[Service]\n"
             "Type=simple\n"
             f"ExecStart={exec_start}\n"
@@ -1621,6 +1635,59 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             commands,
             [["disable", backend.PRELOAD_UNIT], ["start", backend.PRELOAD_UNIT]],
         )
+
+    def test_stop_uses_bound_environment_during_runner_mismatch(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        different_wine = str(self.home / "updated-runner/bin/wine")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ) as office, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl, mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "mismatch"}
+        ):
+            backend.manage_preload_service(
+                "stop", binding["prefix"], different_wine, True
+            )
+
+        office.assert_called_once_with(
+            binding["prefix"], binding["wine"], binding["use_x11"]
+        )
+        systemctl.assert_called_once_with(["stop", backend.PRELOAD_UNIT])
+
+    def test_stop_wine_tool_restarts_matching_active_background_service(self):
+        prefix = self._make_prefix(self.home / "stop-and-restart")
+        with mock.patch.object(
+            backend, "_preload_active_for_environment", return_value=True
+        ) as active, mock.patch.object(
+            backend, "stop_wine"
+        ) as stop, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            result = backend.launch_tool(str(prefix), str(self.wine), "stop", False)
+
+        self.assertIsNone(result)
+        active.assert_called_once_with(str(prefix), str(self.wine), False)
+        stop.assert_called_once_with(str(prefix), str(self.wine), False)
+        systemctl.assert_called_once_with(["restart", backend.PRELOAD_UNIT])
+
+    def test_stop_wine_tool_does_not_start_an_inactive_background_service(self):
+        prefix = self._make_prefix(self.home / "stop-without-service")
+        with mock.patch.object(
+            backend, "_preload_active_for_environment", return_value=False
+        ), mock.patch.object(
+            backend, "stop_wine"
+        ), mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            backend.launch_tool(str(prefix), str(self.wine), "stop")
+        systemctl.assert_not_called()
 
     def test_preload_status_merges_fresh_and_stale_heartbeat(self):
         binding = self._preload_binding()
@@ -2082,6 +2149,69 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(
             backend._read_preload_binding()["prefix"], str(new_prefix.resolve())
         )
+
+    def test_enable_installs_when_only_a_stale_binding_file_exists(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        new_prefix = self._make_prefix(self.home / "selected prefix")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "inactive")
+        ), mock.patch.object(
+            backend, "_systemctl_user",
+            return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+        ), mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "enabled"}
+        ):
+            backend.install_preload_service(str(new_prefix), str(self.wine), True)
+
+        self.assertTrue(backend.preload_unit_path().is_file())
+        self.assertEqual(
+            backend._read_preload_binding()["prefix"], str(new_prefix.resolve())
+        )
+
+    def test_runner_update_rebinds_and_restarts_owned_background_service(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(),
+            backend._preload_unit_text(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            ),
+            0o644,
+        )
+        new_runner = self.home / "new runner"
+        new_wine = new_runner / "bin/wine"
+        new_wine.parent.mkdir(parents=True)
+        new_wine.write_text("#!/bin/sh\n")
+        new_wine.chmod(0o755)
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[(True, "enabled"), (True, "active")],
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            state = backend.prepare_preload_runner_update(old["prefix"], True)
+            self.assertIsNotNone(state)
+            backend.finish_preload_runner_update(state, str(new_wine))
+
+        self.assertEqual(commands, [
+            ["stop", backend.PRELOAD_UNIT],
+            ["daemon-reload"],
+            ["start", backend.PRELOAD_UNIT],
+        ])
+        updated = backend._read_preload_binding()
+        self.assertEqual(updated["prefix"], old["prefix"])
+        self.assertEqual(updated["wine"], str(new_wine.resolve()))
 
     def test_enabled_mismatched_binding_cannot_be_replaced(self):
         old = self._preload_binding()

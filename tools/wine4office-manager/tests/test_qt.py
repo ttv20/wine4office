@@ -127,12 +127,12 @@ class QtManagerTests(unittest.TestCase):
         return snapshot
 
     def test_background_preload_controls_are_explicit_and_accessible(self):
-        self.assertEqual(self.window.preload_group.title(), "Click-to-Run preload")
+        self.assertEqual(self.window.preload_group.title(), "Background services")
         notice = self.window.preload_notice_label.text()
         self.assertEqual(
             notice,
-            "Optional: start the Office Click-to-Run service at login for faster launches. "
-            "Uses about 100–200 MB of background RAM.",
+            "Start Office Click-to-Run and App-V services at login for faster launches. "
+            "Uses about 100–200 MB of RAM.",
         )
         self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (
@@ -149,7 +149,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertIn("does not stop", self.window.preload_disable_button.toolTip())
         self.assertTrue(self.window.preload_selected_label.accessibleName())
         self.assertTrue(self.window.preload_binding_label.accessibleName())
-        self.assertTrue(self.window.preload_state_label.accessibleName())
+        self.assertFalse(hasattr(self.window, "preload_state_label"))
         self.assertFalse(any(
             "immediate" in checkbox.text().lower()
             for checkbox in self.window.preload_group.findChildren(QCheckBox)
@@ -161,11 +161,10 @@ class QtManagerTests(unittest.TestCase):
             "wine": self.config["wine"],
         }
         cases = (
-            ("unbound", {}, "Not configured", (True, False, False, False)),
+            ("unbound", {}, (True, False, False, False)),
             (
                 "disabled",
                 {"installed": True, "binding": binding, "selected_matches": True},
-                "Disabled",
                 (True, False, True, False),
             ),
             (
@@ -176,7 +175,6 @@ class QtManagerTests(unittest.TestCase):
                     "binding": binding,
                     "selected_matches": True,
                 },
-                "Enabled",
                 (False, True, True, False),
             ),
             (
@@ -192,7 +190,6 @@ class QtManagerTests(unittest.TestCase):
                         "AppV": {"state": "running", "owned": True, "detail": ""},
                     },
                 },
-                "Active",
                 (False, True, False, True),
             ),
             (
@@ -208,7 +205,6 @@ class QtManagerTests(unittest.TestCase):
                         "AppV": {"state": "stopped", "owned": False, "detail": "failed"},
                     },
                 },
-                "Needs attention",
                 (False, True, False, True),
             ),
         )
@@ -218,19 +214,13 @@ class QtManagerTests(unittest.TestCase):
             self.window.preload_start_button,
             self.window.preload_stop_button,
         )
-        for state, values, text, enabled in cases:
+        for state, values, enabled in cases:
             with self.subTest(state=state):
                 self._refresh_preload(state=state, **values)
-                self.assertIn(text, self.window.preload_state_label.text())
                 self.assertEqual(
                     tuple(button.isEnabled() for button in buttons),
                     enabled,
                 )
-        self.assertIn("Login: enabled", self.window.preload_state_label.text())
-        self.assertIn("Worker: running", self.window.preload_state_label.text())
-        self.assertIn("Click-to-Run: failed", self.window.preload_state_label.text())
-        self.assertIn("App-V: stopped", self.window.preload_state_label.text())
-        self.assertNotIn("RpcSs", self.window.preload_state_label.text())
 
     def test_background_preload_binding_mismatch_shows_both_environments(self):
         bound = str(self.home / "other-office")
@@ -245,7 +235,6 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertEqual(self.window.preload_selected_label.text(), self.config["prefix"])
         self.assertEqual(self.window.preload_binding_label.text(), bound)
-        self.assertIn("Different environment bound", self.window.preload_state_label.text())
         self.assertIn(self.config["prefix"], self.window.preload_detail_label.text())
         self.assertIn(bound, self.window.preload_detail_label.text())
         self.assertIn("both disabled and stopped", self.window.preload_detail_label.text())
@@ -290,7 +279,7 @@ class QtManagerTests(unittest.TestCase):
 
         start.assert_called_once_with("enable")
         self.assertEqual(question.call_count, 2)
-        self.assertEqual(question.call_args.args[1], "Replace preload binding")
+        self.assertEqual(question.call_args.args[1], "Replace background service binding")
         prompt = question.call_args.args[2]
         self.assertIn(bound, prompt)
         self.assertIn(self.config["prefix"], prompt)
@@ -305,9 +294,10 @@ class QtManagerTests(unittest.TestCase):
             state="unsupported",
         )
 
-        self.assertIn("Unavailable", self.window.preload_state_label.text())
-        self.assertIn(reason, self.window.preload_detail_label.text())
-        self.assertIn("autostart or detached fallback", self.window.preload_detail_label.text())
+        self.assertEqual(
+            self.window.preload_detail_label.text(),
+            "Systemd user services are unavailable.",
+        )
         self.assertTrue(all(
             not button.isEnabled()
             for button in (
@@ -317,6 +307,22 @@ class QtManagerTests(unittest.TestCase):
                 self.window.preload_stop_button,
             )
         ))
+
+    def test_enable_installs_when_unit_is_missing_despite_stale_binding(self):
+        self._refresh_preload(
+            installed=False,
+            enabled=False,
+            active=False,
+            state="mismatch",
+            binding={"prefix": "/old/prefix", "wine": "/old/runner/bin/wine"},
+            selected_matches=False,
+        )
+
+        self.assertEqual(
+            self.window.preload_detail_label.text(),
+            "Click Enable at login to install the background services.",
+        )
+        self.assertTrue(self.window.preload_enable_button.isEnabled())
 
     def test_background_preload_controls_disable_during_checks_and_tasks(self):
         values = {
@@ -337,7 +343,7 @@ class QtManagerTests(unittest.TestCase):
             self.window.preload_stop_button,
         )
         self._refresh_preload(checking=True, **values)
-        self.assertIn("Checking status", self.window.preload_state_label.text())
+        self.assertEqual(self.window.preload_detail_label.text(), "Checking background services…")
         self.assertTrue(all(not button.isEnabled() for button in buttons))
 
         self._refresh_preload(
@@ -505,6 +511,47 @@ class QtManagerTests(unittest.TestCase):
         with mock.patch.object(self.state, "start_update_check") as check:
             self.window.start_background_update_check()
         check.assert_called_once_with()
+
+    def test_combined_update_prompt_installs_once_and_opens_maintenance(self):
+        offer = {
+            "id": "manager:0.1.6|wine:11.14",
+            "updates": {
+                "manager": {"version": "0.1.6"},
+                "wine": {"version": "11.14"},
+            },
+        }
+        install_button = object()
+        later_button = object()
+        skip_button = object()
+        with mock.patch.object(qt_module, "QMessageBox") as message_box, \
+             mock.patch.object(self.state, "start_offered_update") as start, \
+             mock.patch.object(self.window, "refresh_state"):
+            message_box.Icon = QMessageBox.Icon
+            message_box.ButtonRole = QMessageBox.ButtonRole
+            dialog = message_box.return_value
+            dialog.addButton.side_effect = (
+                install_button,
+                later_button,
+                skip_button,
+            )
+            dialog.clickedButton.return_value = install_button
+
+            self.window.prompt_update_offer(offer)
+
+        self.assertEqual(dialog.exec.call_count, 1)
+        self.assertIn(
+            "Wine4Office Manager: 0.1.6",
+            dialog.setInformativeText.call_args.args[0],
+        )
+        self.assertIn(
+            "Wine runner: 11.14",
+            dialog.setInformativeText.call_args.args[0],
+        )
+        start.assert_called_once_with(["manager", "wine"])
+        self.assertEqual(
+            self.window.navigation.currentRow(),
+            self.window.MAINTENANCE_PAGE,
+        )
 
     def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
         self.assertTrue(self.window.use_x11.isChecked())

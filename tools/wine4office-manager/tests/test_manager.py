@@ -652,7 +652,7 @@ class ManagerTests(unittest.TestCase):
 
         install.assert_called_once()
         manage.assert_not_called()
-        self.assertIn("was not started", state.snapshot()["task"]["log"])
+        self.assertIn("were not started", state.snapshot()["task"]["log"])
 
     def test_preload_cli_routes_actions_and_exit_codes(self):
         config = backend.default_config()

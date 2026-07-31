@@ -439,25 +439,51 @@ class ManagerState:
             config = dict(self.config)
 
         def install() -> str:
-            if "wine" in selected:
-                try:
-                    backend.stop_wine(
-                        config["prefix"], config["wine"],
-                        use_x11=config.get("use_x11", True),
+            preload_update = None
+            try:
+                if "wine" in selected:
+                    preload_update = backend.prepare_preload_runner_update(
+                        config["prefix"], config.get("use_x11", True)
                     )
-                    self.output("Stopped the selected Wine environment before updating.")
-                except (FileNotFoundError, OSError):
-                    pass
-            result = backend.install_release_updates(
-                metadata, selected, self.output, self.cancel_event
-            )
-            if "wine" in selected:
-                with self.lock:
-                    candidate = dict(self.config)
-                    candidate["wine"] = str(backend.runner_update_target() / "bin/wine")
-                    backend.save_config(candidate)
-                    self.config = candidate
-                    config.update(candidate)
+                    try:
+                        backend.stop_wine(
+                            config["prefix"], config["wine"],
+                            use_x11=config.get("use_x11", True),
+                        )
+                        self.output("Stopped the selected Wine environment before updating.")
+                    except (FileNotFoundError, OSError):
+                        pass
+                result = backend.install_release_updates(
+                    metadata, selected, self.output, self.cancel_event
+                )
+                if "wine" in selected:
+                    new_wine = str(backend.runner_update_target() / "bin/wine")
+                    self.output(
+                        backend.update_wine_prefix(
+                            config["prefix"], new_wine,
+                            config.get("use_x11", True), self.output,
+                            self.cancel_event, self.set_process,
+                        )
+                    )
+                    if preload_update is not None:
+                        backend.finish_preload_runner_update(preload_update, new_wine)
+                        preload_update = None
+                        self.output("Updated the background services to use the new Wine runner.")
+                    with self.lock:
+                        candidate = dict(self.config)
+                        candidate["wine"] = new_wine
+                        backend.save_config(candidate)
+                        self.config = candidate
+                        config.update(candidate)
+            finally:
+                if preload_update is not None:
+                    try:
+                        backend.restore_preload_after_runner_update(preload_update)
+                    except RuntimeError as error:
+                        self.output(
+                            "WARNING: Could not resume background services after the "
+                            f"failed Wine update: {error}"
+                        )
             if "manager" in selected:
                 with self.lock:
                     self.task["restart_required"] = True
@@ -581,16 +607,16 @@ class ManagerState:
                         config.get("use_x11", True),
                     )
                 return {
-                    "enable": "Click-to-Run preload enabled for login; it was not started.",
+                    "enable": "Background services enabled for login; they were not started.",
                     "disable": (
-                        "Click-to-Run preload disabled for login; a running service "
-                        "was not stopped."
+                        "Background services disabled for login; running services "
+                        "were not stopped."
                     ),
                     "start": (
-                        "Click-to-Run preload started without enabling login startup."
+                        "Background services started without enabling login startup."
                     ),
                     "stop": (
-                        "Click-to-Run preload stopped without disabling login startup."
+                        "Background services stopped without disabling login startup."
                     ),
                 }[action]
             finally:

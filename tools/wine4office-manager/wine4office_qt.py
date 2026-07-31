@@ -236,14 +236,14 @@ class ManagerWindow(QMainWindow):
         environment_layout.addLayout(environment_buttons)
         layout.addWidget(environment)
 
-        preload = self.preload_group = QGroupBox("Click-to-Run preload")
+        preload = self.preload_group = QGroupBox("Background services")
         preload_layout = QVBoxLayout(preload)
         preload_layout.setSpacing(2)
         self.preload_notice_label = QLabel(
-            "Optional: start the Office Click-to-Run service at login for faster launches. "
-            "Uses about 100–200 MB of background RAM."
+            "Start Office Click-to-Run and App-V services at login for faster launches. "
+            "Uses about 100–200 MB of RAM."
         )
-        self.preload_notice_label.setAccessibleName("Click-to-Run preload memory notice")
+        self.preload_notice_label.setAccessibleName("Background services memory notice")
         self.preload_notice_label.setWordWrap(True)
         preload_layout.addWidget(self.preload_notice_label)
         preload_form = self._form()
@@ -262,12 +262,8 @@ class ManagerWindow(QMainWindow):
         preload_form.addRow("Bound environment:", self.preload_binding_label)
         preload_layout.addLayout(preload_form)
 
-        self.preload_state_label = QLabel("Checking preload service status…")
-        self.preload_state_label.setAccessibleName("Click-to-Run preload state")
-        self.preload_state_label.setWordWrap(True)
-        preload_layout.addWidget(self.preload_state_label)
         self.preload_detail_label = QLabel()
-        self.preload_detail_label.setAccessibleName("Click-to-Run preload details")
+        self.preload_detail_label.setAccessibleName("Background services details")
         self.preload_detail_label.setWordWrap(True)
         self.preload_detail_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -280,41 +276,37 @@ class ManagerWindow(QMainWindow):
             lambda: self.preload_action("enable"),
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        self.preload_enable_button.setAccessibleName("Enable Click-to-Run preload at login")
+        self.preload_enable_button.setAccessibleName("Enable background services at login")
         self.preload_enable_button.setToolTip(
-            "Opt in for the selected environment and enable its Click-to-Run user service "
-            "for future logins. It typically uses 100–200 MB of background RAM. "
-            "This does not start Word or the preload worker now."
+            "Enable Office background services for future logins. "
+            "This does not start them now."
         )
         self.preload_disable_button = self._action_button(
             "Disable at login",
             lambda: self.preload_action("disable"),
             QStyle.StandardPixmap.SP_DialogCancelButton,
         )
-        self.preload_disable_button.setAccessibleName("Disable Click-to-Run preload at login")
+        self.preload_disable_button.setAccessibleName("Disable background services at login")
         self.preload_disable_button.setToolTip(
-            "Disable automatic startup at login. This does not stop a running preload "
-            "worker or Microsoft Office."
+            "Disable startup at future logins. This does not stop running services."
         )
         self.preload_start_button = self._action_button(
             "Start now",
             lambda: self.preload_action("start"),
             QStyle.StandardPixmap.SP_MediaPlay,
         )
-        self.preload_start_button.setAccessibleName("Start Click-to-Run preload now")
+        self.preload_start_button.setAccessibleName("Start background services now")
         self.preload_start_button.setToolTip(
-            "Start the preload worker now for the bound environment. "
-            "This does not enable startup at login."
+            "Start Office background services now. This does not enable them at login."
         )
         self.preload_stop_button = self._action_button(
             "Stop now",
             lambda: self.preload_action("stop"),
             QStyle.StandardPixmap.SP_MediaStop,
         )
-        self.preload_stop_button.setAccessibleName("Stop Click-to-Run preload now")
+        self.preload_stop_button.setAccessibleName("Stop background services now")
         self.preload_stop_button.setToolTip(
-            "Stop only the preload worker and components it owns after Office is closed. "
-            "This never stops Microsoft Office."
+            "Stop Office background services after Office is closed."
         )
         for button in (
             self.preload_enable_button,
@@ -366,8 +358,8 @@ class ManagerWindow(QMainWindow):
             bound, selected = self.preload_rebind
             result = QMessageBox.question(
                 self,
-                "Replace preload binding",
-                f"Replace the inactive preload binding for {bound} with {selected} "
+                "Replace background service binding",
+                f"Move the inactive background services from {bound} to {selected} "
                 "and enable it at login?\n\nThis will not start it now.",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
                 QMessageBox.StandardButton.Cancel,
@@ -375,10 +367,10 @@ class ManagerWindow(QMainWindow):
             if result != QMessageBox.StandardButton.Yes:
                 return
         messages = {
-            "enable": "Enabling Click-to-Run preload at login; it will not start now.",
-            "disable": "Disabling Click-to-Run preload at login; a running worker will not stop.",
-            "start": "Starting Click-to-Run preload for this session…",
-            "stop": "Stopping Click-to-Run preload without stopping Office…",
+            "enable": "Enabling background services at login; they will not start now.",
+            "disable": "Disabling background services at login; running services will not stop.",
+            "start": "Starting background services for this session…",
+            "stop": "Stopping background services…",
         }
         try:
             self.state.start_preload_action(action)
@@ -394,21 +386,6 @@ class ManagerWindow(QMainWindow):
                 )
             self.show_error(detail)
 
-    @staticmethod
-    def _preload_component_state(component) -> str:
-        if not isinstance(component, dict):
-            return "unknown"
-        state = component.get("state")
-        if not isinstance(state, str) or not state.strip():
-            return "unknown"
-        labels = {
-            "inactive": "stopped",
-            "not_running": "stopped",
-            "not_found": "not found",
-        }
-        normalized = state.strip().lower()
-        return labels.get(normalized, normalized.replace("_", " "))
-
     def _update_preload_status(self, snapshot: dict) -> None:
         preload = snapshot["preload"]
         selected = str(snapshot["config"]["prefix"])
@@ -418,7 +395,6 @@ class ManagerWindow(QMainWindow):
         self.preload_selected_label.setText(selected)
         self.preload_binding_label.setText(bound_text)
 
-        state = str(preload.get("state") or "unknown")
         supported = bool(preload.get("supported"))
         installed = bool(preload.get("installed"))
         enabled = bool(preload.get("enabled"))
@@ -426,36 +402,13 @@ class ManagerWindow(QMainWindow):
         checking = bool(preload.get("checking"))
         selected_matches = bool(preload.get("selected_matches"))
         mismatch = bool(binding) and not selected_matches
-        state_names = {
-            "unsupported": "Unavailable",
-            "unbound": "Not configured",
-            "disabled": "Disabled",
-            "enabled": "Enabled",
-            "active": "Active",
-            "degraded": "Needs attention",
-            "binding_mismatch": "Different environment bound",
-        }
-        overall = "Checking status" if checking else state_names.get(
-            state, state.replace("_", " ").capitalize()
-        )
-        components = preload.get("components")
-        if not isinstance(components, dict):
-            components = {}
-        click_to_run = self._preload_component_state(components.get("ClickToRunSvc"))
-        appv = self._preload_component_state(components.get("AppV"))
-        self.preload_state_label.setText(
-            f"{overall} — Login: {'enabled' if enabled else 'disabled'}; "
-            f"Worker: {'running' if active else 'stopped'}; "
-            f"Click-to-Run: {click_to_run}; App-V: {appv}."
-        )
-
         detail = str(preload.get("detail") or "").strip()
-        reason = str(preload.get("reason") or "").strip()
         if not supported:
-            cause = reason or detail or "User services are unavailable."
-            detail = (
-                f"{cause} Wine4Office will not use an autostart or detached fallback."
-            )
+            detail = "Systemd user services are unavailable."
+        elif checking:
+            detail = "Checking background services…"
+        elif not installed:
+            detail = "Click Enable at login to install the background services."
         elif mismatch:
             if enabled or active:
                 detail = (
@@ -470,13 +423,6 @@ class ManagerWindow(QMainWindow):
                     f"Bound: {bound_text}. Enable at login can replace it only after "
                     "explicit confirmation, and will not start the worker now."
                 )
-        elif checking:
-            detail = "Checking the optional user service without blocking the Manager."
-        elif not installed:
-            detail = detail or (
-                "Opt in with Enable at login. Enabling creates the Click-to-Run user "
-                "service but does not start it now or run Word."
-            )
         elif active and not enabled:
             detail = detail or (
                 "Running for this session only. It will not start at the next login."
@@ -500,7 +446,7 @@ class ManagerWindow(QMainWindow):
         available = supported and not checking and not task_running
         self.preload_enable_button.setEnabled(
             available and not enabled
-            and (not mismatch or (installed and not active))
+            and (not installed or not mismatch or not active)
         )
         self.preload_disable_button.setEnabled(
             available and installed and enabled
@@ -1512,54 +1458,56 @@ class ManagerWindow(QMainWindow):
     def prompt_update_offer(self, offer: dict) -> None:
         if self._close_when_idle or self._automatic_close:
             return
-        selected: list[str] = []
-        skipped: list[str] = []
         labels = {
             "manager": "Wine4Office Manager",
             "wine": "Wine runner",
         }
-        for name in ("manager", "wine"):
-            component = offer["updates"].get(name)
-            if not component:
-                continue
-            dialog = QMessageBox(self)
-            dialog.setIcon(QMessageBox.Icon.Question)
-            dialog.setWindowTitle(f"{labels[name]} update available")
-            dialog.setText(f"{labels[name]} {component['version']} is available.")
-            dialog.setInformativeText(
-                "The artifact will download only after you approve this component."
+        selected = [
+            name for name in ("manager", "wine")
+            if offer["updates"].get(name)
+        ]
+        if not selected:
+            return
+        versions = "\n".join(
+            f"{labels[name]}: {offer['updates'][name]['version']}"
+            for name in selected
+        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle("Wine4Office update available")
+        dialog.setText("Updates are available.")
+        dialog.setInformativeText(
+            f"{versions}\n\nNothing downloads until you approve this update."
+        )
+        install_button = dialog.addButton(
+            "Download and install", QMessageBox.ButtonRole.AcceptRole
+        )
+        later_button = dialog.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip_button = dialog.addButton(
+            "Skip these versions", QMessageBox.ButtonRole.DestructiveRole
+        )
+        with self.state.lock:
+            automatic_enabled = (
+                self.state.config.get("automatic_update_checks") is True
             )
-            install_button = dialog.addButton(
-                "Download and install", QMessageBox.ButtonRole.AcceptRole
+        disable_button = (
+            dialog.addButton(
+                "Disable automatic checks", QMessageBox.ButtonRole.ActionRole
             )
-            later_button = dialog.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-            skip_button = dialog.addButton(
-                f"Skip {component['version']}", QMessageBox.ButtonRole.DestructiveRole
-            )
-            with self.state.lock:
-                automatic_enabled = (
-                    self.state.config.get("automatic_update_checks") is True
-                )
-            disable_button = (
-                dialog.addButton(
-                    "Disable automatic checks", QMessageBox.ButtonRole.ActionRole
-                )
-                if automatic_enabled else None
-            )
-            dialog.setDefaultButton(later_button)
-            dialog.exec()
-            if dialog.clickedButton() is install_button:
-                selected.append(name)
-            elif dialog.clickedButton() is skip_button:
-                skipped.append(name)
-            elif disable_button is not None and dialog.clickedButton() is disable_button:
-                self._apply_automatic_update_checks(False, prompted=True)
-        if skipped:
-            self.state.skip_offered_updates(skipped)
-        if selected:
+            if automatic_enabled else None
+        )
+        dialog.setDefaultButton(later_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is skip_button:
+            self.state.skip_offered_updates(selected)
+        elif disable_button is not None and clicked is disable_button:
+            self._apply_automatic_update_checks(False, prompted=True)
+        elif clicked is install_button:
             try:
                 if "manager" in selected:
                     self.restart_prompted = False
+                self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
                 self.state.start_offered_update(selected)
                 self.notify("Downloading the approved updates…")
                 self.refresh_state()
