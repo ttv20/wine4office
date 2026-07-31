@@ -697,6 +697,7 @@ struct x11drv_win_data
     UINT        parent_invalid : 1; /* is the parent host window possibly invalid */
     UINT        reparenting : 1; /* window is being reparented, likely from a decoration change */
     UINT        is_resizable : 1; /* window is allowed to be resized by the window manager */
+    UINT        surface_initialized : 1; /* whole window has received initialized surface contents */
     UINT        map_after_first_paint : 1; /* visible window is waiting for initialized contents */
     UINT        map_activate : 1; /* activate the window when deferred mapping completes */
     Window      embedder;       /* window id of embedder */
