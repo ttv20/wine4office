@@ -67,6 +67,19 @@ static EGLConfig egl_config_for_format(int format)
     return egl->configs[(format - 1) % egl->config_count];
 }
 
+static BOOL client_surface_needs_alpha(HWND hwnd)
+{
+    HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    HRGN region;
+    int type;
+
+    if (!toplevel || toplevel == hwnd) return FALSE;
+    if (!(region = NtGdiCreateRectRgn(0, 0, 0, 0))) return FALSE;
+    type = NtUserGetWindowRgnEx(toplevel, region, 0);
+    NtGdiDeleteObjectApp(region);
+    return type > ERROR;
+}
+
 static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
 {
     int client_width, client_height;
@@ -95,12 +108,15 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     if (rect.right == rect.left) rect.right = rect.left + 1;
     if (rect.bottom == rect.top) rect.bottom = rect.top + 1;
 
-    if (!egl->has_EGL_EXT_present_opaque)
-        WARN("Missing EGL_EXT_present_opaque extension\n");
-    else
+    if (!client_surface_needs_alpha(hwnd))
     {
-        *attrib++ = EGL_PRESENT_OPAQUE_EXT;
-        *attrib++ = EGL_TRUE;
+        if (!egl->has_EGL_EXT_present_opaque)
+            WARN("Missing EGL_EXT_present_opaque extension\n");
+        else
+        {
+            *attrib++ = EGL_PRESENT_OPAQUE_EXT;
+            *attrib++ = EGL_TRUE;
+        }
     }
     *attrib++ = EGL_NONE;
 
