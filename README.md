@@ -1,4 +1,6 @@
-![Wine4Office banner](banner.png)
+<p align="center">
+  <img src="banner.png" alt="Wine4Office banner">
+</p>
 
 # Wine4Office 🍷📎
 
