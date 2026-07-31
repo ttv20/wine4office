@@ -38,7 +38,7 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
                                          uint32_t serial)
 {
     struct wayland_surface *surface;
-    BOOL should_post = FALSE, initial_configure = FALSE;
+    BOOL should_post = FALSE, expose_contents = FALSE;
     struct wayland_win_data *data;
     HWND hwnd = private;
 
@@ -55,7 +55,11 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
          * WM_WAYLAND_CONFIGURE which hasn't been handled yet. In that case,
          * avoid sending another message to reduce message queue traffic. */
         should_post = surface->requested.serial == 0;
-        initial_configure = surface->current.serial == 0;
+        /* A window surface is initialized to opaque white. Only expose it
+         * after the initial configure if an application presentation was
+         * already queued while waiting for that configure. Otherwise the
+         * initialization buffer would be visible until the first paint. */
+        expose_contents = surface->current.serial == 0 && data->window_contents;
         surface->pending.serial = serial;
         surface->requested = surface->pending;
         memset(&surface->pending, 0, sizeof(surface->pending));
@@ -67,7 +71,7 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
 
     /* Flush the window surface in case there is content that we weren't
      * able to flush before due to the lack of the initial configure. */
-    if (initial_configure)
+    if (expose_contents)
     {
         NtUserExposeWindowSurface(hwnd, 0, NULL);
     }
