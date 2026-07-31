@@ -13,7 +13,8 @@ from typing import Callable
 import wine4office_backend as backend
 
 
-POST_INSTALL_SCHEMA = 3
+POST_INSTALL_SCHEMA = 4
+RUNNER_LIFECYCLE_SCHEMA = 4
 Output = Callable[[str], None]
 
 
@@ -58,6 +59,59 @@ def _write_marker(version: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _runner_lifecycle_migration_needed() -> bool:
+    try:
+        marker = json.loads(marker_path().read_text())
+        return int(marker.get("schema", 0)) < RUNNER_LIFECYCLE_SCHEMA
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return True
+
+
+def _migrate_runner_lifecycle(context: PostInstallContext) -> dict:
+    """Apply the runner lifecycle once for updates initiated by older managers."""
+    if not _runner_lifecycle_migration_needed():
+        context.output(
+            "Post-install: Wine runner lifecycle migration already applied."
+        )
+        return {"needed": False, "updated": False, "preload_resumed": False}
+
+    prefix = context.config["prefix"]
+    wine = context.config["wine"]
+    use_x11 = context.config.get("use_x11", True)
+    try:
+        valid_prefix = backend.classify_prefix(prefix) == "valid"
+        valid_runner = Path(wine).is_file() and os.access(wine, os.X_OK)
+    except (OSError, ValueError):
+        valid_prefix = valid_runner = False
+    if not valid_prefix or not valid_runner:
+        context.output(
+            "Post-install: no ready Wine environment; runner lifecycle left unchanged."
+        )
+        return {"needed": True, "updated": False, "preload_resumed": False}
+
+    preload_update = backend.prepare_preload_runner_update(prefix, use_x11)
+    try:
+        backend.stop_wine(prefix, wine, use_x11)
+        context.output("Post-install: stopped the selected Wine environment.")
+        context.output(
+            backend.update_wine_prefix(prefix, wine, use_x11, context.output)
+        )
+        if preload_update is not None:
+            backend.finish_preload_runner_update(preload_update, wine)
+            preload_update = None
+            context.output(
+                "Post-install: background services resumed with the new Wine runner."
+            )
+            resumed = True
+        else:
+            resumed = False
+    finally:
+        if preload_update is not None:
+            backend.restore_preload_after_runner_update(preload_update)
+
+    return {"needed": True, "updated": True, "preload_resumed": resumed}
+
+
 def _migrate_managed_shortcuts(context: PostInstallContext) -> dict:
     result = backend.refresh_managed_app_shortcuts(
         context.config["prefix"], context.config["wine"],
@@ -93,6 +147,7 @@ def _refresh_automatic_update_schedule(context: PostInstallContext) -> dict:
 
 
 POST_INSTALL_HOOKS = (
+    _migrate_runner_lifecycle,
     _migrate_managed_shortcuts,
     _refresh_manager_shortcut,
     _refresh_automatic_update_schedule,

@@ -134,6 +134,82 @@ class PostInstallTests(unittest.TestCase):
 
         install.assert_called_once_with()
 
+    def test_legacy_update_runs_new_runner_lifecycle_once(self):
+        Path(self.config["wine"]).parent.mkdir(parents=True)
+        Path(self.config["wine"]).write_text("#!/bin/sh\n")
+        Path(self.config["wine"]).chmod(0o755)
+        transition = {"active": True, "binding": {"prefix": self.config["prefix"]}}
+        output = []
+        with mock.patch.object(
+            backend, "current_version", return_value="2.4.0"
+        ), mock.patch.object(
+            backend, "classify_prefix", return_value="valid",
+        ), mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=transition,
+        ) as prepare, mock.patch.object(
+            backend, "stop_wine",
+        ) as stop, mock.patch.object(
+            backend, "update_wine_prefix", return_value="runner updated",
+        ) as update, mock.patch.object(
+            backend, "finish_preload_runner_update",
+        ) as finish, mock.patch.object(
+            backend, "refresh_managed_app_shortcuts",
+            return_value={"updated": [], "skipped": {}},
+        ), mock.patch.object(
+            backend, "refresh_manager_shortcut",
+            return_value={"updated": False, "path": "/manager.desktop"},
+        ):
+            first = post_install.run_post_install(
+                self.config, self.helper, self.manager_command, self.icons,
+                output.append,
+            )
+            second = post_install.run_post_install(
+                self.config, self.helper, self.manager_command, self.icons,
+                output.append, force=True,
+            )
+
+        prepare.assert_called_once_with(self.config["prefix"], True)
+        stop.assert_called_once_with(
+            self.config["prefix"], self.config["wine"], True
+        )
+        update.assert_called_once_with(
+            self.config["prefix"], self.config["wine"], True, output.append
+        )
+        finish.assert_called_once_with(transition, self.config["wine"])
+        self.assertEqual(first["hooks"][0], {
+            "needed": True, "updated": True, "preload_resumed": True,
+        })
+        self.assertEqual(second["hooks"][0], {
+            "needed": False, "updated": False, "preload_resumed": False,
+        })
+
+    def test_failed_runner_migration_restores_preload_service(self):
+        Path(self.config["wine"]).parent.mkdir(parents=True)
+        Path(self.config["wine"]).write_text("#!/bin/sh\n")
+        Path(self.config["wine"]).chmod(0o755)
+        transition = {"active": True}
+        with mock.patch.object(
+            backend, "current_version", return_value="2.4.0"
+        ), mock.patch.object(
+            backend, "classify_prefix", return_value="valid",
+        ), mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=transition,
+        ), mock.patch.object(
+            backend, "stop_wine",
+        ), mock.patch.object(
+            backend, "update_wine_prefix", side_effect=RuntimeError("wineboot failed"),
+        ), mock.patch.object(
+            backend, "restore_preload_after_runner_update",
+        ) as restore:
+            with self.assertRaisesRegex(RuntimeError, "wineboot failed"):
+                post_install.run_post_install(
+                    self.config, self.helper, self.manager_command, self.icons,
+                    lambda _line: None,
+                )
+
+        restore.assert_called_once_with(transition)
+        self.assertFalse(post_install.marker_path().exists())
+
 
 if __name__ == "__main__":
     unittest.main()

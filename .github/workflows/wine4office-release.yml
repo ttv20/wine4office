@@ -157,13 +157,18 @@ jobs:
       - name: Package separate release artifacts
         run: |
           set -euo pipefail
+          release_base_url=$CONFIGURED_RELEASE_BASE_URL
+          if [[ $GITHUB_REF == refs/tags/wine4office-v* \
+                && $release_base_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" ]]; then
+            release_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          fi
           tools/wine4office-manager/packaging/build-release-artifacts.sh \
             stage/opt/wine4office \
             build/manager/Wine4OfficeManager \
             release \
             '${{ steps.version.outputs.version }}' \
             "$CONFIGURED_METADATA_URL" \
-            "$CONFIGURED_RELEASE_BASE_URL" \
+            "$release_base_url" \
             "$CONFIGURED_RELEASE_CHANNEL"
           install -m 0755 install.sh release/install.sh
 
