@@ -1,0 +1,42 @@
+# Changelog
+
+## 0.1.7 — 2026-07-31
+
+- Complete updates started by older managers on the first restart: stop Wine,
+  run `wineboot -u` with the new runner, and restore active background services.
+- Use tag-specific artifact URLs for prereleases.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.6...wine4office-v0.1.7)
+
+## 0.1.6 — 2026-07-31
+
+- Update the Wine prefix and safely rebind active background services after a
+  runner update.
+- Restart background services after **Stop Wine** and allow stopping an older
+  runner binding.
+- Simplify the background-services controls and update progress in the Manager.
+- Fix the repeated update prompt and show updates in the Maintenance view.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.5...wine4office-v0.1.6)
+
+## 0.1.5 — 2026-07-31
+
+- Update the runner to Wine 11.14.
+- Preload App-V with Click-to-Run for faster Office startup.
+- Improve Office rendering and window behavior on Wayland, including mixed
+  GDI/OpenGL child windows.
+- Fix several Wayland surface-locking and first-paint issues.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.4...wine4office-v0.1.5)
+
+## 0.1.4 — 2026-07-31
+
+- Add an opt-in login service that keeps Office Click-to-Run ready without
+  starting Word.
+- Speed up Office startup by deferring printer discovery and caching unchanged
+  cloud-font scans.
+- Launch Office shortcuts directly and require NTSYNC-enabled runners.
+- Add per-prefix Office settings, scheduled update checks, and post-update
+  maintenance hooks.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.3...wine4office-v0.1.4)
