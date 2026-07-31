@@ -377,6 +377,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
     BOOL flushed = FALSE;
+    BOOL update_full_shape = shape_changed;
     BOOL reapply_clip;
     HRGN surface_damage_region = NULL;
     HRGN copy_from_window_region;
@@ -409,6 +410,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         TRACE("recreating buffer queue with format %d\n", buffer_format);
         wayland_buffer_queue_destroy(wws->wayland_buffer_queue);
         wws->wayland_buffer_queue = wayland_buffer_queue_create(width, height, buffer_format);
+        update_full_shape = TRUE;
 
         /* Changing between opaque and alpha-capable buffers changes the
          * effective contents outside the current paint bounds too. This is
@@ -457,11 +459,14 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         /* If we don't have a latest buffer, use the window_surface as
          * the source of all pixel data. */
         copy_from_window_region = shm_buffer->damage_region;
+        update_full_shape = TRUE;
     }
 
     wayland_shm_buffer_copy_data(shm_buffer, color_bits, &surface_rect, copy_from_window_region,
                                  shape_bits && !wws->layered);
-    if (shape_bits) wayland_shm_buffer_copy_shape(shm_buffer, rect, shape_info, shape_bits);
+    if (shape_bits)
+        wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
+                                      shape_info, shape_bits);
 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
