@@ -47,6 +47,7 @@ struct wayland_window_surface
     struct wayland_buffer_queue *wayland_buffer_queue;
     BOOL layered;
     LONG reapply_clip;
+    void *popup_restack_owner;
 };
 
 static struct wayland_window_surface *wayland_window_surface_cast(
@@ -379,6 +380,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     BOOL flushed = FALSE;
     BOOL update_full_shape = shape_changed;
     BOOL reapply_clip;
+    HWND popup_restack_owner;
     HRGN surface_damage_region = NULL;
     HRGN copy_from_window_region;
     uint32_t buffer_format;
@@ -471,8 +473,10 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
     flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region,
-                                          &reapply_clip);
+                                          &reapply_clip, &popup_restack_owner);
     if (reapply_clip) InterlockedExchange(&wws->reapply_clip, TRUE);
+    if (popup_restack_owner)
+        InterlockedExchangePointer(&wws->popup_restack_owner, popup_restack_owner);
     wl_display_flush(process_wayland.wl_display);
 
 done:
@@ -483,9 +487,13 @@ done:
 static void wayland_window_surface_flush_done(struct window_surface *window_surface)
 {
     struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
+    HWND popup_restack_owner;
 
     if (InterlockedExchange(&wws->reapply_clip, FALSE))
         wayland_reapply_cursor_clipping(window_surface->hwnd);
+    if ((popup_restack_owner =
+         InterlockedExchangePointer(&wws->popup_restack_owner, NULL)))
+        wayland_restack_after_surface_flush(popup_restack_owner);
 }
 
 /***********************************************************************

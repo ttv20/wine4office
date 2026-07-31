@@ -858,7 +858,8 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
                 wl_subsurface_place_above(surface->wl_subsurface, owner_data->client_surface->wl_surface);
             else
                 wl_subsurface_place_above(surface->wl_subsurface, owner_surface->wl_surface);
-            wayland_win_data_restack_owned_popups(surface->owner_hwnd);
+            /* The complete popup/client stack is rebuilt by flush_done after
+             * both the window-surface and win-data locks have been released. */
             surface->stacked = TRUE;
         }
         wl_surface_commit(owner_surface->wl_surface);
