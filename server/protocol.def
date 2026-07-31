@@ -267,6 +267,12 @@ struct property_data
     lparam_t       data;     /* data stored in property */
 };
 
+struct ratio
+{
+    unsigned short num;
+    unsigned short den;
+};
+
 /* structure to specify window rectangles */
 struct rectangle
 {
@@ -361,6 +367,7 @@ union hw_input
         unsigned int   flags;   /* event flags */
         unsigned int   time;    /* event time */
         lparam_t       info;    /* extra info */
+        unsigned int   raw_count; /* number of rawinput POINT in varargs */
     } mouse;
     struct
     {
@@ -917,8 +924,9 @@ struct monitor_info
 {
     struct rectangle raw;     /* host / physical position of the monitor rect */
     struct rectangle virt;    /* client / virtual position of the monitor rect */
-    unsigned int     flags;  /* MONITOR_FLAG_* flags for the monitor */
-    unsigned int     dpi;    /* physical DPI for the monitor */
+    unsigned int     flags;   /* MONITOR_FLAG_* flags for the monitor */
+    struct ratio     dpi;     /* effective DPI for the monitor */
+    struct ratio     raw_dpi; /* raw DPI for the monitor */
 };
 #define MONITOR_FLAG_PRIMARY  0x01
 #define MONITOR_FLAG_CLONE    0x02
@@ -1089,6 +1097,8 @@ typedef volatile struct
     unsigned int         fnid;             /* builtin class FNID, or 0 */
     unsigned int         ansi;             /* window wndproc is ansi */
     int                  __pad;
+    struct ratio         dpi;              /* effective DPI of the window monitor */
+    struct ratio         raw_dpi;          /* raw DPI of the window monitor */
     data_size_t          private_size;     /* length of private extra bytes range */
     data_size_t          extra_size;       /* size of the extra info */
     struct window_info   info;             /* window info (GWLP_*) */
@@ -2461,7 +2471,7 @@ enum message_type
     user_handle_t   win;       /* window handle */
     union hw_input  input;     /* input data */
     unsigned int    flags;     /* flags (see below) */
-    VARARG(report,bytes);      /* HID report data */
+    VARARG(extra,bytes);       /* HID report data / raw input data */
 @REPLY
     int             wait;      /* do we need to wait for a reply? */
     int             prev_x;    /* previous cursor position */
@@ -2469,7 +2479,8 @@ enum message_type
     int             new_x;     /* new cursor position */
     int             new_y;
 @END
-#define SEND_HWMSG_INJECTED    0x01
+#define SEND_HWMSG_INJECTED    0x01  /* message is injected from application */
+#define SEND_HWMSG_RAWINPUT    0x02  /* don't generate WM_INPUT x / y updates */
 
 
 /* Get a message from the current queue */
@@ -2817,7 +2828,7 @@ enum message_type
     user_handle_t  parent;        /* parent window */
     int            x;             /* point in parent coordinates */
     int            y;
-    int            dpi;           /* dpi for the point coordinates */
+    struct ratio   dpi;           /* dpi for the point coordinates */
 @REPLY
     int            count;         /* total count of children */
     VARARG(children,user_handles); /* children handles */
@@ -2842,7 +2853,6 @@ enum message_type
 @REQ(set_window_pos)
     unsigned short swp_flags;     /* SWP_* flags */
     unsigned short paint_flags;   /* paint flags (see below) */
-    unsigned int   monitor_dpi;   /* DPI of the window's monitor */
     user_handle_t  handle;        /* handle to the window */
     user_handle_t  previous;      /* previous window in Z order */
     struct rectangle window;      /* window rectangle (in parent coords) */
@@ -2861,7 +2871,7 @@ enum message_type
 @REQ(get_window_rectangles)
     user_handle_t  handle;        /* handle to the window */
     int            relative;      /* coords relative to (see below) */
-    int            dpi;           /* DPI to map to, or zero for per-monitor DPI */
+    struct ratio   dpi;           /* DPI to map to, or zero for per-monitor DPI */
 @REPLY
     struct rectangle window;      /* window rectangle */
     struct rectangle client;      /* client rectangle */
@@ -2895,7 +2905,7 @@ enum coords_relative
 @REQ(get_windows_offset)
     user_handle_t  from;          /* handle to the first window */
     user_handle_t  to;            /* handle to the second window */
-    int            dpi;           /* DPI to map to, or zero for per-monitor DPI */
+    struct ratio   dpi;           /* DPI to map to, or zero for per-monitor DPI */
 @REPLY
     int            x;             /* x coordinate offset */
     int            y;             /* y coordinate offset */
@@ -4364,4 +4374,14 @@ enum inproc_sync_type
     unsigned __int64    fence_value;    /* semaphore fence value */
     data_size_t         runtime_size;   /* size of client runtime data */
     VARARG(runtime,bytes);              /* client runtime data */
+@END
+
+
+/* Create a new ALPC object */
+@REQ(alpc_create_port)
+    unsigned int        flags;          /* flags in port attributes */
+    mem_size_t          max_msg_len;    /* max message length in port attributes */
+    VARARG(obj_attr,object_attributes); /* object attributes */
+@REPLY
+    obj_handle_t        handle;         /* handle to the ALPC port */
 @END

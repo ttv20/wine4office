@@ -916,9 +916,10 @@ static HRESULT d2d_device_context_update_ps_cb(struct d2d_device_context *contex
     cb_data->is_curve = is_curve;
     cb_data->is_arc = is_arc;
     cb_data->antialias = context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
-    if (!d2d_brush_fill_cb(brush, &cb_data->colour_brush))
+    if (!d2d_brush_fill_cb(brush, context->drawing_state.unitMode, &cb_data->colour_brush))
         WARN("Failed to initialize colour brush buffer.\n");
-    if (!d2d_brush_fill_cb(opacity_brush, &cb_data->opacity_brush))
+    if (!d2d_brush_fill_cb(opacity_brush, context->drawing_state.unitMode,
+            &cb_data->opacity_brush))
         WARN("Failed to initialize opacity brush buffer.\n");
 
     ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)context->ps_cb, 0);
@@ -4002,7 +4003,7 @@ static void d2d_software_image_apply_color_matrix(struct d2d_software_image *ima
         input[1] = pixel[1] / 255.0f;
         input[2] = pixel[blue] / 255.0f;
         input[3] = pixel[3] / 255.0f;
-        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT && input[3] > 0.0f)
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED && input[3] > 0.0f)
             for (x = 0; x < 3; ++x)
                 input[x] /= input[3];
 
@@ -4013,7 +4014,7 @@ static void d2d_software_image_apply_color_matrix(struct d2d_software_image *ima
                 output[y] += input[x] * matrix->m[x][y];
             output[y] = fminf(1.0f, fmaxf(0.0f, output[y]));
         }
-        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_STRAIGHT)
+        if (alpha_mode == D2D1_COLORMATRIX_ALPHA_MODE_PREMULTIPLIED)
             for (x = 0; x < 3; ++x)
                 output[x] *= output[3];
 

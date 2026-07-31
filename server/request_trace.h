@@ -14,6 +14,7 @@ static void dump_ioctl_code( const char *prefix, const ioctl_code_t *val );
 static void dump_irp_params( const char *prefix, const union irp_params *val );
 static void dump_luid( const char *prefix, const struct luid *val );
 static void dump_obj_locator( const char *prefix, const struct obj_locator *val );
+static void dump_ratio( const char *prefix, const struct ratio *val );
 static void dump_rectangle( const char *prefix, const struct rectangle *val );
 static void dump_timeout( const char *prefix, const timeout_t *val );
 static void dump_uint64( const char *prefix, const unsigned __int64 *val );
@@ -1497,7 +1498,7 @@ static void dump_send_hardware_message_request( const struct send_hardware_messa
     fprintf( stderr, " win=%08x", req->win );
     dump_hw_input( ", input=", &req->input );
     fprintf( stderr, ", flags=%08x", req->flags );
-    dump_varargs_bytes( ", report=", cur_size );
+    dump_varargs_bytes( ", extra=", cur_size );
 }
 
 static void dump_send_hardware_message_reply( const struct send_hardware_message_reply *req )
@@ -1878,7 +1879,7 @@ static void dump_get_window_children_from_point_request( const struct get_window
     fprintf( stderr, " parent=%08x", req->parent );
     fprintf( stderr, ", x=%d", req->x );
     fprintf( stderr, ", y=%d", req->y );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_window_children_from_point_reply( const struct get_window_children_from_point_reply *req )
@@ -1908,7 +1909,6 @@ static void dump_set_window_pos_request( const struct set_window_pos_request *re
 {
     fprintf( stderr, " swp_flags=%04x", req->swp_flags );
     fprintf( stderr, ", paint_flags=%04x", req->paint_flags );
-    fprintf( stderr, ", monitor_dpi=%08x", req->monitor_dpi );
     fprintf( stderr, ", handle=%08x", req->handle );
     fprintf( stderr, ", previous=%08x", req->previous );
     dump_rectangle( ", window=", &req->window );
@@ -1927,7 +1927,7 @@ static void dump_get_window_rectangles_request( const struct get_window_rectangl
 {
     fprintf( stderr, " handle=%08x", req->handle );
     fprintf( stderr, ", relative=%d", req->relative );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_window_rectangles_reply( const struct get_window_rectangles_reply *req )
@@ -1957,7 +1957,7 @@ static void dump_get_windows_offset_request( const struct get_windows_offset_req
 {
     fprintf( stderr, " from=%08x", req->from );
     fprintf( stderr, ", to=%08x", req->to );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_windows_offset_reply( const struct get_windows_offset_reply *req )
@@ -3570,6 +3570,18 @@ static void dump_d3dkmt_mutex_release_request( const struct d3dkmt_mutex_release
     dump_varargs_bytes( ", runtime=", cur_size );
 }
 
+static void dump_alpc_create_port_request( const struct alpc_create_port_request *req )
+{
+    fprintf( stderr, " flags=%08x", req->flags );
+    dump_uint64( ", max_msg_len=", &req->max_msg_len );
+    dump_varargs_object_attributes( ", obj_attr=", cur_size );
+}
+
+static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -3885,6 +3897,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_object_open_name_request,
     (dump_func)dump_d3dkmt_mutex_acquire_request,
     (dump_func)dump_d3dkmt_mutex_release_request,
+    (dump_func)dump_alpc_create_port_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4200,6 +4213,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_object_open_name_reply,
     (dump_func)dump_d3dkmt_mutex_acquire_reply,
     NULL,
+    (dump_func)dump_alpc_create_port_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4515,6 +4529,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "d3dkmt_object_open_name",
     "d3dkmt_mutex_acquire",
     "d3dkmt_mutex_release",
+    "alpc_create_port",
 };
 
 static const struct

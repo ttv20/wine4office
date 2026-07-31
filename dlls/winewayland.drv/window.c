@@ -48,7 +48,7 @@ static int wayland_win_data_cmp_rb(const void *key,
     return 0;
 }
 
-static pthread_mutex_t win_data_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t win_data_mutex;
 static struct rb_tree win_data_rb = { wayland_win_data_cmp_rb };
 
 /***********************************************************************
@@ -112,10 +112,10 @@ static void wayland_win_data_destroy(struct wayland_win_data *data)
  */
 struct wayland_win_data *wayland_win_data_get_nolock(HWND hwnd)
 {
-    struct rb_entry *rb_entry;
+    struct rb_entry *entry;
 
-    if ((rb_entry = rb_get(&win_data_rb, hwnd)))
-        return RB_ENTRY_VALUE(rb_entry, struct wayland_win_data, entry);
+    if ((entry = rb_get(&win_data_rb, hwnd)))
+        return RB_ENTRY_VALUE(entry, struct wayland_win_data, entry);
 
     return NULL;
 }
@@ -235,15 +235,43 @@ void wayland_win_data_restack_owned_popups(HWND toplevel)
     wayland_win_data_restack_client_surfaces(toplevel);
 }
 
+struct wayland_window_state
+{
+    DWORD style;
+    DWORD exstyle;
+    WCHAR title[1024];
+    BYTE layered_alpha;
+    DWORD layered_flags;
+    BOOL layered_attributes;
+    BOOL has_background;
+    BOOL foreground;
+};
+
+static void get_wayland_window_state(HWND hwnd, struct wayland_window_state *state)
+{
+    COLORREF key;
+
+    memset(state, 0, sizeof(*state));
+    state->layered_alpha = 0xff;
+    state->style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+    state->exstyle = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (!NtUserInternalGetWindowText(hwnd, state->title, ARRAY_SIZE(state->title)))
+        state->title[0] = 0;
+    state->layered_attributes = (state->exstyle & WS_EX_LAYERED) &&
+        NtUserGetLayeredWindowAttributes(hwnd, &key, &state->layered_alpha,
+                                         &state->layered_flags);
+    state->has_background = !!NtUserGetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
+    state->foreground = hwnd == NtUserGetForegroundWindow();
+}
+
 static void wayland_win_data_get_config(struct wayland_win_data *data,
+                                        const struct wayland_window_state *state,
                                         struct wayland_window_config *conf)
 {
     enum wayland_surface_config_state window_state = 0;
-    DWORD style;
+    DWORD style = state->style;
 
     conf->rect = data->rects.window;
-    conf->client_rect = data->rects.client;
-    style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
 
     TRACE("window=%s style=%#x\n", wine_dbgstr_rect(&conf->rect), style);
 
@@ -272,42 +300,41 @@ static void reapply_cursor_clipping(void)
 {
     RECT rect;
     UINT context = NtUserSetThreadDpiAwarenessContext(NTUSER_DPI_PER_MONITOR_AWARE);
-    if (NtUserGetClipCursor(&rect )) NtUserClipCursor(&rect);
+    if (NtUserGetClipCursor(&rect)) NtUserClipCursor(&rect);
     NtUserSetThreadDpiAwarenessContext(context);
 }
 
 static void wayland_win_data_update_wayland_state(struct wayland_win_data *data);
 
-static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data, struct wayland_surface *owner_surface)
+static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data,
+                                                    struct wayland_surface *owner_surface,
+                                                    const struct wayland_window_state *state,
+                                                    BOOL *reapply_clip)
 {
     struct wayland_surface *surface;
     enum wayland_surface_role role;
     BOOL visible;
-    DWORD exstyle = NtUserGetWindowLongW(data->hwnd, GWL_EXSTYLE);
     struct wl_region *input_region;
-    COLORREF key;
-    BYTE alpha;
-    DWORD flags;
 
     TRACE("hwnd=%p\n", data->hwnd);
 
-    visible = ((NtUserGetWindowLongW(data->hwnd, GWL_STYLE) & WS_VISIBLE) == WS_VISIBLE) &&
-               (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
+    visible = ((state->style & WS_VISIBLE) == WS_VISIBLE) &&
+               (!(state->exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
 
     /* A global alpha of zero means that the window must not be mapped. This
      * also preserves the contract on compositors without alpha-modifier
      * support, where attaching a buffer would otherwise expose its contents. */
-    if (visible && (exstyle & WS_EX_LAYERED) &&
-        NtUserGetLayeredWindowAttributes(data->hwnd, &key, &alpha, &flags) &&
-        (flags & LWA_ALPHA) && !alpha)
+    if (visible && state->layered_attributes &&
+        (state->layered_flags & LWA_ALPHA) && !state->layered_alpha)
         visible = FALSE;
 
-    /* A newly visible toplevel without a class background brush has no
-     * application-defined contents yet. Keep it role-less until the first
+    /* A newly visible unmanaged toplevel without a class background brush has
+     * no application-defined contents yet. Keep it role-less until the first
      * software flush or GPU presentation instead of exposing the driver's
-     * generic initialization buffer. */
-    if (visible && !owner_surface && !data->contents_presented &&
-        !NtUserGetClassLongPtrW(data->hwnd, GCLP_HBRBACKGROUND))
+     * generic initialization buffer. Managed application windows need their
+     * initial xdg configure before they can produce the first presentation. */
+    if (visible && !data->managed && !owner_surface &&
+        !data->contents_presented && !state->has_background)
         visible = FALSE;
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
@@ -317,19 +344,24 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     /* we can temporarily clear the role of a surface but cannot assign a different one after it's set */
     if ((surface = data->wayland_surface) && role && surface->role && surface->role != role)
     {
-        /* Make sure any attached client surface is detached before we destroy the surface.
-         * They will be reattached when win32u updates them again after WindowPosChanged.
-         */
+        /* Client surfaces are reattached by win32u after WindowPosChanged
+         * returns. Do not update them here while holding win_data_mutex:
+         * presentation holds surfaces_lock while entering the Wayland driver,
+         * so taking surfaces_lock here would invert the lock order and can
+         * deadlock with a presentation thread. */
         data->wayland_surface = NULL;
-        update_client_surfaces(data->hwnd);
         wayland_surface_destroy(surface);
     }
 
-    if (!(surface = data->wayland_surface) && !(surface = wayland_surface_create(data->hwnd))) return FALSE;
+    if (!(surface = data->wayland_surface) &&
+        !(surface = wayland_surface_create(data->hwnd, state->layered_alpha,
+                                           state->layered_flags)))
+        return FALSE;
 
     /* Pass through mouse events for layered, transparent windows, to match
      * Windows behavior. */
-    input_region = ((exstyle & WS_EX_TRANSPARENT) && (exstyle & WS_EX_LAYERED)) ?
+    input_region = ((state->exstyle & WS_EX_TRANSPARENT) &&
+                    (state->exstyle & WS_EX_LAYERED)) ?
                    wl_compositor_create_region(process_wayland.wl_compositor) :
                    NULL;
     wl_surface_set_input_region(surface->wl_surface, input_region);
@@ -344,25 +376,25 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         wayland_surface_clear_role(surface);
         break;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
-        wayland_surface_make_toplevel(surface);
+        wayland_surface_make_toplevel(surface, state->title);
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
 
-    wayland_win_data_get_config(data, &surface->window);
+    wayland_win_data_get_config(data, state, &surface->window);
 
     /* Size/position changes affect the effective pointer constraint, so update
      * it as needed. A new xdg_toplevel cannot safely accept a constraint until
      * it has been configured and mapped; Weston otherwise intersects the
      * constraint with an empty surface region. */
-    if (data->hwnd == NtUserGetForegroundWindow())
+    if (state->foreground)
     {
         if (role == WAYLAND_SURFACE_ROLE_TOPLEVEL && !surface->current.serial)
             data->defer_cursor_clip = TRUE;
         else
-            reapply_cursor_clipping();
+            *reapply_clip = TRUE;
     }
 
     TRACE("hwnd=%p surface=%p=>%p\n", data->hwnd, data->wayland_surface, surface);
@@ -372,13 +404,17 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
 void wayland_window_surface_presented(HWND hwnd)
 {
     struct wayland_win_data *data;
+    struct wayland_window_state state;
+    BOOL reapply_clip = FALSE;
 
+    get_wayland_window_state(hwnd, &state);
     if (!(data = wayland_win_data_get(hwnd))) return;
     data->contents_presented = TRUE;
     if ((!data->wayland_surface || data->wayland_surface->role == WAYLAND_SURFACE_ROLE_NONE) &&
-        wayland_win_data_create_wayland_surface(data, NULL))
+        wayland_win_data_create_wayland_surface(data, NULL, &state, &reapply_clip))
         wayland_win_data_update_wayland_state(data);
     wayland_win_data_release(data);
+    if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
 }
 
 
@@ -396,6 +432,9 @@ static void wayland_surface_update_state_toplevel(struct wayland_surface *surfac
      * window state to determine and update the Wayland state. */
     if (!processing_config)
     {
+        xdg_toplevel_set_min_size(surface->xdg_toplevel, 0, 0);
+        xdg_toplevel_set_max_size(surface->xdg_toplevel, 0, 0);
+
          /* First do all state unsettings, before setting new state. Some
           * Wayland compositors misbehave if the order is reversed. */
         if (!(surface->window.state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED) &&
@@ -626,7 +665,9 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
     BOOL managed, retry_client_surfaces = FALSE;
+    BOOL reapply_clip = FALSE;
     BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
+    struct wayland_window_state state;
 
     TRACE("hwnd %p new_rects %s after %p flags %08x\n", hwnd, debugstr_window_rects(new_rects), insert_after, swp_flags);
 
@@ -668,6 +709,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     }
     if (transient_owner) transient_owner = NtUserGetAncestor(transient_owner, GA_ROOT);
 
+    get_wayland_window_state(hwnd, &state);
     if (!(data = wayland_win_data_get(hwnd))) return;
     {
         enum wayland_surface_role old_role = data->wayland_surface ?
@@ -702,7 +744,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             data->wayland_surface = NULL;
         }
     }
-    else if (wayland_win_data_create_wayland_surface(data, owner_surface))
+    else if (wayland_win_data_create_wayland_surface(data, owner_surface, &state,
+                                                     &reapply_clip))
     {
         retry_client_surfaces = retry_client_surfaces &&
                                 data->wayland_surface->role != WAYLAND_SURFACE_ROLE_NONE;
@@ -718,6 +761,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         wayland_win_data_restack_client_surfaces(data->client_surface->toplevel);
 
     wayland_win_data_release(data);
+    if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
     if (retry_client_surfaces)
     {
         update_client_surfaces(hwnd);
@@ -1117,17 +1161,15 @@ void WAYLAND_UpdateLayeredWindow(HWND hwnd, BYTE alpha, UINT flags)
 void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 {
     HWND toplevel = new_client->client.toplevel;
+    RECT rect = new_client->client.monitor_rect;
     struct wayland_client_surface *old_client;
     struct wayland_win_data *data;
-    BOOL visible = toplevel && NtUserIsWindowVisible(hwnd);
-    RECT client_rect;
-
-    if (visible)
-        wayland_client_surface_get_rect(new_client, toplevel, &client_rect);
+    BOOL visible = FALSE, offscreen;
 
     /* ownership is shared with the callers, the last caller to release
      * its reference will also destroy it and clear our pointer. */
-
+    if(toplevel) visible = NtUserIsWindowVisible(hwnd);
+    offscreen = InterlockedCompareExchange(&new_client->client.offscreen, 0, 0);
     if (!(data = wayland_win_data_get(hwnd))) return;
 
     TRACE("hwnd %p old client %p new client %p\n", hwnd, data->client_surface, new_client);
@@ -1139,18 +1181,19 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 
         if ((data->client_surface = new_client))
         {
-            if (visible)
-                wayland_client_surface_attach(new_client, toplevel, &client_rect);
+            if (toplevel && visible && !offscreen)
+                wayland_client_surface_attach(new_client, toplevel, &rect);
             else
                 wayland_client_surface_attach(new_client, NULL, NULL);
         }
     }
-    else if (visible && (!new_client->wl_subsurface || new_client->toplevel != toplevel))
+    else if (visible && !offscreen &&
+             (!new_client->wl_subsurface || new_client->toplevel != toplevel))
     {
         /* The drawable may first be presented while its window is hidden. In
          * that case it is tracked above but deliberately left detached. Make
          * sure a later present after the window becomes visible attaches it. */
-        wayland_client_surface_attach(new_client, toplevel, &client_rect);
+        wayland_client_surface_attach(new_client, toplevel, &rect);
     }
     else if (!visible && new_client->wl_subsurface)
     {
@@ -1160,11 +1203,14 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     wayland_win_data_release(data);
 }
 
-BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region)
+BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
+                                 BOOL *reapply_clip)
 {
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
-    BOOL committed = FALSE, reapply_clip = FALSE;
+    BOOL committed = FALSE;
+
+    *reapply_clip = FALSE;
 
     if (!(data = wayland_win_data_get(hwnd))) return FALSE;
 
@@ -1178,7 +1224,7 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
             if (data->defer_cursor_clip)
             {
                 data->defer_cursor_clip = FALSE;
-                reapply_clip = TRUE;
+                *reapply_clip = TRUE;
             }
         }
         else
@@ -1196,9 +1242,12 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
 
     wayland_win_data_release(data);
 
-    if (reapply_clip && hwnd == NtUserGetForegroundWindow()) reapply_cursor_clipping();
-
     return committed;
+}
+
+void wayland_reapply_cursor_clipping(HWND hwnd)
+{
+    if (hwnd == NtUserGetForegroundWindow()) reapply_cursor_clipping();
 }
 
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd)
@@ -1213,26 +1262,12 @@ struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd)
     return shm_buffer;
 }
 
-void ensure_window_surface_contents(HWND hwnd)
+void wayland_window_init(void)
 {
-    struct wayland_surface *wayland_surface;
-    struct wayland_win_data *data;
+    pthread_mutexattr_t attr;
 
-    if (!(data = wayland_win_data_get(hwnd))) return;
-
-    if ((wayland_surface = data->wayland_surface))
-    {
-        wayland_surface_ensure_contents(wayland_surface);
-
-        /* Handle any processed configure request, to ensure the related
-         * surface state is applied by the compositor. */
-        if (wayland_surface->processing.serial &&
-            wayland_surface->processing.processed &&
-            wayland_surface_reconfigure(wayland_surface))
-        {
-            wl_surface_commit(wayland_surface->wl_surface);
-        }
-    }
-
-    wayland_win_data_release(data);
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&win_data_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
 }

@@ -855,6 +855,26 @@ static void spin_unlock( LONG *lock )
     InterlockedExchange( lock, 0 );
 }
 
+struct futex_wait_cleanup
+{
+    struct futex_queue *queue;
+    struct futex_entry *entry;
+};
+
+static void CALLBACK cleanup_futex_wait( BOOL normal, void *arg )
+{
+    struct futex_wait_cleanup *cleanup = arg;
+
+    (void)normal;
+    spin_lock( &cleanup->queue->lock );
+    if (cleanup->entry->addr)
+    {
+        cleanup->entry->addr = NULL;
+        list_remove( &cleanup->entry->entry );
+    }
+    spin_unlock( &cleanup->queue->lock );
+}
+
 static BOOL compare_addr( const void *addr, const void *cmp, SIZE_T size )
 {
     switch (size)
@@ -880,6 +900,7 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
 {
     struct futex_queue *queue = get_futex_queue( addr );
     struct futex_entry entry;
+    struct futex_wait_cleanup cleanup = { queue, &entry };
     NTSTATUS ret;
 
     TRACE("addr %p cmp %p size %#Ix timeout %s\n", addr, cmp, size, debugstr_timeout( timeout ));
@@ -906,16 +927,12 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
 
     spin_unlock( &queue->lock );
 
-    ret = NtWaitForAlertByThreadId( NULL, timeout );
-
-    /* We may have already been removed by a call to RtlWakeAddressSingle() or RtlWakeAddressAll(). */
-    if (entry.addr)
+    /* The queue entry lives on this stack, so it must also be removed on unwind. */
+    __TRY
     {
-        spin_lock( &queue->lock );
-        if (entry.addr)
-            list_remove( &entry.entry );
-        spin_unlock( &queue->lock );
+        ret = NtWaitForAlertByThreadId( NULL, timeout );
     }
+    __FINALLY_CTX( cleanup_futex_wait, &cleanup )
 
     TRACE("returning %#lx\n", ret);
 

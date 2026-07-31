@@ -63,27 +63,10 @@ static void ranges_destroy( struct object *obj );
 
 static const struct object_ops ranges_ops =
 {
-    sizeof(struct ranges),     /* size */
-    &no_type,                  /* type */
-    ranges_dump,               /* dump */
-    no_add_queue,              /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    no_signal,                 /* signal */
-    no_get_fd,                 /* get_fd */
-    default_get_sync,          /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    no_get_full_name,          /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    no_link_name,              /* link_name */
-    NULL,                      /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    ranges_destroy             /* destroy */
+    .size    = sizeof(struct ranges),
+    .type    = &no_type,
+    .dump    = ranges_dump,
+    .destroy = ranges_destroy,
 };
 
 /* page-aligned file backing PE image sections that cannot be mapped directly */
@@ -100,27 +83,10 @@ static void shared_map_destroy( struct object *obj );
 
 static const struct object_ops shared_map_ops =
 {
-    sizeof(struct shared_map), /* size */
-    &no_type,                  /* type */
-    shared_map_dump,           /* dump */
-    no_add_queue,              /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    NULL,                      /* satisfied */
-    no_signal,                 /* signal */
-    no_get_fd,                 /* get_fd */
-    default_get_sync,          /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    no_get_full_name,          /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    no_link_name,              /* link_name */
-    NULL,                      /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    shared_map_destroy         /* destroy */
+    .size    = sizeof(struct shared_map),
+    .type    = &no_type,
+    .dump    = shared_map_dump,
+    .destroy = shared_map_destroy,
 };
 
 static struct list shared_map_list = LIST_INIT( shared_map_list );
@@ -178,43 +144,16 @@ static enum server_fd_type mapping_get_fd_type( struct fd *fd );
 
 static const struct object_ops mapping_ops =
 {
-    sizeof(struct mapping),      /* size */
-    &mapping_type,               /* type */
-    mapping_dump,                /* dump */
-    no_add_queue,                /* add_queue */
-    NULL,                        /* remove_queue */
-    NULL,                        /* signaled */
-    NULL,                        /* satisfied */
-    no_signal,                   /* signal */
-    mapping_get_fd,              /* get_fd */
-    default_get_sync,            /* get_sync */
-    default_map_access,          /* map_access */
-    default_get_sd,              /* get_sd */
-    default_set_sd,              /* set_sd */
-    default_get_full_name,       /* get_full_name */
-    no_lookup_name,              /* lookup_name */
-    directory_link_name,         /* link_name */
-    default_unlink_name,         /* unlink_name */
-    no_open_file,                /* open_file */
-    no_kernel_obj_list,          /* get_kernel_obj_list */
-    no_close_handle,             /* close_handle */
-    mapping_destroy              /* destroy */
+    .size    = sizeof(struct mapping),
+    .type    = &mapping_type,
+    .dump    = mapping_dump,
+    .get_fd  = mapping_get_fd,
+    .destroy = mapping_destroy,
 };
 
 static const struct fd_ops mapping_fd_ops =
 {
-    default_fd_get_poll_events,   /* get_poll_events */
-    default_poll_event,           /* poll_event */
-    mapping_get_fd_type,          /* get_fd_type */
-    no_fd_read,                   /* read */
-    no_fd_write,                  /* write */
-    no_fd_flush,                  /* flush */
-    no_fd_get_file_info,          /* get_file_info */
-    no_fd_get_volume_info,        /* get_volume_info */
-    no_fd_ioctl,                  /* ioctl */
-    default_fd_cancel_async,      /* cancel_async */
-    no_fd_queue_async,            /* queue_async */
-    default_fd_reselect_async     /* reselect_async */
+    .get_fd_type = mapping_get_fd_type,
 };
 
 /* free address ranges for PE image mappings */

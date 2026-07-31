@@ -726,10 +726,12 @@ AC_CHECK_HEADERS(\
 	OpenCL/opencl.h \
 	arpa/inet.h \
 	arpa/nameser.h \
+	asm/hwcap.h \
 	asm/termbits.h \
 	asm/types.h \
 	asm/user.h \
-        bluetooth/bluetooth.h \
+	bluetooth/bluetooth.h \
+	dev/evdev/input.h \
 	elf.h \
 	gettext-po.h \
 	link.h \
@@ -1104,7 +1106,16 @@ case $host_os in
           *)
             WINE_TRY_CFLAGS([-static-pie],
                             [AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static-pie"])],
-                            [AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d00000000"])])
+            [
+                case $HOST_ARCH in
+                  aarch64)
+                    dnl AArch64 kernels may be limited to 39 bits of address
+                    dnl space; limit the text section load address to that.
+                    AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d000000"]) ;;
+                  *)
+                    AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d00000000"]) ;;
+                esac
+            ])
             ;;
         esac
         ;;
@@ -1511,10 +1522,11 @@ dnl **** Check for libpcsclite ****
 if test "x$with_pcsclite" != "xno"
 then
     WINE_PACKAGE_FLAGS(PCSCLITE,[libpcsclite],[-lpcsclite],,,
-                 [AC_CHECK_FUNC(SCardEstablishContext,[:],[PCSCLITE_LIBS=""])],
-                 [case $host_os in
-                    darwin*) AC_SUBST(PCSCLITE_LIBS,"-framework PCSC") ;;
-                  esac])
+                 [AC_CHECK_FUNC(SCardEstablishContext,[:],
+                    [case $host_os in
+                        darwin*) PCSCLITE_LIBS="-framework PCSC" ;;
+                        *) PCSCLITE_LIBS="";;
+                     esac])])
 fi
 WINE_NOTICE_WITH(pcsclite,[test "x$PCSCLITE_LIBS" = x],
                  [libpcsclite not found, smart cards won't be supported.],

@@ -115,6 +115,7 @@ struct wayland_pointer
     HWND focused_hwnd;
     HWND button_hwnd;
     HWND constraint_hwnd;
+    BOOL relative_mode;
     BOOL pending_warp;
     BOOL edge_resize;
     uint32_t enter_serial;
@@ -242,7 +243,6 @@ struct wayland_surface_config
 struct wayland_window_config
 {
     RECT rect;
-    RECT client_rect;
     enum wayland_surface_config_state state;
     /* The scale (i.e., normalized dpi) the window is rendering at. */
     double scale;
@@ -256,9 +256,14 @@ struct wayland_client_surface
 {
     struct client_surface client;
     HWND toplevel;
+    RECT rect;
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
     struct wp_viewport *wp_viewport;
+    void *offscreen_bits;
+    size_t offscreen_bits_size;
+    int offscreen_width;
+    int offscreen_height;
 };
 
 extern struct wayland_client_surface *impl_from_client_surface(struct client_surface *client);
@@ -328,9 +333,10 @@ void wayland_output_use_xdg_extension(struct wayland_output *output);
  *          Wayland surface
  */
 
-struct wayland_surface *wayland_surface_create(HWND hwnd);
+struct wayland_surface *wayland_surface_create(HWND hwnd, BYTE layered_alpha,
+                                               DWORD layered_flags);
 void wayland_surface_destroy(struct wayland_surface *surface);
-void wayland_surface_make_toplevel(struct wayland_surface *surface);
+void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR *title);
 void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
                                          struct wayland_surface *parent);
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
@@ -346,10 +352,7 @@ RECT map_rect_to_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_to_surface(struct wayland_surface *surface, POINT point);
 RECT map_rect_from_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_from_surface(struct wayland_surface *surface, POINT point);
-void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel,
-                                   const RECT *client_rect);
-void wayland_client_surface_get_rect(struct wayland_client_surface *client, HWND toplevel,
-                                     RECT *client_rect);
+void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel, const RECT *rect);
 struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
                                                      struct wayland_client_surface *client);
 void wayland_surface_ensure_contents(struct wayland_surface *surface);
@@ -408,10 +411,12 @@ void wayland_win_data_restack_owned_popups(HWND toplevel);
 
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);
-BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region);
+BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
+                                 BOOL *reapply_clip);
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
-void ensure_window_surface_contents(HWND hwnd);
+void wayland_reapply_cursor_clipping(HWND hwnd);
 void wayland_window_surface_presented(HWND hwnd);
+void wayland_window_init(void);
 
 /**********************************************************************
  *          Wayland Keyboard

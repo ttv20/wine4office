@@ -205,52 +205,26 @@ static void key_value_query_destroy( struct object *obj );
 
 static const struct object_ops key_ops =
 {
-    sizeof(struct key),      /* size */
-    &key_type,               /* type */
-    key_dump,                /* dump */
-    no_add_queue,            /* add_queue */
-    NULL,                    /* remove_queue */
-    NULL,                    /* signaled */
-    NULL,                    /* satisfied */
-    no_signal,               /* signal */
-    no_get_fd,               /* get_fd */
-    default_get_sync,        /* get_sync */
-    key_map_access,          /* map_access */
-    key_get_sd,              /* get_sd */
-    default_set_sd,          /* set_sd */
-    key_get_full_name,       /* get_full_name */
-    key_lookup_name,         /* lookup_name */
-    key_link_name,           /* link_name */
-    key_unlink_name,         /* unlink_name */
-    no_open_file,            /* open_file */
-    no_kernel_obj_list,      /* get_kernel_obj_list */
-    key_close_handle,        /* close_handle */
-    key_destroy              /* destroy */
+    .size          = sizeof(struct key),
+    .type          = &key_type,
+    .dump          = key_dump,
+    .map_access    = key_map_access,
+    .get_sd        = key_get_sd,
+    .get_full_name = key_get_full_name,
+    .lookup_name   = key_lookup_name,
+    .link_name     = key_link_name,
+    .unlink_name   = key_unlink_name,
+    .close_handle  = key_close_handle,
+    .destroy       = key_destroy,
 };
 
 static const struct object_ops key_value_query_ops =
 {
-    sizeof(struct key_value_query), /* size */
-    &no_type,                       /* type */
-    key_value_query_dump,           /* dump */
-    no_add_queue,                   /* add_queue */
-    NULL,                           /* remove_queue */
-    NULL,                           /* signaled */
-    NULL,                           /* satisfied */
-    no_signal,                      /* signal */
-    no_get_fd,                      /* get_fd */
-    default_get_sync,               /* get_sync */
-    default_map_access,             /* map_access */
-    default_get_sd,                 /* get_sd */
-    default_set_sd,                 /* set_sd */
-    no_get_full_name,               /* get_full_name */
-    no_lookup_name,                 /* lookup_name */
-    no_link_name,                   /* link_name */
-    NULL,                           /* unlink_name */
-    no_open_file,                   /* open_file */
-    no_kernel_obj_list,             /* get_kernel_obj_list */
-    no_close_handle,                /* close_handle */
-    key_value_query_destroy         /* destroy */
+    .size       = sizeof(struct key_value_query),
+    .type       = &no_type,
+    .dump       = key_value_query_dump,
+    .map_access = default_map_access,
+    .destroy    = key_value_query_destroy,
 };
 
 
@@ -678,7 +652,7 @@ static void key_unlink_name( struct object *obj, struct object_name *name )
 
     if (parent->obj.ops != &key_ops)
     {
-        default_unlink_name( obj, name );
+        unlink_name( name );
         return;
     }
 
@@ -1016,7 +990,7 @@ static void enum_key( struct key *key, int index, int info_class, struct enum_ke
     switch(info_class)
     {
     case KeyNameInformation:
-        if (!(fullname = key->obj.ops->get_full_name( &key->obj, ~0u, &namelen ))) return;
+        if (!(fullname = key_get_full_name( &key->obj, ~0u, &namelen ))) return;
         /* fall through */
     case KeyBasicInformation:
         classlen = 0; /* only return the name */

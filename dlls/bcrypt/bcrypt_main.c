@@ -54,6 +54,7 @@ enum alg_id
     ALG_ID_3DES,
     ALG_ID_CHACHA20_POLY1305,
     ALG_ID_AES,
+    ALG_ID_AES_GMAC,
     ALG_ID_RC4,
 
     /* hash */
@@ -134,6 +135,7 @@ struct algorithm
     enum chain_mode   mode;
     ULONG             flags;
     enum ecc_curve_id curve_id;
+    enum chain_mode   chain_mode;
 };
 
 struct aes_key
@@ -343,12 +345,14 @@ static const struct
     ULONG        hash_length;
     ULONG        block_bits;
     enum ecc_curve_id curve_id;
+    enum chain_mode   chain_mode;
 }
 builtin_algorithms[] =
 {
     {  BCRYPT_3DES_ALGORITHM,       BCRYPT_CIPHER_INTERFACE,                522,    0,    0 },
     {  BCRYPT_CHACHA20_POLY1305_ALGORITHM, BCRYPT_CIPHER_INTERFACE,         166,    0,    0 },
     {  BCRYPT_AES_ALGORITHM,        BCRYPT_CIPHER_INTERFACE,                654,    0,    0 },
+    {  BCRYPT_AES_GMAC_ALGORITHM,   BCRYPT_CIPHER_INTERFACE,                654,    0,    0, 0, CHAIN_MODE_GCM },
     {  BCRYPT_RC4_ALGORITHM,        BCRYPT_CIPHER_INTERFACE,                654,    0,    0 },
     {  BCRYPT_SHA256_ALGORITHM,     BCRYPT_HASH_INTERFACE,                  286,   32,  512 },
     {  BCRYPT_SHA384_ALGORITHM,     BCRYPT_HASH_INTERFACE,                  382,   48, 1024 },
@@ -458,7 +462,7 @@ static const struct algorithm pseudo_algorithms[] =
     {{ MAGIC_ALG }, ALG_ID_RSA },
     {{ MAGIC_ALG }, ALG_ID_ECDSA },
     {{ 0 }}, /* AES_CMAC */
-    {{ 0 }}, /* AES_GMAC */
+    {{ MAGIC_ALG }, ALG_ID_AES_GMAC, CHAIN_MODE_GCM },
     {{ MAGIC_ALG }, ALG_ID_MD2, 0, BCRYPT_ALG_HANDLE_HMAC_FLAG },
     {{ MAGIC_ALG }, ALG_ID_MD4, 0, BCRYPT_ALG_HANDLE_HMAC_FLAG },
     {{ MAGIC_ALG }, ALG_ID_3DES, CHAIN_MODE_CBC },
@@ -599,10 +603,11 @@ static struct algorithm *create_algorithm( enum alg_id id, DWORD flags )
 {
     struct algorithm *ret;
     if (!(ret = calloc( 1, sizeof(*ret) ))) return NULL;
-    ret->hdr.magic = MAGIC_ALG;
-    ret->id        = id;
-    ret->flags     = flags;
-    ret->curve_id  = builtin_algorithms[id].curve_id;
+    ret->hdr.magic  = MAGIC_ALG;
+    ret->id         = id;
+    ret->flags      = flags;
+    ret->curve_id   = builtin_algorithms[id].curve_id;
+    ret->chain_mode = builtin_algorithms[id].chain_mode;
     return ret;
 }
 
@@ -684,24 +689,26 @@ NTSTATUS WINAPI BCryptGetFipsAlgorithmMode(BOOLEAN *enabled)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS get_dword_property( UCHAR *buf, ULONG size, ULONG *ret_size, DWORD value )
+{
+    *ret_size = sizeof(value);
+    if (size < sizeof(value)) return STATUS_BUFFER_TOO_SMALL;
+    if (buf) *(DWORD *)buf = value;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS get_generic_alg_property( enum alg_id id, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_OBJECT_LENGTH ))
     {
         if (!builtin_algorithms[id].object_length) return STATUS_NOT_SUPPORTED;
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = builtin_algorithms[id].object_length;
-        return STATUS_SUCCESS;
+        return get_dword_property( buf, size, ret_size, builtin_algorithms[id].object_length );
     }
 
     if (!wcscmp( prop, BCRYPT_HASH_LENGTH ))
     {
         if (!builtin_algorithms[id].hash_length) return STATUS_NOT_SUPPORTED;
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG*)buf = builtin_algorithms[id].hash_length;
-        return STATUS_SUCCESS;
+        return get_dword_property( buf, size, ret_size, builtin_algorithms[id].hash_length );
     }
 
     if (!wcscmp( prop, BCRYPT_ALGORITHM_NAME ))
@@ -718,12 +725,8 @@ static NTSTATUS get_generic_alg_property( enum alg_id id, const WCHAR *prop, UCH
 static NTSTATUS get_3des_property( enum chain_mode mode, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_BLOCK_LENGTH ))
-    {
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = BLOCK_LENGTH_3DES;
-        return STATUS_SUCCESS;
-    }
+        return get_dword_property( buf, size, ret_size, BLOCK_LENGTH_3DES );
+
     if (!wcscmp( prop, BCRYPT_CHAINING_MODE ))
     {
         const WCHAR *str;
@@ -760,12 +763,11 @@ static NTSTATUS get_3des_property( enum chain_mode mode, const WCHAR *prop, UCHA
 static NTSTATUS get_aes_property( enum chain_mode mode, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_BLOCK_LENGTH ))
-    {
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = BLOCK_LENGTH_AES;
-        return STATUS_SUCCESS;
-    }
+        return get_dword_property( buf, size, ret_size, BLOCK_LENGTH_AES );
+
+    if (!wcscmp( prop, BCRYPT_MESSAGE_BLOCK_LENGTH ))
+        return get_dword_property( buf, size, ret_size, 1 );
+
     if (!wcscmp( prop, BCRYPT_CHAINING_MODE ))
     {
         const WCHAR *str;
@@ -818,12 +820,7 @@ static NTSTATUS get_aes_property( enum chain_mode mode, const WCHAR *prop, UCHAR
 static NTSTATUS get_rc4_property( enum chain_mode mode, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_BLOCK_LENGTH ))
-    {
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = BLOCK_LENGTH_RC4;
-        return STATUS_SUCCESS;
-    }
+        return get_dword_property( buf, size, ret_size, BLOCK_LENGTH_RC4 );
 
     FIXME( "unsupported property %s\n", debugstr_w(prop) );
     return STATUS_NOT_IMPLEMENTED;
@@ -832,12 +829,7 @@ static NTSTATUS get_rc4_property( enum chain_mode mode, const WCHAR *prop, UCHAR
 static NTSTATUS get_rsa_property( enum chain_mode mode, const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_PADDING_SCHEMES ))
-    {
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = BCRYPT_SUPPORTED_PAD_PKCS1_SIG | BCRYPT_SUPPORTED_PAD_OAEP;
-        return STATUS_SUCCESS;
-    }
+        return get_dword_property( buf, size, ret_size, BCRYPT_SUPPORTED_PAD_PKCS1_SIG | BCRYPT_SUPPORTED_PAD_OAEP );
 
     FIXME( "unsupported property %s\n", debugstr_w(prop) );
     return STATUS_NOT_IMPLEMENTED;
@@ -873,12 +865,7 @@ static NTSTATUS get_pbkdf2_property( enum chain_mode mode, const WCHAR *prop, UC
 static NTSTATUS get_chacha20_poly1305_property( const WCHAR *prop, UCHAR *buf, ULONG size, ULONG *ret_size )
 {
     if (!wcscmp( prop, BCRYPT_BLOCK_LENGTH ))
-    {
-        *ret_size = sizeof(ULONG);
-        if (size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf) *(ULONG *)buf = BLOCK_LENGTH_CHACHA20_POLY1305;
-        return STATUS_SUCCESS;
-    }
+        return get_dword_property( buf, size, ret_size, BLOCK_LENGTH_CHACHA20_POLY1305 );
 
     FIXME( "unsupported property %s\n", debugstr_w(prop) );
     return STATUS_NOT_IMPLEMENTED;
@@ -901,6 +888,7 @@ static NTSTATUS get_alg_property( const struct algorithm *alg, const WCHAR *prop
         return get_chacha20_poly1305_property( prop, buf, size, ret_size );
 
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         return get_aes_property( alg->mode, prop, buf, size, ret_size );
 
     case ALG_ID_RC4:
@@ -986,6 +974,9 @@ static NTSTATUS set_alg_property( struct algorithm *alg, const WCHAR *prop, UCHA
                 return STATUS_NOT_IMPLEMENTED;
             }
         }
+        else if (!wcscmp( (WCHAR *)prop, BCRYPT_MESSAGE_BLOCK_LENGTH ))
+            return STATUS_INVALID_PARAMETER;
+
         FIXME( "unsupported aes algorithm property %s\n", debugstr_w(prop) );
         return STATUS_NOT_IMPLEMENTED;
 
@@ -1184,14 +1175,8 @@ static NTSTATUS get_key_property( const struct key *key, const WCHAR *prop, UCHA
 {
     if (!wcscmp( prop, BCRYPT_KEY_STRENGTH ))
     {
-        *ret_size = sizeof(DWORD);
-        if (size < sizeof(DWORD)) return STATUS_BUFFER_TOO_SMALL;
-        if (buf)
-        {
-            if (is_symmetric_key(key)) *(DWORD *)buf = key->s.block_size * 8;
-            else *(DWORD *)buf = key->a.bitlen;
-        }
-        return STATUS_SUCCESS;
+        DWORD value = is_symmetric_key (key ) ? key->s.block_size * 8 : key->a.bitlen;
+        return get_dword_property( buf, size, ret_size, value );
     }
 
     switch (key->alg_id)
@@ -1200,12 +1185,18 @@ static NTSTATUS get_key_property( const struct key *key, const WCHAR *prop, UCHA
         return get_3des_property( key->s.mode, prop, buf, size, ret_size );
 
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         if (!wcscmp( prop, BCRYPT_AUTH_TAG_LENGTH )) return STATUS_NOT_SUPPORTED;
         return get_aes_property( key->s.mode, prop, buf, size, ret_size );
 
     case ALG_ID_DH:
         if (wcscmp( prop, BCRYPT_DH_PARAMETERS )) return STATUS_NOT_SUPPORTED;
         return get_dh_parameters( key, buf, size, ret_size );
+
+    case ALG_ID_RSA:
+    case ALG_ID_RSA_SIGN:
+        if (wcscmp( prop, BCRYPT_SIGNATURE_LENGTH )) return STATUS_NOT_SUPPORTED;
+        return get_dword_property( buf, size, ret_size, key->a.bitlen / 8 );
 
     default:
         FIXME( "unsupported algorithm %u\n", key->alg_id );
@@ -1586,6 +1577,7 @@ static NTSTATUS generate_symmetric_key( const struct algorithm *alg, const UCHAR
     switch (alg->id)
     {
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         if ((status = validate_len_aes( &key_lengths, secret_len, &secret_len )) ||
             (status = alloc_aes_key( key, alg->mode, BLOCK_LENGTH_AES, secret, secret_len )))
         {
@@ -1770,6 +1762,7 @@ static NTSTATUS decrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
     switch (key->alg_id)
     {
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         switch (key->s.mode)
         {
         case CHAIN_MODE_ECB:
@@ -2114,6 +2107,7 @@ static NTSTATUS encrypt_symmetric( struct key *key, const UCHAR *input, ULONG in
     switch (key->alg_id)
     {
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         switch (key->s.mode)
         {
         case CHAIN_MODE_ECB:
@@ -3367,6 +3361,22 @@ NTSTATUS WINAPI BCryptImportKeyPair( BCRYPT_ALG_HANDLE handle, BCRYPT_KEY_HANDLE
     return STATUS_SUCCESS;
 }
 
+static ULONG curve_size( enum ecc_curve_id curve_id )
+{
+    switch (curve_id)
+    {
+    case ECC_CURVE_25519:           return 255;
+    case ECC_CURVE_BRAINPOOLP256R1:
+    case ECC_CURVE_P256R1:          return 256;
+    case ECC_CURVE_BRAINPOOLP384R1:
+    case ECC_CURVE_P384R1:          return 384;
+    case ECC_CURVE_P521R1:          return 521;
+    default:
+        FIXME( "unsupported curve %u\n", curve_id );
+        return 0;
+    }
+}
+
 static NTSTATUS generate_key_pair( const struct algorithm *alg, ULONG bitlen, ULONG flags, struct key **ret_key )
 {
     NTSTATUS status;
@@ -3397,7 +3407,7 @@ static NTSTATUS generate_key_pair( const struct algorithm *alg, ULONG bitlen, UL
     case ALG_ID_ECDSA_P256:
     case ALG_ID_ECDSA_P384:
     case ALG_ID_ECDSA_P521:
-        if (bitlen && bitlen != curve_strength( alg->curve_id ))
+        if (bitlen && bitlen != curve_size( alg->curve_id ))
         {
             destroy_key( key );
             return STATUS_INVALID_PARAMETER;
@@ -3522,6 +3532,7 @@ static NTSTATUS duplicate_key( const struct key *src, struct key **ret_key )
     switch (src->alg_id)
     {
     case ALG_ID_AES:
+    case ALG_ID_AES_GMAC:
         if ((status = alloc_key( src->alg_id, src->flags, &dst ))) return status;
         if ((status = alloc_aes_key( dst, src->s.mode, src->s.block_size, src->s.secret, src->s.secret_len )))
         {

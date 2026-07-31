@@ -67,6 +67,19 @@ static EGLConfig egl_config_for_format(int format)
     return egl->configs[(format - 1) % egl->config_count];
 }
 
+static BOOL client_surface_needs_alpha(HWND hwnd)
+{
+    HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    HRGN region;
+    int type;
+
+    if (!toplevel || toplevel == hwnd) return FALSE;
+    if (!(region = NtGdiCreateRectRgn(0, 0, 0, 0))) return FALSE;
+    type = NtUserGetWindowRgnEx(toplevel, region, 0);
+    NtGdiDeleteObjectApp(region);
+    return type > ERROR;
+}
+
 static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
 {
     int client_width, client_height;
@@ -95,12 +108,15 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     if (rect.right == rect.left) rect.right = rect.left + 1;
     if (rect.bottom == rect.top) rect.bottom = rect.top + 1;
 
-    if (!egl->has_EGL_EXT_present_opaque)
-        WARN("Missing EGL_EXT_present_opaque extension\n");
-    else
+    if (!client_surface_needs_alpha(hwnd))
     {
-        *attrib++ = EGL_PRESENT_OPAQUE_EXT;
-        *attrib++ = EGL_TRUE;
+        if (!egl->has_EGL_EXT_present_opaque)
+            WARN("Missing EGL_EXT_present_opaque extension\n");
+        else
+        {
+            *attrib++ = EGL_PRESENT_OPAQUE_EXT;
+            *attrib++ = EGL_TRUE;
+        }
     }
     *attrib++ = EGL_NONE;
 
@@ -148,9 +164,50 @@ static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
 
 static BOOL wayland_drawable_swap(struct opengl_drawable *base)
 {
+    struct wayland_client_surface *surface = impl_from_client_surface(base->client);
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
+    GLint old_pack_alignment, old_read_buffer, old_read_fbo;
+    RECT rect;
+    size_t size;
 
     TRACE("drawable %p client %p EGL surface %p\n", gl, base->client, gl->base.surface);
+
+    if (InterlockedCompareExchange(&base->client->offscreen, 0, 0) &&
+        NtUserGetClientRect(base->client->hwnd, &rect,
+                            NtUserGetDpiForWindow(base->client->hwnd)) &&
+        !IsRectEmpty(&rect))
+    {
+        surface->offscreen_width = 0;
+        surface->offscreen_height = 0;
+        size = (size_t)(rect.right - rect.left) * (rect.bottom - rect.top) * 4;
+        if (size > surface->offscreen_bits_size)
+        {
+            void *bits = realloc(surface->offscreen_bits, size);
+            if (bits)
+            {
+                surface->offscreen_bits = bits;
+                surface->offscreen_bits_size = size;
+            }
+        }
+
+        if (surface->offscreen_bits_size >= size)
+        {
+            funcs->p_glGetIntegerv(GL_PACK_ALIGNMENT, &old_pack_alignment);
+            funcs->p_glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+            funcs->p_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read_fbo);
+            funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            funcs->p_glReadBuffer(base->doublebuffer ? GL_BACK : GL_FRONT);
+            funcs->p_glReadPixels(0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                                  GL_BGRA, GL_UNSIGNED_BYTE, surface->offscreen_bits);
+            funcs->p_glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read_fbo);
+            if (!old_read_fbo) funcs->p_glReadBuffer(old_read_buffer);
+            funcs->p_glPixelStorei(GL_PACK_ALIGNMENT, old_pack_alignment);
+            surface->offscreen_width = rect.right - rect.left;
+            surface->offscreen_height = rect.bottom - rect.top;
+        }
+    }
+
     client_surface_present(base->client);
     funcs->p_eglSwapBuffers(egl->display, gl->base.surface);
 

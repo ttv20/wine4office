@@ -46,6 +46,7 @@ struct wayland_window_surface
     struct window_surface header;
     struct wayland_buffer_queue *wayland_buffer_queue;
     BOOL layered;
+    LONG reapply_clip;
 };
 
 static struct wayland_window_surface *wayland_window_surface_cast(
@@ -376,9 +377,21 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
     BOOL flushed = FALSE;
+    BOOL update_full_shape = shape_changed;
+    BOOL reapply_clip;
     HRGN surface_damage_region = NULL;
     HRGN copy_from_window_region;
     uint32_t buffer_format;
+
+    /*
+     * Presenting the first contents can create the Wayland role and query
+     * Win32 window state. The caller holds the window-surface mutex here;
+     * drop it around that operation to keep the surface -> user lock order
+     * from deadlocking against window updates taking the locks in reverse.
+     */
+    window_surface_unlock(window_surface);
+    wayland_window_surface_presented(window_surface->hwnd);
+    window_surface_lock(window_surface);
 
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
                                                rect->left + dirty->right, rect->top + dirty->bottom);
@@ -393,9 +406,18 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     {
         int width = wws->wayland_buffer_queue->width;
         int height = wws->wayland_buffer_queue->height;
+
         TRACE("recreating buffer queue with format %d\n", buffer_format);
         wayland_buffer_queue_destroy(wws->wayland_buffer_queue);
         wws->wayland_buffer_queue = wayland_buffer_queue_create(width, height, buffer_format);
+        update_full_shape = TRUE;
+
+        /* Changing between opaque and alpha-capable buffers changes the
+         * effective contents outside the current paint bounds too. This is
+         * particularly visible when a window first acquires a shape: without
+         * full damage, compositors may retain opaque black pixels where the
+         * new ARGB buffer is transparent. */
+        NtGdiSetRectRgn(surface_damage_region, 0, 0, width, height);
     }
 
     wayland_buffer_queue_add_damage(wws->wayland_buffer_queue, surface_damage_region);
@@ -437,21 +459,33 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         /* If we don't have a latest buffer, use the window_surface as
          * the source of all pixel data. */
         copy_from_window_region = shm_buffer->damage_region;
+        update_full_shape = TRUE;
     }
 
     wayland_shm_buffer_copy_data(shm_buffer, color_bits, &surface_rect, copy_from_window_region,
                                  shape_bits && !wws->layered);
-    if (shape_bits) wayland_shm_buffer_copy_shape(shm_buffer, rect, shape_info, shape_bits);
+    if (shape_bits)
+        wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
+                                      shape_info, shape_bits);
 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
-    wayland_window_surface_presented(window_surface->hwnd);
-    flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region);
+    flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region,
+                                          &reapply_clip);
+    if (reapply_clip) InterlockedExchange(&wws->reapply_clip, TRUE);
     wl_display_flush(process_wayland.wl_display);
 
 done:
     if (surface_damage_region) NtGdiDeleteObjectApp(surface_damage_region);
     return flushed;
+}
+
+static void wayland_window_surface_flush_done(struct window_surface *window_surface)
+{
+    struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
+
+    if (InterlockedExchange(&wws->reapply_clip, FALSE))
+        wayland_reapply_cursor_clipping(window_surface->hwnd);
 }
 
 /***********************************************************************
@@ -470,7 +504,8 @@ static const struct window_surface_funcs wayland_window_surface_funcs =
 {
     wayland_window_surface_set_clip,
     wayland_window_surface_flush,
-    wayland_window_surface_destroy
+    wayland_window_surface_destroy,
+    wayland_window_surface_flush_done
 };
 
 /***********************************************************************

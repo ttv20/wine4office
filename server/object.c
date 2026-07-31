@@ -102,52 +102,16 @@ static void dump_reserve( struct object *obj, int verbose );
 
 static const struct object_ops apc_reserve_ops =
 {
-    sizeof(struct reserve),     /* size */
-    &apc_reserve_type,          /* type */
-    dump_reserve,               /* dump */
-    no_add_queue,               /* add_queue */
-    NULL,                       /* remove_queue */
-    NULL,                       /* signaled */
-    no_satisfied,               /* satisfied */
-    no_signal,                  /* signal */
-    no_get_fd,                  /* get_fd */
-    default_get_sync,           /* get_sync */
-    default_map_access,         /* map_access */
-    default_get_sd,             /* get_sd */
-    default_set_sd,             /* set_sd */
-    default_get_full_name,      /* get_full_name */
-    no_lookup_name,             /* lookup_name */
-    directory_link_name,        /* link_name */
-    default_unlink_name,        /* unlink_name */
-    no_open_file,               /* open_file */
-    no_kernel_obj_list,         /* get_kernel_obj_list */
-    no_close_handle,            /* close_handle */
-    no_destroy                  /* destroy */
+    .size = sizeof(struct reserve),
+    .type = &apc_reserve_type,
+    .dump = dump_reserve,
 };
 
 static const struct object_ops completion_reserve_ops =
 {
-    sizeof(struct reserve),    /* size */
-    &completion_reserve_type,  /* type */
-    dump_reserve,              /* dump */
-    no_add_queue,              /* add_queue */
-    NULL,                      /* remove_queue */
-    NULL,                      /* signaled */
-    no_satisfied,              /* satisfied */
-    no_signal,                 /* signal */
-    no_get_fd,                 /* get_fd */
-    default_get_sync,          /* get_sync */
-    default_map_access,        /* map_access */
-    default_get_sd,            /* get_sd */
-    default_set_sd,            /* set_sd */
-    default_get_full_name,     /* get_full_name */
-    no_lookup_name,            /* lookup_name */
-    directory_link_name,       /* link_name */
-    default_unlink_name,       /* unlink_name */
-    no_open_file,              /* open_file */
-    no_kernel_obj_list,        /* get_kernel_obj_list */
-    no_close_handle,           /* close_handle */
-    no_destroy                 /* destroy */
+    .size = sizeof(struct reserve),
+    .type = &completion_reserve_type,
+    .dump = dump_reserve,
 };
 
 #ifdef DEBUG_OBJECTS
@@ -339,7 +303,7 @@ struct object *lookup_named_object( struct object *root, const struct unicode_st
                                     unsigned int attr, struct unicode_str *name_left )
 {
     static int recursion_count;
-    struct object *obj, *parent;
+    struct object *parent;
     struct unicode_str name_tmp = *name, *ptr = &name_tmp;
 
     if (root)
@@ -376,8 +340,14 @@ struct object *lookup_named_object( struct object *root, const struct unicode_st
     recursion_count++;
     clear_error();
 
-    while ((obj = parent->ops->lookup_name( parent, ptr, attr, root )))
+    for (;;)
     {
+        struct object *obj = NULL;
+
+        if (parent->ops->lookup_name) obj = parent->ops->lookup_name( parent, ptr, attr, root );
+        else if (!ptr) set_error( STATUS_OBJECT_TYPE_MISMATCH );
+
+        if (!obj) break;
         /* move to the next element */
         release_object ( parent );
         parent = obj;
@@ -415,11 +385,14 @@ static struct object *create_object( struct object *parent, const struct object_
     if (sd && !default_set_sd( obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
                                DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION ))
         goto failed;
-    if (!obj->ops->link_name( obj, name_ptr, parent )) goto failed;
-
-    name_ptr->obj = obj;
-    obj->name = name_ptr;
-    return obj;
+    if (obj->ops->link_name ?
+        obj->ops->link_name( obj, name_ptr, parent ) :
+        directory_link_name( obj, name_ptr, parent ))
+    {
+        name_ptr->obj = obj;
+        obj->name = name_ptr;
+        return obj;
+    }
 
 failed:
     if (obj) free_object( obj );
@@ -527,7 +500,8 @@ void unlink_named_object( struct object *obj )
 
     if (!name_ptr) return;
     obj->name = NULL;
-    obj->ops->unlink_name( obj, name_ptr );
+    if (obj->ops->unlink_name) obj->ops->unlink_name( obj, name_ptr );
+    else unlink_name( name_ptr );
     if (name_ptr->parent) release_object( name_ptr->parent );
     free( name_ptr );
 }
@@ -553,7 +527,7 @@ void release_object( void *ptr )
         assert( list_empty( &obj->wait_queue ));
         free_kernel_objects( obj );
         unlink_named_object( obj );
-        obj->ops->destroy( obj );
+        if (obj->ops->destroy) obj->ops->destroy( obj );
         free_object( obj );
     }
 }
@@ -617,44 +591,22 @@ struct namespace *create_namespace( unsigned int hash_size )
     return namespace;
 }
 
-/* functions for unimplemented/default object operations */
-
-int no_add_queue( struct object *obj, struct wait_queue_entry *entry )
+/* retrieve the file descriptor associated to an object, if any */
+struct fd *get_obj_fd( struct object *obj )
 {
-    set_error( STATUS_OBJECT_TYPE_MISMATCH );
-    return 0;
-}
-
-void no_satisfied( struct object *obj, struct wait_queue_entry *entry )
-{
-}
-
-int no_signal( struct object *obj, unsigned int access, int signal )
-{
-    set_error( STATUS_OBJECT_TYPE_MISMATCH );
-    return 0;
-}
-
-struct fd *no_get_fd( struct object *obj )
-{
+    if (obj->ops->get_fd) return obj->ops->get_fd( obj );
     set_error( STATUS_OBJECT_TYPE_MISMATCH );
     return NULL;
 }
 
-struct object *default_get_sync( struct object *obj )
+/* retrieve the sync object associated to an object, or the object itself */
+struct object *get_obj_sync( struct object *obj )
 {
+    if (obj->ops->get_sync) return obj->ops->get_sync( obj );
     return grab_object( obj );
 }
 
-unsigned int default_map_access( struct object *obj, unsigned int access )
-{
-    return map_access( access, &obj->ops->type->mapping );
-}
-
-struct security_descriptor *default_get_sd( struct object *obj )
-{
-    return obj->sd;
-}
+/* functions for unimplemented/default object operations */
 
 int set_sd_defaults_from_token( struct object *obj, const struct security_descriptor *sd,
                                 unsigned int set_info, struct token *token )
@@ -782,45 +734,6 @@ int default_set_sd( struct object *obj, const struct security_descriptor *sd,
                     unsigned int set_info )
 {
     return set_sd_defaults_from_token( obj, sd, set_info, current->process->token );
-}
-
-WCHAR *no_get_full_name( struct object *obj, data_size_t max, data_size_t *ret_len )
-{
-    return NULL;
-}
-
-struct object *no_lookup_name( struct object *obj, struct unicode_str *name,
-                               unsigned int attr, struct object *root )
-{
-    if (!name) set_error( STATUS_OBJECT_TYPE_MISMATCH );
-    return NULL;
-}
-
-int no_link_name( struct object *obj, struct object_name *name, struct object *parent )
-{
-    set_error( STATUS_OBJECT_TYPE_MISMATCH );
-    return 0;
-}
-
-void default_unlink_name( struct object *obj, struct object_name *name )
-{
-    list_remove( &name->entry );
-}
-
-struct object *no_open_file( struct object *obj, unsigned int access, unsigned int sharing,
-                             unsigned int options )
-{
-    set_error( STATUS_OBJECT_TYPE_MISMATCH );
-    return NULL;
-}
-
-int no_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
-{
-    return 1;  /* ok to close */
-}
-
-void no_destroy( struct object *obj )
-{
 }
 
 static void dump_reserve( struct object *obj, int verbose )

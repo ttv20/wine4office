@@ -34,6 +34,8 @@
 
 #include "wine/test.h"
 
+DEFINE_GUID(CLSID_XMLSchemaCache60, 0x88d96a07, 0xf192, 0x11d4, 0xa6, 0x5f, 0x00, 0x40, 0x96, 0x32, 0x51, 0xe5);
+
 static const WCHAR xdr_schema1_uri[] = L"x-schema:test1.xdr";
 static const WCHAR xdr_schema1_xml[] =
 L"<?xml version='1.0'?>"

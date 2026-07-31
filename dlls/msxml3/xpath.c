@@ -2548,6 +2548,13 @@ static int xpath_equal_number_values(double arg1, double arg2)
     return ret;
 }
 
+static bool xpath_strequal(const WCHAR *str1, const WCHAR *str2)
+{
+    if (str1 == str2) return true;
+    if (!str1 || !str2) return false;
+    return !wcscmp(str1, str2);
+}
+
 static bool xpath_equal_values_common(struct xpath_parser_context *ctxt,
         struct xpath_object *arg1, struct xpath_object *arg2)
 {
@@ -2601,8 +2608,7 @@ static bool xpath_equal_values_common(struct xpath_parser_context *ctxt,
                     ret = (arg2->boolval == ret);
                     break;
                 case XPATH_STRING:
-                    ret = !wcscmp(arg1->stringval ? arg1->stringval : L"",
-                            arg2->stringval ? arg2->stringval : L"");
+                    ret = xpath_strequal(arg1->stringval, arg2->stringval);
                     break;
                 case XPATH_NUMBER:
                     xpath_push_value(ctxt, arg1);
@@ -6058,6 +6064,14 @@ static void xpath_builtin_concat(struct xpath_parser_context *ctxt, int nargs)
     xpath_push_value(ctxt, cur);
 }
 
+static WCHAR * xpath_wcsstr(const WCHAR *str, const WCHAR *sub)
+{
+    if (!str || !sub)
+        return NULL;
+
+    return wcsstr(str, sub);
+}
+
 static void xpath_builtin_contains(struct xpath_parser_context *ctxt, int nargs)
 {
     struct xpath_object *hay, *needle;
@@ -6075,7 +6089,7 @@ static void xpath_builtin_contains(struct xpath_parser_context *ctxt, int nargs)
 
     if (hay && hay->type == _XPATH_STRING)
     {
-        match = wcsstr(hay->stringval, needle->stringval);
+        match = !!xpath_wcsstr(hay->stringval, needle->stringval);
         xpath_push_value(ctxt, xpath_new_boolean(ctxt, match));
         xpath_object_release(ctxt->context, hay);
         xpath_object_release(ctxt->context, needle);
@@ -6619,7 +6633,7 @@ static void xpath_builtin_substringbefore(struct xpath_parser_context *ctxt, int
     xpath_arg_cast_to_string(ctxt);
     str = xpath_pop_value(ctxt);
 
-    point = wcsstr(str->stringval, find->stringval);
+    point = xpath_wcsstr(str->stringval, find->stringval);
     if (point)
     {
         offset = point - str->stringval;
@@ -6646,7 +6660,7 @@ static void xpath_builtin_substringafter(struct xpath_parser_context *ctxt, int 
     xpath_arg_cast_to_string(ctxt);
     str = xpath_pop_value(ctxt);
 
-    point = wcsstr(str->stringval, find->stringval);
+    point = xpath_wcsstr(str->stringval, find->stringval);
     if (point)
     {
         offset = point - str->stringval + wcslen(find->stringval);
@@ -7787,6 +7801,9 @@ HRESULT xpath_parse_selection_namespaces(const WCHAR *value, struct domdoc_prope
     struct xpath_qname name;
     HRESULT hr = S_OK;
     WCHAR *uri;
+
+    if (!value)
+        return S_OK;
 
     ctxt.cur = ctxt.base = value;
 

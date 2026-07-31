@@ -1318,6 +1318,39 @@ static void test_bitmap_scaler(void)
     IWICBitmap_Release(bitmap);
 }
 
+static void test_bitmap_scaler_fant(void)
+{
+    static const BYTE src_data[] =
+    {
+        0, 0, 0, 90, 90, 90, 240, 240, 240,
+    };
+    static const BYTE expected[] = {30, 30, 30, 190, 190, 190};
+    IWICBitmapScaler *scaler;
+    IWICBitmap *bitmap;
+    BYTE buf[6];
+    HRESULT hr;
+
+    hr = IWICImagingFactory_CreateBitmapFromMemory(factory, 3, 1, &GUID_WICPixelFormat24bppBGR,
+            9, sizeof(src_data), (BYTE *)src_data, &bitmap);
+    ok(hr == S_OK, "Failed to create bitmap, hr %#lx.\n", hr);
+
+    hr = IWICImagingFactory_CreateBitmapScaler(factory, &scaler);
+    ok(hr == S_OK, "Failed to create bitmap scaler, hr %#lx.\n", hr);
+
+    hr = IWICBitmapScaler_Initialize(scaler, (IWICBitmapSource *)bitmap, 2, 1,
+            WICBitmapInterpolationModeFant);
+    ok(hr == S_OK, "Failed to initialize bitmap scaler, hr %#lx.\n", hr);
+
+    memset(buf, 0xcc, sizeof(buf));
+    hr = IWICBitmapScaler_CopyPixels(scaler, NULL, sizeof(buf), sizeof(buf), buf);
+    ok(hr == S_OK, "Failed to copy scaled pixels, hr %#lx.\n", hr);
+    ok(!memcmp(buf, expected, sizeof(buf)), "Unexpected Fant pixels %u,%u,%u %u,%u,%u.\n",
+            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+
+    IWICBitmapScaler_Release(scaler);
+    IWICBitmap_Release(bitmap);
+}
+
 static LONG obj_refcount(void *obj)
 {
     IUnknown_AddRef((IUnknown *)obj);
@@ -1598,6 +1631,7 @@ START_TEST(bitmap)
         &IID_IWICImagingFactory, (void**)&factory);
     ok(SUCCEEDED(hr), "CoCreateInstance failed, hr=%lx\n", hr);
 
+    test_bitmap_scaler_fant();
     test_IMILBitmap();
     test_createbitmap();
     test_createbitmapfromsource();

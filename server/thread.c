@@ -94,34 +94,18 @@ struct thread_apc
     union apc_result    result;   /* call results once executed */
 };
 
-static void dump_thread_apc( struct object *obj, int verbose );
+static void thread_apc_dump( struct object *obj, int verbose );
 static struct object *thread_apc_get_sync( struct object *obj );
 static void thread_apc_destroy( struct object *obj );
 static void clear_apc_queue( struct list *queue );
 
 static const struct object_ops thread_apc_ops =
 {
-    sizeof(struct thread_apc),  /* size */
-    &no_type,                   /* type */
-    dump_thread_apc,            /* dump */
-    NULL,                       /* add_queue */
-    NULL,                       /* remove_queue */
-    NULL,                       /* signaled */
-    NULL,                       /* satisfied */
-    no_signal,                  /* signal */
-    no_get_fd,                  /* get_fd */
-    thread_apc_get_sync,        /* get_sync */
-    default_map_access,         /* map_access */
-    default_get_sd,             /* get_sd */
-    default_set_sd,             /* set_sd */
-    no_get_full_name,           /* get_full_name */
-    no_lookup_name,             /* lookup_name */
-    no_link_name,               /* link_name */
-    NULL,                       /* unlink_name */
-    no_open_file,               /* open_file */
-    no_kernel_obj_list,         /* get_kernel_obj_list */
-    no_close_handle,            /* close_handle */
-    thread_apc_destroy          /* destroy */
+    .size     = sizeof(struct thread_apc),
+    .type     = &no_type,
+    .dump     = thread_apc_dump,
+    .get_sync = thread_apc_get_sync,
+    .destroy  = thread_apc_destroy,
 };
 
 
@@ -141,33 +125,17 @@ struct context
 /* flags for registers that always need to be set from the server side */
 static const unsigned int system_flags = SERVER_CTX_DEBUG_REGISTERS;
 
-static void dump_context( struct object *obj, int verbose );
+static void context_dump( struct object *obj, int verbose );
 static struct object *context_get_sync( struct object *obj );
 static void context_destroy( struct object *obj );
 
 static const struct object_ops context_ops =
 {
-    sizeof(struct context),     /* size */
-    &no_type,                   /* type */
-    dump_context,               /* dump */
-    NULL,                       /* add_queue */
-    NULL,                       /* remove_queue */
-    NULL,                       /* signaled */
-    NULL,                       /* satisfied */
-    no_signal,                  /* signal */
-    no_get_fd,                  /* get_fd */
-    context_get_sync,           /* get_sync */
-    default_map_access,         /* map_access */
-    default_get_sd,             /* get_sd */
-    default_set_sd,             /* set_sd */
-    no_get_full_name,           /* get_full_name */
-    no_lookup_name,             /* lookup_name */
-    no_link_name,               /* link_name */
-    NULL,                       /* unlink_name */
-    no_open_file,               /* open_file */
-    no_kernel_obj_list,         /* get_kernel_obj_list */
-    no_close_handle,            /* close_handle */
-    context_destroy,            /* destroy */
+    .size     = sizeof(struct context),
+    .type     = &no_type,
+    .dump     = context_dump,
+    .get_sync = context_get_sync,
+    .destroy  = context_destroy,
 };
 
 
@@ -188,47 +156,27 @@ struct type_descr thread_type =
     },
 };
 
-static void dump_thread( struct object *obj, int verbose );
+static void thread_dump( struct object *obj, int verbose );
 static struct object *thread_get_sync( struct object *obj );
 static unsigned int thread_map_access( struct object *obj, unsigned int access );
 static void thread_poll_event( struct fd *fd, int event );
 static struct list *thread_get_kernel_obj_list( struct object *obj );
-static void destroy_thread( struct object *obj );
+static void thread_destroy( struct object *obj );
 
 static const struct object_ops thread_ops =
 {
-    sizeof(struct thread),      /* size */
-    &thread_type,               /* type */
-    dump_thread,                /* dump */
-    NULL,                       /* add_queue */
-    NULL,                       /* remove_queue */
-    NULL,                       /* signaled */
-    NULL,                       /* satisfied */
-    no_signal,                  /* signal */
-    no_get_fd,                  /* get_fd */
-    thread_get_sync,            /* get_sync */
-    thread_map_access,          /* map_access */
-    default_get_sd,             /* get_sd */
-    default_set_sd,             /* set_sd */
-    no_get_full_name,           /* get_full_name */
-    no_lookup_name,             /* lookup_name */
-    no_link_name,               /* link_name */
-    NULL,                       /* unlink_name */
-    no_open_file,               /* open_file */
-    thread_get_kernel_obj_list, /* get_kernel_obj_list */
-    no_close_handle,            /* close_handle */
-    destroy_thread              /* destroy */
+    .size                = sizeof(struct thread),
+    .type                = &thread_type,
+    .dump                = thread_dump,
+    .get_sync            = thread_get_sync,
+    .map_access          = thread_map_access,
+    .get_kernel_obj_list = thread_get_kernel_obj_list,
+    .destroy             = thread_destroy,
 };
 
 static const struct fd_ops thread_fd_ops =
 {
-    NULL,                       /* get_poll_events */
-    thread_poll_event,          /* poll_event */
-    NULL,                       /* flush */
-    NULL,                       /* get_fd_type */
-    NULL,                       /* ioctl */
-    NULL,                       /* queue_async */
-    NULL                        /* reselect_async */
+    .poll_event = thread_poll_event,
 };
 
 static struct list thread_list = LIST_INIT(thread_list);
@@ -459,7 +407,7 @@ static inline int is_valid_address( client_ptr_t addr )
 
 
 /* dump a context on stdout for debugging purposes */
-static void dump_context( struct object *obj, int verbose )
+static void context_dump( struct object *obj, int verbose )
 {
     struct context *context = (struct context *)obj;
     assert( obj->ops == &context_ops );
@@ -651,7 +599,7 @@ static void cleanup_thread( struct thread *thread )
 }
 
 /* destroy a thread when its refcount is 0 */
-static void destroy_thread( struct object *obj )
+static void thread_destroy( struct object *obj )
 {
     struct thread *thread = (struct thread *)obj;
     assert( obj->ops == &thread_ops );
@@ -666,7 +614,7 @@ static void destroy_thread( struct object *obj )
 }
 
 /* dump a thread on stdout for debugging purposes */
-static void dump_thread( struct object *obj, int verbose )
+static void thread_dump( struct object *obj, int verbose )
 {
     struct thread *thread = (struct thread *)obj;
     assert( obj->ops == &thread_ops );
@@ -690,7 +638,7 @@ static unsigned int thread_map_access( struct object *obj, unsigned int access )
     return access;
 }
 
-static void dump_thread_apc( struct object *obj, int verbose )
+static void thread_apc_dump( struct object *obj, int verbose )
 {
     struct thread_apc *apc = (struct thread_apc *)obj;
     assert( obj->ops == &thread_apc_ops );
@@ -1028,7 +976,7 @@ void set_wait_status( struct wait_queue_entry *entry, int status )
 static void object_sync_satisfied( struct object *obj, struct wait_queue_entry *entry )
 {
     struct object *sync = get_obj_sync( obj );
-    sync->ops->satisfied( sync, entry );
+    if (sync->ops->satisfied) sync->ops->satisfied( sync, entry );
     release_object( sync );
 }
 
@@ -1042,7 +990,10 @@ static void object_sync_remove_queue( struct object *obj, struct wait_queue_entr
 static int object_sync_add_queue( struct object *obj, struct wait_queue_entry *entry )
 {
     struct object *sync = get_obj_sync( obj );
-    int ret = sync->ops->add_queue( sync, entry );
+    int ret = 0;
+
+    if (sync->ops->add_queue) ret = sync->ops->add_queue( sync, entry );
+    else set_error( STATUS_OBJECT_TYPE_MISMATCH );
     release_object( sync );
     return ret;
 }
@@ -1307,7 +1258,8 @@ static int signal_object( obj_handle_t handle )
     obj = get_handle_obj( current->process, handle, 0, NULL );
     if (obj)
     {
-        ret = obj->ops->signal( obj, get_handle_access( current->process, handle ), -1 );
+        if (obj->ops->signal) ret = obj->ops->signal( obj, get_handle_access( current->process, handle ), -1 );
+        else set_error( STATUS_OBJECT_TYPE_MISMATCH );
         release_object( obj );
     }
     return ret;

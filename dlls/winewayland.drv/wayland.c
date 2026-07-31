@@ -297,6 +297,8 @@ BOOL wayland_process_init(void)
         return FALSE;
     }
 
+    wayland_window_init();
+
     /* Populate registry */
     wl_registry_add_listener(process_wayland.wl_registry, &registry_listener, NULL);
 
