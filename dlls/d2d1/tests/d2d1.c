@@ -2732,6 +2732,7 @@ static void test_bitmap_brush(BOOL d3d11)
 
     /* Bitmap brushes use pixel dimensions rather than DPI-adjusted DIP
      * dimensions when the device context is in pixel unit mode. */
+    ID2D1RenderTarget_SetDpi(rt, 96.0f, 96.0f);
     bitmap_desc.dpiX = bitmap_desc.dpiY = 192.0f;
     hr = ID2D1RenderTarget_CreateBitmap(rt, size, bitmap_data,
             4 * sizeof(*bitmap_data), &bitmap_desc, &pixel_bitmap);
@@ -2760,6 +2761,7 @@ static void test_bitmap_brush(BOOL d3d11)
     ok(compare_colour(colour, 0xff000000, 1), "Got unexpected colour 0x%08lx.\n", colour);
     release_resource_readback(&rb);
     ID2D1DeviceContext_SetUnitMode(ctx.context, D2D1_UNIT_MODE_DIPS);
+    ID2D1RenderTarget_SetDpi(rt, 192.0f, 48.0f);
     ID2D1BitmapBrush_Release(brush);
     ID2D1Bitmap_Release(pixel_bitmap);
 
