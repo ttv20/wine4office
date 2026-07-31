@@ -157,9 +157,6 @@ void wp_fractional_scale_handle_scale(void* user_data,
 
     surface->window.scale = scale;
 
-    /* reattach client surfaces as their rects have changed */
-    update_client_surfaces(hwnd);
-
     /* the subsurface rect has changed */
     if (surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
     {
@@ -168,6 +165,10 @@ void wp_fractional_scale_handle_scale(void* user_data,
     }
 
     wayland_win_data_release(data);
+
+    /* Reattach client surfaces after dropping win_data_mutex. Updating a
+     * client re-enters the Wayland window-data lookup path. */
+    update_client_surfaces(hwnd);
 
     NtUserExposeWindowSurface(hwnd, 0, NULL);
 }
