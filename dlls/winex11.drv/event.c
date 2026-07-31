@@ -965,6 +965,17 @@ static BOOL X11DRV_ConfigureNotify( HWND hwnd, XEvent *xev )
     if (!hwnd) return FALSE;
     if (!(data = get_win_data( hwnd ))) return FALSE;
 
+    if (data->office_popup_offscreen || data->office_transition_offscreen ||
+        (data->office_suppress_config_until_serial &&
+         (long)(event->serial - data->office_suppress_config_until_serial) < 0))
+    {
+        rect = data->pending_state.rect;
+        window_configure_notify( data, event->serial, &rect );
+        release_win_data( data );
+        return FALSE;
+    }
+    data->office_suppress_config_until_serial = 0;
+
     /* update our view of the window tree for mouse event coordinate mapping */
     if (data->whole_window && data->parent && !data->parent_invalid)
     {

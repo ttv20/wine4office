@@ -1786,6 +1786,54 @@ static void x11drv_surface_set_clip( struct window_surface *window_surface, cons
 }
 
 /***********************************************************************
+ *           surface_has_varied_pixels
+ *
+ * Office Net UI tool popups sometimes submit an initialized but blank
+ * surface before their real contents. Sample a bounded grid inside only the
+ * region uploaded by this flush.
+ */
+static BOOL surface_has_varied_pixels( const XImage *image, const RECT *dirty,
+                                       DWORD alpha_mask )
+{
+    unsigned int columns, rows, width, height, x, y;
+    RECT sample;
+    DWORD first = 0, pixel_mask;
+    BOOL have_first = FALSE;
+
+    if (image->bits_per_pixel != 32 || image->width <= 0 || image->height <= 0) return FALSE;
+    sample.left = max( dirty->left, 0 );
+    sample.top = max( dirty->top, 0 );
+    sample.right = min( dirty->right, image->width );
+    sample.bottom = min( dirty->bottom, image->height );
+    if (sample.left >= sample.right || sample.top >= sample.bottom) return FALSE;
+
+    pixel_mask = image->red_mask | image->green_mask | image->blue_mask | alpha_mask;
+    width = sample.right - sample.left;
+    height = sample.bottom - sample.top;
+    columns = min( width, 32 );
+    rows = min( height, 32 );
+    for (y = 0; y < rows; y++)
+    {
+        unsigned int py = sample.top + (rows == 1 ? 0 : y * (height - 1) / (rows - 1));
+        const DWORD *scanline = (const DWORD *)(image->data + py * image->bytes_per_line);
+
+        for (x = 0; x < columns; x++)
+        {
+            unsigned int px = sample.left + (columns == 1 ? 0 : x * (width - 1) / (columns - 1));
+            DWORD pixel = scanline[px] & pixel_mask;
+
+            if (!have_first)
+            {
+                first = pixel;
+                have_first = TRUE;
+            }
+            else if (pixel != first) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/***********************************************************************
  *           x11drv_surface_flush
  */
 static BOOL x11drv_surface_flush( struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
@@ -1854,7 +1902,8 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
                    dirty->right - dirty->left, dirty->bottom - dirty->top );
 
     XFlush( gdi_display );
-    window_surface_presented( window_surface->hwnd );
+    window_surface_presented( window_surface->hwnd, X11DRV_PRESENT_WINDOW_SURFACE,
+                              surface_has_varied_pixels( ximage, dirty, alpha_mask ) );
 
     return TRUE;
 }

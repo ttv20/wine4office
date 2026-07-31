@@ -393,7 +393,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
 
     if (!hdc)
     {
-        window_surface_presented( toplevel );
+        window_surface_presented( toplevel, X11DRV_PRESENT_CLIENT_SURFACE, FALSE );
         return;
     }
     window = X11DRV_get_whole_window( toplevel );
@@ -432,7 +432,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     XFlush( gdi_display );
 
     if (region) NtGdiDeleteObjectApp( region );
-    window_surface_presented( toplevel );
+    window_surface_presented( toplevel, X11DRV_PRESENT_CLIENT_SURFACE, FALSE );
 }
 
 static const struct client_surface_funcs x11drv_client_surface_funcs =

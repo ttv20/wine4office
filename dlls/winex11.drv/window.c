@@ -431,6 +431,95 @@ static struct x11drv_win_data *alloc_win_data( Display *display, HWND hwnd )
 
 
 /***********************************************************************
+ *              is_office_net_ui_tool_window
+ */
+static BOOL is_office_net_ui_tool_window( HWND hwnd )
+{
+    static const WCHAR net_ui_tool_window[] =
+        {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    INT len;
+
+    if ((len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, net_ui_tool_window );
+}
+
+static BOOL is_office_window_transition( HWND hwnd )
+{
+    static const WCHAR window_transition[] =
+        {'A','S','_','W','i','n','d','o','w','T','r','a','n','s','i','t','i','o','n',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    INT len;
+
+    if ((len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, window_transition );
+}
+
+static void map_office_transition_target( HWND hwnd );
+
+static HWND find_office_transition_target( HWND transition, RECT *transition_rect, HWND *owner )
+{
+    HWND *list, target = 0;
+    UINT i;
+
+    *owner = NtUserGetAncestor( transition, GA_ROOTOWNER );
+    if (!*owner || !NtUserGetWindowRect( transition, transition_rect,
+                                         NtUserGetDpiForWindow( transition ) ))
+        return 0;
+    if (!(list = build_hwnd_list())) return 0;
+
+    for (i = 0; list[i] != HWND_BOTTOM; i++)
+    {
+        RECT rect;
+
+        if (list[i] == transition || !is_office_net_ui_tool_window( list[i] ) ||
+            !(NtUserGetWindowLongW( list[i], GWL_STYLE ) & WS_VISIBLE)) continue;
+        if (NtUserGetAncestor( list[i], GA_ROOTOWNER ) != *owner) continue;
+        if (!NtUserGetWindowRect( list[i], &rect, NtUserGetDpiForWindow( list[i] ))) continue;
+        if (EqualRect( transition_rect, &rect ))
+        {
+            target = list[i];
+            break;
+        }
+    }
+    free( list );
+    return target;
+}
+
+static BOOL validate_office_transition_target( HWND target, HWND owner, const RECT *rect )
+{
+    RECT target_rect;
+
+    return target && is_office_net_ui_tool_window( target ) &&
+           (NtUserGetWindowLongW( target, GWL_STYLE ) & WS_VISIBLE) &&
+           NtUserGetAncestor( target, GA_ROOTOWNER ) == owner &&
+           NtUserGetWindowRect( target, &target_rect, NtUserGetDpiForWindow( target ) ) &&
+           EqualRect( rect, &target_rect );
+}
+
+static BOOL is_transient_tool_popup( DWORD style, DWORD ex_style, BOOL fullscreen )
+{
+    return !fullscreen &&
+           (style & (WS_POPUP | WS_CAPTION | WS_SYSMENU)) == WS_POPUP &&
+           (ex_style & (WS_EX_TOOLWINDOW | WS_EX_APPWINDOW)) == WS_EX_TOOLWINDOW;
+}
+
+static BOOL can_place_window_offscreen( const RECT *rect )
+{
+    int width = rect->right - rect->left;
+    int height = rect->bottom - rect->top;
+
+    return width > 0 && width < 8192 && height > 0 && height < 8192;
+}
+
+
+/***********************************************************************
  *		is_window_managed
  *
  * Check if a given window should be managed
@@ -443,7 +532,11 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
+    ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE );
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
+    /* Captionless tool popups are transient application UI, even when shown active. */
+    if (is_transient_tool_popup( style, ex_style, fullscreen ))
+        return FALSE;
     /* activated windows are managed */
     if (!(swp_flags & (SWP_NOACTIVATE|SWP_HIDEWINDOW))) return TRUE;
     if (hwnd == get_active_window()) return TRUE;
@@ -459,7 +552,6 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
         if (fullscreen) return TRUE;
     }
     /* application windows are managed */
-    ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE );
     if (ex_style & WS_EX_APPWINDOW) return TRUE;
     /* windows that own popups are managed */
     if (has_owned_popups( hwnd )) return TRUE;
@@ -543,6 +635,17 @@ static int get_window_attributes( struct x11drv_win_data *data, XSetWindowAttrib
  * This uses the ShapeInput extension to control which areas of the window
  * can receive input events.
  */
+static void set_window_input_shape_empty( struct x11drv_win_data *data )
+{
+#ifdef HAVE_LIBXSHAPE
+    static XRectangle empty_rect;
+
+    if (!data->whole_window) return;
+    XShapeCombineRectangles( data->display, data->whole_window, ShapeInput, 0, 0,
+                             &empty_rect, 1, ShapeSet, YXBanded );
+#endif
+}
+
 static void sync_window_input_shape( struct x11drv_win_data *data )
 {
 #ifdef HAVE_LIBXSHAPE
@@ -553,9 +656,7 @@ static void sync_window_input_shape( struct x11drv_win_data *data )
     if (ex_style & WS_EX_TRANSPARENT)
     {
         /* For transparent windows, set an empty input shape to allow mouse pass-through */
-        static XRectangle empty_rect;
-        XShapeCombineRectangles( data->display, data->whole_window, ShapeInput, 0, 0,
-                                 &empty_rect, 1, ShapeSet, YXBanded );
+        set_window_input_shape_empty( data );
         TRACE( "window %p/%lx set empty input shape for WS_EX_TRANSPARENT\n",
                data->hwnd, data->whole_window );
     }
@@ -672,7 +773,6 @@ static void sync_window_opacity( Display *display, Window win, BYTE alpha, DWORD
         XChangeProperty( display, win, x11drv_atom(_NET_WM_WINDOW_OPACITY),
                          XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&opacity, 1 );
 }
-
 
 /***********************************************************************
  *              sync_window_text
@@ -1125,7 +1225,11 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
      * only normal windows, and doesn't handle correctly TRANSIENT_FOR hint for
      * dialogs owned by fullscreen windows.
      */
-    if (((style & WS_POPUP) || (ex_style & WS_EX_DLGMODALFRAME)) && owner)
+    if (is_transient_tool_popup( style, ex_style, data->is_fullscreen ))
+        window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_UTILITY );
+    else if (data->is_fullscreen)
+        window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_NORMAL );
+    else if (((style & WS_POPUP) || (ex_style & WS_EX_DLGMODALFRAME)) && owner)
         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_DIALOG );
     else
         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_NORMAL );
@@ -2417,6 +2521,19 @@ static void create_whole_window( struct x11drv_win_data *data )
     POINT pos;
 
     data->surface_initialized = FALSE;
+    data->reveal_after_first_paint = FALSE;
+    data->warmup_content_ready = FALSE;
+    data->office_net_ui_tool_window = is_office_net_ui_tool_window( data->hwnd );
+    data->office_popup_offscreen = FALSE;
+    data->office_window_transition = is_office_window_transition( data->hwnd );
+    data->office_transition_offscreen = FALSE;
+    data->office_transition_target = 0;
+    data->office_transition_owner = 0;
+    data->office_ulw_alpha = 255;
+    data->office_ulw_ready = FALSE;
+    data->office_ulw_uses_alpha = FALSE;
+    data->office_suppress_config_until_serial = 0;
+    SetRectEmpty( &data->office_transition_rect );
 
     if ((win_rgn = NtGdiCreateRectRgn( 0, 0, 0, 0 )) &&
         NtUserGetWindowRgnEx( data->hwnd, win_rgn, 0 ) == ERROR)
@@ -2482,6 +2599,10 @@ done:
 static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_destroyed )
 {
     TRACE( "win %p xwin %lx/%lx\n", data->hwnd, data->whole_window, data->client_window );
+    if (data->office_window_transition)
+        TRACE( "Office transition destroy hwnd %p xwin %lx already %u offscreen %u\n",
+              data->hwnd, data->whole_window, already_destroyed,
+              data->office_transition_offscreen );
 
     if (!data->whole_window)
     {
@@ -2513,6 +2634,19 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
     data->configure_serial = 0;
     data->net_wm_icon_serial = 0;
     data->reparenting = 0;
+    data->reveal_after_first_paint = FALSE;
+    data->warmup_content_ready = FALSE;
+    data->office_net_ui_tool_window = FALSE;
+    data->office_popup_offscreen = FALSE;
+    data->office_window_transition = FALSE;
+    data->office_transition_offscreen = FALSE;
+    data->office_transition_target = 0;
+    data->office_transition_owner = 0;
+    data->office_ulw_alpha = 255;
+    data->office_ulw_ready = FALSE;
+    data->office_ulw_uses_alpha = FALSE;
+    data->office_suppress_config_until_serial = 0;
+    SetRectEmpty( &data->office_transition_rect );
 
     if (data->xic)
     {
@@ -2555,6 +2689,9 @@ void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BO
     client_window = data->client_window;
     /* detach the client before re-creating whole_window */
     detach_client_window( data, client_window );
+    /* A transition helper visual switch is not its Win32 destruction. */
+    data->office_transition_offscreen = FALSE;
+    data->office_transition_target = 0;
     destroy_whole_window( data, FALSE );
     data->vis = *vis;
     create_whole_window( data );
@@ -2605,6 +2742,9 @@ void X11DRV_SetWindowStyle( HWND hwnd, INT offset, STYLESTRUCT *style )
         if (changed & WS_EX_LAYERED) /* changing WS_EX_LAYERED resets attributes */
         {
             data->layered = FALSE;
+            data->office_ulw_alpha = 255;
+            data->office_ulw_ready = FALSE;
+            data->office_ulw_uses_alpha = FALSE;
             set_window_visual( data, &default_visual, FALSE );
             sync_window_opacity( data->display, data->whole_window, 0, 0 );
         }
@@ -2625,8 +2765,16 @@ void X11DRV_DestroyWindow( HWND hwnd )
 {
     struct x11drv_thread_data *thread_data = x11drv_thread_data();
     struct x11drv_win_data *data;
+    HWND transition_target;
 
     if (!(data = get_win_data( hwnd ))) return;
+
+    transition_target = 0;
+    if (data->office_window_transition && data->office_transition_offscreen &&
+        validate_office_transition_target( data->office_transition_target,
+                                           data->office_transition_owner,
+                                           &data->office_transition_rect ))
+        transition_target = data->office_transition_target;
 
     destroy_whole_window( data, FALSE );
     if (thread_data->last_focus == hwnd) thread_data->last_focus = 0;
@@ -2638,6 +2786,7 @@ void X11DRV_DestroyWindow( HWND hwnd )
     XDeleteContext( gdi_display, (XID)hwnd, win_data_context );
     release_win_data( data );
     free( data );
+    if (transition_target) map_office_transition_target( transition_target );
 }
 
 
@@ -3248,21 +3397,168 @@ static BOOL get_desired_wm_state( DWORD style, const struct window_rects *rects 
     }
     return WithdrawnState;
 }
-void window_surface_presented( HWND hwnd )
+
+static BOOL map_office_transition_target_locked( struct x11drv_win_data *data,
+                                                 BYTE alpha, DWORD layered_flags )
+{
+    DWORD style;
+    POINT pos;
+
+    if (!data->office_net_ui_tool_window || !data->whole_window ||
+        !data->warmup_content_ready) return FALSE;
+
+    style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
+    if (!(style & WS_VISIBLE))
+        return FALSE;
+
+    data->map_after_layered_attributes = FALSE;
+    data->map_after_first_paint = FALSE;
+    data->reveal_after_first_paint = FALSE;
+    data->warmup_content_ready = FALSE;
+    sync_window_opacity( data->display, data->whole_window, alpha, layered_flags );
+    if (data->office_popup_offscreen)
+    {
+        XSync( gdi_display, False );
+        pos = virtual_screen_to_root( data->rects.visible.left, data->rects.visible.top );
+        data->office_suppress_config_until_serial = NextRequest( data->display );
+        XMoveWindow( data->display, data->whole_window, pos.x, pos.y );
+        data->office_popup_offscreen = FALSE;
+        sync_window_input_shape( data );
+    }
+    if (data->desired_state.wm_state == WithdrawnState)
+    {
+        /* The varied window surface was uploaded on gdi_display. Make that
+         * upload visible to the server before mapping on the thread display. */
+        XSync( gdi_display, False );
+        window_set_wm_state( data, get_desired_wm_state( style, &data->rects ), data->map_activate );
+    }
+
+    XFlush( data->display );
+    TRACE( "mapped ready Office target %p/%lx directly\n", data->hwnd, data->whole_window );
+    return TRUE;
+}
+
+static void map_office_transition_target( HWND hwnd )
 {
     struct x11drv_win_data *data;
-    DWORD style;
+    BOOL has_layered_attributes;
+    BOOL mapped;
+    DWORD flags = 0;
+    COLORREF key;
+    BYTE alpha = 255;
+
+    has_layered_attributes = NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha, &flags );
+    if (!(data = get_win_data( hwnd ))) return;
+    if (!has_layered_attributes)
+    {
+        if (!data->office_ulw_ready)
+        {
+            release_win_data( data );
+            return;
+        }
+        alpha = data->office_ulw_alpha;
+        flags = data->office_ulw_uses_alpha ? LWA_ALPHA : 0;
+    }
+    if ((flags & LWA_ALPHA) && !alpha)
+    {
+        release_win_data( data );
+        return;
+    }
+    mapped = map_office_transition_target_locked( data, alpha, flags );
+    release_win_data( data );
+    if (mapped)
+        NtUserRedrawWindow( hwnd, NULL, 0,
+                            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN );
+}
+
+void window_surface_presented( HWND hwnd, enum x11drv_present_source source, BOOL content_ready )
+{
+    struct x11drv_win_data *data;
+    BOOL had_deferred_mapping, has_layered_attributes = FALSE, visible_layered_attributes = TRUE;
+    BOOL request_redraw = FALSE, was_surface_initialized;
+    DWORD ex_style, layered_flags = 0, style;
+    COLORREF key;
+    BYTE alpha = 255;
 
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
-    if (!(data = get_win_data( hwnd ))) return;
-    data->surface_initialized = TRUE;
-    if (data->map_after_first_paint)
+    ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE );
+    if (ex_style & WS_EX_LAYERED)
     {
+        has_layered_attributes = NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha,
+                                                                  &layered_flags );
+    }
+    if (!(data = get_win_data( hwnd ))) return;
+    if (!data->office_net_ui_tool_window || !(ex_style & WS_EX_LAYERED))
+    {
+        data->surface_initialized = TRUE;
+        if (data->map_after_first_paint)
+        {
+            data->map_after_first_paint = FALSE;
+            window_set_wm_state( data, get_desired_wm_state( style, &data->rects ),
+                                 data->map_activate );
+            XFlush( data->display );
+        }
+        release_win_data( data );
+        return;
+    }
+    if (ex_style & WS_EX_LAYERED)
+    {
+        if (!has_layered_attributes)
+        {
+            visible_layered_attributes = data->office_ulw_ready;
+            alpha = data->office_ulw_alpha;
+            layered_flags = data->office_ulw_uses_alpha ? LWA_ALPHA : 0;
+        }
+        if (visible_layered_attributes && (layered_flags & LWA_ALPHA) && !alpha)
+            visible_layered_attributes = FALSE;
+    }
+    TRACE( "Office popup present hwnd %p source %u ready %u deferred-attrs %u deferred-paint %u reveal %u\n",
+          hwnd, source, content_ready, data->map_after_layered_attributes,
+          data->map_after_first_paint, data->reveal_after_first_paint );
+    if (content_ready && visible_layered_attributes)
+        data->warmup_content_ready = TRUE;
+    was_surface_initialized = data->surface_initialized;
+    had_deferred_mapping = data->map_after_layered_attributes || data->map_after_first_paint;
+    if (visible_layered_attributes) data->surface_initialized = TRUE;
+    if (data->map_after_layered_attributes && visible_layered_attributes)
+    {
+        data->map_after_layered_attributes = FALSE;
+        if (!was_surface_initialized)
+        {
+            data->reveal_after_first_paint = TRUE;
+            if (data->office_net_ui_tool_window)
+            {
+                /* Drop any varied frame seen while alpha was zero. Only the
+                 * presentation which observes visible attributes may open the
+                 * popup directly. */
+                data->warmup_content_ready = content_ready;
+                map_office_transition_target_locked( data, alpha, layered_flags );
+                request_redraw = TRUE;
+            }
+        }
+    }
+    if (data->map_after_first_paint &&
+        (!data->office_net_ui_tool_window || data->warmup_content_ready))
         data->map_after_first_paint = FALSE;
+    if (data->office_net_ui_tool_window && data->reveal_after_first_paint &&
+        data->warmup_content_ready && visible_layered_attributes)
+    {
+        if (map_office_transition_target_locked( data, alpha, layered_flags ))
+            request_redraw = TRUE;
+    }
+    else if (had_deferred_mapping &&
+        (!data->reveal_after_first_paint || !data->office_net_ui_tool_window) &&
+        !data->map_after_layered_attributes && !data->map_after_first_paint &&
+        data->desired_state.wm_state == WithdrawnState)
+    {
+        XSync( gdi_display, False );
         window_set_wm_state( data, get_desired_wm_state( style, &data->rects ), data->map_activate );
         XFlush( data->display );
     }
     release_win_data( data );
+    if (request_redraw)
+        NtUserRedrawWindow( hwnd, NULL, 0,
+                            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
 }
 
 
@@ -3278,7 +3574,8 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     struct window_rects old_rects;
     BOOL is_managed, was_fullscreen, activate = !(swp_flags & SWP_NOACTIVATE), fullscreen = !!(swp_flags & WINE_SWP_FULLSCREEN);
     BOOL fully_transparent = FALSE, has_layered_attributes = FALSE;
-    BOOL no_class_brush, wait_for_first_present;
+    BOOL no_class_brush, wait_for_first_present, wait_for_layered_attributes;
+    BOOL retain_transition_hide;
     COLORREF key;
     BYTE alpha;
     DWORD layered_flags;
@@ -3286,12 +3583,15 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     if ((is_managed = is_window_managed( hwnd, swp_flags, fullscreen ))) make_owner_managed( hwnd );
 
     if (!(data = get_win_data( hwnd ))) return;
+    was_fullscreen = data->is_fullscreen;
+    data->is_fullscreen = fullscreen;
     if (is_managed) window_set_managed( data, TRUE );
 
     old_rects = data->rects;
-    was_fullscreen = data->is_fullscreen;
+    retain_transition_hide = !(new_style & WS_VISIBLE) && data->office_window_transition &&
+                             data->office_transition_offscreen &&
+                             data->office_transition_target;
     if (!(new_style & WS_MINIMIZE) || is_virtual_desktop()) data->rects = *new_rects;
-    data->is_fullscreen = fullscreen;
     data->is_resizable = !!(swp_flags & WINE_SWP_RESIZABLE);
 
     TRACE( "win %p/%lx new_rects %s style %08x flags %08x\n", hwnd, data->whole_window,
@@ -3304,33 +3604,83 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         WARN( "win %p/%lx not yet hidden, delaying unmapping\n", hwnd, data->whole_window );
         new_style |= WS_VISIBLE;
     }
-    if (!(new_style & WS_VISIBLE)) data->map_after_first_paint = FALSE;
+    if (!(new_style & WS_VISIBLE))
+    {
+        if (retain_transition_hide)
+        {
+            /* Keep the completed helper mapped offscreen and input-free until
+             * its Win32 window is destroyed. */
+            new_style |= WS_VISIBLE;
+            set_window_input_shape_empty( data );
+            TRACE( "Office transition delaying X unmap hwnd %p/%lx target %p\n",
+                  hwnd, data->whole_window, data->office_transition_target );
+        }
+        else
+        {
+            data->map_after_first_paint = FALSE;
+            data->map_after_layered_attributes = FALSE;
+            data->reveal_after_first_paint = FALSE;
+            data->warmup_content_ready = FALSE;
+        }
+    }
 
-    if ((ex_style & WS_EX_LAYERED) && data->layered)
+    if (ex_style & WS_EX_LAYERED)
     {
         has_layered_attributes = NtUserGetLayeredWindowAttributes( hwnd, &key, &alpha, &layered_flags );
         if (has_layered_attributes && (layered_flags & LWA_ALPHA) && !alpha)
             fully_transparent = TRUE;
+        else if (!has_layered_attributes && data->office_ulw_ready &&
+                 data->office_ulw_uses_alpha && !data->office_ulw_alpha)
+            fully_transparent = TRUE;
     }
 
-    /* Layered windows are mapped only once their attributes can contribute
-     * visible content. Layered surfaces without attributes and windows
-     * without a class background brush wait for their first actual surface
-     * presentation instead of exposing undefined X11 backing pixels. */
     no_class_brush = !NtUserGetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND );
+    wait_for_layered_attributes = data->office_net_ui_tool_window &&
+                                  (ex_style & WS_EX_LAYERED) &&
+                                  (fully_transparent ||
+                                   (!has_layered_attributes && !data->office_ulw_ready));
     wait_for_first_present = (no_class_brush && !data->map_after_first_paint) ||
                              ((ex_style & WS_EX_LAYERED) && data->layered &&
                               !has_layered_attributes && !data->surface_initialized);
+    if (data->office_net_ui_tool_window && (ex_style & WS_EX_LAYERED))
+        wait_for_first_present = TRUE;
     if (data->desired_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
         (((ex_style & WS_EX_LAYERED) && (!data->layered || fully_transparent)) ||
          wait_for_first_present) &&
         !IsRectEmpty( &new_rects->window ))
     {
+        data->map_after_layered_attributes = wait_for_layered_attributes;
         data->map_after_first_paint = wait_for_first_present &&
                                       (!(ex_style & WS_EX_LAYERED) ||
                                        (data->layered && !fully_transparent));
-        data->map_activate = activate;
-        WARN( "win %p/%lx has no initialized contents, delaying mapping\n", hwnd, data->whole_window );
+        if (wait_for_layered_attributes || wait_for_first_present)
+        {
+            data->map_activate = activate;
+            TRACE( "win %p/%lx is waiting for initialized contents or visible attributes, delaying mapping\n",
+                  hwnd, data->whole_window );
+            if (data->office_net_ui_tool_window)
+            {
+                if (can_place_window_offscreen( &new_rects->visible ))
+                {
+                    data->office_popup_offscreen = TRUE;
+                    data->reveal_after_first_paint = TRUE;
+                    sync_window_opacity( data->display, data->whole_window, 255, LWA_ALPHA );
+                    set_window_input_shape_empty( data );
+                }
+                else
+                {
+                    data->reveal_after_first_paint = FALSE;
+                    new_style &= ~WS_VISIBLE;
+                }
+            }
+            else new_style &= ~WS_VISIBLE;
+        }
+    }
+
+    if (data->office_popup_offscreen &&
+        !can_place_window_offscreen( &new_rects->visible ))
+    {
+        data->reveal_after_first_paint = FALSE;
         new_style &= ~WS_VISIBLE;
     }
 
@@ -3360,6 +3710,45 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
                                    new_x_offset - old_x_offset, new_y_offset - old_y_offset );
         }
 #endif
+    }
+
+    if (data->office_popup_offscreen && !IsRectEmpty( &new_rects->visible ))
+    {
+        int width = new_rects->visible.right - new_rects->visible.left;
+        int height = new_rects->visible.bottom - new_rects->visible.top;
+
+        XMoveWindow( data->display, data->whole_window, -width - 1, -height - 1 );
+    }
+
+    if (!retain_transition_hide)
+    {
+        data->office_transition_target = 0;
+        data->office_transition_owner = 0;
+        SetRectEmpty( &data->office_transition_rect );
+    }
+    if (!retain_transition_hide && data->office_window_transition && (new_style & WS_VISIBLE) &&
+        !IsRectEmpty( &new_rects->visible ))
+    {
+        RECT transition_rect;
+        HWND transition_owner, transition_target;
+        int width = new_rects->visible.right - new_rects->visible.left;
+        int height = new_rects->visible.bottom - new_rects->visible.top;
+
+        if (can_place_window_offscreen( &new_rects->visible ) &&
+            (transition_target = find_office_transition_target( hwnd, &transition_rect,
+                                                                &transition_owner )))
+        {
+            /* Root coordinates start at zero. Keep the entire helper just above
+             * and left of the root while staying safely in signed X11 range. */
+            XMoveWindow( data->display, data->whole_window, -width - 1, -height - 1 );
+            data->office_transition_offscreen = TRUE;
+            data->office_transition_target = transition_target;
+            data->office_transition_owner = transition_owner;
+            data->office_transition_rect = transition_rect;
+            TRACE( "Office transition prepared offscreen hwnd %p/%lx target %p owner %p rect %s size %dx%d\n",
+                  hwnd, data->whole_window, transition_target,
+                  transition_owner, wine_dbgstr_rect( &transition_rect ), width, height );
+        }
     }
 
     window_set_wm_state( data, get_desired_wm_state( new_style, new_rects ), activate );
@@ -3488,18 +3877,26 @@ void X11DRV_SetWindowRgn( HWND hwnd, HRGN hrgn, BOOL redraw )
 void X11DRV_SetLayeredWindowAttributes( HWND hwnd, COLORREF key, BYTE alpha, DWORD flags )
 {
     struct x11drv_win_data *data = get_win_data( hwnd );
+    BOOL defer_visible_opacity;
 
+    TRACE( "hwnd %p key %#x alpha %u flags %#x\n", hwnd, key, alpha, flags );
     if (data)
     {
+        defer_visible_opacity = data->map_after_layered_attributes && !data->surface_initialized &&
+                                (!(flags & LWA_ALPHA) || alpha);
+        data->office_ulw_alpha = 255;
+        data->office_ulw_ready = FALSE;
+        data->office_ulw_uses_alpha = FALSE;
         set_window_visual( data, &default_visual, FALSE );
 
         if (data->whole_window)
         {
-            sync_window_opacity( data->display, data->whole_window, alpha, flags );
-            XFlush( data->display );
+            if (!defer_visible_opacity && !data->office_popup_offscreen)
+                sync_window_opacity( data->display, data->whole_window, alpha, flags );
         }
 
         data->layered = TRUE;
+        XFlush( data->display );
         release_win_data( data );
     }
     else
@@ -3523,13 +3920,47 @@ void X11DRV_UpdateLayeredWindow( HWND hwnd, BYTE alpha, UINT flags )
 {
     struct x11drv_win_data *data;
 
+    TRACE( "hwnd %p alpha %u flags %#x\n", hwnd, alpha, flags );
     if (!(data = get_win_data( hwnd ))) return;
+    if (data->office_net_ui_tool_window)
+    {
+        data->office_ulw_alpha = alpha;
+        data->office_ulw_ready = TRUE;
+        data->office_ulw_uses_alpha = !!(flags & ULW_ALPHA);
+    }
+    if (data->office_window_transition)
+    {
+        RECT transition_rect;
+        HWND transition_owner, transition_target;
 
-    if (data->whole_window)
+        if ((transition_target = find_office_transition_target( hwnd, &transition_rect,
+                                                                &transition_owner )))
+        {
+            data->office_transition_target = transition_target;
+            data->office_transition_owner = transition_owner;
+            data->office_transition_rect = transition_rect;
+        }
+        else
+        {
+            data->office_transition_target = 0;
+            data->office_transition_owner = 0;
+            SetRectEmpty( &data->office_transition_rect );
+        }
+        TRACE( "Office transition layered update hwnd %p/%lx alpha %u flags %#x offscreen %u\n",
+              hwnd, data->whole_window, alpha, flags, data->office_transition_offscreen );
+    }
+
+    if (data->whole_window && !data->office_popup_offscreen)
     {
         sync_window_opacity( data->display, data->whole_window, alpha, flags );
-        XFlush( data->display );
     }
+
+    if ((!(flags & ULW_ALPHA) || alpha) && data->map_after_layered_attributes)
+    {
+        data->map_after_layered_attributes = FALSE;
+        data->map_after_first_paint = TRUE;
+    }
+    XFlush( data->display );
 
     release_win_data( data );
 }
