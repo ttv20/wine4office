@@ -1021,8 +1021,6 @@ HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",2,"1
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","DllName",2,"%10%\resources\themes\aero\aero.msstyles"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ColorName",2,"Blue"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","SizeName",2,"NormalSize"
-HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","AppsUseLightTheme",0x10001,1
-HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","SystemUsesLightTheme",0x10001,1
 
 [WinmgmtService]
 Description="Provides access to Windows Management Instrumentation"

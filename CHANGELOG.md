@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 — Upcoming
+
+- Stop forcing new Wine prefixes to use light application and system themes,
+  allowing host color-scheme synchronization to choose the initial theme.
+
 ## 0.1.7 — 2026-07-31
 
 - Complete updates started by older managers on the first restart: stop Wine,
