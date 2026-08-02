@@ -5,6 +5,14 @@
 - Stop forcing new Wine prefixes to use light application and system themes,
   allowing host color-scheme synchronization to choose the initial theme.
 
+## 0.1.8 — 2026-08-01
+
+- Reduce blank windows and flicker when Office starts.
+- Improve menu and popup reliability on Wayland and X11.
+- Prevent freezes caused by popup stacking on Wayland.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.7...wine4office-v0.1.8)
+
 ## 0.1.7 — 2026-07-31
 
 - Complete updates started by older managers on the first restart: stop Wine,
