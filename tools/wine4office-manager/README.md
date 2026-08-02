@@ -67,7 +67,7 @@ The manager defaults to:
 - Apply curated per-prefix Office compatibility and privacy policies without
   exposing Windows-only Group Policy infrastructure.
 - Optionally start Office Click-to-Run and App-V background services at login
-  for faster first launches. They typically use 100–200 MB of RAM.
+  to make Office apps open 2–3× faster. They typically use 300–600 MB of RAM.
 - Open Wine configuration and maintenance utilities.
 - Download and atomically install separately verified Wine4Office Manager and
   Wine runner updates. Runner updates refresh the prefix with `wineboot -u`,

@@ -133,8 +133,8 @@ class QtManagerTests(unittest.TestCase):
         notice = self.window.preload_notice_label.text()
         self.assertEqual(
             notice,
-            "Start Office Click-to-Run and App-V services at login for faster launches. "
-            "Uses about 100–200 MB of RAM.",
+            "Start Office Click-to-Run and App-V services at login. "
+            "Uses about 300–600 MB of RAM and makes Office apps open 2–3× faster.",
         )
         self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (

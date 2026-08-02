@@ -247,8 +247,8 @@ class ManagerWindow(QMainWindow):
         preload_layout = QVBoxLayout(preload)
         preload_layout.setSpacing(2)
         self.preload_notice_label = QLabel(
-            "Start Office Click-to-Run and App-V services at login for faster launches. "
-            "Uses about 100–200 MB of RAM."
+            "Start Office Click-to-Run and App-V services at login. "
+            "Uses about 300–600 MB of RAM and makes Office apps open 2–3× faster."
         )
         self.preload_notice_label.setAccessibleName("Background services memory notice")
         self.preload_notice_label.setWordWrap(True)
