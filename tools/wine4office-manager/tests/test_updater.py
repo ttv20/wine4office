@@ -123,6 +123,65 @@ class UpdaterTests(unittest.TestCase):
         (self.install_root / "UPDATE_URL").write_text(configured + "\n")
         self.assertEqual(backend.default_config()["update_url"], configured)
 
+    def test_prerelease_check_resolves_newest_published_github_release(self):
+        releases = [
+            {"draft": True, "assets": []},
+            {
+                "draft": False,
+                "prerelease": True,
+                "assets": [{
+                    "name": "release.json",
+                    "browser_download_url": (
+                        "https://github.com/ttv20/wine4office/releases/download/"
+                        "v0.2.0-rc.1/release.json"
+                    ),
+                }],
+            },
+        ]
+        with mock.patch.object(
+            backend.urllib.request, "urlopen",
+            return_value=Response(__import__("json").dumps(releases).encode()),
+        ) as urlopen:
+            resolved = backend._github_latest_release_metadata_url(
+                "https://github.com/ttv20/wine4office/releases/latest/download/release.json"
+            )
+
+        self.assertEqual(
+            resolved,
+            "https://github.com/ttv20/wine4office/releases/download/"
+            "v0.2.0-rc.1/release.json",
+        )
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "https://api.github.com/repos/ttv20/wine4office/releases?per_page=20",
+        )
+
+    def test_prerelease_check_uses_discovered_metadata(self):
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+        source = "https://github.com/owner/repo/releases/download/v2/release.json"
+        with mock.patch.object(
+            backend, "_github_latest_release_metadata_url", return_value=source
+        ) as discover, mock.patch.object(
+            backend, "fetch_release_metadata", return_value=parsed
+        ) as fetch, mock.patch.object(
+            backend, "available_updates", return_value={}
+        ):
+            backend.check_for_updates(
+                "https://github.com/owner/repo/releases/latest/download/release.json",
+                include_prereleases=True,
+            )
+
+        discover.assert_called_once()
+        fetch.assert_called_once_with(source, None, None)
+
+    def test_prerelease_check_rejects_custom_metadata_provider(self):
+        with self.assertRaisesRegex(ValueError, "standard GitHub"):
+            backend._github_latest_release_metadata_url(
+                "https://updates.example/release.json"
+            )
+
     def test_frozen_manager_reads_embedded_release_channel(self):
         bundle = self.root / "frozen-bundle"
         bundle.mkdir()
@@ -196,10 +255,11 @@ class UpdaterTests(unittest.TestCase):
             "desktop_copy": False,
             "update_url": "https://updates.example/release.json",
             "skipped_updates": {},
+            "include_prereleases": True,
         }
         result = {"metadata": parsed, "updates": {"manager": parsed["manager"]}}
         with mock.patch.object(backend, "load_config", return_value=config), \
-             mock.patch.object(backend, "check_for_updates", return_value=result), \
+             mock.patch.object(backend, "check_for_updates", return_value=result) as check, \
              mock.patch.object(backend, "save_config"), \
              mock.patch.object(backend, "persist_metadata_url"), \
              mock.patch.object(backend, "install_release_updates", return_value="installed") as install, \
@@ -207,6 +267,9 @@ class UpdaterTests(unittest.TestCase):
             state = manager.ManagerState()
             self.assertTrue(state.start_update_check())
             self._wait_for(lambda: state.snapshot()["updater"]["checked"])
+            check.assert_called_once_with(
+                config["update_url"], {}, include_prereleases=True
+            )
             self.assertEqual(
                 state.snapshot()["config"]["update_url"],
                 "https://future.example/releases/release.json",
@@ -461,6 +524,30 @@ class UpdaterTests(unittest.TestCase):
                 backend._download_artifact("manager", component)
         self.assertEqual(target.read_bytes(), b"old-manager")
         self.assertFalse(list((backend.cache_home() / "wine4office/updates").glob("*.part")))
+
+    def test_artifact_download_reports_numeric_progress(self):
+        payload = b"updated-manager" * 1024
+        component = {
+            "version": "2.0.0",
+            "url": "https://updates.example/manager",
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        events = []
+        with mock.patch.object(
+            backend.urllib.request, "urlopen", return_value=Response(payload)
+        ):
+            downloaded = backend._download_artifact(
+                "manager", component,
+                progress=lambda label, value: events.append((label, value)),
+            )
+        downloaded.unlink()
+
+        self.assertEqual(events[0], ("Downloading Wine4Office Manager 2.0.0", 0))
+        self.assertIn(("Downloading Wine4Office Manager 2.0.0", 100), events)
+        self.assertEqual(
+            events[-1], ("Verified Wine4Office Manager 2.0.0", 100)
+        )
 
     def test_archive_traversal_is_rejected_before_extraction(self):
         archive = self.root / "malicious.tar.zst"

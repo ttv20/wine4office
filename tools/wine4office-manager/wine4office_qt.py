@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -77,6 +78,12 @@ class ManagerWindow(QMainWindow):
         self.installed_apps: set[str] = set()
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
         self.preload_rebind: tuple[str, str] | None = None
+        self.update_progress_dialog: QDialog | None = None
+        self.update_progress_status: QLabel | None = None
+        self.update_progress_bar: QProgressBar | None = None
+        self.update_progress_log: QPlainTextEdit | None = None
+        self.update_progress_button: QPushButton | None = None
+        self.update_progress_finished = False
 
         self.setWindowTitle("Wine4Office Manager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
@@ -272,46 +279,25 @@ class ManagerWindow(QMainWindow):
 
         preload_buttons = QHBoxLayout()
         self.preload_enable_button = self._action_button(
-            "Enable at login",
-            lambda: self.preload_action("enable"),
+            "Enable & start",
+            lambda: self.preload_action("enable-start"),
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        self.preload_enable_button.setAccessibleName("Enable background services at login")
+        self.preload_enable_button.setAccessibleName("Enable and start background services")
         self.preload_enable_button.setToolTip(
-            "Enable Office background services for future logins. "
-            "This does not start them now."
-        )
-        self.preload_disable_button = self._action_button(
-            "Disable at login",
-            lambda: self.preload_action("disable"),
-            QStyle.StandardPixmap.SP_DialogCancelButton,
-        )
-        self.preload_disable_button.setAccessibleName("Disable background services at login")
-        self.preload_disable_button.setToolTip(
-            "Disable startup at future logins. This does not stop running services."
-        )
-        self.preload_start_button = self._action_button(
-            "Start now",
-            lambda: self.preload_action("start"),
-            QStyle.StandardPixmap.SP_MediaPlay,
-        )
-        self.preload_start_button.setAccessibleName("Start background services now")
-        self.preload_start_button.setToolTip(
-            "Start Office background services now. This does not enable them at login."
+            "Install if needed, enable at login, and start now."
         )
         self.preload_stop_button = self._action_button(
-            "Stop now",
-            lambda: self.preload_action("stop"),
+            "Stop & disable",
+            lambda: self.preload_action("stop-disable"),
             QStyle.StandardPixmap.SP_MediaStop,
         )
-        self.preload_stop_button.setAccessibleName("Stop background services now")
+        self.preload_stop_button.setAccessibleName("Stop and disable background services")
         self.preload_stop_button.setToolTip(
-            "Stop Office background services after Office is closed."
+            "Stop now and disable startup at login. Close Office first."
         )
         for button in (
             self.preload_enable_button,
-            self.preload_disable_button,
-            self.preload_start_button,
             self.preload_stop_button,
         ):
             preload_buttons.addWidget(button)
@@ -352,25 +338,23 @@ class ManagerWindow(QMainWindow):
         return page
 
     def preload_action(self, action: str) -> None:
-        if action not in {"enable", "disable", "start", "stop"}:
+        if action not in {"enable-start", "stop-disable"}:
             raise ValueError(f"Unknown preload action: {action}")
-        if action == "enable" and self.preload_rebind is not None:
+        if action == "enable-start" and self.preload_rebind is not None:
             bound, selected = self.preload_rebind
             result = QMessageBox.question(
                 self,
                 "Replace background service binding",
                 f"Move the inactive background services from {bound} to {selected} "
-                "and enable it at login?\n\nThis will not start it now.",
+                "then enable and start them?",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
                 QMessageBox.StandardButton.Cancel,
             )
             if result != QMessageBox.StandardButton.Yes:
                 return
         messages = {
-            "enable": "Enabling background services at login; they will not start now.",
-            "disable": "Disabling background services at login; running services will not stop.",
-            "start": "Starting background services for this session…",
-            "stop": "Stopping background services…",
+            "enable-start": "Enabling and starting background services…",
+            "stop-disable": "Stopping and disabling background services…",
         }
         try:
             self.state.start_preload_action(action)
@@ -378,12 +362,8 @@ class ManagerWindow(QMainWindow):
             self.refresh_state()
         except Exception as error:
             detail = str(error)
-            if action == "stop":
-                detail += (
-                    "\n\nStop now was not performed. Close Office before trying again, "
-                    "or use Disable at login as the safe alternative. Disable at login "
-                    "does not stop the worker or Office."
-                )
+            if action == "stop-disable" and "Office is active" in detail:
+                detail += "\n\nClose Office before trying again."
             self.show_error(detail)
 
     def _update_preload_status(self, snapshot: dict) -> None:
@@ -405,36 +385,27 @@ class ManagerWindow(QMainWindow):
         detail = str(preload.get("detail") or "").strip()
         if not supported:
             detail = "Systemd user services are unavailable."
-        elif checking:
-            detail = "Checking background services…"
         elif not installed:
-            detail = "Click Enable at login to install the background services."
+            detail = "Click Enable & start to use background services."
         elif mismatch:
             if enabled or active:
                 detail = (
                     f"A different environment is bound. Selected: {selected}. "
-                    f"Bound: {bound_text}. Disable at login and Stop now apply to the "
-                    "bound environment. Enable stays unavailable until that binding is "
-                    "both disabled and stopped."
+                    f"Bound: {bound_text}. Stop & disable applies to the bound "
+                    "environment before this one can be enabled."
                 )
             else:
                 detail = (
                     f"An inactive environment is bound. Selected: {selected}. "
-                    f"Bound: {bound_text}. Enable at login can replace it only after "
-                    "explicit confirmation, and will not start the worker now."
+                    f"Bound: {bound_text}. Enable & start can replace it after "
+                    "confirmation."
                 )
         elif active and not enabled:
-            detail = detail or (
-                "Running for this session only. It will not start at the next login."
-            )
+            detail = detail or "Running, but disabled at login."
         elif enabled and not active:
-            detail = detail or (
-                "Enabled for the next login but not running now. Use Start now separately."
-            )
+            detail = detail or "Enabled at login, but not running."
         else:
-            detail = detail or (
-                "Disable at login changes future logins only; it does not stop a running worker."
-            )
+            detail = detail or ""
         self.preload_detail_label.setText(detail)
         self.preload_rebind = (
             (bound_text, selected)
@@ -445,17 +416,11 @@ class ManagerWindow(QMainWindow):
         task_running = bool(snapshot["task"]["running"])
         available = supported and not checking and not task_running
         self.preload_enable_button.setEnabled(
-            available and not enabled
-            and (not installed or not mismatch or not active)
-        )
-        self.preload_disable_button.setEnabled(
-            available and installed and enabled
-        )
-        self.preload_start_button.setEnabled(
-            available and installed and selected_matches and not active
+            available and (not enabled or not active)
+            and (not installed or not mismatch or (not enabled and not active))
         )
         self.preload_stop_button.setEnabled(
-            available and installed and active
+            available and installed and (enabled or active)
         )
 
     def _office_install_page(self) -> QWidget:
@@ -992,6 +957,13 @@ class ManagerWindow(QMainWindow):
             self.set_automatic_update_checks
         )
         update_layout.addWidget(self.automatic_update_checks)
+        self.include_prereleases = QCheckBox("Include prerelease updates")
+        prerelease_help = (
+            "Offer the newest published GitHub release, including test versions."
+        )
+        self.include_prereleases.setToolTip(prerelease_help)
+        self.include_prereleases.setAccessibleDescription(prerelease_help)
+        update_layout.addWidget(self.include_prereleases)
         update_buttons = QHBoxLayout()
         update_buttons.addStretch()
         self.update_button = self._action_button(
@@ -1044,6 +1016,7 @@ class ManagerWindow(QMainWindow):
             "desktop_copy": self.desktop_copy.isChecked(),
             "use_x11": self.use_x11.isChecked(),
             "update_url": self.update_edit.text(),
+            "include_prereleases": self.include_prereleases.isChecked(),
         }
 
     def _sync_office_settings_summary(self, prefix: str) -> None:
@@ -1076,6 +1049,9 @@ class ManagerWindow(QMainWindow):
         self.update_edit.setText(config["update_url"])
         self.desktop_copy.setChecked(config["desktop_copy"])
         self.use_x11.setChecked(config["use_x11"])
+        self.include_prereleases.setChecked(
+            config.get("include_prereleases") is True
+        )
         self._sync_office_settings_summary(config["prefix"])
 
 
@@ -1509,10 +1485,113 @@ class ManagerWindow(QMainWindow):
                     self.restart_prompted = False
                 self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
                 self.state.start_offered_update(selected)
+                self._show_update_progress(offer, selected)
                 self.notify("Downloading the approved updates…")
                 self.refresh_state()
             except Exception as error:
                 self.show_error(error)
+
+    def _show_update_progress(self, offer: dict, selected: list[str]) -> None:
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+        labels = {"manager": "Wine4Office Manager", "wine": "Wine runner"}
+        versions = " · ".join(
+            f"{labels[name]} {offer['updates'][name]['version']}"
+            for name in selected
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Updating Wine4Office")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel(versions)
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        status = QLabel("Preparing update…")
+        status.setAccessibleName("Update progress status")
+        layout.addWidget(status)
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        progress.setAccessibleName("Update progress")
+        layout.addWidget(progress)
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        details.setMaximumHeight(130)
+        details.setPlaceholderText("Update details will appear here.")
+        layout.addWidget(details)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel update")
+        cancel.clicked.connect(self.cancel_task)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        self.update_progress_dialog = dialog
+        self.update_progress_status = status
+        self.update_progress_bar = progress
+        self.update_progress_log = details
+        self.update_progress_button = cancel
+        self.update_progress_finished = False
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._clear_update_progress(current)
+        )
+        dialog.show()
+
+    def _clear_update_progress(self, dialog: QDialog) -> None:
+        if self.update_progress_dialog is not dialog:
+            return
+        self.update_progress_dialog = None
+        self.update_progress_status = None
+        self.update_progress_bar = None
+        self.update_progress_log = None
+        self.update_progress_button = None
+        self.update_progress_finished = False
+
+    def _refresh_update_progress(self, task: dict) -> None:
+        dialog = self.update_progress_dialog
+        if dialog is None or task.get("kind") != "update":
+            return
+        label = str(task.get("progress_label") or "Updating Wine4Office…")
+        if self.update_progress_status is not None:
+            self.update_progress_status.setText(label)
+        value = task.get("progress_value")
+        if self.update_progress_bar is not None:
+            if value is None:
+                self.update_progress_bar.setRange(0, 0)
+            else:
+                self.update_progress_bar.setRange(0, 100)
+                self.update_progress_bar.setValue(int(value))
+        if self.update_progress_log is not None:
+            log = str(task.get("log") or "")
+            if self.update_progress_log.toPlainText() != log:
+                self.update_progress_log.setPlainText(log)
+                self.update_progress_log.moveCursor(QTextCursor.MoveOperation.End)
+        if task.get("running") or self.update_progress_finished:
+            return
+        self.update_progress_finished = True
+        if self.update_progress_status is not None:
+            messages = {
+                "completed": "Update completed.",
+                "cancelled": "Update cancelled.",
+                "failed": "Update failed. Review the details below.",
+            }
+            self.update_progress_status.setText(
+                messages.get(str(task.get("status")), "Update finished.")
+            )
+        if self.update_progress_bar is not None:
+            self.update_progress_bar.setRange(0, 100)
+            self.update_progress_bar.setValue(
+                100 if task.get("status") == "completed" else 0
+            )
+        if self.update_progress_button is not None:
+            try:
+                self.update_progress_button.clicked.disconnect()
+            except RuntimeError:
+                pass
+            self.update_progress_button.setText("Close")
+            self.update_progress_button.clicked.connect(dialog.accept)
+        if task.get("restart_required"):
+            QTimer.singleShot(500, dialog.accept)
 
     def prompt_manager_restart(self, update_succeeded: bool) -> None:
         detail = (
@@ -1648,13 +1727,14 @@ class ManagerWindow(QMainWindow):
             self.handled_offer_id = offer["id"]
             QTimer.singleShot(0, lambda current=offer: self.prompt_update_offer(current))
         task = snapshot["task"]
+        self._refresh_update_progress(task)
         if (self.pending_odt_xml is not None
                 and task["kind"] == "odt-install" and not task["running"]):
             config_path, _configuration_payload, expected_digest = self.pending_odt_xml
             self.pending_odt_xml = None
             if task["status"] == "completed":
                 QTimer.singleShot(
-                    0,
+                    700 if self.update_progress_dialog is not None else 0,
                     lambda current=config_path, digest=expected_digest:
                     self.prompt_office_xml_cleanup(current, digest),
                 )
@@ -1683,13 +1763,8 @@ class ManagerWindow(QMainWindow):
                 if "preload" in task_kind:
                     failure = (str(task.get("log") or "").strip()
                                or "The background preload operation failed.")
-                    if "stop" in task_kind:
-                        failure += (
-                            "\n\nStop now was not performed. Close Office before trying "
-                            "again, or use Disable at login as the safe alternative. "
-                            "Disable at login changes future logins only and does not stop "
-                            "the worker or Office."
-                        )
+                    if "stop" in task_kind and "Office is active" in failure:
+                        failure += "\n\nClose Office before trying again."
                     QTimer.singleShot(
                         0, lambda current=failure: self.show_error(current)
                     )

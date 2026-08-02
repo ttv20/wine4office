@@ -317,6 +317,7 @@ def default_config() -> dict:
         "office_compatibility_policies": {},
         "update_url": configured_update_url(),
         "skipped_updates": {},
+        "include_prereleases": False,
         "automatic_update_checks": False,
         "automatic_update_checks_prompted": False,
     }
@@ -733,6 +734,13 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
 
+    wineserver = sibling_tool(wine, "wineserver")
+    if wineserver is None:
+        raise FileNotFoundError(
+            f"Cannot stop Wine because wineserver is missing beside {wine}"
+        )
+
+    graceful_close = False
     try:
         subprocess.run(
             [str(wine), "wine4officeclose.exe"],
@@ -742,26 +750,34 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
             timeout=20,
             check=True,
         )
+        graceful_close = True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        # A hung window is exactly when the hard wineserver fallback is needed.
+        # Continue with wineserver termination when a window cannot close cleanly.
         pass
 
-    wineserver = sibling_tool(wine, "wineserver")
-    if wineserver is None:
-        raise FileNotFoundError(
-            f"Cannot stop Wine because wineserver is missing beside {wine}"
-        )
+    if graceful_close:
+        try:
+            # Let applications and services finish their normal shutdown before
+            # asking wineserver to terminate the remaining prefix processes.
+            subprocess.run(
+                [str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=8, check=True,
+            )
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+
     try:
         subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=15, check=True)
         subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, check=True)
+                       stderr=subprocess.DEVNULL, timeout=20, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         # Retry with an explicit SIGKILL, then verify that this prefix stopped.
         subprocess.run([str(wineserver), "-k9"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=15, check=False)
         subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, check=True)
+                       stderr=subprocess.DEVNULL, timeout=20, check=True)
 
 
 def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
@@ -1059,9 +1075,13 @@ def launch_tool(prefix_value: str, wine_value: str, tool: str,
         restart_preload = _preload_active_for_environment(
             prefix_value, wine_value, use_x11
         )
-        stop_wine(prefix_value, wine_value, use_x11)
         if restart_preload:
-            _systemctl_user(["restart", PRELOAD_UNIT])
+            _stop_preload_unit_and_wait()
+        try:
+            stop_wine(prefix_value, wine_value, use_x11)
+        finally:
+            if restart_preload:
+                _systemctl_user(["start", PRELOAD_UNIT])
         return None
     if tool not in TOOL_META:
         raise ValueError(f"Unknown Wine tool: {tool}")
@@ -1680,6 +1700,57 @@ def fetch_release_metadata(metadata_url: str, output: Output | None = None,
     return parse_release_metadata(payload, metadata_url, expected_channel)
 
 
+def _github_latest_release_metadata_url(metadata_url: str) -> str:
+    """Resolve the newest published GitHub release, including prereleases."""
+    parsed = urllib.parse.urlparse(_https_url(metadata_url, "Metadata address"))
+    match = re.fullmatch(
+        r"/([^/]+)/([^/]+)/releases/latest/download/release\.json", parsed.path
+    )
+    if parsed.netloc.lower() != "github.com" or not match:
+        raise ValueError(
+            "Prerelease updates require the standard GitHub latest-release metadata URL."
+        )
+    owner, repository = match.groups()
+    api_url = (
+        "https://api.github.com/repos/"
+        f"{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repository, safe='')}"
+        "/releases?per_page=20"
+    )
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Wine4OfficeManager/1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(
+            request, timeout=30, context=_https_context()
+    ) as response:
+        payload = response.read(MAX_METADATA_SIZE + 1)
+    if len(payload) > MAX_METADATA_SIZE:
+        raise ValueError("GitHub release information is larger than 1 MiB.")
+    try:
+        releases = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("GitHub release information is not valid JSON.") from error
+    if not isinstance(releases, list):
+        raise ValueError("GitHub release information has an invalid format.")
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") is True:
+            continue
+        assets = release.get("assets", [])
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict) or asset.get("name") != "release.json":
+                continue
+            return _https_url(
+                asset.get("browser_download_url"), "Prerelease metadata address"
+            )
+    raise ValueError("No published GitHub release contains release.json metadata.")
+
+
 def _split_version(value: str) -> tuple[list[tuple[int, object]], list[str] | None]:
     if not isinstance(value, str) or not VERSION_PATTERN.fullmatch(value):
         raise ValueError(f"Invalid version: {value!r}")
@@ -1745,8 +1816,13 @@ def available_updates(metadata: dict, skipped: dict | None = None,
 
 def check_for_updates(metadata_url: str, skipped: dict | None = None,
                       output: Output | None = None,
-                      expected_channel: str | None = None) -> dict:
-    metadata = fetch_release_metadata(metadata_url, output, expected_channel)
+                      expected_channel: str | None = None,
+                      include_prereleases: bool = False) -> dict:
+    source_url = (
+        _github_latest_release_metadata_url(metadata_url)
+        if include_prereleases else metadata_url
+    )
+    metadata = fetch_release_metadata(source_url, output, expected_channel)
     return {
         "metadata": metadata,
         "updates": available_updates(metadata, skipped, expected_channel),
@@ -1804,7 +1880,8 @@ def run_scheduled_update_check() -> dict:
         return {"checked": False, "updates": {}, "action": ""}
 
     result = check_for_updates(
-        metadata_url, dict(config.get("skipped_updates", {}))
+        metadata_url, dict(config.get("skipped_updates", {})),
+        include_prereleases=config.get("include_prereleases") is True,
     )
     canonical_url = result["metadata"]["metadata_url"]
     candidate = dict(config)
@@ -2360,7 +2437,8 @@ def persist_metadata_url(metadata_url: str) -> str:
 
 
 def _download_artifact(name: str, component: dict, cancel_event=None,
-                       output: Output | None = None) -> Path:
+                       output: Output | None = None,
+                       progress: Callable[[str, int | None], None] | None = None) -> Path:
     download_dir = cache_home() / "wine4office/updates"
     download_dir.mkdir(parents=True, exist_ok=True)
     destination = download_dir / f"{name}-{component['version']}.{uuid.uuid4().hex}.part"
@@ -2369,8 +2447,12 @@ def _download_artifact(name: str, component: dict, cancel_event=None,
     )
     digest = hashlib.sha256()
     downloaded = 0
+    display_name = "Wine4Office Manager" if name == "manager" else "Wine runner"
+    label = f"Downloading {display_name} {component['version']}"
     if output:
-        output(f"Downloading {name} {component['version']}")
+        output(label)
+    if progress:
+        progress(label, 0)
     try:
         with urllib.request.urlopen(
                 request, timeout=60, context=_https_context()
@@ -2392,12 +2474,16 @@ def _download_artifact(name: str, component: dict, cancel_event=None,
                     raise ValueError(f"{name.title()} download is larger than release metadata.")
                 digest.update(chunk)
                 target.write(chunk)
+                if progress:
+                    progress(label, min(100, downloaded * 100 // component["size"]))
             target.flush()
             os.fsync(target.fileno())
         if downloaded != component["size"]:
             raise ValueError(f"{name.title()} download size does not match release metadata.")
         if digest.hexdigest() != component["sha256"]:
             raise ValueError(f"{name.title()} download failed SHA-256 verification.")
+        if progress:
+            progress(f"Verified {display_name} {component['version']}", 100)
         if output:
             output(f"Verified {downloaded} bytes for {name} {component['version']}")
         return destination
@@ -2706,7 +2792,8 @@ def _commit_update_transaction(
 
 def install_release_updates(metadata: dict, components: Iterable[str], output: Output,
                             cancel_event=None,
-                            expected_channel: str | None = None) -> str:
+                            expected_channel: str | None = None,
+                            progress: Callable[[str, int | None], None] | None = None) -> str:
     """Stage every selected payload, then commit all components transactionally."""
     selected = list(dict.fromkeys(components))
     if not selected or any(name not in ("manager", "wine") for name in selected):
@@ -2736,11 +2823,15 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
     try:
         for name in selected:
             downloads[name] = _download_artifact(
-                name, metadata[name], cancel_event, output
+                name, metadata[name], cancel_event, output, progress
             )
         if manager_target is not None:
+            if progress:
+                progress("Preparing Wine4Office Manager update", None)
             manager_staged = _stage_update_file(downloads["manager"], manager_target)
         if "wine" in selected:
+            if progress:
+                progress("Extracting the Wine runner update", None)
             runner_target.parent.mkdir(parents=True, exist_ok=True)
             extraction = Path(tempfile.mkdtemp(
                 prefix=".wine-update.", dir=runner_target.parent
@@ -2749,6 +2840,8 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
             runner_staged = safe_extract_wine_archive(downloads["wine"], extraction)
 
         with _install_update_lock(root, manager_target, runner_target):
+            if progress:
+                progress("Installing verified updates", None)
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
             offered = available_updates(metadata, expected_channel=expected_channel)
@@ -2786,6 +2879,8 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
             if root is not None:
                 text_updates[root / "UPDATE_URL"] = metadata["metadata_url"] + "\n"
             _commit_update_transaction(replacements, text_updates)
+            if progress:
+                progress("Updates installed", 100)
     finally:
         for download in downloads.values():
             download.unlink(missing_ok=True)
@@ -3017,6 +3112,33 @@ def _systemctl_property(command: str) -> tuple[bool, str]:
     if value not in known:
         raise RuntimeError(detail or "Cannot determine whether the preload service is active.")
     return value in {"active", "reloading", "activating", "deactivating"}, detail
+
+
+def _stop_preload_unit_and_wait(timeout: float = 30.0) -> None:
+    """Stop the preload worker and verify systemd no longer considers it active."""
+    deadline = time.monotonic() + timeout
+    last_detail = ""
+    # --no-block avoids the generic eight-second systemctl command timeout;
+    # component cleanup is allowed to use the unit's full shutdown window.
+    _systemctl_user(["stop", "--no-block", PRELOAD_UNIT])
+    while time.monotonic() < deadline:
+        active, last_detail = _systemctl_property("is-active")
+        if not active:
+            return
+        time.sleep(0.1)
+    # Re-submit once in case the first request was lost during a user-manager
+    # reload, then give systemd a short final verification window.
+    _systemctl_user(["stop", "--no-block", PRELOAD_UNIT], check=False)
+    retry_deadline = time.monotonic() + 5.0
+    while time.monotonic() < retry_deadline:
+        active, last_detail = _systemctl_property("is-active")
+        if not active:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(
+        "The background service did not stop cleanly"
+        + (f": {last_detail}" if last_detail else ".")
+    )
 
 
 def _read_preload_heartbeat() -> tuple[dict | None, str]:
@@ -3368,7 +3490,7 @@ def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> di
         "active": active,
     }
     if active:
-        _systemctl_user(["stop", PRELOAD_UNIT])
+        _stop_preload_unit_and_wait()
     return state
 
 
@@ -3488,7 +3610,10 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
             raise RuntimeError(
                 "Office is active; refusing to stop preload: " + ", ".join(active_office)
             )
-    _systemctl_user([action, PRELOAD_UNIT])
+    if action == "stop":
+        _stop_preload_unit_and_wait()
+    else:
+        _systemctl_user([action, PRELOAD_UNIT])
     return preload_service_status(prefix_value, wine_value, use_x11)
 
 
@@ -3859,8 +3984,6 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             return 1
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
-            if not record["owned"]:
-                continue
             stopped, detail = _preload_component_action(binding, "stop", component)
             record["state"] = "stopped" if stopped else "unknown"
             record["detail"] = detail
@@ -3870,7 +3993,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
         if cleanup_failed:
             _write_preload_heartbeat(
                 status, components, "degraded",
-                "Could not stop owned components: " + ", ".join(cleanup_failed),
+                "Could not stop background components: " + ", ".join(cleanup_failed),
             )
             return 1
         _write_preload_heartbeat(status, components, "stopped")

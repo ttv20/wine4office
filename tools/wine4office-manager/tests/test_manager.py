@@ -617,8 +617,10 @@ class ManagerTests(unittest.TestCase):
             deadline = time.monotonic() + 1
             while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
                 time.sleep(0.01)
-            state.start_preload_action("stop")
-            self.assertEqual(state.snapshot()["task"]["kind"], "preload-stop")
+            state.start_preload_action("stop-disable")
+            self.assertEqual(
+                state.snapshot()["task"]["kind"], "preload-stop-disable"
+            )
             self._wait(state)
 
         task = state.snapshot()["task"]
@@ -629,7 +631,7 @@ class ManagerTests(unittest.TestCase):
             state.config.get("use_x11", True),
         )
 
-    def test_preload_enable_action_never_dispatches_start(self):
+    def test_preload_enable_start_action_runs_both_steps(self):
         status = {
             "supported": True, "reason": "", "installed": True,
             "enabled": True, "active": False, "state": "inactive",
@@ -647,12 +649,71 @@ class ManagerTests(unittest.TestCase):
             deadline = time.monotonic() + 1
             while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
                 time.sleep(0.01)
-            state.start_preload_action("enable")
+            state.start_preload_action("enable-start")
             self._wait(state)
 
         install.assert_called_once()
-        manage.assert_not_called()
-        self.assertIn("were not started", state.snapshot()["task"]["log"])
+        manage.assert_called_once_with(
+            "start", state.config["prefix"], state.config["wine"],
+            state.config.get("use_x11", True),
+        )
+        self.assertIn("enabled and started", state.snapshot()["task"]["log"])
+
+    def test_preload_enable_start_rolls_back_new_enable_when_start_fails(self):
+        status = {
+            "supported": True, "reason": "", "installed": False,
+            "enabled": False, "active": False, "state": "uninstalled",
+            "binding": None, "selected_matches": False, "components": {},
+            "detail": "",
+        }
+        actions = []
+
+        def manage(action, *_args):
+            actions.append(action)
+            if action == "start":
+                raise RuntimeError("start failed")
+
+        with mock.patch.object(
+            backend, "preload_service_status", return_value=dict(status)
+        ), mock.patch.object(
+            backend, "install_preload_service", return_value=dict(status)
+        ), mock.patch.object(
+            backend, "manage_preload_service", side_effect=manage
+        ):
+            state = manager.ManagerState()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            state.start_preload_action("enable-start")
+            self._wait(state)
+
+        self.assertEqual(actions, ["start", "disable"])
+        self.assertEqual(state.snapshot()["task"]["status"], "failed")
+        self.assertIn("start failed", state.snapshot()["task"]["log"])
+
+    def test_preload_stop_disable_action_runs_both_steps(self):
+        status = {
+            "supported": True, "reason": "", "installed": True,
+            "enabled": True, "active": True, "state": "active",
+            "binding": {}, "selected_matches": True, "components": {},
+            "detail": "",
+        }
+        actions = []
+        with mock.patch.object(
+            backend, "preload_service_status", return_value=dict(status)
+        ), mock.patch.object(
+            backend, "manage_preload_service",
+            side_effect=lambda action, *_args: actions.append(action),
+        ):
+            state = manager.ManagerState()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            state.start_preload_action("stop-disable")
+            self._wait(state)
+
+        self.assertEqual(actions, ["stop", "disable"])
+        self.assertIn("stopped and disabled", state.snapshot()["task"]["log"])
 
     def test_preload_cli_routes_actions_and_exit_codes(self):
         config = backend.default_config()

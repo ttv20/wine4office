@@ -20,6 +20,7 @@ try:
         QApplication,
         QCheckBox,
         QDialog,
+        QLabel,
         QListWidget,
         QMessageBox,
         QStackedWidget,
@@ -56,6 +57,7 @@ class QtManagerTests(unittest.TestCase):
             "desktop_copy": False,
             "use_x11": True,
             "update_url": "",
+            "include_prereleases": False,
             "office_telemetry_disabled": {},
             "automatic_update_checks": False,
             "automatic_update_checks_prompted": True,
@@ -136,17 +138,16 @@ class QtManagerTests(unittest.TestCase):
         )
         self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (
-            (self.window.preload_enable_button, "Enable at login"),
-            (self.window.preload_disable_button, "Disable at login"),
-            (self.window.preload_start_button, "Start now"),
-            (self.window.preload_stop_button, "Stop now"),
+            (self.window.preload_enable_button, "Enable & start"),
+            (self.window.preload_stop_button, "Stop & disable"),
         )
         for button, text in controls:
             with self.subTest(text=text):
                 self.assertEqual(button.text(), text)
                 self.assertTrue(button.accessibleName())
                 self.assertTrue(button.toolTip())
-        self.assertIn("does not stop", self.window.preload_disable_button.toolTip())
+        self.assertFalse(hasattr(self.window, "preload_disable_button"))
+        self.assertFalse(hasattr(self.window, "preload_start_button"))
         self.assertTrue(self.window.preload_selected_label.accessibleName())
         self.assertTrue(self.window.preload_binding_label.accessibleName())
         self.assertFalse(hasattr(self.window, "preload_state_label"))
@@ -161,11 +162,11 @@ class QtManagerTests(unittest.TestCase):
             "wine": self.config["wine"],
         }
         cases = (
-            ("unbound", {}, (True, False, False, False)),
+            ("unbound", {}, (True, False)),
             (
                 "disabled",
                 {"installed": True, "binding": binding, "selected_matches": True},
-                (True, False, True, False),
+                (True, False),
             ),
             (
                 "enabled",
@@ -175,7 +176,7 @@ class QtManagerTests(unittest.TestCase):
                     "binding": binding,
                     "selected_matches": True,
                 },
-                (False, True, True, False),
+                (True, True),
             ),
             (
                 "active",
@@ -190,7 +191,7 @@ class QtManagerTests(unittest.TestCase):
                         "AppV": {"state": "running", "owned": True, "detail": ""},
                     },
                 },
-                (False, True, False, True),
+                (False, True),
             ),
             (
                 "degraded",
@@ -205,13 +206,11 @@ class QtManagerTests(unittest.TestCase):
                         "AppV": {"state": "stopped", "owned": False, "detail": "failed"},
                     },
                 },
-                (False, True, False, True),
+                (False, True),
             ),
         )
         buttons = (
             self.window.preload_enable_button,
-            self.window.preload_disable_button,
-            self.window.preload_start_button,
             self.window.preload_stop_button,
         )
         for state, values, enabled in cases:
@@ -237,10 +236,8 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(self.window.preload_binding_label.text(), bound)
         self.assertIn(self.config["prefix"], self.window.preload_detail_label.text())
         self.assertIn(bound, self.window.preload_detail_label.text())
-        self.assertIn("both disabled and stopped", self.window.preload_detail_label.text())
+        self.assertIn("Stop & disable", self.window.preload_detail_label.text())
         self.assertFalse(self.window.preload_enable_button.isEnabled())
-        self.assertTrue(self.window.preload_disable_button.isEnabled())
-        self.assertFalse(self.window.preload_start_button.isEnabled())
         self.assertTrue(self.window.preload_stop_button.isEnabled())
 
     def test_inactive_mismatch_rebind_requires_explicit_confirmation(self):
@@ -255,11 +252,8 @@ class QtManagerTests(unittest.TestCase):
         )
 
         self.assertTrue(self.window.preload_enable_button.isEnabled())
-        self.assertFalse(self.window.preload_disable_button.isEnabled())
-        self.assertFalse(self.window.preload_start_button.isEnabled())
         self.assertFalse(self.window.preload_stop_button.isEnabled())
-        self.assertIn("explicit confirmation", self.window.preload_detail_label.text())
-        self.assertIn("will not start", self.window.preload_detail_label.text())
+        self.assertIn("after confirmation", self.window.preload_detail_label.text())
 
         with mock.patch.object(
             QMessageBox,
@@ -277,13 +271,13 @@ class QtManagerTests(unittest.TestCase):
             start.assert_not_called()
             self.window.preload_enable_button.click()
 
-        start.assert_called_once_with("enable")
+        start.assert_called_once_with("enable-start")
         self.assertEqual(question.call_count, 2)
         self.assertEqual(question.call_args.args[1], "Replace background service binding")
         prompt = question.call_args.args[2]
         self.assertIn(bound, prompt)
         self.assertIn(self.config["prefix"], prompt)
-        self.assertIn("will not start it now", prompt)
+        self.assertIn("enable and start", prompt)
 
 
     def test_background_preload_unsupported_has_no_fallback_or_controls(self):
@@ -302,8 +296,6 @@ class QtManagerTests(unittest.TestCase):
             not button.isEnabled()
             for button in (
                 self.window.preload_enable_button,
-                self.window.preload_disable_button,
-                self.window.preload_start_button,
                 self.window.preload_stop_button,
             )
         ))
@@ -320,7 +312,7 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertEqual(
             self.window.preload_detail_label.text(),
-            "Click Enable at login to install the background services.",
+            "Click Enable & start to use background services.",
         )
         self.assertTrue(self.window.preload_enable_button.isEnabled())
 
@@ -338,12 +330,10 @@ class QtManagerTests(unittest.TestCase):
         }
         buttons = (
             self.window.preload_enable_button,
-            self.window.preload_disable_button,
-            self.window.preload_start_button,
             self.window.preload_stop_button,
         )
-        self._refresh_preload(checking=True, **values)
-        self.assertEqual(self.window.preload_detail_label.text(), "Checking background services…")
+        self._refresh_preload(checking=True, detail="Services are ready.", **values)
+        self.assertEqual(self.window.preload_detail_label.text(), "Services are ready.")
         self.assertTrue(all(not button.isEnabled() for button in buttons))
 
         self._refresh_preload(
@@ -354,10 +344,8 @@ class QtManagerTests(unittest.TestCase):
 
     def test_background_preload_buttons_dispatch_exact_manager_actions(self):
         controls = (
-            (self.window.preload_enable_button, "enable"),
-            (self.window.preload_disable_button, "disable"),
-            (self.window.preload_start_button, "start"),
-            (self.window.preload_stop_button, "stop"),
+            (self.window.preload_enable_button, "enable-start"),
+            (self.window.preload_stop_button, "stop-disable"),
         )
         self.window.preload_rebind = None
         with mock.patch.object(self.window, "refresh_state"):
@@ -373,7 +361,7 @@ class QtManagerTests(unittest.TestCase):
         snapshot = self._preload_snapshot(
             task={
                 "running": False,
-                "kind": "preload-stop",
+                "kind": "preload-stop-disable",
                 "status": "failed",
                 "log": "ERROR: Office is active; refusing to stop preload",
             },
@@ -402,8 +390,8 @@ class QtManagerTests(unittest.TestCase):
         show_error.assert_called_once()
         message = str(show_error.call_args.args[0])
         self.assertIn("Office is active", message)
-        self.assertIn("Disable at login", message)
-        self.assertIn("does not stop", message)
+        self.assertIn("Close Office", message)
+        self.assertNotIn("Disable at login", message)
 
     def test_completed_manager_update_prompts_for_restart_once(self):
         snapshot = self._preload_snapshot(task={
@@ -525,6 +513,7 @@ class QtManagerTests(unittest.TestCase):
         skip_button = object()
         with mock.patch.object(qt_module, "QMessageBox") as message_box, \
              mock.patch.object(self.state, "start_offered_update") as start, \
+             mock.patch.object(self.window, "_show_update_progress") as progress, \
              mock.patch.object(self.window, "refresh_state"):
             message_box.Icon = QMessageBox.Icon
             message_box.ButtonRole = QMessageBox.ButtonRole
@@ -548,10 +537,50 @@ class QtManagerTests(unittest.TestCase):
             dialog.setInformativeText.call_args.args[0],
         )
         start.assert_called_once_with(["manager", "wine"])
+        progress.assert_called_once_with(offer, ["manager", "wine"])
         self.assertEqual(
             self.window.navigation.currentRow(),
             self.window.MAINTENANCE_PAGE,
         )
+
+    def test_update_progress_popup_tracks_download_and_completion(self):
+        offer = {
+            "updates": {"manager": {"version": "0.2.0-rc.1"}},
+        }
+        self.window._show_update_progress(offer, ["manager"])
+        self.application.processEvents()
+
+        self.assertTrue(self.window.update_progress_dialog.isVisible())
+        self.assertTrue(any(
+            "0.2.0-rc.1" in label.text()
+            for label in self.window.update_progress_dialog.findChildren(QLabel)
+        ))
+        self.window._refresh_update_progress({
+            "kind": "update",
+            "running": True,
+            "status": "running",
+            "log": "Downloading the approved update\n",
+            "progress_label": "Downloading Wine4Office Manager 0.2.0-rc.1",
+            "progress_value": 42,
+        })
+        self.assertEqual(self.window.update_progress_bar.value(), 42)
+        self.assertIn("Downloading", self.window.update_progress_status.text())
+        self.assertIn(
+            "approved update", self.window.update_progress_log.toPlainText()
+        )
+
+        self.window._refresh_update_progress({
+            "kind": "update",
+            "running": False,
+            "status": "completed",
+            "log": "Installed.\n",
+            "progress_label": "Updates installed",
+            "progress_value": 100,
+            "restart_required": False,
+        })
+        self.assertEqual(self.window.update_progress_bar.value(), 100)
+        self.assertEqual(self.window.update_progress_button.text(), "Close")
+        self.window.update_progress_dialog.accept()
 
     def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
         self.assertTrue(self.window.use_x11.isChecked())
@@ -563,6 +592,16 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertFalse(saved["use_x11"])
         self.assertFalse(self.state.snapshot()["config"]["use_x11"])
+
+    def test_prerelease_updates_are_opt_in_and_persisted(self):
+        self.assertFalse(self.window.include_prereleases.isChecked())
+        self.window.include_prereleases.setChecked(True)
+
+        saved = self.window.save_config()
+
+        self.assertTrue(saved["include_prereleases"])
+        self.assertTrue(self.state.snapshot()["config"]["include_prereleases"])
+        self.assertIn("test versions", self.window.include_prereleases.toolTip())
 
     def test_privacy_dialog_is_accessible_and_persists_telemetry(self):
         dialog, checkbox = self.window._privacy_settings_dialog(self.state.config)

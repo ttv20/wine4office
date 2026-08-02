@@ -57,7 +57,7 @@ class ManagerState:
         self.config = backend.load_config()
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
-            "restart_required": False,
+            "restart_required": False, "progress_label": "", "progress_value": None,
         }
         self.cancel_event = threading.Event()
         self.process: subprocess.Popen | None = None
@@ -77,7 +77,7 @@ class ManagerState:
             "binding": None,
             "selected_matches": False,
             "components": {},
-            "detail": "Checking per-user service support.",
+            "detail": "",
             "checking": False,
         }
         self._preload_generation = 0
@@ -103,7 +103,7 @@ class ManagerState:
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
-        for key in ("desktop_copy", "use_x11"):
+        for key in ("desktop_copy", "use_x11", "include_prereleases"):
             if key in payload:
                 candidate[key] = bool(payload[key])
         if "disable_office_telemetry" in payload:
@@ -360,6 +360,7 @@ class ManagerState:
             if not metadata_url:
                 return False
             skipped = dict(self.config.get("skipped_updates", {}))
+            include_prereleases = self.config.get("include_prereleases") is True
             self.updater = {
                 "checking": True,
                 "checked": False,
@@ -369,7 +370,10 @@ class ManagerState:
 
         def check() -> None:
             try:
-                result = backend.check_for_updates(metadata_url, skipped)
+                result = backend.check_for_updates(
+                    metadata_url, skipped,
+                    include_prereleases=include_prereleases,
+                )
                 canonical_url = result["metadata"]["metadata_url"]
                 with self.lock:
                     candidate = dict(self.config)
@@ -442,6 +446,7 @@ class ManagerState:
             preload_update = None
             try:
                 if "wine" in selected:
+                    self.set_progress("Stopping background services", None)
                     preload_update = backend.prepare_preload_runner_update(
                         config["prefix"], config.get("use_x11", True)
                     )
@@ -454,9 +459,11 @@ class ManagerState:
                     except (FileNotFoundError, OSError):
                         pass
                 result = backend.install_release_updates(
-                    metadata, selected, self.output, self.cancel_event
+                    metadata, selected, self.output, self.cancel_event,
+                    progress=self.set_progress,
                 )
                 if "wine" in selected:
+                    self.set_progress("Updating the Wine environment", None)
                     new_wine = str(backend.runner_update_target() / "bin/wine")
                     self.output(
                         backend.update_wine_prefix(
@@ -485,6 +492,7 @@ class ManagerState:
                             f"failed Wine update: {error}"
                         )
             if "manager" in selected:
+                self.set_progress("Finishing the Manager update", None)
                 with self.lock:
                     self.task["restart_required"] = True
                 self._run_updated_manager_post_install(config)
@@ -580,7 +588,7 @@ class ManagerState:
         return True
 
     def start_preload_action(self, action: str) -> None:
-        if action not in {"enable", "disable", "start", "stop"}:
+        if action not in {"enable-start", "stop-disable"}:
             raise ValueError(f"Unknown preload service action: {action}")
         with self.lock:
             if self.task["running"]:
@@ -597,28 +605,45 @@ class ManagerState:
 
         def operation() -> str:
             try:
-                if action == "enable":
+                current = self._preload_status(config)
+                was_enabled = bool(current.get("enabled"))
+                was_active = bool(current.get("active"))
+                if action == "enable-start":
                     backend.install_preload_service(
                         config["prefix"], config["wine"], config.get("use_x11", True)
                     )
-                else:
+                    try:
+                        backend.manage_preload_service(
+                            "start", config["prefix"], config["wine"],
+                            config.get("use_x11", True),
+                        )
+                    except Exception:
+                        if not was_enabled:
+                            backend.manage_preload_service(
+                                "disable", config["prefix"], config["wine"],
+                                config.get("use_x11", True),
+                            )
+                        raise
+                    return "Background services enabled and started."
+
+                if was_active:
                     backend.manage_preload_service(
-                        action, config["prefix"], config["wine"],
+                        "stop", config["prefix"], config["wine"],
                         config.get("use_x11", True),
                     )
-                return {
-                    "enable": "Background services enabled for login; they were not started.",
-                    "disable": (
-                        "Background services disabled for login; running services "
-                        "were not stopped."
-                    ),
-                    "start": (
-                        "Background services started without enabling login startup."
-                    ),
-                    "stop": (
-                        "Background services stopped without disabling login startup."
-                    ),
-                }[action]
+                try:
+                    backend.manage_preload_service(
+                        "disable", config["prefix"], config["wine"],
+                        config.get("use_x11", True),
+                    )
+                except Exception:
+                    if was_active:
+                        backend.manage_preload_service(
+                            "start", config["prefix"], config["wine"],
+                            config.get("use_x11", True),
+                        )
+                    raise
+                return "Background services stopped and disabled."
             finally:
                 try:
                     status = self._preload_status(config)
@@ -692,6 +717,13 @@ class ManagerState:
         with self.lock:
             self.process = process
 
+    def set_progress(self, label: str, value: int | None = None) -> None:
+        with self.lock:
+            self.task["progress_label"] = str(label)
+            self.task["progress_value"] = (
+                max(0, min(100, int(value))) if value is not None else None
+            )
+
     def start_task(self, kind: str, operation) -> None:
         with self.lock:
             if self.task["running"]:
@@ -699,6 +731,7 @@ class ManagerState:
             self.task = {
                 "running": True, "kind": kind, "status": "running", "log": "",
                 "restart_required": False,
+                "progress_label": "Preparing operation", "progress_value": None,
             }
             self.cancel_event.clear()
 

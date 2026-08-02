@@ -89,6 +89,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         config = backend.default_config()
         self.assertFalse(config["automatic_update_checks"])
         self.assertFalse(config["automatic_update_checks_prompted"])
+        self.assertFalse(config["include_prereleases"])
 
     def test_automatic_update_timer_checks_at_login_and_every_24_hours(self):
         commands = []
@@ -409,7 +410,6 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [call.args[0] for call in run.call_args_list],
             [
                 [str(self.wine), "wine4officeclose.exe"],
-                [str(self.runner / "wineserver"), "-k"],
                 [str(self.runner / "wineserver"), "-w"],
             ],
         )
@@ -442,7 +442,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         timeout = subprocess.TimeoutExpired("wineserver -w", 15)
         with mock.patch.object(
             backend.subprocess, "run",
-            side_effect=[mock.DEFAULT, mock.DEFAULT, timeout, mock.DEFAULT, mock.DEFAULT],
+            side_effect=[
+                mock.DEFAULT, timeout, mock.DEFAULT, timeout,
+                mock.DEFAULT, mock.DEFAULT,
+            ],
         ) as run:
             backend.stop_wine(str(prefix), str(self.wine))
 
@@ -1648,6 +1651,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ) as office, mock.patch.object(
+            backend, "_systemctl_property", return_value=(False, "inactive")
+        ), mock.patch.object(
             backend, "_systemctl_user"
         ) as systemctl, mock.patch.object(
             backend, "preload_service_status", return_value={"state": "mismatch"}
@@ -1659,13 +1664,17 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         office.assert_called_once_with(
             binding["prefix"], binding["wine"], binding["use_x11"]
         )
-        systemctl.assert_called_once_with(["stop", backend.PRELOAD_UNIT])
+        systemctl.assert_called_once_with(
+            ["stop", "--no-block", backend.PRELOAD_UNIT]
+        )
 
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
         with mock.patch.object(
             backend, "_preload_active_for_environment", return_value=True
         ) as active, mock.patch.object(
+            backend, "_stop_preload_unit_and_wait"
+        ) as stop_service, mock.patch.object(
             backend, "stop_wine"
         ) as stop, mock.patch.object(
             backend, "_systemctl_user"
@@ -1674,8 +1683,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertIsNone(result)
         active.assert_called_once_with(str(prefix), str(self.wine), False)
+        stop_service.assert_called_once_with()
         stop.assert_called_once_with(str(prefix), str(self.wine), False)
-        systemctl.assert_called_once_with(["restart", backend.PRELOAD_UNIT])
+        systemctl.assert_called_once_with(["start", backend.PRELOAD_UNIT])
 
     def test_stop_wine_tool_does_not_start_an_inactive_background_service(self):
         prefix = self._make_prefix(self.home / "stop-without-service")
@@ -1989,7 +1999,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ), mock.patch.object(
             backend, "_preload_component_state", return_value=("running", "running")
         ), mock.patch.object(
-            backend, "_preload_component_action"
+            backend, "_preload_component_action", return_value=(True, "stopped")
         ) as action, mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
@@ -2000,7 +2010,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             )
 
         self.assertEqual(result, 0)
-        action.assert_not_called()
+        self.assertEqual(
+            [call.args[1:] for call in action.call_args_list],
+            [("stop", "ClickToRunSvc")],
+        )
         heartbeat = __import__("json").loads(
             backend.preload_runtime_status_path().read_text()
         )
@@ -2067,7 +2080,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend, "_preload_component_state",
             return_value=("stopped", "stopped"),
         ), mock.patch.object(
-            backend, "_preload_component_action", return_value=(False, "start failed")
+            backend, "_preload_component_action",
+            side_effect=[(False, "start failed"), (True, "stopped")],
         ) as action, mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
@@ -2099,7 +2113,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         with mock.patch.object(
             backend, "_systemd_user_capability", return_value=(True, "")
         ), mock.patch.object(
-            backend, "_systemctl_property", return_value=(True, "active")
+            backend, "_systemctl_property",
+            side_effect=[
+                (True, "active"), (True, "enabled"), (False, "inactive")
+            ],
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
@@ -2113,7 +2130,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ):
             backend.uninstall_preload_service()
         self.assertEqual(commands, [
-            ["stop", backend.PRELOAD_UNIT],
+            ["stop", "--no-block", backend.PRELOAD_UNIT],
             ["disable", backend.PRELOAD_UNIT],
             ["daemon-reload"],
         ])
@@ -2196,7 +2213,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend, "_systemd_user_capability", return_value=(True, "")
         ), mock.patch.object(
             backend, "_systemctl_property",
-            side_effect=[(True, "enabled"), (True, "active")],
+            side_effect=[
+                (True, "enabled"), (True, "active"), (False, "inactive")
+            ],
         ), mock.patch.object(
             backend, "_systemctl_user", side_effect=systemctl
         ):
@@ -2205,7 +2224,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend.finish_preload_runner_update(state, str(new_wine))
 
         self.assertEqual(commands, [
-            ["stop", backend.PRELOAD_UNIT],
+            ["stop", "--no-block", backend.PRELOAD_UNIT],
             ["daemon-reload"],
             ["start", backend.PRELOAD_UNIT],
         ])

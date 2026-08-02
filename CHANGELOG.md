@@ -1,9 +1,23 @@
 # Changelog
 
-## 0.1.9 — Upcoming
+## 0.1.9 — 2026-08-02 (prerelease)
 
+- Replace the four background-service controls with **Enable & start** and
+  **Stop & disable**.
+- Refresh background-service status silently without replacing the visible
+  message every few seconds.
+- Make **Stop Wine** and runner updates pause and verify the background service
+  before shutting down Wine, with graceful and bounded fallback stages.
+- Add an opt-in Maintenance option to include the newest GitHub prerelease in
+  update checks.
+- Show a live progress popup after an update is approved, including download
+  percentage, the active installation stage, operation details, and cancellation.
+- Make Office save/discard exit dialogs respond immediately on native Wayland
+  and prevent their unpainted first frame from flashing on XWayland.
 - Stop forcing new Wine prefixes to use light application and system themes,
   allowing host color-scheme synchronization to choose the initial theme.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.8...wine4office-v0.1.9)
 
 ## 0.1.8 — 2026-08-01
 
