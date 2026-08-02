@@ -43,6 +43,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 mkdir -p "$LIB" "$ROOT/bin" "$ROOT/icons" "$BIN_HOME" "$DATA_HOME/applications"
 install -m 0644 "$HERE/wine4office_backend.py" "$LIB/wine4office_backend.py"
 install -m 0755 "$HERE/wine4office_manager.py" "$LIB/wine4office_manager.py"
+install -m 0755 "$HERE/wine4office_preload.py" "$LIB/wine4office_preload.py"
 install -m 0644 "$HERE/wine4office_post_install.py" "$LIB/wine4office_post_install.py"
 install -m 0644 "$HERE/wine4office_qt.py" "$LIB/wine4office_qt.py"
 install -m 0755 "$HERE/register-office-cloud-fonts.sh" "$LIB/register-office-cloud-fonts.sh"
@@ -72,6 +73,15 @@ fi
 exec python3 "$ROOT/lib/wine4office_manager.py" "$@"
 EOF
 chmod 0755 "$ROOT/bin/wine4office-manager"
+cat >"$ROOT/bin/wine4office-preload-worker" <<'EOF'
+#!/bin/sh
+SELF=$(readlink -f "$0")
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+export WINE4OFFICE_MANAGER_ROOT="$ROOT"
+export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 "$ROOT/lib/wine4office_preload.py" "$@"
+EOF
+chmod 0755 "$ROOT/bin/wine4office-preload-worker"
 ln -sfn "$ROOT/bin/wine4office-manager" "$BIN_HOME/wine4office-manager"
 ln -sfn "$ROOT/bin/wine4office-launcher" "$BIN_HOME/wine4office-launcher"
 

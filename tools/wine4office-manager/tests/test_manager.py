@@ -13,6 +13,7 @@ sys.path.insert(0, str(MANAGER_DIR))
 import wine4office_backend as backend
 import wine4office_manager as manager
 import wine4office_post_install as post_install
+import wine4office_preload as preload_helper
 
 
 class ManagerTests(unittest.TestCase):
@@ -600,6 +601,43 @@ class ManagerTests(unittest.TestCase):
         self.assertIsNot(callers[0], main_thread)
         self.assertEqual(state.snapshot()["preload"]["state"], "uninstalled")
 
+    def test_periodic_preload_refresh_updates_only_memory(self):
+        status = {
+            "supported": True, "reason": "", "installed": True,
+            "enabled": True, "active": True, "state": "active",
+            "binding": {}, "selected_matches": True, "components": {},
+            "detail": "",
+        }
+        with mock.patch.object(
+            backend, "preload_service_status", return_value=dict(status)
+        ) as full_status, mock.patch.object(
+            backend, "preload_service_memory_bytes",
+            return_value=600 * 1024 * 1024,
+        ) as memory:
+            state = manager.ManagerState()
+            deadline = time.monotonic() + 1
+            while state.snapshot()["preload"]["checking"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            full_status.reset_mock()
+            memory.return_value = 612 * 1024 * 1024
+            memory.reset_mock()
+            with state.lock:
+                state._preload_checked_at = 0
+            self.assertTrue(state._refresh_preload_memory_async())
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                with state.lock:
+                    finished = memory.call_count >= 1 and not state._preload_memory_checking
+                if finished:
+                    break
+                time.sleep(0.01)
+
+        full_status.assert_not_called()
+        with state.lock:
+            self.assertEqual(
+                state.preload["memory_bytes"], 612 * 1024 * 1024
+            )
+
     def test_preload_action_dispatches_async_and_surfaces_stop_refusal(self):
         status = {
             "supported": True, "reason": "", "installed": True,
@@ -764,6 +802,13 @@ class ManagerTests(unittest.TestCase):
         ):
             self.assertEqual(manager.main(), 7)
         worker.assert_called_once_with("/snapshot", "/status")
+
+    def test_lightweight_preload_helper_uses_two_explicit_paths(self):
+        with mock.patch.object(
+            backend, "run_preload_worker", return_value=7
+        ) as worker:
+            self.assertEqual(preload_helper.main(["/snapshot", "/status"]), 7)
+        worker.assert_called_once_with(Path("/snapshot"), Path("/status"))
 
     def _wait(self, state):
         deadline = time.monotonic() + 2

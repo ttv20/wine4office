@@ -70,9 +70,14 @@ def _runner_lifecycle_migration_needed() -> bool:
 def _migrate_runner_lifecycle(context: PostInstallContext) -> dict:
     """Apply the runner lifecycle once for updates initiated by older managers."""
     if not _runner_lifecycle_migration_needed():
+        worker_refreshed = backend.refresh_preload_worker_service()
         context.output(
             "Post-install: Wine runner lifecycle migration already applied."
         )
+        if worker_refreshed:
+            context.output(
+                "Post-install: background services moved to the lightweight worker."
+            )
         return {"needed": False, "updated": False, "preload_resumed": False}
 
     prefix = context.config["prefix"]
@@ -84,9 +89,14 @@ def _migrate_runner_lifecycle(context: PostInstallContext) -> dict:
     except (OSError, ValueError):
         valid_prefix = valid_runner = False
     if not valid_prefix or not valid_runner:
+        worker_refreshed = backend.refresh_preload_worker_service()
         context.output(
             "Post-install: no ready Wine environment; runner lifecycle left unchanged."
         )
+        if worker_refreshed:
+            context.output(
+                "Post-install: background services moved to the lightweight worker."
+            )
         return {"needed": True, "updated": False, "preload_resumed": False}
 
     preload_update = backend.prepare_preload_runner_update(prefix, use_x11)

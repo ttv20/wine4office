@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.10 — Upcoming
+
+- Render the literal ampersand in the **Enable & start** and **Stop & disable**
+  background-service buttons.
+- Keep background-service controls stable during periodic refreshes and update
+  only the displayed RAM usage.
+- Run background services through a dedicated lightweight preload helper
+  instead of the full Qt Manager executable.
+
 ## 0.1.9 — 2026-08-02 (prerelease)
 
 - Replace the four background-service controls with **Enable & start** and

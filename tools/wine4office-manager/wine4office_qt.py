@@ -267,6 +267,9 @@ class ManagerWindow(QMainWindow):
         )
         preload_form.addRow("Selected environment:", self.preload_selected_label)
         preload_form.addRow("Bound environment:", self.preload_binding_label)
+        self.preload_memory_label = QLabel("—")
+        self.preload_memory_label.setAccessibleName("Background services RAM usage")
+        preload_form.addRow("RAM usage:", self.preload_memory_label)
         preload_layout.addLayout(preload_form)
 
         self.preload_detail_label = QLabel()
@@ -279,7 +282,7 @@ class ManagerWindow(QMainWindow):
 
         preload_buttons = QHBoxLayout()
         self.preload_enable_button = self._action_button(
-            "Enable & start",
+            "Enable && start",
             lambda: self.preload_action("enable-start"),
             QStyle.StandardPixmap.SP_DialogApplyButton,
         )
@@ -288,7 +291,7 @@ class ManagerWindow(QMainWindow):
             "Install if needed, enable at login, and start now."
         )
         self.preload_stop_button = self._action_button(
-            "Stop & disable",
+            "Stop && disable",
             lambda: self.preload_action("stop-disable"),
             QStyle.StandardPixmap.SP_MediaStop,
         )
@@ -368,6 +371,13 @@ class ManagerWindow(QMainWindow):
 
     def _update_preload_status(self, snapshot: dict) -> None:
         preload = snapshot["preload"]
+        memory = preload.get("memory_bytes")
+        memory_text = (
+            f"{max(1, round(int(memory) / (1024 * 1024)))} MB"
+            if isinstance(memory, int) and memory > 0 else "—"
+        )
+        if self.preload_memory_label.text() != memory_text:
+            self.preload_memory_label.setText(memory_text)
         selected = str(snapshot["config"]["prefix"])
         binding = preload.get("binding")
         bound = binding.get("prefix") if isinstance(binding, dict) else binding
@@ -379,7 +389,6 @@ class ManagerWindow(QMainWindow):
         installed = bool(preload.get("installed"))
         enabled = bool(preload.get("enabled"))
         active = bool(preload.get("active"))
-        checking = bool(preload.get("checking"))
         selected_matches = bool(preload.get("selected_matches"))
         mismatch = bool(binding) and not selected_matches
         detail = str(preload.get("detail") or "").strip()
@@ -414,7 +423,7 @@ class ManagerWindow(QMainWindow):
         )
 
         task_running = bool(snapshot["task"]["running"])
-        available = supported and not checking and not task_running
+        available = supported and not task_running
         self.preload_enable_button.setEnabled(
             available and (not enabled or not active)
             and (not installed or not mismatch or (not enabled and not active))

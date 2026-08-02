@@ -138,8 +138,8 @@ class QtManagerTests(unittest.TestCase):
         )
         self.assertTrue(self.window.preload_notice_label.accessibleName())
         controls = (
-            (self.window.preload_enable_button, "Enable & start"),
-            (self.window.preload_stop_button, "Stop & disable"),
+            (self.window.preload_enable_button, "Enable && start"),
+            (self.window.preload_stop_button, "Stop && disable"),
         )
         for button, text in controls:
             with self.subTest(text=text):
@@ -334,13 +334,36 @@ class QtManagerTests(unittest.TestCase):
         )
         self._refresh_preload(checking=True, detail="Services are ready.", **values)
         self.assertEqual(self.window.preload_detail_label.text(), "Services are ready.")
-        self.assertTrue(all(not button.isEnabled() for button in buttons))
+        self.assertFalse(self.window.preload_enable_button.isEnabled())
+        self.assertTrue(self.window.preload_stop_button.isEnabled())
 
         self._refresh_preload(
             task={"running": True, "kind": "other", "status": "running"},
             **values,
         )
         self.assertTrue(all(not button.isEnabled() for button in buttons))
+
+    def test_background_preload_refresh_changes_only_ram_number(self):
+        values = {
+            "state": "active",
+            "installed": True,
+            "enabled": True,
+            "active": True,
+            "binding": {
+                "prefix": self.config["prefix"],
+                "wine": self.config["wine"],
+            },
+            "selected_matches": True,
+        }
+        self._refresh_preload(memory_bytes=600 * 1024 * 1024, **values)
+        stop_enabled = self.window.preload_stop_button.isEnabled()
+
+        self._refresh_preload(
+            checking=True, memory_bytes=612 * 1024 * 1024, **values
+        )
+
+        self.assertEqual(self.window.preload_memory_label.text(), "612 MB")
+        self.assertEqual(self.window.preload_stop_button.isEnabled(), stop_enabled)
 
     def test_background_preload_buttons_dispatch_exact_manager_actions(self):
         controls = (

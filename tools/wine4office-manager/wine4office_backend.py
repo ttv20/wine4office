@@ -2921,6 +2921,7 @@ AUTOMATIC_UPDATE_TIMER = "wine4office-update-check.timer"
 PRELOAD_COMPONENTS = ("ClickToRunSvc",)
 PRELOAD_APPV_COMPONENT = "AppV"
 PRELOAD_APPV_HELPER = "wine4office-appv-preload.exe"
+PRELOAD_WORKER_BINARY = "Wine4OfficePreloadWorker"
 _LEGACY_PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
 _PRELOAD_COMPONENT_IMAGES = {"ClickToRunSvc": "OfficeClickToRun.exe"}
 _PRELOAD_SCHEMA = 1
@@ -2942,6 +2943,10 @@ def preload_binding_path() -> Path:
 
 def preload_unit_path() -> Path:
     return config_home() / "systemd/user" / PRELOAD_UNIT
+
+
+def preload_worker_path() -> Path:
+    return data_home() / "wine4office/bin" / PRELOAD_WORKER_BINARY
 
 
 def automatic_update_service_path() -> Path:
@@ -3114,6 +3119,22 @@ def _systemctl_property(command: str) -> tuple[bool, str]:
     return value in {"active", "reloading", "activating", "deactivating"}, detail
 
 
+def preload_service_memory_bytes() -> int | None:
+    """Return current cgroup memory without refreshing service state."""
+    result = _systemctl_user(
+        ["show", PRELOAD_UNIT, "--property=MemoryCurrent", "--value"],
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode or not value or value in {"[not set]", "infinity"}:
+        return None
+    try:
+        memory = int(value)
+    except ValueError as error:
+        raise RuntimeError("Cannot determine background-service RAM usage.") from error
+    return memory if memory >= 0 else None
+
+
 def _stop_preload_unit_and_wait(timeout: float = 30.0) -> None:
     """Stop the preload worker and verify systemd no longer considers it active."""
     deadline = time.monotonic() + timeout
@@ -3265,6 +3286,32 @@ def _preload_manager_executable() -> Path:
     return manager
 
 
+def _preload_worker_executable() -> Path:
+    """Install or locate the non-Qt preload worker executable."""
+    root = installed_root()
+    installed_script = root / "bin/wine4office-preload-worker" if root else None
+    if installed_script and installed_script.is_file() and os.access(installed_script, os.X_OK):
+        return installed_script.resolve()
+
+    if getattr(sys, "frozen", False):
+        bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        source = bundle_root / PRELOAD_WORKER_BINARY
+        if not source.is_file() or not os.access(source, os.X_OK):
+            raise FileNotFoundError(
+                f"Bundled Wine4Office preload worker is unavailable: {source}"
+            )
+        target = preload_worker_path()
+        _atomic_write_bytes(target, source.read_bytes(), 0o755)
+        return target
+
+    source = Path(__file__).resolve().with_name("wine4office_preload.py")
+    if not source.is_file() or not os.access(source, os.X_OK):
+        raise FileNotFoundError(
+            f"Wine4Office preload worker is unavailable: {source}"
+        )
+    return source
+
+
 def _automatic_update_service_text() -> str:
     arguments = " ".join(
         _systemd_quote(value) for value in (
@@ -3379,7 +3426,7 @@ def uninstall_automatic_update_schedule() -> None:
 def _preload_unit_text(binding_path: Path, status_path: Path) -> str:
     arguments = " ".join(
         _systemd_quote(value) for value in (
-            _preload_manager_executable(), "--preload-worker", binding_path, status_path
+            _preload_worker_executable(), binding_path, status_path
         )
     )
     return (
@@ -3524,6 +3571,24 @@ def finish_preload_runner_update(state: dict, wine_value: str) -> None:
         except RuntimeError:
             pass
         raise
+
+
+def refresh_preload_worker_service() -> bool:
+    """Replace the legacy Manager-based worker and preserve its active state."""
+    supported, _ = _systemd_user_capability()
+    if not supported or not _owned_preload_unit():
+        return False
+    try:
+        binding = _read_preload_binding()
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    enabled, _ = _systemctl_property("is-enabled")
+    active, _ = _systemctl_property("is-active")
+    state = {"binding": binding, "enabled": enabled, "active": active}
+    if active:
+        _stop_preload_unit_and_wait()
+    finish_preload_runner_update(state, binding["wine"])
+    return True
 
 
 def restore_preload_after_runner_update(state: dict) -> None:

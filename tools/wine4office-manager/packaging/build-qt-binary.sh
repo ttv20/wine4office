@@ -33,6 +33,21 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --noconfirm \
     --noupx \
     --onefile \
+    --name Wine4OfficePreloadWorker \
+    --distpath "$BUILD/helper-dist" \
+    --workpath "$BUILD/helper-work" \
+    --specpath "$BUILD/helper-spec" \
+    --paths "$HERE" \
+    --exclude-module PySide6 \
+    --exclude-module wine4office_qt \
+    --hidden-import wine4office_backend \
+    "$HERE/wine4office_preload.py"
+
+"$PYTHON" -m PyInstaller \
+    --clean \
+    --noconfirm \
+    --noupx \
+    --onefile \
     --name Wine4OfficeManager \
     --distpath "$BUILD/dist" \
     --workpath "$BUILD/work" \
@@ -42,6 +57,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --add-data "$HERE/register-office-cloud-fonts.sh:." \
     --add-data "$BUILD/VERSION:." \
     --add-data "$BUILD/CHANNEL:." \
+    --add-binary "$BUILD/helper-dist/Wine4OfficePreloadWorker:." \
     --hidden-import wine4office_backend \
     --hidden-import wine4office_post_install \
     --hidden-import wine4office_qt \

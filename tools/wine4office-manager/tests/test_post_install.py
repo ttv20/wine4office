@@ -158,7 +158,9 @@ class PostInstallTests(unittest.TestCase):
         ), mock.patch.object(
             backend, "refresh_manager_shortcut",
             return_value={"updated": False, "path": "/manager.desktop"},
-        ):
+        ), mock.patch.object(
+            backend, "refresh_preload_worker_service", return_value=True,
+        ) as refresh_worker:
             first = post_install.run_post_install(
                 self.config, self.helper, self.manager_command, self.icons,
                 output.append,
@@ -176,6 +178,8 @@ class PostInstallTests(unittest.TestCase):
             self.config["prefix"], self.config["wine"], True, output.append
         )
         finish.assert_called_once_with(transition, self.config["wine"])
+        refresh_worker.assert_called_once_with()
+        self.assertTrue(any("lightweight worker" in line for line in output))
         self.assertEqual(first["hooks"][0], {
             "needed": True, "updated": True, "preload_resumed": True,
         })

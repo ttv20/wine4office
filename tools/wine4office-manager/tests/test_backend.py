@@ -1515,8 +1515,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         exec_start = " ".join(
             backend._systemd_quote(value) for value in (
-                backend._preload_manager_executable(),
-                "--preload-worker",
+                backend._preload_worker_executable(),
                 backend.preload_binding_path(),
                 backend.preload_runtime_status_path(),
             )
@@ -1542,11 +1541,32 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn("WantedBy=default.target\n", expected)
         self.assertNotIn("/bin/sh", expected)
         self.assertNotIn("wineserver", expected)
+        self.assertNotIn("wine4office_manager.py", expected)
+        self.assertIn("wine4office_preload.py", expected)
         self.assertEqual(commands, [["daemon-reload"], ["enable", backend.PRELOAD_UNIT]])
 
     def test_preload_unit_rejects_newline_in_argv(self):
         with self.assertRaisesRegex(ValueError, "unsafe control"):
             backend._systemd_quote("/tmp/manager\nExecStart=/bin/false")
+
+    def test_frozen_manager_installs_bundled_lightweight_preload_worker(self):
+        bundle = self.home / "bundle"
+        bundle.mkdir()
+        source = bundle / backend.PRELOAD_WORKER_BINARY
+        source.write_bytes(b"lightweight-worker")
+        source.chmod(0o755)
+        with mock.patch.object(
+            backend, "installed_root", return_value=None
+        ), mock.patch.object(
+            backend.sys, "frozen", True, create=True
+        ), mock.patch.object(
+            backend.sys, "_MEIPASS", str(bundle), create=True
+        ):
+            worker = backend._preload_worker_executable()
+
+        self.assertEqual(worker, backend.preload_worker_path())
+        self.assertEqual(worker.read_bytes(), b"lightweight-worker")
+        self.assertTrue(os.access(worker, os.X_OK))
 
     def test_systemctl_user_timeout_is_bounded_and_uses_no_shell(self):
         with mock.patch.object(
@@ -1563,6 +1583,19 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertNotIn("shell", run.call_args.kwargs)
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
+
+    def test_preload_memory_reads_only_systemd_memory_property(self):
+        completed = mock.Mock(returncode=0, stdout="637788160\n", stderr="")
+        with mock.patch.object(
+            backend, "_systemctl_user", return_value=completed
+        ) as systemctl:
+            memory = backend.preload_service_memory_bytes()
+
+        self.assertEqual(memory, 637788160)
+        systemctl.assert_called_once_with(
+            ["show", backend.PRELOAD_UNIT, "--property=MemoryCurrent", "--value"],
+            check=False,
+        )
 
     def test_enable_failure_rolls_back_binding_and_unit(self):
         binding = self._preload_binding()
@@ -2231,6 +2264,43 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         updated = backend._read_preload_binding()
         self.assertEqual(updated["prefix"], old["prefix"])
         self.assertEqual(updated["wine"], str(new_wine.resolve()))
+
+    def test_manager_update_replaces_legacy_preload_executor(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(),
+            backend._PRELOAD_UNIT_MARKER
+            + "\n[Service]\nExecStart=/legacy/Wine4OfficeManager --preload-worker\n",
+            0o644,
+        )
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[
+                (True, "enabled"), (True, "active"), (False, "inactive")
+            ],
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            self.assertTrue(backend.refresh_preload_worker_service())
+
+        unit = backend.preload_unit_path().read_text()
+        self.assertNotIn("ExecStart=/legacy/Wine4OfficeManager", unit)
+        self.assertNotIn("--preload-worker", unit)
+        self.assertIn("wine4office_preload.py", unit)
+        self.assertEqual(commands, [
+            ["stop", "--no-block", backend.PRELOAD_UNIT],
+            ["daemon-reload"],
+            ["start", backend.PRELOAD_UNIT],
+        ])
 
     def test_enabled_mismatched_binding_cannot_be_replaced(self):
         old = self._preload_binding()

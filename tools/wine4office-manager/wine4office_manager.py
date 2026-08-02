@@ -79,10 +79,12 @@ class ManagerState:
             "components": {},
             "detail": "",
             "checking": False,
+            "memory_bytes": None,
         }
         self._preload_generation = 0
         self._preload_request_key = None
         self._preload_checked_at = 0.0
+        self._preload_memory_checking = False
         self._refresh_preload_status_async()
 
     def _candidate_config(self, payload: dict) -> dict:
@@ -536,6 +538,10 @@ class ManagerState:
             config["prefix"], config["wine"], config.get("use_x11", True)
         )
         status["checking"] = False
+        try:
+            status["memory_bytes"] = backend.preload_service_memory_bytes()
+        except RuntimeError:
+            status["memory_bytes"] = None
         return status
 
     def _refresh_preload_status_async(self, force: bool = False) -> bool:
@@ -584,6 +590,40 @@ class ManagerState:
 
         threading.Thread(
             target=check, name="wine4office-preload-status", daemon=True
+        ).start()
+        return True
+
+    def _refresh_preload_memory_async(self) -> bool:
+        with self.lock:
+            config = dict(self.config)
+            key = (
+                str(config["prefix"]), str(config["wine"]),
+                bool(config.get("use_x11", True)),
+            )
+            if key != self._preload_request_key:
+                return self._refresh_preload_status_async(force=True)
+            now = time.monotonic()
+            if (
+                self.preload.get("checking")
+                or self._preload_memory_checking
+                or now - self._preload_checked_at < 5
+            ):
+                return False
+            self._preload_memory_checking = True
+
+        def check() -> None:
+            try:
+                memory = backend.preload_service_memory_bytes()
+            except RuntimeError:
+                memory = None
+            with self.lock:
+                if key == self._preload_request_key:
+                    self.preload["memory_bytes"] = memory
+                    self._preload_checked_at = time.monotonic()
+                self._preload_memory_checking = False
+
+        threading.Thread(
+            target=check, name="wine4office-preload-memory", daemon=True
         ).start()
         return True
 
@@ -662,7 +702,7 @@ class ManagerState:
         self.start_task(f"preload-{action}", operation)
 
     def snapshot(self) -> dict:
-        self._refresh_preload_status_async()
+        self._refresh_preload_memory_async()
         with self.lock:
             config = dict(self.config)
             config["skipped_updates"] = dict(config.get("skipped_updates", {}))
