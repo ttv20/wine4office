@@ -27,6 +27,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
+#define WM_WAYLAND_DCOMP_EXPORT 0x80001003
+
 static DXGI_SWAP_EFFECT dxgi_swap_effect_from_wined3d(enum wined3d_swap_effect swap_effect)
 {
     switch (swap_effect)
@@ -318,10 +320,40 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
         const DXGI_PRESENT_PARAMETERS *parameters);
 static HRESULT d3d11_swapchain_restore_present1_contents(struct d3d11_swapchain *swapchain);
 
+static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
+{
+    HWND window = d3d11_swapchain_get_hwnd(swapchain);
+    HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
+    ATOM foreign_atom;
+    HWND root;
+    RECT rect;
+
+    if (!target) return;
+    root = GetAncestor(target, GA_ROOT);
+    if (!root) return;
+    foreign_atom = HandleToULong(GetPropW(root, L"__wine_dcomp_xdg_export_handle"));
+    if (foreign_atom)
+        SetPropW(window, L"__wine_dcomp_xdg_parent_atom", ULongToHandle(foreign_atom));
+    else
+        PostMessageW(root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+    if (!IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
+
+    if (!GetWindowRect(target, &rect)) return;
+    SetWindowPos(window, foreign_atom ? NULL : HWND_TOP, rect.left, rect.top,
+            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | (foreign_atom ? SWP_NOZORDER : 0));
+}
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
     HRESULT hr;
+
+    d3d11_swapchain_update_composition_window(swapchain);
 
     if (sync_interval > 4)
     {

@@ -577,7 +577,9 @@ HRESULT wined3d_swapchain_desc_from_dxgi(struct wined3d_swapchain_desc *wined3d_
 
     if (dxgi_desc->Scaling != DXGI_SCALING_STRETCH)
         FIXME("Ignoring scaling %#x.\n", dxgi_desc->Scaling);
-    if (dxgi_desc->AlphaMode != DXGI_ALPHA_MODE_UNSPECIFIED && dxgi_desc->AlphaMode != DXGI_ALPHA_MODE_IGNORE)
+    if (dxgi_desc->AlphaMode != DXGI_ALPHA_MODE_UNSPECIFIED
+            && dxgi_desc->AlphaMode != DXGI_ALPHA_MODE_IGNORE
+            && dxgi_desc->AlphaMode != DXGI_ALPHA_MODE_PREMULTIPLIED)
         FIXME("Ignoring alpha mode %#x.\n", dxgi_desc->AlphaMode);
     if (dxgi_fullscreen_desc && dxgi_fullscreen_desc->ScanlineOrdering)
         FIXME("Unhandled scanline ordering %#x.\n", dxgi_fullscreen_desc->ScanlineOrdering);
@@ -624,6 +626,8 @@ HRESULT wined3d_swapchain_desc_from_dxgi(struct wined3d_swapchain_desc *wined3d_
     wined3d_desc->enable_auto_depth_stencil = FALSE;
     wined3d_desc->auto_depth_stencil_format = 0;
     wined3d_desc->flags = wined3d_swapchain_flags_from_dxgi(dxgi_desc->Flags);
+    if (dxgi_desc->AlphaMode == DXGI_ALPHA_MODE_PREMULTIPLIED)
+        wined3d_desc->flags |= WINED3D_SWAPCHAIN_ALPHA_PREMULTIPLIED;
     wined3d_desc->refresh_rate = dxgi_fullscreen_desc ? dxgi_rational_to_uint(&dxgi_fullscreen_desc->RefreshRate) : 0;
     wined3d_desc->auto_restore_display_mode = TRUE;
 

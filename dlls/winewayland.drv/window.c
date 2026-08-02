@@ -35,6 +35,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static const WCHAR dcomp_foreign_parent_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','p','a','r','e','n','t','_','a','t','o','m',0};
+
 
 static int wayland_win_data_cmp_rb(const void *key,
                                    const struct rb_entry *entry)
@@ -274,9 +277,10 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
 
     if (!(surface = data->wayland_surface) && !(surface = wayland_surface_create(data->hwnd))) return FALSE;
 
-    /* Pass through mouse events for layered, transparent windows, to match
-     * Windows behavior. */
-    input_region = ((exstyle & WS_EX_TRANSPARENT) && (exstyle & WS_EX_LAYERED)) ?
+    /* Pass through mouse events for transparent windows. X11 uses an empty
+     * input shape for WS_EX_TRANSPARENT as well, and requiring WS_EX_LAYERED
+     * here prevents non-layered presentation surfaces from forwarding input. */
+    input_region = (exstyle & WS_EX_TRANSPARENT) ?
                    wl_compositor_create_region(process_wayland.wl_compositor) :
                    NULL;
     wl_surface_set_input_region(surface->wl_surface, input_region);
@@ -292,6 +296,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         break;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         wayland_surface_make_toplevel(surface);
+        if (NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop))
+            wayland_surface_import_toplevel(surface,
+                    HandleToULong(NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop)));
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         wayland_surface_make_subsurface(surface, owner_surface);
@@ -794,6 +801,18 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_SET_FOREGROUND:
         NtUserSetForegroundWindowInternal(hwnd);
         return 0;
+    case WM_WAYLAND_DCOMP_EXPORT:
+    {
+        struct wayland_win_data *data;
+
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface)
+                wayland_surface_export_toplevel(data->wayland_surface);
+            wayland_win_data_release(data);
+        }
+        return 0;
+    }
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);
         return 0;

@@ -2806,7 +2806,7 @@ static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, 
     return ret;
 }
 
-static BOOL run_wine365_resource_refresh( const WCHAR *scope )
+static BOOL run_wine365_resource_refresh( const WCHAR *scope, const WCHAR *client_id )
 {
     WCHAR command[4 * MAX_PATH];
     PROCESS_INFORMATION process = {0};
@@ -2814,10 +2814,11 @@ static BOOL run_wine365_resource_refresh( const WCHAR *scope )
     DWORD exit_code = 3;
     BOOL ret;
 
-    if (!scope || !*scope || wcschr( scope, '"' )) return FALSE;
+    if (!scope || !*scope || wcschr( scope, '"' ) || !client_id || !*client_id ||
+        wcschr( client_id, '"' )) return FALSE;
     if (swprintf( command, ARRAY_SIZE(command),
-                  L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh-resource \"%s\"",
-                  scope ) < 0) return FALSE;
+                  L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh-resource \"%s\" \"%s\"",
+                  scope, client_id ) < 0) return FALSE;
     ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
     if (!ret) return FALSE;
     WaitForSingleObject( process.hProcess, INFINITE );
@@ -3248,7 +3249,13 @@ static ULONGLONG get_unix_time(void)
     return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
 }
 
-static BOOL prepare_silent_wam_token(const WCHAR *scopes)
+static BOOL is_supported_wam_client(const WCHAR *client_id)
+{
+    return client_id && (!wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
+                         !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" ));
+}
+
+static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id)
 {
     WCHAR *token = load_wam_token_file( L"C:\\wam-access-token.txt" );
     WCHAR *expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
@@ -3259,7 +3266,7 @@ static BOOL prepare_silent_wam_token(const WCHAR *scopes)
 
     if (scopes && *scopes && !wcsstr( scopes, L"service::officeapps.live.com" ))
     {
-        if (!run_wine365_resource_refresh( scopes )) goto done;
+        if (!run_wine365_resource_refresh( scopes, client_id )) goto done;
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
         token = load_wam_token_file( L"C:\\wam-access-token.txt" );
         have_token = token != NULL;
@@ -3297,9 +3304,8 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         INT32 status;
         refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
         if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
-        status = (!wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
-                  !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
-                 prepare_silent_wam_token( scopes ) ? 0 : 3;
+        status = is_supported_wam_client( client_id ) &&
+                 prepare_silent_wam_token( scopes, client_id ) ? 0 : 3;
         hr = web_token_request_result_create( status, scopes, NULL, &result );
         if (refresh_mutex)
         {
@@ -3326,8 +3332,11 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
     *operation = NULL;
     refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
     if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
-    hr = web_token_request_result_create( prepare_silent_wam_token(
-            WindowsGetStringRawBuffer( token_request->scope, NULL ) ) ? 0 : 3,
+    hr = web_token_request_result_create( is_supported_wam_client(
+            WindowsGetStringRawBuffer( token_request->client_id, NULL ) ) &&
+            prepare_silent_wam_token(
+            WindowsGetStringRawBuffer( token_request->scope, NULL ),
+            WindowsGetStringRawBuffer( token_request->client_id, NULL ) ) ? 0 : 3,
             WindowsGetStringRawBuffer( token_request->scope, NULL ), account, &result );
     if (refresh_mutex)
     {

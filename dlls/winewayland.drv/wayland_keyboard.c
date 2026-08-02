@@ -669,11 +669,20 @@ static BOOL find_xkb_layout_variant(const char *name, const char **layout, const
     return FALSE;
 }
 
+static HWND wayland_keyboard_input_hwnd(HWND hwnd)
+{
+    HWND mapped = wayland_get_input_hwnd(hwnd);
+
+    return mapped == hwnd ? hwnd : NULL;
+}
+
 static void release_all_keys(HWND hwnd)
 {
     BYTE state[256];
     int vkey;
     INPUT input = {.type = INPUT_KEYBOARD};
+
+    hwnd = wayland_keyboard_input_hwnd(hwnd);
 
     NtUserGetAsyncKeyboardState(state);
 
@@ -876,6 +885,7 @@ static void keyboard_handle_key(void *data, struct wl_keyboard *wl_keyboard,
     InterlockedExchange(&process_wayland.input_serial, serial);
 
     if (!(hwnd = wayland_keyboard_get_focused_hwnd())) return;
+    hwnd = wayland_keyboard_input_hwnd(hwnd);
 
     TRACE_(key)("serial=%u hwnd=%p key=%d scan=%#x state=%#x\n", serial, hwnd, key, scan, state);
 

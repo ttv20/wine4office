@@ -34,6 +34,98 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static const WCHAR dcomp_foreign_handle_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','e','x','p','o','r','t','_','h','a','n','d','l','e',0};
+
+static void dcomp_exported_handle(void *data, struct zxdg_exported_v2 *exported,
+                                  const char *handle)
+{
+    struct wayland_surface *surface = data;
+    WCHAR name[256];
+    UNICODE_STRING name_str;
+    ATOM atom;
+    unsigned int i;
+
+    for (i = 0; handle[i] && i < ARRAY_SIZE(name) - 1; ++i) name[i] = (unsigned char)handle[i];
+    name[i] = 0;
+    RtlInitUnicodeString(&name_str, name);
+    if ((atom = NtUserRegisterWindowMessage(&name_str)))
+    {
+        surface->dcomp_foreign_atom = atom;
+        NtUserSetProp(surface->hwnd, dcomp_foreign_handle_prop, ULongToHandle(atom));
+        TRACE("exported DComp toplevel hwnd %p with atom %#x\n", surface->hwnd, atom);
+    }
+}
+
+static const struct zxdg_exported_v2_listener dcomp_exported_listener =
+{
+    dcomp_exported_handle,
+};
+
+static void dcomp_imported_destroyed(void *data, struct zxdg_imported_v2 *imported)
+{
+    struct wayland_surface *surface = data;
+
+    if (surface->zxdg_imported_v2 == imported)
+    {
+        zxdg_imported_v2_destroy(imported);
+        surface->zxdg_imported_v2 = NULL;
+        surface->dcomp_foreign_atom = 0;
+    }
+}
+
+static const struct zxdg_imported_v2_listener dcomp_imported_listener =
+{
+    dcomp_imported_destroyed,
+};
+
+BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
+{
+    if (surface->zxdg_exported_v2) return TRUE;
+    if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
+        !surface->xdg_toplevel)
+        return FALSE;
+
+    surface->zxdg_exported_v2 = zxdg_exporter_v2_export_toplevel(
+            process_wayland.zxdg_exporter_v2, surface->wl_surface);
+    if (!surface->zxdg_exported_v2) return FALSE;
+    zxdg_exported_v2_add_listener(surface->zxdg_exported_v2, &dcomp_exported_listener, surface);
+    wl_display_flush(process_wayland.wl_display);
+    return TRUE;
+}
+
+BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom)
+{
+    WCHAR name[256];
+    char handle[256];
+    UNICODE_STRING name_str = {0, sizeof(name), name};
+    unsigned int i, len;
+
+    if (surface->zxdg_imported_v2 && surface->dcomp_foreign_atom == atom) return TRUE;
+    TRACE("import request for hwnd %p role %u atom %#x\n", surface->hwnd, surface->role, atom);
+    if (!process_wayland.zxdg_importer_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
+        !surface->xdg_toplevel || !(len = NtUserGetAtomName(atom, &name_str)))
+        return FALSE;
+
+    if (surface->zxdg_imported_v2)
+    {
+        zxdg_imported_v2_destroy(surface->zxdg_imported_v2);
+        surface->zxdg_imported_v2 = NULL;
+    }
+    for (i = 0; i < len && i < ARRAY_SIZE(handle) - 1; ++i) handle[i] = name[i];
+    handle[i] = 0;
+    surface->zxdg_imported_v2 = zxdg_importer_v2_import_toplevel(
+            process_wayland.zxdg_importer_v2, handle);
+    if (!surface->zxdg_imported_v2) return FALSE;
+    zxdg_imported_v2_add_listener(surface->zxdg_imported_v2, &dcomp_imported_listener, surface);
+    zxdg_imported_v2_set_parent_of(surface->zxdg_imported_v2, surface->wl_surface);
+    surface->dcomp_foreign_atom = atom;
+    wl_surface_commit(surface->wl_surface);
+    wl_display_flush(process_wayland.wl_display);
+    TRACE("imported DComp parent for hwnd %p from atom %#x\n", surface->hwnd, atom);
+    return TRUE;
+}
+
 static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_surface,
                                          uint32_t serial)
 {
@@ -477,6 +569,19 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
     TRACE("surface=%p\n", surface);
 
     /* some objects are shared between several roles */
+
+    if (surface->zxdg_imported_v2)
+    {
+        zxdg_imported_v2_destroy(surface->zxdg_imported_v2);
+        surface->zxdg_imported_v2 = NULL;
+    }
+    if (surface->zxdg_exported_v2)
+    {
+        zxdg_exported_v2_destroy(surface->zxdg_exported_v2);
+        surface->zxdg_exported_v2 = NULL;
+        NtUserRemoveProp(surface->hwnd, dcomp_foreign_handle_prop);
+    }
+    surface->dcomp_foreign_atom = 0;
 
     if (surface->wp_fractional_scale_v1)
     {

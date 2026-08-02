@@ -36,6 +36,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(cursor);
 
+#define WM_WINE_DCOMP_FOCUS 0x80000ff0
+
 /* The cursor-shape-v1 protocol file references the zwp_tablet_tool_v2
  * interface object. Since we don't currently use the tablet protocol,
  * provide a dummy object here to avoid linking errors. */
@@ -121,6 +123,34 @@ static HWND wayland_pointer_get_focused_hwnd(void)
     return hwnd;
 }
 
+HWND wayland_get_input_hwnd(HWND hwnd)
+{
+    static const WCHAR target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    static const WCHAR keyboard_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
+    HWND target, parent, input_window, root;
+
+    if ((input_window = NtUserGetProp(hwnd, keyboard_prop))) return input_window;
+    if ((input_window = NtUserGetProp(NtUserGetAncestor(hwnd, GA_ROOT), keyboard_prop)))
+        return input_window;
+
+    /* Cross-process DirectComposition swapchains use a detached presentation
+     * window in Chromium's GPU process. That thread does not pump Win32 mouse
+     * messages. Route hardware input to the target's parent so normal Win32
+     * hit-testing runs on the host thread while the GPU surface remains the
+     * Wayland pointer focus. */
+    if (!(target = NtUserGetProp(hwnd, target_prop))) return hwnd;
+    if (!(parent = NtUserGetAncestor(target, GA_PARENT))) return hwnd;
+    input_window = NtUserGetWindowRelative(parent, GW_CHILD);
+    NtUserSetProp(parent, input_prop, input_window ? input_window : parent);
+    if ((root = NtUserGetAncestor(parent, GA_ROOT)))
+        NtUserSetProp(root, keyboard_prop, parent);
+    return parent;
+}
+
 static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 {
     INPUT input = {0};
@@ -161,7 +191,7 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
           hwnd, wl_fixed_to_double(sx), wl_fixed_to_double(sy),
           screen.x, screen.y);
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
@@ -231,7 +261,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
     INPUT input = {0};
-    HWND hwnd;
+    HWND hwnd, input_hwnd, focus;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
@@ -266,7 +296,11 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    input_hwnd = wayland_get_input_hwnd(hwnd);
+    NtUserSendHardwareInput(input_hwnd, 0, &input, 0);
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED && input_hwnd != hwnd &&
+        (focus = NtUserGetWindowRelative(input_hwnd, GW_CHILD)))
+        NtUserPostMessage(focus, WM_WINE_DCOMP_FOCUS, 0, 0);
 }
 
 static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
@@ -365,7 +399,7 @@ static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_point
 
     TRACE("hwnd=%p axis=%u value120=%d\n", hwnd, axis, value120);
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static void pointer_handle_axis_discrete(void *data, struct wl_pointer *wl_pointer,
@@ -443,7 +477,7 @@ static void relative_pointer_v1_relative_motion(void *private,
           hwnd, wl_fixed_to_double(dx), wl_fixed_to_double(dy),
           input.mi.dx, input.mi.dy);
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static const struct zwp_relative_pointer_v1_listener relative_pointer_v1_listener =

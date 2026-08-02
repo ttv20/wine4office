@@ -46,6 +46,7 @@ extern "C" BOOL WINAPI InternetCloseHandle(HINTERNET);
 #define HTTP_QUERY_FLAG_NUMBER 0x20000000
 
 static const char client_id[] = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
+static const char teams_client_id[] = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 static const char office_scope[] = "https://officeapps.live.com/.default offline_access openid profile";
 static const char licensing_scope[] = "https://licensing.m365.svc.cloud.microsoft/.default";
 static const char redirect_uri[] =
@@ -600,10 +601,11 @@ static bool parse_token_set(const std::string &response, token_set &tokens,
 }
 
 static bool refresh_scope(const std::string &refresh_token, const char *scope,
-                          token_set &tokens, const token_set *previous = NULL)
+                          token_set &tokens, const token_set *previous = NULL,
+                          const char *requested_client_id = client_id)
 {
     std::string response;
-    std::string body = "client_id=" + std::string(client_id) +
+    std::string body = "client_id=" + std::string(requested_client_id) +
         "&grant_type=refresh_token&refresh_token=" + url_encode(refresh_token) +
         "&scope=" + url_encode(scope);
     bool success = token_request(body, response) && parse_token_set(response, tokens, previous);
@@ -707,14 +709,15 @@ static std::string normalize_resource_scope(const std::string &scope)
     return scope;
 }
 
-static bool resource_cache_names(const std::string &scope, std::wstring &token_name,
+static bool resource_cache_names(const std::string &scope, const std::string &requested_client_id,
+                                 std::wstring &token_name,
                                  std::wstring &expires_name)
 {
     static const WCHAR hex[] = L"0123456789abcdef";
     BYTE hash[32];
     WCHAR suffix[17];
 
-    if (!sha256(scope, hash)) return false;
+    if (!sha256(scope + "\n" + requested_client_id, hash)) return false;
     for (unsigned int i = 0; i < 8; ++i)
     {
         suffix[2 * i] = hex[hash[i] >> 4];
@@ -727,13 +730,14 @@ static bool resource_cache_names(const std::string &scope, std::wstring &token_n
     return true;
 }
 
-static bool refresh_resource_and_save(const std::string &requested_scope)
+static bool refresh_resource_and_save(const std::string &requested_scope,
+                                      const std::string &requested_client_id)
 {
     token_set previous, resource;
     std::string scope = normalize_resource_scope(requested_scope);
     std::string cached_token, cached_expires;
     std::wstring token_name, expires_name;
-    bool have_cache_names = resource_cache_names(scope, token_name, expires_name);
+    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name, expires_name);
     ULONGLONG expiry = 0;
 
     if (have_cache_names && protected_read(token_name.c_str(), cached_token) &&
@@ -752,9 +756,11 @@ static bool refresh_resource_and_save(const std::string &requested_scope)
     secure_clear(cached_expires);
 
     bool success = !scope.empty() &&
+        (requested_client_id == client_id || requested_client_id == teams_client_id) &&
         protected_read(L"wam-refresh-token.dat", previous.refresh_token) &&
         protected_read(L"wam-id-token.dat", previous.id_token);
-    if (success) success = refresh_scope(previous.refresh_token, scope.c_str(), resource, &previous);
+    if (success) success = refresh_scope(previous.refresh_token, scope.c_str(), resource, &previous,
+                                         requested_client_id.c_str());
     if (success)
     {
         std::string expires = std::to_string(unix_time() + resource.expires_in);
@@ -1299,11 +1305,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
         LocalFree(argv);
         return success ? 0 : 3;
     }
-    if (argc >= 3 && !wcscmp(argv[1], L"--refresh-resource"))
+    if (argc >= 4 && !wcscmp(argv[1], L"--refresh-resource"))
     {
         std::string scope = wide_to_utf8(argv[2]);
-        success = refresh_resource_and_save(scope);
+        std::string requested_client_id = wide_to_utf8(argv[3]);
+        success = refresh_resource_and_save(scope, requested_client_id);
         secure_clear(scope);
+        secure_clear(requested_client_id);
         LocalFree(argv);
         return success ? 0 : 3;
     }

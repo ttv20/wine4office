@@ -35,6 +35,7 @@
 #include "text-input-unstable-v3-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
+#include "xdg-foreign-unstable-v2-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 #include "xdg-toplevel-icon-v1-client-protocol.h"
@@ -70,6 +71,7 @@ enum wayland_window_message
     WM_WAYLAND_INIT_DISPLAY_DEVICES = WM_WINE_FIRST_DRIVER_MSG,
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
+    WM_WAYLAND_DCOMP_EXPORT,
 };
 
 enum wayland_surface_config_state
@@ -188,6 +190,8 @@ struct wayland
     struct wp_cursor_shape_manager_v1 *wp_cursor_shape_manager_v1;
     struct wp_pointer_warp_v1 *wp_pointer_warp_v1;
     struct wp_alpha_modifier_v1 *wp_alpha_modifier_v1;
+    struct zxdg_exporter_v2 *zxdg_exporter_v2;
+    struct zxdg_importer_v2 *zxdg_importer_v2;
     struct wayland_seat seat;
     struct wayland_keyboard keyboard;
     struct wayland_pointer pointer;
@@ -299,6 +303,9 @@ struct wayland_surface
         };
     };
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+    struct zxdg_exported_v2 *zxdg_exported_v2;
+    struct zxdg_imported_v2 *zxdg_imported_v2;
+    ATOM dcomp_foreign_atom;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
@@ -333,6 +340,8 @@ void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *parent);
 void wayland_surface_clear_role(struct wayland_surface *surface);
+BOOL wayland_surface_export_toplevel(struct wayland_surface *surface);
+BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom);
 void wayland_surface_attach_shm(struct wayland_surface *surface,
                                 struct wayland_shm_buffer *shm_buffer,
                                 HRGN surface_damage_region);
@@ -422,6 +431,7 @@ void activate_keyboard_hkl(HWND hwnd, BOOL ime);
  */
 
 void wayland_pointer_init(struct wl_pointer *wl_pointer);
+HWND wayland_get_input_hwnd(HWND hwnd);
 void wayland_pointer_deinit(void);
 void wayland_pointer_clear_constraint(void);
 

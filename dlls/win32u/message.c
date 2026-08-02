@@ -44,6 +44,7 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #define QS_DRIVER       0x80000000
 #define QS_HARDWARE     0x40000000
 #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
+#define WM_WINE_DCOMP_FOCUS 0x80000ff0
 
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
@@ -2182,6 +2183,8 @@ static LRESULT handle_internal_message( HWND hwnd, UINT msg, WPARAM wparam, LPAR
 {
     switch(msg)
     {
+    case WM_WINE_DCOMP_FOCUS:
+        return (LRESULT)NtUserSetFocus( hwnd );
     case WM_WINE_DESTROYWINDOW:
         return destroy_window( hwnd );
     case WM_WINE_SETWINDOWPOS:
@@ -2852,6 +2855,7 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
                 }
             }
         }
+
     }
 
     /* send the WM_SETCURSOR message */

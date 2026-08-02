@@ -1066,6 +1066,19 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
 
     device = dst_resource->device;
 
+    /* A framebuffer blit copies premultiplied pixels verbatim and cannot
+     * supply the opaque desktop backdrop expected by composition swapchains.
+     * Let the GLSL blitter composite those pixels over white instead. */
+    if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain
+            && (dst_texture->swapchain->state.desc.flags & WINED3D_SWAPCHAIN_ALPHA_PREMULTIPLIED))
+    {
+        if (!(next = blitter->next))
+            return dst_location;
+        return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx,
+                src_location, src_rect, dst_texture, dst_sub_resource_idx, dst_location,
+                dst_rect, colour_key, filter, resolve_format);
+    }
+
     if (blit_op == WINED3D_BLIT_OP_RAW_BLIT && dst_resource->format->id == src_resource->format->id)
     {
         if (dst_resource->format->depth_size || dst_resource->format->stencil_size)

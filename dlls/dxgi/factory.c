@@ -21,6 +21,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
+#define WM_WAYLAND_DCOMP_EXPORT 0x80001003
+
 static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *iface)
 {
     return CONTAINING_RECORD(iface, struct dxgi_factory, IWineDXGIFactory_iface);
@@ -393,15 +395,56 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
 }
 
+static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
+    WNDPROC old_proc = (WNDPROC)GetPropW(window, L"__wine_dcomp_old_proc");
+    POINT point;
+
+    if (target)
+    {
+        switch (message)
+        {
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_LBUTTONDBLCLK:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_RBUTTONDBLCLK:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+            case WM_MBUTTONDBLCLK:
+                point.x = (short)LOWORD(lparam);
+                point.y = (short)HIWORD(lparam);
+                ClientToScreen(window, &point);
+                ScreenToClient(target, &point);
+                PostMessageW(target, message, wparam, MAKELPARAM(point.x, point.y));
+                return 0;
+
+            case WM_MOUSEWHEEL:
+            case WM_MOUSEHWHEEL:
+                PostMessageW(target, message, wparam, lparam);
+                return 0;
+        }
+    }
+
+    return old_proc ? CallWindowProcW(old_proc, window, message, wparam, lparam)
+            : DefWindowProcW(window, message, wparam, lparam);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
     typedef HWND (WINAPI *get_dcomp_target_window_t)(void);
     get_dcomp_target_window_t get_target_window;
     HMODULE dcomp;
+    DWORD target_process;
+    HWND target_root;
     BOOL own_window = FALSE;
     HRESULT hr;
     HWND window;
+    HWND target;
 
     TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
@@ -413,11 +456,41 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
      * before this call. Creating wined3d's presentation surface for that HWND
      * from the start is important on Wayland, where changing a window's role
      * after surface creation does not retarget the existing surface. */
-    window = NULL;
+    target = NULL;
     if ((dcomp = GetModuleHandleW(L"dcomp.dll"))
             && (get_target_window = (get_dcomp_target_window_t)GetProcAddress(dcomp,
             "__wine_dcomp_get_target_window")))
-        window = get_target_window();
+        target = get_target_window();
+
+    target_process = 0;
+    target_root = target ? GetAncestor(target, GA_ROOT) : NULL;
+    if (target_root) GetWindowThreadProcessId(target_root, &target_process);
+    if (target && target_process != GetCurrentProcessId())
+    {
+        RECT rect;
+
+        /* WebView2 renders in a separate process from its host. A Wayland
+         * subsurface cannot reference a surface from another client connection,
+         * and X11 child-window stacking leaves Chromium's helper windows above
+         * the presentation surface. Use a non-activating companion surface on
+         * the rendering process' connection and keep it aligned with the
+         * cross-process DComp target. */
+        GetWindowRect(target, &rect);
+        if (!(window = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                "static", "DXGI composition window", WS_POPUP,
+                rect.left, rect.top, max(rect.right - rect.left, 1),
+                max(rect.bottom - rect.top, 1), target, NULL, NULL, NULL)))
+            return E_FAIL;
+        SetPropW(window, L"__wine_dcomp_detached_window", target);
+        PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+        SetPropW(window, L"__wine_dcomp_old_proc", (HANDLE)SetWindowLongPtrW(window, GWLP_WNDPROC,
+                (LONG_PTR)dxgi_composition_window_proc));
+        own_window = TRUE;
+    }
+    else
+    {
+        window = target;
+    }
 
     if (!window)
     {
