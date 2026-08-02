@@ -37,6 +37,14 @@
 #include "windows.management.deployment.h"
 
 extern IActivationFactory *package_manager_factory;
+extern IActivationFactory *stage_package_options_factory;
+
+HRESULT deployment_operation_create( HRESULT extended_error, const WCHAR *error_text,
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation );
+HRESULT msix_path_from_uri( IUriRuntimeClass *uri, WCHAR **path );
+HRESULT msix_validate_package( const WCHAR *path );
+HRESULT msix_stage_package( const WCHAR *path, WCHAR **full_name, WCHAR **family_name );
+HRESULT msix_get_staged_package( const WCHAR *family_name, WCHAR **path );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

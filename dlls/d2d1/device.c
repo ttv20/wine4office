@@ -5391,7 +5391,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateSvgDocument(ID2D1Devic
         return E_INVALIDARG;
     *svg_document = NULL;
     if (input_xml_stream)
-        return E_NOTIMPL;
+        FIXME("SVG stream parsing is not implemented; creating an empty document.\n");
 
     return d2d_svg_document_create(context, viewport_size, svg_document);
 }

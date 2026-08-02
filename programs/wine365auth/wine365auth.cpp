@@ -684,6 +684,93 @@ static bool refresh_and_save(void)
     return success;
 }
 
+static std::string normalize_resource_scope(const std::string &scope)
+{
+    static const std::string prefix = "service::";
+    if (!scope.compare(0, prefix.size(), prefix))
+    {
+        size_t end = scope.find("::", prefix.size());
+        if (end == std::string::npos || end == prefix.size()) return {};
+        return "https://" + scope.substr(prefix.size(), end - prefix.size()) + "/.default";
+    }
+
+    /* WAM callers use both delegated scopes and v1-style resource URLs.  The
+     * v2 token endpoint accepts the former unchanged, but a bare resource URL
+     * must be converted to its /.default scope. */
+    size_t scheme = scope.find("://");
+    if (scheme != std::string::npos)
+    {
+        size_t path = scope.find('/', scheme + 3);
+        if (path == std::string::npos) return scope + "/.default";
+        if (path == scope.size() - 1) return scope + ".default";
+    }
+    return scope;
+}
+
+static bool resource_cache_names(const std::string &scope, std::wstring &token_name,
+                                 std::wstring &expires_name)
+{
+    static const WCHAR hex[] = L"0123456789abcdef";
+    BYTE hash[32];
+    WCHAR suffix[17];
+
+    if (!sha256(scope, hash)) return false;
+    for (unsigned int i = 0; i < 8; ++i)
+    {
+        suffix[2 * i] = hex[hash[i] >> 4];
+        suffix[2 * i + 1] = hex[hash[i] & 0xf];
+    }
+    suffix[16] = 0;
+    token_name = L"wam-resource-" + std::wstring(suffix) + L"-token.dat";
+    expires_name = L"wam-resource-" + std::wstring(suffix) + L"-expires-on.dat";
+    SecureZeroMemory(hash, sizeof(hash));
+    return true;
+}
+
+static bool refresh_resource_and_save(const std::string &requested_scope)
+{
+    token_set previous, resource;
+    std::string scope = normalize_resource_scope(requested_scope);
+    std::string cached_token, cached_expires;
+    std::wstring token_name, expires_name;
+    bool have_cache_names = resource_cache_names(scope, token_name, expires_name);
+    ULONGLONG expiry = 0;
+
+    if (have_cache_names && protected_read(token_name.c_str(), cached_token) &&
+        protected_read(expires_name.c_str(), cached_expires))
+        expiry = _strtoui64(cached_expires.c_str(), NULL, 10);
+    if (!cached_token.empty() && expiry > unix_time() + 300)
+    {
+        bool success = protected_write(L"wam-access-token.dat", cached_token) &&
+                       protected_write(L"wam-token-expires-on.dat", cached_expires);
+        secure_clear(cached_token);
+        secure_clear(cached_expires);
+        secure_clear(scope);
+        return success;
+    }
+    secure_clear(cached_token);
+    secure_clear(cached_expires);
+
+    bool success = !scope.empty() &&
+        protected_read(L"wam-refresh-token.dat", previous.refresh_token) &&
+        protected_read(L"wam-id-token.dat", previous.id_token);
+    if (success) success = refresh_scope(previous.refresh_token, scope.c_str(), resource, &previous);
+    if (success)
+    {
+        std::string expires = std::to_string(unix_time() + resource.expires_in);
+        success = protected_write(L"wam-access-token.dat", resource.access_token) &&
+                  protected_write(L"wam-refresh-token.dat", resource.refresh_token) &&
+                  protected_write(L"wam-token-expires-on.dat", expires) &&
+                  (!have_cache_names ||
+                   (protected_write(token_name.c_str(), resource.access_token) &&
+                    protected_write(expires_name.c_str(), expires)));
+    }
+    secure_clear(scope);
+    secure_clear(previous);
+    secure_clear(resource);
+    return success;
+}
+
 static bool handle_redirect(const WCHAR *location)
 {
     if (!location || _wcsnicmp(location, redirect_prefix, ARRAYSIZE(redirect_prefix) - 1))
@@ -1209,6 +1296,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     if (argc >= 2 && !wcscmp(argv[1], L"--refresh"))
     {
         success = refresh_and_save();
+        LocalFree(argv);
+        return success ? 0 : 3;
+    }
+    if (argc >= 3 && !wcscmp(argv[1], L"--refresh-resource"))
+    {
+        std::string scope = wide_to_utf8(argv[2]);
+        success = refresh_resource_and_save(scope);
+        secure_clear(scope);
         LocalFree(argv);
         return success ? 0 : 3;
     }

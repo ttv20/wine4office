@@ -183,11 +183,14 @@ struct d3d11_swapchain
     ID3D11Texture2D *present1_shadow;
     ID3D11Texture2D *present1_scratch;
     BOOL present1_shadow_valid;
+    HWND composition_window;
 
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
 };
+
+void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc);

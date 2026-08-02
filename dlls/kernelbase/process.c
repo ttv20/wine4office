@@ -26,6 +26,7 @@
 #include "winbase.h"
 #include "winnls.h"
 #include "wincontypes.h"
+#include "winreg.h"
 #include "winternl.h"
 
 #include "kernelbase.h"
@@ -540,6 +541,60 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     {
         if (!(tidy_cmdline = get_file_name( cmd_line, name, ARRAY_SIZE(name) ))) return FALSE;
         app_name = name;
+    }
+
+    /* Some WebView2 hosts use CreateWebViewEnvironmentWithOptionsInternal(),
+     * which bypasses the runtime's documented additional-arguments overrides.
+     * Keep this opt-in so launchers can select a Wine-specific rendering mode
+     * without changing command lines for unrelated child processes. */
+    {
+        const WCHAR *basename = wcsrchr( app_name, '\\' );
+        const WCHAR *forward_basename = wcsrchr( app_name, '/' );
+        const WCHAR *args_env = L"WINE_WEBVIEW2_ARGUMENTS";
+        const WCHAR *args_key = L"Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+        DWORD reg_size = 0;
+        DWORD extra_len;
+
+        if (!basename || (forward_basename && forward_basename > basename)) basename = forward_basename;
+        if (basename) basename++;
+        else basename = app_name;
+
+        extra_len = GetEnvironmentVariableW( args_env, NULL, 0 );
+        if (extra_len <= 1)
+        {
+            args_env = L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+            extra_len = GetEnvironmentVariableW( args_env, NULL, 0 );
+        }
+        if (extra_len <= 1 && !RegGetValueW( HKEY_CURRENT_USER, args_key, L"*", RRF_RT_REG_SZ,
+                                             NULL, NULL, &reg_size ) && reg_size > sizeof(WCHAR))
+        {
+            args_env = NULL;
+            extra_len = reg_size / sizeof(WCHAR);
+        }
+
+        if (!wcsicmp( basename, L"msedgewebview2.exe" ) && extra_len > 1)
+        {
+            SIZE_T cmd_len = lstrlenW( tidy_cmdline );
+            WCHAR *new_cmdline;
+
+            if (!(new_cmdline = RtlAllocateHeap( GetProcessHeap(), 0,
+                    (cmd_len + 1 + extra_len) * sizeof(WCHAR) )))
+                return FALSE;
+
+            memcpy( new_cmdline, tidy_cmdline, cmd_len * sizeof(WCHAR) );
+            new_cmdline[cmd_len] = ' ';
+            if ((args_env && !GetEnvironmentVariableW( args_env, new_cmdline + cmd_len + 1, extra_len )) ||
+                (!args_env && RegGetValueW( HKEY_CURRENT_USER, args_key, L"*", RRF_RT_REG_SZ,
+                                            NULL, new_cmdline + cmd_len + 1, &reg_size )))
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, new_cmdline );
+                return FALSE;
+            }
+
+            if (tidy_cmdline != cmd_line) RtlFreeHeap( GetProcessHeap(), 0, tidy_cmdline );
+            tidy_cmdline = new_cmdline;
+            TRACE( "WebView2 command line with Wine arguments: %s\n", debugstr_w(tidy_cmdline) );
+        }
     }
 
     /* Warn if unsupported features are used */

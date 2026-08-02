@@ -29,4 +29,5 @@ import "windows.applicationmodel.idl";
 namespace Windows.ApplicationModel {
     runtimeclass Package;
     runtimeclass DesignMode;
+    runtimeclass LimitedAccessFeatures;
 }

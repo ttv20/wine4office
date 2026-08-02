@@ -25,4 +25,5 @@ import "windows.system.profile.idl";
 
 namespace Windows.System.Profile {
     runtimeclass SystemIdentification;
+    runtimeclass WindowsIntegrityPolicy;
 }

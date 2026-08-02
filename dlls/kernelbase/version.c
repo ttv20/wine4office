@@ -36,6 +36,7 @@
 #include "winnls.h"
 #include "winternl.h"
 #include "winerror.h"
+#include "winreg.h"
 #include "appmodel.h"
 
 #include "kernelbase.h"
@@ -1558,10 +1559,90 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *le
 /***********************************************************************
  *         GetCurrentPackageFamilyName   (kernelbase.@)
  */
+static LONG get_current_staged_package( WCHAR **family, WCHAR **full_name, WCHAR **package_path )
+{
+    static const WCHAR key_name[] = L"Software\\Wine\\Appx\\StagedPackages";
+    WCHAR executable[MAX_PATH], value_name[PACKAGE_FAMILY_NAME_MAX_LENGTH];
+    DWORD index = 0, executable_len, value_name_len, data_size, type;
+    WCHAR *data = NULL, *basename;
+    HKEY key;
+    LONG status;
+
+    *family = *full_name = *package_path = NULL;
+    if (!(executable_len = GetModuleFileNameW( NULL, executable, ARRAY_SIZE(executable) )))
+        return GetLastError();
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, key_name, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
+    if (status) return APPMODEL_ERROR_NO_PACKAGE;
+    for (;; ++index)
+    {
+        value_name_len = ARRAY_SIZE(value_name);
+        data_size = 0;
+        status = RegEnumValueW( key, index, value_name, &value_name_len, NULL, &type, NULL, &data_size );
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status || type != REG_SZ || !(data = HeapAlloc( GetProcessHeap(), 0, data_size ))) continue;
+        status = RegQueryValueExW( key, value_name, NULL, &type, (BYTE *)data, &data_size );
+        if (!status)
+        {
+            DWORD path_len = wcslen( data );
+            if (executable_len > path_len && executable[path_len] == '\\' &&
+                !wcsnicmp( executable, data, path_len ))
+            {
+                if (!(basename = wcsrchr( data, '\\' ))) basename = data;
+                else ++basename;
+                *family = HeapAlloc( GetProcessHeap(), 0, (wcslen( value_name ) + 1) * sizeof(**family) );
+                *full_name = HeapAlloc( GetProcessHeap(), 0, (wcslen( basename ) + 1) * sizeof(**full_name) );
+                if (*family) wcscpy( *family, value_name );
+                if (*full_name) wcscpy( *full_name, basename );
+                *package_path = data;
+                data = NULL;
+                status = *family && *full_name ? ERROR_SUCCESS : ERROR_NOT_ENOUGH_MEMORY;
+                break;
+            }
+        }
+        HeapFree( GetProcessHeap(), 0, data );
+        data = NULL;
+    }
+    RegCloseKey( key );
+    HeapFree( GetProcessHeap(), 0, data );
+    if (status == ERROR_NO_MORE_ITEMS) return APPMODEL_ERROR_NO_PACKAGE;
+    if (status)
+    {
+        HeapFree( GetProcessHeap(), 0, *family );
+        HeapFree( GetProcessHeap(), 0, *full_name );
+        HeapFree( GetProcessHeap(), 0, *package_path );
+        *family = *full_name = *package_path = NULL;
+    }
+    return status;
+}
+
+static LONG copy_package_string( const WCHAR *source, UINT32 *length, WCHAR *destination )
+{
+    UINT32 required;
+
+    if (!length) return ERROR_INVALID_PARAMETER;
+    required = wcslen( source ) + 1;
+    if (!destination || *length < required)
+    {
+        *length = required;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    memcpy( destination, source, required * sizeof(*destination) );
+    *length = required;
+    return ERROR_SUCCESS;
+}
+
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p): stub\n", length, name );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR *family, *full_name, *path;
+    LONG status;
+
+    TRACE( "(%p %p)\n", length, name );
+    if ((status = get_current_staged_package( &family, &full_name, &path ))) return status;
+    status = copy_package_string( family, length, name );
+    HeapFree( GetProcessHeap(), 0, family );
+    HeapFree( GetProcessHeap(), 0, full_name );
+    HeapFree( GetProcessHeap(), 0, path );
+    return status;
 }
 
 
@@ -1570,8 +1651,16 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p): stub\n", length, name );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR *family, *full_name, *path;
+    LONG status;
+
+    TRACE( "(%p %p)\n", length, name );
+    if ((status = get_current_staged_package( &family, &full_name, &path ))) return status;
+    status = copy_package_string( full_name, length, name );
+    HeapFree( GetProcessHeap(), 0, family );
+    HeapFree( GetProcessHeap(), 0, full_name );
+    HeapFree( GetProcessHeap(), 0, path );
+    return status;
 }
 
 
@@ -1580,8 +1669,16 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, W
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buffer )
 {
-    FIXME( "(%p %p): stub\n", len, buffer );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR *family, *full_name, *path;
+    LONG status;
+
+    TRACE( "(%p %p)\n", len, buffer );
+    if ((status = get_current_staged_package( &family, &full_name, &path ))) return status;
+    status = PackageIdFromFullName( full_name, 0, len, buffer );
+    HeapFree( GetProcessHeap(), 0, family );
+    HeapFree( GetProcessHeap(), 0, full_name );
+    HeapFree( GetProcessHeap(), 0, path );
+    return status;
 }
 
 /***********************************************************************
@@ -1598,8 +1695,16 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR *path )
 {
-    FIXME( "(%p %p): stub\n", length, path );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR *family, *full_name, *package_path;
+    LONG status;
+
+    TRACE( "(%p %p)\n", length, path );
+    if ((status = get_current_staged_package( &family, &full_name, &package_path ))) return status;
+    status = copy_package_string( package_path, length, path );
+    HeapFree( GetProcessHeap(), 0, family );
+    HeapFree( GetProcessHeap(), 0, full_name );
+    HeapFree( GetProcessHeap(), 0, package_path );
+    return status;
 }
 
 

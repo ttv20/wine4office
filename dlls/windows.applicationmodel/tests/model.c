@@ -436,6 +436,8 @@ static void test_execute_package( IPackage *package )
 
 static void test_PackageManager(void)
 {
+    static const GUID package_manager9_iid =
+        {0x1aa79035, 0xcc71, 0x4b2e, {0x80, 0xa6, 0xc7, 0x04, 0x1d, 0x85, 0x79, 0xa7}};
     static const WCHAR *statics_name = RuntimeClass_Windows_Management_Deployment_PackageManager;
     IStorageFolder *storage_folder;
     IStorageItem *storage_item;
@@ -444,6 +446,7 @@ static void test_PackageManager(void)
     IInspectable *inspectable;
     IPackageManager2 *manager2;
     IPackageManager *manager;
+    IUnknown *manager9;
     IIterator_Package *iter;
     IPackage *package;
     HSTRING str, str2;
@@ -474,6 +477,41 @@ static void test_PackageManager(void)
 
     hr = IInspectable_QueryInterface( inspectable, &IID_IPackageManager, (void **)&manager );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IPackageManager_QueryInterface( manager, &package_manager9_iid, (void **)&manager9 );
+    ok( hr == S_OK || broken( hr == E_NOINTERFACE ), "got hr %#lx.\n", hr );
+    if (hr == S_OK)
+    {
+        ref = IUnknown_Release( manager9 );
+        ok( ref == 2, "got ref %ld.\n", ref );
+    }
+
+    hr = WindowsCreateString( L"WineTest.Does.Not.Exist_8wekyb3d8bbwe",
+                              wcslen( L"WineTest.Does.Not.Exist_8wekyb3d8bbwe" ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    packages = (IIterable_Package *)0xdeadbeef;
+    hr = IPackageManager_FindPackagesByPackageFamilyName( manager, str, &packages );
+    ok( hr == S_OK || broken( hr == E_ACCESSDENIED ), "got hr %#lx.\n", hr );
+    WindowsDeleteString( str );
+    if (hr == S_OK)
+    {
+        boolean has_current = TRUE;
+
+        ok( packages != NULL, "got packages %p.\n", packages );
+        hr = IIterable_Package_First( packages, &iter );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IIterator_Package_get_HasCurrent( iter, &has_current );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !has_current, "got has_current %u.\n", has_current );
+        package = (IPackage *)0xdeadbeef;
+        hr = IIterator_Package_get_Current( iter, &package );
+        ok( hr == E_BOUNDS, "got hr %#lx.\n", hr );
+        ok( package == NULL, "got package %p.\n", package );
+        ref = IIterator_Package_Release( iter );
+        ok( !ref, "got ref %ld.\n", ref );
+        ref = IIterable_Package_Release( packages );
+        ok( !ref, "got ref %ld.\n", ref );
+    }
 
     hr = IPackageManager_FindPackagesByNamePublisher( manager, NULL, NULL, &packages );
     ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
@@ -543,6 +581,56 @@ static void test_PackageManager(void)
 
 skip_tests:
     ref = IPackageManager_Release( manager );
+    ok( ref == 1, "got ref %ld.\n", ref );
+    ref = IInspectable_Release( inspectable );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = IActivationFactory_Release( factory );
+    ok( ref == 1, "got ref %ld.\n", ref );
+}
+
+static void test_StagePackageOptions(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_Management_Deployment_StagePackageOptions;
+    IStagePackageOptions *options;
+    IActivationFactory *factory;
+    IInspectable *inspectable;
+    HSTRING str, name;
+    boolean value;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_ActivateInstance( factory, &inspectable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( inspectable, &IID_IAgileObject, TRUE, FALSE );
+    hr = IInspectable_QueryInterface( inspectable, &IID_IStagePackageOptions, (void **)&options );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IStagePackageOptions_get_DeveloperMode( options, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !value, "got value %u.\n", value );
+    hr = IStagePackageOptions_put_DeveloperMode( options, TRUE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IStagePackageOptions_get_DeveloperMode( options, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( value, "got value %u.\n", value );
+
+    hr = IInspectable_GetRuntimeClassName( inspectable, &name );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( name, NULL ), class_name ), "got name %s.\n", debugstr_hstring(name) );
+    WindowsDeleteString( name );
+
+    ref = IStagePackageOptions_Release( options );
     ok( ref == 1, "got ref %ld.\n", ref );
     ref = IInspectable_Release( inspectable );
     ok( !ref, "got ref %ld.\n", ref );
@@ -630,6 +718,7 @@ START_TEST(model)
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
     test_PackageManager();
+    test_StagePackageOptions();
     test_PackageStatics();
     test_DesignMode();
 

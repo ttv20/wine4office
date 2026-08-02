@@ -598,6 +598,15 @@ HRESULT WINAPI RegisterApplicationRecoveryCallback(APPLICATION_RECOVERY_CALLBACK
     return S_OK;
 }
 
+/**********************************************************************
+ *           UnregisterApplicationRecoveryCallback     (KERNEL32.@)
+ */
+HRESULT WINAPI UnregisterApplicationRecoveryCallback(void)
+{
+    TRACE("faking success\n");
+    return S_OK;
+}
+
 static SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *get_logical_processor_info(void)
 {
     DWORD size = 0;

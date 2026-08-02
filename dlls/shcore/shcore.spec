@@ -119,10 +119,10 @@
 125 stub -noname SHGetValueGoodBootW
 126 stub -noname SHLoadRegUIStringW
 127 stub -noname QuerySourceCreateFromKeyEx
-130 stub -noname SHGlobalCounterGetValue
-131 stub -noname SHGlobalCounterIncrement
-132 stub -noname SHGlobalCounterDecrement
-133 stub -noname SHGlobalCounterSetValue
+130 stdcall SHGlobalCounterGetValue(long)
+131 stdcall SHGlobalCounterIncrement(long)
+132 stdcall SHGlobalCounterDecrement(long)
+133 stdcall SHGlobalCounterSetValue(long long)
 140 stub -noname IUnknown_ProfferService
 141 stub -noname IUnknown_RemoveBackReferences
 142 stub -noname IUnknown_GetClassID

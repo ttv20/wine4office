@@ -2447,7 +2447,8 @@ static HRESULT token_response_vector_create( const WCHAR *token, const WCHAR *sc
             if (SUCCEEDED(hr)) hr = response_property_insert( response->properties, L"Authority", authority );
             if (SUCCEEDED(hr)) hr = response_property_insert( response->properties, L"wamcompat_client_info", client_info );
             if (SUCCEEDED(hr)) hr = response_property_insert( response->properties, L"wamcompat_scopes", scopes );
-            if (SUCCEEDED(hr)) hr = response_property_insert( response->properties, L"wamcompat_id_token", id_token );
+            if (SUCCEEDED(hr))
+                hr = response_property_insert( response->properties, L"wamcompat_id_token", id_token );
         }
         free( expires_on );
         free( authority );
@@ -2709,18 +2710,22 @@ struct interactive_token_context
     HWND owner;
 };
 
-static HRESULT token_request_get_login_hint( struct web_token_request *request, HSTRING *value )
+static HRESULT token_request_get_property( struct web_token_request *request, const WCHAR *name, HSTRING *value )
 {
-    static const WCHAR login_hint_key[] = L"LoginHint";
     HSTRING key = NULL;
     HRESULT hr;
 
     if (!value) return E_POINTER;
     *value = NULL;
-    if (FAILED(hr = WindowsCreateString( login_hint_key, ARRAY_SIZE(login_hint_key) - 1, &key ))) return hr;
+    if (FAILED(hr = WindowsCreateString( name, wcslen( name ), &key ))) return hr;
     hr = string_map_Lookup( (struct string_map *)request->properties, key, value );
     WindowsDeleteString( key );
     return hr;
+}
+
+static HRESULT token_request_get_login_hint( struct web_token_request *request, HSTRING *value )
+{
+    return token_request_get_property( request, L"LoginHint", value );
 }
 
 static BOOL write_login_hint_file( HSTRING hint, WCHAR path[MAX_PATH] )
@@ -2798,6 +2803,27 @@ static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, 
     CloseHandle( process.hThread );
     CloseHandle( process.hProcess );
     if (hint_path[0]) DeleteFileW( hint_path );
+    return ret;
+}
+
+static BOOL run_wine365_resource_refresh( const WCHAR *scope )
+{
+    WCHAR command[4 * MAX_PATH];
+    PROCESS_INFORMATION process = {0};
+    STARTUPINFOW startup = {sizeof(startup)};
+    DWORD exit_code = 3;
+    BOOL ret;
+
+    if (!scope || !*scope || wcschr( scope, '"' )) return FALSE;
+    if (swprintf( command, ARRAY_SIZE(command),
+                  L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh-resource \"%s\"",
+                  scope ) < 0) return FALSE;
+    ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
+    if (!ret) return FALSE;
+    WaitForSingleObject( process.hProcess, INFINITE );
+    ret = GetExitCodeProcess( process.hProcess, &exit_code ) && !exit_code;
+    CloseHandle( process.hThread );
+    CloseHandle( process.hProcess );
     return ret;
 }
 
@@ -3222,7 +3248,7 @@ static ULONGLONG get_unix_time(void)
     return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
 }
 
-static BOOL prepare_silent_wam_token(void)
+static BOOL prepare_silent_wam_token(const WCHAR *scopes)
 {
     WCHAR *token = load_wam_token_file( L"C:\\wam-access-token.txt" );
     WCHAR *expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
@@ -3231,6 +3257,14 @@ static BOOL prepare_silent_wam_token(void)
     ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
     DWORD exit_code;
 
+    if (scopes && *scopes && !wcsstr( scopes, L"service::officeapps.live.com" ))
+    {
+        if (!run_wine365_resource_refresh( scopes )) goto done;
+        if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
+        token = load_wam_token_file( L"C:\\wam-access-token.txt" );
+        have_token = token != NULL;
+        goto done;
+    }
     if (have_token && (!expiry || expiry > get_unix_time() + 300)) goto done;
     refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
     if (refresh && run_wine365_auth( NULL, NULL, FALSE, &exit_code ) && !exit_code)
@@ -3250,6 +3284,7 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )
 {
     IInspectable *result;
+    HANDLE refresh_mutex;
     HRESULT hr;
 
     TRACE( "iface %p, request %p, operation %p.\n", iface, request, operation );
@@ -3258,10 +3293,20 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
     {
         struct web_token_request *token_request = (struct web_token_request *)request;
         const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
-        INT32 status = !wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) &&
-                       prepare_silent_wam_token() ? 0 : 3;
-        if (FAILED(hr = web_token_request_result_create( status,
-                WindowsGetStringRawBuffer( token_request->scope, NULL ), NULL, &result ))) return hr;
+        const WCHAR *scopes = WindowsGetStringRawBuffer( token_request->scope, NULL );
+        INT32 status;
+        refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
+        if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
+        status = (!wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
+                  !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
+                 prepare_silent_wam_token( scopes ) ? 0 : 3;
+        hr = web_token_request_result_create( status, scopes, NULL, &result );
+        if (refresh_mutex)
+        {
+            ReleaseMutex( refresh_mutex );
+            CloseHandle( refresh_mutex );
+        }
+        if (FAILED(hr)) return hr;
     }
     hr = completed_provider_operation_create( result, operation );
     IInspectable_Release( result );
@@ -3271,15 +3316,25 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable *account,
         IInspectable **operation )
 {
+    struct web_token_request *token_request = (struct web_token_request *)request;
     IInspectable *result;
+    HANDLE refresh_mutex;
     HRESULT hr;
 
     TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
-    if (FAILED(hr = web_token_request_result_create( prepare_silent_wam_token() ? 0 : 3,
-            WindowsGetStringRawBuffer( ((struct web_token_request *)request)->scope, NULL ), account,
-            &result ))) return hr;
+    refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
+    if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
+    hr = web_token_request_result_create( prepare_silent_wam_token(
+            WindowsGetStringRawBuffer( token_request->scope, NULL ) ) ? 0 : 3,
+            WindowsGetStringRawBuffer( token_request->scope, NULL ), account, &result );
+    if (refresh_mutex)
+    {
+        ReleaseMutex( refresh_mutex );
+        CloseHandle( refresh_mutex );
+    }
+    if (FAILED(hr)) return hr;
     hr = completed_provider_operation_create( result, operation );
     IInspectable_Release( result );
     return hr;
@@ -3318,10 +3373,46 @@ static HRESULT WINAPI web_manager_RequestTokenWithWebAccountAsync(
     return create_interactive_token_operation( 4, (struct web_token_request *)request, account,
                                                &IID_IInspectable, (void **)operation );
 }
-WEB_MANAGER_ASYNC_STUB( web_manager_FindAccountAsync,
-        (struct web_authentication_core_manager_statics *iface, IInspectable *provider, HSTRING id,
-         IInspectable **operation),
-        ("iface %p, provider %p, id %s, operation %p stub!\n", iface, provider, debugstr_hstring( id ), operation) )
+static HRESULT WINAPI web_manager_FindAccountAsync(
+        struct web_authentication_core_manager_statics *iface, IInspectable *provider, HSTRING id,
+        IInspectable **operation )
+{
+    struct web_account *account;
+    IInspectable *result = NULL;
+    HSTRING account_id = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, provider %p, id %s, operation %p.\n",
+           iface, provider, debugstr_hstring( id ), operation );
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+
+    hr = web_account_create( &result );
+    if (hr == HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND )) hr = S_OK;
+    if (FAILED(hr)) return hr;
+
+    if (result)
+    {
+        account = (struct web_account *)result;
+        hr = web_account2_get_Id( &account->IWebAccount2_iface, &account_id );
+        if (FAILED(hr))
+        {
+            IInspectable_Release( result );
+            return hr;
+        }
+        if (!id || wcscmp( WindowsGetStringRawBuffer( id, NULL ),
+                           WindowsGetStringRawBuffer( account_id, NULL ) ))
+        {
+            IInspectable_Release( result );
+            result = NULL;
+        }
+        WindowsDeleteString( account_id );
+    }
+
+    hr = completed_provider_operation_create( result, operation );
+    if (result) IInspectable_Release( result );
+    return hr;
+}
 static HRESULT WINAPI web_manager_FindAccountProviderAsync(
         struct web_authentication_core_manager_statics *iface, HSTRING id, IInspectable **operation )
 {
@@ -3523,8 +3614,10 @@ static HRESULT WINAPI web_manager_FindAllAccountsWithClientIdAsync(
     if (!operation) return E_POINTER;
     *operation = NULL;
     if (FAILED(hr = find_all_accounts_result_create(
-            !wcsicmp( WindowsGetStringRawBuffer( client_id, NULL ),
-                      L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) &&
+            (!wcsicmp( WindowsGetStringRawBuffer( client_id, NULL ),
+                       L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
+             !wcsicmp( WindowsGetStringRawBuffer( client_id, NULL ),
+                       L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
             wcsstr( WindowsGetStringRawBuffer( ((struct web_account_provider *)provider)->authority, NULL ),
                     L"organizations" ) != NULL, &result ))) return hr;
     hr = completed_provider_operation_create( result, operation );

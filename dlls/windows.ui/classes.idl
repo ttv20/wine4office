@@ -31,6 +31,7 @@ import "windows.devices.enumeration.idl";
 import "windows.ui.idl";
 import "windows.devices.input.idl";
 import "windows.ui.core.idl";
+import "windows.ui.composition.idl";
 import "windows.ui.input.idl";
 import "windows.ui.windowmanagement.idl";
 import "windows.ui.viewmanagement.idl";
@@ -44,4 +45,8 @@ namespace Windows.UI.ViewManagement {
     runtimeclass UISettings;
     runtimeclass UIViewSettings;
     runtimeclass InputPane;
+}
+
+namespace Windows.UI.Composition {
+    runtimeclass Compositor;
 }

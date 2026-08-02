@@ -185,6 +185,12 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
+    swapchain->composition_window = window;
+}
+
 /* IUnknown methods */
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
@@ -234,6 +240,7 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     if (!refcount)
     {
         IWineDXGIDevice *device = swapchain->device;
+        HWND composition_window = swapchain->composition_window;
         if (swapchain->present1_shadow)
             ID3D11Texture2D_Release(swapchain->present1_shadow);
         if (swapchain->present1_scratch)
@@ -246,6 +253,8 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         IWineDXGIFactory_Release(swapchain->factory);
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
+        if (composition_window)
+            DestroyWindow(composition_window);
     }
 
     return refcount;

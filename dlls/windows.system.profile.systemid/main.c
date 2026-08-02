@@ -26,6 +26,7 @@ struct system_id_statics
 {
     IActivationFactory IActivationFactory_iface;
     ISystemIdentificationStatics ISystemIdentificationStatics_iface;
+    IWindowsIntegrityPolicyStatics IWindowsIntegrityPolicyStatics_iface;
     LONG ref;
 };
 
@@ -52,6 +53,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     if (IsEqualGUID( iid, &IID_ISystemIdentificationStatics ))
     {
         *out = &impl->ISystemIdentificationStatics_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindowsIntegrityPolicyStatics ))
+    {
+        *out = &impl->IWindowsIntegrityPolicyStatics_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -294,10 +302,84 @@ static const struct ISystemIdentificationStaticsVtbl system_id_statics_vtbl =
     system_id_statics_GetSystemIdForUser,
 };
 
+DEFINE_IINSPECTABLE( integrity_policy_statics, IWindowsIntegrityPolicyStatics,
+                     struct system_id_statics, IActivationFactory_iface )
+
+static HRESULT WINAPI integrity_policy_statics_get_IsEnabled( IWindowsIntegrityPolicyStatics *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_INVALIDARG;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI integrity_policy_statics_get_IsEnabledForTrial( IWindowsIntegrityPolicyStatics *iface,
+                                                                       boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_INVALIDARG;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI integrity_policy_statics_get_CanDisable( IWindowsIntegrityPolicyStatics *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_INVALIDARG;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI integrity_policy_statics_get_IsDisableSupported( IWindowsIntegrityPolicyStatics *iface,
+                                                                        boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_INVALIDARG;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI integrity_policy_statics_add_PolicyChanged( IWindowsIntegrityPolicyStatics *iface,
+        __FIEventHandler_1_IInspectable *handler, EventRegistrationToken *token )
+{
+    static LONG64 next_token;
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    if (!handler || !token) return E_INVALIDARG;
+    token->value = InterlockedIncrement64( &next_token );
+    return S_OK;
+}
+
+static HRESULT WINAPI integrity_policy_statics_remove_PolicyChanged( IWindowsIntegrityPolicyStatics *iface,
+                                                                      EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %s.\n", iface, wine_dbgstr_longlong( token.value ) );
+    return S_OK;
+}
+
+static const struct IWindowsIntegrityPolicyStaticsVtbl integrity_policy_statics_vtbl =
+{
+    integrity_policy_statics_QueryInterface,
+    integrity_policy_statics_AddRef,
+    integrity_policy_statics_Release,
+    /* IInspectable methods */
+    integrity_policy_statics_GetIids,
+    integrity_policy_statics_GetRuntimeClassName,
+    integrity_policy_statics_GetTrustLevel,
+    /* IWindowsIntegrityPolicyStatics methods */
+    integrity_policy_statics_get_IsEnabled,
+    integrity_policy_statics_get_IsEnabledForTrial,
+    integrity_policy_statics_get_CanDisable,
+    integrity_policy_statics_get_IsDisableSupported,
+    integrity_policy_statics_add_PolicyChanged,
+    integrity_policy_statics_remove_PolicyChanged,
+};
+
 static struct system_id_statics system_id_statics =
 {
     {&factory_vtbl},
     {&system_id_statics_vtbl},
+    {&integrity_policy_statics_vtbl},
     1,
 };
 
@@ -317,7 +399,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
 
-    if (!wcscmp( name, RuntimeClass_Windows_System_Profile_SystemIdentification ))
+    if (!wcscmp( name, RuntimeClass_Windows_System_Profile_SystemIdentification ) ||
+        !wcscmp( name, RuntimeClass_Windows_System_Profile_WindowsIntegrityPolicy ))
         IActivationFactory_QueryInterface( system_id_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

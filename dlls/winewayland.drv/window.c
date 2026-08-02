@@ -479,20 +479,29 @@ static HWND find_adjacent_window(HWND hwnd, const RECT *rect)
  */
 static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
 {
+    static const WCHAR nui_dialog_class[] = {'N','U','I','D','i','a','l','o','g',0};
+    WCHAR class_buffer[64];
+    UNICODE_STRING class_name = {.Buffer = class_buffer, .MaximumLength = sizeof(class_buffer)};
     DWORD style, ex_style;
+    BOOL office_nui_dialog = FALSE;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (NtUserGetClassName(hwnd, FALSE, &class_name))
+        office_nui_dialog = !wcscmp(class_buffer, nui_dialog_class);
     /* Owned popups without a thick frame must remain owner-relative, even when
-     * active or captioned. Office NUIDialog uses WS_CAPTION but ships companion
+     * active. Office NUIDialog also uses WS_CAPTION but ships companion
      * MSO_BORDEREFFECT surfaces that are not owned by the dialog; if the dialog
      * becomes a free-floating xdg_toplevel while those strips are Word-relative
      * subsurfaces, the border/shadow chrome drifts. Captionless menus/galleries
-     * take the same path. */
+     * take the same path. Other captioned owned popups, such as embedded-browser
+     * authentication dialogs, must remain managed to avoid being clipped below
+     * the owner's GPU client surface. */
     if ((style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
-        !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW))
+        !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW) &&
+        (!(style & WS_CAPTION) || office_nui_dialog))
     {
         TRACE("keeping owned popup hwnd=%p owner-relative\n", hwnd);
         return FALSE;

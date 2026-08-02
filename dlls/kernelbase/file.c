@@ -73,7 +73,11 @@ static BOOL oem_file_apis;
 static void WINAPI read_write_apc( void *apc_user, PIO_STATUS_BLOCK io, ULONG reserved )
 {
     LPOVERLAPPED_COMPLETION_ROUTINE func = apc_user;
-    func( RtlNtStatusToDosError( io->Status ), io->Information, (LPOVERLAPPED)io );
+    /* Win32 completion routines report warning statuses as successful I/O.
+     * The warning remains in OVERLAPPED.Internal and is available through
+     * GetOverlappedResult(). */
+    func( NT_ERROR( io->Status ) ? RtlNtStatusToDosError( io->Status ) : ERROR_SUCCESS,
+          io->Information, (LPOVERLAPPED)io );
 }
 
 static const WCHAR *get_machine_wow64_dir( WORD machine )
@@ -3702,6 +3706,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH ReadFileEx( HANDLE file, LPVOID buffer, DWORD coun
 
     status = NtReadFile( file, NULL, read_write_apc, completion, io, buffer, count, &offset, NULL);
     if (status == STATUS_PENDING) return TRUE;
+    if (NT_WARNING( status ))
+    {
+        SetLastError( RtlNtStatusToDosError( status ));
+        return TRUE;
+    }
     return set_ntstatus( status );
 }
 

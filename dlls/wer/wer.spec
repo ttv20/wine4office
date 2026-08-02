@@ -1,3 +1,7 @@
+@ stdcall CloseThreadWaitChainSession(ptr) advapi32.CloseThreadWaitChainSession
+@ stdcall GetThreadWaitChain(ptr ptr long long ptr ptr ptr) advapi32.GetThreadWaitChain
+@ stdcall OpenThreadWaitChainSession(long ptr) advapi32.OpenThreadWaitChainSession
+@ stdcall RegisterWaitChainCOMCallback(ptr ptr) advapi32.RegisterWaitChainCOMCallback
 @ stub WerSysprepCleanup
 @ stub WerSysprepGeneralize
 @ stub WerSysprepSpecialize

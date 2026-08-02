@@ -31,6 +31,7 @@ namespace Windows.Management.Deployment {
     typedef enum PackageState PackageState;
     typedef enum PackageTypes PackageTypes;
     typedef enum RemovalOptions RemovalOptions;
+    typedef enum StubPackageOption StubPackageOption;
 
     typedef struct DeploymentProgress DeploymentProgress;
 
@@ -38,14 +39,18 @@ namespace Windows.Management.Deployment {
     interface IPackageManager;
     interface IPackageManager2;
     interface IPackageUserInformation;
+    interface IStagePackageOptions;
 
     runtimeclass DeploymentResult;
     runtimeclass PackageManager;
     runtimeclass PackageUserInformation;
+    runtimeclass StagePackageOptions;
 
     declare {
         interface Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *>;
         interface Windows.Foundation.Collections.IIterator<Windows.Foundation.Uri *>;
+        interface Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *>;
+        interface Windows.Foundation.Collections.IVector<HSTRING>;
         interface Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.Package *>;
         interface Windows.Foundation.Collections.IIterator<Windows.ApplicationModel.Package *>;
         interface Windows.Foundation.Collections.IIterable<Windows.Management.Deployment.PackageUserInformation *>;
@@ -129,6 +134,15 @@ namespace Windows.Management.Deployment {
         PreserveRoamableApplicationData = 0x80,
         [contract(Windows.Foundation.UniversalApiContract, 7.0)]
         RemoveForAllUsers               = 0x80000,
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 5.0)]
+    enum StubPackageOption
+    {
+        Default       = 0,
+        InstallFull   = 1,
+        InstallStub   = 2,
+        UsePreference = 3,
     };
 
     [contract(Windows.Foundation.UniversalApiContract, 1.0)]
@@ -239,6 +253,37 @@ namespace Windows.Management.Deployment {
     }
 
     [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.Management.Deployment.StagePackageOptions),
+        uuid(0b110c9c-b95d-4c56-bd36-6d656800d06b)
+    ]
+    interface IStagePackageOptions : IInspectable
+    {
+        [propget] HRESULT DependencyPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT TargetVolume([out, retval] IInspectable **value);
+        [propput] HRESULT TargetVolume([in] IInspectable *value);
+        [propget] HRESULT OptionalPackageFamilyNames([out, retval] Windows.Foundation.Collections.IVector<HSTRING> **value);
+        [propget] HRESULT OptionalPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT RelatedPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT ExternalLocationUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT ExternalLocationUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT StubPackageOption([out, retval] Windows.Management.Deployment.StubPackageOption *value);
+        [propput] HRESULT StubPackageOption([in] Windows.Management.Deployment.StubPackageOption value);
+        [propget] HRESULT DeveloperMode([out, retval] boolean *value);
+        [propput] HRESULT DeveloperMode([in] boolean value);
+        [propget] HRESULT ForceUpdateFromAnyVersion([out, retval] boolean *value);
+        [propput] HRESULT ForceUpdateFromAnyVersion([in] boolean value);
+        [propget] HRESULT InstallAllResources([out, retval] boolean *value);
+        [propput] HRESULT InstallAllResources([in] boolean value);
+        [propget] HRESULT RequiredContentGroupOnly([out, retval] boolean *value);
+        [propput] HRESULT RequiredContentGroupOnly([in] boolean value);
+        [propget] HRESULT StageInPlace([out, retval] boolean *value);
+        [propput] HRESULT StageInPlace([in] boolean value);
+        [propget] HRESULT AllowUnsigned([out, retval] boolean *value);
+        [propput] HRESULT AllowUnsigned([in] boolean value);
+    }
+
+    [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile)
     ]
@@ -274,6 +319,17 @@ namespace Windows.Management.Deployment {
     runtimeclass PackageUserInformation
     {
         [default] interface Windows.Management.Deployment.IPackageUserInformation;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 5.0),
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass StagePackageOptions
+    {
+        [default] interface Windows.Management.Deployment.IStagePackageOptions;
     }
 
 }

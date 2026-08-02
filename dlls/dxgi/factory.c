@@ -396,10 +396,44 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    FIXME("iface %p, device %p, desc %p, output %p, swapchain %p stub!\n",
+    typedef HWND (WINAPI *get_dcomp_target_window_t)(void);
+    get_dcomp_target_window_t get_target_window;
+    HMODULE dcomp;
+    BOOL own_window = FALSE;
+    HRESULT hr;
+    HWND window;
+
+    TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
 
-    return E_NOTIMPL;
+    if (!device || !desc || !swapchain)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* Wine's fallback dcomp implementation records the target created just
+     * before this call. Creating wined3d's presentation surface for that HWND
+     * from the start is important on Wayland, where changing a window's role
+     * after surface creation does not retarget the existing surface. */
+    window = NULL;
+    if ((dcomp = GetModuleHandleW(L"dcomp.dll"))
+            && (get_target_window = (get_dcomp_target_window_t)GetProcAddress(dcomp,
+            "__wine_dcomp_get_target_window")))
+        window = get_target_window();
+
+    if (!window)
+    {
+        if (!(window = CreateWindowA("static", "DXGI composition window", WS_DISABLED,
+                0, 0, max(desc->Width, 1), max(desc->Height, 1), NULL, NULL, NULL, NULL)))
+            return E_FAIL;
+        own_window = TRUE;
+    }
+
+    if (FAILED(hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window, desc, NULL, output, swapchain)))
+    {
+        if (own_window) DestroyWindow(window);
+        return hr;
+    }
+    if (own_window) d3d11_swapchain_set_composition_window(*swapchain, window);
+    return S_OK;
 }
 
 static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)
