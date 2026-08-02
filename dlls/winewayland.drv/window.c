@@ -626,14 +626,13 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
-    /* Owned popups without a thick frame must remain owner-relative, even when
-     * active or captioned. Office NUIDialog uses WS_CAPTION but ships companion
-     * MSO_BORDEREFFECT surfaces that are not owned by the dialog; if the dialog
-     * becomes a free-floating xdg_toplevel while those strips are Word-relative
-     * subsurfaces, the border/shadow chrome drifts. Captionless menus/galleries
-     * take the same path. */
+    /* Captionless owned popups without a thick frame must remain
+     * owner-relative. Captioned dialogs need to be managed so that their
+     * activation and input follow the compositor toplevel. Thin companion
+     * border surfaces are attached through find_adjacent_window(). */
     if ((style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
-        !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW))
+        !(style & (WS_CAPTION | WS_THICKFRAME)) &&
+        !(ex_style & WS_EX_APPWINDOW))
     {
         TRACE("keeping owned popup hwnd=%p owner-relative\n", hwnd);
         return FALSE;

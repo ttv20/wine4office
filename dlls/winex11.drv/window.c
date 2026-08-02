@@ -447,6 +447,19 @@ static BOOL is_office_net_ui_tool_window( HWND hwnd )
     return !wcscmp( buffer, net_ui_tool_window );
 }
 
+static BOOL is_office_nui_dialog( HWND hwnd )
+{
+    static const WCHAR nui_dialog[] = {'N','U','I','D','i','a','l','o','g',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    INT len;
+
+    if ((len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    return !wcscmp( buffer, nui_dialog );
+}
+
 static BOOL is_office_window_transition( HWND hwnd )
 {
     static const WCHAR window_transition[] =
@@ -3642,6 +3655,12 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     wait_for_first_present = (no_class_brush && !data->map_after_first_paint) ||
                              ((ex_style & WS_EX_LAYERED) && data->layered &&
                               !has_layered_attributes && !data->surface_initialized);
+    /* NUIDialog paints its GPU client after creating a uniform class-brush
+     * frame. Mapping that intermediate frame makes modal Office dialogs look
+     * as though they open twice. Keep the X window withdrawn until the first
+     * complete window-surface presentation. */
+    if (is_office_nui_dialog( hwnd ) && !data->surface_initialized)
+        wait_for_first_present = TRUE;
     if (data->office_net_ui_tool_window && (ex_style & WS_EX_LAYERED))
         wait_for_first_present = TRUE;
     if (data->desired_state.wm_state == WithdrawnState && (new_style & WS_VISIBLE) &&
