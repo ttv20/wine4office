@@ -21,15 +21,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
-static HWND last_target_window;
-
-HWND WINAPI __wine_dcomp_get_target_window(void)
-{
-    HWND window = InterlockedExchangePointer((void **)&last_target_window, NULL);
-    TRACE("Returning target window %p.\n", window);
-    return window;
-}
-
 struct dcomp_device
 {
     IDCompositionDevice IDCompositionDevice_iface;
@@ -53,6 +44,13 @@ struct dcomp_visual
     LONG ref;
     IUnknown *content;
     HWND target_window;
+    struct dcomp_visual_child *children;
+};
+
+struct dcomp_visual_child
+{
+    IDCompositionVisual *visual;
+    struct dcomp_visual_child *next;
 };
 
 static inline struct dcomp_visual *impl_from_IDCompositionVisual2(IDCompositionVisual2 *iface)
@@ -82,9 +80,16 @@ static ULONG WINAPI dcomp_visual_AddRef(IDCompositionVisual2 *iface)
 static ULONG WINAPI dcomp_visual_Release(IDCompositionVisual2 *iface)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+    struct dcomp_visual_child *child, *next;
     ULONG ref = InterlockedDecrement(&visual->ref);
     if (!ref)
     {
+        for (child = visual->children; child; child = next)
+        {
+            next = child->next;
+            child->visual->lpVtbl->Release(child->visual);
+            free(child);
+        }
         if (visual->content) visual->content->lpVtbl->Release(visual->content);
         free(visual);
     }
@@ -114,56 +119,114 @@ VISUAL_ENUM_METHOD(SetBorderMode, DCOMPOSITION_BORDER_MODE)
 VISUAL_OBJECT_METHOD(SetClipObject, IDCompositionClip)
 VISUAL_OBJECT_METHOD(SetClip, const D2D_RECT_F)
 
+static void dcomp_visual_bind_content(struct dcomp_visual *visual)
+{
+    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
+    bind_composition_window_t bind_composition_window;
+    IDXGISwapChain1 *swapchain;
+    HMODULE dxgi;
+    HWND window;
+    RECT rect;
+
+    if (!visual->content || FAILED(visual->content->lpVtbl->QueryInterface(visual->content,
+            &IID_IDXGISwapChain1, (void **)&swapchain)))
+        return;
+
+    if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
+    {
+        if ((dxgi = GetModuleHandleW(L"dxgi.dll"))
+                && (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
+                "__wine_dxgi_bind_composition_window")))
+            bind_composition_window(window, visual->target_window);
+        else if (visual->target_window && window != visual->target_window)
+        {
+            GetClientRect(visual->target_window, &rect);
+            SetParent(window, visual->target_window);
+            SetWindowLongW(window, GWL_STYLE, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
+            SetWindowPos(window, HWND_TOP, 0, 0, max(rect.right, 1), max(rect.bottom, 1),
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        TRACE("Bound composition window %p to target %p.\n", window, visual->target_window);
+    }
+    swapchain->lpVtbl->Release(swapchain);
+}
+
+static void dcomp_visual_set_target_window(struct dcomp_visual *visual, HWND target_window)
+{
+    struct dcomp_visual_child *child;
+
+    visual->target_window = target_window;
+    dcomp_visual_bind_content(visual);
+    for (child = visual->children; child; child = child->next)
+        dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)child->visual), target_window);
+}
+
 static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual2 *iface, IUnknown *content)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
-    IDXGISwapChain1 *swapchain;
-    HWND window;
-    RECT rect;
 
     TRACE("iface %p, content %p.\n", iface, content);
     if (content) content->lpVtbl->AddRef(content);
     if (visual->content) visual->content->lpVtbl->Release(visual->content);
     visual->content = content;
-
-    if (content && visual->target_window
-            && SUCCEEDED(content->lpVtbl->QueryInterface(content, &IID_IDXGISwapChain1, (void **)&swapchain)))
-    {
-        if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
-        {
-            GetClientRect(visual->target_window, &rect);
-            if (window != visual->target_window
-                    && !GetPropW(window, L"__wine_dcomp_detached_window"))
-            {
-                SetParent(window, visual->target_window);
-                SetWindowLongW(window, GWL_STYLE, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
-                SetWindowPos(window, HWND_TOP, 0, 0, max(rect.right, 1), max(rect.bottom, 1),
-                        SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            }
-            TRACE("Bound composition window %p to target %p, size %ldx%ld.\n",
-                    window, visual->target_window, rect.right, rect.bottom);
-        }
-        swapchain->lpVtbl->Release(swapchain);
-    }
+    dcomp_visual_bind_content(visual);
     return S_OK;
 }
 
 static HRESULT WINAPI dcomp_visual_AddVisual(IDCompositionVisual2 *iface, IDCompositionVisual *visual,
         BOOL insert_above, IDCompositionVisual *reference)
 {
+    struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
+    struct dcomp_visual_child *child, **link;
+
     TRACE("iface %p, visual %p, insert_above %d, reference %p.\n", iface, visual, insert_above, reference);
-    return visual ? S_OK : E_INVALIDARG;
+    if (!visual) return E_INVALIDARG;
+    if (!(child = calloc(1, sizeof(*child)))) return E_OUTOFMEMORY;
+    child->visual = visual;
+    visual->lpVtbl->AddRef(visual);
+    for (link = &parent->children; *link; link = &(*link)->next);
+    *link = child;
+    dcomp_visual_set_target_window(impl_from_IDCompositionVisual2((IDCompositionVisual2 *)visual),
+            parent->target_window);
+    return S_OK;
 }
 
 static HRESULT WINAPI dcomp_visual_RemoveVisual(IDCompositionVisual2 *iface, IDCompositionVisual *visual)
 {
+    struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
+    struct dcomp_visual_child **link, *child;
+
     TRACE("iface %p, visual %p.\n", iface, visual);
-    return visual ? S_OK : E_INVALIDARG;
+    if (!visual) return E_INVALIDARG;
+    for (link = &parent->children; (child = *link); link = &child->next)
+    {
+        if (child->visual != visual) continue;
+        *link = child->next;
+        dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)child->visual), NULL);
+        child->visual->lpVtbl->Release(child->visual);
+        free(child);
+        return S_OK;
+    }
+    return E_INVALIDARG;
 }
 
 static HRESULT WINAPI dcomp_visual_RemoveAllVisuals(IDCompositionVisual2 *iface)
 {
+    struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
+    struct dcomp_visual_child *child, *next;
+
     TRACE("iface %p.\n", iface);
+    for (child = parent->children; child; child = next)
+    {
+        next = child->next;
+        dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)child->visual), NULL);
+        child->visual->lpVtbl->Release(child->visual);
+        free(child);
+    }
+    parent->children = NULL;
     return S_OK;
 }
 
@@ -249,8 +312,12 @@ static HRESULT WINAPI dcomp_target_SetRoot(IDCompositionTarget *iface, IDComposi
     struct dcomp_target *target = impl_from_IDCompositionTarget(iface);
 
     TRACE("iface %p, visual %p.\n", iface, visual);
+    if (target->root)
+        dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)target->root), NULL);
     if (visual)
-        impl_from_IDCompositionVisual2((IDCompositionVisual2 *)visual)->target_window = target->hwnd;
+        dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)visual), target->hwnd);
     if (visual) visual->lpVtbl->AddRef(visual);
     if (target->root) target->root->lpVtbl->Release(target->root);
     target->root = visual;
@@ -368,7 +435,6 @@ static HRESULT WINAPI dcomp_device_CreateTargetForHwnd(IDCompositionDevice *ifac
     object->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     object->ref = 1;
     object->hwnd = hwnd;
-    InterlockedExchangePointer((void **)&last_target_window, hwnd);
     *target = &object->IDCompositionTarget_iface;
     return S_OK;
 }

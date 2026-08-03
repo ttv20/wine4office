@@ -97,7 +97,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
 
     if (!egl->has_EGL_EXT_present_opaque)
         WARN("Missing EGL_EXT_present_opaque extension\n");
-    else
+    else if (!(NtUserGetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED))
     {
         *attrib++ = EGL_PRESENT_OPAQUE_EXT;
         *attrib++ = EGL_TRUE;

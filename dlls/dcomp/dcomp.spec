@@ -16,7 +16,6 @@
 @ stdcall DCompositionCreateDevice2(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice(ptr ptr ptr)
-@ stdcall __wine_dcomp_get_target_window()
 @ stub DCompositionCreateSurfaceHandle
 @ stub DeserializeEffectDescription
 @ stdcall -private DllCanUnloadNow()

@@ -327,10 +327,19 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     ATOM foreign_atom;
     HWND root;
     RECT rect;
+    UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
-    if (!target) return;
+    if (!target || !IsWindow(target))
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
     root = GetAncestor(target, GA_ROOT);
-    if (!root) return;
+    if (!root)
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
     foreign_atom = HandleToULong(GetPropW(root, L"__wine_dcomp_xdg_export_handle"));
     if (foreign_atom)
         SetPropW(window, L"__wine_dcomp_xdg_parent_atom", ULongToHandle(foreign_atom));
@@ -343,9 +352,12 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     }
 
     if (!GetWindowRect(target, &rect)) return;
-    SetWindowPos(window, foreign_atom ? NULL : HWND_TOP, rect.left, rect.top,
+    if (IsWindowVisible(window)
+            && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
+        flags |= SWP_NOZORDER;
+    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
             max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
-            SWP_NOACTIVATE | SWP_SHOWWINDOW | (foreign_atom ? SWP_NOZORDER : 0));
+            flags);
 }
 
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,

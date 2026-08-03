@@ -400,12 +400,43 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
 {
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
     WNDPROC old_proc = (WNDPROC)GetPropW(window, L"__wine_dcomp_old_proc");
+    HWND root;
     POINT point;
+    RECT rect;
 
     if (target)
     {
         switch (message)
         {
+            case WM_TIMER:
+            {
+                UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+
+                if (wparam != 1) break;
+                root = GetAncestor(target, GA_ROOT);
+                if (!root || !IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
+                    ShowWindow(window, SW_HIDE);
+                else if (GetWindowRect(target, &rect))
+                {
+                    /* The opaque base must not repeatedly jump above the
+                     * transparent DComp layers. Reorder it only when bringing
+                     * a previously hidden presentation back from the tray. */
+                    if (IsWindowVisible(window)
+                            && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
+                        flags |= SWP_NOZORDER;
+                    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+                            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+                            flags);
+                }
+                return 0;
+            }
+
+            case WM_DESTROY:
+                KillTimer(window, 1);
+                if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
+                    RemovePropW(target, L"__wine_dcomp_base_presentation");
+                break;
+
             case WM_MOUSEMOVE:
             case WM_LBUTTONDOWN:
             case WM_LBUTTONUP:
@@ -441,18 +472,84 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
             : DefWindowProcW(window, message, wparam, lparam);
 }
 
+void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
+{
+    HWND old_target = GetPropW(window, L"__wine_dcomp_detached_window");
+    HWND input_window, target_root;
+    BOOL base_presentation;
+    DWORD exstyle;
+    RECT rect;
+
+    TRACE("Binding composition window %p to target %p (old target %p).\n",
+            window, target, old_target);
+
+    if (old_target && old_target != target
+            && GetPropW(old_target, L"__wine_dcomp_base_presentation") == window)
+        RemovePropW(old_target, L"__wine_dcomp_base_presentation");
+
+    if (!target)
+    {
+        ShowWindow(window, SW_HIDE);
+        RemovePropW(window, L"__wine_dcomp_detached_window");
+        RemovePropW(window, L"__wine_dcomp_input_window");
+        RemovePropW(window, L"__wine_dcomp_keyboard_window");
+        RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
+        return;
+    }
+
+    target_root = GetAncestor(target, GA_ROOT);
+    input_window = GetAncestor(target, GA_PARENT);
+    base_presentation = old_target == target
+            ? GetPropW(target, L"__wine_dcomp_base_presentation") == window
+            : !GetPropW(target, L"__wine_dcomp_base_presentation");
+    exstyle = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    if (!base_presentation) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
+
+    SetPropW(window, L"__wine_dcomp_detached_window", target);
+    SetWindowLongW(window, GWL_STYLE, WS_POPUP);
+    SetWindowLongW(window, GWL_EXSTYLE, exstyle);
+    SetWindowLongPtrW(window, GWLP_HWNDPARENT, (LONG_PTR)target);
+    if (base_presentation)
+    {
+        SetPropW(target, L"__wine_dcomp_base_presentation", window);
+        SetPropW(window, L"__wine_dcomp_composite_alpha_white", ULongToHandle(1));
+    }
+    else
+    {
+        RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
+        SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
+    }
+
+    if (input_window)
+    {
+        SetPropW(window, L"__wine_dcomp_input_window", input_window);
+        SetPropW(window, L"__wine_dcomp_keyboard_window", input_window);
+        SetPropW(input_window, L"__wine_direct_hardware_input", ULongToHandle(0x57444952));
+        if (target_root)
+        {
+            SetPropW(target_root, L"__wine_dcomp_input_window", input_window);
+            SetPropW(target_root, L"__wine_dcomp_keyboard_window", input_window);
+        }
+    }
+    if (target_root) PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+    if (!GetPropW(window, L"__wine_dcomp_old_proc"))
+    {
+        SetPropW(window, L"__wine_dcomp_old_proc", (HANDLE)SetWindowLongPtrW(window, GWLP_WNDPROC,
+                (LONG_PTR)dxgi_composition_window_proc));
+        SetTimer(window, 1, 250, NULL);
+    }
+    if (GetWindowRect(target, &rect))
+        SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+                max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    typedef HWND (WINAPI *get_dcomp_target_window_t)(void);
-    get_dcomp_target_window_t get_target_window;
-    HMODULE dcomp;
-    DWORD target_process;
-    HWND target_root;
-    BOOL own_window = FALSE;
+    BOOL own_window = TRUE;
     HRESULT hr;
     HWND window;
-    HWND target;
 
     TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
@@ -460,67 +557,13 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (!device || !desc || !swapchain)
         return DXGI_ERROR_INVALID_CALL;
 
-    /* Wine's fallback dcomp implementation records the target created just
-     * before this call. Creating wined3d's presentation surface for that HWND
-     * from the start is important on Wayland, where changing a window's role
-     * after surface creation does not retarget the existing surface. */
-    target = NULL;
-    if ((dcomp = GetModuleHandleW(L"dcomp.dll"))
-            && (get_target_window = (get_dcomp_target_window_t)GetProcAddress(dcomp,
-            "__wine_dcomp_get_target_window")))
-        target = get_target_window();
-
-    target_process = 0;
-    target_root = target ? GetAncestor(target, GA_ROOT) : NULL;
-    if (target_root) GetWindowThreadProcessId(target_root, &target_process);
-    if (target && target_process != GetCurrentProcessId())
-    {
-        HWND input_window = GetAncestor(target, GA_PARENT);
-        RECT rect;
-
-        /* WebView2 renders in a separate process from its host. A Wayland
-         * subsurface cannot reference a surface from another client connection,
-         * and X11 child-window stacking leaves Chromium's helper windows above
-         * the presentation surface. Use a non-activating companion surface on
-         * the rendering process' connection and keep it aligned with the
-         * cross-process DComp target. */
-        GetWindowRect(target, &rect);
-        if (!(window = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                "static", "DXGI composition window", WS_POPUP,
-                rect.left, rect.top, max(rect.right - rect.left, 1),
-                max(rect.bottom - rect.top, 1), target, NULL, NULL, NULL)))
-            return E_FAIL;
-        SetPropW(window, L"__wine_dcomp_detached_window", target);
-        if (input_window)
-        {
-            SetPropW(window, L"__wine_dcomp_input_window", input_window);
-            SetPropW(window, L"__wine_dcomp_keyboard_window", input_window);
-            SetPropW(input_window, L"__wine_direct_hardware_input", ULongToHandle(0x57444952));
-            if (target_root)
-            {
-                SetPropW(target_root, L"__wine_dcomp_input_window", input_window);
-                SetPropW(target_root, L"__wine_dcomp_keyboard_window", input_window);
-            }
-            TRACE("Published DComp input window %p for presentation %p and root %p.\n",
-                    input_window, window, target_root);
-        }
-        PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
-        SetPropW(window, L"__wine_dcomp_old_proc", (HANDLE)SetWindowLongPtrW(window, GWLP_WNDPROC,
-                (LONG_PTR)dxgi_composition_window_proc));
-        own_window = TRUE;
-    }
-    else
-    {
-        window = target;
-    }
-
-    if (!window)
-    {
-        if (!(window = CreateWindowA("static", "DXGI composition window", WS_DISABLED,
-                0, 0, max(desc->Width, 1), max(desc->Height, 1), NULL, NULL, NULL, NULL)))
-            return E_FAIL;
-        own_window = TRUE;
-    }
+    /* A composition swapchain is windowless. Wine uses an initially hidden
+     * helper only as a local presentation surface; dcomp binds it to an HWND
+     * later, when SetContent connects the swapchain to a targeted visual. */
+    if (!(window = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            "static", "DXGI composition window", WS_POPUP,
+            0, 0, max(desc->Width, 1), max(desc->Height, 1), NULL, NULL, NULL, NULL)))
+        return E_FAIL;
 
     if (FAILED(hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window, desc, NULL, output, swapchain)))
     {

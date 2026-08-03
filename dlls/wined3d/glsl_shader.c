@@ -13011,8 +13011,8 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
     }
 
     if (!(program = glsl_blitter_get_program(glsl_blitter, context_gl, src_texture_gl, !!colour_key,
-            dst_texture->swapchain && (dst_texture->swapchain->state.desc.flags
-            & WINED3D_SWAPCHAIN_ALPHA_PREMULTIPLIED))))
+            dst_texture->swapchain && GetPropW(dst_texture->swapchain->win_handle,
+            L"__wine_dcomp_composite_alpha_white"))))
     {
         ERR("Failed to get blitter program.\n");
         return dst_location;
