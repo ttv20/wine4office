@@ -1,0 +1,1 @@
+@ stdcall MFCreateSensorActivityMonitor(ptr ptr)

@@ -1,0 +1,5 @@
+TESTDLL   = mfsensorgroup.dll
+IMPORTS   = mfplat mfuuid uuid
+
+SOURCES = \
+	mfsensorgroup.c

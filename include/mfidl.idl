@@ -639,6 +639,28 @@ interface IMFSequencerSource : IUnknown
 }
 
 interface IMFPresentationClock;
+interface IMFSensorActivitiesReport;
+
+[
+    object,
+    uuid(de5072ee-dbe3-46dc-8a87-b6f631194751),
+    local
+]
+interface IMFSensorActivitiesReportCallback : IUnknown
+{
+    HRESULT OnActivitiesReport([in] IMFSensorActivitiesReport *report);
+}
+
+[
+    object,
+    uuid(d0cef145-b3f4-4340-a2e5-7a5080ca05cb),
+    local
+]
+interface IMFSensorActivityMonitor : IUnknown
+{
+    HRESULT Start();
+    HRESULT Stop();
+}
 
 [
     object,
@@ -704,6 +726,8 @@ cpp_quote("HRESULT WINAPI MFCreateAudioRendererActivate(IMFActivate **activate);
 cpp_quote("HRESULT WINAPI MFCreateFMPEG4MediaSink(IMFByteStream *stream, IMFMediaType *video_type,")
 cpp_quote("    IMFMediaType *audio_type, IMFMediaSink **sink);")
 cpp_quote("HRESULT WINAPI MFCreateMediaSession(IMFAttributes *config, IMFMediaSession **session);")
+cpp_quote("HRESULT WINAPI MFCreateSensorActivityMonitor(IMFSensorActivitiesReportCallback *callback,")
+cpp_quote("    IMFSensorActivityMonitor **monitor);")
 cpp_quote("HRESULT WINAPI MFCreateMFByteStreamOnStream(IStream *stream, IMFByteStream **bytestream);" )
 cpp_quote("HRESULT WINAPI MFCreateMFByteStreamOnStreamEx(IUnknown *stream, IMFByteStream **bytestream);")
 cpp_quote("HRESULT WINAPI MFCreateMP3MediaSink(IMFByteStream *stream, IMFMediaSink **sink);")

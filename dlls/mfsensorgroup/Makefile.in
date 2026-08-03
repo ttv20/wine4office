@@ -1,0 +1,8 @@
+MODULE    = mfsensorgroup.dll
+IMPORTLIB = mfsensorgroup
+IMPORTS   = mfplat mfuuid uuid
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	main.c
