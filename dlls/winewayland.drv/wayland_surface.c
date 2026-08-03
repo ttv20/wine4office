@@ -415,7 +415,8 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *owner)
 {
     assert(!surface->role || surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE);
-    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd) return;
+    if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd &&
+        surface->parent_surface == owner->wl_surface) return;
 
     /* Win32 popup ownership can change transiently while nested Office UI is
      * being rearranged. Never mirror a relationship that would make this
@@ -448,6 +449,7 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
 
     surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     surface->owner_hwnd = owner->hwnd;
+    surface->parent_surface = owner->wl_surface;
 
     /* Present contents independently of the owner surface. */
     wl_subsurface_set_desync(surface->wl_subsurface);
@@ -518,6 +520,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         }
 
         surface->owner_hwnd = NULL;
+        surface->parent_surface = NULL;
         break;
     }
 
@@ -846,6 +849,10 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
     {
         RECT rect = surface->window.rect;
 
+        if (surface->parent_surface != owner_surface->wl_surface)
+            wayland_surface_make_subsurface(surface, owner_surface);
+        if (!surface->wl_subsurface) goto done;
+
         OffsetRect(&rect, -owner_surface->window.rect.left, -owner_surface->window.rect.top);
         rect = map_rect_to_surface(surface, rect);
 
@@ -867,6 +874,7 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
         memset(&surface->processing, 0, sizeof(surface->processing));
     }
 
+done:
     wayland_win_data_release(owner_data);
 }
 
@@ -1411,6 +1419,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         }
 
         client->toplevel = 0;
+        client->parent_surface = NULL;
         return;
     }
 
@@ -1426,7 +1435,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
     }
 
 
-    if (client->toplevel != toplevel)
+    if (client->toplevel != toplevel || client->parent_surface != surface->wl_surface)
     {
         wayland_client_surface_attach(client, NULL, NULL);
 
@@ -1440,6 +1449,7 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         wl_subsurface_set_desync(client->wl_subsurface);
 
         client->toplevel = toplevel;
+        client->parent_surface = surface->wl_surface;
     }
 
     wayland_surface_reconfigure_client(surface, client, rect);

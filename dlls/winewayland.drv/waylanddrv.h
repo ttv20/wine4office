@@ -260,6 +260,7 @@ struct wayland_client_surface
     RECT rect;
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
+    struct wl_surface *parent_surface;
     struct wp_viewport *wp_viewport;
     void *offscreen_bits;
     size_t offscreen_bits_size;
@@ -305,6 +306,7 @@ struct wayland_surface
         {
             struct wl_subsurface *wl_subsurface;
             HWND owner_hwnd;
+            struct wl_surface *parent_surface;
         };
     };
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;

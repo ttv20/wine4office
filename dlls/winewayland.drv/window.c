@@ -174,7 +174,8 @@ static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
         {
             if (!(data = wayland_win_data_get_nolock(list[i])) ||
                 !(client = data->client_surface) || !client->wl_subsurface ||
-                client->toplevel != toplevel)
+                client->toplevel != toplevel ||
+                client->parent_surface != toplevel_surface->wl_surface)
                 continue;
             wl_subsurface_place_above(client->wl_subsurface,
                                       wayland_client_surface_get_parent(toplevel_surface, client));
@@ -183,7 +184,8 @@ static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
 
     /* The root client is the base content below all child HWND surfaces. */
     client = toplevel_data->client_surface;
-    if (client && client->wl_subsurface && client->toplevel == toplevel)
+    if (client && client->wl_subsurface && client->toplevel == toplevel &&
+        client->parent_surface == toplevel_surface->wl_surface)
         wl_subsurface_place_above(client->wl_subsurface, toplevel_surface->wl_surface);
 
     /* Subsurface stacking state is applied by committing the parent. */
@@ -249,6 +251,9 @@ static void wayland_win_data_restack_owned_popups(HWND toplevel)
                             &toplevel_surface->window.rect))
             continue;
         if (!popup->window.popup) continue;
+        if (popup->parent_surface != toplevel_surface->wl_surface)
+            wayland_surface_make_subsurface(popup, toplevel_surface);
+        if (!popup->wl_subsurface) continue;
         wl_subsurface_place_above(popup->wl_subsurface, toplevel_surface->wl_surface);
         popup_found = TRUE;
     }
@@ -346,7 +351,7 @@ static void wayland_win_data_update_wayland_state(struct wayland_win_data *data)
 static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data,
                                                     struct wayland_surface *owner_surface,
                                                     const struct wayland_window_state *state,
-                                                    BOOL *reapply_clip)
+                                                    BOOL *reapply_clip, BOOL *recreated)
 {
     struct wayland_surface *surface;
     enum wayland_surface_role role;
@@ -354,6 +359,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     struct wl_region *input_region;
 
     TRACE("hwnd=%p\n", data->hwnd);
+    if (recreated) *recreated = FALSE;
 
     visible = ((state->style & WS_VISIBLE) == WS_VISIBLE) &&
                (!(state->exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
@@ -394,6 +400,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         !(surface = wayland_surface_create(data->hwnd, state->layered_alpha,
                                            state->layered_flags)))
         return FALSE;
+    if (!data->wayland_surface && recreated) *recreated = TRUE;
 
     /* Pass through mouse events for layered, transparent windows, to match
      * Windows behavior. */
@@ -448,7 +455,7 @@ void wayland_window_surface_presented(HWND hwnd)
     if (!(data = wayland_win_data_get(hwnd))) return;
     data->contents_presented = TRUE;
     if ((!data->wayland_surface || data->wayland_surface->role == WAYLAND_SURFACE_ROLE_NONE) &&
-        wayland_win_data_create_wayland_surface(data, NULL, &state, &reapply_clip))
+        wayland_win_data_create_wayland_surface(data, NULL, &state, &reapply_clip, NULL))
         wayland_win_data_update_wayland_state(data);
     wayland_win_data_release(data);
     if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
@@ -700,7 +707,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     DWORD process_id, active_process_id;
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
-    BOOL managed, retry_client_surfaces = FALSE;
+    BOOL managed, retry_client_surfaces = FALSE, surface_recreated = FALSE;
     BOOL reapply_clip = FALSE;
     BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
     struct wayland_window_state state;
@@ -782,9 +789,9 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         }
     }
     else if (wayland_win_data_create_wayland_surface(data, owner_surface, &state,
-                                                     &reapply_clip))
+                                                     &reapply_clip, &surface_recreated))
     {
-        retry_client_surfaces = retry_client_surfaces &&
+        retry_client_surfaces = (retry_client_surfaces || surface_recreated) &&
                                 data->wayland_surface->role != WAYLAND_SURFACE_ROLE_NONE;
         wayland_surface_set_toplevel_parent(data->wayland_surface, transient_parent_surface);
         wayland_win_data_update_wayland_state(data);
@@ -793,7 +800,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     {
         retry_client_surfaces = FALSE;
     }
-    if (data->client_surface && data->client_surface->wl_subsurface &&
+    if (!retry_client_surfaces && data->client_surface && data->client_surface->wl_subsurface &&
         (!(swp_flags & SWP_NOZORDER) || (swp_flags & SWP_SHOWWINDOW)))
         client_restack_toplevel = data->client_surface->toplevel;
     if (data->wayland_surface &&
@@ -1204,7 +1211,8 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     HWND toplevel = new_client->client.toplevel;
     RECT rect = new_client->client.monitor_rect;
     struct wayland_client_surface *old_client;
-    struct wayland_win_data *data;
+    struct wayland_win_data *data, *toplevel_data;
+    struct wl_surface *parent_surface = NULL;
     BOOL visible = FALSE, offscreen;
 
     /* ownership is shared with the callers, the last caller to release
@@ -1212,6 +1220,9 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
     offscreen = InterlockedCompareExchange(&new_client->client.offscreen, 0, 0);
     if (!(data = wayland_win_data_get(hwnd))) return;
+    if (toplevel && (toplevel_data = wayland_win_data_get_nolock(toplevel)) &&
+        toplevel_data->wayland_surface)
+        parent_surface = toplevel_data->wayland_surface->wl_surface;
 
     TRACE("hwnd %p old client %p new client %p\n", hwnd, data->client_surface, new_client);
 
@@ -1229,7 +1240,8 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
         }
     }
     else if (visible && !offscreen &&
-             (!new_client->wl_subsurface || new_client->toplevel != toplevel))
+             (!new_client->wl_subsurface || new_client->toplevel != toplevel ||
+              new_client->parent_surface != parent_surface))
     {
         /* The drawable may first be presented while its window is hidden. In
          * that case it is tracked above but deliberately left detached. Make
