@@ -1293,19 +1293,34 @@ static void context_restore_gl_context(const struct wined3d_gl_info *gl_info, HD
 
 static void wined3d_context_gl_update_window(struct wined3d_context_gl *context_gl)
 {
-    if (!context_gl->c.swapchain)
+    struct wined3d_swapchain *swapchain = context_gl->c.swapchain;
+    HDC dc;
+
+    if (!swapchain)
         return;
 
-    if (context_gl->window == context_gl->c.swapchain->win_handle &&
-        context_gl->dc == context_gl->c.swapchain->dc)
+    /* A swapchain may temporarily have no DC after changing to a window for
+     * which GetDCEx() failed. Keep using the device backup DC in that case,
+     * instead of replacing a valid context DC with NULL on every acquire. */
+    if (!(dc = swapchain->dc))
+    {
+        if (!(dc = wined3d_device_gl_get_backup_dc(wined3d_device_gl(context_gl->c.device))))
+        {
+            WARN("Failed to retrieve a device context.\n");
+            context_gl->valid = 0;
+            return;
+        }
+    }
+
+    if (context_gl->window == swapchain->win_handle && context_gl->dc == dc)
         return;
 
     TRACE("Updating context %p window from %p to %p.\n",
-            context_gl, context_gl->window, context_gl->c.swapchain->win_handle);
+            context_gl, context_gl->window, swapchain->win_handle);
 
-    context_gl->window = context_gl->c.swapchain->win_handle;
-    context_gl->dc = context_gl->c.swapchain->dc;
-    context_gl->dc_is_private = FALSE;
+    context_gl->window = swapchain->win_handle;
+    context_gl->dc = dc;
+    context_gl->dc_is_private = !swapchain->dc;
     context_gl->dc_has_format = FALSE;
     context_gl->needs_set = 1;
     context_gl->valid = 1;
@@ -1534,6 +1549,16 @@ BOOL wined3d_context_gl_set_current(struct wined3d_context_gl *context_gl)
         if (old->c.destroyed)
         {
             TRACE("Switching away from destroyed context %p.\n", old);
+
+            /* Do not leave a freed context in TLS if activating the new
+             * context below fails. Keeping the destroyed context alive is
+             * safer than freeing it behind a live TLS pointer. */
+            if (!TlsSetValue(wined3d_context_tls_idx, NULL))
+            {
+                ERR("Failed to clear destroyed context %p from TLS.\n", old);
+                return FALSE;
+            }
+
             wined3d_context_gl_cleanup(old);
             free((void *)old->gl_info);
             free(old);
@@ -4616,6 +4641,7 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
     struct wined3d_context *context;
+    RECT dirty_rect;
     bool rasterizer_discard = false;
     unsigned int i, idx_size = 0;
     const void *idx_data = NULL;
@@ -4653,6 +4679,13 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
     }
     gl_info = context_gl->gl_info;
 
+    SetRect(&dirty_rect, state->viewports[0].x, state->viewports[0].y,
+            state->viewports[0].x + state->viewports[0].width,
+            state->viewports[0].y + state->viewports[0].height);
+    if (state->rasterizer_state && state->rasterizer_state->desc.scissor
+            && state->scissor_rect_count)
+        IntersectRect(&dirty_rect, &dirty_rect, &state->scissor_rects[0]);
+
     if (!use_transform_feedback(state))
         wined3d_context_gl_pause_transform_feedback(context_gl, TRUE);
 
@@ -4664,7 +4697,8 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
         if (wined3d_blend_state_get_writemask(state->blend_state, i))
         {
             wined3d_rendertarget_view_load_location(rtv, context, rtv->resource->draw_binding);
-            wined3d_rendertarget_view_invalidate_location(rtv, ~rtv->resource->draw_binding);
+            wined3d_rendertarget_view_invalidate_location_box(rtv,
+                    ~rtv->resource->draw_binding, &dirty_rect);
         }
         else
         {

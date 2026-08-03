@@ -84,12 +84,12 @@ static GLenum get_texture_view_target(const struct wined3d_gl_info *gl_info,
 static bool find_format_plane_idx(const struct wined3d_format *resource_format,
         const struct wined3d_format *plane_format, unsigned int *plane_idx)
 {
-    if (plane_format->id == resource_format->plane_formats[0])
+    if (plane_format->typeless_id == resource_format->plane_formats[0]->typeless_id)
     {
         *plane_idx = 0;
         return true;
     }
-    if (plane_format->id == resource_format->plane_formats[1])
+    if (plane_format->typeless_id == resource_format->plane_formats[1]->typeless_id)
     {
         *plane_idx = 1;
         return true;
@@ -347,7 +347,7 @@ static void create_buffer_view(struct wined3d_gl_view *view, struct wined3d_cont
 }
 
 static void wined3d_view_invalidate_location(struct wined3d_resource *resource,
-        const struct wined3d_view_desc *desc, DWORD location)
+        const struct wined3d_view_desc *desc, DWORD location, const RECT *rect)
 {
     unsigned int i, sub_resource_idx;
     struct wined3d_texture *texture;
@@ -361,13 +361,21 @@ static void wined3d_view_invalidate_location(struct wined3d_resource *resource,
     texture = texture_from_resource(resource);
     if (resource->type == WINED3D_RTYPE_TEXTURE_3D)
     {
-        wined3d_texture_invalidate_location(texture, desc->u.texture.level_idx, location);
+        if (rect)
+            wined3d_texture_invalidate_location_box(texture, desc->u.texture.level_idx, location, rect);
+        else
+            wined3d_texture_invalidate_location(texture, desc->u.texture.level_idx, location);
         return;
     }
 
     sub_resource_idx = desc->u.texture.layer_idx * texture->level_count + desc->u.texture.level_idx;
     for (i = 0; i < desc->u.texture.layer_count; ++i, sub_resource_idx += texture->level_count)
-        wined3d_texture_invalidate_location(texture, sub_resource_idx, location);
+    {
+        if (rect)
+            wined3d_texture_invalidate_location_box(texture, sub_resource_idx, location, rect);
+        else
+            wined3d_texture_invalidate_location(texture, sub_resource_idx, location);
+    }
 }
 
 static void wined3d_view_load_location(struct wined3d_resource *resource,
@@ -545,7 +553,13 @@ void wined3d_rendertarget_view_validate_location(struct wined3d_rendertarget_vie
 
 void wined3d_rendertarget_view_invalidate_location(struct wined3d_rendertarget_view *view, uint32_t location)
 {
-    wined3d_view_invalidate_location(view->resource, &view->desc, location);
+    wined3d_view_invalidate_location(view->resource, &view->desc, location, NULL);
+}
+
+void wined3d_rendertarget_view_invalidate_location_box(struct wined3d_rendertarget_view *view,
+        uint32_t location, const RECT *rect)
+{
+    wined3d_view_invalidate_location(view->resource, &view->desc, location, rect);
 }
 
 /* Note: This may return 0 if the selected layers do not have a location in common. */
@@ -1603,7 +1617,7 @@ void * CDECL wined3d_unordered_access_view_get_parent(const struct wined3d_unord
 void wined3d_unordered_access_view_invalidate_location(struct wined3d_unordered_access_view *view,
         uint32_t location)
 {
-    wined3d_view_invalidate_location(view->resource, &view->desc, location);
+    wined3d_view_invalidate_location(view->resource, &view->desc, location, NULL);
 }
 
 void wined3d_unordered_access_view_gl_clear(struct wined3d_unordered_access_view_gl *view_gl,

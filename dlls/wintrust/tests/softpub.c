@@ -1845,6 +1845,10 @@ static void test_multiple_signatures(void)
     settings.dwVerifiedSigIndex = 0xcccccccc;
     status = WinVerifyTrust(NULL, &WVTPolicyGUID, &data);
     todo_wine ok(status == CERT_E_UNTRUSTEDROOT || status == CERT_E_CHAINING, "Failed, ret %#lx\n", status);
+    file = CreateFileW(pathW, DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "Failed to open verified file for delete, err %lu.\n", GetLastError());
+    CloseHandle(file);
     ok(settings.cSecondarySigs == 0xcccccccc, "Got %lu.\n", settings.cSecondarySigs);
     todo_wine ok(settings.dwVerifiedSigIndex == 2, "Got %lu.\n", settings.dwVerifiedSigIndex);
 

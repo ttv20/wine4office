@@ -99,6 +99,70 @@ void DSOUND_AmpFactorToVolPan(PDSVOLUMEPAN volpan)
     TRACE("Vol=%ld Pan=%ld\n", volpan->lVolume, volpan->lPan);
 }
 
+static void get8(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + channel;
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        dst[i] = (buf[i * channels] - 0x80) / (float)0x80;
+}
+
+static void get16(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 2 * channel;
+    const SHORT *sbuf = (const SHORT*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        dst[i] = sbuf[i * channels] / (float)0x8000;
+}
+
+static void get24(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 3 * channel;
+    int i;
+
+    for (i = 0; i < samples; ++i) {
+        /* The next expression deliberately has an overflow for buf[2] >= 0x80,
+           this is how negative values are made.
+         */
+        LONG sample =
+                (buf[i * channels * 3 + 0] << 8) |
+                (buf[i * channels * 3 + 1] << 16) |
+                (buf[i * channels * 3 + 2] << 24);
+        dst[i] = sample / (float)0x80000000U;
+    }
+}
+
+static void get32(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 4 * channel;
+    const LONG *sbuf = (const LONG*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        dst[i] = sbuf[i * channels] / (float)0x80000000U;
+}
+
+static const bitsgetfunc getbpp[4] = {get8, get16, get24, get32};
+
+static void getieee32(const IDirectSoundBufferImpl *dsb, BYTE *base, float *dst, unsigned samples, DWORD channel)
+{
+    DWORD channels = dsb->pwfx->nChannels;
+    const BYTE *buf = base + 4 * channel;
+    const float *sbuf = (const float*)(buf);
+    int i;
+
+    for (i = 0; i < samples; ++i)
+        /* The value will be clipped later, when put into some non-float buffer */
+        dst[i] = sbuf[i * channels];
+}
+
 /**
  * Recalculate the size for temporary buffer, and new writelead
  * Should be called when one of the following things occur:
@@ -137,10 +201,9 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 		dsb->freqAccNum = (dsb->freqAccNum * (LONG64)dsb->freqAdjustDen +
 				oldFreqAdjustDen / 2) / oldFreqAdjustDen;
 
-	dsb->get_aux = ieee ? getbpp[4] : getbpp[dsb->pwfx->wBitsPerSample/8 - 1];
 	dsb->put_aux = putieee32;
 
-	dsb->get = dsb->get_aux;
+	dsb->get = ieee ? getieee32 : getbpp[dsb->pwfx->wBitsPerSample/8 - 1];
 	dsb->put = dsb->put_aux;
 
 	if (ichannels == ochannels)
@@ -164,8 +227,9 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 	}
 	else if (ochannels == 1)
 	{
-		dsb->mix_channels = 1;
-		dsb->get = get_mono;
+		dsb->mix_channels = ichannels;
+		dsb->put = put_mono;
+		dsb->put_aux = putieee32_sum;
 	}
 	else if (ichannels == 2 && ochannels == 4)
 	{
@@ -194,6 +258,26 @@ void DSOUND_RecalcFormat(IDirectSoundBufferImpl *dsb)
 		dsb->mix_channels = 4;
 		dsb->put = put_quad2stereo;
 		dsb->put_aux = putieee32_sum;
+	}
+	else if (ichannels == 1 && ochannels == 8)
+	{
+		dsb->mix_channels = 1;
+		dsb->put = put_mono2surround71;
+	}
+	else if (ichannels == 2 && ochannels == 8)
+	{
+		dsb->mix_channels = 2;
+		dsb->put = put_stereo2surround71;
+	}
+	else if (ichannels == 4 && ochannels == 8)
+	{
+		dsb->mix_channels = 4;
+		dsb->put = put_quad2surround71;
+	}
+	else if (ichannels == 6 && ochannels == 8)
+	{
+		dsb->mix_channels = 6;
+		dsb->put = put_surround512surround71;
 	}
 	else
 	{
@@ -279,12 +363,28 @@ void DSOUND_CheckEvent(const IDirectSoundBufferImpl *dsb, DWORD playpos, int len
     }
 }
 
-static inline float get_current_sample(const IDirectSoundBufferImpl *dsb,
-        BYTE *buffer, DWORD buflen, DWORD mixpos, DWORD channel)
+static inline void get_samples(const IDirectSoundBufferImpl *dsb, BYTE *buffer, DWORD buflen,
+        DWORD mixpos, DWORD channel, DWORD count, float *dst)
 {
-    if (mixpos >= buflen && !(dsb->playflags & DSBPLAY_LOOPING))
-        return 0.0f;
-    return dsb->get(dsb, buffer + (mixpos % buflen), channel);
+    UINT istride = dsb->pwfx->nBlockAlign;
+    DWORD advance;
+    DWORD pos;
+
+    if (!(dsb->playflags & DSBPLAY_LOOPING)) {
+        advance = buflen < mixpos ? 0 : min((buflen - mixpos) / istride, count);
+        dsb->get(dsb, buffer + mixpos, dst, advance, channel);
+        memset(dst + advance, 0, (count - advance) * sizeof(float));
+        return;
+    }
+
+    advance = min((buflen - mixpos % buflen) / istride, count);
+    dsb->get(dsb, buffer + mixpos % buflen, dst, advance, channel);
+    pos = advance;
+    while (pos < count) {
+        advance = min(buflen / istride, count - pos);
+        dsb->get(dsb, buffer, dst + pos, advance, channel);
+        pos += advance;
+    }
 }
 
 #ifdef __SSE__
@@ -536,7 +636,7 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, DWORD *f
     UINT required_input = max(
             (freqAcc_start + (count - 1) * dsb->freqAdjustNum) / dsb->freqAdjustDen + FIR_WIDTH,
             (freqAcc_start + (count - 1 + FIR_WIDTH) * dsb->freqAdjustNum) / dsb->freqAdjustDen);
-    float *intermediate, *output, *itmp;
+    float *intermediate, *output;
 
     DWORD len = required_input * channels;
     /* Allocate an output buffer for each channel with padding on both ends as
@@ -570,14 +670,14 @@ static UINT cp_fields_resample(IDirectSoundBufferImpl *dsb, UINT count, DWORD *f
      * if you want -msse3 to have any effect.
      * This is good for CPU cache effects, too.
      */
-    itmp = intermediate;
     for (channel = 0; channel < channels; channel++) {
-        for (i = 0; i < committed_samples; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->committedbuff,
-                dsb->writelead, dsb->committed_mixpos + i * istride, channel);
-        for (; i < required_input; i++)
-            *(itmp++) = get_current_sample(dsb, dsb->buffer->memory,
-                    dsb->buflen, dsb->sec_mixpos + i * istride, channel);
+        get_samples(dsb, dsb->committedbuff, dsb->writelead, dsb->committed_mixpos, channel,
+                committed_samples, intermediate + channel * required_input);
+        if (required_input > committed_samples)
+            get_samples(dsb, dsb->buffer->memory, dsb->buflen,
+                    dsb->sec_mixpos + committed_samples * istride, channel,
+                    required_input - committed_samples,
+                    intermediate + channel * required_input + committed_samples);
     }
 
     for (channel = 0; channel < channels; channel++)
@@ -597,25 +697,43 @@ static UINT cp_fields_noresample(IDirectSoundBufferImpl *dsb, UINT count)
     UINT istride = dsb->pwfx->nBlockAlign;
     UINT ostride = dsb->device->pwfx->nChannels * sizeof(float);
     UINT committed_samples = 0;
+    float *intermediate;
     DWORD channel, i;
+
+    DWORD len = count * dsb->mix_channels;
+    len *= sizeof(float);
 
     if (!secondarybuffer_is_audible(dsb))
         return count;
+
+    if (!dsb->device->cp_buffer) {
+        dsb->device->cp_buffer = malloc(len);
+        dsb->device->cp_buffer_len = len;
+    } else if (len > dsb->device->cp_buffer_len) {
+        dsb->device->cp_buffer = realloc(dsb->device->cp_buffer, len);
+        dsb->device->cp_buffer_len = len;
+    }
+
+    intermediate = dsb->device->cp_buffer;
 
     if(dsb->use_committed) {
         committed_samples = (dsb->writelead - dsb->committed_mixpos) / istride;
         committed_samples = committed_samples <= count ? committed_samples : count;
     }
 
-    for (i = 0; i < committed_samples; i++)
-        for (channel = 0; channel < dsb->mix_channels; channel++)
-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->committedbuff,
-                dsb->writelead, dsb->committed_mixpos + i * istride, channel));
+    for (channel = 0; channel < dsb->mix_channels; channel++)
+    {
+        get_samples(dsb, dsb->committedbuff, dsb->writelead, dsb->committed_mixpos, channel,
+                committed_samples, intermediate + channel * count);
+        if (count > committed_samples)
+            get_samples(dsb, dsb->buffer->memory, dsb->buflen,
+                    dsb->sec_mixpos + committed_samples * istride, channel,
+                    count - committed_samples, intermediate + channel * count + committed_samples);
+    }
 
-    for (; i < count; i++)
+    for (i = 0; i < count; i++)
         for (channel = 0; channel < dsb->mix_channels; channel++)
-            dsb->put(dsb, i * ostride, channel, get_current_sample(dsb, dsb->buffer->memory,
-                dsb->buflen, dsb->sec_mixpos + i * istride, channel));
+            dsb->put(dsb, i * ostride, channel, intermediate[channel * count + i]);
 
     return count;
 }

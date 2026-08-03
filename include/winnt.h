@@ -1049,7 +1049,11 @@ NTSYSAPI WORD         WINAPI RtlQueryDepthSList(PSLIST_HEADER);
 #define HEAP_SHARED                     0x04000000
 
 typedef enum _HEAP_INFORMATION_CLASS {
-    HeapCompatibilityInformation,
+    HeapCompatibilityInformation = 0,
+    HeapEnableTerminationOnCorruption = 1,
+    HeapExtendedInformation = 2,
+    HeapOptimizeResources = 3,
+    HeapTag = 7,
 } HEAP_INFORMATION_CLASS;
 
 /* Processor feature flags.  */
@@ -5456,6 +5460,9 @@ typedef enum tagSID_NAME_USE {
 
 #define MAXIMUM_ALLOWED            0x02000000
 #define ACCESS_SYSTEM_SECURITY     0x01000000
+
+#define ALPC_PORT_QUERY_STATE      0x0001
+#define ALPC_PORT_ALL_ACCESS       (STANDARD_RIGHTS_REQUIRED|SYNCHRONIZE|ALPC_PORT_QUERY_STATE)
 
 #define EVENT_QUERY_STATE          0x0001
 #define EVENT_MODIFY_STATE         0x0002

@@ -1,7 +1,7 @@
 /*
  * Delivery Optimization tests
  *
- * Copyright 2026 Wine 365 project
+ * Copyright 2026 Wine4Office project
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public

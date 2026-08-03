@@ -6427,6 +6427,9 @@ static void test_GdiTransparentBlt(void)
     HBITMAP bmp_dst, bmp_src, old_dst, old_src;
     HDC hdc_screen, hdc_dst, hdc_src;
     UINT32 *dst_buffer, *src_buffer;
+    const COLORREF text_color = RGB( 0xcc, 0xdd, 0xee );
+    const UINT32 dib_text_color = 0x00ccddee;
+    const BYTE mono_bits[2] = {0x80, 0};
     BITMAPINFO bmi;
     BOOL ret;
 
@@ -6436,7 +6439,7 @@ static void test_GdiTransparentBlt(void)
 
     memset( &bmi, 0, sizeof(BITMAPINFO) );
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = 1;
+    bmi.bmiHeader.biWidth = 2;
     bmi.bmiHeader.biHeight = 1;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
@@ -6454,6 +6457,31 @@ static void test_GdiTransparentBlt(void)
     ret = GdiTransparentBlt( hdc_dst, 0, 0, 1, 1, hdc_src, 0, 0, 1, 1, RGB(0xff, 0xff, 0xff) );
     ok( ret, "GdiTransparentBlt failed, error %lu.\n", GetLastError() );
     ok( dst_buffer[0] == 0x123456, "Got unexpected color %#x.\n", dst_buffer[0] );
+
+    SelectObject( hdc_src, old_src );
+    DeleteObject( bmp_src );
+
+    /* A monochrome source uses the destination text color for pixels which do
+     * not match the transparent key. This is how owner-drawn controls tint
+     * cached monochrome glyphs for their current theme. */
+    bmp_src = CreateBitmap( 2, 1, 1, 1, mono_bits );
+    old_src = SelectObject( hdc_src, bmp_src );
+    SetTextColor( hdc_dst, text_color );
+    dst_buffer[0] = dst_buffer[1] = 0x00123456;
+    ret = GdiTransparentBlt( hdc_dst, 0, 0, 2, 1, hdc_src, 0, 0, 2, 1,
+                             RGB( 0xff, 0xff, 0xff ) );
+    ok( ret, "GdiTransparentBlt failed, error %lu.\n", GetLastError() );
+    ok( dst_buffer[0] == 0x123456, "Got unexpected transparent color %#x.\n", dst_buffer[0] );
+    ok( dst_buffer[1] == dib_text_color, "Got unexpected text color %#x.\n", dst_buffer[1] );
+    ok( GetTextColor( hdc_dst ) == text_color, "Destination text color was not restored.\n" );
+
+    SetTextColor( hdc_dst, RGB( 0, 0, 0 ) );
+    dst_buffer[0] = dst_buffer[1] = 0x00123456;
+    ret = GdiTransparentBlt( hdc_dst, 0, 0, 2, 1, hdc_src, 0, 0, 2, 1,
+                             RGB( 0xff, 0xff, 0xff ) );
+    ok( ret, "GdiTransparentBlt failed, error %lu.\n", GetLastError() );
+    ok( dst_buffer[0] == 0x123456, "Got unexpected transparent color %#x.\n", dst_buffer[0] );
+    ok( dst_buffer[1] == 0, "Got unexpected black text color %#x.\n", dst_buffer[1] );
 
     SelectObject( hdc_src, old_src );
     SelectObject( hdc_dst, old_dst );

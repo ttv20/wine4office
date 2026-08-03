@@ -120,3 +120,18 @@ HRESULT WINAPI Initialize(BOOLEAN bAllowIManagementObjectQI)
     TRACE("%i\n", bAllowIManagementObjectQI);
     return S_OK;
 }
+
+HRESULT WINAPI GetNames(int vFunc, IWbemClassObject *ptr, LPCWSTR wszQualifierName, LONG lFlags,
+    VARIANT *pQualifierVal, SAFEARRAY **pNames)
+{
+    TRACE("%i %p %s %lx %p %p\n", vFunc, ptr, debugstr_w(wszQualifierName), lFlags, pQualifierVal, pNames);
+
+    return IWbemClassObject_GetNames(ptr, wszQualifierName, lFlags, pQualifierVal, pNames);
+}
+
+HRESULT WINAPI BeginMethodEnumeration(int vFunc, IWbemClassObject *ptr, LONG lEnumFlags)
+{
+    TRACE("%i %p %lx\n", vFunc, ptr, lEnumFlags);
+
+    return IWbemClassObject_BeginMethodEnumeration(ptr, lEnumFlags);
+}

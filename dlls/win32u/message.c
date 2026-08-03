@@ -48,6 +48,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
+static const struct ratio no_dpi;
+
 static LONG atomic_load_long( const volatile LONG *ptr )
 {
 #if defined(__i386__) || defined(__x86_64__)
@@ -2482,17 +2484,6 @@ static void send_parent_notify( HWND hwnd, WORD event, WORD idChild, POINT pt )
 }
 
 /***********************************************************************
- *          process_pointer_message
- *
- * returns TRUE if the contents of 'msg' should be passed to the application
- */
-static BOOL process_pointer_message( MSG *msg, UINT hw_id, const struct hardware_msg_data *msg_data )
-{
-    msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
-    return TRUE;
-}
-
-/***********************************************************************
  *          process_keyboard_message
  *
  * returns TRUE if the contents of 'msg' should be passed to the application
@@ -2602,6 +2593,40 @@ static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
     return pointer_flags;
 }
 
+static BOOL get_office_net_ui_ltr_capture_clip( HWND hwnd, RECT *rect )
+{
+    static const WCHAR net_ui_hwnd[] = {'N','e','t','U','I','H','W','N','D',0};
+    static const WCHAR net_ui_tool[] =
+        {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+    WCHAR buffer[64];
+    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+    HWND parent;
+    INT len;
+
+    if ((get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL) ||
+        (len = NtUserGetClassName( hwnd, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    if (wcscmp( buffer, net_ui_hwnd ) ||
+        !(parent = NtUserGetAncestor( hwnd, GA_PARENT )) ||
+        !(get_window_long( parent, GWL_EXSTYLE ) & WS_EX_LAYOUTRTL))
+        return FALSE;
+
+    name.Length = 0;
+    if ((len = NtUserGetClassName( parent, FALSE, &name )) <= 0 || len >= ARRAY_SIZE(buffer))
+        return FALSE;
+    buffer[len] = 0;
+    if (wcscmp( buffer, net_ui_tool ) ||
+        !get_window_rect( parent, rect, get_thread_dpi() ))
+        return FALSE;
+
+    /* Convert the physically visible popup interval to coordinates of the
+     * monitor-wide LTR capture child. */
+    map_window_points( 0, hwnd, (POINT *)rect, 2, get_thread_dpi() );
+
+    return TRUE;
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2702,7 +2727,21 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             break;
         }
 
-        if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+        if (message)
+        {
+            MSG pointer_msg =
+            {
+                .message = message,
+                .lParam = MAKELONG( msg->pt.x, msg->pt.y ),
+                .wParam = MAKELONG( 1, flags ),
+                .hwnd = msg->hwnd,
+                .time = msg->time,
+                .pt = msg->pt,
+            };
+
+            update_pointer_from_msg( PT_MOUSE, &pointer_msg );
+            send_message( msg->hwnd, message, pointer_msg.wParam, pointer_msg.lParam );
+        }
     }
 
     /* FIXME: is this really the right place for this hook? */
@@ -2731,7 +2770,19 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
             /* coordinates don't get translated while tracking a menu */
             /* FIXME: should differentiate popups and top-level menus */
             if (!(info.flags & GUI_INMENUMODE))
+            {
+                RECT clip;
+
                 screen_to_client( msg->hwnd, &pt );
+                /* Office positions LTR NetUI capture children inside RTL
+                 * gallery parents seven pixels to the right of their hit-test
+                 * interval. Keep screen cursor placement intact while
+                 * aligning the delivered client coordinate. */
+                if (info.hwndCapture &&
+                    get_office_net_ui_ltr_capture_clip( msg->hwnd, &clip ) &&
+                    pt.x >= clip.left && pt.x < clip.right)
+                    pt.x -= 7;
+            }
         }
     }
     msg->lParam = MAKELONG( pt.x, pt.y );
@@ -3124,7 +3175,7 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
                 RECT rect = {info.msg.pt.x, info.msg.pt.y, info.msg.pt.x, info.msg.pt.y};
                 MSLLHOOKSTRUCT hook;
 
-                rect = map_rect_raw_to_virt( rect, 0 );
+                rect = map_rect_raw_to_virt( rect, no_dpi );
                 info.msg.pt.x = rect.left;
                 info.msg.pt.y = rect.top;
 
@@ -3907,9 +3958,9 @@ LRESULT send_internal_message_timeout( DWORD dest_pid, DWORD dest_tid,
 }
 
 /***********************************************************************
- *		send_hardware_message
+ *		server_send_hardware_message
  */
-NTSTATUS send_hardware_message( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam )
+NTSTATUS server_send_hardware_message( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam )
 {
     struct send_message_info info;
     int prev_x, prev_y, new_x, new_y;
@@ -3940,30 +3991,40 @@ NTSTATUS send_hardware_message( HWND hwnd, UINT flags, const INPUT *input, LPARA
             req->input.mouse.flags = input->mi.dwFlags;
             req->input.mouse.time  = input->mi.time;
             req->input.mouse.info  = input->mi.dwExtraInfo;
+            if (lparam)
+            {
+                struct raw_mouse *raw = (struct raw_mouse *)lparam;
+                req->input.mouse.raw_count = raw->count;
+                wine_server_add_data( req, raw->data, raw->count * sizeof(*raw->data) );
+            }
             break;
         case INPUT_KEYBOARD:
-            if (input->ki.dwFlags & KEYEVENTF_SCANCODE)
+            req->input.kbd.vkey  = input->ki.wVk;
+            req->input.kbd.scan  = input->ki.wScan;
+            req->input.kbd.flags = input->ki.dwFlags;
+            req->input.kbd.time  = input->ki.time;
+            req->input.kbd.info  = input->ki.dwExtraInfo;
+
+            /* Handle the scancode resolution before sending data to wineserver, as it doesn't
+             * have access to keyboard layout tables and needs the vkey to start hook chain.
+             */
+            if (req->input.kbd.flags & KEYEVENTF_SCANCODE)
             {
-                UINT scan = input->ki.wScan;
+                UINT scan = input->ki.wScan, dummy;
                 /* TODO: Use the keyboard layout of the target hwnd, once
                  * NtUserGetKeyboardLayout supports non-current threads. */
                 HKL layout = NtUserGetKeyboardLayout( 0 );
-                if (flags & SEND_HWMSG_INJECTED)
-                {
-                    scan = scan & 0xff;
-                    if (input->ki.dwFlags & KEYEVENTF_EXTENDEDKEY) scan |= 0xe000;
-                }
-                req->input.kbd.vkey = map_scan_to_kbd_vkey( scan, layout );
-                req->input.kbd.scan = input->ki.wScan & 0xff;
+
+                if (flags & SEND_HWMSG_INJECTED) scan = scan & 0xff;
+                if (req->input.kbd.flags & KEYEVENTF_EXTENDEDKEY) scan |= 0xe000;
+
+                req->input.kbd.vkey = map_scan_to_kbd_vkey( scan, layout, (flags & SEND_HWMSG_INJECTED) ? &dummy : &scan );
+                if (scan & ~0xff) req->input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
+                else req->input.kbd.flags &= ~KEYEVENTF_EXTENDEDKEY;
+
+                req->input.kbd.scan = scan & 0xff;
+                req->input.kbd.flags &= ~KEYEVENTF_SCANCODE;
             }
-            else
-            {
-                req->input.kbd.vkey = input->ki.wVk;
-                req->input.kbd.scan = input->ki.wScan;
-            }
-            req->input.kbd.flags = input->ki.dwFlags & ~KEYEVENTF_SCANCODE;
-            req->input.kbd.time  = input->ki.time;
-            req->input.kbd.info  = input->ki.dwExtraInfo;
             break;
         case INPUT_HARDWARE:
             req->input.hw.msg    = input->hi.uMsg;

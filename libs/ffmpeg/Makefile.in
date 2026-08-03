@@ -19,6 +19,8 @@ SOURCES = \
 	libavutil/arm/float_dsp_init_vfp.c \
 	libavutil/arm/float_dsp_neon.S \
 	libavutil/arm/float_dsp_vfp.S \
+	libavutil/arm64ec/cpu.c \
+	libavutil/arm64ec/crc.S \
 	libavutil/audio_fifo.c \
 	libavutil/avsscanf.c \
 	libavutil/avstring.c \
@@ -127,6 +129,10 @@ SOURCES = \
 	libswresample/arm/audio_convert_neon.S \
 	libswresample/arm/resample.S \
 	libswresample/arm/resample_init.c \
+	libswresample/arm64ec/audio_convert_init.c \
+	libswresample/arm64ec/audio_convert_neon.S \
+	libswresample/arm64ec/resample.S \
+	libswresample/arm64ec/resample_init.c \
 	libswresample/audioconvert.c \
 	libswresample/dither.c \
 	libswresample/options.c \
@@ -159,6 +165,16 @@ SOURCES = \
 	libswscale/arm/swscale.c \
 	libswscale/arm/swscale_unscaled.c \
 	libswscale/arm/yuv2rgb_neon.S \
+	libswscale/arm64ec/hscale.S \
+	libswscale/arm64ec/input.S \
+	libswscale/arm64ec/output.S \
+	libswscale/arm64ec/range_convert_neon.S \
+	libswscale/arm64ec/rgb2rgb.c \
+	libswscale/arm64ec/rgb2rgb_neon.S \
+	libswscale/arm64ec/swscale.c \
+	libswscale/arm64ec/swscale_unscaled.c \
+	libswscale/arm64ec/swscale_unscaled_neon.S \
+	libswscale/arm64ec/yuv2rgb_neon.S \
 	libswscale/cms.c \
 	libswscale/csputils.c \
 	libswscale/format.c \

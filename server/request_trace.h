@@ -14,6 +14,7 @@ static void dump_ioctl_code( const char *prefix, const ioctl_code_t *val );
 static void dump_irp_params( const char *prefix, const union irp_params *val );
 static void dump_luid( const char *prefix, const struct luid *val );
 static void dump_obj_locator( const char *prefix, const struct obj_locator *val );
+static void dump_ratio( const char *prefix, const struct ratio *val );
 static void dump_rectangle( const char *prefix, const struct rectangle *val );
 static void dump_timeout( const char *prefix, const timeout_t *val );
 static void dump_uint64( const char *prefix, const unsigned __int64 *val );
@@ -1168,6 +1169,52 @@ static void dump_get_key_value_reply( const struct get_key_value_reply *req )
     dump_varargs_bytes( ", data=", cur_size );
 }
 
+static void dump_create_key_value_query_request( const struct create_key_value_query_request *req )
+{
+    fprintf( stderr, " hkey=%04x", req->hkey );
+    fprintf( stderr, ", count=%08x", req->count );
+}
+
+static void dump_create_key_value_query_reply( const struct create_key_value_query_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_append_key_value_query_request( const struct append_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    dump_uint64( ", offset=", &req->offset );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_execute_key_value_query_request( const struct execute_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", count=%08x", req->count );
+    fprintf( stderr, ", length=%u", req->length );
+}
+
+static void dump_execute_key_value_query_reply( const struct execute_key_value_query_reply *req )
+{
+    fprintf( stderr, " status=%08x", req->status );
+    fprintf( stderr, ", used=%u", req->used );
+    fprintf( stderr, ", required=%u", req->required );
+    fprintf( stderr, ", count=%08x", req->count );
+}
+
+static void dump_read_key_value_query_request( const struct read_key_value_query_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", which=%08x", req->which );
+    fprintf( stderr, ", offset=%u", req->offset );
+}
+
+static void dump_read_key_value_query_reply( const struct read_key_value_query_reply *req )
+{
+    fprintf( stderr, " total=%u", req->total );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
 static void dump_enum_key_value_request( const struct enum_key_value_request *req )
 {
     fprintf( stderr, " hkey=%04x", req->hkey );
@@ -1451,7 +1498,7 @@ static void dump_send_hardware_message_request( const struct send_hardware_messa
     fprintf( stderr, " win=%08x", req->win );
     dump_hw_input( ", input=", &req->input );
     fprintf( stderr, ", flags=%08x", req->flags );
-    dump_varargs_bytes( ", report=", cur_size );
+    dump_varargs_bytes( ", extra=", cur_size );
 }
 
 static void dump_send_hardware_message_reply( const struct send_hardware_message_reply *req )
@@ -1832,7 +1879,7 @@ static void dump_get_window_children_from_point_request( const struct get_window
     fprintf( stderr, " parent=%08x", req->parent );
     fprintf( stderr, ", x=%d", req->x );
     fprintf( stderr, ", y=%d", req->y );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_window_children_from_point_reply( const struct get_window_children_from_point_reply *req )
@@ -1862,7 +1909,6 @@ static void dump_set_window_pos_request( const struct set_window_pos_request *re
 {
     fprintf( stderr, " swp_flags=%04x", req->swp_flags );
     fprintf( stderr, ", paint_flags=%04x", req->paint_flags );
-    fprintf( stderr, ", monitor_dpi=%08x", req->monitor_dpi );
     fprintf( stderr, ", handle=%08x", req->handle );
     fprintf( stderr, ", previous=%08x", req->previous );
     dump_rectangle( ", window=", &req->window );
@@ -1881,7 +1927,7 @@ static void dump_get_window_rectangles_request( const struct get_window_rectangl
 {
     fprintf( stderr, " handle=%08x", req->handle );
     fprintf( stderr, ", relative=%d", req->relative );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_window_rectangles_reply( const struct get_window_rectangles_reply *req )
@@ -1911,7 +1957,7 @@ static void dump_get_windows_offset_request( const struct get_windows_offset_req
 {
     fprintf( stderr, " from=%08x", req->from );
     fprintf( stderr, ", to=%08x", req->to );
-    fprintf( stderr, ", dpi=%d", req->dpi );
+    dump_ratio( ", dpi=", &req->dpi );
 }
 
 static void dump_get_windows_offset_reply( const struct get_windows_offset_reply *req )
@@ -3524,6 +3570,18 @@ static void dump_d3dkmt_mutex_release_request( const struct d3dkmt_mutex_release
     dump_varargs_bytes( ", runtime=", cur_size );
 }
 
+static void dump_alpc_create_port_request( const struct alpc_create_port_request *req )
+{
+    fprintf( stderr, " flags=%08x", req->flags );
+    dump_uint64( ", max_msg_len=", &req->max_msg_len );
+    dump_varargs_object_attributes( ", obj_attr=", cur_size );
+}
+
+static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -3621,6 +3679,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_enum_key_request,
     (dump_func)dump_set_key_value_request,
     (dump_func)dump_get_key_value_request,
+    (dump_func)dump_create_key_value_query_request,
+    (dump_func)dump_append_key_value_query_request,
+    (dump_func)dump_execute_key_value_query_request,
+    (dump_func)dump_read_key_value_query_request,
     (dump_func)dump_enum_key_value_request,
     (dump_func)dump_delete_key_value_request,
     (dump_func)dump_load_registry_request,
@@ -3835,6 +3897,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_object_open_name_request,
     (dump_func)dump_d3dkmt_mutex_acquire_request,
     (dump_func)dump_d3dkmt_mutex_release_request,
+    (dump_func)dump_alpc_create_port_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -3932,6 +3995,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_enum_key_reply,
     NULL,
     (dump_func)dump_get_key_value_reply,
+    (dump_func)dump_create_key_value_query_reply,
+    NULL,
+    (dump_func)dump_execute_key_value_query_reply,
+    (dump_func)dump_read_key_value_query_reply,
     (dump_func)dump_enum_key_value_reply,
     NULL,
     NULL,
@@ -4146,6 +4213,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_object_open_name_reply,
     (dump_func)dump_d3dkmt_mutex_acquire_reply,
     NULL,
+    (dump_func)dump_alpc_create_port_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4243,6 +4311,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "enum_key",
     "set_key_value",
     "get_key_value",
+    "create_key_value_query",
+    "append_key_value_query",
+    "execute_key_value_query",
+    "read_key_value_query",
     "enum_key_value",
     "delete_key_value",
     "load_registry",
@@ -4457,6 +4529,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "d3dkmt_object_open_name",
     "d3dkmt_mutex_acquire",
     "d3dkmt_mutex_release",
+    "alpc_create_port",
 };
 
 static const struct
@@ -4514,6 +4587,7 @@ static const struct
     { "INFO_LENGTH_MISMATCH",        STATUS_INFO_LENGTH_MISMATCH },
     { "INSTANCE_NOT_AVAILABLE",      STATUS_INSTANCE_NOT_AVAILABLE },
     { "INSUFFICIENT_RESOURCES",      STATUS_INSUFFICIENT_RESOURCES },
+    { "INTEGER_OVERFLOW",            STATUS_INTEGER_OVERFLOW },
     { "INVALID_ACL",                 STATUS_INVALID_ACL },
     { "INVALID_ADDRESS",             STATUS_INVALID_ADDRESS },
     { "INVALID_ADDRESS_COMPONENT",   STATUS_INVALID_ADDRESS_COMPONENT },

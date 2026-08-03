@@ -115,6 +115,32 @@ struct key_value
     void             *data;    /* pointer to value data */
 };
 
+#define MAX_QUERY_VALUE_COUNT 0x10000
+
+struct key_value_query_chunk
+{
+    struct list entry;
+    data_size_t size;
+    unsigned char data[1];
+};
+
+struct key_value_query
+{
+    struct object obj;
+    struct key *key;
+    struct list chunks;
+    file_pos_t names_size;
+    unsigned int count;
+    unsigned int executed;
+    unsigned int status;
+    data_size_t used;
+    data_size_t required;
+    unsigned int result_count;
+    struct key_value_result *results;
+    unsigned char *data;
+    data_size_t data_size;
+};
+
 #define MIN_SUBKEYS  8   /* min. number of allocated subkeys per key */
 #define MIN_VALUES   8   /* min. number of allocated values per key */
 
@@ -174,30 +200,31 @@ static int key_link_name( struct object *obj, struct object_name *name, struct o
 static void key_unlink_name( struct object *obj, struct object_name *name );
 static int key_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void key_destroy( struct object *obj );
+static void key_value_query_dump( struct object *obj, int verbose );
+static void key_value_query_destroy( struct object *obj );
 
 static const struct object_ops key_ops =
 {
-    sizeof(struct key),      /* size */
-    &key_type,               /* type */
-    key_dump,                /* dump */
-    no_add_queue,            /* add_queue */
-    NULL,                    /* remove_queue */
-    NULL,                    /* signaled */
-    NULL,                    /* satisfied */
-    no_signal,               /* signal */
-    no_get_fd,               /* get_fd */
-    default_get_sync,        /* get_sync */
-    key_map_access,          /* map_access */
-    key_get_sd,              /* get_sd */
-    default_set_sd,          /* set_sd */
-    key_get_full_name,       /* get_full_name */
-    key_lookup_name,         /* lookup_name */
-    key_link_name,           /* link_name */
-    key_unlink_name,         /* unlink_name */
-    no_open_file,            /* open_file */
-    no_kernel_obj_list,      /* get_kernel_obj_list */
-    key_close_handle,        /* close_handle */
-    key_destroy              /* destroy */
+    .size          = sizeof(struct key),
+    .type          = &key_type,
+    .dump          = key_dump,
+    .map_access    = key_map_access,
+    .get_sd        = key_get_sd,
+    .get_full_name = key_get_full_name,
+    .lookup_name   = key_lookup_name,
+    .link_name     = key_link_name,
+    .unlink_name   = key_unlink_name,
+    .close_handle  = key_close_handle,
+    .destroy       = key_destroy,
+};
+
+static const struct object_ops key_value_query_ops =
+{
+    .size       = sizeof(struct key_value_query),
+    .type       = &no_type,
+    .dump       = key_value_query_dump,
+    .map_access = default_map_access,
+    .destroy    = key_value_query_destroy,
 };
 
 
@@ -625,7 +652,7 @@ static void key_unlink_name( struct object *obj, struct object_name *name )
 
     if (parent->obj.ops != &key_ops)
     {
-        default_unlink_name( obj, name );
+        unlink_name( name );
         return;
     }
 
@@ -685,6 +712,33 @@ static void key_destroy( struct object *obj )
         struct notify *notify = LIST_ENTRY( ptr, struct notify, entry );
         do_notification( key, notify, 1 );
     }
+}
+
+static void key_value_query_dump( struct object *obj, int verbose )
+{
+    struct key_value_query *query = (struct key_value_query *)obj;
+
+    assert( obj->ops == &key_value_query_ops );
+    fprintf( stderr, "registry value query count=%u names=%llu executed=%u status=%08x\n",
+             query->count, (unsigned long long)query->names_size, query->executed, query->status );
+}
+
+static void key_value_query_destroy( struct object *obj )
+{
+    struct key_value_query *query = (struct key_value_query *)obj;
+    struct list *ptr;
+
+    assert( obj->ops == &key_value_query_ops );
+    while ((ptr = list_head( &query->chunks )))
+    {
+        struct key_value_query_chunk *chunk =
+            LIST_ENTRY( ptr, struct key_value_query_chunk, entry );
+        list_remove( ptr );
+        free( chunk );
+    }
+    if (query->key) release_object( query->key );
+    free( query->results );
+    free( query->data );
 }
 
 /* allocate a key object */
@@ -936,7 +990,7 @@ static void enum_key( struct key *key, int index, int info_class, struct enum_ke
     switch(info_class)
     {
     case KeyNameInformation:
-        if (!(fullname = key->obj.ops->get_full_name( &key->obj, ~0u, &namelen ))) return;
+        if (!(fullname = key_get_full_name( &key->obj, ~0u, &namelen ))) return;
         /* fall through */
     case KeyBasicInformation:
         classlen = 0; /* only return the name */
@@ -1250,6 +1304,198 @@ static void get_value( struct key *key, const struct unicode_str *name, int *typ
         *type = -1;
         set_error( STATUS_OBJECT_NAME_NOT_FOUND );
     }
+}
+
+struct key_value_query_cursor
+{
+    const struct key_value_query *query;
+    struct list *entry;
+    data_size_t offset;
+    file_pos_t remaining;
+};
+
+static void init_key_value_query_cursor( const struct key_value_query *query,
+                                         struct key_value_query_cursor *cursor )
+{
+    cursor->query = query;
+    cursor->entry = list_head( &query->chunks );
+    cursor->offset = 0;
+    cursor->remaining = query->names_size;
+}
+
+static int read_key_value_query_stream( struct key_value_query_cursor *cursor,
+                                        void *buffer, data_size_t size )
+{
+    unsigned char *dst = buffer;
+
+    if (size > cursor->remaining) return 0;
+    while (size)
+    {
+        struct key_value_query_chunk *chunk;
+        data_size_t count;
+
+        if (!cursor->entry) return 0;
+        chunk = LIST_ENTRY( cursor->entry, struct key_value_query_chunk, entry );
+        count = min( size, chunk->size - cursor->offset );
+        if (dst)
+        {
+            memcpy( dst, chunk->data + cursor->offset, count );
+            dst += count;
+        }
+        cursor->offset += count;
+        cursor->remaining -= count;
+        size -= count;
+        if (cursor->offset == chunk->size)
+        {
+            cursor->entry = list_next( &cursor->query->chunks, cursor->entry );
+            cursor->offset = 0;
+        }
+    }
+    return 1;
+}
+
+static int validate_key_value_query_stream( const struct key_value_query *query,
+                                             unsigned int count, data_size_t *max_name )
+{
+    struct key_value_query_cursor cursor;
+    unsigned int i;
+
+    *max_name = 0;
+    init_key_value_query_cursor( query, &cursor );
+    for (i = 0; i < count; i++)
+    {
+        unsigned int len;
+
+        if (!read_key_value_query_stream( &cursor, &len, sizeof(len) ) ||
+            len > USHRT_MAX || len % sizeof(WCHAR) ||
+            !read_key_value_query_stream( &cursor, NULL, len ))
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            return 0;
+        }
+        *max_name = max( *max_name, len );
+    }
+    if (cursor.remaining)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return 0;
+    }
+    return 1;
+}
+
+static int execute_key_value_query( struct key_value_query *query, unsigned int count, data_size_t length )
+{
+    struct key_value_query_cursor cursor;
+    struct key_value **values = NULL;
+    struct key_value_result *results = NULL;
+    unsigned char *name = NULL, *data = NULL;
+    data_size_t max_name, data_size = 0;
+    unsigned int i, result_count = 0, status = STATUS_SUCCESS;
+    file_pos_t used = 0, required = 0, reported_used;
+    int buffer_full = 0, size_overflow = 0;
+
+    if (!validate_key_value_query_stream( query, count, &max_name )) return 0;
+    if (count && !(values = mem_alloc( count * sizeof(*values) ))) return 0;
+    if (max_name && !(name = mem_alloc( max_name )))
+    {
+        free( values );
+        return 0;
+    }
+
+    init_key_value_query_cursor( query, &cursor );
+    if (query->key->flags & KEY_DELETED) status = STATUS_KEY_DELETED;
+    else if (query->key->flags & KEY_PREDEF) status = STATUS_INVALID_HANDLE;
+
+    for (i = 0; !status && i < count; i++)
+    {
+        struct unicode_str value_name;
+        struct key_value *value;
+        unsigned int len;
+        int index;
+
+        read_key_value_query_stream( &cursor, &len, sizeof(len) );
+        read_key_value_query_stream( &cursor, name, len );
+        value_name.str = (const WCHAR *)name;
+        value_name.len = len;
+
+        used = (used + sizeof(ULONG) - 1) & ~(file_pos_t)(sizeof(ULONG) - 1);
+        required = (required + sizeof(ULONG) - 1) & ~(file_pos_t)(sizeof(ULONG) - 1);
+        if (!(value = find_value( query->key, &value_name, &index )))
+        {
+            status = STATUS_OBJECT_NAME_NOT_FOUND;
+            break;
+        }
+        values[i] = value;
+        if (debug_level > 1) dump_operation( query->key, value, "Get multiple" );
+
+        if (!buffer_full && used + value->len <= length)
+        {
+            if (data_size > UINT_MAX - value->len)
+            {
+                size_overflow = 1;
+                buffer_full = 1;
+            }
+            else
+            {
+                data_size += value->len;
+                used += value->len;
+                result_count++;
+            }
+        }
+        else buffer_full = 1;
+
+        required += value->len;
+        if (used > UINT_MAX || required > UINT_MAX) size_overflow = 1;
+    }
+
+    reported_used = used;
+
+    if (!status)
+    {
+        if (size_overflow) status = STATUS_INTEGER_OVERFLOW;
+        else if (buffer_full) status = STATUS_BUFFER_OVERFLOW;
+    }
+
+    if (result_count && !(results = mem_alloc( result_count * sizeof(*results) ))) goto failed;
+    if (data_size && !(data = mem_alloc( data_size ))) goto failed;
+
+    used = 0;
+    data_size = 0;
+    for (i = 0; i < result_count; i++)
+    {
+        struct key_value *value = values[i];
+
+        used = (used + sizeof(ULONG) - 1) & ~(file_pos_t)(sizeof(ULONG) - 1);
+        results[i].type = value->type;
+        results[i].length = value->len;
+        results[i].offset = used;
+        results[i].data_offset = data_size;
+        if (value->len)
+        {
+            memcpy( data + data_size, value->data, value->len );
+            data_size += value->len;
+        }
+        used += value->len;
+    }
+
+    query->executed = 1;
+    query->status = status;
+    query->used = min( reported_used, (file_pos_t)UINT_MAX );
+    query->required = min( required, (file_pos_t)UINT_MAX );
+    query->result_count = result_count;
+    query->results = results;
+    query->data = data;
+    query->data_size = data_size;
+    free( name );
+    free( values );
+    return 1;
+
+failed:
+    free( data );
+    free( results );
+    free( name );
+    free( values );
+    return 0;
 }
 
 /* enumerate a key value */
@@ -2303,6 +2549,137 @@ DECL_HANDLER(get_key_value)
     {
         get_value( key, &name, &reply->type, &reply->total );
         release_object( key );
+    }
+}
+
+/* create a staged multiple-value query */
+DECL_HANDLER(create_key_value_query)
+{
+    struct key_value_query *query;
+    struct key *key;
+
+    reply->handle = 0;
+    if (!(key = get_hkey_obj( req->hkey, KEY_QUERY_VALUE ))) return;
+    if ((query = alloc_object( &key_value_query_ops )))
+    {
+        query->key = key;
+        list_init( &query->chunks );
+        query->names_size = 0;
+        query->count = req->count;
+        query->executed = 0;
+        query->status = STATUS_SUCCESS;
+        query->used = 0;
+        query->required = 0;
+        query->result_count = 0;
+        query->results = NULL;
+        query->data = NULL;
+        query->data_size = 0;
+        reply->handle = alloc_handle_no_access_check( current->process, query, 0, 0 );
+        release_object( query );
+    }
+    else release_object( key );
+}
+
+/* append packed names to a staged multiple-value query */
+DECL_HANDLER(append_key_value_query)
+{
+    struct key_value_query *query;
+
+    if ((query = (struct key_value_query *)get_handle_obj( current->process, req->handle, 0,
+                                                           &key_value_query_ops )))
+    {
+        data_size_t size = get_req_data_size();
+
+        if (query->count > MAX_QUERY_VALUE_COUNT)
+            set_error( STATUS_INSUFFICIENT_RESOURCES );
+        else
+        {
+            file_pos_t max_size = (file_pos_t)query->count *
+                                  (sizeof(unsigned int) + USHRT_MAX - 1);
+
+            if (query->executed || req->offset != query->names_size ||
+                query->names_size > max_size || size > max_size - query->names_size)
+                set_error( STATUS_INVALID_PARAMETER );
+            else if (size)
+            {
+                struct key_value_query_chunk *chunk;
+                size_t alloc_size = offsetof( struct key_value_query_chunk, data ) + size;
+
+                if ((chunk = mem_alloc( alloc_size )))
+                {
+                    chunk->size = size;
+                    memcpy( chunk->data, get_req_data(), size );
+                    list_add_tail( &query->chunks, &chunk->entry );
+                    query->names_size += size;
+                }
+            }
+        }
+        release_object( query );
+    }
+}
+
+/* perform all lookups and retain one result snapshot */
+DECL_HANDLER(execute_key_value_query)
+{
+    struct key_value_query *query;
+
+    reply->status = STATUS_SUCCESS;
+    reply->used = 0;
+    reply->required = 0;
+    reply->count = 0;
+    if ((query = (struct key_value_query *)get_handle_obj( current->process, req->handle, 0,
+                                                           &key_value_query_ops )))
+    {
+        if (query->executed || req->count > query->count || req->count > MAX_QUERY_VALUE_COUNT)
+            set_error( req->count > MAX_QUERY_VALUE_COUNT ? STATUS_INSUFFICIENT_RESOURCES :
+                       STATUS_INVALID_PARAMETER );
+        else if (execute_key_value_query( query, req->count, req->length ))
+        {
+            reply->status = query->status;
+            reply->used = query->used;
+            reply->required = query->required;
+            reply->count = query->result_count;
+        }
+        release_object( query );
+    }
+}
+
+/* read one bounded section of a retained result snapshot */
+DECL_HANDLER(read_key_value_query)
+{
+    struct key_value_query *query;
+
+    reply->total = 0;
+    if ((query = (struct key_value_query *)get_handle_obj( current->process, req->handle, 0,
+                                                           &key_value_query_ops )))
+    {
+        const void *data = NULL;
+        data_size_t total = 0;
+
+        if (!query->executed) set_error( STATUS_INVALID_PARAMETER );
+        else if (req->which == KEY_VALUE_QUERY_RESULTS)
+        {
+            data = query->results;
+            total = query->result_count * sizeof(*query->results);
+        }
+        else if (req->which == KEY_VALUE_QUERY_DATA)
+        {
+            data = query->data;
+            total = query->data_size;
+        }
+        else set_error( STATUS_INVALID_PARAMETER );
+
+        if (!get_error())
+        {
+            reply->total = total;
+            if (req->offset > total) set_error( STATUS_INVALID_PARAMETER );
+            else if (req->offset < total)
+            {
+                data_size_t size = min( total - req->offset, get_reply_max_size() );
+                set_reply_data( (const char *)data + req->offset, size );
+            }
+        }
+        release_object( query );
     }
 }
 

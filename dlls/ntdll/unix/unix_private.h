@@ -400,6 +400,9 @@ extern NTSTATUS unixcall_wine_server_call( void *args );
 extern NTSTATUS unixcall_wine_server_fd_to_handle( void *args );
 extern NTSTATUS unixcall_wine_server_handle_to_fd( void *args );
 extern NTSTATUS unixcall_wine_spawnvp( void *args );
+extern NTSTATUS unixcall_wine_probe_for_write( void *args );
+extern NTSTATUS unixcall_wine_create_key_value_query( void *args );
+extern NTSTATUS unixcall_wine_query_multiple_value_key( void *args );
 #ifdef _WIN64
 extern NTSTATUS wow64_wine_dbg_write( void *args );
 extern NTSTATUS wow64_wine_server_call( void *args );

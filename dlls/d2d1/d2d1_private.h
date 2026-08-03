@@ -442,7 +442,8 @@ HRESULT d2d_image_brush_create(ID2D1Factory *factory, ID2D1Image *image,
         struct d2d_brush **brush);
 void d2d_brush_bind_resources(struct d2d_brush *brush, struct d2d_device_context *context,
         unsigned int brush_idx);
-BOOL d2d_brush_fill_cb(const struct d2d_brush *brush, struct d2d_brush_cb *cb);
+BOOL d2d_brush_fill_cb(const struct d2d_brush *brush, D2D1_UNIT_MODE unit_mode,
+        struct d2d_brush_cb *cb);
 struct d2d_brush *unsafe_impl_from_ID2D1Brush(ID2D1Brush *iface);
 
 struct d2d_stroke_style

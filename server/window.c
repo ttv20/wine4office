@@ -36,6 +36,8 @@
 #include "user.h"
 #include "unicode.h"
 
+static const struct ratio no_dpi;
+
 /* a window property */
 struct property
 {
@@ -81,7 +83,6 @@ struct window
     unsigned int     color_key;       /* color key for a layered window */
     unsigned int     alpha;           /* alpha value for a layered window */
     unsigned int     layered_flags;   /* flags for a layered window */
-    unsigned int     monitor_dpi;     /* DPI of the window monitor */
     WCHAR           *text;            /* window caption text */
     data_size_t      text_len;        /* length of window caption */
     unsigned int     paint_flags;     /* various painting flags */
@@ -98,27 +99,10 @@ static void window_destroy( struct object *obj );
 
 static const struct object_ops window_ops =
 {
-    sizeof(struct window),    /* size */
-    &no_type,                 /* type */
-    window_dump,              /* dump */
-    no_add_queue,             /* add_queue */
-    NULL,                     /* remove_queue */
-    NULL,                     /* signaled */
-    NULL,                     /* satisfied */
-    no_signal,                /* signal */
-    no_get_fd,                /* get_fd */
-    default_get_sync,         /* get_sync */
-    default_map_access,       /* map_access */
-    default_get_sd,           /* get_sd */
-    default_set_sd,           /* set_sd */
-    no_get_full_name,         /* get_full_name */
-    no_lookup_name,           /* lookup_name */
-    no_link_name,             /* link_name */
-    NULL,                     /* unlink_name */
-    no_open_file,             /* open_file */
-    no_kernel_obj_list,       /* get_kernel_obj_list */
-    no_close_handle,          /* close_handle */
-    window_destroy            /* destroy */
+    .size    = sizeof(struct window),
+    .type    = &no_type,
+    .dump    = window_dump,
+    .destroy = window_destroy,
 };
 
 /* flags that can be set by the client */
@@ -319,16 +303,18 @@ static void map_point_raw_to_virt( struct desktop *desktop, int *x, int *y )
 }
 
 /* get the per-monitor DPI for a window */
-static unsigned int get_monitor_dpi( struct window *win )
+static struct ratio get_monitor_dpi( struct window *win )
 {
     while (win->parent && !is_desktop_window( win->parent )) win = win->parent;
-    return win->monitor_dpi;
+    return win->shared->dpi;
 }
 
-static unsigned int get_window_dpi( struct window *win )
+static struct ratio get_window_dpi( struct window *win )
 {
+    struct ratio dpi = {1, 1};
     if (NTUSER_DPI_CONTEXT_IS_MONITOR_AWARE( win->shared->dpi_context )) return get_monitor_dpi( win );
-    return NTUSER_DPI_CONTEXT_GET_DPI( win->shared->dpi_context );
+    dpi.num = NTUSER_DPI_CONTEXT_GET_DPI( win->shared->dpi_context );
+    return dpi;
 }
 
 /* link a window at the right place in the siblings list */
@@ -390,6 +376,20 @@ static int link_window( struct window *win, struct window *previous )
     return old_prev != win->entry.prev;
 }
 
+static void set_window_monitor_dpi( struct window *win )
+{
+    struct monitor_info *info;
+
+    if (!(info = get_monitor_from_rect( win->desktop->winstation, &win->window_rect, 0 ))) return;
+
+    SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+    {
+        shared->dpi     = info->dpi;
+        shared->raw_dpi = info->raw_dpi;
+    }
+    SHARED_WRITE_END;
+}
+
 /* change the parent of a window (or unlink the window if the new parent is NULL) */
 static int set_parent_window( struct window *win, struct window *parent )
 {
@@ -411,14 +411,14 @@ static int set_parent_window( struct window *win, struct window *parent )
         win->parent = (struct window *)grab_object( parent );
         link_window( win, WINPTR_TOP );
 
-        if (!is_desktop_window( parent ))
+        if (is_desktop_window( parent )) set_window_monitor_dpi( win );
+        else SHARED_WRITE_BEGIN( win->shared, window_shm_t )
         {
-            SHARED_WRITE_BEGIN( win->shared, window_shm_t )
-            {
-                shared->dpi_context = parent->shared->dpi_context;
-            }
-            SHARED_WRITE_END;
+            shared->dpi_context = parent->shared->dpi_context;
+            shared->dpi         = parent->shared->dpi;
+            shared->raw_dpi     = parent->shared->raw_dpi;
         }
+        SHARED_WRITE_END;
 
         /* if parent belongs to a different thread and the window isn't */
         /* top-level, attach the two threads */
@@ -658,7 +658,6 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->is_layered     = 0;
     win->is_orphan      = 0;
     win->set_foreground = 0;
-    win->monitor_dpi    = USER_DEFAULT_SCREEN_DPI;
     win->text           = NULL;
     win->text_len       = 0;
     win->paint_flags    = 0;
@@ -674,9 +673,14 @@ static struct window *create_window( struct window *parent, struct window *owner
     SHARED_WRITE_BEGIN( win->shared, window_shm_t )
     {
         shared->class           = class_locator;
+        /* FIXME: NTUSER_DPI_PER_MONITOR_AWARE_V2 isn't implemented */
         shared->dpi_context     = NTUSER_DPI_PER_MONITOR_AWARE;
         shared->fnid            = fnid;
         shared->private_size    = private_size;
+        shared->dpi.num         = USER_DEFAULT_SCREEN_DPI;
+        shared->dpi.den         = 1;
+        shared->raw_dpi.num     = USER_DEFAULT_SCREEN_DPI;
+        shared->raw_dpi.den     = 1;
         shared->extra_size      = extra_size;
         memset( (void *)&shared->info, 0, sizeof(shared->info) );
         memset( (void *)shared->extra, 0, extra_size );
@@ -815,30 +819,30 @@ static inline void inc_window_paint_count( struct window *win, int incr )
 }
 
 /* map a point between different DPI scaling levels */
-static void map_dpi_point( struct window *win, int *x, int *y, unsigned int from, unsigned int to )
+static void map_dpi_point( struct window *win, int *x, int *y, struct ratio from, struct ratio to )
 {
-    if (!from) from = get_monitor_dpi( win );
-    if (!to) to = get_monitor_dpi( win );
-    if (from == to) return;
+    if (!from.num) from = get_monitor_dpi( win );
+    if (!to.num) to = get_monitor_dpi( win );
+    if (from.num == to.num) return;
     *x = scale_dpi( *x, from, to );
     *y = scale_dpi( *y, from, to );
 }
 
 /* map a window rectangle between different DPI scaling levels */
-static void map_dpi_rect( struct window *win, struct rectangle *rect, unsigned int from, unsigned int to )
+static void map_dpi_rect( struct window *win, struct rectangle *rect, struct ratio from, struct ratio to )
 {
-    if (!from) from = get_monitor_dpi( win );
-    if (!to) to = get_monitor_dpi( win );
-    if (from == to) return;
+    if (!from.num) from = get_monitor_dpi( win );
+    if (!to.num) to = get_monitor_dpi( win );
+    if (from.num == to.num) return;
     scale_dpi_rect( rect, from, to );
 }
 
 /* map a region between different DPI scaling levels */
-static void map_dpi_region( struct window *win, struct region *region, unsigned int from, unsigned int to )
+static void map_dpi_region( struct window *win, struct region *region, struct ratio from, struct ratio to )
 {
-    if (!from) from = get_monitor_dpi( win );
-    if (!to) to = get_monitor_dpi( win );
-    if (from == to) return;
+    if (!from.num) from = get_monitor_dpi( win );
+    if (!to.num) to = get_monitor_dpi( win );
+    if (from.num == to.num) return;
     scale_region( region, from, to );
 }
 
@@ -853,7 +857,7 @@ static inline void client_to_screen( struct window *win, int *x, int *y )
 }
 
 /* convert coordinates from screen to client coords and dpi */
-static void screen_to_client( struct window *win, int *x, int *y, unsigned int dpi )
+static void screen_to_client( struct window *win, int *x, int *y, struct ratio dpi )
 {
     int offset_x = 0, offset_y = 0;
 
@@ -909,7 +913,7 @@ static int is_parent_composited( struct window *win )
 }
 
 /* check if point is inside the window, and map to window dpi */
-static int is_point_in_window( struct window *win, int *x, int *y, unsigned int dpi )
+static int is_point_in_window( struct window *win, int *x, int *y, struct ratio dpi )
 {
     if (!(win->style & WS_VISIBLE)) return 0; /* not visible */
     if ((win->style & (WS_POPUP|WS_CHILD|WS_DISABLED)) == (WS_CHILD|WS_DISABLED))
@@ -1048,7 +1052,7 @@ user_handle_t shallow_window_from_point( struct desktop *desktop, int x, int y )
     {
         int x_child = x, y_child = y;
 
-        if (!is_point_in_window( ptr, &x_child, &y_child, 0 )) continue;  /* skip it */
+        if (!is_point_in_window( ptr, &x_child, &y_child, no_dpi )) continue;  /* skip it */
         return ptr->handle;
     }
     return desktop->top_window->handle;
@@ -1063,7 +1067,7 @@ struct thread *window_thread_from_point( user_handle_t scope, int x, int y )
 
     map_point_raw_to_virt( win->desktop, &x, &y );
 
-    screen_to_client( win, &x, &y, 0 );
+    screen_to_client( win, &x, &y, no_dpi );
     if (!window_has_direct_hardware_input( win ))
         win = child_window_from_point( win, x, y );
     if (!win->thread) return NULL;
@@ -1082,7 +1086,7 @@ int is_direct_hardware_input_window( user_handle_t handle )
 }
 
 /* return list of all windows containing point (in absolute coords) */
-static int all_windows_from_point( struct window *top, int x, int y, unsigned int dpi,
+static int all_windows_from_point( struct window *top, int x, int y, struct ratio dpi,
                                    struct user_handle_array *array )
 {
     if (!is_desktop_window( top ) && !is_desktop_window( top->parent ))
@@ -1968,6 +1972,9 @@ static void set_window_pos( struct window *win, struct window *previous,
     if (swp_flags & SWP_SHOWWINDOW) win->style |= WS_VISIBLE;
     else if (swp_flags & SWP_HIDEWINDOW) win->style &= ~WS_VISIBLE;
 
+    /* update window monitor dpi for toplevel windows */
+    if (!win->parent || is_desktop_window( win->parent )) set_window_monitor_dpi( win );
+
     /* keep children at the same position relative to top right corner when the parent is mirrored */
     if (win->ex_style & WS_EX_LAYOUTRTL)
     {
@@ -2226,7 +2233,7 @@ DECL_HANDLER(create_window)
     struct window *win, *parent = NULL, *owner = NULL;
     struct unicode_str cls_name = get_req_unicode_str();
     struct atom_table *table = get_user_atom_table();
-    unsigned int dpi_context;
+    unsigned int dpi_context = req->dpi_context;
     atom_t atom = req->atom;
 
     reply->handle = 0;
@@ -2259,17 +2266,19 @@ DECL_HANDLER(create_window)
 
     if (!(win = create_window( parent, owner, atom, req->class_instance, !!req->ansi ))) return;
 
-    if (parent && !is_desktop_window( parent ))
-        dpi_context = parent->shared->dpi_context;
-    else if (!parent || !NTUSER_DPI_CONTEXT_IS_MONITOR_AWARE( req->dpi_context ))
-        dpi_context = req->dpi_context;
-    else
-        dpi_context = win->shared->dpi_context;
+    /* FIXME: NTUSER_DPI_PER_MONITOR_AWARE_V2 isn't implemented */
+    if (NTUSER_DPI_CONTEXT_IS_MONITOR_AWARE( dpi_context )) dpi_context = NTUSER_DPI_PER_MONITOR_AWARE;
 
     SHARED_WRITE_BEGIN( win->shared, window_shm_t )
     {
         shared->dpi_context     = dpi_context;
         shared->info.instance   = req->instance;
+        if (parent && !is_desktop_window( parent ))
+        {
+            shared->dpi_context = parent->shared->dpi_context;
+            shared->dpi         = parent->shared->dpi;
+            shared->raw_dpi     = parent->shared->raw_dpi;
+        }
     }
     SHARED_WRITE_END;
 
@@ -2754,7 +2763,6 @@ DECL_HANDLER(set_window_pos)
     win->paint_flags = (win->paint_flags & ~PAINT_CLIENT_FLAGS) | (req->paint_flags & PAINT_CLIENT_FLAGS);
     if (win->paint_flags & PAINT_HAS_PIXEL_FORMAT) update_pixel_format_flags( win );
 
-    win->monitor_dpi = req->monitor_dpi;
     old_style = win->style;
     old_window = win->window_rect;
     old_client = win->client_rect;
@@ -3053,12 +3061,17 @@ DECL_HANDLER(get_update_region)
 
 
 /* update the z order of a window so that a given rectangle is fully visible */
-DECL_HANDLER(update_window_zorder)
+void set_window_rect_visible( user_handle_t window, struct rectangle rect )
 {
-    struct rectangle tmp, rect = req->rect;
-    struct window *ptr, *win = get_window( req->window );
+    struct window *ptr, *win;
+    struct rectangle tmp;
 
-    if (!win || !win->parent || !is_visible( win )) return;  /* nothing to do */
+    if (!(win = get_window( window )) || !win->parent || !is_visible( win )) return;  /* nothing to do */
+
+    map_point_raw_to_virt( win->desktop, &rect.left, &rect.top );
+    map_point_raw_to_virt( win->desktop, &rect.right, &rect.bottom );
+    rect.right = max( rect.left + 1, rect.right );
+    rect.bottom = max( rect.top + 1, rect.bottom );
 
     LIST_FOR_EACH_ENTRY( ptr, &win->parent->children, struct window, entry )
     {
@@ -3085,6 +3098,10 @@ DECL_HANDLER(update_window_zorder)
     }
 }
 
+DECL_HANDLER(update_window_zorder)
+{
+    set_window_rect_visible( req->window, req->rect );
+}
 
 /* mark parts of a window as needing a redraw */
 DECL_HANDLER(redraw_window)

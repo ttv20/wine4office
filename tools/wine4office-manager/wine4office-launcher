@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Stable command-line launcher used by Wine4Office desktop files."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+LIB = HERE.parent / "lib"
+if (LIB / "wine4office_backend.py").is_file():
+    sys.path.insert(0, str(LIB))
+    HELPER = LIB / "register-office-cloud-fonts.sh"
+else:
+    sys.path.insert(0, str(HERE))
+    HELPER = HERE / "register-office-cloud-fonts.sh"
+
+import wine4office_backend as backend  # noqa: E402
+
+
+def main() -> int:
+    defaults = backend.load_config()
+    parser = argparse.ArgumentParser(description="Launch Office or a Wine tool with Wine4Office")
+    parser.add_argument("--prefix", default=defaults["prefix"])
+    parser.add_argument("--wine", default=defaults["wine"])
+    parser.add_argument("target", choices=[*backend.APP_META, *backend.TOOL_META, "stop"])
+    parser.add_argument("documents", nargs="*")
+    args = parser.parse_args()
+    try:
+        if args.target in backend.APP_META:
+            backend.launch_app(
+                args.prefix, args.wine, args.target, HELPER, args.documents,
+                use_x11=defaults["use_x11"],
+            )
+        else:
+            if args.documents:
+                parser.error("Wine tools do not accept document arguments.")
+            backend.launch_tool(
+                args.prefix, args.wine, args.target, use_x11=defaults["use_x11"]
+            )
+    except Exception as error:
+        print(f"wine4office-launcher: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -113,6 +113,7 @@ MAKE_FUNCPTR(FT_New_Face);
 MAKE_FUNCPTR(FT_New_Memory_Face);
 MAKE_FUNCPTR(FT_Outline_Embolden);
 MAKE_FUNCPTR(FT_Outline_Get_Bitmap);
+MAKE_FUNCPTR(FT_Outline_Render);
 MAKE_FUNCPTR(FT_Outline_Get_CBox);
 MAKE_FUNCPTR(FT_Outline_Transform);
 MAKE_FUNCPTR(FT_Outline_Translate);
@@ -1489,6 +1490,7 @@ static BOOL init_freetype(void)
     LOAD_FUNCPTR(FT_New_Memory_Face)
     LOAD_FUNCPTR(FT_Outline_Embolden)
     LOAD_FUNCPTR(FT_Outline_Get_Bitmap)
+    LOAD_FUNCPTR(FT_Outline_Render)
     LOAD_FUNCPTR(FT_Outline_Get_CBox)
     LOAD_FUNCPTR(FT_Outline_Transform)
     LOAD_FUNCPTR(FT_Outline_Translate)
@@ -2718,8 +2720,173 @@ static DWORD get_antialias_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT 
     return needed;
 }
 
-static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT format,
-                                        BOOL fake_bold, const FT_Matrix *matrices,
+struct outline_render_context
+{
+    BYTE *buf;
+    INT pitch;
+    INT width;
+    INT height;
+    INT x_min;
+    INT y_max;
+};
+
+static void antialias_outline_spans( INT y, INT count, const FT_Span *spans, void *user )
+{
+    struct outline_render_context *context = user;
+    INT row = context->y_max - 1 - y;
+    INT i, x;
+
+    if (row < 0 || row >= context->height) return;
+    for (i = 0; i < count; i++)
+    {
+        INT first = max( spans[i].x - context->x_min, 0 );
+        INT last = min( spans[i].x + spans[i].len - context->x_min, context->width );
+
+        for (x = first; x < last; x++)
+            context->buf[row * context->pitch + x] = spans[i].coverage;
+    }
+}
+
+static BYTE filter_lcd_sample( const BYTE *buf, INT pitch, INT width, INT height,
+                               INT x, INT y, BOOL horizontal )
+{
+    /* freetype_init() selects FT_LCD_FILTER_DEFAULT and Wine exposes no custom weights. */
+    static const BYTE weights[5] = { 0x08, 0x4d, 0x56, 0x4d, 0x08 };
+    UINT value = 0;
+    INT i;
+
+    for (i = 0; i < 5; i++)
+    {
+        INT sample_x = x + (horizontal ? i - 2 : 0);
+        INT sample_y = y + (horizontal ? 0 : i - 2);
+
+        if (sample_x >= 0 && sample_x < width && sample_y >= 0 && sample_y < height)
+            value += (buf[sample_y * pitch + sample_x] * weights[i] + 85) >> 8;
+    }
+    return min( value, 255 );
+}
+
+static FT_Error render_filtered_subpixel_outline( FT_GlyphSlot glyph, FT_BBox bbox, UINT format,
+                                                   DWORD width, DWORD height, DWORD pitch, BYTE *buf )
+{
+    static const INT rgb_order[3] = { 0, 1, 2 };
+    static const INT bgr_order[3] = { 2, 1, 0 };
+    const INT *order = (format == WINE_GGO_HRGB_BITMAP ||
+                        format == WINE_GGO_VRGB_BITMAP) ? rgb_order : bgr_order;
+    BOOL horizontal = (format == WINE_GGO_HRGB_BITMAP ||
+                       format == WINE_GGO_HBGR_BITMAP);
+    struct outline_render_context context;
+    FT_Raster_Params params = {0};
+    FT_Outline outline = glyph->outline;
+    SIZE_T points_size, buf_size;
+    BYTE *coverage;
+    FT_Error error;
+    INT x, y, i;
+
+    if (!outline.n_points) return FT_Err_Invalid_Outline;
+    if ((horizontal && width > INT_MAX / 3) || (!horizontal && height > INT_MAX / 3))
+        return FT_Err_Raster_Overflow;
+
+    points_size = outline.n_points * sizeof(*outline.points);
+    if (!(outline.points = malloc( points_size ))) return FT_Err_Out_Of_Memory;
+    memcpy( outline.points, glyph->outline.points, points_size );
+
+    context.width = horizontal ? width * 3 : width;
+    context.height = horizontal ? height : height * 3;
+    context.pitch = context.width;
+    context.x_min = (bbox.xMin >> 6) * (horizontal ? 3 : 1);
+    context.y_max = (bbox.yMax >> 6) * (horizontal ? 1 : 3);
+    buf_size = (SIZE_T)context.pitch * context.height;
+    if (!(coverage = malloc( buf_size )))
+    {
+        free( outline.points );
+        return FT_Err_Out_Of_Memory;
+    }
+    memset( coverage, 0, buf_size );
+    context.buf = coverage;
+
+    for (i = 0; i < outline.n_points; i++)
+    {
+        if (horizontal) outline.points[i].x *= 3;
+        else outline.points[i].y *= 3;
+    }
+
+    params.source = &outline;
+    params.flags = FT_RASTER_FLAG_AA | FT_RASTER_FLAG_DIRECT | FT_RASTER_FLAG_CLIP;
+    params.gray_spans = antialias_outline_spans;
+    params.user = &context;
+    params.clip_box.xMin = context.x_min;
+    params.clip_box.xMax = context.x_min + context.width;
+    params.clip_box.yMax = context.y_max;
+    params.clip_box.yMin = context.y_max - context.height;
+    error = pFT_Outline_Render( library, &outline, &params );
+    free( outline.points );
+
+    memset( buf, 0, pitch * height );
+    if (!error)
+    {
+        for (y = 0; y < height; y++)
+        {
+            DWORD *dst = (DWORD *)(buf + y * pitch);
+
+            for (x = 0; x < width; x++)
+            {
+                BYTE samples[3];
+
+                for (i = 0; i < 3; i++)
+                {
+                    INT sample_x = horizontal ? x * 3 + order[i] : x;
+                    INT sample_y = horizontal ? y : y * 3 + order[i];
+
+                    samples[i] = filter_lcd_sample( coverage, context.pitch, context.width,
+                                                    context.height, sample_x, sample_y, horizontal );
+                }
+                dst[x] = ((DWORD)samples[0] << 16) | ((DWORD)samples[1] << 8) | samples[2];
+            }
+        }
+    }
+    free( coverage );
+    return error;
+}
+
+static FT_Error reload_glyph_outline( FT_GlyphSlot glyph, UINT glyph_index, FT_Int load_flags,
+                                      BOOL fake_bold, LONG ppem, const FT_Matrix *matrices )
+{
+    FT_Glyph_Metrics metrics;
+    FT_Error error;
+
+    error = pFT_Load_Glyph( glyph->face, glyph_index, load_flags );
+    if (!error && fake_bold)
+    {
+        metrics = glyph->metrics;
+        get_bold_glyph_outline( glyph, ppem, &metrics );
+    }
+    if (!error && matrices)
+        pFT_Outline_Transform( &glyph->outline, &matrices[matrix_vert] );
+    return error;
+}
+
+static void copy_mono_outline_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, DWORD width,
+                                      DWORD height, DWORD pitch, BYTE *buf )
+{
+    INT x_shift = glyph->bitmap_left - (bbox.xMin >> 6);
+    INT y_shift = (bbox.yMax >> 6) - glyph->bitmap_top;
+    INT x, y;
+
+    memset( buf, 0, pitch * height );
+    for (y = max( y_shift, 0 ); y < min( y_shift + (INT)glyph->bitmap.rows, (INT)height ); y++)
+    {
+        const BYTE *src = glyph->bitmap.buffer + (y - y_shift) * glyph->bitmap.pitch;
+        DWORD *dst = (DWORD *)(buf + y * pitch);
+
+        for (x = max( x_shift, 0 ); x < min( x_shift + (INT)glyph->bitmap.width, (INT)width ); x++)
+            if (src[(x - x_shift) / 8] & masks[(x - x_shift) % 8]) dst[x] = ~0u;
+    }
+}
+
+static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, UINT glyph_index, FT_BBox bbox,
+                                        UINT format, BOOL fake_bold, LONG ppem,
+                                        FT_Int load_flags, const FT_Matrix *matrices,
                                         GLYPHMETRICS *gm, DWORD buflen, BYTE *buf )
 {
     DWORD width  = (bbox.xMax - bbox.xMin ) >> 6;
@@ -2762,6 +2929,7 @@ static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT f
     case FT_GLYPH_FORMAT_OUTLINE:
       {
         INT src_pitch, src_width, src_height, x_shift, y_shift;
+        FT_Error error;
         INT sub_stride, hmul, vmul;
         const INT *sub_order;
         const INT rgb_order[3] = { 0, 1, 2 };
@@ -2800,7 +2968,30 @@ static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT f
         if (matrices)
             pFT_Outline_Transform( &glyph->outline, &matrices[matrix_vert] );
 
-        pFT_Render_Glyph( glyph, render_mode );
+        error = pFT_Render_Glyph( glyph, render_mode );
+        if (error)
+        {
+            TRACE("Failed to render glyph in subpixel mode, retrying filtered direct rendering. Error %#x.\n",
+                  error);
+            error = reload_glyph_outline( glyph, glyph_index, load_flags, fake_bold, ppem, matrices );
+            if (!error)
+                error = render_filtered_subpixel_outline( glyph, bbox, format, width, height, pitch, buf );
+            if (!error) return needed;
+
+            TRACE("Failed to render glyph directly, retrying monochrome. Error %#x.\n", error);
+            memset( buf, 0, pitch * height );
+            error = reload_glyph_outline( glyph, glyph_index, load_flags, fake_bold, ppem, matrices );
+            if (!error) error = pFT_Render_Glyph( glyph, FT_RENDER_MODE_MONO );
+            if (!error)
+            {
+                copy_mono_outline_bitmap( glyph, bbox, width, height, pitch, buf );
+                return needed;
+            }
+
+            memset( buf, 0, pitch * height );
+            TRACE("Failed to render glyph in monochrome. Error %#x.\n", error);
+            return GDI_ERROR;
+        }
 
         src_pitch = glyph->bitmap.pitch;
         src_width = glyph->bitmap.width;
@@ -2808,11 +2999,12 @@ static DWORD get_subpixel_glyph_bitmap( FT_GlyphSlot glyph, FT_BBox bbox, UINT f
         src = glyph->bitmap.buffer;
         dst = buf;
         memset( buf, 0, buflen );
+        if (!src || !src_width || !src_height) return needed;
 
         sub_order  = (format == WINE_GGO_HRGB_BITMAP ||
                       format == WINE_GGO_VRGB_BITMAP) ? rgb_order : bgr_order;
         sub_stride = render_mode == FT_RENDER_MODE_LCD ? 1 : src_pitch;
-        hmul       = render_mode == FT_RENDER_MODE_LCD ? 3 : 1;
+        hmul       = render_mode != FT_RENDER_MODE_LCD ? 1 : 3;
         vmul       = render_mode == FT_RENDER_MODE_LCD ? 1 : 3;
 
         x_shift = glyph->bitmap_left - (bbox.xMin >> 6);
@@ -3187,8 +3379,8 @@ static UINT freetype_get_glyph_outline( struct gdi_font *font, UINT glyph, UINT 
     case WINE_GGO_HBGR_BITMAP:
     case WINE_GGO_VRGB_BITMAP:
     case WINE_GGO_VBGR_BITMAP:
-        return get_subpixel_glyph_bitmap( ft_face->glyph, bbox, format, font->fake_bold,
-                                          matrices, lpgm, buflen, buf );
+        return get_subpixel_glyph_bitmap( ft_face->glyph, glyph, bbox, format, font->fake_bold,
+                                          font->ppem, load_flags, matrices, lpgm, buflen, buf );
 
     case GGO_NATIVE:
         if (ft_face->glyph->format == ft_glyph_format_outline)
@@ -3878,6 +4070,11 @@ static UINT freetype_get_kerning_pairs( struct gdi_font *font, KERNINGPAIR **pai
     return count;
 }
 
+static UINT freetype_get_default_aa_flags(void)
+{
+    return default_aa_flags;
+}
+
 static const struct font_backend_funcs font_funcs =
 {
     freetype_load_fonts,
@@ -3887,6 +4084,7 @@ static const struct font_backend_funcs font_funcs =
     freetype_load_font,
     freetype_get_font_data,
     freetype_get_aa_flags,
+    freetype_get_default_aa_flags,
     freetype_get_glyph_index,
     freetype_get_default_glyph,
     freetype_get_glyph_outline,

@@ -513,6 +513,7 @@ HKLM,%FontSubStr%,"Courier New TUR,162",,"Courier New,162"
 HKLM,%FontSubStr%,"Helv",,"MS Sans Serif"
 HKLM,%FontSubStr%,"Helvetica",,"Arial"
 HKLM,%FontSubStr%,"MS Shell Dlg 2",,"Tahoma"
+HKLM,%FontSubStr%,"Segoe UI",,"Tahoma"
 HKLM,%FontSubStr%,"Times",,"Times New Roman"
 HKLM,%FontSubStr%,"Times New Roman Baltic,186",,"Times New Roman,186"
 HKLM,%FontSubStr%,"Times New Roman CE,238",,"Times New Roman,238"
@@ -1020,8 +1021,6 @@ HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ThemeActive",2,"1
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","DllName",2,"%10%\resources\themes\aero\aero.msstyles"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","ColorName",2,"Blue"
 HKCU,"Software\Microsoft\Windows\CurrentVersion\ThemeManager","SizeName",2,"NormalSize"
-HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","AppsUseLightTheme",0x10001,1
-HKCU,"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize","SystemUsesLightTheme",0x10001,1
 
 [WinmgmtService]
 Description="Provides access to Windows Management Instrumentation"

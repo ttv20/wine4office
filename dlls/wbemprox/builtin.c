@@ -365,6 +365,7 @@ static const struct column col_physicalmemory[] =
     { L"PartNumber",           CIM_STRING },
     { L"SerialNumber",         CIM_STRING },
     { L"Speed",                CIM_UINT32 },
+    { L"Tag",                  CIM_STRING },
 };
 static const struct column col_physicalmemoryarray[] =
 {
@@ -947,6 +948,7 @@ struct record_physicalmemory
     const WCHAR *partnumber;
     const WCHAR *serial;
     UINT32       speed;
+    const WCHAR *tag;
 };
 struct record_physicalmemoryarray
 {
@@ -3524,6 +3526,7 @@ static enum fill_status fill_physicalmemory( struct table *table, const struct e
     rec->partnumber           = L"";
     rec->serial               = L"";
     rec->speed                = 3200;
+    rec->tag                  = L"Physical Memory 0";
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
@@ -3695,6 +3698,18 @@ static enum fill_status fill_pnpentity( struct table *table, const struct expr *
     return status;
 }
 
+static BOOL (WINAPI *pEnumPrintersW)(DWORD, WCHAR *, DWORD, BYTE *, DWORD, DWORD *, DWORD *);
+static INIT_ONCE winspool_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_winspool( INIT_ONCE *once, void *param, void **context )
+{
+    HMODULE module;
+
+    if ((module = LoadLibraryW( L"winspool.drv" )))
+        pEnumPrintersW = (void *)GetProcAddress( module, "EnumPrintersW" );
+    return TRUE;
+}
+
 static enum fill_status fill_printer( struct table *table, const struct expr *cond )
 {
     struct record_printer *rec;
@@ -3704,11 +3719,14 @@ static enum fill_status fill_printer( struct table *table, const struct expr *co
     UINT num_rows = 0;
     WCHAR id[20];
 
-    EnumPrintersW( PRINTER_ENUM_LOCAL, NULL, 2, NULL, 0, &size, &count );
+    InitOnceExecuteOnce( &winspool_init_once, init_winspool, NULL, NULL );
+    if (!pEnumPrintersW) return FILL_STATUS_FAILED;
+
+    pEnumPrintersW( PRINTER_ENUM_LOCAL, NULL, 2, NULL, 0, &size, &count );
     if (!count) return FILL_STATUS_UNFILTERED;
 
     if (!(info = malloc( size ))) return FILL_STATUS_FAILED;
-    if (!EnumPrintersW( PRINTER_ENUM_LOCAL, NULL, 2, (BYTE *)info, size, &size, &count ))
+    if (!pEnumPrintersW( PRINTER_ENUM_LOCAL, NULL, 2, (BYTE *)info, size, &size, &count ))
     {
         free( info );
         return FILL_STATUS_FAILED;

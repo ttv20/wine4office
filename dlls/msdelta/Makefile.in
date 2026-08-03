@@ -1,3 +1,6 @@
 MODULE    = msdelta.dll
+IMPORTLIB = msdelta
+IMPORTS   = mspatcha
 
-EXTRADLLFLAGS = -Wb,--prefer-native
+SOURCES = \
+	msdelta_main.c

@@ -96,6 +96,87 @@ struct heap
     UINT     force_flags;
 };
 
+#define HEAP_EXTENDED_PERFORMANCE_INFORMATION 0x80000000
+
+struct heap_performance_counters_information
+{
+    ULONG size;
+    ULONG version;
+    ULONG heap_index;
+    ULONG last_heap_index;
+    void *base_address;
+    SIZE_T reserve_size;
+    SIZE_T commit_size;
+    ULONG segment_count;
+    SIZE_T large_ucr_memory;
+    ULONG ucr_length;
+    SIZE_T allocated_space;
+    SIZE_T free_space;
+    ULONG free_list_length;
+    ULONG contention;
+    ULONG virtual_blocks;
+    ULONG commit_rate;
+    ULONG decommit_rate;
+    SIZE_T segment_heap_information[6];
+};
+
+struct heap_information_item
+{
+    ULONG level;
+    SIZE_T size;
+    union
+    {
+        struct heap_performance_counters_information performance;
+        ULONG_PTR dynamic_start;
+    } u;
+};
+
+typedef NTSTATUS (WINAPI *heap_extended_enumeration_routine)(
+        struct heap_information_item *information, void *context );
+
+struct heap_extended_information
+{
+    HANDLE process;
+    HANDLE heap;
+    ULONG level;
+    heap_extended_enumeration_routine callback;
+    void *context;
+    union
+    {
+        struct
+        {
+            SIZE_T reserve_size;
+            SIZE_T commit_size;
+            ULONG number_of_heaps;
+            ULONG_PTR first_heap_information_offset;
+        } process;
+        SIZE_T reserved[4];
+    } u;
+};
+
+struct heap_extended_test_context
+{
+    HANDLE heap;
+    ULONG count;
+    BOOL found;
+};
+
+static NTSTATUS WINAPI heap_extended_test_callback( struct heap_information_item *item, void *context )
+{
+    struct heap_extended_test_context *test = context;
+
+    ok( item->level == HEAP_EXTENDED_PERFORMANCE_INFORMATION, "got level %#lx\n", item->level );
+    ok( item->size >= offsetof(struct heap_performance_counters_information, segment_heap_information),
+            "got size %Iu\n", item->size );
+    ok( item->u.performance.version == 1 || item->u.performance.version == 2,
+            "got version %lu\n", item->u.performance.version );
+    ok( item->u.performance.heap_index <= item->u.performance.last_heap_index,
+            "got heap index %lu, last %lu\n", item->u.performance.heap_index,
+            item->u.performance.last_heap_index );
+    if (item->u.performance.base_address == test->heap) test->found = TRUE;
+    test->count++;
+    return 0;
+}
 
 /* undocumented RtlWalkHeap structure */
 
@@ -1261,6 +1342,73 @@ static void test_HeapCreate(void)
     CloseHandle( thread );
 }
 
+static void test_HeapExtendedInformation(void)
+{
+    struct heap_extended_test_context context = { GetProcessHeap() };
+    struct heap_extended_information info = {0};
+    HANDLE process = NULL;
+    SIZE_T size;
+    BOOL ret;
+
+    info.process = GetCurrentProcess();
+    info.level = HEAP_EXTENDED_PERFORMANCE_INFORMATION;
+    info.callback = heap_extended_test_callback;
+    info.context = &context;
+
+    size = 0;
+    SetLastError( 0xdeadbeef );
+    ret = pHeapQueryInformation( GetProcessHeap(), HeapExtendedInformation,
+            NULL, 0, &size );
+    ok( !ret, "HeapQueryInformation succeeded\n" );
+    ok( GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %lu\n", GetLastError() );
+    ok( size == sizeof(info), "got size %Iu\n", size );
+
+    size = 0;
+    SetLastError( 0xdeadbeef );
+    ret = pHeapQueryInformation( GetProcessHeap(), HeapExtendedInformation,
+            &info, sizeof(info) - 1, &size );
+    ok( !ret, "HeapQueryInformation succeeded\n" );
+    ok( GetLastError() == ERROR_INSUFFICIENT_BUFFER, "got error %lu\n", GetLastError() );
+    ok( size == sizeof(info), "got size %Iu\n", size );
+
+    info.callback = NULL;
+    SetLastError( 0xdeadbeef );
+    ret = pHeapQueryInformation( GetProcessHeap(), HeapExtendedInformation,
+            &info, sizeof(info), NULL );
+    ok( !ret, "HeapQueryInformation succeeded\n" );
+    ok( GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError() );
+    info.callback = heap_extended_test_callback;
+
+    size = 0;
+    SetLastError( 0xdeadbeef );
+    ret = pHeapQueryInformation( GetProcessHeap(), HeapExtendedInformation,
+            &info, sizeof(info), &size );
+    ok( ret, "HeapQueryInformation failed, error %lu\n", GetLastError() );
+    ok( size == sizeof(info), "got size %Iu\n", size );
+    if (ret)
+    {
+        ok( context.count != 0, "callback was not called\n" );
+        ok( context.found, "process heap was not enumerated\n" );
+    }
+
+    context.count = 0;
+    context.found = FALSE;
+    ret = DuplicateHandle( GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+            &process, PROCESS_QUERY_INFORMATION, FALSE, 0 );
+    ok( ret, "DuplicateHandle failed, error %lu\n", GetLastError() );
+    info.process = process;
+    info.heap = GetProcessHeap();
+    SetLastError( 0xdeadbeef );
+    ret = pHeapQueryInformation( GetProcessHeap(), HeapExtendedInformation,
+            &info, sizeof(info), NULL );
+    ok( ret, "HeapQueryInformation failed, error %lu\n", GetLastError() );
+    if (ret)
+    {
+        ok( context.count == 1, "got callback count %lu\n", context.count );
+        ok( context.found, "requested heap was not enumerated\n" );
+    }
+    CloseHandle( process );
+}
 
 struct mem_entry
 {
@@ -3877,6 +4025,7 @@ START_TEST(heap)
     }
 
     test_HeapCreate();
+    test_HeapExtendedInformation();
     test_GlobalAlloc();
     test_LocalAlloc();
 

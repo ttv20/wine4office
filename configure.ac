@@ -726,10 +726,12 @@ AC_CHECK_HEADERS(\
 	OpenCL/opencl.h \
 	arpa/inet.h \
 	arpa/nameser.h \
+	asm/hwcap.h \
 	asm/termbits.h \
 	asm/types.h \
 	asm/user.h \
-        bluetooth/bluetooth.h \
+	bluetooth/bluetooth.h \
+	dev/evdev/input.h \
 	elf.h \
 	gettext-po.h \
 	link.h \
@@ -1104,7 +1106,16 @@ case $host_os in
           *)
             WINE_TRY_CFLAGS([-static-pie],
                             [AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static-pie"])],
-                            [AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d00000000"])])
+            [
+                case $HOST_ARCH in
+                  aarch64)
+                    dnl AArch64 kernels may be limited to 39 bits of address
+                    dnl space; limit the text section load address to that.
+                    AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d000000"]) ;;
+                  *)
+                    AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d00000000"]) ;;
+                esac
+            ])
             ;;
         esac
         ;;
@@ -1511,10 +1522,11 @@ dnl **** Check for libpcsclite ****
 if test "x$with_pcsclite" != "xno"
 then
     WINE_PACKAGE_FLAGS(PCSCLITE,[libpcsclite],[-lpcsclite],,,
-                 [AC_CHECK_FUNC(SCardEstablishContext,[:],[PCSCLITE_LIBS=""])],
-                 [case $host_os in
-                    darwin*) AC_SUBST(PCSCLITE_LIBS,"-framework PCSC") ;;
-                  esac])
+                 [AC_CHECK_FUNC(SCardEstablishContext,[:],
+                    [case $host_os in
+                        darwin*) PCSCLITE_LIBS="-framework PCSC" ;;
+                        *) PCSCLITE_LIBS="";;
+                     esac])])
 fi
 WINE_NOTICE_WITH(pcsclite,[test "x$PCSCLITE_LIBS" = x],
                  [libpcsclite not found, smart cards won't be supported.],
@@ -2878,6 +2890,7 @@ WINE_CONFIG_MAKEFILE(dlls/mfplay/tests)
 WINE_CONFIG_MAKEFILE(dlls/mfreadwrite)
 WINE_CONFIG_MAKEFILE(dlls/mfreadwrite/tests)
 WINE_CONFIG_MAKEFILE(dlls/mfsensorgroup)
+WINE_CONFIG_MAKEFILE(dlls/mfsensorgroup/tests)
 WINE_CONFIG_MAKEFILE(dlls/mfsrcsnk)
 WINE_CONFIG_MAKEFILE(dlls/mfsrcsnk/tests)
 WINE_CONFIG_MAKEFILE(dlls/mgmtapi)
@@ -2923,6 +2936,7 @@ WINE_CONFIG_MAKEFILE(dlls/msdaps)
 WINE_CONFIG_MAKEFILE(dlls/msdasql)
 WINE_CONFIG_MAKEFILE(dlls/msdasql/tests)
 WINE_CONFIG_MAKEFILE(dlls/msdelta)
+WINE_CONFIG_MAKEFILE(dlls/msdelta/tests)
 WINE_CONFIG_MAKEFILE(dlls/msdmo)
 WINE_CONFIG_MAKEFILE(dlls/msdmo/tests)
 WINE_CONFIG_MAKEFILE(dlls/msdrm)
@@ -3667,7 +3681,9 @@ WINE_CONFIG_MAKEFILE(programs/view)
 WINE_CONFIG_MAKEFILE(programs/wevtutil)
 WINE_CONFIG_MAKEFILE(programs/where)
 WINE_CONFIG_MAKEFILE(programs/whoami)
-WINE_CONFIG_MAKEFILE(programs/wine365auth)
+WINE_CONFIG_MAKEFILE(programs/wine4office-appv-preload)
+WINE_CONFIG_MAKEFILE(programs/wine4officeauth)
+WINE_CONFIG_MAKEFILE(programs/wine4officeclose)
 WINE_CONFIG_MAKEFILE(programs/wineboot)
 WINE_CONFIG_MAKEFILE(programs/winebrowser)
 WINE_CONFIG_MAKEFILE(programs/winecfg)

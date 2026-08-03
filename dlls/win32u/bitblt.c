@@ -857,6 +857,8 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
     int oldStretchMode;
     DC *dc_src;
     DC *dc_work;
+    BITMAPOBJ *src_bitmap;
+    BOOL monochrome_source = FALSE;
 
     if(widthDest < 0 || heightDest < 0 || widthSrc < 0 || heightSrc < 0) {
         TRACE("Cannot mirror\n");
@@ -867,6 +869,13 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
 
     NtGdiGetAndSetDCDword( hdcDest, NtGdiSetBkColor, RGB(255,255,255), &oldBackground );
     NtGdiGetAndSetDCDword( hdcDest, NtGdiSetTextColor, RGB(0,0,0), &oldForeground );
+
+    if ((src_bitmap = GDI_GetObjPtr( dc_src->hBitmap, NTGDI_OBJ_BITMAP )))
+    {
+        monochrome_source = src_bitmap->dib.dsBm.bmPlanes == 1 &&
+                            src_bitmap->dib.dsBm.bmBitsPixel == 1;
+        GDI_ReleaseObj( dc_src->hBitmap );
+    }
 
     /* Stretch bitmap */
     oldStretchMode = dc_src->attr->stretch_blt_mode;
@@ -917,6 +926,21 @@ BOOL WINAPI NtGdiTransparentBlt( HDC hdcDest, int xDest, int yDest, int widthDes
     {
         TRACE("Failed to mask out background\n");
         goto error;
+    }
+
+    /* Monochrome sources use the destination DC text color for their visible
+     * pixels. The mask has already preserved which source pixels matched the
+     * transparent key, so tint only its zero (non-transparent) bits now. */
+    if (monochrome_source)
+    {
+        NtGdiGetAndSetDCDword( hdcWork, NtGdiSetBkColor, RGB(0,0,0), NULL );
+        NtGdiGetAndSetDCDword( hdcWork, NtGdiSetTextColor, oldForeground, NULL );
+        if (!NtGdiBitBlt( hdcWork, 0, 0, widthDest, heightDest, hdcMask, 0, 0,
+                          SRCPAINT, 0, 0 ))
+        {
+            TRACE("Failed to color monochrome source\n");
+            goto error;
+        }
     }
 
     /* Replace non-transparent area on destination with black */

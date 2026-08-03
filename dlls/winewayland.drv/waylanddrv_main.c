@@ -34,11 +34,13 @@ char *process_name = NULL;
 
 static const struct user_driver_funcs waylanddrv_funcs =
 {
+    .pActivateKeyboardLayout = WAYLAND_ActivateKeyboardLayout,
     .pClipboardWindowProc = WAYLAND_ClipboardWindowProc,
     .pClipCursor = WAYLAND_ClipCursor,
     .pDesktopWindowProc = WAYLAND_DesktopWindowProc,
     .pDestroyWindow = WAYLAND_DestroyWindow,
     .pSetIMECompositionRect = WAYLAND_SetIMECompositionRect,
+    .pGetKeyboardLayoutList = WAYLAND_GetKeyboardLayoutList,
     .pKbdLayerDescriptor = WAYLAND_KbdLayerDescriptor,
     .pNotifyIcon = WAYLAND_NotifyIcon,
     .pCleanupIcons = WAYLAND_CleanupIcons,

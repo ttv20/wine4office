@@ -3839,6 +3839,7 @@ GpStatus WINGDIPAPI GdipEnumerateMetafileSrcRectDestPoints(GpGraphics *graphics,
     GraphicsContainer state;
     GpPath *dst_path;
     RECT dst_bounds;
+    REAL scale_x, scale_y;
 
     TRACE("(%p,%p,%p,%i,%p,%i,%p,%p,%p)\n", graphics, metafile,
         destPoints, count, srcRect, srcUnit, callback, callbackData,
@@ -3932,10 +3933,25 @@ GpStatus WINGDIPAPI GdipEnumerateMetafileSrcRectDestPoints(GpGraphics *graphics,
         {
             stat = METAFILE_PlaybackGetDC(real_metafile);
 
-            dst_bounds.left = real_metafile->playback_points[0].X;
-            dst_bounds.right = real_metafile->playback_points[1].X;
-            dst_bounds.top = real_metafile->playback_points[0].Y;
-            dst_bounds.bottom = real_metafile->playback_points[2].Y;
+            /*
+             * EnumEnhMetaFile maps the entire metafile frame to dst_bounds.
+             * Expand that rectangle when only a source subrectangle is being
+             * played, matching the transform used for EMF+ records above.
+             */
+            scale_x = (real_metafile->playback_points[1].X -
+                    real_metafile->playback_points[0].X) / real_metafile->src_rect.Width;
+            scale_y = (real_metafile->playback_points[2].Y -
+                    real_metafile->playback_points[0].Y) / real_metafile->src_rect.Height;
+            dst_bounds.left = gdip_round(real_metafile->playback_points[0].X +
+                    (metafile->bounds.X - real_metafile->src_rect.X) * scale_x);
+            dst_bounds.right = gdip_round(real_metafile->playback_points[0].X +
+                    (metafile->bounds.X + metafile->bounds.Width -
+                    real_metafile->src_rect.X) * scale_x);
+            dst_bounds.top = gdip_round(real_metafile->playback_points[0].Y +
+                    (metafile->bounds.Y - real_metafile->src_rect.Y) * scale_y);
+            dst_bounds.bottom = gdip_round(real_metafile->playback_points[0].Y +
+                    (metafile->bounds.Y + metafile->bounds.Height -
+                    real_metafile->src_rect.Y) * scale_y);
         }
 
         if (stat == Ok)

@@ -376,7 +376,6 @@ struct x11drv_client_surface
     Colormap colormap;
     XVisualInfo visual;
     Window window;
-    RECT rect;
 
     HDC hdc_src;
     HDC hdc_dst;
@@ -436,6 +435,7 @@ struct x11drv_thread_data
     XIValuatorClassInfo x_valuator;
     XIValuatorClassInfo y_valuator;
     int      xinput2_pointer;      /* XInput2 master pointer device id */
+    int      root_window_users;    /* counter for root window XISelectEvents */
 #endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
 
     struct display_state desired_state;       /* display state tracking the desired / win32 state */
@@ -683,6 +683,11 @@ struct x11drv_win_data
     Window      whole_window;   /* X window for the complete window */
     Window      client_window;  /* X window for the client area */
     struct window_rects rects;  /* window rects in monitor DPI, relative to parent client area */
+    HWND        office_transition_target; /* paired Office popup while transition HWND is alive */
+    HWND        office_transition_owner;  /* GA_ROOTOWNER used to validate transition pairing */
+    RECT        office_transition_rect;   /* Win32 rectangle used to validate transition pairing */
+    BYTE        office_ulw_alpha; /* alpha from the latest Office UpdateLayeredWindow call */
+    unsigned long office_suppress_config_until_serial; /* on-screen reveal request ordering */
     struct host_window *parent; /* the host window parent, frame or embedder, NULL if root_window */
     XIC         xic;            /* X input context */
     UINT        managed : 1;    /* is window managed? */
@@ -697,6 +702,18 @@ struct x11drv_win_data
     UINT        parent_invalid : 1; /* is the parent host window possibly invalid */
     UINT        reparenting : 1; /* window is being reparented, likely from a decoration change */
     UINT        is_resizable : 1; /* window is allowed to be resized by the window manager */
+    UINT        surface_initialized : 1; /* whole window has received initialized surface contents */
+    UINT        map_after_first_paint : 1; /* visible window is waiting for initialized contents */
+    UINT        map_after_layered_attributes : 1; /* layered window is waiting for visible attributes */
+    UINT        reveal_after_first_paint : 1; /* mapped transparent window is waiting for painted contents */
+    UINT        warmup_content_ready : 1; /* Office popup surface contains non-uniform painted content */
+    UINT        office_net_ui_tool_window : 1; /* downstream Office Net UI popup compatibility scope */
+    UINT        office_popup_offscreen : 1; /* exact Office popup is mapped outside root while painted */
+    UINT        office_window_transition : 1; /* downstream Office popup transition helper */
+    UINT        office_transition_offscreen : 1; /* transition helper is preparing outside root bounds */
+    UINT        office_ulw_ready : 1; /* UpdateLayeredWindow established Office layered readiness */
+    UINT        office_ulw_uses_alpha : 1; /* latest Office UpdateLayeredWindow used ULW_ALPHA */
+    UINT        map_activate : 1; /* activate the window when deferred mapping completes */
     Window      embedder;       /* window id of embedder */
     Pixmap         icon_pixmap;
     Pixmap         icon_mask;
@@ -748,6 +765,13 @@ extern void detach_client_window( struct x11drv_win_data *data, Window client_wi
 extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
 extern void destroy_client_window( HWND hwnd, Window client_window );
 extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
+enum x11drv_present_source
+{
+    X11DRV_PRESENT_CLIENT_SURFACE,
+    X11DRV_PRESENT_WINDOW_SURFACE,
+};
+
+extern void window_surface_presented( HWND hwnd, enum x11drv_present_source source, BOOL content_ready );
 extern void change_systray_owner( Display *display, Window systray_window );
 extern BOOL update_clipboard( HWND hwnd );
 extern void init_win_context(void);

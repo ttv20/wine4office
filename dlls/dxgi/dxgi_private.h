@@ -96,6 +96,7 @@ void wined3d_display_mode_from_dxgi1(struct wined3d_display_mode *wined3d_mode,
 DXGI_USAGE dxgi_usage_from_wined3d_bind_flags(unsigned int wined3d_bind_flags);
 unsigned int wined3d_bind_flags_from_dxgi_usage(DXGI_USAGE usage);
 unsigned int dxgi_swapchain_flags_from_wined3d(unsigned int wined3d_flags);
+unsigned int wined3d_swapchain_flags_from_dxgi(unsigned int flags);
 HRESULT dxgi_get_output_from_window(IWineDXGIFactory *factory, HWND window, IDXGIOutput **dxgi_output)
        ;
 HRESULT wined3d_swapchain_desc_from_dxgi(struct wined3d_swapchain_desc *wined3d_desc,
@@ -185,6 +186,7 @@ struct d3d11_swapchain
     BOOL present1_shadow_valid;
     HWND composition_window;
 
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc;
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
@@ -193,13 +195,14 @@ struct d3d11_swapchain
 void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
-        struct wined3d_swapchain_desc *desc);
+        struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc);
 
 HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *queue, HWND window,
         const DXGI_SWAP_CHAIN_DESC1 *swapchain_desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc,
         IDXGISwapChain1 **swapchain);
 
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
+BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
 
 /* IDXGISurface/IDXGIResource */
 struct dxgi_resource

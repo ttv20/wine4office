@@ -1221,10 +1221,10 @@
 # @ stub PsmIsChildKey
 # @ stub PsmIsDynamicKey
 # @ stub PsmIsValidKey
-# @ stub PssCaptureSnapshot
+@ stdcall PssCaptureSnapshot(ptr long long ptr)
 # @ stub PssDuplicateSnapshot
-# @ stub PssFreeSnapshot
-# @ stub PssQuerySnapshot
+@ stdcall PssFreeSnapshot(ptr ptr)
+@ stdcall PssQuerySnapshot(ptr long ptr long)
 # @ stub PssWalkMarkerCreate
 # @ stub PssWalkMarkerFree
 # @ stub PssWalkMarkerGetPosition

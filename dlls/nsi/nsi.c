@@ -68,6 +68,7 @@ DWORD WINAPI NsiAllocateAndGetTable( DWORD unk, const NPI_MODULEID *module, DWOR
                                      void **static_data, DWORD static_size, DWORD *count, DWORD unk2 )
 {
     DWORD err, num = 64;
+    SIZE_T alloc_size, row_size = (SIZE_T)key_size + rw_size + dynamic_size + static_size;
     void *data[4] = { NULL };
     DWORD sizes[4] = { key_size, rw_size, dynamic_size, static_size };
     int i, attempt;
@@ -77,11 +78,22 @@ DWORD WINAPI NsiAllocateAndGetTable( DWORD unk, const NPI_MODULEID *module, DWOR
 
     for (attempt = 0; attempt < 5; attempt++)
     {
+        if (row_size > MAXDWORD || (row_size && num > (MAXDWORD - sizeof(DWORD)) / row_size))
+        {
+            err = ERROR_OUTOFMEMORY;
+            goto err;
+        }
         for (i = 0; i < ARRAY_SIZE(data); i++)
         {
             if (sizes[i])
             {
-                data[i] = HeapAlloc( GetProcessHeap(), 0, sizes[i] * num );
+                if (num > ~(SIZE_T)0 / sizes[i])
+                {
+                    err = ERROR_OUTOFMEMORY;
+                    goto err;
+                }
+                alloc_size = (SIZE_T)sizes[i] * num;
+                data[i] = HeapAlloc( GetProcessHeap(), 0, alloc_size );
                 if (!data[i])
                 {
                     err = ERROR_OUTOFMEMORY;
@@ -99,6 +111,7 @@ DWORD WINAPI NsiAllocateAndGetTable( DWORD unk, const NPI_MODULEID *module, DWOR
         err = NsiEnumerateObjectsAllParameters( unk, 0, module, table, NULL, 0, NULL, 0, NULL, 0, NULL, 0, &num );
         if (err) return err;
         err = ERROR_OUTOFMEMORY; /* fail if this is the last attempt */
+        if (num > MAXDWORD - (num >> 4)) goto err;
         num += num >> 4; /* the tables may grow before the next iteration; get ahead */
     }
 
@@ -166,13 +179,17 @@ DWORD WINAPI NsiEnumerateObjectsAllParametersEx( struct nsi_enumerate_all_ex *pa
     DWORD out_size, received, err = ERROR_SUCCESS;
     HANDLE device = get_nsi_device( FALSE );
     struct nsiproxy_enumerate_all in;
+    SIZE_T row_size, total_size;
     BYTE *out, *ptr;
 
     if (device == INVALID_HANDLE_VALUE) return GetLastError();
 
-    out_size = sizeof(DWORD) +
-        (params->key_size + params->rw_size + params->dynamic_size + params->static_size) * params->count;
-
+    row_size = (SIZE_T)params->key_size + params->rw_size + params->dynamic_size + params->static_size;
+    if (row_size > MAXDWORD ||
+        (row_size && params->count > (MAXDWORD - sizeof(DWORD)) / row_size))
+        return ERROR_OUTOFMEMORY;
+    total_size = sizeof(DWORD) + row_size * params->count;
+    out_size = (DWORD)total_size;
     out = malloc( out_size );
     if (!out) return ERROR_OUTOFMEMORY;
 
@@ -190,15 +207,25 @@ DWORD WINAPI NsiEnumerateObjectsAllParametersEx( struct nsi_enumerate_all_ex *pa
         err = GetLastError();
     if (err == ERROR_SUCCESS || err == ERROR_MORE_DATA)
     {
-        params->count = *(DWORD *)out;
-        ptr = out + sizeof(DWORD);
-        if (params->key_size) memcpy( params->key_data, ptr, params->key_size * params->count );
-        ptr += params->key_size * in.count;
-        if (params->rw_size) memcpy( params->rw_data, ptr, params->rw_size * params->count );
-        ptr += params->rw_size * in.count;
-        if (params->dynamic_size) memcpy( params->dynamic_data, ptr, params->dynamic_size * params->count );
-        ptr += params->dynamic_size * in.count;
-        if (params->static_size) memcpy( params->static_data, ptr, params->static_size * params->count );
+        if (received < sizeof(DWORD))
+            err = ERROR_INVALID_DATA;
+        else
+        {
+            params->count = *(DWORD *)out;
+            if (row_size && params->count > in.count)
+                err = ERROR_INVALID_DATA;
+            else
+            {
+                ptr = out + sizeof(DWORD);
+                if (params->key_size) memcpy( params->key_data, ptr, params->key_size * params->count );
+                ptr += params->key_size * in.count;
+                if (params->rw_size) memcpy( params->rw_data, ptr, params->rw_size * params->count );
+                ptr += params->rw_size * in.count;
+                if (params->dynamic_size) memcpy( params->dynamic_data, ptr, params->dynamic_size * params->count );
+                ptr += params->dynamic_size * in.count;
+                if (params->static_size) memcpy( params->static_data, ptr, params->static_size * params->count );
+            }
+        }
     }
 
     free( out );

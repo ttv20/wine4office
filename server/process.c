@@ -99,39 +99,19 @@ static void terminate_process( struct process *process, struct thread *skip, int
 
 static const struct object_ops process_ops =
 {
-    sizeof(struct process),      /* size */
-    &process_type,               /* type */
-    process_dump,                /* dump */
-    NULL,                        /* add_queue */
-    NULL,                        /* remove_queue */
-    NULL,                        /* signaled */
-    NULL,                        /* satisfied */
-    no_signal,                   /* signal */
-    no_get_fd,                   /* get_fd */
-    process_get_sync,            /* get_sync */
-    process_map_access,          /* map_access */
-    process_get_sd,              /* get_sd */
-    default_set_sd,              /* set_sd */
-    no_get_full_name,            /* get_full_name */
-    no_lookup_name,              /* lookup_name */
-    no_link_name,                /* link_name */
-    NULL,                        /* unlink_name */
-    no_open_file,                /* open_file */
-    process_get_kernel_obj_list, /* get_kernel_obj_list */
-    no_close_handle,             /* close_handle */
-    process_destroy              /* destroy */
+    .size                = sizeof(struct process),
+    .type                = &process_type,
+    .dump                = process_dump,
+    .get_sync            = process_get_sync,
+    .map_access          = process_map_access,
+    .get_sd              = process_get_sd,
+    .get_kernel_obj_list = process_get_kernel_obj_list,
+    .destroy             = process_destroy,
 };
 
 static const struct fd_ops process_fd_ops =
 {
-    NULL,                        /* get_poll_events */
-    process_poll_event,          /* poll_event */
-    NULL,                        /* flush */
-    NULL,                        /* get_fd_type */
-    NULL,                        /* ioctl */
-    NULL,                        /* queue_async */
-    NULL,                        /* reselect_async */
-    NULL                         /* cancel async */
+    .poll_event = process_poll_event,
 };
 
 /* process startup info */
@@ -152,27 +132,11 @@ static void startup_info_destroy( struct object *obj );
 
 static const struct object_ops startup_info_ops =
 {
-    sizeof(struct startup_info),   /* size */
-    &no_type,                      /* type */
-    startup_info_dump,             /* dump */
-    NULL,                          /* add_queue */
-    NULL,                          /* remove_queue */
-    NULL,                          /* signaled */
-    NULL,                          /* satisfied */
-    no_signal,                     /* signal */
-    no_get_fd,                     /* get_fd */
-    startup_info_get_sync,         /* get_sync */
-    default_map_access,            /* map_access */
-    default_get_sd,                /* get_sd */
-    default_set_sd,                /* set_sd */
-    no_get_full_name,              /* get_full_name */
-    no_lookup_name,                /* lookup_name */
-    no_link_name,                  /* link_name */
-    NULL,                          /* unlink_name */
-    no_open_file,                  /* open_file */
-    no_kernel_obj_list,            /* get_kernel_obj_list */
-    no_close_handle,               /* close_handle */
-    startup_info_destroy           /* destroy */
+    .size     = sizeof(struct startup_info),
+    .type     = &no_type,
+    .dump     = startup_info_dump,
+    .get_sync = startup_info_get_sync,
+    .destroy  = startup_info_destroy,
 };
 
 /* job object */
@@ -214,27 +178,12 @@ struct job
 
 static const struct object_ops job_ops =
 {
-    sizeof(struct job),            /* size */
-    &job_type,                     /* type */
-    job_dump,                      /* dump */
-    NULL,                          /* add_queue */
-    NULL,                          /* remove_queue */
-    NULL,                          /* signaled */
-    NULL,                          /* satisfied */
-    no_signal,                     /* signal */
-    no_get_fd,                     /* get_fd */
-    job_get_sync,                  /* get_sync */
-    default_map_access,            /* map_access */
-    default_get_sd,                /* get_sd */
-    default_set_sd,                /* set_sd */
-    default_get_full_name,         /* get_full_name */
-    no_lookup_name,                /* lookup_name */
-    directory_link_name,           /* link_name */
-    default_unlink_name,           /* unlink_name */
-    no_open_file,                  /* open_file */
-    no_kernel_obj_list,            /* get_kernel_obj_list */
-    job_close_handle,              /* close_handle */
-    job_destroy                    /* destroy */
+    .size         = sizeof(struct job),
+    .type         = &job_type,
+    .dump         = job_dump,
+    .get_sync     = job_get_sync,
+    .close_handle = job_close_handle,
+    .destroy      = job_destroy,
 };
 
 static struct job *create_job_object( struct object *root, const struct unicode_str *name,

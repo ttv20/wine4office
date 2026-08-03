@@ -630,6 +630,7 @@ static void test_getdc(void)
     HENHMETAFILE hemf;
     BOOL ret;
     static const GpRectF frame = {0.0, 0.0, 100.0, 100.0};
+    static const GpRectF right_half = {50.0, 0.0, 50.0, 100.0};
     static const GpPointF dst_points[3] = {{0.0,0.0},{100.0,0.0},{0.0,100.0}};
     static const GpPointF dst_points_half[3] = {{0.0,0.0},{50.0,0.0},{0.0,50.0}};
     HBRUSH hbrush, holdbrush;
@@ -725,6 +726,20 @@ static void test_getdc(void)
     stat = GdipBitmapGetPixel(bitmap, 50, 50, &color);
     expect(Ok, stat);
     expect(0xff0000ff, color);
+
+    stat = GdipGraphicsClear(graphics, 0);
+    expect(Ok, stat);
+
+    play_metafile(metafile, graphics, getdc_records, "getdc cropped playback",
+            dst_points, &right_half, UnitPixel);
+
+    stat = GdipBitmapGetPixel(bitmap, 10, 50, &color);
+    expect(Ok, stat);
+    expect(0xff0000ff, color);
+
+    stat = GdipBitmapGetPixel(bitmap, 60, 50, &color);
+    expect(Ok, stat);
+    expect(0, color);
 
     stat = GdipDeleteGraphics(graphics);
     expect(Ok, stat);

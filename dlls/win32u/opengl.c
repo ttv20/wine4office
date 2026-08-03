@@ -45,6 +45,12 @@ struct opengl_thread_data
     struct opengl_drawable *null_surface;  /* dummy surface when no client context is active */
 };
 
+struct opengl_drawable_state
+{
+    LONG current_count;
+    LONG padding;
+};
+
 static struct opengl_thread_data *get_opengl_thread_data(void)
 {
     struct user_thread_info *info = get_user_thread_info();
@@ -116,9 +122,12 @@ static void dump_extensions( const char *list )
 
 void *opengl_drawable_create( UINT size, const struct opengl_drawable_funcs *funcs, int format, struct client_surface *client )
 {
+    struct opengl_drawable_state *state;
     struct opengl_drawable *drawable;
 
-    if (!(drawable = calloc( 1, size ))) return NULL;
+    if (!(state = calloc( 1, sizeof(*state) + size ))) return NULL;
+    drawable = (struct opengl_drawable *)(state + 1);
+
     drawable->funcs = funcs;
     drawable->ref = 1;
 
@@ -164,12 +173,61 @@ void opengl_drawable_release( struct opengl_drawable *drawable )
     {
         const struct opengl_funcs *funcs = &display_funcs;
         const struct egl_platform *egl = &display_egl;
+        struct opengl_drawable_state *state = (struct opengl_drawable_state *)drawable - 1;
+
+        assert( !InterlockedCompareExchange( &state->current_count, 0, 0 ) );
 
         drawable->funcs->destroy( drawable );
         if (drawable->surface) funcs->p_eglDestroySurface( egl->display, drawable->surface );
         if (drawable->client) client_surface_release( drawable->client );
-        free( drawable );
+        free( state );
     }
+}
+
+static BOOL opengl_drawable_was_current( struct opengl_drawable *drawable,
+        struct opengl_drawable *old_draw, struct opengl_drawable *old_read )
+{
+    return drawable == old_draw || drawable == old_read;
+}
+
+static void opengl_drawable_release_reservation( struct opengl_drawable *drawable )
+{
+    struct opengl_drawable_state *state = (struct opengl_drawable_state *)drawable - 1;
+    LONG previous = InterlockedCompareExchange( &state->current_count, 0, 1 );
+
+    assert( previous == 1 );
+}
+
+static BOOL opengl_drawables_try_reserve( struct opengl_drawable *draw, struct opengl_drawable *read,
+        struct opengl_drawable *old_draw, struct opengl_drawable *old_read )
+{
+    struct opengl_drawable_state *draw_state = (struct opengl_drawable_state *)draw - 1;
+    struct opengl_drawable_state *read_state = (struct opengl_drawable_state *)read - 1;
+    BOOL reserved_draw = FALSE;
+
+    if (!opengl_drawable_was_current( draw, old_draw, old_read ))
+    {
+        if (InterlockedCompareExchange( &draw_state->current_count, 1, 0 )) return FALSE;
+        reserved_draw = TRUE;
+    }
+    if (read != draw && !opengl_drawable_was_current( read, old_draw, old_read ))
+    {
+        if (InterlockedCompareExchange( &read_state->current_count, 1, 0 ))
+        {
+            if (reserved_draw) opengl_drawable_release_reservation( draw );
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static void opengl_drawables_release_reservation( struct opengl_drawable *draw,
+        struct opengl_drawable *read, struct opengl_drawable *keep_draw, struct opengl_drawable *keep_read )
+{
+    if (draw && draw != keep_draw && draw != keep_read)
+        opengl_drawable_release_reservation( draw );
+    if (read && read != draw && read != keep_draw && read != keep_read)
+        opengl_drawable_release_reservation( read );
 }
 
 static void opengl_drawable_flush( struct opengl_drawable *drawable, int interval, UINT flags )
@@ -193,6 +251,28 @@ static BOOL opengl_drawable_swap( struct opengl_drawable *drawable )
     return drawable->funcs->swap( drawable );
 }
 
+static void *internal_context_create( void *share, int *context_format )
+{
+    static const int attribs[] = { WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB, 0 };
+    BOOL shared = TRUE;
+    void *context;
+    int format;
+
+    for (format = 1; format <= formats_count; format++)
+    {
+        struct wgl_pixel_format *desc = pixel_formats + format - 1;
+        if (!(desc->pfd.dwFlags & PFD_SUPPORT_OPENGL)) continue;
+        if (desc->pfd.iPixelType != PFD_TYPE_RGBA) continue;
+        if (desc->pfd.cColorBits < 24) continue;
+        if (!driver_funcs->p_context_create( format, share, attribs, &context, &shared )) continue;
+        if (context_format) *context_format = format;
+        return context;
+    }
+
+    WARN( "Failed to create internal %s context\n", global_context ? "global" : "thread" );
+    return NULL;
+}
+
 static BOOL make_null_context_current( struct opengl_drawable *drawable )
 {
     struct opengl_thread_data *data = get_opengl_thread_data();
@@ -200,17 +280,7 @@ static BOOL make_null_context_current( struct opengl_drawable *drawable )
 
     if (!data->null_context)
     {
-        for (format = 1; format <= formats_count; format++)
-        {
-            struct wgl_pixel_format *desc = pixel_formats + format - 1;
-            if (!(desc->pfd.dwFlags & PFD_SUPPORT_OPENGL)) continue;
-            if (desc->pfd.iPixelType != PFD_TYPE_RGBA) continue;
-            if (desc->pfd.cColorBits < 24) continue;
-            break;
-        }
-
-        if (format > formats_count) return FALSE;
-        driver_funcs->p_context_create( format, global_context, NULL, &data->null_context );
+        if (!(data->null_context = internal_context_create( global_context, &format ))) return FALSE;
         if (driver_funcs->p_null_surface_create) driver_funcs->p_null_surface_create( format, &data->null_surface );
     }
 
@@ -788,7 +858,7 @@ static UINT egldrv_pbuffer_bind( HDC hdc, struct opengl_drawable *drawable, GLen
     return -1; /* use default implementation */
 }
 
-static BOOL egldrv_context_create( int format, void *share, const int *attribs, void **context )
+static BOOL egldrv_context_create( int format, void *share, const int *attribs, void **context, BOOL *shared )
 {
     const struct opengl_funcs *funcs = &display_funcs;
     const struct egl_platform *egl = &display_egl;
@@ -1339,7 +1409,7 @@ static UINT nulldrv_pbuffer_bind( HDC hdc, struct opengl_drawable *drawable, GLe
     return -1; /* use default implementation */
 }
 
-static BOOL nulldrv_context_create( int format, void *share, const int *attribs, void **private )
+static BOOL nulldrv_context_create( int format, void *share, const int *attribs, void **private, BOOL *shared )
 {
     return FALSE;
 }
@@ -1424,6 +1494,24 @@ static struct opengl_drawable *get_window_current_drawable( HWND hwnd )
     return drawable;
 }
 
+static struct opengl_drawable *create_window_opengl_drawable( HWND hwnd, int format )
+{
+    struct opengl_drawable *drawable = NULL;
+    struct client_surface *client;
+
+    if (!(client = user_driver->pCreateClientSurface( hwnd, format )))
+        WARN( "Failed to create a surface for window %p, format %d\n", hwnd, format );
+    else
+    {
+        if (!(driver_funcs->p_surface_create( client, format, &drawable )))
+            WARN( "Failed to create a drawable for window %p, format %d\n", hwnd, format );
+        client_surface_release( client );
+    }
+
+    if (drawable && drawable->client) add_window_client_surface( hwnd, drawable->client );
+    return drawable;
+}
+
 static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format )
 {
     struct opengl_drawable *drawable = NULL;
@@ -1441,27 +1529,13 @@ static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format
         opengl_drawable_release( drawable );
         drawable = NULL;
     }
-
     /* No compatible window drawable found, try creating a new one. This is not what native
      * is doing, it allows multiple contexts to be current on separate threads on the same
      * window, each drawing to the same back/front buffers. We cannot do that because host
      * OpenGL usually doesn't allow multiple contexts to use the same surface at the same time.
      */
     if (!drawable)
-    {
-        struct client_surface *client;
-
-        if (!(client = user_driver->pCreateClientSurface( hwnd, format )))
-            WARN( "Failed to create a surface for window %p, format %d\n", hwnd, format );
-        else
-        {
-            if (!(driver_funcs->p_surface_create( client, format, &drawable )))
-                WARN( "Failed to create a drawable for window %p, format %d\n", hwnd, format );
-            client_surface_release( client );
-        }
-
-        if (drawable && drawable->client) add_window_client_surface( hwnd, drawable->client );
-    }
+        drawable = create_window_opengl_drawable( hwnd, format );
 
     TRACE( "hwnd %p, drawable %s\n", hwnd, debugstr_opengl_drawable( drawable ) );
     return drawable;
@@ -1850,11 +1924,11 @@ static struct opengl_drawable *get_updated_drawable( HDC hdc, int format, struct
 
 static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc, HDC read_hdc )
 {
-    struct opengl_drawable *new_draw, *new_read, *old_draw = NULL, *old_read = NULL;
+    struct opengl_drawable *new_draw = NULL, *new_read = NULL, *old_draw = NULL, *old_read = NULL;
     struct opengl_context *previous = NtCurrentTeb()->glContext;
     BOOL ret = FALSE;
 
-    if (!(new_draw = get_updated_drawable( draw_hdc, context->format, context->draw ))) return FALSE;
+    if (!(new_draw = get_updated_drawable( draw_hdc, context->format, context->draw ))) goto done;
     if (!draw_hdc && context->draw == context->read) opengl_drawable_add_ref( (new_read = new_draw) );
     else if (draw_hdc && draw_hdc == read_hdc) opengl_drawable_add_ref( (new_read = new_draw) );
     else new_read = get_updated_drawable( read_hdc, context->format, context->read );
@@ -1864,15 +1938,57 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
     if (!new_draw || !new_read)
     {
         WARN( "One of the drawable has been lost, ignoring\n" );
-        return FALSE;
+        goto done;
     }
 
     if (previous == context && new_draw == context->draw && new_read == context->read) ret = TRUE;
     else if (previous) context_exchange_drawables( previous, &old_draw, &old_read ); /* take ownership of the previous context drawables */
 
+    if (!ret && !opengl_drawables_try_reserve( new_draw, new_read, old_draw, old_read ))
+    {
+        HWND draw_hwnd = new_draw->client ? new_draw->client->hwnd : 0;
+        HWND read_hwnd = new_read->client ? new_read->client->hwnd : 0;
+        BOOL draw_dc_owned = draw_hdc && new_draw->owner_hdc == draw_hdc;
+        BOOL read_dc_owned = read_hdc && new_read->owner_hdc == read_hdc;
+
+        /* A drawable became current after it was selected. Window drawables can be
+         * recreated with an independent native surface; other drawable types cannot. */
+        if (new_draw == new_read && !opengl_drawable_was_current( new_draw, old_draw, old_read ) && draw_hwnd)
+        {
+            opengl_drawable_release( new_draw );
+            opengl_drawable_release( new_read );
+            if ((new_draw = create_window_opengl_drawable( draw_hwnd, context->format )))
+            {
+                opengl_drawable_add_ref( (new_read = new_draw) );
+                if (draw_dc_owned) set_dc_opengl_drawable( draw_hdc, new_draw );
+                else if (read_dc_owned) set_dc_opengl_drawable( read_hdc, new_read );
+            }
+            else new_read = NULL;
+        }
+        else
+        {
+            if (!opengl_drawable_was_current( new_draw, old_draw, old_read ) && draw_hwnd)
+            {
+                opengl_drawable_release( new_draw );
+                new_draw = create_window_opengl_drawable( draw_hwnd, context->format );
+                if (new_draw && draw_dc_owned) set_dc_opengl_drawable( draw_hdc, new_draw );
+            }
+            if (!opengl_drawable_was_current( new_read, old_draw, old_read ) && read_hwnd)
+            {
+                opengl_drawable_release( new_read );
+                new_read = create_window_opengl_drawable( read_hwnd, context->format );
+                if (new_read && read_dc_owned) set_dc_opengl_drawable( read_hdc, new_read );
+            }
+        }
+        if (!new_draw || !new_read ||
+            !opengl_drawables_try_reserve( new_draw, new_read, old_draw, old_read )) goto restore;
+    }
+
     if (!ret && (ret = driver_funcs->p_make_current( new_draw, new_read, context->driver_private )))
     {
         NtCurrentTeb()->glContext = context;
+
+        opengl_drawables_release_reservation( old_draw, old_read, new_draw, new_read );
 
         if (old_draw && old_draw != new_draw && old_draw != new_read && old_draw->client)
             set_window_opengl_drawable( old_draw->client->hwnd, old_draw, FALSE );
@@ -1886,6 +2002,7 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
         opengl_drawable_flush( new_read, new_read->interval, 0 );
         opengl_drawable_flush( new_draw, new_draw->interval, 0 );
     }
+    else if (!ret) opengl_drawables_release_reservation( new_draw, new_read, old_draw, old_read );
 
     if (ret)
     {
@@ -1893,12 +2010,14 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
         if (new_draw->client) set_window_opengl_drawable( new_draw->client->hwnd, new_draw, TRUE );
         context_exchange_drawables( context, &new_draw, &new_read );
     }
-    else if (previous)
+restore:
+    if (!ret && previous)
     {
         context_exchange_drawables( previous, &old_draw, &old_read ); /* give back ownership of the previous drawables */
         assert( !old_draw && !old_read );
     }
 
+done:
     if (new_draw) opengl_drawable_release( new_draw );
     if (new_read) opengl_drawable_release( new_read );
     return ret;
@@ -1922,6 +2041,7 @@ static BOOL win32u_wglMakeContextCurrentARB( HDC draw_hdc, HDC read_hdc, HGLRC c
         NtCurrentTeb()->glContext = NULL;
 
         context_exchange_drawables( context, &draw, &read );
+        opengl_drawables_release_reservation( draw, read, NULL, NULL );
         if (draw->client) set_window_opengl_drawable( draw->client->hwnd, draw, FALSE );
         opengl_drawable_release( draw );
         if (read->client) set_window_opengl_drawable( read->client->hwnd, read, FALSE );
@@ -2274,6 +2394,7 @@ static int get_window_swap_interval( HWND hwnd )
 
 static BOOL win32u_context_create( struct opengl_context *context, HDC hdc, const int *attribs )
 {
+    BOOL shared = TRUE;
     int format;
 
     TRACE( "context %p, hdc %p, attribs %p\n", context, hdc, attribs );
@@ -2285,12 +2406,13 @@ static BOOL win32u_context_create( struct opengl_context *context, HDC hdc, cons
         else RtlSetLastWin32Error( ERROR_INVALID_HANDLE );
         return FALSE;
     }
-    if (!driver_funcs->p_context_create( format, global_context, attribs, &context->driver_private ))
+    if (!driver_funcs->p_context_create( format, global_context, attribs, &context->driver_private, &shared ))
     {
         WARN( "Failed to create driver context for context %p\n", context );
         return FALSE;
     }
     context->format = format;
+    if (!shared) opengl_client_context_from_client( context->client_context )->broken_sharing = TRUE;
 
     TRACE( "created context %p, format %u for driver context %p\n", context, format, context->driver_private );
     return TRUE;
@@ -2782,17 +2904,7 @@ static void display_funcs_init(void)
             init_device_info( egl, &display_funcs );
     }
 
-    if (!global_context)
-    {
-        for (int format = 1; format <= formats_count; format++)
-        {
-            struct wgl_pixel_format *desc = pixel_formats + format - 1;
-            if (!(desc->pfd.dwFlags & PFD_SUPPORT_OPENGL)) continue;
-            if (desc->pfd.iPixelType != PFD_TYPE_RGBA) continue;
-            if (desc->pfd.cColorBits < 24) continue;
-            if (driver_funcs->p_context_create( format, NULL, NULL, &global_context )) break;
-        }
-    }
+    if (!global_context) global_context = internal_context_create( NULL, NULL );
 }
 
 /***********************************************************************
@@ -2847,6 +2959,7 @@ void cleanup_opengl_thread(void)
         struct opengl_drawable *draw = NULL, *read = NULL;
 
         context_exchange_drawables( context, &draw, &read );
+        opengl_drawables_release_reservation( draw, read, NULL, NULL );
         if (draw->client) set_window_opengl_drawable( draw->client->hwnd, draw, FALSE );
         opengl_drawable_release( draw );
         if (read->client) set_window_opengl_drawable( read->client->hwnd, read, FALSE );

@@ -4259,6 +4259,25 @@ static void test_GlobalOptions(void)
     if (SUCCEEDED(hres))
         ok(value == COMGLB_EXCEPTION_HANDLE, "Unexpected value %Id.\n", value);
 
+    hres = IGlobalOptions_Set(global_options, 0, COMGLB_EXCEPTION_DONOT_HANDLE_ANY);
+    ok(hres == E_INVALIDARG, "Unexpected hr %#lx.\n", hres);
+
+    hres = IGlobalOptions_Set(global_options, COMGLB_PROPERTIES_RESERVED3 + 1,
+            COMGLB_EXCEPTION_DONOT_HANDLE_ANY);
+    ok(hres == E_INVALIDARG, "Unexpected hr %#lx.\n", hres);
+
+    hres = IGlobalOptions_Set(global_options, COMGLB_EXCEPTION_HANDLING,
+            COMGLB_EXCEPTION_DONOT_HANDLE_ANY);
+    ok(hres == S_OK, "Unexpected hr %#lx.\n", hres);
+
+    value = ~0u;
+    hres = IGlobalOptions_Query(global_options, COMGLB_EXCEPTION_HANDLING, &value);
+    ok(hres == S_OK, "Unexpected hr %#lx.\n", hres);
+    ok(value == COMGLB_EXCEPTION_DONOT_HANDLE_ANY, "Unexpected value %Id.\n", value);
+
+    hres = IGlobalOptions_Set(global_options, COMGLB_EXCEPTION_HANDLING, COMGLB_EXCEPTION_HANDLE);
+    ok(hres == S_OK, "Unexpected hr %#lx.\n", hres);
+
     IGlobalOptions_Release(global_options);
 
     hres = CoCreateInstance(&CLSID_GlobalOptions, (IUnknown*)0xdeadbeef, CLSCTX_INPROC_SERVER,

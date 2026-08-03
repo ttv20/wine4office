@@ -334,7 +334,7 @@
 @ stdcall -syscall NtQueryIoCompletion(long long ptr long ptr)
 @ stdcall -syscall=0x0016 NtQueryKey(long long ptr long ptr)
 @ stdcall -syscall NtQueryLicenseValue(ptr ptr ptr long ptr)
-@ stdcall -syscall NtQueryMultipleValueKey(long ptr long ptr long ptr)
+@ stdcall -syscall NtQueryMultipleValueKey(long ptr long ptr ptr ptr)
 @ stdcall -syscall NtQueryMutant(long long ptr long ptr)
 @ stdcall -syscall=0x0010 NtQueryObject(long long ptr long ptr)
 # @ stub NtQueryOpenSubKeys
@@ -1414,7 +1414,7 @@
 @ stdcall -private ZwQueryIoCompletion(long long ptr long ptr) NtQueryIoCompletion
 @ stdcall -private ZwQueryKey(long long ptr long ptr) NtQueryKey
 @ stdcall -private ZwQueryLicenseValue(ptr ptr ptr long ptr) NtQueryLicenseValue
-@ stdcall -private ZwQueryMultipleValueKey(long ptr long ptr long ptr) NtQueryMultipleValueKey
+@ stdcall -private ZwQueryMultipleValueKey(long ptr long ptr ptr ptr) NtQueryMultipleValueKey
 @ stdcall -private ZwQueryMutant(long long ptr long ptr) NtQueryMutant
 @ stdcall -private ZwQueryObject(long long ptr long ptr) NtQueryObject
 # @ stub ZwQueryOpenSubKeys
@@ -1767,6 +1767,9 @@
 # Unix interface
 @ stdcall __wine_unix_spawnvp(long ptr)
 @ stdcall __wine_ctrl_routine(ptr)
+@ stdcall __wine_probe_for_write(ptr long long)
+@ stdcall __wine_create_key_value_query(long long ptr)
+@ stdcall __wine_query_multiple_value_key(long ptr long ptr ptr ptr)
 @ extern -private __wine_syscall_dispatcher
 @ extern -private __wine_unix_call_dispatcher
 @ extern -private -arch=arm64ec __wine_unix_call_dispatcher_arm64ec

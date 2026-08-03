@@ -1,0 +1,5 @@
+certifi>=2025.1,<2027
+PyInstaller>=6.10,<7
+PySide6>=6.8,<7
+pefile>=2024.8.26,<2025
+zstandard>=0.23,<1

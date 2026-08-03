@@ -251,6 +251,12 @@ struct property_data
     lparam_t       data;
 };
 
+struct ratio
+{
+    unsigned short num;
+    unsigned short den;
+};
+
 
 struct rectangle
 {
@@ -278,6 +284,17 @@ struct hw_msg_source
     unsigned int    device;
     unsigned int    origin;
 };
+
+struct key_value_result
+{
+    unsigned int type;
+    data_size_t  length;
+    data_size_t  offset;
+    data_size_t  data_offset;
+};
+
+#define KEY_VALUE_QUERY_RESULTS 0
+#define KEY_VALUE_QUERY_DATA    1
 
 struct rawinput
 {
@@ -334,6 +351,7 @@ union hw_input
         unsigned int   flags;
         unsigned int   time;
         lparam_t       info;
+        unsigned int   raw_count;
     } mouse;
     struct
     {
@@ -891,7 +909,8 @@ struct monitor_info
     struct rectangle raw;
     struct rectangle virt;
     unsigned int     flags;
-    unsigned int     dpi;
+    struct ratio     dpi;
+    struct ratio     raw_dpi;
 };
 #define MONITOR_FLAG_PRIMARY  0x01
 #define MONITOR_FLAG_CLONE    0x02
@@ -1062,6 +1081,8 @@ typedef volatile struct
     unsigned int         fnid;
     unsigned int         ansi;
     int                  __pad;
+    struct ratio         dpi;
+    struct ratio         raw_dpi;
     data_size_t          private_size;
     data_size_t          extra_size;
     struct window_info   info;
@@ -2701,6 +2722,71 @@ struct get_key_value_reply
 
 
 
+struct create_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t hkey;
+    unsigned int count;
+    char __pad_20[4];
+};
+struct create_key_value_query_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    char __pad_12[4];
+};
+
+
+
+struct append_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    file_pos_t   offset;
+    /* VARARG(data,bytes); */
+};
+struct append_key_value_query_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct execute_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    unsigned int count;
+    data_size_t  length;
+};
+struct execute_key_value_query_reply
+{
+    struct reply_header __header;
+    unsigned int status;
+    data_size_t  used;
+    data_size_t  required;
+    unsigned int count;
+};
+
+
+
+struct read_key_value_query_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    unsigned int which;
+    data_size_t  offset;
+};
+struct read_key_value_query_reply
+{
+    struct reply_header __header;
+    data_size_t  total;
+    /* VARARG(data,bytes); */
+    char __pad_12[4];
+};
+
+
+
 struct enum_key_value_request
 {
     struct request_header __header;
@@ -3144,7 +3230,7 @@ struct send_hardware_message_request
     user_handle_t   win;
     union hw_input  input;
     unsigned int    flags;
-    /* VARARG(report,bytes); */
+    /* VARARG(extra,bytes); */
     char __pad_60[4];
 };
 struct send_hardware_message_reply
@@ -3158,6 +3244,7 @@ struct send_hardware_message_reply
     char __pad_28[4];
 };
 #define SEND_HWMSG_INJECTED    0x01
+#define SEND_HWMSG_RAWINPUT    0x02
 
 
 
@@ -3703,7 +3790,7 @@ struct get_window_children_from_point_request
     user_handle_t  parent;
     int            x;
     int            y;
-    int            dpi;
+    struct ratio   dpi;
     char __pad_28[4];
 };
 struct get_window_children_from_point_reply
@@ -3740,13 +3827,11 @@ struct set_window_pos_request
     struct request_header __header;
     unsigned short swp_flags;
     unsigned short paint_flags;
-    unsigned int   monitor_dpi;
     user_handle_t  handle;
     user_handle_t  previous;
     struct rectangle window;
     struct rectangle client;
     /* VARARG(valid,rectangles); */
-    char __pad_60[4];
 };
 struct set_window_pos_reply
 {
@@ -3766,7 +3851,7 @@ struct get_window_rectangles_request
     struct request_header __header;
     user_handle_t  handle;
     int            relative;
-    int            dpi;
+    struct ratio   dpi;
 };
 struct get_window_rectangles_reply
 {
@@ -3817,7 +3902,7 @@ struct get_windows_offset_request
     struct request_header __header;
     user_handle_t  from;
     user_handle_t  to;
-    int            dpi;
+    struct ratio   dpi;
 };
 struct get_windows_offset_reply
 {
@@ -6212,6 +6297,22 @@ struct d3dkmt_mutex_release_reply
 };
 
 
+
+struct alpc_create_port_request
+{
+    struct request_header __header;
+    unsigned int        flags;
+    mem_size_t          max_msg_len;
+    /* VARARG(obj_attr,object_attributes); */
+};
+struct alpc_create_port_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6307,6 +6408,10 @@ enum request
     REQ_enum_key,
     REQ_set_key_value,
     REQ_get_key_value,
+    REQ_create_key_value_query,
+    REQ_append_key_value_query,
+    REQ_execute_key_value_query,
+    REQ_read_key_value_query,
     REQ_enum_key_value,
     REQ_delete_key_value,
     REQ_load_registry,
@@ -6521,6 +6626,7 @@ enum request
     REQ_d3dkmt_object_open_name,
     REQ_d3dkmt_mutex_acquire,
     REQ_d3dkmt_mutex_release,
+    REQ_alpc_create_port,
     REQ_NB_REQUESTS
 };
 
@@ -6621,6 +6727,10 @@ union generic_request
     struct enum_key_request enum_key_request;
     struct set_key_value_request set_key_value_request;
     struct get_key_value_request get_key_value_request;
+    struct create_key_value_query_request create_key_value_query_request;
+    struct append_key_value_query_request append_key_value_query_request;
+    struct execute_key_value_query_request execute_key_value_query_request;
+    struct read_key_value_query_request read_key_value_query_request;
     struct enum_key_value_request enum_key_value_request;
     struct delete_key_value_request delete_key_value_request;
     struct load_registry_request load_registry_request;
@@ -6835,6 +6945,7 @@ union generic_request
     struct d3dkmt_object_open_name_request d3dkmt_object_open_name_request;
     struct d3dkmt_mutex_acquire_request d3dkmt_mutex_acquire_request;
     struct d3dkmt_mutex_release_request d3dkmt_mutex_release_request;
+    struct alpc_create_port_request alpc_create_port_request;
 };
 union generic_reply
 {
@@ -6933,6 +7044,10 @@ union generic_reply
     struct enum_key_reply enum_key_reply;
     struct set_key_value_reply set_key_value_reply;
     struct get_key_value_reply get_key_value_reply;
+    struct create_key_value_query_reply create_key_value_query_reply;
+    struct append_key_value_query_reply append_key_value_query_reply;
+    struct execute_key_value_query_reply execute_key_value_query_reply;
+    struct read_key_value_query_reply read_key_value_query_reply;
     struct enum_key_value_reply enum_key_value_reply;
     struct delete_key_value_reply delete_key_value_reply;
     struct load_registry_reply load_registry_reply;
@@ -7147,8 +7262,9 @@ union generic_reply
     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
     struct d3dkmt_mutex_acquire_reply d3dkmt_mutex_acquire_reply;
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
+    struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 952
+#define SERVER_PROTOCOL_VERSION 959
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

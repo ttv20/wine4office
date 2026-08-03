@@ -1,0 +1,242 @@
+name: Build Wine4Office release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (blank uses the commit)"
+        required: false
+        type: string
+      metadata_url:
+        description: "Canonical HTTPS release.json URL"
+        required: false
+        type: string
+      release_base_url:
+        description: "HTTPS artifact base URL, or a path relative to release.json"
+        required: false
+        type: string
+      channel:
+        description: "Release channel"
+        required: false
+        type: string
+  push:
+    tags:
+      - "wine4office-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wine4office-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 360
+    env:
+      CONFIGURED_METADATA_URL: ${{ inputs.metadata_url || vars.WINE4OFFICE_METADATA_URL || 'https://github.com/ttv20/wine4office/releases/latest/download/release.json' }}
+      CONFIGURED_RELEASE_BASE_URL: ${{ inputs.release_base_url || vars.WINE4OFFICE_RELEASE_BASE_URL || 'https://github.com/ttv20/wine4office/releases/latest/download' }}
+      CONFIGURED_RELEASE_CHANNEL: ${{ inputs.channel || vars.WINE4OFFICE_RELEASE_CHANNEL || 'stable' }}
+    steps:
+      - name: Check out Wine4Office
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies when permitted
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ $(id -u) -eq 0 ]]; then
+            elevate=()
+          elif command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+            elevate=(sudo)
+          else
+            echo "Runner has no root/package-manager access; using preinstalled build dependencies."
+            exit 0
+          fi
+          command -v apt-get >/dev/null || {
+            echo "This automatic dependency step supports apt-based runner containers only." >&2
+            exit 1
+          }
+          "${elevate[@]}" dpkg --add-architecture i386
+          "${elevate[@]}" apt-get update
+          "${elevate[@]}" apt-get install -y --no-install-recommends \
+            autoconf bison build-essential ca-certificates flex gh python3-pip python3-venv zstd \
+            gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
+            libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libcups2-dev libdbus-1-dev libfontconfig-dev \
+            libegl1 libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
+            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev libpython3-dev \
+            libpcap-dev libpcsclite-dev libpulse-dev libsane-dev libsdl2-dev \
+            libswresample-dev libswscale-dev libudev-dev libunwind-dev \
+            libusb-1.0-0-dev libv4l-dev libvulkan-dev libwayland-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev \
+            libxinerama-dev libxkbcommon-dev libxkbregistry-dev libxrandr-dev libxrender-dev \
+            libxxf86vm-dev ocl-icd-opencl-dev samba-dev unixodbc-dev \
+            wayland-protocols
+
+      - name: Verify self-hosted build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar zstd gh)
+          missing=()
+          for command in "${required[@]}"; do
+            command -v "$command" >/dev/null || missing+=("$command")
+          done
+          if ((${#missing[@]})); then
+            printf 'Missing runner dependency: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          echo "Runner: $(uname -a)"
+          echo "Available build cores: $(nproc)"
+          df -h .
+
+      - name: Select release version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          requested=${REQUESTED_VERSION:-}
+          if [[ -n "$requested" ]]; then
+            version=$requested
+          elif [[ $GITHUB_REF == refs/tags/wine4office-v* ]]; then
+            version=${GITHUB_REF_NAME#wine4office-v}
+          else
+            version="0.0.0-${GITHUB_SHA:0:12}"
+          fi
+          [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test verified curl installer
+        run: tools/wine4office-manager/tests/test_curl_install.sh
+
+      - name: Configure and build Wine4Office
+        run: |
+          set -euo pipefail
+          mkdir -p build stage
+          cd build
+          CPPFLAGS="-I$GITHUB_WORKSPACE/tools/wine4office-manager/packaging/linux-uapi" \
+            ../configure \
+            --prefix=/opt/wine4office \
+            --enable-archs=i386,x86_64 \
+            --disable-tests
+          grep -q '^#define HAVE_LINUX_NTSYNC_H 1$' include/config.h || {
+            echo "Wine configure did not enable NTSYNC support." >&2
+            exit 1
+          }
+          echo "Building with $(nproc) parallel jobs"
+          make -j"$(nproc)"
+          make DESTDIR="$GITHUB_WORKSPACE/stage" install
+          grep -aq '/dev/ntsync' "$GITHUB_WORKSPACE/stage/opt/wine4office/bin/wineserver" || {
+            echo "Built wineserver does not contain NTSYNC support." >&2
+            exit 1
+          }
+          test -f "$GITHUB_WORKSPACE/stage/opt/wine4office/lib/wine/x86_64-unix/winewayland.so" || {
+            echo "Wine Wayland driver was not built; check libwayland, libxkbcommon, libxkbregistry, and protocol dependencies." >&2
+            exit 1
+          }
+
+      - name: Bundle Wine Gecko
+        shell: bash
+        run: |
+          set -euo pipefail
+          gecko_version=2.47.4
+          gecko_dir="$GITHUB_WORKSPACE/stage/opt/wine4office/share/wine/gecko"
+          mkdir -p "$gecko_dir"
+          curl --fail --location --retry 3 --show-error \
+            --output "$gecko_dir/wine-gecko-${gecko_version}-x86.msi" \
+            "https://dl.winehq.org/wine/wine-gecko/${gecko_version}/wine-gecko-${gecko_version}-x86.msi"
+          curl --fail --location --retry 3 --show-error \
+            --output "$gecko_dir/wine-gecko-${gecko_version}-x86_64.msi" \
+            "https://dl.winehq.org/wine/wine-gecko/${gecko_version}/wine-gecko-${gecko_version}-x86_64.msi"
+          sha256sum --check <<EOF
+          26cecc47706b091908f7f814bddb074c61beb8063318e9efc5a7f789857793d6  $gecko_dir/wine-gecko-${gecko_version}-x86.msi
+          e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f  $gecko_dir/wine-gecko-${gecko_version}-x86_64.msi
+          EOF
+
+      - name: Build standalone Wine4OfficeManager
+        run: |
+          set -euo pipefail
+          python3 -m venv manager-qt-venv
+          manager-qt-venv/bin/python -m pip install --disable-pip-version-check \
+            -r tools/wine4office-manager/requirements-build.txt
+          PYTHON="$PWD/manager-qt-venv/bin/python" \
+            tools/wine4office-manager/packaging/build-qt-binary.sh \
+            build/manager/Wine4OfficeManager \
+            '${{ steps.version.outputs.version }}' \
+            "$CONFIGURED_RELEASE_CHANNEL"
+          QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
+            build/manager/Wine4OfficeManager --smoke-test
+
+      - name: Package separate release artifacts
+        run: |
+          set -euo pipefail
+          release_base_url=$CONFIGURED_RELEASE_BASE_URL
+          if [[ $GITHUB_REF == refs/tags/wine4office-v* \
+                && $release_base_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" ]]; then
+            release_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          fi
+          tools/wine4office-manager/packaging/build-release-artifacts.sh \
+            stage/opt/wine4office \
+            build/manager/Wine4OfficeManager \
+            release \
+            '${{ steps.version.outputs.version }}' \
+            "$CONFIGURED_METADATA_URL" \
+            "$release_base_url" \
+            "$CONFIGURED_RELEASE_CHANNEL"
+          install -m 0755 install.sh release/install.sh
+
+      - name: Upload Wine4OfficeManager CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64
+          path: |
+            release/Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64
+            release/Wine4OfficeManager-${{ steps.version.outputs.version }}-x86_64.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload Wine CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine4office-${{ steps.version.outputs.version }}-x86_64
+          path: |
+            release/wine4office-${{ steps.version.outputs.version }}-x86_64.tar.zst
+            release/wine4office-${{ steps.version.outputs.version }}-x86_64.tar.zst.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload release metadata and installer CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine4office-release-metadata-${{ steps.version.outputs.version }}
+          path: |
+            release/release.json
+            release/install.sh
+          if-no-files-found: error
+
+      - name: Publish tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/wine4office-v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          artifacts=(
+            "release/Wine4OfficeManager-${version}-x86_64"
+            "release/Wine4OfficeManager-${version}-x86_64.sha256"
+            "release/wine4office-${version}-x86_64.tar.zst"
+            "release/wine4office-${version}-x86_64.tar.zst.sha256"
+            "release/install.sh"
+            "release/release.json"
+          )
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "${artifacts[@]}" \
+            --repo "$GITHUB_REPOSITORY" --clobber

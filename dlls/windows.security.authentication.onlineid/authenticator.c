@@ -2496,7 +2496,7 @@ static WCHAR *load_encrypted_wam_token( const WCHAR *legacy_path )
     lstrcpynW( filename, name + 1, ARRAY_SIZE(filename) );
     if ((extension = wcsrchr( filename, '.' ))) lstrcpyW( extension, L".dat" );
     if (!GetEnvironmentVariableW( L"LOCALAPPDATA", local_appdata, ARRAY_SIZE(local_appdata) )) return NULL;
-    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Wine365\\WAM\\%s", local_appdata, filename ) < 0) return NULL;
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Wine4Office\\WAM\\%s", local_appdata, filename ) < 0) return NULL;
     file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx( file, &size ) ||
         size.QuadPart <= 0 || size.QuadPart > 1024 * 1024)
@@ -2768,8 +2768,8 @@ done:
     return ret;
 }
 
-static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
-                             HSTRING scopes, HSTRING resource_client_id, HSTRING resource_redirect_uri )
+static BOOL run_wine4office_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
+                                  HSTRING scopes, HSTRING resource_client_id, HSTRING resource_redirect_uri )
 {
     WCHAR command[6 * MAX_PATH], hint_path[MAX_PATH];
     PROCESS_INFORMATION process = {0};
@@ -2791,20 +2791,20 @@ static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, 
 
         if (resource && hint_path[0])
             swprintf( command, ARRAY_SIZE(command),
-                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\" --login-hint-file \"%s\"",
+                      L"\"C:\\windows\\system32\\wine4officeauth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\" --login-hint-file \"%s\"",
                       (ULONG_PTR)owner, scope, client_id, redirect_uri, hint_path );
         else if (resource)
             swprintf( command, ARRAY_SIZE(command),
-                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\"",
+                      L"\"C:\\windows\\system32\\wine4officeauth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\"",
                       (ULONG_PTR)owner, scope, client_id, redirect_uri );
         else if (hint_path[0])
             swprintf( command, ARRAY_SIZE(command),
-                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
+                      L"\"C:\\windows\\system32\\wine4officeauth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
                       (ULONG_PTR)owner, hint_path );
         else
-            swprintf( command, ARRAY_SIZE(command), L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
+            swprintf( command, ARRAY_SIZE(command), L"\"C:\\windows\\system32\\wine4officeauth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
     }
-    else lstrcpyW( command, L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh" );
+    else lstrcpyW( command, L"\"C:\\windows\\system32\\wine4officeauth.exe\" --refresh" );
 
     ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
     if (!ret)
@@ -2834,7 +2834,7 @@ static BOOL run_wine365_resource_refresh( const WCHAR *scope, const WCHAR *clien
     if (!scope || !*scope || wcschr( scope, '"' ) || !client_id || !*client_id ||
         wcschr( client_id, '"' )) return FALSE;
     if (swprintf( command, ARRAY_SIZE(command),
-                  L"\"C:\\windows\\system32\\wine365auth.exe\" --refresh-resource \"%s\" \"%s\"",
+                  L"\"C:\\windows\\system32\\wine4officeauth.exe\" --refresh-resource \"%s\" \"%s\"",
                   scope, client_id ) < 0) return FALSE;
     ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
     if (!ret) return FALSE;
@@ -2853,8 +2853,8 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
     INT32 response_status = 4;
     HRESULT hr;
 
-    if (run_wine365_auth( context->owner, context->login_hint, TRUE, &exit_code, context->scopes,
-                          context->resource_client_id, context->resource_redirect_uri ))
+    if (run_wine4office_auth( context->owner, context->login_hint, TRUE, &exit_code, context->scopes,
+                              context->resource_client_id, context->resource_redirect_uri ))
     {
         if (!exit_code) response_status = 0;
         else if (exit_code == 2) response_status = 1;
@@ -3326,7 +3326,7 @@ static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id
     }
     if (have_token && (!expiry || expiry > get_unix_time() + 300)) goto done;
     refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
-    if (refresh && run_wine365_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL ) && !exit_code )
+    if (refresh && run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL ) && !exit_code)
     {
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
         token = load_wam_token_file( L"C:\\wam-access-token.txt" );

@@ -267,6 +267,8 @@ struct client_surface
     LONG                               updated;        /* has been moved / resized / reparented */
     HWND                               toplevel;       /* toplevel window of the surface */
     LONG                               offscreen;      /* client window is offscreen */
+    RECT                               virtual_rect;   /* virtual size and position in the toplevel ancestor */
+    RECT                               monitor_rect;   /* raw physical size and position in the toplevel ancestor */
 };
 
 W32KAPI void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd );
@@ -294,6 +296,7 @@ struct window_surface_funcs
                     const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
                     const BITMAPINFO *shape_info, const void *shape_bits );
     void  (*destroy)( struct window_surface *surface );
+    void  (*flush_done)( struct window_surface *surface );
 };
 
 struct window_surface
@@ -321,6 +324,8 @@ W32KAPI struct window_surface *window_surface_create( UINT size, const struct wi
                                                       const RECT *rect, BITMAPINFO *info, HBITMAP bitmap );
 W32KAPI void window_surface_add_ref( struct window_surface *surface );
 W32KAPI void window_surface_release( struct window_surface *surface );
+W32KAPI void window_surface_lock( struct window_surface *surface );
+W32KAPI void window_surface_unlock( struct window_surface *surface );
 W32KAPI void window_surface_set_shape( struct window_surface *surface, HRGN shape_region );
 
 /* display manager interface, used to initialize display device registry data */

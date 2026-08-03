@@ -2553,6 +2553,208 @@ ULONG WINAPI RtlGetProcessHeaps( ULONG count, HANDLE *heaps )
     return total;
 }
 
+#define HEAP_EXTENDED_PERFORMANCE_INFORMATION 0x80000000
+#define HEAP_PERFORMANCE_STANDARD_VERSION 1
+
+struct heap_performance_counters_information
+{
+    ULONG size;
+    ULONG version;
+    ULONG heap_index;
+    ULONG last_heap_index;
+    void *base_address;
+    SIZE_T reserve_size;
+    SIZE_T commit_size;
+    ULONG segment_count;
+    SIZE_T large_ucr_memory;
+    ULONG ucr_length;
+    SIZE_T allocated_space;
+    SIZE_T free_space;
+    ULONG free_list_length;
+    ULONG contention;
+    ULONG virtual_blocks;
+    ULONG commit_rate;
+    ULONG decommit_rate;
+    SIZE_T segment_heap_information[6];
+};
+
+struct heap_information_item
+{
+    ULONG level;
+    SIZE_T size;
+    union
+    {
+        struct heap_performance_counters_information performance;
+        ULONG_PTR dynamic_start;
+    } u;
+};
+
+typedef NTSTATUS (WINAPI *heap_extended_enumeration_routine)(
+        struct heap_information_item *information, void *context );
+
+struct heap_extended_information
+{
+    HANDLE process;
+    HANDLE heap;
+    ULONG level;
+    heap_extended_enumeration_routine callback;
+    void *context;
+    union
+    {
+        struct
+        {
+            SIZE_T reserve_size;
+            SIZE_T commit_size;
+            ULONG number_of_heaps;
+            ULONG_PTR first_heap_information_offset;
+        } process;
+        SIZE_T reserved[4];
+    } u;
+};
+
+#ifdef _WIN64
+C_ASSERT( offsetof(struct heap_extended_information, callback) == 24 );
+C_ASSERT( offsetof(struct heap_extended_information, context) == 32 );
+C_ASSERT( offsetof(struct heap_information_item, u.performance.version) == 20 );
+C_ASSERT( offsetof(struct heap_information_item, u.performance.base_address) == 32 );
+#else
+C_ASSERT( offsetof(struct heap_extended_information, callback) == 12 );
+C_ASSERT( offsetof(struct heap_extended_information, context) == 16 );
+C_ASSERT( offsetof(struct heap_information_item, u.performance.version) == 12 );
+C_ASSERT( offsetof(struct heap_information_item, u.performance.base_address) == 24 );
+#endif
+
+static void get_heap_performance_counters( struct heap *heap,
+        struct heap_performance_counters_information *info )
+{
+    const ARENA_LARGE *large;
+    const SUBHEAP *subheap;
+
+    info->size = sizeof(*info);
+    info->version = HEAP_PERFORMANCE_STANDARD_VERSION;
+    info->base_address = heap;
+
+    RtlEnterCriticalSection( &heap->cs );
+    LIST_FOR_EACH_ENTRY( subheap, &heap->subheap_list, SUBHEAP, entry )
+    {
+        info->reserve_size += subheap_size( subheap );
+        info->commit_size += (const char *)subheap_commit_end( subheap )
+                - (const char *)subheap_base( subheap );
+        info->segment_count++;
+    }
+    LIST_FOR_EACH_ENTRY( large, &heap->large_list, ARENA_LARGE, entry )
+    {
+        info->reserve_size += large->block_size;
+        info->commit_size += large->block_size;
+        info->allocated_space += large->data_size;
+    }
+    RtlLeaveCriticalSection( &heap->cs );
+}
+
+static struct heap *find_process_heap_locked( HANDLE handle )
+{
+    struct heap *heap;
+
+    if (handle == process_heap) return process_heap;
+    LIST_FOR_EACH_ENTRY( heap, &process_heap->entry, struct heap, entry )
+        if ((HANDLE)heap == handle) return heap;
+    return NULL;
+}
+
+static void init_heap_information_item( struct heap_information_item *item,
+        struct heap *heap, ULONG index, ULONG last_index )
+{
+    memset( item, 0, sizeof(*item) );
+    item->level = HEAP_EXTENDED_PERFORMANCE_INFORMATION;
+    item->size = sizeof(item->u.performance);
+    item->u.performance.heap_index = index;
+    item->u.performance.last_heap_index = last_index;
+    get_heap_performance_counters( heap, &item->u.performance );
+}
+
+static NTSTATUS validate_extended_process_handle( HANDLE process )
+{
+    PROCESS_BASIC_INFORMATION basic_info;
+    NTSTATUS status;
+
+    if (!process || process == NtCurrentProcess()) return STATUS_SUCCESS;
+    if ((status = NtQueryInformationProcess( process, ProcessBasicInformation,
+            &basic_info, sizeof(basic_info), NULL ))) return status;
+    if ((HANDLE)basic_info.UniqueProcessId != NtCurrentTeb()->ClientId.UniqueProcess)
+        return STATUS_NOT_SUPPORTED;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS query_extended_heap_information( HANDLE handle, void *info,
+        SIZE_T size_in, SIZE_T *size_out )
+{
+    struct heap_extended_information *extended = info;
+    struct heap_information_item local_items[16], *items = local_items;
+    struct heap *heap;
+    ULONG capacity, count, i;
+    NTSTATUS status;
+
+    if (size_out) *size_out = sizeof(*extended);
+    if (size_in < sizeof(*extended)) return STATUS_BUFFER_TOO_SMALL;
+    if (!info) return STATUS_ACCESS_VIOLATION;
+    if ((status = validate_extended_process_handle( extended->process ))) return status;
+    if (!extended->callback) return STATUS_INVALID_PARAMETER;
+    if (extended->level != HEAP_EXTENDED_PERFORMANCE_INFORMATION) return STATUS_NOT_IMPLEMENTED;
+
+    RtlEnterCriticalSection( &process_heap->cs );
+    heap = find_process_heap_locked( handle );
+    RtlLeaveCriticalSection( &process_heap->cs );
+    if (!heap) return STATUS_ACCESS_VIOLATION;
+
+    if (extended->heap)
+    {
+        RtlEnterCriticalSection( &process_heap->cs );
+        if ((heap = find_process_heap_locked( extended->heap )))
+            init_heap_information_item( items, heap, 0, 0 );
+        RtlLeaveCriticalSection( &process_heap->cs );
+        if (!heap) return STATUS_ACCESS_VIOLATION;
+        count = 1;
+    }
+    else
+    {
+        for (;;)
+        {
+            capacity = RtlGetProcessHeaps( 0, NULL );
+            if (capacity > ARRAY_SIZE(local_items))
+            {
+                if (!(items = RtlAllocateHeap( process_heap, 0, capacity * sizeof(*items) )))
+                    return STATUS_NO_MEMORY;
+            }
+
+            RtlEnterCriticalSection( &process_heap->cs );
+            count = 1;
+            LIST_FOR_EACH_ENTRY( heap, &process_heap->entry, struct heap, entry ) count++;
+            if (count <= capacity)
+            {
+                i = 0;
+                init_heap_information_item( &items[i++], process_heap, 0, count - 1 );
+                LIST_FOR_EACH_ENTRY( heap, &process_heap->entry, struct heap, entry )
+                {
+                    init_heap_information_item( &items[i], heap, i, count - 1 );
+                    i++;
+                }
+            }
+            RtlLeaveCriticalSection( &process_heap->cs );
+
+            if (count <= capacity) break;
+            if (items != local_items) RtlFreeHeap( process_heap, 0, items );
+            items = local_items;
+        }
+    }
+
+    status = STATUS_SUCCESS;
+    for (i = 0; i < count; ++i)
+        if ((status = extended->callback( &items[i], extended->context ))) break;
+
+    if (items != local_items) RtlFreeHeap( process_heap, 0, items );
+    return status;
+}
+
 /***********************************************************************
  *           RtlQueryHeapInformation    (NTDLL.@)
  */
@@ -2572,6 +2774,9 @@ NTSTATUS WINAPI RtlQueryHeapInformation( HANDLE handle, HEAP_INFORMATION_CLASS i
         if (size_in < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
         *(ULONG *)info = ReadNoFence( &heap->compat_info );
         return STATUS_SUCCESS;
+
+    case HeapExtendedInformation:
+        return query_extended_heap_information( handle, info, size_in, size_out );
 
     default:
         FIXME( "HEAP_INFORMATION_CLASS %u not implemented!\n", info_class );

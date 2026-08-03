@@ -1014,6 +1014,9 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_wine_server_fd_to_handle,
     unixcall_wine_server_handle_to_fd,
     unixcall_wine_spawnvp,
+    unixcall_wine_probe_for_write,
+    unixcall_wine_create_key_value_query,
+    unixcall_wine_query_multiple_value_key,
     system_time_precise,
 };
 
@@ -1022,6 +1025,7 @@ static const unixlib_entry_t unix_call_funcs[] =
 
 static NTSTATUS wow64_load_so_dll( void *args ) { return STATUS_INVALID_IMAGE_FORMAT; }
 static NTSTATUS wow64_unwind_builtin_dll( void *args ) { return STATUS_UNSUCCESSFUL; }
+static NTSTATUS wow64_key_value_query( void *args ) { return STATUS_NOT_SUPPORTED; }
 
 const unixlib_entry_t unix_call_wow64_funcs[] =
 {
@@ -1032,6 +1036,9 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_server_fd_to_handle,
     wow64_wine_server_handle_to_fd,
     wow64_wine_spawnvp,
+    wow64_key_value_query,
+    wow64_key_value_query,
+    wow64_key_value_query,
     system_time_precise,
 };
 

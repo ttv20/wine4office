@@ -203,6 +203,62 @@ static void NearestNeighbor_CopyScanline(BitmapScaler *This,
     }
 }
 
+static void Fant_GetRequiredSourceRect(BitmapScaler *This,
+    UINT x, UINT y, WICRect *src_rect)
+{
+    UINT64 left = (UINT64)x * This->src_width;
+    UINT64 top = (UINT64)y * This->src_height;
+    UINT64 right = ((UINT64)x + 1) * This->src_width;
+    UINT64 bottom = ((UINT64)y + 1) * This->src_height;
+
+    src_rect->X = left / This->width;
+    src_rect->Y = top / This->height;
+    src_rect->Width = (right + This->width - 1) / This->width - src_rect->X;
+    src_rect->Height = (bottom + This->height - 1) / This->height - src_rect->Y;
+}
+
+static void Fant_CopyScanline(BitmapScaler *This,
+    UINT dst_x, UINT dst_y, UINT dst_width,
+    BYTE **src_data, UINT src_data_x, UINT src_data_y, BYTE *pbBuffer)
+{
+    UINT bytesperpixel = This->bpp / 8;
+    UINT64 top = (UINT64)dst_y * This->src_height;
+    UINT64 bottom = ((UINT64)dst_y + 1) * This->src_height;
+    UINT64 area = (UINT64)This->src_width * This->src_height;
+    UINT x, channel;
+
+    for (x = 0; x < dst_width; ++x)
+    {
+        UINT64 left = ((UINT64)dst_x + x) * This->src_width;
+        UINT64 right = ((UINT64)dst_x + x + 1) * This->src_width;
+        UINT src_y;
+
+        for (channel = 0; channel < bytesperpixel; ++channel)
+        {
+            UINT64 sum = 0;
+
+            for (src_y = top / This->height; (UINT64)src_y * This->height < bottom; ++src_y)
+            {
+                UINT64 y0 = max(top, (UINT64)src_y * This->height);
+                UINT64 y1 = min(bottom, ((UINT64)src_y + 1) * This->height);
+                UINT src_x;
+
+                for (src_x = left / This->width; (UINT64)src_x * This->width < right; ++src_x)
+                {
+                    UINT64 x0 = max(left, (UINT64)src_x * This->width);
+                    UINT64 x1 = min(right, ((UINT64)src_x + 1) * This->width);
+                    UINT64 weight = (x1 - x0) * (y1 - y0);
+
+                    sum += src_data[src_y - src_data_y]
+                            [(src_x - src_data_x) * bytesperpixel + channel] * weight;
+                }
+            }
+
+            pbBuffer[x * bytesperpixel + channel] = (sum + area / 2) / area;
+        }
+    }
+}
+
 static HRESULT WINAPI BitmapScaler_CopyPixels(IWICBitmapScaler *iface,
     const WICRect *prc, UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer)
 {
@@ -351,6 +407,26 @@ static HRESULT WINAPI BitmapScaler_Initialize(IWICBitmapScaler *iface,
     {
         switch (mode)
         {
+        case WICBitmapInterpolationModeFant:
+            if (IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat24bppBGR)
+                    || IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat32bppBGR)
+                    || IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat32bppBGRA)
+                    || IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat32bppPBGRA)
+                    || IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat32bppRGBA)
+                    || IsEqualGUID(&src_pixelformat, &GUID_WICPixelFormat32bppPRGBA))
+            {
+                IWICBitmapSource_AddRef(pISource);
+                This->source = pISource;
+            }
+            else
+            {
+                hr = WICConvertBitmapSource(&GUID_WICPixelFormat32bppBGRA,
+                    pISource, &This->source);
+                This->bpp = 32;
+            }
+            This->fn_get_required_source_rect = Fant_GetRequiredSourceRect;
+            This->fn_copy_scanline = Fant_CopyScanline;
+            break;
         default:
             FIXME("unsupported mode %i\n", mode);
             /* fall-through */

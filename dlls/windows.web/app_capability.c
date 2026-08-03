@@ -65,12 +65,27 @@ done:
     return found;
 }
 
+static HRESULT inspectable_get_iids( const IID *iid, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = CoTaskMemAlloc( sizeof(**iids) );
+    if (!*iids) return E_OUTOFMEMORY;
+    **iids = *iid;
+    *count = 1;
+    return S_OK;
+}
+
 struct app_capability
 {
     IAppCapability IAppCapability_iface;
     LONG ref;
     HSTRING name;
+    ITypedEventHandler_AppCapability_AppCapabilityAccessChangedEventArgs *access_changed_handler;
+    EventRegistrationToken access_changed_token;
 };
+
+static LONG64 next_access_changed_token;
 
 static inline struct app_capability *impl_from_IAppCapability( IAppCapability *iface )
 {
@@ -104,6 +119,9 @@ static ULONG WINAPI app_capability_Release( IAppCapability *iface )
 
     if (!ref)
     {
+        if (impl->access_changed_handler)
+            ITypedEventHandler_AppCapability_AppCapabilityAccessChangedEventArgs_Release(
+                    impl->access_changed_handler );
         WindowsDeleteString( impl->name );
         free( impl );
     }
@@ -112,17 +130,21 @@ static ULONG WINAPI app_capability_Release( IAppCapability *iface )
 
 static HRESULT WINAPI app_capability_GetIids( IAppCapability *iface, ULONG *count, IID **iids )
 {
-    return E_NOTIMPL;
+    TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
+    return inspectable_get_iids( &IID_IAppCapability, count, iids );
 }
 
 static HRESULT WINAPI app_capability_GetRuntimeClassName( IAppCapability *iface, HSTRING *name )
 {
+    TRACE( "iface %p, name %p.\n", iface, name );
+    if (!name) return E_POINTER;
     return WindowsCreateString( RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability,
                                 wcslen( RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability ), name );
 }
 
 static HRESULT WINAPI app_capability_GetTrustLevel( IAppCapability *iface, TrustLevel *level )
 {
+    TRACE( "iface %p, level %p.\n", iface, level );
     if (!level) return E_POINTER;
     *level = BaseTrust;
     return S_OK;
@@ -131,28 +153,270 @@ static HRESULT WINAPI app_capability_GetTrustLevel( IAppCapability *iface, Trust
 static HRESULT WINAPI app_capability_get_CapabilityName( IAppCapability *iface, HSTRING *value )
 {
     struct app_capability *impl = impl_from_IAppCapability( iface );
+    TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
     return WindowsDuplicateString( impl->name, value );
 }
 
 static HRESULT WINAPI app_capability_get_User( IAppCapability *iface, __x_ABI_CWindows_CSystem_CIUser **value )
 {
+    TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
     *value = NULL;
+    return S_OK;
+}
+
+struct capability_operation
+{
+    IAsyncOperation_AppCapabilityAccessStatus IAsyncOperation_AppCapabilityAccessStatus_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    IAsyncOperationCompletedHandler_AppCapabilityAccessStatus *handler;
+    AppCapabilityAccessStatus result;
+    BOOL closed;
+};
+
+static inline struct capability_operation *impl_from_capability_operation(
+        IAsyncOperation_AppCapabilityAccessStatus *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_operation,
+                              IAsyncOperation_AppCapabilityAccessStatus_iface );
+}
+
+static inline struct capability_operation *impl_from_capability_operation_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_operation, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI capability_operation_QueryInterface( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        REFIID iid, void **out )
+{
+    struct capability_operation *impl = impl_from_capability_operation( iface );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo )) *out = &impl->IAsyncInfo_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+             IsEqualGUID( iid, &IID_IAgileObject ) ||
+             IsEqualGUID( iid, &IID_IAsyncOperation_AppCapabilityAccessStatus ))
+        *out = iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI capability_operation_AddRef( IAsyncOperation_AppCapabilityAccessStatus *iface )
+{
+    return InterlockedIncrement( &impl_from_capability_operation( iface )->ref );
+}
+
+static ULONG WINAPI capability_operation_Release( IAsyncOperation_AppCapabilityAccessStatus *iface )
+{
+    struct capability_operation *impl = impl_from_capability_operation( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->handler) IAsyncOperationCompletedHandler_AppCapabilityAccessStatus_Release( impl->handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI capability_operation_GetIids( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        ULONG *count, IID **iids )
+{
+    return inspectable_get_iids( &IID_IAsyncOperation_AppCapabilityAccessStatus, count, iids );
+}
+
+static HRESULT WINAPI capability_operation_GetRuntimeClassName( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        HSTRING *name )
+{
+    static const WCHAR class_name[] =
+        L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Authorization.AppCapabilityAccess.AppCapabilityAccessStatus>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI capability_operation_GetTrustLevel( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_operation_put_Completed( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        IAsyncOperationCompletedHandler_AppCapabilityAccessStatus *handler )
+{
+    struct capability_operation *impl = impl_from_capability_operation( iface );
+    HRESULT hr;
+
+    if (!handler) return E_POINTER;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    if (impl->handler) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    IAsyncOperationCompletedHandler_AppCapabilityAccessStatus_AddRef( handler );
+    impl->handler = handler;
+    capability_operation_AddRef( iface );
+    hr = IAsyncOperationCompletedHandler_AppCapabilityAccessStatus_Invoke( handler, iface, Completed );
+    capability_operation_Release( iface );
+    return hr;
+}
+
+static HRESULT WINAPI capability_operation_get_Completed( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        IAsyncOperationCompletedHandler_AppCapabilityAccessStatus **handler )
+{
+    struct capability_operation *impl = impl_from_capability_operation( iface );
+
+    if (!handler) return E_POINTER;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    if ((*handler = impl->handler)) IAsyncOperationCompletedHandler_AppCapabilityAccessStatus_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_operation_GetResults( IAsyncOperation_AppCapabilityAccessStatus *iface,
+        AppCapabilityAccessStatus *result )
+{
+    if (!result) return E_POINTER;
+    if (impl_from_capability_operation( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *result = impl_from_capability_operation( iface )->result;
+    return S_OK;
+}
+
+static const IAsyncOperation_AppCapabilityAccessStatusVtbl capability_operation_vtbl =
+{
+    capability_operation_QueryInterface,
+    capability_operation_AddRef,
+    capability_operation_Release,
+    capability_operation_GetIids,
+    capability_operation_GetRuntimeClassName,
+    capability_operation_GetTrustLevel,
+    capability_operation_put_Completed,
+    capability_operation_get_Completed,
+    capability_operation_GetResults,
+};
+
+static HRESULT WINAPI capability_operation_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return capability_operation_QueryInterface(
+            &impl_from_capability_operation_info( iface )->IAsyncOperation_AppCapabilityAccessStatus_iface,
+            iid, out );
+}
+
+static ULONG WINAPI capability_operation_info_AddRef( IAsyncInfo *iface )
+{
+    return capability_operation_AddRef(
+            &impl_from_capability_operation_info( iface )->IAsyncOperation_AppCapabilityAccessStatus_iface );
+}
+
+static ULONG WINAPI capability_operation_info_Release( IAsyncInfo *iface )
+{
+    return capability_operation_Release(
+            &impl_from_capability_operation_info( iface )->IAsyncOperation_AppCapabilityAccessStatus_iface );
+}
+
+static HRESULT WINAPI capability_operation_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    return inspectable_get_iids( &IID_IAsyncInfo, count, iids );
+}
+
+static HRESULT WINAPI capability_operation_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return capability_operation_GetRuntimeClassName(
+            &impl_from_capability_operation_info( iface )->IAsyncOperation_AppCapabilityAccessStatus_iface, name );
+}
+
+static HRESULT WINAPI capability_operation_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
+{
+    return capability_operation_GetTrustLevel(
+            &impl_from_capability_operation_info( iface )->IAsyncOperation_AppCapabilityAccessStatus_iface, level );
+}
+
+static HRESULT WINAPI capability_operation_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    if (!id) return E_POINTER;
+    if (impl_from_capability_operation_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_operation_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    if (!status) return E_POINTER;
+    if (impl_from_capability_operation_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *status = Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_operation_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
+{
+    if (!error) return E_POINTER;
+    if (impl_from_capability_operation_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *error = S_OK;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_operation_info_Cancel( IAsyncInfo *iface )
+{
+    return impl_from_capability_operation_info( iface )->closed ? E_ILLEGAL_METHOD_CALL : S_OK;
+}
+
+static HRESULT WINAPI capability_operation_info_Close( IAsyncInfo *iface )
+{
+    impl_from_capability_operation_info( iface )->closed = TRUE;
+    return S_OK;
+}
+
+static const IAsyncInfoVtbl capability_operation_info_vtbl =
+{
+    capability_operation_info_QueryInterface,
+    capability_operation_info_AddRef,
+    capability_operation_info_Release,
+    capability_operation_info_GetIids,
+    capability_operation_info_GetRuntimeClassName,
+    capability_operation_info_GetTrustLevel,
+    capability_operation_info_get_Id,
+    capability_operation_info_get_Status,
+    capability_operation_info_get_ErrorCode,
+    capability_operation_info_Cancel,
+    capability_operation_info_Close,
+};
+
+static HRESULT capability_operation_create( AppCapabilityAccessStatus result,
+        IAsyncOperation_AppCapabilityAccessStatus **out )
+{
+    struct capability_operation *impl;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IAsyncOperation_AppCapabilityAccessStatus_iface.lpVtbl = &capability_operation_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &capability_operation_info_vtbl;
+    impl->ref = 1;
+    impl->result = result;
+    *out = &impl->IAsyncOperation_AppCapabilityAccessStatus_iface;
     return S_OK;
 }
 
 static HRESULT WINAPI app_capability_RequestAccessAsync( IAppCapability *iface,
         IAsyncOperation_AppCapabilityAccessStatus **operation )
 {
-    FIXME( "iface %p, operation %p stub!\n", iface, operation );
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
+    struct app_capability *impl = impl_from_IAppCapability( iface );
+    AppCapabilityAccessStatus status = package_declares_capability( impl->name )
+            ? AppCapabilityAccessStatus_Allowed : AppCapabilityAccessStatus_NotDeclaredByApp;
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+    return capability_operation_create( status, operation );
 }
 
 static HRESULT WINAPI app_capability_CheckAccess( IAppCapability *iface, AppCapabilityAccessStatus *result )
 {
     struct app_capability *impl = impl_from_IAppCapability( iface );
+
+    TRACE( "iface %p, result %p.\n", iface, result );
     if (!result) return E_POINTER;
     if (package_declares_capability( impl->name ))
     {
@@ -171,12 +435,32 @@ static HRESULT WINAPI app_capability_add_AccessChanged( IAppCapability *iface,
         ITypedEventHandler_AppCapability_AppCapabilityAccessChangedEventArgs *handler,
         EventRegistrationToken *token )
 {
-    return E_NOTIMPL;
+    struct app_capability *impl = impl_from_IAppCapability( iface );
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+
+    if (!handler || !token) return E_POINTER;
+    if (impl->access_changed_handler) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    ITypedEventHandler_AppCapability_AppCapabilityAccessChangedEventArgs_AddRef( handler );
+    impl->access_changed_handler = handler;
+    impl->access_changed_token.value = InterlockedIncrement64( &next_access_changed_token );
+    *token = impl->access_changed_token;
+    return S_OK;
 }
 
 static HRESULT WINAPI app_capability_remove_AccessChanged( IAppCapability *iface, EventRegistrationToken token )
 {
-    return E_NOTIMPL;
+    struct app_capability *impl = impl_from_IAppCapability( iface );
+
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+
+    if (!impl->access_changed_handler || token.value != impl->access_changed_token.value)
+        return E_INVALIDARG;
+    ITypedEventHandler_AppCapability_AppCapabilityAccessChangedEventArgs_Release(
+            impl->access_changed_handler );
+    impl->access_changed_handler = NULL;
+    impl->access_changed_token.value = 0;
+    return S_OK;
 }
 
 static const IAppCapabilityVtbl app_capability_vtbl =
@@ -245,17 +529,21 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
 {
-    return E_NOTIMPL;
+    return inspectable_get_iids( &IID_IActivationFactory, count, iids );
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
 {
-    return E_NOTIMPL;
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability,
+                                wcslen( RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability ), name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
 {
-    return E_NOTIMPL;
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -294,34 +582,466 @@ static ULONG WINAPI statics_Release( IAppCapabilityStatics *iface )
 
 static HRESULT WINAPI statics_GetIids( IAppCapabilityStatics *iface, ULONG *count, IID **iids )
 {
-    return E_NOTIMPL;
+    return inspectable_get_iids( &IID_IAppCapabilityStatics, count, iids );
 }
 
 static HRESULT WINAPI statics_GetRuntimeClassName( IAppCapabilityStatics *iface, HSTRING *name )
 {
-    return E_NOTIMPL;
+    return factory_GetRuntimeClassName( &impl_from_IAppCapabilityStatics( iface )->IActivationFactory_iface, name );
 }
 
 static HRESULT WINAPI statics_GetTrustLevel( IAppCapabilityStatics *iface, TrustLevel *level )
 {
-    return E_NOTIMPL;
+    return factory_GetTrustLevel( &impl_from_IAppCapabilityStatics( iface )->IActivationFactory_iface, level );
+}
+
+struct capability_map
+{
+    IMapView_HSTRING_AppCapabilityAccessStatus IMapView_HSTRING_AppCapabilityAccessStatus_iface;
+    LONG ref;
+    HSTRING *names;
+    UINT32 count;
+};
+
+static inline struct capability_map *impl_from_capability_map( IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_map, IMapView_HSTRING_AppCapabilityAccessStatus_iface );
+}
+
+static HRESULT WINAPI capability_map_QueryInterface( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IMapView_HSTRING_AppCapabilityAccessStatus ))
+    {
+        *out = iface;
+        IMapView_HSTRING_AppCapabilityAccessStatus_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI capability_map_AddRef( IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    return InterlockedIncrement( &impl_from_capability_map( iface )->ref );
+}
+
+static ULONG WINAPI capability_map_Release( IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    struct capability_map *impl = impl_from_capability_map( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    UINT32 i;
+
+    if (!ref)
+    {
+        for (i = 0; i < impl->count; ++i) WindowsDeleteString( impl->names[i] );
+        free( impl->names );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI capability_map_GetIids( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        ULONG *count, IID **iids )
+{
+    return inspectable_get_iids( &IID_IMapView_HSTRING_AppCapabilityAccessStatus, count, iids );
+}
+
+static HRESULT WINAPI capability_map_GetRuntimeClassName( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        HSTRING *name )
+{
+    static const WCHAR class_name[] =
+        L"Windows.Foundation.Collections.IMapView`2<String,Windows.Security.Authorization.AppCapabilityAccess.AppCapabilityAccessStatus>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI capability_map_GetTrustLevel( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_Lookup( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        HSTRING key, AppCapabilityAccessStatus *value )
+{
+    struct capability_map *impl = impl_from_capability_map( iface );
+    UINT32 i;
+    int order;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    for (i = 0; i < impl->count; ++i)
+    {
+        if (SUCCEEDED(hr = WindowsCompareStringOrdinal( impl->names[i], key, &order )) && !order)
+        {
+            *value = AppCapabilityAccessStatus_NotDeclaredByApp;
+            return S_OK;
+        }
+        if (FAILED(hr)) return hr;
+    }
+    return E_BOUNDS;
+}
+
+static HRESULT WINAPI capability_map_get_Size( IMapView_HSTRING_AppCapabilityAccessStatus *iface, UINT32 *size )
+{
+    if (!size) return E_POINTER;
+    *size = impl_from_capability_map( iface )->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_HasKey( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        HSTRING key, boolean *found )
+{
+    AppCapabilityAccessStatus value;
+    HRESULT hr;
+
+    if (!found) return E_POINTER;
+    hr = capability_map_Lookup( iface, key, &value );
+    if (hr == E_BOUNDS)
+    {
+        *found = FALSE;
+        return S_OK;
+    }
+    if (SUCCEEDED(hr)) *found = TRUE;
+    return hr;
+}
+
+static HRESULT WINAPI capability_map_Split( IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        IMapView_HSTRING_AppCapabilityAccessStatus **first, IMapView_HSTRING_AppCapabilityAccessStatus **second )
+{
+    if (!first || !second) return E_POINTER;
+    *first = NULL;
+    *second = NULL;
+    return S_OK;
+}
+
+static const IMapView_HSTRING_AppCapabilityAccessStatusVtbl capability_map_vtbl =
+{
+    capability_map_QueryInterface,
+    capability_map_AddRef,
+    capability_map_Release,
+    capability_map_GetIids,
+    capability_map_GetRuntimeClassName,
+    capability_map_GetTrustLevel,
+    capability_map_Lookup,
+    capability_map_get_Size,
+    capability_map_HasKey,
+    capability_map_Split,
+};
+
+static HRESULT capability_map_create( IIterable_HSTRING *names,
+        IMapView_HSTRING_AppCapabilityAccessStatus **out )
+{
+    struct capability_map *impl;
+    IIterator_HSTRING *iterator = NULL;
+    boolean current;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!names) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IMapView_HSTRING_AppCapabilityAccessStatus_iface.lpVtbl = &capability_map_vtbl;
+    impl->ref = 1;
+
+    if (FAILED(hr = IIterable_HSTRING_First( names, &iterator ))) goto failed;
+    while (SUCCEEDED(hr = IIterator_HSTRING_get_HasCurrent( iterator, &current )) && current)
+    {
+        HSTRING *new_names;
+
+        if (!(new_names = realloc( impl->names, (impl->count + 1) * sizeof(*new_names) )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto failed;
+        }
+        impl->names = new_names;
+        impl->names[impl->count] = NULL;
+        if (FAILED(hr = IIterator_HSTRING_get_Current( iterator, &impl->names[impl->count] ))) goto failed;
+        ++impl->count;
+        if (FAILED(hr = IIterator_HSTRING_MoveNext( iterator, &current ))) goto failed;
+    }
+    if (FAILED(hr)) goto failed;
+    IIterator_HSTRING_Release( iterator );
+    *out = &impl->IMapView_HSTRING_AppCapabilityAccessStatus_iface;
+    return S_OK;
+
+failed:
+    if (iterator) IIterator_HSTRING_Release( iterator );
+    capability_map_Release( &impl->IMapView_HSTRING_AppCapabilityAccessStatus_iface );
+    return hr;
+}
+
+struct capability_map_operation
+{
+    IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    IMapView_HSTRING_AppCapabilityAccessStatus *result;
+    IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus *handler;
+    BOOL closed;
+};
+
+static inline struct capability_map_operation *impl_from_capability_map_operation(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_map_operation,
+                              IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface );
+}
+
+static inline struct capability_map_operation *impl_from_capability_map_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_map_operation, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI capability_map_operation_QueryInterface(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface, REFIID iid, void **out )
+{
+    struct capability_map_operation *impl = impl_from_capability_map_operation( iface );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo )) *out = &impl->IAsyncInfo_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+             IsEqualGUID( iid, &IID_IAgileObject ) ||
+             IsEqualGUID( iid, &IID_IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus ))
+        *out = iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI capability_map_operation_AddRef(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    return InterlockedIncrement( &impl_from_capability_map_operation( iface )->ref );
+}
+
+static ULONG WINAPI capability_map_operation_Release(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface )
+{
+    struct capability_map_operation *impl = impl_from_capability_map_operation( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->handler)
+            IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus_Release( impl->handler );
+        IMapView_HSTRING_AppCapabilityAccessStatus_Release( impl->result );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI capability_map_operation_GetIids(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface, ULONG *count, IID **iids )
+{
+    return inspectable_get_iids( &IID_IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus, count, iids );
+}
+
+static HRESULT WINAPI capability_map_operation_GetRuntimeClassName(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] =
+        L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IMapView`2<String,Windows.Security.Authorization.AppCapabilityAccess.AppCapabilityAccessStatus>>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI capability_map_operation_GetTrustLevel(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_operation_put_Completed(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus *handler )
+{
+    struct capability_map_operation *impl = impl_from_capability_map_operation( iface );
+    HRESULT hr;
+
+    if (!handler) return E_POINTER;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    if (impl->handler) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus_AddRef( handler );
+    impl->handler = handler;
+    capability_map_operation_AddRef( iface );
+    hr = IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus_Invoke( handler, iface, Completed );
+    capability_map_operation_Release( iface );
+    return hr;
+}
+
+static HRESULT WINAPI capability_map_operation_get_Completed(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus **handler )
+{
+    struct capability_map_operation *impl = impl_from_capability_map_operation( iface );
+
+    if (!handler) return E_POINTER;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    if ((*handler = impl->handler))
+        IAsyncOperationCompletedHandler_IMapView_HSTRING_AppCapabilityAccessStatus_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_operation_GetResults(
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *iface,
+        IMapView_HSTRING_AppCapabilityAccessStatus **result )
+{
+    struct capability_map_operation *impl = impl_from_capability_map_operation( iface );
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    IMapView_HSTRING_AppCapabilityAccessStatus_AddRef( *result = impl->result );
+    return S_OK;
+}
+
+static const IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatusVtbl capability_map_operation_vtbl =
+{
+    capability_map_operation_QueryInterface,
+    capability_map_operation_AddRef,
+    capability_map_operation_Release,
+    capability_map_operation_GetIids,
+    capability_map_operation_GetRuntimeClassName,
+    capability_map_operation_GetTrustLevel,
+    capability_map_operation_put_Completed,
+    capability_map_operation_get_Completed,
+    capability_map_operation_GetResults,
+};
+
+static HRESULT WINAPI capability_map_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return capability_map_operation_QueryInterface(
+            &impl_from_capability_map_info( iface )->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface,
+            iid, out );
+}
+
+static ULONG WINAPI capability_map_info_AddRef( IAsyncInfo *iface )
+{
+    return capability_map_operation_AddRef(
+            &impl_from_capability_map_info( iface )->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface );
+}
+
+static ULONG WINAPI capability_map_info_Release( IAsyncInfo *iface )
+{
+    return capability_map_operation_Release(
+            &impl_from_capability_map_info( iface )->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface );
+}
+
+static HRESULT WINAPI capability_map_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    return inspectable_get_iids( &IID_IAsyncInfo, count, iids );
+}
+
+static HRESULT WINAPI capability_map_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return capability_map_operation_GetRuntimeClassName(
+            &impl_from_capability_map_info( iface )->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface,
+            name );
+}
+
+static HRESULT WINAPI capability_map_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
+{
+    return capability_map_operation_GetTrustLevel(
+            &impl_from_capability_map_info( iface )->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface,
+            level );
+}
+
+static HRESULT WINAPI capability_map_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    if (!id) return E_POINTER;
+    if (impl_from_capability_map_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    if (!status) return E_POINTER;
+    if (impl_from_capability_map_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *status = Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
+{
+    if (!error) return E_POINTER;
+    if (impl_from_capability_map_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
+    *error = S_OK;
+    return S_OK;
+}
+
+static HRESULT WINAPI capability_map_info_Cancel( IAsyncInfo *iface )
+{
+    return impl_from_capability_map_info( iface )->closed ? E_ILLEGAL_METHOD_CALL : S_OK;
+}
+
+static HRESULT WINAPI capability_map_info_Close( IAsyncInfo *iface )
+{
+    impl_from_capability_map_info( iface )->closed = TRUE;
+    return S_OK;
+}
+
+static const IAsyncInfoVtbl capability_map_info_vtbl =
+{
+    capability_map_info_QueryInterface,
+    capability_map_info_AddRef,
+    capability_map_info_Release,
+    capability_map_info_GetIids,
+    capability_map_info_GetRuntimeClassName,
+    capability_map_info_GetTrustLevel,
+    capability_map_info_get_Id,
+    capability_map_info_get_Status,
+    capability_map_info_get_ErrorCode,
+    capability_map_info_Cancel,
+    capability_map_info_Close,
+};
+
+static HRESULT capability_map_operation_create( IIterable_HSTRING *names,
+        IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus **out )
+{
+    struct capability_map_operation *impl;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface.lpVtbl = &capability_map_operation_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &capability_map_info_vtbl;
+    impl->ref = 1;
+    if (FAILED(hr = capability_map_create( names, &impl->result )))
+    {
+        free( impl );
+        return hr;
+    }
+    *out = &impl->IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI statics_RequestAccessForCapabilitiesAsync( IAppCapabilityStatics *iface,
         IIterable_HSTRING *names, IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus **operation )
 {
-    FIXME( "iface %p, names %p, operation %p stub!\n", iface, names, operation );
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
+    TRACE( "iface %p, names %p, operation %p.\n", iface, names, operation );
+    return capability_map_operation_create( names, operation );
 }
 
 static HRESULT WINAPI statics_RequestAccessForCapabilitiesForUserAsync( IAppCapabilityStatics *iface,
         __x_ABI_CWindows_CSystem_CIUser *user, IIterable_HSTRING *names,
         IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus **operation )
 {
-    FIXME( "iface %p, user %p, names %p, operation %p stub!\n", iface, user, names, operation );
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
+    TRACE( "iface %p, user %p, names %p, operation %p.\n", iface, user, names, operation );
+    return capability_map_operation_create( names, operation );
 }
 
 static HRESULT WINAPI statics_Create( IAppCapabilityStatics *iface, HSTRING name, IAppCapability **result )

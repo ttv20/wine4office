@@ -90,7 +90,8 @@ static DWORD SOFTPUB_OpenFile(CRYPT_PROVIDER_DATA *data)
     {
         data->pWintrustData->pFile->hFile =
             CreateFileW(data->pWintrustData->pFile->pcwszFilePath, GENERIC_READ,
-          FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+          FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+          FILE_ATTRIBUTE_NORMAL, NULL);
         if (data->pWintrustData->pFile->hFile != INVALID_HANDLE_VALUE)
             data->fOpenedFile = TRUE;
         else

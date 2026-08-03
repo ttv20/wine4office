@@ -871,12 +871,20 @@ static ULONG WINAPI resourcefontfileloader_Release(IDWriteFontFileLoader *iface)
     return 1;
 }
 
+/* Fail after this many successful stream creations. A negative value disables failure. */
+static int resourcefontfileloader_fail_after = -1;
+
 static HRESULT WINAPI resourcefontfileloader_CreateStreamFromKey(IDWriteFontFileLoader *iface, const void *ref_key, UINT32 key_size,
     IDWriteFontFileStream **stream)
 {
     LPVOID data;
     DWORD size;
     HGLOBAL mem;
+
+    if (!resourcefontfileloader_fail_after)
+        return E_FAIL;
+    if (resourcefontfileloader_fail_after > 0)
+        --resourcefontfileloader_fail_after;
 
     mem = LoadResource(GetModuleHandleA(NULL), *(HRSRC*)ref_key);
     ok(mem != NULL, "Failed to lock font resource\n");
@@ -9840,6 +9848,77 @@ static void test_AnalyzeContainerType(void)
     IDWriteFactory5_Release(factory);
 }
 
+static void test_failed_font_file_stream(void)
+{
+    IDWriteLocalizedStrings *values;
+    IDWriteFontSetBuilder1 *builder1;
+    IDWriteFontSetBuilder *builder;
+    IDWriteFontResource *resource;
+    IDWriteFactory6 *factory;
+    IDWriteFontSet *fontset;
+    IDWriteFontFile *file;
+    BOOL exists;
+    HRESULT hr;
+    HRSRC font;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory6)))
+    {
+        win_skip("IDWriteFactory6 is not supported.\n");
+        return;
+    }
+
+    hr = IDWriteFactory_RegisterFontFileLoader((IDWriteFactory *)factory, &rloader);
+    ok(hr == S_OK, "Failed to register file loader, hr %#lx.\n", hr);
+
+    font = FindResourceA(GetModuleHandleA(NULL), (LPCSTR)MAKEINTRESOURCE(1), (LPCSTR)RT_RCDATA);
+    ok(!!font, "Failed to find font resource.\n");
+
+    hr = IDWriteFactory_CreateCustomFontFileReference((IDWriteFactory *)factory, &font, sizeof(font), &rloader, &file);
+    ok(hr == S_OK, "Failed to create font file, hr %#lx.\n", hr);
+
+    hr = IDWriteFactory3_CreateFontSetBuilder((IDWriteFactory3 *)factory, &builder);
+    ok(hr == S_OK, "Failed to create font set builder, hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder_QueryInterface(builder, &IID_IDWriteFontSetBuilder1, (void **)&builder1);
+    ok(hr == S_OK, "Failed to get builder1 interface, hr %#lx.\n", hr);
+
+    hr = IDWriteFontSetBuilder1_AddFontFile(builder1, file);
+    ok(hr == S_OK, "Failed to add font file, hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder1_CreateFontSet(builder1, &fontset);
+    ok(hr == S_OK, "Failed to create font set, hr %#lx.\n", hr);
+
+    resourcefontfileloader_fail_after = 0;
+    values = (void *)0xdeadbeef;
+    exists = TRUE;
+    hr = IDWriteFontSet_GetPropertyValues(fontset, 0, DWRITE_FONT_PROPERTY_ID_FULL_NAME, &exists, &values);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!exists, "Unexpected property value.\n");
+    ok(!values, "Unexpected values pointer %p.\n", values);
+    resourcefontfileloader_fail_after = -1;
+
+    IDWriteFontSet_Release(fontset);
+    IDWriteFontSetBuilder1_Release(builder1);
+    IDWriteFontSetBuilder_Release(builder);
+    IDWriteFontFile_Release(file);
+
+    hr = IDWriteFactory_CreateCustomFontFileReference((IDWriteFactory *)factory, &font, sizeof(font), &rloader, &file);
+    ok(hr == S_OK, "Failed to create font file, hr %#lx.\n", hr);
+
+    resourcefontfileloader_fail_after = 1;
+    resource = (void *)0xdeadbeef;
+    hr = IDWriteFactory6_CreateFontResource(factory, file, 0, &resource);
+    ok(hr == E_FAIL || broken(hr == S_OK), "Unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        IDWriteFontResource_Release(resource);
+    else
+        ok(!resource, "Unexpected resource pointer %p.\n", resource);
+    resourcefontfileloader_fail_after = -1;
+
+    IDWriteFontFile_Release(file);
+    hr = IDWriteFactory_UnregisterFontFileLoader((IDWriteFactory *)factory, &rloader);
+    ok(hr == S_OK, "Failed to unregister file loader, hr %#lx.\n", hr);
+    IDWriteFactory6_Release(factory);
+}
+
 static void test_fontsetbuilder(void)
 {
     IDWriteFontFaceReference *ref, *ref2, *ref3;
@@ -10810,6 +10889,7 @@ START_TEST(font)
     test_CreateCustomRenderingParams();
     test_localfontfileloader();
     test_AnalyzeContainerType();
+    test_failed_font_file_stream();
     test_fontsetbuilder();
     test_font_resource();
     test_IsColorFont();

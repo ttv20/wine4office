@@ -1,0 +1,7 @@
+MODULE    = wine4officeclose.exe
+IMPORTS   = user32
+
+EXTRADLLFLAGS = -mconsole -municode
+
+SOURCES = \
+	wine4officeclose.c

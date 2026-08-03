@@ -1,0 +1,6 @@
+MODULE = wine4office-appv-preload.exe
+
+EXTRADLLFLAGS = -mconsole
+
+SOURCES = \
+	main.c

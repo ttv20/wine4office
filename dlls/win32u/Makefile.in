@@ -3,7 +3,7 @@ MODULE    = win32u.dll
 UNIXLIB   = win32u.so
 IMPORTLIB = win32u
 IMPORTS   = ntdll
-UNIX_CFLAGS  = $(FREETYPE_CFLAGS) $(FONTCONFIG_CFLAGS)
+UNIX_CFLAGS  = $(DBUS_CFLAGS) $(FREETYPE_CFLAGS) $(FONTCONFIG_CFLAGS)
 UNIX_LIBS    = $(CORETEXT_LIBS) $(APPKIT_LIBS) $(PTHREAD_LIBS) -lm
 
 EXTRADLLFLAGS = -nodefaultlibs
@@ -34,6 +34,7 @@ SOURCES = \
 	hook.c \
 	imm.c \
 	input.c \
+	host_theme.c \
 	main.c \
 	mapping.c \
 	menu.c \

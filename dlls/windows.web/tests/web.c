@@ -914,8 +914,14 @@ static void test_AppCapability(void)
         L"Windows.Security.Authorization.AppCapabilityAccess.AppCapability";
     IAppCapabilityStatics *statics = (void *)0xdeadbeef;
     IAppCapability *capability = (void *)0xdeadbeef;
+    IAsyncOperation_AppCapabilityAccessStatus *operation;
+    IAsyncInfo *async_info;
     AppCapabilityAccessStatus status;
+    AsyncStatus async_status;
     HSTRING class = NULL, name = NULL, returned_name = NULL;
+    TrustLevel trust_level;
+    IID *iids;
+    ULONG count;
     HRESULT hr;
     int result;
 
@@ -937,6 +943,20 @@ static void test_AppCapability(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     if (SUCCEEDED(hr))
     {
+        hr = IAppCapability_GetIids( capability, &count, &iids );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( count == 1, "got count %lu.\n", count );
+        ok( IsEqualIID( iids, &IID_IAppCapability ), "got iid %s.\n", wine_dbgstr_guid( iids ) );
+        CoTaskMemFree( iids );
+        hr = IAppCapability_GetRuntimeClassName( capability, &class );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !wcscmp( WindowsGetStringRawBuffer( class, NULL ), class_name ),
+            "got class %s.\n", wine_dbgstr_hstring( class ) );
+        WindowsDeleteString( class );
+        hr = IAppCapability_GetTrustLevel( capability, &trust_level );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( trust_level == BaseTrust, "got trust level %u.\n", trust_level );
+
         hr = IAppCapability_get_CapabilityName( capability, &returned_name );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         hr = WindowsCompareStringOrdinal( name, returned_name, &result );
@@ -948,6 +968,20 @@ static void test_AppCapability(void)
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( status >= AppCapabilityAccessStatus_DeniedBySystem &&
             status <= AppCapabilityAccessStatus_Allowed, "got status %u.\n", status );
+
+        hr = IAppCapability_RequestAccessAsync( capability, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IAsyncOperation_AppCapabilityAccessStatus_QueryInterface( operation, &IID_IAsyncInfo,
+                                                                        (void **)&async_info );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IAsyncInfo_get_Status( async_info, &async_status );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( async_status == Completed, "got status %u.\n", async_status );
+        hr = IAsyncOperation_AppCapabilityAccessStatus_GetResults( operation, &status );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( status == AppCapabilityAccessStatus_NotDeclaredByApp, "got status %u.\n", status );
+        IAsyncInfo_Release( async_info );
+        IAsyncOperation_AppCapabilityAccessStatus_Release( operation );
         IAppCapability_Release( capability );
     }
     WindowsDeleteString( name );

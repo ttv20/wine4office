@@ -25,6 +25,7 @@
 #pragma makedep unix
 #endif
 
+#include <limits.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -560,11 +561,362 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
 /******************************************************************************
  *              NtQueryMultipleValueKey  (NTDLL.@)
  */
-NTSTATUS WINAPI NtQueryMultipleValueKey( HANDLE key, KEY_MULTIPLE_VALUE_INFORMATION *info,
-                                         ULONG count, void *buffer, ULONG length, ULONG *retlen )
+#define KEY_VALUE_QUERY_CHUNK_SIZE 4096
+
+struct key_value_query_writer
 {
-    FIXME( "(%p,%p,0x%08x,%p,0x%08x,%p) stub!\n", key, info, count, buffer, length, retlen );
+    HANDLE handle;
+    file_pos_t offset;
+    data_size_t size;
+    unsigned char data[KEY_VALUE_QUERY_CHUNK_SIZE];
+};
+
+static NTSTATUS flush_key_value_query_writer( struct key_value_query_writer *writer )
+{
+    NTSTATUS status;
+
+    if (!writer->size) return STATUS_SUCCESS;
+    SERVER_START_REQ( append_key_value_query )
+    {
+        req->handle = wine_server_obj_handle( writer->handle );
+        req->offset = writer->offset;
+        wine_server_add_data( req, writer->data, writer->size );
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    if (!status)
+    {
+        writer->offset += writer->size;
+        writer->size = 0;
+    }
+    return status;
+}
+
+static NTSTATUS write_key_value_query_bytes( struct key_value_query_writer *writer,
+                                             const void *data, data_size_t size )
+{
+    const unsigned char *src = data;
+
+    while (size)
+    {
+        data_size_t count = min( size, KEY_VALUE_QUERY_CHUNK_SIZE - writer->size );
+        NTSTATUS status;
+
+        memcpy( writer->data + writer->size, src, count );
+        writer->size += count;
+        src += count;
+        size -= count;
+        if (writer->size == KEY_VALUE_QUERY_CHUNK_SIZE &&
+            (status = flush_key_value_query_writer( writer ))) return status;
+    }
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS read_key_value_query_section( HANDLE handle, unsigned int which,
+                                              data_size_t offset, void *data, data_size_t size,
+                                              data_size_t total )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( read_key_value_query )
+    {
+        req->handle = wine_server_obj_handle( handle );
+        req->which = which;
+        req->offset = offset;
+        wine_server_set_reply( req, data, size );
+        status = wine_server_call( req );
+        if (!status && (reply->total != total || wine_server_reply_size( reply ) != size))
+            status = STATUS_INVALID_SERVER_STATE;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+NTSTATUS WINAPI __wine_probe_for_write( void *ptr, ULONG size, ULONG alignment )
+{
+    if (size && ((UINT_PTR)ptr & (alignment - 1))) return STATUS_DATATYPE_MISALIGNMENT;
+    return virtual_check_buffer_for_write( ptr, size ) ? STATUS_SUCCESS : STATUS_ACCESS_VIOLATION;
+}
+
+NTSTATUS WINAPI __wine_create_key_value_query( HANDLE key, ULONG count, HANDLE *query )
+{
+    NTSTATUS status;
+
+    *query = 0;
+    SERVER_START_REQ( create_key_value_query )
+    {
+        req->hkey = wine_server_obj_handle( key );
+        req->count = count;
+        status = wine_server_call( req );
+        if (!status) *query = wine_server_ptr_handle( reply->handle );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+NTSTATUS WINAPI __wine_query_multiple_value_key( HANDLE query,
+                                                 KEY_MULTIPLE_VALUE_INFORMATION *info,
+                                                 ULONG count, void *buffer,
+                                                 ULONG *length, ULONG *retlen )
+{
+    struct key_value_query_writer writer;
+    struct key_value_result *results = NULL;
+    unsigned char data[KEY_VALUE_QUERY_CHUNK_SIZE];
+    ULONG capacity, used = 0, required = 0;
+    data_size_t results_size = 0, data_size = 0, offset;
+    unsigned int result_count = 0, execute_count = 0, i, value_index;
+    NTSTATUS status, query_status = STATUS_SUCCESS, probe_status = STATUS_SUCCESS;
+
+    if ((UINT_PTR)length & (sizeof(ULONG) - 1))
+    {
+        status = STATUS_DATATYPE_MISALIGNMENT;
+        goto done;
+    }
+    if (!virtual_check_buffer_for_write( length, sizeof(*length) ) ||
+        virtual_uninterrupted_read_memory( length, &capacity, sizeof(capacity) ) != sizeof(capacity))
+    {
+        status = STATUS_ACCESS_VIOLATION;
+        goto done;
+    }
+    if (count > 0x10000)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if (count && ((UINT_PTR)info & (sizeof(ULONG) - 1)))
+    {
+        status = STATUS_DATATYPE_MISALIGNMENT;
+        goto done;
+    }
+    if (!virtual_check_buffer_for_write( info, count * sizeof(*info) ))
+    {
+        status = STATUS_ACCESS_VIOLATION;
+        goto done;
+    }
+    if (retlen && ((UINT_PTR)retlen & (sizeof(ULONG) - 1)))
+    {
+        status = STATUS_DATATYPE_MISALIGNMENT;
+        goto done;
+    }
+    if (retlen && !virtual_check_buffer_for_write( retlen, sizeof(*retlen) ))
+    {
+        status = STATUS_ACCESS_VIOLATION;
+        goto done;
+    }
+    if (capacity)
+    {
+        if ((UINT_PTR)buffer & (sizeof(ULONG) - 1))
+        {
+            status = STATUS_DATATYPE_MISALIGNMENT;
+            goto done;
+        }
+        if (!virtual_check_buffer_for_write( buffer, capacity ))
+        {
+            status = STATUS_ACCESS_VIOLATION;
+            goto done;
+        }
+    }
+
+
+    writer.handle = query;
+    writer.offset = 0;
+    writer.size = 0;
+    for (i = 0; i < count; i++)
+    {
+        KEY_MULTIPLE_VALUE_INFORMATION entry;
+        UNICODE_STRING name;
+        unsigned char *name_data = NULL;
+        unsigned int name_len;
+
+        if (virtual_uninterrupted_read_memory( info + i, &entry, sizeof(entry) ) != sizeof(entry) ||
+            virtual_uninterrupted_read_memory( entry.ValueName, &name, sizeof(name) ) != sizeof(name))
+        {
+            probe_status = STATUS_ACCESS_VIOLATION;
+            break;
+        }
+        if (name.Length && ((UINT_PTR)name.Buffer & (sizeof(WCHAR) - 1)))
+        {
+            probe_status = STATUS_DATATYPE_MISALIGNMENT;
+            break;
+        }
+        if (name.Length)
+        {
+            if (!(name_data = malloc( name.Length )))
+            {
+                probe_status = STATUS_NO_MEMORY;
+                break;
+            }
+            if (virtual_uninterrupted_read_memory( name.Buffer, name_data, name.Length ) != name.Length)
+            {
+                free( name_data );
+                probe_status = STATUS_ACCESS_VIOLATION;
+                break;
+            }
+        }
+        name_len = name.Length;
+        status = write_key_value_query_bytes( &writer, &name_len, sizeof(name_len) );
+        if (!status) status = write_key_value_query_bytes( &writer, name_data, name.Length );
+        free( name_data );
+        if (status) goto done;
+    }
+    execute_count = i;
+    if ((status = flush_key_value_query_writer( &writer ))) goto done;
+
+    SERVER_START_REQ( execute_key_value_query )
+    {
+        req->handle = wine_server_obj_handle( query );
+        req->count = execute_count;
+        req->length = capacity;
+        status = wine_server_call( req );
+        if (!status)
+        {
+            query_status = reply->status;
+            used = reply->used;
+            required = reply->required;
+            result_count = reply->count;
+        }
+    }
+    SERVER_END_REQ;
+    if (status) goto done;
+    if (result_count > execute_count || result_count > UINT_MAX / sizeof(*results))
+    {
+        status = STATUS_INVALID_SERVER_STATE;
+        goto done;
+    }
+
+    results_size = result_count * sizeof(*results);
+    if (results_size && !(results = malloc( results_size )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    for (offset = 0; offset < results_size; offset += KEY_VALUE_QUERY_CHUNK_SIZE)
+    {
+        data_size_t size = min( results_size - offset, (data_size_t)KEY_VALUE_QUERY_CHUNK_SIZE );
+        if ((status = read_key_value_query_section( query, KEY_VALUE_QUERY_RESULTS, offset,
+                                                    (char *)results + offset, size, results_size )))
+            goto done;
+    }
+
+    for (i = 0; i < result_count; i++)
+    {
+        if (results[i].offset & (sizeof(ULONG) - 1) ||
+            results[i].offset > capacity ||
+            results[i].length > capacity - results[i].offset ||
+            results[i].data_offset != data_size ||
+            results[i].length > UINT_MAX - data_size)
+        {
+            status = STATUS_INVALID_SERVER_STATE;
+            goto done;
+        }
+        data_size += results[i].length;
+    }
+
+    value_index = 0;
+    for (offset = 0; offset < data_size; offset += KEY_VALUE_QUERY_CHUNK_SIZE)
+    {
+        data_size_t pos = 0;
+        data_size_t size = min( data_size - offset, (data_size_t)KEY_VALUE_QUERY_CHUNK_SIZE );
+
+        if ((status = read_key_value_query_section( query, KEY_VALUE_QUERY_DATA, offset,
+                                                    data, size, data_size ))) goto done;
+        while (pos < size)
+        {
+            struct key_value_result *result;
+            data_size_t value_offset, count;
+
+            while (value_index < result_count && !results[value_index].length) value_index++;
+            if (value_index == result_count)
+            {
+                status = STATUS_INVALID_SERVER_STATE;
+                goto done;
+            }
+            result = &results[value_index];
+            value_offset = offset + pos - result->data_offset;
+            count = min( size - pos, result->length - value_offset );
+            status = virtual_uninterrupted_write_memory( (char *)buffer + result->offset + value_offset,
+                                                         data + pos, count );
+            if (status) goto done;
+            pos += count;
+            if (value_offset + count == result->length) value_index++;
+        }
+    }
+
+    for (i = 0; i < result_count; i++)
+    {
+        struct
+        {
+            ULONG DataLength;
+            ULONG DataOffset;
+            ULONG Type;
+        } output;
+
+        output.DataLength = results[i].length;
+        output.DataOffset = results[i].offset;
+        output.Type = results[i].type;
+        status = virtual_uninterrupted_write_memory( &info[i].DataLength, &output, sizeof(output) );
+        if (status) goto done;
+    }
+
+    if (probe_status)
+    {
+        status = (query_status == STATUS_SUCCESS || query_status == STATUS_BUFFER_OVERFLOW ||
+                  query_status == STATUS_INTEGER_OVERFLOW) ? probe_status : query_status;
+    }
+    else
+    {
+        status = query_status;
+        if (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW)
+        {
+            if ((status = virtual_uninterrupted_write_memory( length, &used, sizeof(used) ))) goto done;
+            if (retlen &&
+                (status = virtual_uninterrupted_write_memory( retlen, &required, sizeof(required) )))
+                goto done;
+            status = query_status;
+        }
+    }
+
+done:
+    free( results );
+    return status;
+}
+
+/******************************************************************************
+ *              NtQueryMultipleValueKey  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtQueryMultipleValueKey( HANDLE key, KEY_MULTIPLE_VALUE_INFORMATION *info,
+                                         ULONG count, void *buffer, ULONG *length, ULONG *retlen )
+{
+    HANDLE query;
+    NTSTATUS status;
+
+    TRACE( "(%p,%p,0x%08x,%p,%p,%p)\n", key, info, count, buffer, length, retlen );
+    if ((status = __wine_create_key_value_query( key, count, &query ))) return status;
+    status = __wine_query_multiple_value_key( query, info, count, buffer, length, retlen );
+    NtClose( query );
+    return status;
+}
+
+NTSTATUS unixcall_wine_probe_for_write( void *args )
+{
+    struct wine_probe_for_write_params *params = args;
+
+    return __wine_probe_for_write( params->ptr, params->size, params->alignment );
+}
+
+NTSTATUS unixcall_wine_create_key_value_query( void *args )
+{
+    struct wine_create_key_value_query_params *params = args;
+
+    return __wine_create_key_value_query( params->key, params->count, params->query );
+}
+
+NTSTATUS unixcall_wine_query_multiple_value_key( void *args )
+{
+    struct wine_query_multiple_value_key_params *params = args;
+
+    return __wine_query_multiple_value_key( params->query, params->info, params->count,
+                                            params->buffer, params->length, params->retlen );
 }
 
 

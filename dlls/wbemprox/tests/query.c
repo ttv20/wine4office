@@ -1756,6 +1756,7 @@ static void test_Win32_PhysicalMemory( IWbemServices *services )
         check_property_nullable( obj, L"Manufacturer", VT_BSTR, CIM_STRING );
         check_property_nullable( obj, L"PartNumber", VT_BSTR, CIM_STRING );
         check_property_nullable( obj, L"SerialNumber", VT_BSTR, CIM_STRING );
+        check_property( obj, L"Tag", VT_BSTR, CIM_STRING );
 
         IWbemClassObject_Release( obj );
     }
