@@ -1017,6 +1017,7 @@ SOURCES = \
 	windot11.h \
 	windows.applicationmodel.activation.idl \
 	windows.applicationmodel.background.idl \
+	windows.applicationmodel.calls.idl \
 	windows.applicationmodel.core.idl \
 	windows.applicationmodel.datatransfer.dragdrop.core.idl \
 	windows.applicationmodel.datatransfer.dragdrop.idl \

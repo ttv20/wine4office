@@ -13,10 +13,11 @@ SOURCES = \
 	dllmain.c \
 	fractional-scale-v1.xml \
 	opengl.c \
-	pointer-constraints-unstable-v1.xml \
 	plasma-shell.xml \
+	pointer-constraints-unstable-v1.xml \
 	pointer-warp-v1.xml \
 	relative-pointer-unstable-v1.xml \
+	systray.c \
 	text-input-unstable-v3.xml \
 	viewporter.xml \
 	vulkan.c \
@@ -30,7 +31,6 @@ SOURCES = \
 	waylanddrv_main.c \
 	window.c \
 	window_surface.c \
-	systray.c \
 	wlr-data-control-unstable-v1.xml \
 	xdg-foreign-unstable-v2.xml \
 	xdg-output-unstable-v1.xml \

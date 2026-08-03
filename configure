@@ -1532,6 +1532,7 @@ enable_win32u
 enable_winbio
 enable_winbrand
 enable_windows_applicationmodel
+enable_windows_applicationmodel_calls
 enable_windows_devices_bluetooth
 enable_windows_devices_enumeration
 enable_windows_devices_radios
@@ -22574,6 +22575,7 @@ wine_fn_config_makefile dlls/mfplay enable_mfplay
 wine_fn_config_makefile dlls/mfplay/tests enable_tests
 wine_fn_config_makefile dlls/mfreadwrite enable_mfreadwrite
 wine_fn_config_makefile dlls/mfreadwrite/tests enable_tests
+wine_fn_config_makefile dlls/mfsensorgroup enable_mfsensorgroup
 wine_fn_config_makefile dlls/mfsrcsnk enable_mfsrcsnk
 wine_fn_config_makefile dlls/mfsrcsnk/tests enable_tests
 wine_fn_config_makefile dlls/mgmtapi enable_mgmtapi
@@ -23012,6 +23014,7 @@ wine_fn_config_makefile dlls/winbio enable_winbio
 wine_fn_config_makefile dlls/winbrand enable_winbrand
 wine_fn_config_makefile dlls/windebug.dll16 enable_win16
 wine_fn_config_makefile dlls/windows.applicationmodel enable_windows_applicationmodel
+wine_fn_config_makefile dlls/windows.applicationmodel.calls enable_windows_applicationmodel_calls
 wine_fn_config_makefile dlls/windows.applicationmodel/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.bluetooth enable_windows_devices_bluetooth
 wine_fn_config_makefile dlls/windows.devices.bluetooth/tests enable_tests
@@ -24863,4 +24866,3 @@ IFS="$ac_save_IFS"
 printf '%s\n' "
 $as_me: Finished.  Do '${MAKE-make}' to compile Wine.
 " >&6
-

@@ -13,6 +13,58 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 
+LONG WINAPI GetCurrentPackagePath( UINT32 *length, WCHAR *path );
+
+static BOOL package_declares_capability( HSTRING capability )
+{
+    static const WCHAR manifest_name[] = L"\\AppxManifest.xml";
+    const WCHAR *capability_name;
+    LARGE_INTEGER file_size;
+    UINT32 path_length = 0, capability_length;
+    WCHAR *path = NULL;
+    char *manifest = NULL, *needle = NULL;
+    DWORD bytes_read;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    LONG status;
+    int utf8_length;
+    BOOL found = FALSE;
+    SIZE_T i, needle_length;
+
+    capability_name = WindowsGetStringRawBuffer( capability, &capability_length );
+    if (!capability_name || !capability_length) return FALSE;
+
+    status = GetCurrentPackagePath( &path_length, NULL );
+    if (status != ERROR_INSUFFICIENT_BUFFER) return FALSE;
+    if (!(path = malloc( (path_length + ARRAY_SIZE(manifest_name)) * sizeof(*path) ))) return FALSE;
+    if (GetCurrentPackagePath( &path_length, path ) != ERROR_SUCCESS) goto done;
+    wcscat( path, manifest_name );
+
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx( file, &file_size ) ||
+        file_size.QuadPart <= 0 || file_size.QuadPart > 16 * 1024 * 1024) goto done;
+    if (!(manifest = malloc( file_size.QuadPart + 1 ))) goto done;
+    if (!ReadFile( file, manifest, file_size.QuadPart, &bytes_read, NULL )) goto done;
+    manifest[bytes_read] = 0;
+
+    utf8_length = WideCharToMultiByte( CP_UTF8, 0, capability_name, capability_length, NULL, 0, NULL, NULL );
+    if (utf8_length <= 0 || !(needle = malloc( utf8_length + 8 ))) goto done;
+    memcpy( needle, "Name=\"", 6 );
+    WideCharToMultiByte( CP_UTF8, 0, capability_name, capability_length, needle + 6, utf8_length, NULL, NULL );
+    needle[6 + utf8_length] = '"';
+    needle_length = 7 + utf8_length;
+
+    for (i = 0; i + needle_length <= bytes_read; ++i)
+        if (!memcmp( manifest + i, needle, needle_length )) { found = TRUE; break; }
+
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    free( needle );
+    free( manifest );
+    free( path );
+    return found;
+}
+
 struct app_capability
 {
     IAppCapability IAppCapability_iface;
@@ -102,8 +154,16 @@ static HRESULT WINAPI app_capability_CheckAccess( IAppCapability *iface, AppCapa
 {
     struct app_capability *impl = impl_from_IAppCapability( iface );
     if (!result) return E_POINTER;
-    TRACE( "capability %s is not declared by desktop process.\n", debugstr_hstring( impl->name ) );
-    *result = AppCapabilityAccessStatus_NotDeclaredByApp;
+    if (package_declares_capability( impl->name ))
+    {
+        TRACE( "capability %s is declared by the current package and allowed.\n", debugstr_hstring( impl->name ) );
+        *result = AppCapabilityAccessStatus_Allowed;
+    }
+    else
+    {
+        TRACE( "capability %s is not declared by the current package.\n", debugstr_hstring( impl->name ) );
+        *result = AppCapabilityAccessStatus_NotDeclaredByApp;
+    }
     return S_OK;
 }
 
