@@ -1,0 +1,10 @@
+MODULE  = windows.ui.notifications.dll
+UNIXLIB = windows.ui.notifications.so
+IMPORTS = combase uuid
+UNIX_CFLAGS = $(DBUS_CFLAGS)
+UNIX_LIBS = -ldbus-1
+
+SOURCES = \
+	classes.idl \
+	main.c \
+	unixlib.c
