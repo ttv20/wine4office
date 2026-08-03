@@ -434,7 +434,17 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                      * a previously hidden presentation back from the tray. */
                     if (IsWindowVisible(window)
                             && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
-                        flags |= SWP_NOZORDER;
+                    {
+                        if (!GetModuleHandleW(L"winewayland.drv")
+                                && GetWindowTextLengthW(root) && GetForegroundWindow() == root
+                                && !GetPropW(window, L"__wine_dcomp_raised_while_active"))
+                            SetPropW(window, L"__wine_dcomp_raised_while_active", ULongToHandle(1));
+                        else
+                            flags |= SWP_NOZORDER;
+                        if (GetModuleHandleW(L"winewayland.drv")
+                                || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
+                            RemovePropW(window, L"__wine_dcomp_raised_while_active");
+                    }
                     SetWindowPos(window, HWND_TOP, rect.left, rect.top,
                             max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
                             flags);
@@ -503,6 +513,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     {
         ShowWindow(window, SW_HIDE);
         RemovePropW(window, L"__wine_dcomp_detached_window");
+        RemovePropW(window, L"__wine_dcomp_raised_while_active");
         RemovePropW(window, L"__wine_dcomp_input_window");
         RemovePropW(window, L"__wine_dcomp_keyboard_window");
         RemovePropW(window, L"__wine_dcomp_composite_alpha_white");

@@ -324,7 +324,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
 {
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
-    ATOM foreign_atom;
+    ATOM foreign_atom, old_foreign_atom;
     HWND root;
     RECT rect;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
@@ -342,7 +342,17 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     }
     foreign_atom = HandleToULong(GetPropW(root, L"__wine_dcomp_xdg_export_handle"));
     if (foreign_atom)
+    {
+        old_foreign_atom = HandleToULong(GetPropW(window, L"__wine_dcomp_xdg_parent_atom"));
         SetPropW(window, L"__wine_dcomp_xdg_parent_atom", ULongToHandle(foreign_atom));
+        /* The export handle is delivered asynchronously.  The composition
+         * window may therefore already have an unparented Wayland toplevel by
+         * the time it becomes available.  Force the driver through a real
+         * window update so it imports the foreign parent and restacks the
+         * surface above the DirectComposition target. */
+        if (old_foreign_atom != foreign_atom)
+            flags |= SWP_FRAMECHANGED;
+    }
     else
         PostMessageW(root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
     if (!IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
@@ -352,9 +362,19 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     }
 
     if (!GetWindowRect(target, &rect)) return;
-    if (IsWindowVisible(window)
+    if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
             && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
-        flags |= SWP_NOZORDER;
+    {
+        if (!GetModuleHandleW(L"winewayland.drv")
+                && GetWindowTextLengthW(root) && GetForegroundWindow() == root
+                && !GetPropW(window, L"__wine_dcomp_raised_while_active"))
+            SetPropW(window, L"__wine_dcomp_raised_while_active", ULongToHandle(1));
+        else
+            flags |= SWP_NOZORDER;
+        if (GetModuleHandleW(L"winewayland.drv")
+                || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
+            RemovePropW(window, L"__wine_dcomp_raised_while_active");
+    }
     SetWindowPos(window, HWND_TOP, rect.left, rect.top,
             max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
             flags);
