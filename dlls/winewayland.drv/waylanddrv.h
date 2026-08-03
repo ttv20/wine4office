@@ -401,6 +401,7 @@ struct wayland_win_data
     BOOL is_fullscreen;
     BOOL resizeable;
     BOOL managed;
+    HWND owner;
     BOOL layered_attribs_set;
     BOOL defer_cursor_clip;
     BOOL contents_presented;

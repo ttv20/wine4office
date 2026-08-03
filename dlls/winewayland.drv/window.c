@@ -447,15 +447,18 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
 }
 void wayland_window_surface_presented(HWND hwnd)
 {
-    struct wayland_win_data *data;
+    struct wayland_win_data *data, *owner_data;
+    struct wayland_surface *owner_surface = NULL;
     struct wayland_window_state state;
     BOOL reapply_clip = FALSE;
 
     get_wayland_window_state(hwnd, &state);
     if (!(data = wayland_win_data_get(hwnd))) return;
     data->contents_presented = TRUE;
+    if (data->owner && (owner_data = wayland_win_data_get_nolock(data->owner)))
+        owner_surface = owner_data->wayland_surface;
     if ((!data->wayland_surface || data->wayland_surface->role == WAYLAND_SURFACE_ROLE_NONE) &&
-        wayland_win_data_create_wayland_surface(data, NULL, &state, &reapply_clip, NULL))
+        wayland_win_data_create_wayland_surface(data, owner_surface, &state, &reapply_clip, NULL))
         wayland_win_data_update_wayland_state(data);
     wayland_win_data_release(data);
     if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
@@ -778,6 +781,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     data->is_fullscreen = fullscreen;
     data->resizeable = swp_flags & WINE_SWP_RESIZABLE;
     data->managed = managed;
+    data->owner = !managed && owner && owner != hwnd ? owner : NULL;
 
     if (!surface)
     {
