@@ -34,6 +34,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surface);
+
 static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_surface,
                                          uint32_t serial)
 {
@@ -558,6 +560,7 @@ void wayland_surface_attach_shm(struct wayland_surface *surface,
                                 HRGN surface_damage_region)
 {
     RGNDATA *surface_damage;
+    RECT presentation_rect;
     int win_width, win_height;
 
     TRACE("surface=%p shm_buffer=%p (%dx%d)\n",
@@ -587,8 +590,9 @@ void wayland_surface_attach_shm(struct wayland_surface *surface,
         free(surface_damage);
     }
 
-    win_width = surface->window.rect.right - surface->window.rect.left;
-    win_height = surface->window.rect.bottom - surface->window.rect.top;
+    presentation_rect = wayland_surface_get_presentation_rect(surface);
+    win_width = presentation_rect.right - presentation_rect.left;
+    win_height = presentation_rect.bottom - presentation_rect.top;
 
     /* It is an error to specify a wp_viewporter source rectangle that
      * is partially or completely outside of the wl_buffe.
@@ -742,6 +746,26 @@ static void wayland_surface_reconfigure_size(struct wayland_surface *surface,
         wp_viewport_set_destination(surface->wp_viewport, -1, -1);
 }
 
+/* Win32u crops backing stores for windows larger than the virtual screen, but
+ * the window rectangle itself retains the application's original geometry.
+ * Use the same crop for presentation, otherwise viewporter scales the cropped
+ * buffer back to the (potentially enormous) window size. */
+static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surface)
+{
+    RECT rect = surface->window.rect;
+    RECT virtual_rect = NtUserGetVirtualScreenRect(MDT_RAW_DPI);
+
+    if (rect.right - rect.left > virtual_rect.right - virtual_rect.left ||
+        rect.bottom - rect.top > virtual_rect.bottom - virtual_rect.top)
+    {
+        RECT clipped;
+
+        if (intersect_rect(&clipped, &rect, &virtual_rect)) rect = clipped;
+    }
+
+    return rect;
+}
+
 struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
                                                      struct wayland_client_surface *client)
 {
@@ -847,7 +871,7 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
 
     if ((owner_surface = owner_data->wayland_surface))
     {
-        RECT rect = surface->window.rect;
+        RECT rect = wayland_surface_get_presentation_rect(surface);
 
         if (surface->parent_surface != owner_surface->wl_surface)
             wayland_surface_make_subsurface(surface, owner_surface);
@@ -905,6 +929,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         if (!surface->wl_subsurface) return FALSE; /* surface role has been cleared */
         wayland_surface_reconfigure_subsurface(surface);
+        rect = map_rect_to_surface(surface, wayland_surface_get_presentation_rect(surface));
         break;
     }
 
