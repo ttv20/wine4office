@@ -47,6 +47,7 @@ extern "C" BOOL WINAPI InternetCloseHandle(HINTERNET);
 
 static const char client_id[] = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 static const char teams_client_id[] = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
+static const char teams_nested_client_id[] = "f4060917-6abe-40d7-baa6-f634c0eda4ac";
 static const char office_scope[] = "https://officeapps.live.com/.default offline_access openid profile";
 static const char licensing_scope[] = "https://licensing.m365.svc.cloud.microsoft/.default";
 static const char redirect_uri[] =
@@ -711,7 +712,7 @@ static std::string normalize_resource_scope(const std::string &scope)
 
 static bool resource_cache_names(const std::string &scope, const std::string &requested_client_id,
                                  std::wstring &token_name,
-                                 std::wstring &expires_name)
+                                 std::wstring &id_token_name, std::wstring &expires_name)
 {
     static const WCHAR hex[] = L"0123456789abcdef";
     BYTE hash[32];
@@ -725,6 +726,7 @@ static bool resource_cache_names(const std::string &scope, const std::string &re
     }
     suffix[16] = 0;
     token_name = L"wam-resource-" + std::wstring(suffix) + L"-token.dat";
+    id_token_name = L"wam-resource-" + std::wstring(suffix) + L"-id-token.dat";
     expires_name = L"wam-resource-" + std::wstring(suffix) + L"-expires-on.dat";
     SecureZeroMemory(hash, sizeof(hash));
     return true;
@@ -735,44 +737,113 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
 {
     token_set previous, resource;
     std::string scope = normalize_resource_scope(requested_scope);
-    std::string cached_token, cached_expires;
-    std::wstring token_name, expires_name;
-    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name, expires_name);
+    std::string cached_token, cached_id_token, cached_expires;
+    std::wstring token_name, id_token_name, expires_name;
+    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name,
+                                                 id_token_name, expires_name);
     ULONGLONG expiry = 0;
 
     if (have_cache_names && protected_read(token_name.c_str(), cached_token) &&
+        protected_read(id_token_name.c_str(), cached_id_token) &&
         protected_read(expires_name.c_str(), cached_expires))
         expiry = _strtoui64(cached_expires.c_str(), NULL, 10);
-    if (!cached_token.empty() && expiry > unix_time() + 300)
+    if (!cached_token.empty() && !cached_id_token.empty() && expiry > unix_time() + 300)
     {
         bool success = protected_write(L"wam-access-token.dat", cached_token) &&
+                       protected_write(L"wam-id-token.dat", cached_id_token) &&
                        protected_write(L"wam-token-expires-on.dat", cached_expires);
         secure_clear(cached_token);
+        secure_clear(cached_id_token);
         secure_clear(cached_expires);
         secure_clear(scope);
         return success;
     }
     secure_clear(cached_token);
+    secure_clear(cached_id_token);
     secure_clear(cached_expires);
 
     bool success = !scope.empty() &&
-        (requested_client_id == client_id || requested_client_id == teams_client_id) &&
+        (requested_client_id == client_id || requested_client_id == teams_client_id ||
+         requested_client_id == teams_nested_client_id) &&
         protected_read(L"wam-refresh-token.dat", previous.refresh_token) &&
         protected_read(L"wam-id-token.dat", previous.id_token);
-    if (success) success = refresh_scope(previous.refresh_token, scope.c_str(), resource, &previous,
-                                         requested_client_id.c_str());
+    if (success)
+    {
+        std::string oidc_scope = scope + " offline_access openid profile";
+        success = refresh_scope(previous.refresh_token, oidc_scope.c_str(), resource, NULL,
+                                requested_client_id.c_str());
+        secure_clear(oidc_scope);
+    }
+    if (success)
+    {
+        std::string payload, audience;
+        success = jwt_payload(resource.id_token, payload) &&
+                  json_string(payload, "aud", audience) && audience == requested_client_id;
+        secure_clear(payload);
+        secure_clear(audience);
+    }
     if (success)
     {
         std::string expires = std::to_string(unix_time() + resource.expires_in);
         success = protected_write(L"wam-access-token.dat", resource.access_token) &&
+                  protected_write(L"wam-id-token.dat", resource.id_token) &&
                   protected_write(L"wam-refresh-token.dat", resource.refresh_token) &&
                   protected_write(L"wam-token-expires-on.dat", expires) &&
                   (!have_cache_names ||
                    (protected_write(token_name.c_str(), resource.access_token) &&
+                    protected_write(id_token_name.c_str(), resource.id_token) &&
                     protected_write(expires_name.c_str(), expires)));
     }
     secure_clear(scope);
     secure_clear(previous);
+    secure_clear(resource);
+    return success;
+}
+
+static bool exchange_resource_and_save(const std::string &code, const std::string &verifier,
+                                       const std::string &requested_scope,
+                                       const std::string &requested_client_id,
+                                       const std::string &requested_redirect_uri)
+{
+    token_set resource;
+    std::string scope = normalize_resource_scope(requested_scope);
+    std::string oidc_scope = scope + " offline_access openid profile";
+    std::string response;
+    std::string body = "client_id=" + requested_client_id +
+        "&grant_type=authorization_code&code=" + url_encode(code) +
+        "&redirect_uri=" + url_encode(requested_redirect_uri) +
+        "&code_verifier=" + url_encode(verifier) + "&scope=" + url_encode(oidc_scope);
+    std::wstring token_name, id_token_name, expires_name;
+    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name,
+                                                 id_token_name, expires_name);
+    bool success = !scope.empty() && requested_client_id == teams_nested_client_id &&
+                   token_request(body, response, oauth_tenant) && parse_token_set(response, resource);
+
+    if (success)
+    {
+        std::string payload, audience;
+        success = jwt_payload(resource.id_token, payload) &&
+                  json_string(payload, "aud", audience) && audience == requested_client_id;
+        secure_clear(payload);
+        secure_clear(audience);
+    }
+
+    if (success)
+    {
+        std::string expires = std::to_string(unix_time() + resource.expires_in);
+        success = protected_write(L"wam-access-token.dat", resource.access_token) &&
+                  protected_write(L"wam-id-token.dat", resource.id_token) &&
+                  protected_write(L"wam-refresh-token.dat", resource.refresh_token) &&
+                  protected_write(L"wam-token-expires-on.dat", expires) &&
+                  (!have_cache_names ||
+                   (protected_write(token_name.c_str(), resource.access_token) &&
+                    protected_write(id_token_name.c_str(), resource.id_token) &&
+                    protected_write(expires_name.c_str(), expires)));
+    }
+    secure_clear(scope);
+    secure_clear(oidc_scope);
+    secure_clear(body);
+    secure_clear(response);
     secure_clear(resource);
     return success;
 }
@@ -1119,7 +1190,9 @@ static void center_window(HWND window, HWND owner)
 }
 
 static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &login_hint,
-                            std::string &verifier)
+                            const std::string &requested_client_id,
+                            const std::string &requested_scope,
+                            const std::string &requested_redirect_uri, std::string &verifier)
 {
     static const WCHAR class_name[] = L"Wine365OAuthBroker";
     BrowserSite *site;
@@ -1156,9 +1229,9 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
         }
     }
     authorize_url = "https://login.microsoftonline.com/" + oauth_tenant +
-        "/oauth2/v2.0/authorize?client_id=" + std::string(client_id) +
+        "/oauth2/v2.0/authorize?client_id=" + requested_client_id +
         "&response_type=code&response_mode=query&redirect_uri=" +
-        url_encode(redirect_uri) + "&scope=" + url_encode(office_scope) +
+        url_encode(requested_redirect_uri) + "&scope=" + url_encode(requested_scope) +
         "&code_challenge=" + challenge + "&code_challenge_method=S256&state=" + oauth_state;
     if (!login_hint.empty()) authorize_url += "&login_hint=" + url_encode(login_hint);
     authorize_url_w = utf8_to_wide(authorize_url);
@@ -1283,6 +1356,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     int argc;
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::string verifier, login_hint, cached_refresh;
+    std::string resource_scope, resource_client_id, resource_redirect_uri;
     bool success;
     (void)previous; (void)command_line; (void)show;
     if (!argv) return 3;
@@ -1321,13 +1395,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
             owner_window = (HWND)(ULONG_PTR)_wcstoui64(argv[++i], NULL, 0);
         else if (!wcscmp(argv[i], L"--login-hint-file") && i + 1 < argc)
             login_hint = read_login_hint_file(argv[++i]);
+        else if (!wcscmp(argv[i], L"--resource-scope") && i + 1 < argc)
+            resource_scope = wide_to_utf8(argv[++i]);
+        else if (!wcscmp(argv[i], L"--resource-client-id") && i + 1 < argc)
+            resource_client_id = wide_to_utf8(argv[++i]);
+        else if (!wcscmp(argv[i], L"--resource-redirect-uri") && i + 1 < argc)
+            resource_redirect_uri = wide_to_utf8(argv[++i]);
     }
     LocalFree(argv);
     if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED))) return 3;
     OleInitialize(NULL);
+    bool resource_mode = !resource_scope.empty() && !resource_client_id.empty() &&
+                         !resource_redirect_uri.empty();
     if (protected_read(L"wam-refresh-token.dat", cached_refresh) && !cached_refresh.empty())
     {
-        success = refresh_and_save();
+        success = resource_mode ? refresh_resource_and_save(resource_scope, resource_client_id) :
+                                  refresh_and_save();
         SecureZeroMemory((void *)cached_refresh.data(), cached_refresh.size());
         if (success)
         {
@@ -1336,10 +1419,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
             return 0;
         }
     }
-    success = run_owned_oauth(instance, owner_window, login_hint, verifier);
-    if (success) success = exchange_and_save(oauth_code, verifier);
+    success = run_owned_oauth(instance, owner_window, login_hint,
+                              resource_mode ? resource_client_id : client_id,
+                              resource_mode ? resource_scope + " offline_access openid profile" : office_scope,
+                              resource_mode ? resource_redirect_uri : redirect_uri, verifier);
+    if (success)
+        success = resource_mode ? exchange_resource_and_save(oauth_code, verifier, resource_scope,
+                                                              resource_client_id, resource_redirect_uri) :
+                                  exchange_and_save(oauth_code, verifier);
     SecureZeroMemory((void *)oauth_code.data(), oauth_code.size());
     SecureZeroMemory((void *)verifier.data(), verifier.size());
+    secure_clear(resource_scope);
+    secure_clear(resource_client_id);
+    secure_clear(resource_redirect_uri);
     OleUninitialize();
     CoUninitialize();
     if (!success && !oauth_cancelled)

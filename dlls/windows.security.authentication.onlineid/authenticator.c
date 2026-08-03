@@ -2706,6 +2706,8 @@ struct interactive_token_context
     struct completed_provider_operation *operation;
     HSTRING scopes;
     HSTRING login_hint;
+    HSTRING resource_client_id;
+    HSTRING resource_redirect_uri;
     IInspectable *account;
     HWND owner;
 };
@@ -2766,9 +2768,10 @@ done:
     return ret;
 }
 
-static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code )
+static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
+                             HSTRING scopes, HSTRING resource_client_id, HSTRING resource_redirect_uri )
 {
-    WCHAR command[2 * MAX_PATH], hint_path[MAX_PATH];
+    WCHAR command[6 * MAX_PATH], hint_path[MAX_PATH];
     PROCESS_INFORMATION process = {0};
     STARTUPINFOW startup = {sizeof(startup)};
     BOOL ret;
@@ -2780,7 +2783,21 @@ static BOOL run_wine365_auth( HWND owner, HSTRING login_hint, BOOL interactive, 
     }
     if (interactive)
     {
-        if (hint_path[0])
+        const WCHAR *scope = WindowsGetStringRawBuffer( scopes, NULL );
+        const WCHAR *client_id = WindowsGetStringRawBuffer( resource_client_id, NULL );
+        const WCHAR *redirect_uri = WindowsGetStringRawBuffer( resource_redirect_uri, NULL );
+        BOOL resource = scope && *scope && client_id && *client_id && redirect_uri && *redirect_uri &&
+                        !wcschr( scope, '"' ) && !wcschr( client_id, '"' ) && !wcschr( redirect_uri, '"' );
+
+        if (resource && hint_path[0])
+            swprintf( command, ARRAY_SIZE(command),
+                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\" --login-hint-file \"%s\"",
+                      (ULONG_PTR)owner, scope, client_id, redirect_uri, hint_path );
+        else if (resource)
+            swprintf( command, ARRAY_SIZE(command),
+                      L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --resource-scope \"%s\" --resource-client-id \"%s\" --resource-redirect-uri \"%s\"",
+                      (ULONG_PTR)owner, scope, client_id, redirect_uri );
+        else if (hint_path[0])
             swprintf( command, ARRAY_SIZE(command),
                       L"\"C:\\windows\\system32\\wine365auth.exe\" --owner 0x%Ix --login-hint-file \"%s\"",
                       (ULONG_PTR)owner, hint_path );
@@ -2836,7 +2853,8 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
     INT32 response_status = 4;
     HRESULT hr;
 
-    if (run_wine365_auth( context->owner, context->login_hint, TRUE, &exit_code ))
+    if (run_wine365_auth( context->owner, context->login_hint, TRUE, &exit_code, context->scopes,
+                          context->resource_client_id, context->resource_redirect_uri ))
     {
         if (!exit_code) response_status = 0;
         else if (exit_code == 2) response_status = 1;
@@ -2852,6 +2870,8 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
     if (context->account) IInspectable_Release( context->account );
     WindowsDeleteString( context->scopes );
     WindowsDeleteString( context->login_hint );
+    WindowsDeleteString( context->resource_client_id );
+    WindowsDeleteString( context->resource_redirect_uri );
     completed_async_Release( &context->operation->IAsyncOperation_IInspectable_iface );
     free( context );
     return 0;
@@ -2878,6 +2898,17 @@ static HRESULT create_pending_interactive_token_operation( HWND owner, struct we
     context->owner = owner;
     if (FAILED(hr = WindowsDuplicateString( request->scope, &context->scopes ))) goto failed;
     token_request_get_login_hint( request, &context->login_hint );
+    token_request_get_property( request, L"nestedClientId", &context->resource_client_id );
+    token_request_get_property( request, L"nestedRedirectUri", &context->resource_redirect_uri );
+    if (!context->resource_client_id &&
+        wcsstr( WindowsGetStringRawBuffer( request->scope, NULL ),
+                L"engage.cloud.microsoft/teams-branded-exp" ))
+    {
+        WindowsCreateString( L"f4060917-6abe-40d7-baa6-f634c0eda4ac", 36,
+                             &context->resource_client_id );
+        WindowsCreateString( L"ms-appx-web://Microsoft.AAD.BrokerPlugin/f4060917-6abe-40d7-baa6-f634c0eda4ac",
+                             77, &context->resource_redirect_uri );
+    }
     if ((context->account = account)) IInspectable_AddRef( account );
     completed_async_AddRef( &impl->IAsyncOperation_IInspectable_iface );
     if (!(thread = CreateThread( NULL, 0, interactive_token_worker, context, 0, NULL )))
@@ -2895,6 +2926,8 @@ failed:
     if (context->account) IInspectable_Release( context->account );
     WindowsDeleteString( context->scopes );
     WindowsDeleteString( context->login_hint );
+    WindowsDeleteString( context->resource_client_id );
+    WindowsDeleteString( context->resource_redirect_uri );
     free( context );
     IInspectable_Release( operation );
     return hr;
@@ -3249,10 +3282,29 @@ static ULONGLONG get_unix_time(void)
     return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
 }
 
-static BOOL is_supported_wam_client(const WCHAR *client_id)
+static BOOL is_supported_wam_client( const WCHAR *client_id )
 {
     return client_id && (!wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
                          !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" ));
+}
+
+static BOOL is_supported_resource_client( const WCHAR *client_id )
+{
+    return is_supported_wam_client( client_id ) ||
+           (client_id && !wcsicmp( client_id, L"f4060917-6abe-40d7-baa6-f634c0eda4ac" ));
+}
+
+static const WCHAR *get_resource_client_id( struct web_token_request *request, HSTRING *nested_client_id )
+{
+    const WCHAR *client_id = WindowsGetStringRawBuffer( request->client_id, NULL );
+    const WCHAR *scopes = WindowsGetStringRawBuffer( request->scope, NULL );
+
+    *nested_client_id = NULL;
+    if (SUCCEEDED(token_request_get_property( request, L"nestedClientId", nested_client_id )))
+        client_id = WindowsGetStringRawBuffer( *nested_client_id, NULL );
+    else if (scopes && wcsstr( scopes, L"engage.cloud.microsoft/teams-branded-exp" ))
+        client_id = L"f4060917-6abe-40d7-baa6-f634c0eda4ac";
+    return client_id;
 }
 
 static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id)
@@ -3274,7 +3326,7 @@ static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id
     }
     if (have_token && (!expiry || expiry > get_unix_time() + 300)) goto done;
     refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
-    if (refresh && run_wine365_auth( NULL, NULL, FALSE, &exit_code ) && !exit_code)
+    if (refresh && run_wine365_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL ) && !exit_code )
     {
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
         token = load_wam_token_file( L"C:\\wam-access-token.txt" );
@@ -3301,17 +3353,22 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         struct web_token_request *token_request = (struct web_token_request *)request;
         const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
         const WCHAR *scopes = WindowsGetStringRawBuffer( token_request->scope, NULL );
+        const WCHAR *resource_client_id;
+        HSTRING nested_client_id;
         INT32 status;
+        resource_client_id = get_resource_client_id( token_request, &nested_client_id );
         refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
         if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
         status = is_supported_wam_client( client_id ) &&
-                 prepare_silent_wam_token( scopes, client_id ) ? 0 : 3;
+                 is_supported_resource_client( resource_client_id ) &&
+                 prepare_silent_wam_token( scopes, resource_client_id ) ? 0 : 3;
         hr = web_token_request_result_create( status, scopes, NULL, &result );
         if (refresh_mutex)
         {
             ReleaseMutex( refresh_mutex );
             CloseHandle( refresh_mutex );
         }
+        WindowsDeleteString( nested_client_id );
         if (FAILED(hr)) return hr;
     }
     hr = completed_provider_operation_create( result, operation );
@@ -3323,6 +3380,9 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
         IInspectable **operation )
 {
     struct web_token_request *token_request = (struct web_token_request *)request;
+    const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
+    const WCHAR *resource_client_id;
+    HSTRING nested_client_id;
     IInspectable *result;
     HANDLE refresh_mutex;
     HRESULT hr;
@@ -3330,48 +3390,32 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
     TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
+    resource_client_id = get_resource_client_id( token_request, &nested_client_id );
     refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
     if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
-    hr = web_token_request_result_create( is_supported_wam_client(
-            WindowsGetStringRawBuffer( token_request->client_id, NULL ) ) &&
+    hr = web_token_request_result_create( is_supported_wam_client( client_id ) &&
+            is_supported_resource_client( resource_client_id ) &&
             prepare_silent_wam_token(
             WindowsGetStringRawBuffer( token_request->scope, NULL ),
-            WindowsGetStringRawBuffer( token_request->client_id, NULL ) ) ? 0 : 3,
+            resource_client_id ) ? 0 : 3,
             WindowsGetStringRawBuffer( token_request->scope, NULL ), account, &result );
     if (refresh_mutex)
     {
         ReleaseMutex( refresh_mutex );
         CloseHandle( refresh_mutex );
     }
+    WindowsDeleteString( nested_client_id );
     if (FAILED(hr)) return hr;
     hr = completed_provider_operation_create( result, operation );
     IInspectable_Release( result );
     return hr;
 }
-static HRESULT create_interactive_token_operation( INT32 status, struct web_token_request *request,
-                                                    IInspectable *account, REFIID iid, void **out )
-{
-    IInspectable *result = NULL, *operation = NULL;
-    HRESULT hr;
-
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (FAILED(hr = web_token_request_result_create( status,
-            request ? WindowsGetStringRawBuffer( request->scope, NULL ) : L"", account, &result ))) return hr;
-    hr = completed_provider_operation_create( result, &operation );
-    IInspectable_Release( result );
-    if (FAILED(hr)) return hr;
-    hr = IInspectable_QueryInterface( operation, iid, out );
-    IInspectable_Release( operation );
-    return hr;
-}
-
 static HRESULT WINAPI web_manager_RequestTokenAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )
 {
     TRACE( "iface %p, request %p, operation %p.\n", iface, request, operation );
-    return create_interactive_token_operation( 4, (struct web_token_request *)request, NULL,
-                                               &IID_IInspectable, (void **)operation );
+    return create_pending_interactive_token_operation( NULL, (struct web_token_request *)request, NULL,
+                                                       &IID_IInspectable, (void **)operation );
 }
 
 static HRESULT WINAPI web_manager_RequestTokenWithWebAccountAsync(
@@ -3379,8 +3423,8 @@ static HRESULT WINAPI web_manager_RequestTokenWithWebAccountAsync(
         IInspectable **operation )
 {
     TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
-    return create_interactive_token_operation( 4, (struct web_token_request *)request, account,
-                                               &IID_IInspectable, (void **)operation );
+    return create_pending_interactive_token_operation( NULL, (struct web_token_request *)request, account,
+                                                       &IID_IInspectable, (void **)operation );
 }
 static HRESULT WINAPI web_manager_FindAccountAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *provider, HSTRING id,
