@@ -1,6 +1,7 @@
 /*
  * Copyright 2020 Nikolay Sivov for CodeWeavers
  * Copyright 2026 Elkana Bardugo
+ * Copyright 2026 Giang Nguyen
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -923,6 +924,20 @@ static const IDCompositionDevice3Vtbl dcomp_device3_vtbl =
     dcomp_device3_CreateArithmeticCompositeEffect,
     dcomp_device3_CreateAffineTransform2DEffect,
 };
+
+/* Adapted from giang17/wine. Chromium and WebView2 use the export as a
+ * DirectComposition capability check. The surface-handle consumers remain
+ * separate from Wine365's HWND-backed composition swapchain path. */
+HRESULT WINAPI DCompositionCreateSurfaceHandle(DWORD desired_access,
+        SECURITY_ATTRIBUTES *security_attributes, HANDLE *surface_handle)
+{
+    TRACE("desired_access %#lx, security_attributes %p, surface_handle %p.\n",
+            desired_access, security_attributes, surface_handle);
+
+    if (!surface_handle) return E_INVALIDARG;
+    *surface_handle = CreateEventW(security_attributes, FALSE, FALSE, NULL);
+    return *surface_handle ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+}
 
 HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **out)
 {
