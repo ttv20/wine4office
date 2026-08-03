@@ -2,6 +2,8 @@
 
 ## 0.1.10 — Upcoming
 
+- Bundle and install Wine Gecko for both 32-bit and 64-bit Office components
+  when creating a Wine environment.
 - Render the literal ampersand in the **Enable & start** and **Stop & disable**
   background-service buttons.
 - Keep background-service controls stable during periodic refreshes and update

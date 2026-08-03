@@ -146,6 +146,8 @@ MAX_OFFICE_XML_SIZE = 1024 * 1024
 MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
 MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
+WINE_GECKO_VERSION = "2.47.4"
+WINE_GECKO_ARCHITECTURES = ("x86", "x86_64")
 
 TOOL_META = {
     "winecfg": ("winecfg", []),
@@ -799,6 +801,39 @@ def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
     return f"Wine environment updated and restarted with {wine}"
 
 
+def bundled_wine_gecko_packages(wine: Path) -> tuple[Path, ...]:
+    """Return the complete bundled Gecko MSI set, or nothing when not bundled."""
+    gecko_dir = wine.parent.parent / "share/wine/gecko"
+    packages = tuple(
+        gecko_dir / f"wine-gecko-{WINE_GECKO_VERSION}-{architecture}.msi"
+        for architecture in WINE_GECKO_ARCHITECTURES
+    )
+    present = tuple(package.is_file() for package in packages)
+    if not any(present):
+        return ()
+    if not all(present):
+        missing = packages[present.index(False)]
+        raise FileNotFoundError(f"Bundled Wine Gecko package is missing: {missing}")
+    return packages
+
+
+def install_bundled_wine_gecko(prefix: Path, wine: Path, output: Output,
+                               cancel_event=None, process_callback=None) -> bool:
+    """Silently install both Gecko architectures shipped with the selected runner."""
+    packages = bundled_wine_gecko_packages(wine)
+    if not packages:
+        return False
+    environment = wine_environment(prefix, wine)
+    for package in packages:
+        output(f"Installing bundled Wine Gecko: {package.name}")
+        _stream_command(
+            [str(wine), "msiexec", "/i", str(package), "/qn"],
+            environment, output,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
+    return True
+
+
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
                        cancel_event=None, process_callback=None) -> str:
     prefix = validate_prefix(prefix_value)
@@ -828,6 +863,10 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         command = [str(wineboot), "-u"] if wineboot else [str(wine), "wineboot.exe", "-u"]
         _stream_command(
             command, wine_environment(prefix, wine), output,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
+        install_bundled_wine_gecko(
+            prefix, wine, output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
         _stream_command([

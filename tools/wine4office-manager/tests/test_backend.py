@@ -400,6 +400,42 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(backend.has_wine_prefix_layout(prefix))
         self.assertIn(str(prefix), message)
 
+    def test_create_environment_installs_both_bundled_gecko_architectures(self):
+        prefix = self.home / ".wine4office"
+        gecko = self.runner.parent / "share/wine/gecko"
+        gecko.mkdir(parents=True)
+        packages = [
+            gecko / f"wine-gecko-{backend.WINE_GECKO_VERSION}-{architecture}.msi"
+            for architecture in backend.WINE_GECKO_ARCHITECTURES
+        ]
+        for package in packages:
+            package.write_bytes(b"msi")
+        commands = []
+        stream_command = backend._stream_command
+
+        def capture(command, *args, **kwargs):
+            commands.append(command)
+            return stream_command(command, *args, **kwargs)
+
+        with mock.patch.object(backend, "_stream_command", side_effect=capture):
+            backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
+
+        self.assertEqual(commands[1:3], [
+            [str(self.wine), "msiexec", "/i", str(packages[0]), "/qn"],
+            [str(self.wine), "msiexec", "/i", str(packages[1]), "/qn"],
+        ])
+
+    def test_create_environment_rejects_partial_bundled_gecko_set(self):
+        prefix = self.home / ".wine4office"
+        gecko = self.runner.parent / "share/wine/gecko"
+        gecko.mkdir(parents=True)
+        (gecko / f"wine-gecko-{backend.WINE_GECKO_VERSION}-x86.msi").write_bytes(b"msi")
+
+        with self.assertRaisesRegex(FileNotFoundError, "Gecko package is missing"):
+            backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
+
+        self.assertFalse(prefix.exists())
+
 
     def test_stop_wine_gracefully_closes_windows_before_server(self):
         prefix = self._make_prefix(self.home / ".wine4office")

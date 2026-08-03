@@ -140,6 +140,24 @@ jobs:
             exit 1
           }
 
+      - name: Bundle Wine Gecko
+        shell: bash
+        run: |
+          set -euo pipefail
+          gecko_version=2.47.4
+          gecko_dir="$GITHUB_WORKSPACE/stage/opt/wine4office/share/wine/gecko"
+          mkdir -p "$gecko_dir"
+          curl --fail --location --retry 3 --show-error \
+            --output "$gecko_dir/wine-gecko-${gecko_version}-x86.msi" \
+            "https://dl.winehq.org/wine/wine-gecko/${gecko_version}/wine-gecko-${gecko_version}-x86.msi"
+          curl --fail --location --retry 3 --show-error \
+            --output "$gecko_dir/wine-gecko-${gecko_version}-x86_64.msi" \
+            "https://dl.winehq.org/wine/wine-gecko/${gecko_version}/wine-gecko-${gecko_version}-x86_64.msi"
+          sha256sum --check <<EOF
+          26cecc47706b091908f7f814bddb074c61beb8063318e9efc5a7f789857793d6  $gecko_dir/wine-gecko-${gecko_version}-x86.msi
+          e590b7d988a32d6aa4cf1d8aa3aa3d33766fdd4cf4c89c2dcc2095ecb28d066f  $gecko_dir/wine-gecko-${gecko_version}-x86_64.msi
+          EOF
+
       - name: Build standalone Wine4OfficeManager
         run: |
           set -euo pipefail

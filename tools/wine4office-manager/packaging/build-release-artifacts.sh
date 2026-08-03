@@ -18,6 +18,11 @@ CHANNEL=${7:-stable}
 
 [[ -x "$RUNNER/bin/wine" ]] || { echo "Runner has no executable bin/wine: $RUNNER" >&2; exit 1; }
 [[ -x "$MANAGER" ]] || { echo "Wine4Office Manager binary is missing or not executable: $MANAGER" >&2; exit 1; }
+GECKO_VERSION=2.47.4
+for gecko_arch in x86 x86_64; do
+    gecko="$RUNNER/share/wine/gecko/wine-gecko-${GECKO_VERSION}-${gecko_arch}.msi"
+    [[ -f "$gecko" ]] || { echo "Runner is missing bundled Wine Gecko: $gecko" >&2; exit 1; }
+done
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
 command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
@@ -51,6 +56,13 @@ tar --zstd -tf "$TMP/$WINE_NAME" | grep -Fx "$WINE_ROOT/bin/wine" >/dev/null || 
     echo "Wine archive is missing $WINE_ROOT/bin/wine" >&2
     exit 1
 }
+for gecko_arch in x86 x86_64; do
+    tar --zstd -tf "$TMP/$WINE_NAME" \
+        | grep -Fx "$WINE_ROOT/share/wine/gecko/wine-gecko-${GECKO_VERSION}-${gecko_arch}.msi" >/dev/null || {
+        echo "Wine archive is missing Wine Gecko for $gecko_arch" >&2
+        exit 1
+    }
+done
 
 (
     cd "$TMP"

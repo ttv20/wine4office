@@ -12,7 +12,8 @@ ORIGINAL="$TMP/original-runner"
 VERSION=2.3.4
 ROOT="wine4office-${VERSION}-x86_64"
 
-mkdir -p "$RUNNER/bin" "$RUNNER/lib/wine/x86_64-windows" "$RUNNER/share/wine4office"
+mkdir -p "$RUNNER/bin" "$RUNNER/lib/wine/x86_64-windows" \
+    "$RUNNER/share/wine4office" "$RUNNER/share/wine/gecko"
 cat > "$RUNNER/bin/wine" <<'SH'
 #!/bin/sh
 exit 0
@@ -20,6 +21,8 @@ SH
 chmod 0755 "$RUNNER/bin/wine"
 printf 'runner payload\n' > "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
 printf 'hidden payload\n' > "$RUNNER/.runner-metadata"
+printf 'gecko x86 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86.msi"
+printf 'gecko x86_64 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
 ln -s ../lib/wine/x86_64-windows/kernel32.dll "$RUNNER/bin/kernel32-link"
 cat > "$MANAGER" <<'SH'
 #!/bin/sh
@@ -27,6 +30,18 @@ exit 0
 SH
 chmod 0755 "$MANAGER"
 cp -a "$RUNNER" "$ORIGINAL"
+
+MISSING_GECKO_RUNNER="$TMP/missing-gecko-runner"
+cp -a "$RUNNER" "$MISSING_GECKO_RUNNER"
+rm "$MISSING_GECKO_RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
+if "$HERE/packaging/build-release-artifacts.sh" \
+    "$MISSING_GECKO_RUNNER" "$MANAGER" "$TMP/release-missing-gecko" "$VERSION" \
+    "https://updates.example/releases/stable/release.json" \
+    >"$TMP/missing-gecko.log" 2>&1; then
+    echo "release packaging accepted a runner without x86_64 Wine Gecko" >&2
+    exit 1
+fi
+grep -F "Runner is missing bundled Wine Gecko:" "$TMP/missing-gecko.log" >/dev/null
 
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$RELEASE" "$VERSION" \
@@ -54,6 +69,10 @@ mapfile -t expected_artifacts < <(printf '%s\n' "${expected_artifacts[@]}" | sor
 mapfile -t roots < <(tar --zstd -tf "$RELEASE/$WINE_NAME" | sed 's|/.*||' | sort -u)
 [[ ${#roots[@]} -eq 1 && ${roots[0]} == "$ROOT" ]]
 ! tar --zstd -tf "$RELEASE/$WINE_NAME" | grep -Fx "$ROOT/bin/wine64" >/dev/null
+tar --zstd -tf "$RELEASE/$WINE_NAME" \
+    | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86.msi" >/dev/null
+tar --zstd -tf "$RELEASE/$WINE_NAME" \
+    | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi" >/dev/null
 EXTRACTED="$TMP/extracted"
 mkdir -p "$EXTRACTED"
 tar --zstd -xf "$RELEASE/$WINE_NAME" -C "$EXTRACTED"
