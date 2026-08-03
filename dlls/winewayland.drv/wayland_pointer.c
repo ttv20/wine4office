@@ -123,7 +123,7 @@ static HWND wayland_pointer_get_focused_hwnd(void)
     return hwnd;
 }
 
-HWND wayland_get_input_hwnd(HWND hwnd)
+static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
 {
     static const WCHAR target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
             'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
@@ -131,24 +131,44 @@ HWND wayland_get_input_hwnd(HWND hwnd)
             'i','n','p','u','t','_','w','i','n','d','o','w',0};
     static const WCHAR keyboard_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
             'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
+    static const WCHAR direct_input_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+            'h','a','r','d','w','a','r','e','_','i','n','p','u','t',0};
     HWND target, parent, input_window, root;
 
-    if ((input_window = NtUserGetProp(hwnd, keyboard_prop))) return input_window;
-    if ((input_window = NtUserGetProp(NtUserGetAncestor(hwnd, GA_ROOT), keyboard_prop)))
-        return input_window;
+    if (keyboard)
+    {
+        if ((input_window = NtUserGetProp(hwnd, keyboard_prop))) return input_window;
+        if ((input_window = NtUserGetProp(NtUserGetAncestor(hwnd, GA_ROOT), keyboard_prop)))
+            return input_window;
+    }
 
     /* Cross-process DirectComposition swapchains use a detached presentation
      * window in Chromium's GPU process. That thread does not pump Win32 mouse
-     * messages. Route hardware input to the target's parent so normal Win32
-     * hit-testing runs on the host thread while the GPU surface remains the
-     * Wayland pointer focus. */
+     * messages. Route hardware input to the browser host window. Chromium's
+     * Aura dispatcher then forwards it to the renderer; its legacy
+     * RenderWidget child is not the native event endpoint. Marking the host as
+     * direct prevents the server from hit-testing back into the covering GPU
+     * child. */
     if (!(target = NtUserGetProp(hwnd, target_prop))) return hwnd;
     if (!(parent = NtUserGetAncestor(target, GA_PARENT))) return hwnd;
-    input_window = NtUserGetWindowRelative(parent, GW_CHILD);
-    NtUserSetProp(parent, input_prop, input_window ? input_window : parent);
-    if ((root = NtUserGetAncestor(parent, GA_ROOT)))
-        NtUserSetProp(root, keyboard_prop, parent);
-    return parent;
+    input_window = parent;
+    NtUserSetProp(parent, input_prop, input_window);
+    NtUserSetProp(input_window, direct_input_prop, (HANDLE)(ULONG_PTR)0x57444952);
+    if ((root = NtUserGetAncestor(target, GA_ROOT)))
+        NtUserSetProp(root, keyboard_prop, input_window);
+    TRACE("DComp input presentation hwnd %p -> target %p parent %p input %p root %p\n",
+          hwnd, target, parent, input_window, root);
+    return input_window;
+}
+
+HWND wayland_get_input_hwnd(HWND hwnd)
+{
+    return wayland_get_input_hwnd_internal(hwnd, TRUE);
+}
+
+static HWND wayland_get_pointer_input_hwnd(HWND hwnd)
+{
+    return wayland_get_input_hwnd_internal(hwnd, FALSE);
 }
 
 static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
@@ -191,7 +211,7 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
           hwnd, wl_fixed_to_double(sx), wl_fixed_to_double(sy),
           screen.x, screen.y);
 
-    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
@@ -261,7 +281,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
     INPUT input = {0};
-    HWND hwnd, input_hwnd, focus;
+    HWND hwnd, input_hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
@@ -296,11 +316,10 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
 
-    input_hwnd = wayland_get_input_hwnd(hwnd);
+    input_hwnd = wayland_get_pointer_input_hwnd(hwnd);
     NtUserSendHardwareInput(input_hwnd, 0, &input, 0);
-    if (state == WL_POINTER_BUTTON_STATE_RELEASED && input_hwnd != hwnd &&
-        (focus = NtUserGetWindowRelative(input_hwnd, GW_CHILD)))
-        NtUserPostMessage(focus, WM_WINE_DCOMP_FOCUS, 0, 0);
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED && input_hwnd != hwnd)
+        NtUserPostMessage(input_hwnd, WM_WINE_DCOMP_FOCUS, 0, 0);
 }
 
 static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
@@ -399,7 +418,7 @@ static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_point
 
     TRACE("hwnd=%p axis=%u value120=%d\n", hwnd, axis, value120);
 
-    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static void pointer_handle_axis_discrete(void *data, struct wl_pointer *wl_pointer,
@@ -477,7 +496,7 @@ static void relative_pointer_v1_relative_motion(void *private,
           hwnd, wl_fixed_to_double(dx), wl_fixed_to_double(dy),
           input.mi.dx, input.mi.dy);
 
-    NtUserSendHardwareInput(wayland_get_input_hwnd(hwnd), 0, &input, 0);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), 0, &input, 0);
 }
 
 static const struct zwp_relative_pointer_v1_listener relative_pointer_v1_listener =

@@ -1251,7 +1251,10 @@ static WORD EVENT_event_to_vkey( XIC xic, XKeyEvent *e)
  */
 static void X11DRV_send_keyboard_input( HWND hwnd, WORD vkey, WORD scan, UINT flags, UINT time )
 {
+    static const WCHAR keyboard_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
     INPUT input;
+    HWND input_hwnd, root;
 
     TRACE_(key)( "hwnd %p vkey=%04x scan=%04x flags=%04x\n", hwnd, vkey, scan, flags );
 
@@ -1262,7 +1265,13 @@ static void X11DRV_send_keyboard_input( HWND hwnd, WORD vkey, WORD scan, UINT fl
     input.ki.time        = time;
     input.ki.dwExtraInfo = 0;
 
-    NtUserSendHardwareInput( hwnd, 0, &input, 0 );
+    input_hwnd = NtUserGetProp(hwnd, keyboard_prop);
+    if (!input_hwnd && (root = NtUserGetAncestor(hwnd, GA_ROOT)))
+        input_hwnd = NtUserGetProp(root, keyboard_prop);
+    if (input_hwnd)
+        TRACE("routing DComp keyboard input hwnd %p to %p vkey %#x flags %#x\n",
+                hwnd, input_hwnd, vkey, flags);
+    NtUserSendHardwareInput(input_hwnd ? input_hwnd : hwnd, 0, &input, 0);
 }
 
 

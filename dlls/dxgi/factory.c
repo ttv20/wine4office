@@ -22,6 +22,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
 #define WM_WAYLAND_DCOMP_EXPORT 0x80001003
+#define WM_WINE_DCOMP_FOCUS     0x80000ff0
 
 static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *iface)
 {
@@ -419,7 +420,14 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 point.y = (short)HIWORD(lparam);
                 ClientToScreen(window, &point);
                 ScreenToClient(target, &point);
+                TRACE("Forwarding DComp mouse message %#x from %p to %p at %ld,%ld.\n",
+                        message, window, target, point.x, point.y);
                 PostMessageW(target, message, wparam, MAKELPARAM(point.x, point.y));
+                if (message == WM_LBUTTONUP)
+                {
+                    TRACE("Requesting DComp input focus for %p.\n", target);
+                    PostMessageW(target, WM_WINE_DCOMP_FOCUS, 0, 0);
+                }
                 return 0;
 
             case WM_MOUSEWHEEL:
@@ -467,6 +475,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (target_root) GetWindowThreadProcessId(target_root, &target_process);
     if (target && target_process != GetCurrentProcessId())
     {
+        HWND input_window = GetAncestor(target, GA_PARENT);
         RECT rect;
 
         /* WebView2 renders in a separate process from its host. A Wayland
@@ -482,6 +491,19 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
                 max(rect.bottom - rect.top, 1), target, NULL, NULL, NULL)))
             return E_FAIL;
         SetPropW(window, L"__wine_dcomp_detached_window", target);
+        if (input_window)
+        {
+            SetPropW(window, L"__wine_dcomp_input_window", input_window);
+            SetPropW(window, L"__wine_dcomp_keyboard_window", input_window);
+            SetPropW(input_window, L"__wine_direct_hardware_input", ULongToHandle(0x57444952));
+            if (target_root)
+            {
+                SetPropW(target_root, L"__wine_dcomp_input_window", input_window);
+                SetPropW(target_root, L"__wine_dcomp_keyboard_window", input_window);
+            }
+            TRACE("Published DComp input window %p for presentation %p and root %p.\n",
+                    input_window, window, target_root);
+        }
         PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
         SetPropW(window, L"__wine_dcomp_old_proc", (HANDLE)SetWindowLongPtrW(window, GWLP_WNDPROC,
                 (LONG_PTR)dxgi_composition_window_proc));

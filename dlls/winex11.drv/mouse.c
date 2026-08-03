@@ -534,6 +534,9 @@ static void map_event_coords( HWND hwnd, Window window, Window event_root, int x
 static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPUT *input )
 {
     struct x11drv_thread_data *thread_data = x11drv_thread_data();
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    HWND input_hwnd = hwnd, root;
 
     /* ignore clipping window input when not clipping or wrong clipping window */
     if (!hwnd && (!thread_data->clipping_cursor || thread_data->clip_window != window)) return;
@@ -555,8 +558,23 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
         SERVER_END_REQ;
     }
 
+    if (hwnd)
+    {
+        if (!(input_hwnd = NtUserGetProp(hwnd, input_prop)))
+        {
+            root = NtUserGetAncestor(hwnd, GA_ROOT);
+            input_hwnd = root ? NtUserGetProp(root, input_prop) : NULL;
+        }
+        if (!input_hwnd) input_hwnd = hwnd;
+    }
+    if (input_hwnd != hwnd)
+        TRACE("routing DComp mouse input hwnd %p to %p flags %#x\n", hwnd, input_hwnd,
+                input->mi.dwFlags);
     input->type = INPUT_MOUSE;
-    NtUserSendHardwareInput( hwnd, 0, input, 0 );
+    NtUserSendHardwareInput( input_hwnd, 0, input, 0 );
+    if (input_hwnd != hwnd && (input->mi.dwFlags &
+            (MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEUP)))
+        NtUserPostMessage(input_hwnd, 0x80000ff0, 0, 0);
 }
 
 #ifdef SONAME_LIBXCURSOR
