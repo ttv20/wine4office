@@ -837,10 +837,59 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     wayland_win_data_release(data);
 }
 
+struct foreground_sync
+{
+    struct wl_callback *callback;
+    HWND hwnd;
+};
+
+static void foreground_sync_done(void *data, struct wl_callback *callback, uint32_t serial)
+{
+    struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+    struct foreground_sync *sync = data;
+    struct wayland_win_data *win_data;
+    BOOL focused;
+
+    pthread_mutex_lock(&keyboard->mutex);
+    focused = !!keyboard->focused_hwnd;
+    pthread_mutex_unlock(&keyboard->mutex);
+
+    /* A keyboard leave is also sent while the compositor switches between
+     * surfaces belonging to one activated toplevel.  Keep the Windows
+     * foreground state in that case; xdg_toplevel activation is the
+     * compositor's authoritative application-focus state. */
+    if (!focused && (win_data = wayland_win_data_get(sync->hwnd)))
+    {
+        struct wayland_surface *surface = win_data->wayland_surface;
+        enum wayland_surface_config_state state = 0;
+
+        if (surface && wayland_surface_is_toplevel(surface))
+        {
+            if (surface->requested.serial) state = surface->requested.state;
+            else if (surface->processing.serial) state = surface->processing.state;
+            else state = surface->current.state;
+            focused = !!(state & WAYLAND_SURFACE_CONFIG_STATE_ACTIVATED);
+        }
+        wayland_win_data_release(win_data);
+    }
+
+    wl_callback_destroy(callback);
+    if (!focused && NtUserGetForegroundWindow() == sync->hwnd)
+        NtUserSetForegroundWindowInternal(NtUserGetDesktopWindow());
+    free(sync);
+}
+
+static const struct wl_callback_listener foreground_sync_listener =
+{
+    foreground_sync_done,
+};
+
 static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
                                   uint32_t serial, struct wl_surface *wl_surface)
 {
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+    struct foreground_sync *sync;
+    BOOL clear_foreground = FALSE;
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -854,14 +903,24 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
 
     pthread_mutex_lock(&keyboard->mutex);
     if (keyboard->focused_hwnd == hwnd)
+    {
         keyboard->focused_hwnd = NULL;
+        clear_foreground = TRUE;
+    }
     pthread_mutex_unlock(&keyboard->mutex);
 
     /* The spec for the leave event tells us to treat all keys as released,
      * and for any key repetition to stop. */
     release_all_keys(hwnd);
 
-    /* FIXME: update foreground window as well */
+    if (clear_foreground && (sync = malloc(sizeof(*sync))))
+    {
+        sync->hwnd = hwnd;
+        sync->callback = wl_display_sync(process_wayland.wl_display);
+        wl_proxy_set_queue((struct wl_proxy *)sync->callback, process_wayland.wl_event_queue);
+        wl_callback_add_listener(sync->callback, &foreground_sync_listener, sync);
+        wl_display_flush(process_wayland.wl_display);
+    }
 }
 
 static void send_right_control(HWND hwnd, uint32_t state)

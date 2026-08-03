@@ -200,6 +200,9 @@ static void xdg_toplevel_handle_configure(void *private,
         case XDG_TOPLEVEL_STATE_FULLSCREEN:
             config_state |= WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN;
             break;
+        case XDG_TOPLEVEL_STATE_ACTIVATED:
+            config_state |= WAYLAND_SURFACE_CONFIG_STATE_ACTIVATED;
+            break;
         default:
             break;
         }
