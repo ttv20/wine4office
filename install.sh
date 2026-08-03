@@ -66,15 +66,19 @@ print(root)
 PY
 )
 MANAGER_TARGET=$ROOT/bin/Wine4OfficeManager
+UNINSTALLER_TARGET=$ROOT/bin/wine4office-uninstall
 RUNNER_TARGET=$ROOT/runner
 
 TMP=$(mktemp -d)
 NEW_RUNNER=$ROOT/.runner.new.$$
 NEW_MANAGER=$ROOT/bin/.Wine4OfficeManager.new.$$
+NEW_UNINSTALLER=$ROOT/bin/.wine4office-uninstall.new.$$
 RUNNER_BACKUP=$ROOT/.runner.old.$$
 MANAGER_BACKUP=$ROOT/bin/.Wine4OfficeManager.old.$$
+UNINSTALLER_BACKUP=$ROOT/bin/.wine4office-uninstall.old.$$
 RUNNER_CHANGED=false
 MANAGER_CHANGED=false
+UNINSTALLER_CHANGED=false
 COMMITTED=false
 METADATA_CHANGED=()
 
@@ -92,6 +96,11 @@ cleanup() {
             [[ ! -e $MANAGER_BACKUP && ! -L $MANAGER_BACKUP ]] || \
                 mv -- "$MANAGER_BACKUP" "$MANAGER_TARGET"
         fi
+        if $UNINSTALLER_CHANGED; then
+            rm -f -- "$UNINSTALLER_TARGET"
+            [[ ! -e $UNINSTALLER_BACKUP && ! -L $UNINSTALLER_BACKUP ]] || \
+                mv -- "$UNINSTALLER_BACKUP" "$UNINSTALLER_TARGET"
+        fi
         if $RUNNER_CHANGED; then
             rm -rf -- "$RUNNER_TARGET"
             [[ ! -e $RUNNER_BACKUP && ! -L $RUNNER_BACKUP ]] || \
@@ -99,10 +108,11 @@ cleanup() {
         fi
     fi
     rm -rf -- "$TMP" "$NEW_RUNNER"
-    rm -f -- "$NEW_MANAGER"
+    rm -f -- "$NEW_MANAGER" "$NEW_UNINSTALLER"
     if $COMMITTED; then
         rm -rf -- "$RUNNER_BACKUP"
         rm -f -- "$MANAGER_BACKUP"
+        rm -f -- "$UNINSTALLER_BACKUP"
         for name in VERSION WINE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
             rm -f -- "$ROOT/.$name.old.$$"
         done
@@ -228,6 +238,66 @@ verify() {
 verify "$TMP/Wine4OfficeManager" "$MANAGER_SIZE" "$MANAGER_SHA256" Wine4OfficeManager
 verify "$TMP/wine.tar.zst" "$WINE_SIZE" "$WINE_SHA256" "Wine runner"
 chmod 0755 "$TMP/Wine4OfficeManager"
+
+cat > "$TMP/wine4office-uninstall" <<'SH'
+#!/usr/bin/env bash
+# Remove a standalone Wine4Office installation for the current user.
+set -euo pipefail
+
+SELF=$(readlink -f "$0")
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
+CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
+MANAGER=$ROOT/bin/Wine4OfficeManager
+PURGE_RUNNER=false
+REMOVE_PREFIX=
+
+usage() {
+    echo "Usage: $0 [--purge-runner] [--remove-prefix PATH]" >&2
+}
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --purge-runner) PURGE_RUNNER=true; shift ;;
+        --remove-prefix)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            REMOVE_PREFIX=$2; shift 2 ;;
+        *) usage; exit 2 ;;
+    esac
+done
+
+[[ -f $ROOT/STANDALONE && $(<"$ROOT/STANDALONE") == Wine4OfficeManager ]] || {
+    echo "Refusing to remove an installation without a valid Wine4Office standalone marker: $ROOT" >&2
+    exit 1
+}
+[[ -x $MANAGER ]] || {
+    echo "Cannot safely remove Wine4Office because its manager is missing: $MANAGER" >&2
+    exit 1
+}
+
+cleanup_args=(--prepare-uninstall)
+if [[ -n $REMOVE_PREFIX ]]; then cleanup_args+=(--remove-prefix "$REMOVE_PREFIX"); fi
+"$MANAGER" "${cleanup_args[@]}"
+
+for link in "$BIN_HOME/Wine4OfficeManager" "$BIN_HOME/wine4office-manager"; do
+    if [[ -L $link && $(readlink -f "$link") == "$MANAGER" ]]; then rm -f -- "$link"; fi
+done
+if $PURGE_RUNNER; then
+    rm -rf -- "$ROOT/runner"
+    rm -f -- "$ROOT/VERSION" "$ROOT/WINE_VERSION" "$ROOT/UPDATE_URL" \
+        "$ROOT/UPDATE_CHANNEL" "$ROOT/STANDALONE" "$ROOT/install.json" \
+        "$ROOT/.wine4office-update.lock"
+    rm -rf -- "$CONFIG_HOME/wine4office"
+fi
+rm -f -- "$MANAGER" "$MANAGER.version" "$SELF"
+rmdir -- "$ROOT/bin" "$ROOT" 2>/dev/null || true
+
+if $PURGE_RUNNER; then
+    echo "Wine4Office runner, manager, shortcuts, and configuration removed."
+else
+    printf 'Wine4Office Manager removed. Configuration and the runner in %s/runner were preserved.\n' "$ROOT"
+fi
+SH
+chmod 0755 "$TMP/wine4office-uninstall"
 
 cat > "$TMP/safe_extract.py" <<'PY'
 import os
@@ -396,6 +466,7 @@ EXTRACTED_ROOT=$(python3 "$TMP/safe_extract.py" "$TMP/wine.tar.zst" "$TMP/extrac
 
 mkdir -p "$ROOT/bin" "$BIN_HOME" "$TMP/metadata"
 install -m 0755 "$TMP/Wine4OfficeManager" "$NEW_MANAGER"
+install -m 0755 "$TMP/wine4office-uninstall" "$NEW_UNINSTALLER"
 mv -- "$EXTRACTED_ROOT" "$NEW_RUNNER"
 printf '%s\n' "$MANAGER_VERSION" > "$TMP/metadata/VERSION"
 printf '%s\n' "$WINE_VERSION" > "$TMP/metadata/WINE_VERSION"
@@ -407,7 +478,7 @@ chmod 0644 "$TMP/metadata"/*
 exec 9> "$ROOT/.wine4office-update.lock"
 flock 9
 trap '' INT TERM
-for path in "$RUNNER_BACKUP" "$MANAGER_BACKUP"; do
+for path in "$RUNNER_BACKUP" "$MANAGER_BACKUP" "$UNINSTALLER_BACKUP"; do
     [[ ! -e $path && ! -L $path ]] || fail "stale installation backup exists: $path"
 done
 if [[ -e $RUNNER_TARGET || -L $RUNNER_TARGET ]]; then mv -- "$RUNNER_TARGET" "$RUNNER_BACKUP"; fi
@@ -416,6 +487,11 @@ mv -- "$NEW_RUNNER" "$RUNNER_TARGET"
 if [[ -e $MANAGER_TARGET || -L $MANAGER_TARGET ]]; then mv -- "$MANAGER_TARGET" "$MANAGER_BACKUP"; fi
 MANAGER_CHANGED=true
 mv -- "$NEW_MANAGER" "$MANAGER_TARGET"
+if [[ -e $UNINSTALLER_TARGET || -L $UNINSTALLER_TARGET ]]; then
+    mv -- "$UNINSTALLER_TARGET" "$UNINSTALLER_BACKUP"
+fi
+UNINSTALLER_CHANGED=true
+mv -- "$NEW_UNINSTALLER" "$UNINSTALLER_TARGET"
 for name in VERSION WINE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
     backup=$ROOT/.$name.old.$$
     [[ ! -e $backup && ! -L $backup ]] || fail "stale metadata backup exists: $backup"

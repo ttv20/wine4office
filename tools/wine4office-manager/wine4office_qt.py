@@ -1637,6 +1637,14 @@ class ManagerWindow(QMainWindow):
         self.timer.stop()
         self.close()
 
+    def finish_successful_removal(self) -> None:
+        QMessageBox.information(
+            self,
+            "Wine4Office Uninstalled",
+            "Wine4Office was uninstalled successfully.",
+        )
+        self.close()
+
     def remove_wine4office(self) -> None:
         config = self.save_config()
         if not config:
@@ -1764,6 +1772,10 @@ class ManagerWindow(QMainWindow):
         if self.last_task_state.endswith(":running") and not task["running"]:
             if task["status"] == "completed":
                 self.notify("Operation completed.")
+                if task.get("kind") == "remove":
+                    self._automatic_close = True
+                    self.timer.stop()
+                    QTimer.singleShot(0, self.finish_successful_removal)
             elif task["status"] == "cancelled":
                 self.notify("Operation cancelled; settings restored.")
             else:

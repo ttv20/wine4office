@@ -1570,6 +1570,28 @@ def refresh_manager_shortcut(manager_launcher: Path | list[str],
     return {"updated": True, "path": str(path)}
 
 
+def remove_manager_shortcut() -> list[str]:
+    """Remove only Wine4Office-owned manager shortcuts and icons."""
+    removed: list[str] = []
+    for path in (
+            data_home() / "applications/wine4office-manager.desktop",
+            desktop_directory() / "wine4office-manager.desktop"):
+        if path.is_file() and _owned_desktop_file(path):
+            path.unlink()
+            removed.append(str(path))
+    icon_dir = data_home() / "icons/wine4office"
+    if icon_dir.is_dir():
+        for path in icon_dir.glob("wine4office-manager*.png"):
+            path.unlink()
+            removed.append(str(path))
+        try:
+            icon_dir.rmdir()
+        except OSError:
+            pass
+    refresh_desktop_database()
+    return removed
+
+
 def refresh_desktop_database() -> None:
     utility = shutil.which("update-desktop-database")
     if utility:

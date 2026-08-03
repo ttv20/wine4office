@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -807,6 +808,8 @@ class ManagerState:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wine4Office Manager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--prepare-uninstall", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--remove-prefix", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--post-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--scheduled-update-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--open-maintenance", action="store_true", help=argparse.SUPPRESS)
@@ -837,6 +840,43 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.prepare_uninstall:
+        if (args.target or args.documents or args.preload_service or args.preload_worker
+                or args.install_shortcut or args.post_update or args.scheduled_update_check
+                or args.open_maintenance or args.disable_office_telemetry
+                or args.restore_office_telemetry_default or args.smoke_test
+                or args.screenshot or args.prefix or args.wine):
+            parser.error("--prepare-uninstall cannot be combined with another operation.")
+        try:
+            remove_prefix = None
+            if args.remove_prefix:
+                remove_prefix = backend.validate_prefix(args.remove_prefix)
+                if backend.classify_prefix(str(remove_prefix)) != "valid":
+                    raise ValueError(
+                        f"Refusing to remove a path that is not a Wine prefix: {remove_prefix}"
+                    )
+            backend.uninstall_preload_service()
+            backend.uninstall_automatic_update_schedule()
+            if remove_prefix is not None:
+                config = backend.load_config()
+                try:
+                    backend.stop_wine(
+                        str(remove_prefix), config["wine"],
+                        use_x11=config.get("use_x11", True),
+                    )
+                except (FileNotFoundError, OSError):
+                    pass
+            backend.remove_app_shortcuts(backend.APP_META)
+            backend.remove_manager_shortcut()
+            if remove_prefix is not None:
+                shutil.rmtree(remove_prefix)
+                print(f"Removed Wine environment: {remove_prefix}")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"wine4office uninstall: {error}", file=sys.stderr)
+            return 1
+        return 0
+    if args.remove_prefix:
+        parser.error("--remove-prefix requires --prepare-uninstall.")
     if args.scheduled_update_check:
         if (args.target or args.documents or args.preload_service or args.preload_worker
                 or args.install_shortcut or args.post_update

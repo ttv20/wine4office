@@ -459,6 +459,57 @@ class QtManagerTests(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         close.assert_called_once()
 
+    def test_successful_removal_shows_confirmation_then_closes_manager(self):
+        snapshot = self._preload_snapshot(task={
+            "running": False,
+            "kind": "remove",
+            "status": "completed",
+        })
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(
+            self.state, "snapshot", return_value=snapshot
+        ), mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            qt_module.QMessageBox, "information"
+        ) as information, mock.patch.object(
+            self.window, "close"
+        ) as close:
+            self.window.refresh_state()
+            single_shot.assert_called_once_with(
+                0, self.window.finish_successful_removal
+            )
+            single_shot.call_args.args[1]()
+
+        information.assert_called_once_with(
+            self.window,
+            "Wine4Office Uninstalled",
+            "Wine4Office was uninstalled successfully.",
+        )
+        close.assert_called_once()
+        self.assertTrue(self.window._automatic_close)
+
+    def test_failed_removal_keeps_manager_open_without_success_confirmation(self):
+        snapshot = self._preload_snapshot(task={
+            "running": False,
+            "kind": "remove",
+            "status": "failed",
+            "log": "ERROR: removal failed",
+        })
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(
+            self.state, "snapshot", return_value=snapshot
+        ), mock.patch.object(
+            qt_module.QMessageBox, "information"
+        ) as information, mock.patch.object(
+            self.window, "close"
+        ) as close:
+            self.window.refresh_state()
+
+        information.assert_not_called()
+        close.assert_not_called()
+        self.assertFalse(self.window._automatic_close)
+
 
 
     def test_ui_uses_system_theme_and_native_navigation_controls(self):

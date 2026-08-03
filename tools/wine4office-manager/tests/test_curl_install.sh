@@ -6,6 +6,7 @@ trap 'rm -rf "$TMP"' EXIT
 RELEASE=$TMP/release
 FAKE_BIN=$TMP/bin
 HOME_DIR=$TMP/home
+REAL_MANAGER=${WINE4OFFICE_TEST_REAL_MANAGER:-}
 mkdir -p "$RELEASE/runner/bin" "$FAKE_BIN" "$HOME_DIR"
 
 cat > "$RELEASE/runner/bin/wine" <<'SH'
@@ -15,6 +16,9 @@ SH
 chmod 0755 "$RELEASE/runner/bin/wine"
 printf 'runner payload\n' > "$RELEASE/runner/identity"
 tar -C "$RELEASE" -cf - runner | zstd -q -o "$RELEASE/wine.tar.zst"
+if [[ -n $REAL_MANAGER ]]; then
+    install -m 0755 "$REAL_MANAGER" "$RELEASE/Wine4OfficeManager"
+else
 cat > "$RELEASE/Wine4OfficeManager" <<'SH'
 #!/bin/sh
 if [ -n "${WINE4OFFICE_TEST_MANAGER_LOG:-}" ]; then
@@ -31,6 +35,7 @@ fi
 exit 0
 SH
 chmod 0755 "$RELEASE/Wine4OfficeManager"
+fi
 
 write_metadata() {
     manager_digest=$1
@@ -98,25 +103,32 @@ export WINE4OFFICE_TEST_MANAGER_LOG=$TMP/manager.log
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
 
 [[ -x $WINE4OFFICE_HOME/bin/Wine4OfficeManager ]]
+[[ -x $WINE4OFFICE_HOME/bin/wine4office-uninstall ]]
 [[ -x $WINE4OFFICE_HOME/runner/bin/wine ]]
 [[ $(cat "$WINE4OFFICE_HOME/runner/identity") == "runner payload" ]]
 [[ $(cat "$WINE4OFFICE_HOME/WINE_VERSION") == 0.1.0 ]]
 [[ -L $WINE4OFFICE_BIN_HOME/Wine4OfficeManager ]]
-[[ -f $XDG_DATA_HOME/shortcut-installed ]]
+if [[ -n $REAL_MANAGER ]]; then
+    [[ -f $XDG_DATA_HOME/applications/wine4office-manager.desktop ]]
+else
+    [[ -f $XDG_DATA_HOME/shortcut-installed ]]
+fi
 [[ $(cat "$WINE4OFFICE_HOME/VERSION") == 0.1.0 ]]
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_URL") == https://example.invalid/release.json ]]
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == stable ]]
 [[ $(cat "$WINE4OFFICE_HOME/STANDALONE") == Wine4OfficeManager ]]
-[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
+if [[ -z $REAL_MANAGER ]]; then
+    [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
 
-WINE4OFFICE_LAUNCH_MANAGER=no PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
-[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
-WINE4OFFICE_LAUNCH_MANAGER= PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
-for _ in {1..20}; do
-    [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]] && break
-    sleep 0.05
-done
-[[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]]
+    WINE4OFFICE_LAUNCH_MANAGER=no PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+    [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
+    WINE4OFFICE_LAUNCH_MANAGER= PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+    for _ in {1..20}; do
+        [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]] && break
+        sleep 0.05
+    done
+    [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 1 ]]
+fi
 
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null &
 FIRST_INSTALL=$!
@@ -166,4 +178,8 @@ fi
 [[ $(sha256sum "$WINE4OFFICE_HOME/bin/Wine4OfficeManager") == "$BEFORE_MANAGER" ]]
 [[ $(sha256sum "$WINE4OFFICE_HOME/runner/identity") == "$BEFORE_RUNNER" ]]
 
-echo "curl installer verified install, locking, rollback, and archive safety: PASS"
+PATH="$FAKE_BIN:$PATH" "$WINE4OFFICE_HOME/bin/wine4office-uninstall" --purge-runner >/dev/null
+[[ ! -e $WINE4OFFICE_HOME ]]
+[[ ! -e $WINE4OFFICE_BIN_HOME/Wine4OfficeManager ]]
+
+echo "curl installer verified install, uninstall, locking, rollback, and archive safety: PASS"
