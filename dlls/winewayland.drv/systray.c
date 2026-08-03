@@ -355,7 +355,7 @@ static void CALLBACK icon_dispatch_thread(void *arg)
 
 static BOOL register_icon(struct tray_icon *icon)
 {
-    DBusMessage *message, *reply;
+    DBusMessage *message;
     DBusError error;
     char name[128];
     const char *path = SNI_PATH;
@@ -369,17 +369,19 @@ static BOOL register_icon(struct tray_icon *icon)
     if (dbus_bus_request_name(icon->connection, name, DBUS_NAME_FLAG_DO_NOT_QUEUE, &error) !=
         DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) goto failed;
     if (!dbus_connection_register_object_path(icon->connection, SNI_PATH, &icon_vtable, icon)) goto failed;
+    if (PsCreateSystemThread(&icon->thread, THREAD_ALL_ACCESS, NULL, 0, NULL,
+                             icon_dispatch_thread, icon)) goto failed;
 
     if (!(message = dbus_message_new_method_call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
                                                   "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem")))
         goto failed;
     dbus_message_append_args(message, DBUS_TYPE_STRING, &path, DBUS_TYPE_INVALID);
-    reply = dbus_connection_send_with_reply_and_block(icon->connection, message, 3000, &error);
+    if (!dbus_connection_send(icon->connection, message, NULL))
+    {
+        dbus_message_unref(message);
+        goto failed;
+    }
     dbus_message_unref(message);
-    if (!reply) goto failed;
-    dbus_message_unref(reply);
-    if (PsCreateSystemThread(&icon->thread, THREAD_ALL_ACCESS, NULL, 0, NULL,
-                             icon_dispatch_thread, icon)) goto failed;
     TRACE("registered StatusNotifierItem %s for hwnd %p id %#x\n", name, icon->owner, icon->id);
     return TRUE;
 
@@ -389,6 +391,12 @@ failed:
     if (icon->connection)
     {
         dbus_connection_close(icon->connection);
+        if (icon->thread)
+        {
+            NtWaitForSingleObject(icon->thread, FALSE, NULL);
+            NtClose(icon->thread);
+            icon->thread = NULL;
+        }
         dbus_connection_unref(icon->connection);
         icon->connection = NULL;
     }
@@ -401,7 +409,6 @@ static void emit_signal(struct tray_icon *icon, const char *member)
     if (!icon->connection || !(message = dbus_message_new_signal(SNI_PATH, SNI_IFACE, member))) return;
     dbus_connection_send(icon->connection, message, NULL);
     dbus_message_unref(message);
-    dbus_connection_flush(icon->connection);
 }
 
 static BOOL modify_icon(struct tray_icon *icon, NOTIFYICONDATAW *nid)
