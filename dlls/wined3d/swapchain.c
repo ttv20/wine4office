@@ -986,6 +986,9 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     if ((desc->flags & WINED3D_SWAPCHAIN_ALPHA_PREMULTIPLIED)
             && (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR))
         vk_swapchain_desc.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    else if ((desc->flags & WINED3D_SWAPCHAIN_ALPHA_PREMULTIPLIED)
+            && (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR))
+        vk_swapchain_desc.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
     else if (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
         vk_swapchain_desc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     else

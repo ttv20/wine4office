@@ -58,6 +58,8 @@ static inline struct dcomp_visual *impl_from_IDCompositionVisual2(IDCompositionV
     return CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual2_iface);
 }
 
+static void dcomp_visual_unbind_content(struct dcomp_visual *visual);
+
 static HRESULT WINAPI dcomp_visual_QueryInterface(IDCompositionVisual2 *iface, REFIID iid, void **out)
 {
     if (!out) return E_POINTER;
@@ -90,7 +92,11 @@ static ULONG WINAPI dcomp_visual_Release(IDCompositionVisual2 *iface)
             child->visual->lpVtbl->Release(child->visual);
             free(child);
         }
-        if (visual->content) visual->content->lpVtbl->Release(visual->content);
+        if (visual->content)
+        {
+            dcomp_visual_unbind_content(visual);
+            visual->content->lpVtbl->Release(visual->content);
+        }
         free(visual);
     }
     return ref;
@@ -118,6 +124,29 @@ VISUAL_ENUM_METHOD(SetBitmapInterpolationMode, DCOMPOSITION_BITMAP_INTERPOLATION
 VISUAL_ENUM_METHOD(SetBorderMode, DCOMPOSITION_BORDER_MODE)
 VISUAL_OBJECT_METHOD(SetClipObject, IDCompositionClip)
 VISUAL_OBJECT_METHOD(SetClip, const D2D_RECT_F)
+
+static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
+{
+    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
+    bind_composition_window_t bind_composition_window;
+    IDXGISwapChain1 *swapchain;
+    HMODULE dxgi;
+    HWND window;
+
+    if (!visual->content || FAILED(visual->content->lpVtbl->QueryInterface(visual->content,
+            &IID_IDXGISwapChain1, (void **)&swapchain)))
+        return;
+    if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
+    {
+        if ((dxgi = GetModuleHandleW(L"dxgi.dll")) &&
+            (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
+                    "__wine_dxgi_bind_composition_window")))
+            bind_composition_window(window, NULL);
+        else
+            ShowWindow(window, SW_HIDE);
+    }
+    swapchain->lpVtbl->Release(swapchain);
+}
 
 static void dcomp_visual_bind_content(struct dcomp_visual *visual)
 {
@@ -168,7 +197,11 @@ static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual2 *iface, IUnkn
 
     TRACE("iface %p, content %p.\n", iface, content);
     if (content) content->lpVtbl->AddRef(content);
-    if (visual->content) visual->content->lpVtbl->Release(visual->content);
+    if (visual->content)
+    {
+        dcomp_visual_unbind_content(visual);
+        visual->content->lpVtbl->Release(visual->content);
+    }
     visual->content = content;
     dcomp_visual_bind_content(visual);
     return S_OK;

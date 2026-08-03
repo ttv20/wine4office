@@ -127,6 +127,12 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
                              version < 2 ? version : 2);
         xdg_wm_base_add_listener(process_wayland.xdg_wm_base, &xdg_wm_base_listener, NULL);
     }
+    else if (strcmp(interface, "org_kde_plasma_shell") == 0)
+    {
+        process_wayland.org_kde_plasma_shell =
+            wl_registry_bind(registry, id, &org_kde_plasma_shell_interface,
+                             version < 8 ? version : 8);
+    }
     else if (strcmp(interface, "zxdg_exporter_v2") == 0)
     {
         process_wayland.zxdg_exporter_v2 =

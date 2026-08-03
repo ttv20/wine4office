@@ -415,6 +415,22 @@ static void wayland_surface_init_fractional_scale(struct wayland_surface *surfac
         surface->hwnd);
 }
 
+static void wayland_surface_set_plasma_position(struct wayland_surface *surface)
+{
+    POINT position = {surface->window.rect.left, surface->window.rect.top};
+
+    if (!surface->org_kde_plasma_surface ||
+        (surface->plasma_position_valid &&
+         surface->plasma_position.x == position.x &&
+         surface->plasma_position.y == position.y))
+        return;
+
+    org_kde_plasma_surface_set_position(surface->org_kde_plasma_surface,
+                                        position.x, position.y);
+    surface->plasma_position = position;
+    surface->plasma_position_valid = TRUE;
+}
+
 /**********************************************************************
  *          wayland_surface_make_toplevel
  *
@@ -449,6 +465,19 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     wayland_surface_set_title(surface, text);
 
     wayland_surface_assign_icon(surface);
+
+    if (surface->plasma_positioned && process_wayland.org_kde_plasma_shell)
+    {
+        surface->org_kde_plasma_surface =
+            org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
+                                             surface->wl_surface);
+        if (surface->org_kde_plasma_surface)
+        {
+            org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, 1);
+            org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, 1);
+            wayland_surface_set_plasma_position(surface);
+        }
+    }
 
     wayland_surface_init_fractional_scale(surface, 1.0);
 
@@ -572,6 +601,13 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
     TRACE("surface=%p\n", surface);
 
     /* some objects are shared between several roles */
+
+    if (surface->org_kde_plasma_surface)
+    {
+        org_kde_plasma_surface_destroy(surface->org_kde_plasma_surface);
+        surface->org_kde_plasma_surface = NULL;
+        surface->plasma_position_valid = FALSE;
+    }
 
     if (surface->zxdg_imported_v2)
     {
@@ -938,6 +974,8 @@ static BOOL wayland_surface_reconfigure_xdg(struct wayland_surface *surface, REC
     }
 
     wayland_surface_reconfigure_geometry(surface, rect);
+
+    wayland_surface_set_plasma_position(surface);
 
     return TRUE;
 }

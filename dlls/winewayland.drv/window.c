@@ -37,6 +37,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR dcomp_foreign_parent_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','p','a','r','e','n','t','_','a','t','o','m',0};
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
 
 
 static int wayland_win_data_cmp_rb(const void *key,
@@ -247,7 +249,10 @@ static void reapply_cursor_clipping(void)
     NtUserSetThreadDpiAwarenessContext(context);
 }
 
-static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data, struct wayland_surface *owner_surface)
+static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *data,
+                                                     struct wayland_surface *owner_surface,
+                                                     BOOL plasma_positioned,
+                                                     BOOL dcomp_only_host)
 {
     struct wayland_surface *surface;
     enum wayland_surface_role role;
@@ -260,7 +265,11 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     visible = ((NtUserGetWindowLongW(data->hwnd, GWL_STYLE) & WS_VISIBLE) == WS_VISIBLE) &&
                (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
 
-    if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
+    /* A DirectComposition-only notification host is a logical Win32 target,
+     * not a presentation surface. Keep it role-less and let the detached
+     * composition window be the only compositor-visible surface. */
+    if (!visible || (dcomp_only_host && (exstyle & WS_EX_NOREDIRECTIONBITMAP)))
+        role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
 
@@ -286,6 +295,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     wl_surface_set_input_region(surface->wl_surface, input_region);
     if (input_region) wl_region_destroy(input_region);
 
+    surface->plasma_positioned = role == WAYLAND_SURFACE_ROLE_TOPLEVEL && plasma_positioned;
+    wayland_win_data_get_config(data, &surface->window);
+
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
      * compositor with empty xdg_toplevels. */
@@ -304,8 +316,6 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
-
-    wayland_win_data_get_config(data, &surface->window);
 
     /* Size/position changes affect the effective pointer constraint, so update
      * it as needed. A new xdg_toplevel cannot safely accept a constraint until
@@ -535,6 +545,25 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     return FALSE;
 }
 
+/* Notification hosts are short-lived, non-activating tool windows which need
+ * compositor placement on Wayland. Keep this deliberately narrower than the
+ * general popup classification so menus and owned tool windows retain their
+ * existing subsurface or xdg_toplevel handling. */
+static BOOL is_notification_window(HWND hwnd, UINT swp_flags, const RECT *rect)
+{
+    DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+    DWORD ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
+    LONG width = rect->right - rect->left;
+    LONG height = rect->bottom - rect->top;
+
+    return !(swp_flags & SWP_HIDEWINDOW) &&
+           ((swp_flags & SWP_NOACTIVATE) || (ex_style & WS_EX_NOREDIRECTIONBITMAP)) &&
+           (style & WS_POPUP) && !(style & WS_CHILD) &&
+           (ex_style & WS_EX_TOOLWINDOW) && (ex_style & WS_EX_TOPMOST) &&
+           !NtUserGetWindowRelative(hwnd, GW_OWNER) &&
+           width > 0 && height > 0 && width <= 640 && height <= 320;
+}
+
 /***********************************************************************
  *           WAYLAND_DestroyWindow
  */
@@ -576,7 +605,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     DWORD process_id, active_process_id;
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
-    BOOL managed, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
+    BOOL managed, notification, fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
 
     TRACE("hwnd %p new_rects %s after %p flags %08x\n", hwnd, debugstr_window_rects(new_rects), insert_after, swp_flags);
 
@@ -629,6 +658,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     data->is_fullscreen = fullscreen;
     data->resizeable = swp_flags & WINE_SWP_RESIZABLE;
     data->managed = managed;
+    notification = is_notification_window(hwnd, swp_flags, &new_rects->window);
 
     if (!surface)
     {
@@ -638,7 +668,10 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             data->wayland_surface = NULL;
         }
     }
-    else if (wayland_win_data_create_wayland_surface(data, owner_surface))
+    else if (wayland_win_data_create_wayland_surface(
+                 data, owner_surface,
+                 notification || NtUserGetProp(hwnd, dcomp_detached_window_prop),
+                 notification))
     {
         wayland_surface_set_toplevel_parent(data->wayland_surface, transient_parent_surface);
         wayland_win_data_update_wayland_state(data);

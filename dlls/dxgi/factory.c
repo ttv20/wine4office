@@ -396,6 +396,17 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
 }
 
+static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+{
+    HWND root;
+
+    if (!GetPropW(window, L"__wine_dcomp_client_rect")) return GetWindowRect(target, rect);
+    if ((root = GetAncestor(target, GA_ROOT))) target = root;
+    if (!GetClientRect(target, rect)) return FALSE;
+    MapWindowPoints(target, NULL, (POINT *)rect, 2);
+    return TRUE;
+}
+
 static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
@@ -416,7 +427,7 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 root = GetAncestor(target, GA_ROOT);
                 if (!root || !IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
                     ShowWindow(window, SW_HIDE);
-                else if (GetWindowRect(target, &rect))
+                else if (dxgi_composition_window_get_rect(window, target, &rect))
                 {
                     /* The opaque base must not repeatedly jump above the
                      * transparent DComp layers. Reorder it only when bringing
@@ -477,7 +488,8 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     HWND old_target = GetPropW(window, L"__wine_dcomp_detached_window");
     HWND input_window, target_root;
     BOOL base_presentation;
-    DWORD exstyle;
+    DWORD exstyle, target_style, target_exstyle;
+    BOOL transparent_base;
     RECT rect;
 
     TRACE("Binding composition window %p to target %p (old target %p).\n",
@@ -494,31 +506,39 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
         RemovePropW(window, L"__wine_dcomp_input_window");
         RemovePropW(window, L"__wine_dcomp_keyboard_window");
         RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
+        RemovePropW(window, L"__wine_dcomp_client_rect");
         return;
     }
 
     target_root = GetAncestor(target, GA_ROOT);
     input_window = GetAncestor(target, GA_PARENT);
+    target_style = target_root ? GetWindowLongW(target_root, GWL_STYLE) : 0;
+    target_exstyle = target_root ? GetWindowLongW(target_root, GWL_EXSTYLE) : 0;
+    transparent_base = (target_style & WS_POPUP) &&
+            (target_exstyle & WS_EX_TOOLWINDOW) && (target_exstyle & WS_EX_TOPMOST);
     base_presentation = old_target == target
             ? GetPropW(target, L"__wine_dcomp_base_presentation") == window
             : !GetPropW(target, L"__wine_dcomp_base_presentation");
     exstyle = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-    if (!base_presentation) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
+    if (!base_presentation || transparent_base) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
 
     SetPropW(window, L"__wine_dcomp_detached_window", target);
     SetWindowLongW(window, GWL_STYLE, WS_POPUP);
     SetWindowLongW(window, GWL_EXSTYLE, exstyle);
     SetWindowLongPtrW(window, GWLP_HWNDPARENT, (LONG_PTR)target);
     if (base_presentation)
-    {
         SetPropW(target, L"__wine_dcomp_base_presentation", window);
-        SetPropW(window, L"__wine_dcomp_composite_alpha_white", ULongToHandle(1));
-    }
-    else
+    if (!base_presentation || transparent_base)
     {
         RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
         SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
     }
+    else
+        SetPropW(window, L"__wine_dcomp_composite_alpha_white", ULongToHandle(1));
+    if (transparent_base)
+        SetPropW(window, L"__wine_dcomp_client_rect", ULongToHandle(1));
+    else
+        RemovePropW(window, L"__wine_dcomp_client_rect");
 
     if (input_window)
     {
@@ -538,7 +558,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
                 (LONG_PTR)dxgi_composition_window_proc));
         SetTimer(window, 1, 250, NULL);
     }
-    if (GetWindowRect(target, &rect))
+    if (dxgi_composition_window_get_rect(window, target, &rect))
         SetWindowPos(window, HWND_TOP, rect.left, rect.top,
                 max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -553,7 +573,6 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
 
     TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
-
     if (!device || !desc || !swapchain)
         return DXGI_ERROR_INVALID_CALL;
 

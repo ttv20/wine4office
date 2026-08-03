@@ -31,6 +31,7 @@
 #include <xkbcommon/xkbregistry.h>
 #include "cursor-shape-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "plasma-shell-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "viewporter-client-protocol.h"
@@ -178,6 +179,7 @@ struct wayland
     struct zxdg_output_manager_v1 *zxdg_output_manager_v1;
     struct wl_compositor *wl_compositor;
     struct xdg_wm_base *xdg_wm_base;
+    struct org_kde_plasma_shell *org_kde_plasma_shell;
     struct wl_shm *wl_shm;
     struct wp_viewporter *wp_viewporter;
     struct wl_subcompositor *wl_subcompositor;
@@ -304,12 +306,16 @@ struct wayland_surface
         };
     };
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+    struct org_kde_plasma_surface *org_kde_plasma_surface;
+    POINT plasma_position;
+    BOOL plasma_position_valid;
     struct zxdg_exported_v2 *zxdg_exported_v2;
     struct zxdg_imported_v2 *zxdg_imported_v2;
     ATOM dcomp_foreign_atom;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
+    BOOL plasma_positioned;
     struct wayland_window_config window;
     int content_width, content_height;
     HCURSOR hcursor;

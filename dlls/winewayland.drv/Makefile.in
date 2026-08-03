@@ -14,6 +14,7 @@ SOURCES = \
 	fractional-scale-v1.xml \
 	opengl.c \
 	pointer-constraints-unstable-v1.xml \
+	plasma-shell.xml \
 	pointer-warp-v1.xml \
 	relative-pointer-unstable-v1.xml \
 	text-input-unstable-v3.xml \
