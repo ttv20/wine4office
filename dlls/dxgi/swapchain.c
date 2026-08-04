@@ -385,7 +385,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
 
     if (!GetWindowRect(target, &rect)) return;
     if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
-            && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
+            && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
     {
         if (!GetModuleHandleW(L"winewayland.drv")
                 && GetWindowTextLengthW(root) && GetForegroundWindow() == root

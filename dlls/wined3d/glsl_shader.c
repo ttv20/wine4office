@@ -12195,7 +12195,7 @@ struct glsl_blitter_args
     GLenum texture_type;
     struct color_fixup_desc fixup;
     unsigned short use_colour_key;
-    unsigned short composite_alpha_over_white;
+    unsigned short composite_alpha_background;
 };
 
 struct glsl_blitter_program
@@ -12599,9 +12599,10 @@ static void glsl_blitter_generate_plain_shader(struct wined3d_string_buffer *buf
     shader_addline(buffer, "    %s = texture%s(sampler, out_texcoord.%s);\n",
             output, needs_legacy_glsl_syntax(gl_info) ? tex_type : "", swizzle);
     shader_glsl_color_correction_ext(buffer, output, WINED3DSP_WRITEMASK_ALL, args->fixup);
-    if (args->composite_alpha_over_white)
+    if (args->composite_alpha_background)
     {
-        shader_addline(buffer, "    %s.rgb += vec3(1.0 - %s.a);\n", output, output);
+        if (args->composite_alpha_background == 1)
+            shader_addline(buffer, "    %s.rgb += vec3(1.0 - %s.a);\n", output, output);
         shader_addline(buffer, "    %s.a = 1.0;\n", output);
     }
     if (args->use_colour_key)
@@ -12779,7 +12780,7 @@ static void glsl_blitter_upload_palette(struct wined3d_glsl_blitter *blitter,
 /* Context activation is done by the caller. */
 static struct glsl_blitter_program *glsl_blitter_get_program(struct wined3d_glsl_blitter *blitter,
         struct wined3d_context_gl *context_gl, const struct wined3d_texture_gl *texture_gl,
-        BOOL use_colour_key, BOOL composite_alpha_over_white)
+        BOOL use_colour_key, unsigned int composite_alpha_background)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct glsl_blitter_program *program;
@@ -12790,7 +12791,7 @@ static struct glsl_blitter_program *glsl_blitter_get_program(struct wined3d_glsl
     args.texture_type = texture_gl->target;
     args.fixup = texture_gl->t.resource.format->color_fixup;
     args.use_colour_key = use_colour_key;
-    args.composite_alpha_over_white = composite_alpha_over_white;
+    args.composite_alpha_background = composite_alpha_background;
 
     if ((entry = wine_rb_get(&blitter->programs, &args)))
         return WINE_RB_ENTRY_VALUE(entry, struct glsl_blitter_program, entry);
@@ -13011,8 +13012,8 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
     }
 
     if (!(program = glsl_blitter_get_program(glsl_blitter, context_gl, src_texture_gl, !!colour_key,
-            dst_texture->swapchain && GetPropW(dst_texture->swapchain->win_handle,
-            L"__wine_dcomp_composite_alpha_white"))))
+            dst_texture->swapchain ? HandleToULong(GetPropW(dst_texture->swapchain->win_handle,
+            L"__wine_dcomp_composite_alpha_background")) : 0)))
     {
         ERR("Failed to get blitter program.\n");
         return dst_location;

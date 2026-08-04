@@ -416,6 +416,24 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
     return TRUE;
 }
 
+static BOOL dxgi_apps_use_light_theme(void)
+{
+    DWORD light_theme = TRUE, size = sizeof(light_theme);
+
+    RegGetValueW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            L"AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &light_theme, &size);
+    return !!light_theme;
+}
+
+static void dxgi_composition_window_update_backdrop(HWND window)
+{
+    /* Base DComp surfaces are opaque desktop windows. Premultiplied alpha
+     * therefore needs to be flattened against the active application theme. */
+    SetPropW(window, L"__wine_dcomp_composite_alpha_background",
+            ULongToHandle(dxgi_apps_use_light_theme() ? 1 : 2));
+}
+
 static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
@@ -433,6 +451,8 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
                 if (wparam != 1) break;
+                if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
+                    dxgi_composition_window_update_backdrop(window);
                 root = GetAncestor(target, GA_ROOT);
                 if (!root || !IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
                     ShowWindow(window, SW_HIDE);
@@ -442,7 +462,7 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                      * transparent DComp layers. Reorder it only when bringing
                      * a previously hidden presentation back from the tray. */
                     if (IsWindowVisible(window)
-                            && GetPropW(window, L"__wine_dcomp_composite_alpha_white"))
+                            && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
                     {
                         if (!GetModuleHandleW(L"winewayland.drv")
                                 && GetWindowTextLengthW(root) && GetForegroundWindow() == root
@@ -525,7 +545,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
         RemovePropW(window, L"__wine_dcomp_raised_while_active");
         RemovePropW(window, L"__wine_dcomp_input_window");
         RemovePropW(window, L"__wine_dcomp_keyboard_window");
-        RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
+        RemovePropW(window, L"__wine_dcomp_composite_alpha_background");
         RemovePropW(window, L"__wine_dcomp_client_rect");
         return;
     }
@@ -550,11 +570,11 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
         SetPropW(target, L"__wine_dcomp_base_presentation", window);
     if (!base_presentation || transparent_base)
     {
-        RemovePropW(window, L"__wine_dcomp_composite_alpha_white");
+        RemovePropW(window, L"__wine_dcomp_composite_alpha_background");
         SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
     }
     else
-        SetPropW(window, L"__wine_dcomp_composite_alpha_white", ULongToHandle(1));
+        dxgi_composition_window_update_backdrop(window);
     if (transparent_base)
         SetPropW(window, L"__wine_dcomp_client_rect", ULongToHandle(1));
     else

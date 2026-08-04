@@ -1071,7 +1071,7 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
      * for a base composition surface. Let the GLSL blitter do that conversion. */
     if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain
             && GetPropW(dst_texture->swapchain->win_handle,
-            L"__wine_dcomp_composite_alpha_white"))
+            L"__wine_dcomp_composite_alpha_background"))
     {
         if (!(next = blitter->next))
             return dst_location;
