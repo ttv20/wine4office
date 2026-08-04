@@ -1,15 +1,23 @@
 # Changelog
 
-## 0.1.10 — Upcoming
+## 0.1.10 — 2026-08-04 (prerelease)
 
 - Bundle and install Wine Gecko for both 32-bit and 64-bit Office components
   when creating a Wine environment.
-- Render the literal ampersand in the **Enable & start** and **Stop & disable**
-  background-service buttons.
-- Keep background-service controls stable during periodic refreshes and update
-  only the displayed RAM usage.
-- Run background services through a dedicated lightweight preload helper
-  instead of the full Qt Manager executable.
+- Run background services through a dedicated lightweight preload helper,
+  show accurate RAM usage, and keep their controls stable during refreshes.
+- Fix the **Enable & start** and **Stop & disable** button labels.
+- Make standalone removal safely clean up services and shortcuts, with options
+  to preserve or remove the runner and Wine environment.
+- Improve OpenGL and native Wayland window, popup, and embedded-surface
+  stability for Office.
+- Let Office installers and updaters replace signed files while Wine verifies
+  them.
+- Add the Windows AppCapability access operations used by modern Office
+  components.
+- Add Media Foundation sensor monitoring and Office network-manager detection.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.9...wine4office-v0.1.10)
 
 ## 0.1.9 — 2026-08-02 (prerelease)
 
