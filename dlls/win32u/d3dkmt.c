@@ -24,11 +24,13 @@
 
 #include <assert.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "ntgdi_private.h"
 #include "win32u_private.h"
 #include "ntuser_private.h"
+#include "wine/d3dkmt.h"
 
 #include <d3d9types.h>
 #include <dxgi.h>
@@ -1080,11 +1082,14 @@ failed:
  */
 NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
 {
+    const struct wine_d3dkmt_allocation_backing *backing = NULL;
     D3DKMT_CREATESTANDARDALLOCATION *standard;
     struct d3dkmt_resource *resource = NULL;
     D3DDDI_ALLOCATIONINFO *alloc_info;
     struct d3dkmt_object *allocation;
     struct d3dkmt_device *device;
+    D3DKMT_HANDLE backing_resource = 0, backing_mutex = 0, backing_sync = 0;
+    int backing_fd = -1;
     NTSTATUS status;
 
     FIXME( "params %p semi-stub!\n", params );
@@ -1093,7 +1098,15 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
     if (!(device = get_d3dkmt_object( params->hDevice, D3DKMT_DEVICE ))) return STATUS_INVALID_PARAMETER;
 
     if (!params->Flags.StandardAllocation) return STATUS_INVALID_PARAMETER;
-    if (params->PrivateDriverDataSize) return STATUS_INVALID_PARAMETER;
+    if (params->PrivateDriverDataSize)
+    {
+        if (params->PrivateDriverDataSize != sizeof(*backing) || !params->pPrivateDriverData)
+            return STATUS_INVALID_PARAMETER;
+        backing = params->pPrivateDriverData;
+        if (backing->magic != WINE_D3DKMT_ALLOCATION_BACKING_MAGIC || backing->size != sizeof(*backing)
+                || !backing->handle)
+            return STATUS_INVALID_PARAMETER;
+    }
 
     if (params->NumAllocations != 1) return STATUS_INVALID_PARAMETER;
     if (!(alloc_info = params->pAllocationInfo)) return STATUS_INVALID_PARAMETER;
@@ -1103,6 +1116,8 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
     if (standard->ExistingHeapData.Size & 0xfff) return STATUS_INVALID_PARAMETER;
     if (!params->Flags.ExistingSysMem) return STATUS_INVALID_PARAMETER;
     if (!alloc_info->pSystemMem) return STATUS_INVALID_PARAMETER;
+    if (backing && (!params->Flags.CreateResource || !params->Flags.CreateShared))
+        return STATUS_INVALID_PARAMETER;
 
     if (params->Flags.CreateResource)
     {
@@ -1112,8 +1127,31 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
         if ((status = d3dkmt_object_alloc( sizeof(*allocation), D3DKMT_ALLOCATION, (void **)&allocation ))) goto failed;
 
         if (!params->Flags.CreateShared) status = alloc_object_handle( &resource->obj );
-        else status = d3dkmt_object_create( &resource->obj, -1, 0, params->Flags.NtSecuritySharing,
-                                            params->pPrivateRuntimeData, params->PrivateRuntimeDataSize );
+        else
+        {
+            if (backing)
+            {
+                if (!(backing_resource = d3dkmt_open_resource( 0, backing->handle,
+                        &backing_mutex, &backing_sync )))
+                {
+                    status = STATUS_INVALID_HANDLE;
+                    goto failed;
+                }
+                backing_fd = d3dkmt_object_get_fd( backing_resource );
+                d3dkmt_destroy_resource( backing_resource );
+                if (backing_mutex) d3dkmt_destroy_mutex( backing_mutex );
+                if (backing_sync) d3dkmt_destroy_sync( backing_sync );
+                if (backing_fd < 0)
+                {
+                    status = STATUS_INVALID_HANDLE;
+                    goto failed;
+                }
+            }
+            status = d3dkmt_object_create( &resource->obj, backing_fd, 0, params->Flags.NtSecuritySharing,
+                    params->pPrivateRuntimeData, params->PrivateRuntimeDataSize );
+        }
+        if (backing_fd >= 0) close( backing_fd );
+        backing_fd = -1;
         if (status) goto failed;
 
         params->hGlobalShare = resource->obj.shared ? 0 : resource->obj.global;
@@ -1137,6 +1175,7 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
     return STATUS_SUCCESS;
 
 failed:
+    if (backing_fd >= 0) close( backing_fd );
     if (resource) d3dkmt_object_free( &resource->obj );
     return status;
 }

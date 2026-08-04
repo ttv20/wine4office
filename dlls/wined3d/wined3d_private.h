@@ -3386,6 +3386,7 @@ struct wined3d_texture_ops
 #define WINED3D_TEXTURE_GET_DC              0x00004000
 #define WINED3D_TEXTURE_GENERATE_MIPMAPS    0x00008000
 #define WINED3D_TEXTURE_DOWNLOADABLE        0x00010000
+#define WINED3D_TEXTURE_SHARED_NTHANDLE     0x00020000
 
 #define WINED3D_TEXTURE_ASYNC_COLOR_KEY     0x00000001
 
@@ -3401,6 +3402,8 @@ struct wined3d_texture
     unsigned int lod;
     uint32_t flags;
     DWORD update_map_binding;
+    HANDLE shared_handle;
+    bool shared_handle_owned;
 
     unsigned int row_pitch;
     unsigned int slice_pitch;

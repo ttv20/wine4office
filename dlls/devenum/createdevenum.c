@@ -718,7 +718,7 @@ static void register_avicap_devices(void)
     REGFILTERPINS2 rgpins = {0};
     REGPINTYPES rgtypes;
     REGFILTER2 rgf;
-    WCHAR name[7];
+    WCHAR name[8];
     VARIANT var;
     HRESULT hr;
     int i = 0;

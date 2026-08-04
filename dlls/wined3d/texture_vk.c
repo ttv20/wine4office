@@ -849,14 +849,21 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     vk_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (resource->bind_flags & WINED3D_BIND_SHADER_RESOURCE)
         vk_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET)
+    /* Multi-planar video formats cannot be color attachments in Vulkan. D3D11
+     * video producers still commonly set BIND_RENDER_TARGET on their shared
+     * NV12 textures; writes to those textures are performed as plane uploads
+     * or transfers instead. */
+    if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET
+            && !(format_vk->f.attrs & WINED3D_FORMAT_ATTR_PLANAR))
         vk_usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (resource->bind_flags & WINED3D_BIND_DEPTH_STENCIL)
         vk_usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (resource->bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
         vk_usage |= VK_IMAGE_USAGE_STORAGE_BIT;
 
-    if (resource->bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
+    if (format_vk->f.attrs & WINED3D_FORMAT_ATTR_PLANAR)
+        texture_vk->layout = VK_IMAGE_LAYOUT_GENERAL;
+    else if (resource->bind_flags & WINED3D_BIND_UNORDERED_ACCESS)
         texture_vk->layout = VK_IMAGE_LAYOUT_GENERAL;
     else if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET)
         texture_vk->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -874,7 +881,9 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
 
     if (!wined3d_context_vk_create_image(context_vk, vk_image_type, vk_usage, format_vk->vk_format,
             resource->width, resource->height, resource->depth, max(1, wined3d_resource_get_sample_count(resource)),
-            texture_vk->t.level_count, texture_vk->t.layer_count, flags, NULL, &texture_vk->image))
+            texture_vk->t.level_count, texture_vk->t.layer_count, flags, NULL,
+            texture_vk->t.flags & WINED3D_TEXTURE_SHARED_NTHANDLE
+                    ? &texture_vk->t.shared_handle : NULL, &texture_vk->image))
     {
         return FALSE;
     }
@@ -1743,7 +1752,7 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
 
             if (!wined3d_context_vk_create_image(context_vk, vk_image_type, usage, vk_format,
                     resolve_region.extent.width, resolve_region.extent.height, 1,
-                    src_sample_count, 1, 1, 0, NULL, &src_image))
+                    src_sample_count, 1, 1, 0, NULL, NULL, &src_image))
                 goto barrier_next;
 
             wined3d_context_vk_reference_image(context_vk, &src_image);
@@ -1814,7 +1823,7 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
 
             if (!wined3d_context_vk_create_image(context_vk, vk_image_type, usage, vk_format,
                     resolve_region.extent.width, resolve_region.extent.height, 1,
-                    VK_SAMPLE_COUNT_1_BIT, 1, 1, 0, NULL, &dst_image))
+                    VK_SAMPLE_COUNT_1_BIT, 1, 1, 0, NULL, NULL, &dst_image))
                 goto barrier_next;
 
             wined3d_context_vk_reference_image(context_vk, &dst_image);

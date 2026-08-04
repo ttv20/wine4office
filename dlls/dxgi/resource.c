@@ -494,10 +494,25 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSubresourceSurface(IDXGIRes
 static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1 *iface,
         const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
 {
-    FIXME("iface %p, attributes %p, access %#lx, name %s, handle %p stub!\n", iface, attributes,
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    IWineDXGIResourceSharing *sharing;
+    HRESULT hr;
+
+    TRACE("iface %p, attributes %p, access %#lx, name %s, handle %p.\n", iface, attributes,
             access, wine_dbgstr_w(name), handle);
 
-    return E_NOTIMPL;
+    if (!handle)
+        return DXGI_ERROR_INVALID_CALL;
+    *handle = NULL;
+
+    if (FAILED(hr = IUnknown_QueryInterface(resource->outer_unknown,
+            &IID_IWineDXGIResourceSharing, (void **)&sharing)))
+        return E_INVALIDARG;
+
+    hr = IWineDXGIResourceSharing_create_shared_handle(sharing, attributes, access, name, handle);
+    IWineDXGIResourceSharing_Release(sharing);
+
+    return hr;
 }
 
 static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =

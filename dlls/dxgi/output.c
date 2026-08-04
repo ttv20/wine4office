@@ -16,76 +16,14 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "dxgi_private.h"
 #include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
 #define CAPTUREBLT 0x40000000
-#define PW_RENDERFULLCONTENT 0x00000002
-
-struct capture_windows_context
-{
-    HWND windows[256];
-    unsigned int count;
-};
-
-static BOOL CALLBACK collect_visible_window(HWND window, LPARAM param)
-{
-    struct capture_windows_context *context = (struct capture_windows_context *)param;
-
-    if (context->count < ARRAY_SIZE(context->windows) && IsWindowVisible(window)
-            && !IsIconic(window) && window != GetDesktopWindow())
-        context->windows[context->count++] = window;
-    return TRUE;
-}
-
-static BOOL capture_visible_windows(HDC dc, LONG source_x, LONG source_y, UINT width, UINT height)
-{
-    struct capture_windows_context context = {0};
-    BOOL captured = FALSE;
-    unsigned int i;
-    RECT rect;
-    int saved;
-
-    PatBlt(dc, 0, 0, width, height, BLACKNESS);
-    EnumWindows(collect_visible_window, (LPARAM)&context);
-
-    /* EnumWindows returns topmost windows first. Paint in reverse order so
-     * the resulting image follows the desktop Z order. */
-    for (i = context.count; i; --i)
-    {
-        HWND window = context.windows[i - 1];
-        HDC window_dc;
-        BOOL copied = FALSE;
-
-        if (!GetWindowRect(window, &rect))
-            continue;
-        if (rect.right <= source_x || rect.bottom <= source_y
-                || rect.left >= source_x + width || rect.top >= source_y + height)
-            continue;
-
-        if ((window_dc = GetWindowDC(window)))
-        {
-            copied = BitBlt(dc, rect.left - source_x, rect.top - source_y,
-                    rect.right - rect.left, rect.bottom - rect.top, window_dc,
-                    0, 0, SRCCOPY | CAPTUREBLT);
-            ReleaseDC(window, window_dc);
-        }
-
-        if (!copied && (saved = SaveDC(dc)))
-        {
-            SetViewportOrgEx(dc, rect.left - source_x, rect.top - source_y, NULL);
-            copied = PrintWindow(window, dc, PW_RENDERFULLCONTENT);
-            RestoreDC(dc, saved);
-        }
-        if (copied)
-            captured = TRUE;
-    }
-
-    return captured;
-}
-
 struct dxgi_output_duplication
 {
     IDXGIOutputDuplication IDXGIOutputDuplication_iface;
@@ -139,6 +77,7 @@ static ULONG STDMETHODCALLTYPE dxgi_output_duplication_Release(IDXGIOutputDuplic
 
     if (!refcount)
     {
+        WINE_UNIX_CALL(unix_release_capture, NULL);
         IDXGISurface1_Release(duplication->surface);
         ID3D11Texture2D_Release(duplication->texture);
         ID3D11Device_Release(duplication->device);
@@ -201,6 +140,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
     HDC surface_dc, screen_dc;
     BOOL captured = FALSE;
     POINT cursor;
+    NTSTATUS status;
     HRESULT hr;
 
     if (!frame_info || !desktop_resource || duplication->frame_acquired)
@@ -227,10 +167,26 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
     {
         capture.buffer = duplication->capture_buffer;
         capture.buffer_size = duplication->capture_buffer_size;
-        if (!WINE_UNIX_CALL(unix_capture_workspace, &capture)
-                && capture.width == duplication->desc.ModeDesc.Width
-                && capture.height == duplication->desc.ModeDesc.Height
-                && capture.stride == capture.width * 4 && capture.format == 6)
+        capture.timeout = timeout;
+        status = WINE_UNIX_CALL(unix_capture_workspace, &capture);
+        if (status == STATUS_BUFFER_TOO_SMALL && capture.width && capture.height &&
+                capture.stride == capture.width * 4 &&
+                capture.height <= ~0u / capture.stride)
+        {
+            UINT size = capture.height * capture.stride;
+            BYTE *buffer;
+
+            if ((buffer = realloc(duplication->capture_buffer, size)))
+            {
+                duplication->capture_buffer = capture.buffer = buffer;
+                duplication->capture_buffer_size = capture.buffer_size = size;
+                capture.timeout = 0;
+                status = WINE_UNIX_CALL(unix_capture_workspace, &capture);
+            }
+        }
+        if (!status && capture.width && capture.height &&
+                capture.stride == capture.width * 4 &&
+                capture.format == DXGI_CAPTURE_FORMAT_BGRA)
         {
             bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
             bitmap_info.bmiHeader.biWidth = capture.width;
@@ -238,16 +194,17 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
             bitmap_info.bmiHeader.biPlanes = 1;
             bitmap_info.bmiHeader.biBitCount = 32;
             bitmap_info.bmiHeader.biCompression = BI_RGB;
-            captured = SetDIBitsToDevice(surface_dc, 0, 0, capture.width, capture.height,
-                    0, 0, 0, capture.height, capture.buffer, &bitmap_info,
-                    DIB_RGB_COLORS) == capture.height;
+            captured = StretchDIBits(surface_dc, 0, 0,
+                    duplication->desc.ModeDesc.Width, duplication->desc.ModeDesc.Height,
+                    0, 0, capture.width, capture.height, capture.buffer,
+                    &bitmap_info, DIB_RGB_COLORS, SRCCOPY) == duplication->desc.ModeDesc.Height;
+        }
+        else if (status == STATUS_TIMEOUT)
+        {
+            IDXGISurface1_ReleaseDC(duplication->surface, NULL);
+            return DXGI_ERROR_WAIT_TIMEOUT;
         }
     }
-
-    if (!captured)
-        captured = capture_visible_windows(surface_dc, duplication->source_x,
-                duplication->source_y, duplication->desc.ModeDesc.Width,
-                duplication->desc.ModeDesc.Height);
 
     if (!captured)
     {
@@ -265,6 +222,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
 
     QueryPerformanceCounter(&frame_info->LastPresentTime);
     frame_info->AccumulatedFrames = 1;
+    frame_info->TotalMetadataBufferSize = sizeof(RECT);
     if (GetCursorPos(&cursor))
     {
         frame_info->PointerPosition.Position = cursor;

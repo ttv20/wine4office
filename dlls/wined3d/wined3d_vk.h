@@ -163,6 +163,7 @@ struct wined3d_device_vk;
     VK_DEVICE_PFN(vkGetImageMemoryRequirements) \
     VK_DEVICE_PFN(vkGetImageSparseMemoryRequirements) \
     VK_DEVICE_PFN(vkGetImageSubresourceLayout) \
+    VK_DEVICE_EXT_PFN(vkGetMemoryWin32HandleKHR) \
     VK_DEVICE_PFN(vkGetPipelineCacheData) \
     VK_DEVICE_PFN(vkGetQueryPoolResults) \
     VK_DEVICE_PFN(vkGetRenderAreaGranularity) \
@@ -260,6 +261,7 @@ enum wined3d_vk_extension
     WINED3D_VK_EXT_SHADER_STENCIL_EXPORT,
     WINED3D_VK_EXT_TRANSFORM_FEEDBACK,
     WINED3D_VK_EXT_VERTEX_ATTRIBUTE_DIVISOR,
+    WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32,
     WINED3D_VK_KHR_MAINTENANCE2,
     WINED3D_VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE,
     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION,
@@ -751,7 +753,7 @@ BOOL wined3d_context_vk_create_bo(struct wined3d_context_vk *context_vk, VkDevic
 BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkImageType vk_image_type,
         VkImageUsageFlags usage, VkFormat vk_format, unsigned int width, unsigned int height, unsigned int depth,
         unsigned int sample_count, unsigned int mip_levels, unsigned int layer_count, unsigned int flags,
-        const void *next, struct wined3d_image_vk *image);
+        const void *next, HANDLE *shared_handle, struct wined3d_image_vk *image);
 void wined3d_context_vk_destroy_allocator_block(struct wined3d_context_vk *context_vk,
         struct wined3d_allocator_block *block, uint64_t command_buffer_id);
 void wined3d_context_vk_destroy_bo(struct wined3d_context_vk *context_vk,

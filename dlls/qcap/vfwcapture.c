@@ -141,8 +141,11 @@ static unsigned int get_image_size(struct vfw_capture *filter)
 static DWORD WINAPI stream_thread(void *arg)
 {
     struct vfw_capture *filter = arg;
+    const VIDEOINFOHEADER *format = (const VIDEOINFOHEADER *)filter->source.pin.mt.pbFormat;
     const unsigned int image_size = get_image_size(filter);
+    const REFERENCE_TIME frame_duration = format->AvgTimePerFrame;
     struct read_frame_params params;
+    LONGLONG frame_number = 0;
 
     for (;;)
     {
@@ -179,6 +182,16 @@ static DWORD WINAPI stream_thread(void *arg)
             IMediaSample_Release(sample);
             break;
         }
+
+        if (frame_duration)
+        {
+            REFERENCE_TIME start = frame_number * frame_duration;
+            REFERENCE_TIME end = start + frame_duration;
+
+            IMediaSample_SetTime(sample, &start, &end);
+        }
+        IMediaSample_SetSyncPoint(sample, TRUE);
+        ++frame_number;
 
         hr = IMemInputPin_Receive(filter->source.pMemInputPin, sample);
         IMediaSample_Release(sample);
