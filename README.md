@@ -53,6 +53,10 @@ sudo make install
 
 Full dependencies: [WineHQ Build Guide](https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine)
 
+For Teams and other WebView-based Office apps, verify that configure detects
+FreeType, Fontconfig, GnuTLS, and D-Bus. Disabling them causes missing text,
+failed secure content, or broken desktop integration.
+
 ---
 
 ## Support this project ☕
