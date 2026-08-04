@@ -723,7 +723,9 @@ static void register_avicap_devices(void)
     HRESULT hr;
     int i = 0;
 
-    for (i = 0; i < 10; ++i)
+    /* V4L2 device numbers are not necessarily densely allocated.  Virtual
+     * cameras in particular are commonly assigned a high fixed number. */
+    for (i = 0; i < 64; ++i)
     {
         if (!capGetDriverDescriptionW(i, friendlyname, ARRAY_SIZE(friendlyname),
                 version, ARRAY_SIZE(version)))

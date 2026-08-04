@@ -1,7 +1,10 @@
 MODULE    = dxgi.dll
+UNIXLIB   = dxgi.so
 IMPORTLIB = dxgi
 IMPORTS   = advapi32 gdi32 dxguid uuid wined3d user32 win32u
 EXTRAINCL = $(VKD3D_PE_CFLAGS)
+UNIX_CFLAGS = $(DBUS_CFLAGS)
+UNIX_LIBS = -ldbus-1
 
 VER_PRODUCTVERSION = 6,0,6000,16386
 
@@ -13,4 +16,5 @@ SOURCES = \
 	output.c \
 	resource.c \
 	swapchain.c \
+	unixlib.c \
 	utils.c
