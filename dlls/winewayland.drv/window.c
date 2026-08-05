@@ -424,6 +424,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
 
     surface->plasma_positioned = role == WAYLAND_SURFACE_ROLE_TOPLEVEL && data->plasma_positioned;
     surface->dcomp_overlay = data->dcomp_overlay;
+    surface->dcomp_base_presentation = data->dcomp_base_presentation;
 
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
@@ -435,7 +436,10 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         break;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         wayland_surface_make_toplevel(surface, state->title);
-        if (NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop))
+        /* A task-delegating opaque DComp base must remain independent.  Making
+         * it transient would cause desktop task managers to filter it out. */
+        if (!surface->dcomp_base_presentation &&
+            NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop))
             wayland_surface_import_toplevel(surface,
                     HandleToULong(NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop)));
         break;
@@ -443,6 +447,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
+
+    if (role == WAYLAND_SURFACE_ROLE_TOPLEVEL && surface->dcomp_base_presentation)
+        wayland_surface_export_toplevel(surface);
 
     wayland_win_data_get_config(data, state, &surface->window);
     /* Size/position changes affect the effective pointer constraint, so update
@@ -833,6 +840,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     data->plasma_positioned = notification || NtUserGetProp(hwnd, dcomp_detached_window_prop);
     data->dcomp_overlay = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
                           !NtUserGetProp(hwnd, dcomp_background_prop);
+    data->dcomp_base_presentation = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
+                                    NtUserGetProp(hwnd, dcomp_background_prop);
 
     if (!surface)
     {

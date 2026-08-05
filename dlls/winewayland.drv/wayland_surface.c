@@ -36,6 +36,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR dcomp_foreign_handle_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','e','x','p','o','r','t','_','h','a','n','d','l','e',0};
+static const WCHAR dcomp_task_delegated_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+static const WCHAR dcomp_task_app_id_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
 
 static void dcomp_exported_handle(void *data, struct zxdg_exported_v2 *exported,
                                   const char *handle)
@@ -84,6 +88,8 @@ static void wayland_surface_enable_plasma_positioning(struct wayland_surface *su
 
 BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
 {
+    BOOL task_delegated;
+
     if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
         !surface->xdg_toplevel)
         return FALSE;
@@ -94,7 +100,8 @@ BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
      * positioning request.  Position the exported host through Plasma as
      * well, so its Win32 screen coordinates and the detached surfaces share
      * the same origin. */
-    wayland_surface_enable_plasma_positioning(surface, FALSE);
+    task_delegated = !!NtUserGetProp(surface->hwnd, dcomp_task_delegated_prop);
+    wayland_surface_enable_plasma_positioning(surface, task_delegated);
 
     if (surface->zxdg_exported_v2) return TRUE;
 
@@ -449,22 +456,45 @@ static void wayland_surface_enable_plasma_positioning(struct wayland_surface *su
                                                       BOOL skip_taskbar)
 {
     surface->plasma_positioned = TRUE;
-    if (!process_wayland.org_kde_plasma_shell || surface->org_kde_plasma_surface) return;
+    if (!process_wayland.org_kde_plasma_shell) return;
 
-    surface->org_kde_plasma_surface =
-        org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
-                                         surface->wl_surface);
-    if (!surface->org_kde_plasma_surface) return;
+    if (!surface->org_kde_plasma_surface)
+    {
+        surface->org_kde_plasma_surface =
+            org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
+                                             surface->wl_surface);
+        if (!surface->org_kde_plasma_surface) return;
+    }
 
     if (skip_taskbar)
     {
         if (surface->dcomp_overlay)
             org_kde_plasma_surface_set_role(surface->org_kde_plasma_surface,
                     ORG_KDE_PLASMA_SURFACE_ROLE_NOTIFICATION);
-        org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, 1);
-        org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, 1);
     }
+    org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, skip_taskbar);
+    org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, skip_taskbar);
     wayland_surface_set_plasma_position(surface);
+}
+
+static void wayland_surface_update_app_id(struct wayland_surface *surface)
+{
+    WCHAR name[MAX_PATH];
+    char app_id[MAX_PATH * 3];
+    UNICODE_STRING name_str = {0, sizeof(name), name};
+    ATOM atom;
+    DWORD len, size;
+
+    if (!surface->xdg_toplevel) return;
+    atom = HandleToULong(NtUserGetProp(surface->hwnd, dcomp_task_app_id_prop));
+    if (atom && (len = NtUserGetAtomName(atom, &name_str)) &&
+        !RtlUnicodeToUTF8N(app_id, sizeof(app_id) - 1, &size, name, len * sizeof(WCHAR)))
+    {
+        app_id[size] = 0;
+        xdg_toplevel_set_app_id(surface->xdg_toplevel, app_id);
+    }
+    else if (process_name)
+        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
 }
 
 /**********************************************************************
@@ -491,15 +521,15 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR 
     if (!surface->xdg_toplevel) goto err;
     xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
 
-    if (process_name)
-        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
+    wayland_surface_update_app_id(surface);
 
     wayland_surface_set_title(surface, title);
 
     wayland_surface_assign_icon(surface);
 
     if (surface->plasma_positioned && process_wayland.org_kde_plasma_shell)
-        wayland_surface_enable_plasma_positioning(surface, TRUE);
+        wayland_surface_enable_plasma_positioning(surface,
+                !surface->dcomp_base_presentation);
 
     wayland_surface_init_fractional_scale(surface, 1.0);
 

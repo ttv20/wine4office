@@ -18,6 +18,8 @@
 - Add Media Foundation sensor monitoring and Office network-manager detection.
 - Make Teams camera video render through shared NV12 textures.
 - Expose the WLAN interface setter used when Teams starts calls.
+- Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
+  including working minimize and restore behavior.
 
 [Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.9...wine4office-v0.1.10)
 
