@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import wine4office_backend as backend  # noqa: E402
+import wine4office_incident as incident  # noqa: E402
 import wine4office_post_install as post_install  # noqa: E402
 
 
@@ -210,6 +211,41 @@ class ManagerState:
                         backend.disable_automatic_update_schedule()
                 except Exception:
                     pass
+                raise
+            self.config = candidate
+            return dict(self.config)
+
+    def set_reliability_preferences(self, reporting_mode: str,
+                                    automatic_update_checks: bool) -> dict:
+        """Atomically persist first-run reporting and update-check choices."""
+        if reporting_mode not in incident.REPORT_MODES:
+            raise ValueError("Unknown incident reporting mode.")
+        if not isinstance(automatic_update_checks, bool):
+            raise ValueError("Automatic update checks must be enabled or disabled.")
+        with self.lock:
+            previous = dict(self.config)
+            was_enabled = previous.get("automatic_update_checks") is True
+            candidate = dict(previous)
+            candidate["incident_reporting_mode"] = reporting_mode
+            candidate["reliability_prompted"] = True
+            candidate["automatic_update_checks"] = automatic_update_checks
+            candidate["automatic_update_checks_prompted"] = True
+            try:
+                if automatic_update_checks != was_enabled:
+                    if automatic_update_checks:
+                        backend.install_automatic_update_schedule()
+                    else:
+                        backend.disable_automatic_update_schedule()
+                backend.save_config(candidate)
+            except Exception:
+                if automatic_update_checks != was_enabled:
+                    try:
+                        if was_enabled:
+                            backend.install_automatic_update_schedule()
+                        else:
+                            backend.disable_automatic_update_schedule()
+                    except Exception:
+                        pass
                 raise
             self.config = candidate
             return dict(self.config)
@@ -813,6 +849,7 @@ def main() -> int:
     parser.add_argument("--post-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--scheduled-update-check", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--open-maintenance", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--review-incident", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--screenshot", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
@@ -840,6 +877,13 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.review_incident and (
+            args.target or args.documents or args.preload_service or args.preload_worker
+            or args.install_shortcut or args.prepare_uninstall or args.remove_prefix
+            or args.post_update or args.scheduled_update_check or args.open_maintenance
+            or args.disable_office_telemetry or args.restore_office_telemetry_default
+            or args.smoke_test or args.screenshot or args.prefix or args.wine):
+        parser.error("--review-incident cannot be combined with another operation.")
     if args.prepare_uninstall:
         if (args.target or args.documents or args.preload_service or args.preload_worker
                 or args.install_shortcut or args.post_update or args.scheduled_update_check
@@ -984,9 +1028,19 @@ def main() -> int:
         wine = args.wine or defaults["wine"]
         use_x11 = defaults["use_x11"]
         if args.target in backend.APP_META:
-            backend.launch_app(
-                prefix, wine, args.target, FONT_HELPER, args.documents, use_x11=use_x11
-            )
+            if incident.monitoring_enabled(defaults):
+                process = backend.launch_app_process(
+                    prefix, wine, args.target, FONT_HELPER, args.documents,
+                    use_x11=use_x11, capture_diagnostics=True,
+                )
+                return incident.supervise_process(
+                    process, app=args.target, prefix=Path(prefix), use_x11=use_x11,
+                    manager_version=backend.current_version(),
+                    runner_version=backend.current_wine_version(),
+                    review_command=MANAGER_RESTART_COMMAND,
+                )
+            backend.launch_app(prefix, wine, args.target, FONT_HELPER, args.documents,
+                               use_x11=use_x11)
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
@@ -1027,6 +1081,9 @@ def main() -> int:
         smoke_test=args.smoke_test,
         screenshot=Path(args.screenshot).expanduser() if args.screenshot else None,
         open_maintenance=args.open_maintenance,
+        review_incident=(
+            Path(args.review_incident).expanduser() if args.review_incident else None
+        ),
     )
 
 

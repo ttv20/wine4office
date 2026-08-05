@@ -322,6 +322,8 @@ def default_config() -> dict:
         "include_prereleases": False,
         "automatic_update_checks": False,
         "automatic_update_checks_prompted": False,
+        "incident_reporting_mode": "ask",
+        "reliability_prompted": False,
     }
 
 
@@ -1026,8 +1028,16 @@ def _windows_document_path(document: str, wine: Path, env: dict[str, str]) -> st
 
 
 
-def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
-               documents: Iterable[str] = (), use_x11: bool = True) -> int:
+def launch_app_process(
+        prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
+        documents: Iterable[str] = (), use_x11: bool = True,
+        *, capture_diagnostics: bool = False) -> subprocess.Popen:
+    """Launch one Office application and return its process handle.
+
+    Diagnostic capture is deliberately narrow: Wine's noisy default channels are
+    disabled and only exception messages are enabled.  The supervisor drains the
+    pipe into a bounded ring so a broken application cannot fill the user's disk.
+    """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     executable = find_office_app(str(prefix), app)
@@ -1041,9 +1051,24 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     if app == "outlook":
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)
-    process = subprocess.Popen([str(wine), str(executable), *arguments], env=env,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               start_new_session=True)
+    if capture_diagnostics:
+        env["WINEDEBUG"] = "-all,+seh,+timestamp"
+        stdout = subprocess.PIPE
+        stderr = subprocess.STDOUT
+    else:
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
+    return subprocess.Popen(
+        [str(wine), str(executable), *arguments], env=env,
+        stdout=stdout, stderr=stderr, start_new_session=True,
+    )
+
+
+def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
+               documents: Iterable[str] = (), use_x11: bool = True) -> int:
+    process = launch_app_process(
+        prefix_value, wine_value, app, helper, documents, use_x11,
+    )
     return process.pid
 
 

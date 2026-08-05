@@ -3,16 +3,25 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, Qt, QUrl
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QFont, QIcon, QTextCursor
+from PySide6.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QShowEvent,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QCommandLinkButton,
     QComboBox,
@@ -33,6 +42,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -46,6 +56,7 @@ from PySide6.QtWidgets import (
 )
 
 import wine4office_backend as backend
+import wine4office_incident as incident
 
 
 class ManagerWindow(QMainWindow):
@@ -57,7 +68,8 @@ class ManagerWindow(QMainWindow):
     MAINTENANCE_PAGE = 5
 
     def __init__(self, state, launcher: Path, icons: Path, font_helper: Path,
-                 restart_command: list[str] | None = None) -> None:
+                 restart_command: list[str] | None = None,
+                 review_incident: Path | None = None) -> None:
         super().__init__()
         self.state = state
         self.launcher = launcher
@@ -84,6 +96,9 @@ class ManagerWindow(QMainWindow):
         self.update_progress_log: QPlainTextEdit | None = None
         self.update_progress_button: QPushButton | None = None
         self.update_progress_finished = False
+        self.reporting_available = incident.reporting_available()
+        self.initial_incident = review_incident
+        self._startup_scheduled = False
 
         self.setWindowTitle("Wine4Office Manager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
@@ -95,11 +110,14 @@ class ManagerWindow(QMainWindow):
         self.timer.timeout.connect(self.refresh_state)
         self.timer.start(1200)
         self.refresh_state()
-        QTimer.singleShot(0, self.start_background_update_check)
-        QTimer.singleShot(0, self.prompt_automatic_update_checks_on_first_launch)
-
     def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(icon)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._startup_scheduled:
+            self._startup_scheduled = True
+            QTimer.singleShot(0, self.finish_startup)
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Main")
@@ -940,6 +958,29 @@ class ManagerWindow(QMainWindow):
             "Maintenance",
             "Update Wine4Office Manager and its Wine runner from verified release metadata.",
         )
+        if self.reporting_available:
+            reliability = QGroupBox("Reliability reporting")
+            reliability_layout = QVBoxLayout(reliability)
+            reliability_intro = QLabel(
+                "Wine4Office does not collect private information. Reports stay "
+                "local unless you choose Send."
+            )
+            reliability_intro.setWordWrap(True)
+            reliability_layout.addWidget(reliability_intro)
+            self.incident_mode_group = QButtonGroup(self)
+            self.incident_ask = QRadioButton(
+                "Catch issues and let me choose whether to report"
+            )
+            self.incident_disabled = QRadioButton(
+                "Don't catch or report anything"
+            )
+            self.incident_mode_group.addButton(self.incident_ask)
+            self.incident_mode_group.addButton(self.incident_disabled)
+            reliability_layout.addWidget(self.incident_ask)
+            reliability_layout.addWidget(self.incident_disabled)
+            self.incident_ask.toggled.connect(self.set_incident_reporting_mode)
+            layout.addWidget(reliability)
+
         update = QGroupBox("Updates")
         update_layout = QVBoxLayout(update)
         update_form = self._form()
@@ -1061,6 +1102,15 @@ class ManagerWindow(QMainWindow):
         self.include_prereleases.setChecked(
             config.get("include_prereleases") is True
         )
+        if self.reporting_available:
+            ask = config.get("incident_reporting_mode", incident.REPORT_MODE_ASK) \
+                == incident.REPORT_MODE_ASK
+            self.incident_ask.blockSignals(True)
+            self.incident_disabled.blockSignals(True)
+            self.incident_ask.setChecked(ask)
+            self.incident_disabled.setChecked(not ask)
+            self.incident_ask.blockSignals(False)
+            self.incident_disabled.blockSignals(False)
         self._sync_office_settings_summary(config["prefix"])
 
 
@@ -1278,11 +1328,13 @@ class ManagerWindow(QMainWindow):
             return
 
         def launch() -> str:
-            pid = backend.launch_app(
-                config["prefix"], config["wine"], apps[0], self.font_helper,
-                use_x11=config["use_x11"],
+            process = subprocess.Popen(
+                [str(self.launcher), apps[0]],
+                env=os.environ.copy(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            return f"Application started (PID {pid})."
+            return f"Application supervisor started (PID {process.pid})."
 
         try:
             self.state.start_task("launch", launch)
@@ -1374,23 +1426,309 @@ class ManagerWindow(QMainWindow):
     def start_background_update_check(self) -> None:
         self.state.start_update_check()
 
-    def prompt_automatic_update_checks_on_first_launch(self) -> None:
+    def finish_startup(self) -> None:
+        """Finish first-open choices before showing update or incident prompts."""
+        self.prompt_reliability_on_first_launch()
+        self.start_background_update_check()
+        if self.initial_incident is not None:
+            self.review_incident(self.initial_incident)
+
+    def _route_after_first_open(self) -> None:
+        try:
+            snapshot = self.state.snapshot()
+            applications = snapshot["status"]["apps"]
+            office_installed = any(
+                applications.get(name) is True
+                for name in ("word", "excel", "powerpoint", "outlook")
+            )
+        except Exception:
+            office_installed = False
+        self.navigation.setCurrentRow(
+            self.ENVIRONMENT_PAGE if office_installed else self.INSTALL_PAGE
+        )
+
+    def _reliability_dialog(self) -> tuple[QDialog, QRadioButton, QCheckBox]:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Reliability & updates")
+        dialog.setMinimumWidth(560)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel("How should Wine4Office handle crashes and hangs?")
+        heading_font = QFont(heading.font())
+        heading_font.setBold(True)
+        heading.setFont(heading_font)
+        layout.addWidget(heading)
+        privacy = QLabel(
+            "You can change this later in Maintenance. We never collect private "
+            "information automatically."
+        )
+        privacy.setWordWrap(True)
+        layout.addWidget(privacy)
+        group = QButtonGroup(dialog)
+        ask = QRadioButton("Catch issues and let me choose whether to report")
+        disabled = QRadioButton("Don't catch or report anything")
+        group.addButton(ask)
+        group.addButton(disabled)
+        ask.setChecked(True)
+        layout.addWidget(ask)
+        ask_detail = QLabel(
+            "Show the complete editable report, let me optionally add context or "
+            "an attachment, and send only if I choose Send."
+        )
+        ask_detail.setWordWrap(True)
+        ask_detail.setContentsMargins(24, 0, 0, 8)
+        layout.addWidget(ask_detail)
+        layout.addWidget(disabled)
+        disabled_detail = QLabel(
+            "Disable monitoring, local incident capture, notifications and reporting."
+        )
+        disabled_detail.setWordWrap(True)
+        disabled_detail.setContentsMargins(24, 0, 0, 8)
+        layout.addWidget(disabled_detail)
+        updates = QCheckBox("Check for Wine4Office updates every 24 hours")
+        updates.setChecked(True)
+        updates.setToolTip(
+            "Only checks and notifies you when an update is available. Updates are "
+            "never downloaded or installed automatically."
+        )
+        updates.setAccessibleDescription(updates.toolTip())
+        layout.addWidget(updates)
+        update_detail = QLabel(updates.toolTip())
+        update_detail.setWordWrap(True)
+        update_detail.setContentsMargins(24, 0, 0, 8)
+        layout.addWidget(update_detail)
+        buttons = QDialogButtonBox()
+        skip = buttons.addButton("Skip", QDialogButtonBox.ButtonRole.RejectRole)
+        save = buttons.addButton(
+            "Save and continue", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        save.setDefault(True)
+        skip.clicked.connect(dialog.reject)
+        save.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        return dialog, ask, updates
+
+    def prompt_reliability_on_first_launch(self) -> None:
         with self.state.lock:
             config = dict(self.state.config)
-        if config.get("automatic_update_checks_prompted") is True:
+        if config.get("reliability_prompted") is True:
             return
-        answer = QMessageBox.question(
-            self,
-            "Automatic update checks",
-            "Check for Wine4Office updates in the background at login and every "
-            "24 hours?\n\nThe Manager will still check whenever you open it. "
-            "No update is downloaded or installed without your approval.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+        if self.reporting_available:
+            dialog, ask, updates = self._reliability_dialog()
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            reporting_mode = (
+                incident.REPORT_MODE_ASK
+                if accepted and ask.isChecked() else
+                incident.REPORT_MODE_DISABLED
+                if accepted else incident.REPORT_MODE_ASK
+            )
+            automatic_checks = updates.isChecked() if accepted else True
+        else:
+            reporting_mode = incident.REPORT_MODE_DISABLED
+            automatic_checks = config.get("automatic_update_checks") is True
+        try:
+            saved = self.state.set_reliability_preferences(
+                reporting_mode, automatic_checks
+            )
+        except Exception as error:
+            self.show_error(f"Could not save reliability settings: {error}")
+            return
+        self._set_config_fields(saved)
+        self._route_after_first_open()
+
+    def set_incident_reporting_mode(self, ask_enabled: bool) -> None:
+        if not self.initialized or not self.reporting_available:
+            return
+        with self.state.lock:
+            automatic_checks = (
+                self.state.config.get("automatic_update_checks") is True
+            )
+        try:
+            saved = self.state.set_reliability_preferences(
+                incident.REPORT_MODE_ASK if ask_enabled else incident.REPORT_MODE_DISABLED,
+                automatic_checks,
+            )
+        except Exception as error:
+            self._restore_config_fields()
+            self.show_error(f"Could not save incident reporting mode: {error}")
+            return
+        self._set_config_fields(saved)
+        self.notify(
+            "Issue detection and review prompts enabled."
+            if ask_enabled else "Issue detection and reporting disabled."
         )
-        self._apply_automatic_update_checks(
-            answer == QMessageBox.StandardButton.Yes, prompted=True
+
+    def review_incident(self, path: Path) -> None:
+        if not self.reporting_available:
+            return
+        try:
+            incident_path, record, stored_trace = incident.load_incident(path)
+        except Exception as error:
+            self.show_error(f"Could not open the local incident report: {error}")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Review Wine4Office report")
+        dialog.setMinimumSize(720, 460)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            f"{record['summary']}\nNothing is sent until you click Send."
         )
+        summary.setWordWrap(True)
+        summary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout.addWidget(summary)
+
+        context_label = QLabel("What were you doing when it crashed or froze? (optional)")
+        context_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        layout.addWidget(context_label)
+        context = QPlainTextEdit(str(record.get("context") or ""))
+        context.setPlaceholderText(
+            "What did you do? What happened? Can you reproduce it?"
+        )
+        context.setMaximumHeight(120)
+        layout.addWidget(context)
+
+        attachment_row = QHBoxLayout()
+        attachment_edit = QLineEdit()
+        attachment_edit.setReadOnly(True)
+        attachment_edit.setPlaceholderText("No attachment selected")
+        choose_attachment = QPushButton("Add attachment…")
+        remove_attachment = QPushButton("Remove")
+        remove_attachment.setEnabled(False)
+        attachment_row.addWidget(choose_attachment)
+        attachment_row.addWidget(attachment_edit, 1)
+        attachment_row.addWidget(remove_attachment)
+        layout.addLayout(attachment_row)
+
+        details_toggle = QToolButton()
+        details_toggle.setText("Review or edit full report (optional)")
+        details_toggle.setCheckable(True)
+        details_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        details_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        layout.addWidget(details_toggle)
+
+        details = QWidget()
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+
+        details_layout.addWidget(QLabel("Technical data"))
+        technical = QPlainTextEdit(
+            json.dumps(record["technical"], indent=2, sort_keys=True)
+        )
+        technical.setAccessibleName("Editable technical report data")
+        technical.setMinimumHeight(130)
+        details_layout.addWidget(technical)
+
+        details_layout.addWidget(QLabel("Diagnostic trace"))
+        trace = QPlainTextEdit(stored_trace)
+        trace.setAccessibleName("Editable diagnostic trace")
+        trace.setMinimumHeight(130)
+        details_layout.addWidget(trace)
+
+        details_layout.addWidget(QLabel("Exact report that will be sent"))
+        exact = QPlainTextEdit()
+        exact.setReadOnly(True)
+        exact.setAccessibleName("Exact report preview")
+        exact.setMinimumHeight(160)
+        details_layout.addWidget(exact)
+        details.setVisible(False)
+        layout.addWidget(details, 1)
+
+        def set_detail_visibility(visible: bool) -> None:
+            details.setVisible(visible)
+            details_toggle.setArrowType(
+                Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow
+            )
+            if visible:
+                dialog.resize(max(dialog.width(), 760), 760)
+
+        details_toggle.toggled.connect(set_detail_visibility)
+
+        def choose_file() -> None:
+            filename, _selected_filter = QFileDialog.getOpenFileName(
+                dialog, "Choose an affected Office file", str(Path.home()),
+                "Office and document files (*.doc *.docx *.xls *.xlsx *.ppt *.pptx "
+                "*.pdf *.rtf *.csv *.txt)",
+            )
+            if filename:
+                attachment_edit.setText(filename)
+
+        choose_attachment.clicked.connect(choose_file)
+        remove_attachment.clicked.connect(attachment_edit.clear)
+        attachment_edit.textChanged.connect(
+            lambda value: remove_attachment.setEnabled(bool(value))
+        )
+
+        def current_technical() -> dict:
+            value = json.loads(technical.toPlainText())
+            if not isinstance(value, dict):
+                raise ValueError("Technical data must remain a JSON object.")
+            return value
+
+        def refresh_exact(_index: int = -1) -> bool:
+            try:
+                preview = incident.report_preview(
+                    record, context=context.toPlainText(),
+                    technical=current_technical(), trace=trace.toPlainText(),
+                    attachment=attachment_edit.text() or None,
+                )
+            except Exception as error:
+                exact.setPlainText(f"Report preview is invalid:\n{error}")
+                return False
+            exact.setPlainText(json.dumps(preview, indent=2, sort_keys=True))
+            return True
+
+        details_toggle.toggled.connect(lambda visible: refresh_exact() if visible else None)
+        context.textChanged.connect(refresh_exact)
+        technical.textChanged.connect(refresh_exact)
+        trace.textChanged.connect(refresh_exact)
+        attachment_edit.textChanged.connect(refresh_exact)
+        refresh_exact()
+
+        buttons = QDialogButtonBox()
+        delete_button = buttons.addButton(
+            "Delete local report", QDialogButtonBox.ButtonRole.DestructiveRole
+        )
+        cancel_button = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        report_button = buttons.addButton(
+            "Send", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        report_button.setDefault(True)
+        layout.addWidget(buttons)
+
+        def delete_local() -> None:
+            try:
+                incident.delete_incident(incident_path)
+            except Exception as error:
+                self.show_error(f"Could not delete the local report: {error}")
+                return
+            dialog.accept()
+
+        def send_report() -> None:
+            if not refresh_exact():
+                details_toggle.setChecked(True)
+                return
+            report_button.setEnabled(False)
+            try:
+                result = incident.submit_incident(
+                    incident_path, context=context.toPlainText(),
+                    technical=current_technical(), trace=trace.toPlainText(),
+                    attachment=attachment_edit.text() or None,
+                )
+            except Exception as error:
+                report_button.setEnabled(True)
+                self.show_error(f"The report was not sent: {error}")
+                return
+            QMessageBox.information(
+                dialog, "Report sent",
+                f"Report {result['incident_id']} was sent successfully.",
+            )
+            dialog.accept()
+
+        delete_button.clicked.connect(delete_local)
+        cancel_button.clicked.connect(dialog.reject)
+        report_button.clicked.connect(send_report)
+        dialog.exec()
 
     def set_automatic_update_checks(self, enabled: bool) -> None:
         if not self.initialized:
@@ -1825,13 +2163,15 @@ class ManagerWindow(QMainWindow):
 def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 restart_command: list[str] | None = None,
                 smoke_test: bool = False, screenshot: Path | None = None,
-                open_maintenance: bool = False) -> int:
+                open_maintenance: bool = False,
+                review_incident: Path | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Wine4Office Manager")
     app.setOrganizationName("Wine4Office")
     app.setDesktopFileName("wine4office-manager")
     window = ManagerWindow(
         state, launcher, icons, font_helper, restart_command=restart_command,
+        review_incident=review_incident,
     )
     if open_maintenance:
         window.navigation.setCurrentRow(window.MAINTENANCE_PAGE)
