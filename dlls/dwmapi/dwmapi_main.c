@@ -26,11 +26,24 @@
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
+#include "winreg.h"
 #include "winuser.h"
 #include "dwmapi.h"
 #include "wine/debug.h"
+#include "wine/dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
+
+static BOOL system_uses_dark_mode(void)
+{
+    static const WCHAR personalizeW[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    DWORD light_theme = TRUE, size = sizeof(light_theme);
+
+    RegGetValueW(HKEY_CURRENT_USER, personalizeW, L"SystemUsesLightTheme",
+                 RRF_RT_REG_DWORD, NULL, &light_theme, &size);
+    return !light_theme;
+}
 
 
 /**********************************************************************
@@ -38,17 +51,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
  */
 HRESULT WINAPI DwmIsCompositionEnabled(BOOL *enabled)
 {
-    RTL_OSVERSIONINFOEXW version;
-
     TRACE("%p\n", enabled);
 
     if (!enabled)
         return E_INVALIDARG;
 
-    *enabled = FALSE;
-    version.dwOSVersionInfoSize = sizeof(version);
-    if (!RtlGetVersion(&version))
-        *enabled = (version.dwMajorVersion > 6 || (version.dwMajorVersion == 6 && version.dwMinorVersion >= 3));
+    *enabled = wine_dwm_is_composition_enabled();
 
     return S_OK;
 }
@@ -100,11 +108,47 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
  */
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
-    static BOOL once;
+    ULONG value;
 
-    if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
+    TRACE("(%p, %lu, %p, %lu)\n", hwnd, attributenum, attribute, size);
 
-    return S_OK;
+    if (!wine_dwm_is_composition_enabled()) return DWM_E_COMPOSITIONDISABLED;
+    if (!IsWindow(hwnd)) return E_HANDLE;
+    switch (attributenum)
+    {
+    case DWMWA_NCRENDERING_POLICY:
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        value = *(const ULONG *)attribute;
+        if (value >= DWMNCRP_LAST) return E_INVALIDARG;
+        if (!SetPropW(hwnd, wine_dwm_nc_rendering_policy_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        SendMessageW(hwnd, WM_DWMNCRENDERINGCHANGED, 0, 0);
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+
+    case DWMWA_USE_IMMERSIVE_DARK_MODE:
+    {
+        BOOL requested, system_dark;
+
+        if (!wine_dwm_supports_immersive_dark_mode()) return E_INVALIDARG;
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        requested = !!*(const ULONG *)attribute;
+        system_dark = system_uses_dark_mode();
+        value = requested && system_dark;
+        TRACE("immersive dark mode requested %u, system dark %u, effective %lu.\n",
+              requested, system_dark, value);
+        if (!SetPropW(hwnd, wine_dwm_immersive_dark_mode_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+    }
+
+    default:
+        FIXME("attribute %lu not implemented.\n", attributenum);
+        return S_OK;
+    }
 }
 
 /**********************************************************************
@@ -195,6 +239,20 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         return E_HANDLE;
 
     switch (attribute) {
+    case DWMWA_NCRENDERING_ENABLED:
+    {
+        enum DWMNCRENDERINGPOLICY policy;
+
+        if (!pv_attribute)
+            return E_INVALIDARG;
+        if (size < sizeof(BOOL))
+            return E_NOT_SUFFICIENT_BUFFER;
+        policy = wine_dwm_decode_window_attribute(
+            GetPropW(hwnd, wine_dwm_nc_rendering_policy_prop), DWMNCRP_USEWINDOWSTYLE);
+        *(BOOL *)pv_attribute = policy != DWMNCRP_DISABLED;
+        hr = S_OK;
+        break;
+    }
     case DWMWA_CAPTION_BUTTON_BOUNDS:
     {
         RECT *rect = pv_attribute;

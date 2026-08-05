@@ -1,0 +1,81 @@
+/*
+ * Wine internal DWM helpers
+ *
+ * Copyright 2026 Elkana Bardugo
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#ifndef __WINE_WINE_DWMAPI_H
+#define __WINE_WINE_DWMAPI_H
+
+#include "windef.h"
+#include "winternl.h"
+#include <dwmapi.h>
+
+/* Private window properties used to carry DWM state from dwmapi to win32u.
+ * Values are stored one greater than their Win32 value so zero remains the
+ * unconfigured state. */
+#ifdef _WIN32U_
+static const WCHAR wine_dwm_nc_rendering_policy_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','n','c','_','r','e','n','d','e','r','i','n','g','_',
+     'p','o','l','i','c','y',0};
+static const WCHAR wine_dwm_immersive_dark_mode_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','i','m','m','e','r','s','i','v','e','_','d','a','r','k',
+     '_','m','o','d','e',0};
+#else
+static const WCHAR wine_dwm_nc_rendering_policy_prop[] = L"__wine_dwm_nc_rendering_policy";
+static const WCHAR wine_dwm_immersive_dark_mode_prop[] = L"__wine_dwm_immersive_dark_mode";
+#endif
+
+/* Keep DWM API reporting and non-client rendering on the same winecfg
+ * Windows-version boundary.  Desktop composition cannot be disabled starting
+ * with Windows 8. */
+static inline BOOL wine_dwm_is_composition_enabled(void)
+{
+#ifdef _WIN32U_
+    const PEB *peb = NtCurrentTeb()->Peb;
+
+    return peb->OSMajorVersion > 6 ||
+           (peb->OSMajorVersion == 6 && peb->OSMinorVersion >= 2);
+#else
+    RTL_OSVERSIONINFOEXW version = {0};
+
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (RtlGetVersion( &version )) return FALSE;
+    return version.dwMajorVersion > 6 ||
+           (version.dwMajorVersion == 6 && version.dwMinorVersion >= 2);
+#endif
+}
+
+static inline BOOL wine_dwm_supports_immersive_dark_mode(void)
+{
+#ifdef _WIN32U_
+    const PEB *peb = NtCurrentTeb()->Peb;
+
+    return peb->OSMajorVersion > 10 ||
+           (peb->OSMajorVersion == 10 && peb->OSBuildNumber >= 19041);
+#else
+    RTL_OSVERSIONINFOEXW version = {0};
+
+    version.dwOSVersionInfoSize = sizeof(version);
+    return !RtlGetVersion( &version ) &&
+           (version.dwMajorVersion > 10 ||
+            (version.dwMajorVersion == 10 && version.dwBuildNumber >= 19041));
+#endif
+}
+
+static inline HANDLE wine_dwm_encode_window_attribute(ULONG value)
+{
+    return ULongToHandle( value + 1 );
+}
+
+static inline ULONG wine_dwm_decode_window_attribute(HANDLE value, ULONG default_value)
+{
+    return value ? HandleToULong( value ) - 1 : default_value;
+}
+
+#endif /* __WINE_WINE_DWMAPI_H */

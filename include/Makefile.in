@@ -1123,6 +1123,7 @@ SOURCES = \
 	wine/d3dkmt.h \
 	wine/debug.h \
 	wine/dplaysp.h \
+	wine/dwmapi.h \
 	wine/epm.idl \
 	wine/exception.h \
 	wine/fil_data.idl \

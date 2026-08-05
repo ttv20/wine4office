@@ -26,6 +26,7 @@
 
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
+#include "wine/dwmapi.h"
 #include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
@@ -1090,8 +1091,50 @@ void get_sys_popup_pos( HWND hwnd, RECT *rect )
     }
 }
 
+static BOOL use_immersive_dark_frame( HWND hwnd )
+{
+    enum DWMNCRENDERINGPOLICY policy;
+
+    if (!wine_dwm_is_composition_enabled() || !wine_dwm_supports_immersive_dark_mode()) return FALSE;
+    policy = wine_dwm_decode_window_attribute(
+        NtUserGetProp( hwnd, wine_dwm_nc_rendering_policy_prop ), DWMNCRP_USEWINDOWSTYLE );
+    if (policy == DWMNCRP_DISABLED) return FALSE;
+    return wine_dwm_decode_window_attribute(
+        NtUserGetProp( hwnd, wine_dwm_immersive_dark_mode_prop ), FALSE );
+}
+
+static void paint_nc_frame( HDC hdc, const RECT *rect, INT width, INT height, COLORREF color )
+{
+    HBRUSH brush = NtGdiCreateSolidBrush( color, NULL );
+    HBRUSH previous = NtGdiSelectBrush( hdc, brush );
+
+    NtGdiPatBlt( hdc, rect->left, rect->top, rect->right - rect->left, height, PATCOPY );
+    NtGdiPatBlt( hdc, rect->left, rect->top, width, rect->bottom - rect->top, PATCOPY );
+    NtGdiPatBlt( hdc, rect->left, rect->bottom - 1, rect->right - rect->left, -height, PATCOPY );
+    NtGdiPatBlt( hdc, rect->right - 1, rect->top, -width, rect->bottom - rect->top, PATCOPY );
+
+    NtGdiSelectBrush( hdc, previous );
+    NtGdiDeleteObjectApp( brush );
+}
+
+/* Windows' default immersive dark frame color.  This is DWM state rather
+ * than a classic COLOR_* brush, whose palette remains light in dark mode. */
+static COLORREF get_immersive_dark_frame_color(void)
+{
+    return RGB(32, 32, 32);
+}
+
+static void fill_immersive_dark_rect( HDC hdc, const RECT *rect )
+{
+    HBRUSH brush = NtGdiCreateSolidBrush( get_immersive_dark_frame_color(), NULL );
+
+    fill_rect( hdc, rect, brush );
+    NtGdiDeleteObjectApp( brush );
+}
+
 /* Draw a window frame inside the given rectangle, and update the rectangle. */
-static void draw_nc_frame( HDC  hdc, RECT  *rect, BOOL  active, DWORD style, DWORD ex_style )
+static void draw_nc_frame( HDC hdc, RECT *rect, BOOL active, DWORD style, DWORD ex_style,
+                           BOOL immersive_dark )
 {
     INT width, height;
 
@@ -1100,13 +1143,18 @@ static void draw_nc_frame( HDC  hdc, RECT  *rect, BOOL  active, DWORD style, DWO
         width  = get_system_metrics( SM_CXFRAME ) - get_system_metrics( SM_CXDLGFRAME );
         height = get_system_metrics( SM_CYFRAME ) - get_system_metrics( SM_CYDLGFRAME );
 
-        NtGdiSelectBrush( hdc, get_sys_color_brush( active ? COLOR_ACTIVEBORDER :
-                                                    COLOR_INACTIVEBORDER ));
-        /* Draw frame */
-        NtGdiPatBlt( hdc, rect->left, rect->top, rect->right - rect->left, height, PATCOPY );
-        NtGdiPatBlt( hdc, rect->left, rect->top, width, rect->bottom - rect->top, PATCOPY );
-        NtGdiPatBlt( hdc, rect->left, rect->bottom - 1, rect->right - rect->left, -height, PATCOPY );
-        NtGdiPatBlt( hdc, rect->right - 1, rect->top, -width, rect->bottom - rect->top, PATCOPY );
+        if (immersive_dark)
+            paint_nc_frame( hdc, rect, width, height, get_immersive_dark_frame_color() );
+        else
+        {
+            NtGdiSelectBrush( hdc, get_sys_color_brush( active ? COLOR_ACTIVEBORDER :
+                                                        COLOR_INACTIVEBORDER ));
+            /* Draw frame */
+            NtGdiPatBlt( hdc, rect->left, rect->top, rect->right - rect->left, height, PATCOPY );
+            NtGdiPatBlt( hdc, rect->left, rect->top, width, rect->bottom - rect->top, PATCOPY );
+            NtGdiPatBlt( hdc, rect->left, rect->bottom - 1, rect->right - rect->left, -height, PATCOPY );
+            NtGdiPatBlt( hdc, rect->right - 1, rect->top, -width, rect->bottom - rect->top, PATCOPY );
+        }
 
         InflateRect( rect, -width, -height );
     }
@@ -1124,17 +1172,22 @@ static void draw_nc_frame( HDC  hdc, RECT  *rect, BOOL  active, DWORD style, DWO
         else if (ex_style & WS_EX_STATICEDGE) color = COLOR_WINDOWFRAME;
         else if (style & (WS_DLGFRAME|WS_THICKFRAME)) color = COLOR_3DFACE;
         else color = COLOR_WINDOWFRAME;
-        NtGdiSelectBrush( hdc, get_sys_color_brush( color ));
+        if (immersive_dark)
+            paint_nc_frame( hdc, rect, width, height, get_immersive_dark_frame_color() );
+        else
+        {
+            NtGdiSelectBrush( hdc, get_sys_color_brush( color ));
 
-        /* Draw frame */
-        NtGdiPatBlt( hdc, rect->left, rect->top,
-                     rect->right - rect->left, height, PATCOPY );
-        NtGdiPatBlt( hdc, rect->left, rect->top,
-                     width, rect->bottom - rect->top, PATCOPY );
-        NtGdiPatBlt( hdc, rect->left, rect->bottom - 1,
-                     rect->right - rect->left, -height, PATCOPY );
-        NtGdiPatBlt( hdc, rect->right - 1, rect->top,
-                     -width, rect->bottom - rect->top, PATCOPY );
+            /* Draw frame */
+            NtGdiPatBlt( hdc, rect->left, rect->top,
+                         rect->right - rect->left, height, PATCOPY );
+            NtGdiPatBlt( hdc, rect->left, rect->top,
+                         width, rect->bottom - rect->top, PATCOPY );
+            NtGdiPatBlt( hdc, rect->left, rect->bottom - 1,
+                         rect->right - rect->left, -height, PATCOPY );
+            NtGdiPatBlt( hdc, rect->right - 1, rect->top,
+                         -width, rect->bottom - rect->top, PATCOPY );
+        }
 
         InflateRect( rect, -width, -height );
     }
@@ -1162,8 +1215,15 @@ static HICON get_nc_icon_for_window( HWND hwnd )
 }
 
 /* Draws the bar part (ie the big rectangle) of the caption */
-static void draw_caption_bar( HDC hdc, const RECT *rect, DWORD style, BOOL active, BOOL gradient )
+static void draw_caption_bar( HDC hdc, const RECT *rect, DWORD style, BOOL active, BOOL gradient,
+                              BOOL immersive_dark )
 {
+    if (immersive_dark)
+    {
+        fill_immersive_dark_rect( hdc, rect );
+        return;
+    }
+
     if (gradient)
     {
         TRIVERTEX vertices[4];
@@ -1319,7 +1379,7 @@ static BOOL draw_push_button( HDC dc, RECT *r, UINT flags )
     return TRUE;
 }
 
-static BOOL draw_frame_caption( HDC dc, RECT *r, UINT flags )
+static BOOL draw_frame_caption( HDC dc, RECT *r, UINT flags, BOOL immersive_dark )
 {
     RECT rect;
     int small_diam = make_square_rect( r, &rect ) - 2;
@@ -1335,7 +1395,8 @@ static BOOL draw_frame_caption( HDC dc, RECT *r, UINT flags )
 
     static const WCHAR marlettW[] = {'M','a','r','l','e','t','t',0};
 
-    draw_push_button( dc, r, flags & 0xff00 );
+    if (immersive_dark) fill_immersive_dark_rect( dc, r );
+    else draw_push_button( dc, r, flags & 0xff00 );
 
     switch (flags & 0xf)
     {
@@ -1361,12 +1422,13 @@ static BOOL draw_frame_caption( HDC dc, RECT *r, UINT flags )
     prev_font = NtGdiSelectFont( dc, font );
     NtGdiGetTextExtentExW( dc, str, 1, 0, NULL, NULL, &size, 0 );
 
-    if (flags & DFCS_INACTIVE)
+    if ((flags & DFCS_INACTIVE) && !immersive_dark)
     {
         NtGdiGetAndSetDCDword( dc, NtGdiSetTextColor, get_sys_color(COLOR_BTNHIGHLIGHT), NULL );
         NtGdiExtTextOutW( dc, xc-size.cx/2+1, yc-size.cy/2+1, 0, NULL, str, 1, NULL, 0 );
     }
-    NtGdiGetAndSetDCDword( dc, NtGdiSetTextColor, get_sys_color( color_idx ), NULL );
+    NtGdiGetAndSetDCDword( dc, NtGdiSetTextColor,
+                          immersive_dark ? RGB( 255, 255, 255 ) : get_sys_color( color_idx ), NULL );
     NtGdiExtTextOutW( dc, xc-size.cx/2, yc-size.cy/2, 0, NULL, str, 1, NULL, 0 );
 
     NtGdiSelectFont(dc, prev_font);
@@ -1497,7 +1559,7 @@ static void draw_close_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
 
     if (down) flags |= DFCS_PUSHED;
     if (grayed) flags |= DFCS_INACTIVE;
-    draw_frame_caption( hdc, &rect, flags );
+    draw_frame_caption( hdc, &rect, flags, use_immersive_dark_frame( hwnd ) );
 }
 
 static void draw_max_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
@@ -1520,7 +1582,7 @@ static void draw_max_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
     rect.right -= 2;
     if (down) flags |= DFCS_PUSHED;
     if (grayed) flags |= DFCS_INACTIVE;
-    draw_frame_caption( hdc, &rect, flags );
+    draw_frame_caption( hdc, &rect, flags, use_immersive_dark_frame( hwnd ) );
 }
 
 static void draw_min_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
@@ -1546,11 +1608,11 @@ static void draw_min_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
     rect.right -= 2;
     if (down) flags |= DFCS_PUSHED;
     if (grayed) flags |= DFCS_INACTIVE;
-    draw_frame_caption( hdc, &rect, flags );
+    draw_frame_caption( hdc, &rect, flags, use_immersive_dark_frame( hwnd ) );
 }
 
 static void draw_nc_caption( HDC hdc, RECT *rect, HWND hwnd, DWORD  style,
-                             DWORD  ex_style, BOOL active )
+                             DWORD  ex_style, BOOL active, BOOL immersive_dark )
 {
     RECT  r = *rect;
     WCHAR buffer[256];
@@ -1560,16 +1622,19 @@ static void draw_nc_caption( HDC hdc, RECT *rect, HWND hwnd, DWORD  style,
     UINT pen_color = COLOR_3DFACE;
     int len;
 
-    if ((ex_style & (WS_EX_STATICEDGE|WS_EX_CLIENTEDGE|WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE)
-        pen_color = COLOR_WINDOWFRAME;
-    prev_pen = NtGdiSelectPen( hdc, get_sys_color_pen( pen_color ));
-    NtGdiMoveTo( hdc, r.left, r.bottom - 1, NULL );
-    NtGdiLineTo( hdc, r.right, r.bottom - 1 );
-    NtGdiSelectPen( hdc, prev_pen );
+    if (!immersive_dark)
+    {
+        if ((ex_style & (WS_EX_STATICEDGE|WS_EX_CLIENTEDGE|WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE)
+            pen_color = COLOR_WINDOWFRAME;
+        prev_pen = NtGdiSelectPen( hdc, get_sys_color_pen( pen_color ));
+        NtGdiMoveTo( hdc, r.left, r.bottom - 1, NULL );
+        NtGdiLineTo( hdc, r.right, r.bottom - 1 );
+        NtGdiSelectPen( hdc, prev_pen );
+    }
     r.bottom--;
 
     NtUserSystemParametersInfo( SPI_GETGRADIENTCAPTIONS, 0, &gradient, 0 );
-    draw_caption_bar( hdc, &r, style, active, gradient );
+    draw_caption_bar( hdc, &r, style, active, gradient, immersive_dark );
 
     if ((style & WS_SYSMENU) && !(ex_style & WS_EX_TOOLWINDOW))
     {
@@ -1612,7 +1677,9 @@ static void draw_nc_caption( HDC hdc, RECT *rect, HWND hwnd, DWORD  style,
         else
             hFont = NtGdiHfontCreate( &nclm.lfCaptionFont, sizeof(nclm.lfCaptionFont), 0, 0, NULL );
         hOldFont = NtGdiSelectFont( hdc, hFont );
-        if (active)
+        if (immersive_dark)
+            NtGdiGetAndSetDCDword( hdc, NtGdiSetTextColor, RGB( 255, 255, 255 ), NULL );
+        else if (active)
             NtGdiGetAndSetDCDword( hdc, NtGdiSetTextColor, get_sys_color( COLOR_CAPTIONTEXT ), NULL );
         else
             NtGdiGetAndSetDCDword( hdc, NtGdiSetTextColor, get_sys_color( COLOR_INACTIVECAPTIONTEXT ), NULL );
@@ -1649,7 +1716,7 @@ BOOL WINAPI NtUserDrawCaptionTemp( HWND hwnd, HDC hdc, const RECT *rect, HFONT f
     else
     {
         DWORD style = get_window_long( hwnd, GWL_STYLE );
-        draw_caption_bar( hdc, &rc, style, flags & DC_ACTIVE, flags & DC_GRADIENT );
+        draw_caption_bar( hdc, &rc, style, flags & DC_ACTIVE, flags & DC_GRADIENT, FALSE );
     }
 
     /* drawing icon */
@@ -1720,7 +1787,7 @@ static void nc_paint( HWND hwnd, HRGN clip )
 {
     HDC hdc;
     RECT rfuzz, rect, clip_rect;
-    BOOL active;
+    BOOL active, immersive_dark;
     WND *win;
     DWORD style, ex_style;
     WORD flags;
@@ -1734,6 +1801,7 @@ static void nc_paint( HWND hwnd, HRGN clip )
     release_win_ptr( win );
 
     active = flags & WIN_NCACTIVATED;
+    immersive_dark = use_immersive_dark_frame( hwnd );
 
     TRACE( "%p %d\n", hwnd, active );
 
@@ -1763,11 +1831,25 @@ static void nc_paint( HWND hwnd, HRGN clip )
     NtGdiSelectPen( hdc, get_sys_color_pen( COLOR_WINDOWFRAME ));
 
     if (has_static_outer_frame( ex_style ))
-        draw_rect_edge( hdc, &rect, BDR_SUNKENOUTER, BF_RECT | BF_ADJUST, 1 );
+    {
+        if (immersive_dark)
+        {
+            paint_nc_frame( hdc, &rect, 1, 1, get_immersive_dark_frame_color() );
+            InflateRect( &rect, -1, -1 );
+        }
+        else draw_rect_edge( hdc, &rect, BDR_SUNKENOUTER, BF_RECT | BF_ADJUST, 1 );
+    }
     else if (has_big_frame( style, ex_style ))
-        draw_rect_edge( hdc, &rect, EDGE_RAISED, BF_RECT | BF_ADJUST, 1 );
+    {
+        if (immersive_dark)
+        {
+            paint_nc_frame( hdc, &rect, 2, 2, get_immersive_dark_frame_color() );
+            InflateRect( &rect, -2, -2 );
+        }
+        else draw_rect_edge( hdc, &rect, EDGE_RAISED, BF_RECT | BF_ADJUST, 1 );
+    }
 
-    draw_nc_frame( hdc, &rect, active, style, ex_style );
+    draw_nc_frame( hdc, &rect, active, style, ex_style, immersive_dark );
 
     if ((style & WS_CAPTION) == WS_CAPTION)
     {
@@ -1783,7 +1865,7 @@ static void nc_paint( HWND hwnd, HRGN clip )
         }
 
         if (intersect_rect( &rfuzz, &r, &clip_rect ))
-            draw_nc_caption( hdc, &r, hwnd, style, ex_style, active );
+            draw_nc_caption( hdc, &r, hwnd, style, ex_style, active, immersive_dark );
     }
 
     if (has_menu( hwnd, style ))

@@ -1,5 +1,5 @@
 MODULE    = dwmapi.dll
-IMPORTS   = user32
+IMPORTS   = advapi32 user32
 IMPORTLIB = dwmapi
 
 VER_FILEDESCRIPTION_STR = "Desktop Window Manager API"

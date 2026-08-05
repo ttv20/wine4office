@@ -79,12 +79,24 @@ static const struct zxdg_imported_v2_listener dcomp_imported_listener =
     dcomp_imported_destroyed,
 };
 
+static void wayland_surface_enable_plasma_positioning(struct wayland_surface *surface,
+                                                      BOOL skip_taskbar);
+
 BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
 {
-    if (surface->zxdg_exported_v2) return TRUE;
     if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
         !surface->xdg_toplevel)
         return FALSE;
+
+    /* Detached cross-process DirectComposition surfaces are positioned in
+     * Win32 screen coordinates.  A regular managed xdg_toplevel may be placed
+     * elsewhere by the compositor, since Wayland has no standard toplevel
+     * positioning request.  Position the exported host through Plasma as
+     * well, so its Win32 screen coordinates and the detached surfaces share
+     * the same origin. */
+    wayland_surface_enable_plasma_positioning(surface, FALSE);
+
+    if (surface->zxdg_exported_v2) return TRUE;
 
     surface->zxdg_exported_v2 = zxdg_exporter_v2_export_toplevel(
             process_wayland.zxdg_exporter_v2, surface->wl_surface);
@@ -433,6 +445,25 @@ static void wayland_surface_set_plasma_position(struct wayland_surface *surface)
     surface->plasma_position_valid = TRUE;
 }
 
+static void wayland_surface_enable_plasma_positioning(struct wayland_surface *surface,
+                                                      BOOL skip_taskbar)
+{
+    surface->plasma_positioned = TRUE;
+    if (!process_wayland.org_kde_plasma_shell || surface->org_kde_plasma_surface) return;
+
+    surface->org_kde_plasma_surface =
+        org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
+                                         surface->wl_surface);
+    if (!surface->org_kde_plasma_surface) return;
+
+    if (skip_taskbar)
+    {
+        org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, 1);
+        org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, 1);
+    }
+    wayland_surface_set_plasma_position(surface);
+}
+
 /**********************************************************************
  *          wayland_surface_make_toplevel
  *
@@ -465,17 +496,7 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR 
     wayland_surface_assign_icon(surface);
 
     if (surface->plasma_positioned && process_wayland.org_kde_plasma_shell)
-    {
-        surface->org_kde_plasma_surface =
-            org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
-                                             surface->wl_surface);
-        if (surface->org_kde_plasma_surface)
-        {
-            org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, 1);
-            org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, 1);
-            wayland_surface_set_plasma_position(surface);
-        }
-    }
+        wayland_surface_enable_plasma_positioning(surface, TRUE);
 
     wayland_surface_init_fractional_scale(surface, 1.0);
 
@@ -1728,7 +1749,7 @@ void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR text)
  */
 void wayland_surface_set_icon_buffer(struct wayland_surface *surface, UINT type, const ICONINFO *ii)
 {
-    struct wayland_shm_buffer *icon_buf;
+    struct wayland_shm_buffer *icon_buf, *scaled_buf = NULL;
     HDC hDC;
 
     if (!process_wayland.xdg_toplevel_icon_manager_v1) return;
@@ -1740,6 +1761,50 @@ void wayland_surface_set_icon_buffer(struct wayland_surface *surface, UINT type,
     hDC = NtGdiCreateCompatibleDC(0);
     icon_buf = wayland_shm_buffer_from_color_bitmaps(hDC, ii->hbmColor, ii->hbmMask, TRUE);
     NtGdiDeleteObjectApp(hDC);
+
+    if (icon_buf)
+        TRACE("surface=%p type=%x icon size=%dx%d\n", surface, type,
+              icon_buf->width, icon_buf->height);
+
+    /* Windows applications commonly expose only the classic 32x32 icon even
+     * when Wayland panels request a larger logical size. Some compositors
+     * scale such buffers with nearest-neighbour filtering, producing visibly
+     * pixelated taskbar icons. Supply a smooth 64x64 choice as well. */
+    if (icon_buf && type == ICON_BIG && (icon_buf->width < 64 || icon_buf->height < 64) &&
+        (scaled_buf = wayland_shm_buffer_create(64, 64, WL_SHM_FORMAT_ARGB8888)))
+    {
+        const uint32_t *src = icon_buf->map_data;
+        uint32_t *dst = scaled_buf->map_data;
+        unsigned int x, y;
+
+        for (y = 0; y < 64; ++y)
+        {
+            unsigned int sy = y * (icon_buf->height - 1) * 256 / 63;
+            unsigned int y0 = sy >> 8, y1 = min(y0 + 1, icon_buf->height - 1), fy = sy & 255;
+
+            for (x = 0; x < 64; ++x)
+            {
+                unsigned int sx = x * (icon_buf->width - 1) * 256 / 63;
+                unsigned int x0 = sx >> 8, x1 = min(x0 + 1, icon_buf->width - 1), fx = sx & 255;
+                unsigned int weights[4] = {(256 - fx) * (256 - fy), fx * (256 - fy),
+                                           (256 - fx) * fy, fx * fy};
+                uint32_t pixels[4] = {src[y0 * icon_buf->width + x0], src[y0 * icon_buf->width + x1],
+                                      src[y1 * icon_buf->width + x0], src[y1 * icon_buf->width + x1]};
+                uint32_t value = 0;
+                unsigned int shift, i;
+
+                for (shift = 0; shift < 32; shift += 8)
+                {
+                    unsigned int channel = 0;
+                    for (i = 0; i < 4; ++i) channel += ((pixels[i] >> shift) & 0xff) * weights[i];
+                    value |= ((channel + 32768) >> 16) << shift;
+                }
+                dst[y * 64 + x] = value;
+            }
+        }
+        wayland_shm_buffer_unref(icon_buf);
+        icon_buf = scaled_buf;
+    }
 
     if (surface->big_icon_buffer && type == ICON_BIG)
     {
@@ -1792,7 +1857,10 @@ void wayland_surface_assign_icon(struct wayland_surface *surface)
                                             surface->small_icon_buffer->wl_buffer, 1);
         }
 
-        xdg_toplevel_icon_v1_set_name(surface->xdg_toplevel_icon, "");
+        /* Match the icon name to xdg_toplevel.app_id so the compositor can
+         * resolve an application icon exported by desktop integration.  The
+         * pixel buffers remain as a fallback when no themed icon exists. */
+        if (process_name) xdg_toplevel_icon_v1_set_name(surface->xdg_toplevel_icon, process_name);
 
         xdg_toplevel_icon_manager_v1_set_icon(process_wayland.xdg_toplevel_icon_manager_v1,
                                               surface->xdg_toplevel, surface->xdg_toplevel_icon);

@@ -636,6 +636,31 @@ done:
     return status ? HRESULT_FROM_NT( status ) : S_OK;
 }
 
+static void update_package_desktop_integration( const WCHAR *path )
+{
+    static const WCHAR builderW[] = L"\\winemenubuilder.exe";
+    PROCESS_INFORMATION process;
+    STARTUPINFOW startup = {0};
+    WCHAR application[MAX_PATH], *command;
+    SIZE_T length;
+
+    if (!GetSystemDirectoryW( application, ARRAY_SIZE(application) - ARRAY_SIZE(builderW) )) return;
+    wcscat( application, builderW );
+    length = wcslen( application ) + wcslen( path ) + 8;
+    if (!(command = malloc( length * sizeof(*command) ))) return;
+    swprintf( command, length, L"%s -p \"%s\"", application, path );
+    startup.cb = sizeof(startup);
+    if (CreateProcessW( application, command, NULL, NULL, FALSE, DETACHED_PROCESS,
+                        NULL, NULL, &startup, &process ))
+    {
+        CloseHandle( process.hThread );
+        CloseHandle( process.hProcess );
+    }
+    else WARN( "failed to start package desktop integration for %s, error %lu.\n",
+               debugstr_w(path), GetLastError() );
+    free( command );
+}
+
 HRESULT msix_stage_package( const WCHAR *path, WCHAR **full_name, WCHAR **family_name )
 {
     WCHAR windows_apps[MAX_PATH], temp[MAX_PATH], publisher_id[14];
@@ -749,6 +774,7 @@ HRESULT msix_stage_package( const WCHAR *path, WCHAR **full_name, WCHAR **family
             if (!status) status = RegSetValueExW( key, *family_name, 0, REG_SZ, (BYTE *)final_path,
                     (wcslen( final_path ) + 1) * sizeof(WCHAR) );
             if (status) hr = HRESULT_FROM_WIN32( status );
+            else update_package_desktop_integration( final_path );
         }
         free( final_path );
     }
