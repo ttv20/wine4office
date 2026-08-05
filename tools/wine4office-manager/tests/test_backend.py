@@ -691,8 +691,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         launcher = backend.shortcut_launcher_path("word")
         text = menu.read_text()
         self.assertIn("X-Wine4Office-Managed=true", text)
-        self.assertIn("%F", text)
-        self.assertIn(f'Exec="{launcher}" %F', text)
+        self.assertIn("%U", text)
+        self.assertIn(f'Exec="{launcher}" %U', text)
         self.assertIn(f"Icon={backend.data_home() / 'icons/wine4office/word.ico'}", text)
         self.assertTrue(os.access(launcher, os.X_OK))
         launcher_text = launcher.read_text()
@@ -747,6 +747,85 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
         self.assertIn(f"ARG={word}", output)
         self.assertIn("ARG=Z:\\converted\\מסמך with spaces.docx", output)
+
+    def test_generated_launcher_materializes_kio_url_before_winepath(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        word = office / "WINWORD.EXE"
+        word.write_bytes(b"exe")
+        source = self.root / "remote inside.docx"
+        source.write_bytes(b"document")
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        log = self.root / "launch.log"
+        self._script(
+            "wine",
+            "#!/bin/bash\n"
+            "printf 'ARG=%s\\n' \"$@\" > \"$WINE4OFFICE_TEST_LOG\"\n",
+        )
+        self._script(
+            "winepath",
+            "#!/bin/bash\n"
+            "printf 'Z:\\\\converted\\\\%s\\n' \"${2##*/}\"\n",
+        )
+        self._script(
+            "kioclient",
+            "#!/bin/bash\n"
+            "printf 'KIO=%s\\n' \"$2\" > \"$WINE4OFFICE_TEST_KIO_LOG\"\n"
+            "cp \"$WINE4OFFICE_TEST_REMOTE_DOCUMENT\" \"$3/inside.docx\"\n",
+        )
+        icon = backend.data_home() / "icons/wine4office/word.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        backend.create_app_shortcuts(["word"], prefix, self.wine, False)
+        environment = os.environ.copy()
+        environment.update({
+            "XDG_RUNTIME_DIR": str(runtime),
+            "WINE4OFFICE_TEST_LOG": str(log),
+            "WINE4OFFICE_TEST_KIO_LOG": str(self.root / "kio.log"),
+            "WINE4OFFICE_TEST_REMOTE_DOCUMENT": str(source),
+        })
+        archive_url = "zip:/home/user/archive.zip/inside.docx"
+        subprocess.run(
+            [str(backend.shortcut_launcher_path("word")), archive_url],
+            env=environment, check=True,
+        )
+
+        self.assertIn("KIO=" + archive_url, (self.root / "kio.log").read_text())
+        self.assertIn(f"ARG={word}", log.read_text())
+        self.assertIn("ARG=Z:\\converted\\inside.docx", log.read_text())
+
+    def test_generated_launcher_decodes_local_file_url_without_copy(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        word = office / "WINWORD.EXE"
+        word.write_bytes(b"exe")
+        log = self.root / "launch.log"
+        self._script(
+            "wine",
+            "#!/bin/bash\nprintf 'ARG=%s\\n' \"$@\" > \"$WINE4OFFICE_TEST_LOG\"\n",
+        )
+        self._script(
+            "winepath",
+            "#!/bin/bash\nprintf 'Z:\\\\converted\\\\%s\\n' \"${2##*/}\"\n",
+        )
+        icon = backend.data_home() / "icons/wine4office/word.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        backend.create_app_shortcuts(["word"], prefix, self.wine, False)
+        environment = os.environ.copy()
+        environment["WINE4OFFICE_TEST_LOG"] = str(log)
+        subprocess.run(
+            [str(backend.shortcut_launcher_path("word")),
+             "file:///home/user/My%20Document.docx"],
+            env=environment, check=True,
+        )
+
+        self.assertIn("ARG=Z:\\converted\\My Document.docx", log.read_text())
 
     def test_generated_outlook_launcher_initializes_language_and_overrides_mshtml(self):
         prefix = self.home / ".wine4office"
@@ -813,12 +892,26 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         menu = backend.data_home() / "applications/wine4office-word.desktop"
         self.assertEqual(created, [str(menu)])
         self.assertIn(
-            f'Exec="{backend.shortcut_launcher_path("word")}" %F', menu.read_text()
+            f'Exec="{backend.shortcut_launcher_path("word")}" %U', menu.read_text()
         )
         self.assertIn(
             f"wine={shlex.quote(str(self.wine))}",
             backend.shortcut_launcher_path("word").read_text(),
         )
+
+    def test_excel_shortcut_registers_csv_mime_type(self):
+        prefix = self.home / ".wine4office"
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        (office / "EXCEL.EXE").write_bytes(b"exe")
+        icon = backend.data_home() / "icons/wine4office/excel.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+
+        backend.create_app_shortcuts(["excel"], prefix, self.wine, False)
+
+        menu = backend.data_home() / "applications/wine4office-excel.desktop"
+        self.assertIn("MimeType=text/csv;", menu.read_text())
 
     def test_post_install_refreshes_only_existing_managed_shortcuts(self):
         prefix = self.home / ".wine4office"
@@ -849,8 +942,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         launcher = backend.shortcut_launcher_path("word")
         self.assertEqual(set(result["updated"]), {str(menu), str(desktop)})
         self.assertEqual(result["skipped"], {})
-        self.assertIn(f'Exec="{launcher}" %F', menu.read_text())
-        self.assertIn(f'Exec="{launcher}" %F', desktop.read_text())
+        self.assertIn(f'Exec="{launcher}" %U', menu.read_text())
+        self.assertIn(f'Exec="{launcher}" %U', desktop.read_text())
         self.assertTrue(launcher.is_file())
         self.assertFalse(
             (backend.data_home() / "applications/wine4office-excel.desktop").exists()
