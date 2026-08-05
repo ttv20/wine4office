@@ -803,6 +803,7 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     VkImageUsageFlags vk_usage;
     VkImageType vk_image_type;
     unsigned int flags = 0;
+    bool importing_shared;
 
     if (texture_vk->t.flags & WINED3D_TEXTURE_RGB_ALLOCATED)
         return TRUE;
@@ -879,6 +880,8 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
         texture_vk->layout = VK_IMAGE_LAYOUT_GENERAL;
     }
 
+    importing_shared = texture_vk->t.flags & WINED3D_TEXTURE_SHARED_NTHANDLE
+            && texture_vk->t.shared_handle;
     if (!wined3d_context_vk_create_image(context_vk, vk_image_type, vk_usage, format_vk->vk_format,
             resource->width, resource->height, resource->depth, max(1, wined3d_resource_get_sample_count(resource)),
             texture_vk->t.level_count, texture_vk->t.layer_count, flags, NULL,
@@ -899,11 +902,20 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     vk_range.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
     wined3d_context_vk_reference_texture(context_vk, texture_vk);
-    wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0, 0,
-            VK_IMAGE_LAYOUT_UNDEFINED, texture_vk->layout,
-            texture_vk->image.vk_image, &vk_range);
+    if (importing_shared)
+    {
+        /* The exporting device leaves ownership with VK_QUEUE_FAMILY_FOREIGN_EXT.
+         * AcquireSync performs the matching ownership transfer after the keyed
+         * mutex has been acquired. */
+        texture_vk->t.shared_external_ownership = true;
+    }
+    else
+    {
+        wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0, 0, VK_IMAGE_LAYOUT_UNDEFINED, texture_vk->layout,
+                texture_vk->image.vk_image, &vk_range);
+    }
 
     texture_vk->t.flags |= WINED3D_TEXTURE_RGB_ALLOCATED;
 
@@ -911,6 +923,91 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
             wine_dbgstr_longlong(texture_vk->image.vk_image), wine_dbgstr_longlong(texture_vk->image.vk_memory), texture_vk);
 
     return TRUE;
+}
+
+static HRESULT wined3d_texture_vk_sync_shared(struct wined3d_texture *texture,
+        BOOL acquire, uint64_t key, uint32_t timeout)
+{
+    struct wined3d_texture_vk *texture_vk = wined3d_texture_vk(texture);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(texture->resource.device);
+    struct wined3d_context *context;
+    struct wined3d_context_vk *context_vk;
+    const struct wined3d_vk_info *vk_info;
+    VkImageMemoryBarrier barrier = {0};
+    VkCommandBuffer command_buffer;
+    unsigned int i;
+    VkResult vr;
+
+    if (!(texture->flags & WINED3D_TEXTURE_SHARED_NTHANDLE))
+        return E_INVALIDARG;
+    if (!device_vk->vk_info.supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX])
+        return E_NOTIMPL;
+
+    context = context_acquire(texture->resource.device, NULL, 0);
+    context_vk = wined3d_context_vk(context);
+    vk_info = context_vk->vk_info;
+
+    if (!wined3d_texture_vk_prepare_texture(texture_vk, context_vk)
+            || !(command_buffer = wined3d_context_vk_get_command_buffer(context_vk)))
+    {
+        context_release(context);
+        return E_FAIL;
+    }
+
+    if ((acquire && texture->shared_external_ownership)
+            || (!acquire && !texture->shared_external_ownership))
+    {
+        wined3d_context_vk_end_current_render_pass(context_vk);
+
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = acquire ? 0 : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = acquire ? VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT : 0;
+        barrier.oldLayout = texture_vk->layout;
+        barrier.newLayout = texture_vk->layout;
+        barrier.srcQueueFamilyIndex = acquire ? VK_QUEUE_FAMILY_FOREIGN_EXT
+                : device_vk->graphics_queue.vk_queue_family_index;
+        barrier.dstQueueFamilyIndex = acquire ? device_vk->graphics_queue.vk_queue_family_index
+                : VK_QUEUE_FAMILY_FOREIGN_EXT;
+        barrier.image = texture_vk->image.vk_image;
+        barrier.subresourceRange.aspectMask = vk_aspect_mask_from_format(texture->resource.format);
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+        VK_CALL(vkCmdPipelineBarrier(command_buffer,
+                acquire ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                acquire ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0, 0, NULL, 0, NULL, 1, &barrier));
+    }
+    wined3d_context_vk_reference_texture(context_vk, texture_vk);
+
+    vr = wined3d_context_vk_submit_keyed_mutex(context_vk,
+            texture_vk->image.vk_memory, acquire, key, timeout);
+    if (vr == VK_SUCCESS)
+    {
+        texture->shared_external_ownership = !acquire;
+        if (acquire)
+        {
+            /* The shared allocation, rather than a local shadow or the
+             * discarded marker from texture creation, is authoritative after
+             * a successful keyed-mutex acquire. */
+            for (i = 0; i < texture->level_count * texture->layer_count; ++i)
+            {
+                wined3d_texture_validate_location(texture, i, WINED3D_LOCATION_TEXTURE_RGB);
+                wined3d_texture_invalidate_location(texture, i, ~WINED3D_LOCATION_TEXTURE_RGB);
+            }
+        }
+    }
+
+    context_release(context);
+    if (vr == VK_SUCCESS)
+        return S_OK;
+    if (vr == VK_TIMEOUT)
+        return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+    WARN("Failed to %s keyed shared texture, vr %s.\n",
+            acquire ? "acquire" : "release", wined3d_debug_vkresult(vr));
+    return E_FAIL;
 }
 
 static BOOL wined3d_texture_vk_prepare_buffer_object(struct wined3d_texture_vk *texture_vk,
@@ -1036,8 +1133,134 @@ static void wined3d_texture_vk_unload_location(struct wined3d_texture *texture,
     }
 }
 
+static HRESULT wined3d_texture_vk_reopen_shared(struct wined3d_texture *texture, HANDLE handle)
+{
+    struct wined3d_texture_vk *texture_vk = wined3d_texture_vk(texture);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(texture->resource.device);
+    struct wined3d_image_vk old_image;
+    struct wined3d_context *context;
+    struct wined3d_context_vk *context_vk;
+    const struct wined3d_vk_info *vk_info;
+    VkImageMemoryBarrier barrier = {0};
+    VkImageSubresourceRange range;
+    VkCommandBuffer command_buffer;
+    uint64_t command_buffer_id;
+    HANDLE old_handle;
+    bool old_handle_owned;
+    HANDLE duplicate;
+
+    if (!handle || !(texture->flags & WINED3D_TEXTURE_SHARED_NTHANDLE))
+        return E_INVALIDARG;
+    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(),
+            &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    context = context_acquire(texture->resource.device, NULL, 0);
+    context_vk = wined3d_context_vk(context);
+    vk_info = context_vk->vk_info;
+
+    old_image = texture_vk->image;
+    memset(&texture_vk->image, 0, sizeof(texture_vk->image));
+    old_handle = texture->shared_handle;
+    old_handle_owned = texture->shared_handle_owned;
+    texture->shared_handle = duplicate;
+    texture->shared_handle_owned = true;
+    texture->shared_external_ownership = false;
+    texture->flags &= ~WINED3D_TEXTURE_RGB_ALLOCATED;
+
+    if (!wined3d_texture_vk_prepare_texture(texture_vk, context_vk))
+    {
+        texture_vk->image = old_image;
+        texture->shared_handle = old_handle;
+        texture->shared_handle_owned = old_handle_owned;
+        texture->flags |= WINED3D_TEXTURE_RGB_ALLOCATED;
+        CloseHandle(duplicate);
+        context_release(context);
+        return E_FAIL;
+    }
+
+    /* The KMT resource now owns the exported allocation, but the old image is
+     * still owned by this queue. Release it before destroying that image so
+     * the replacement imported image can acquire the same external contents
+     * on the first keyed-mutex acquire. */
+    if (old_image.vk_image
+            && (command_buffer = wined3d_context_vk_get_command_buffer(context_vk)))
+    {
+        range.aspectMask = vk_aspect_mask_from_format(texture->resource.format);
+        range.baseMipLevel = 0;
+        range.levelCount = VK_REMAINING_MIP_LEVELS;
+        range.baseArrayLayer = 0;
+        range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = 0;
+        barrier.oldLayout = texture_vk->layout;
+        barrier.newLayout = texture_vk->layout;
+        barrier.srcQueueFamilyIndex = device_vk->graphics_queue.vk_queue_family_index;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+        barrier.image = old_image.vk_image;
+        barrier.subresourceRange = range;
+        VK_CALL(vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier));
+    }
+
+    command_buffer_id = texture_vk->image.command_buffer_id;
+    wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
+    wined3d_context_vk_wait_command_buffer(context_vk, command_buffer_id);
+    if (old_image.vk_image)
+        wined3d_context_vk_destroy_image(context_vk, &old_image);
+    if (old_handle_owned && old_handle)
+        CloseHandle(old_handle);
+
+    texture->shared_external_ownership = true;
+    context_release(context);
+    return S_OK;
+}
+
+static HRESULT wined3d_texture_vk_create_shared_sync(struct wined3d_texture *texture, HANDLE *handle)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(texture->resource.device);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    VkExportSemaphoreCreateInfo export_info = {0};
+    VkSemaphoreTypeCreateInfo type_info = {0};
+    VkSemaphoreCreateInfo create_info = {0};
+    VkSemaphoreGetWin32HandleInfoKHR get_info = {0};
+    VkSemaphore semaphore;
+    VkResult vr;
+
+    if (!vk_info->supported[WINED3D_VK_EXT_QUEUE_FAMILY_FOREIGN]
+            || !vk_info->supported[WINED3D_VK_KHR_EXTERNAL_SEMAPHORE_WIN32]
+            || !vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX])
+        return E_NOTIMPL;
+
+    export_info.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+    export_info.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    type_info.pNext = &export_info;
+    type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    type_info.initialValue = 0;
+    create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    create_info.pNext = &type_info;
+
+    if ((vr = VK_CALL(vkCreateSemaphore(device_vk->vk_device,
+            &create_info, NULL, &semaphore))) != VK_SUCCESS)
+        return E_FAIL;
+
+    get_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
+    get_info.semaphore = semaphore;
+    get_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    vr = VK_CALL(vkGetSemaphoreWin32HandleKHR)(device_vk->vk_device, &get_info, handle);
+    VK_CALL(vkDestroySemaphore(device_vk->vk_device, semaphore, NULL));
+
+    return vr == VK_SUCCESS ? S_OK : E_FAIL;
+}
+
 static const struct wined3d_texture_ops wined3d_texture_vk_ops =
 {
+    wined3d_texture_vk_sync_shared,
+    wined3d_texture_vk_reopen_shared,
+    wined3d_texture_vk_create_shared_sync,
     wined3d_texture_vk_prepare_location,
     wined3d_texture_vk_load_location,
     wined3d_texture_vk_unload_location,

@@ -2123,6 +2123,16 @@ class StructConversionFunction(object):
                     if m.is_generic_handle():
                         body += f"            out_ext->{m.name} = in_ext->{m.name};\n"
                         continue
+                    # The Unix driver consumes this extension itself and needs
+                    # Wine's VkDeviceMemory wrappers to find the corresponding NT
+                    # synchronization objects. The extension is removed before the
+                    # submit reaches the host Vulkan driver, so keep these handles
+                    # wrapped here.
+                    if self.direction == Direction.INPUT \
+                            and ext.name == "VkWin32KeyedMutexAcquireReleaseInfoKHR" \
+                            and m.name in ("pAcquireSyncs", "pReleaseSyncs"):
+                        body += f"            out_ext->{m.name} = {m.value('in_ext->', self.conv)};\n"
+                        continue
                     body += ident + m.copy("in_ext->", "out_ext->", self.direction, self.conv, Unwrap.HOST, self.const, conversions)
 
                 if self.direction == Direction.INPUT:

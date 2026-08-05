@@ -40,6 +40,7 @@ struct wined3d_device_vk;
     VK_INSTANCE_PFN(vkGetPhysicalDeviceFeatures) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceFormatProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties) \
+    VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties2) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceMemoryProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceQueueFamilyProperties) \
@@ -164,6 +165,7 @@ struct wined3d_device_vk;
     VK_DEVICE_PFN(vkGetImageSparseMemoryRequirements) \
     VK_DEVICE_PFN(vkGetImageSubresourceLayout) \
     VK_DEVICE_EXT_PFN(vkGetMemoryWin32HandleKHR) \
+    VK_DEVICE_EXT_PFN(vkGetSemaphoreWin32HandleKHR) \
     VK_DEVICE_PFN(vkGetPipelineCacheData) \
     VK_DEVICE_PFN(vkGetQueryPoolResults) \
     VK_DEVICE_PFN(vkGetRenderAreaGranularity) \
@@ -257,11 +259,14 @@ enum wined3d_vk_extension
     WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE2,
     WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE3,
     WINED3D_VK_EXT_HOST_QUERY_RESET,
+    WINED3D_VK_EXT_QUEUE_FAMILY_FOREIGN,
     WINED3D_VK_EXT_SAMPLER_FILTER_MINMAX,
     WINED3D_VK_EXT_SHADER_STENCIL_EXPORT,
     WINED3D_VK_EXT_TRANSFORM_FEEDBACK,
     WINED3D_VK_EXT_VERTEX_ATTRIBUTE_DIVISOR,
     WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32,
+    WINED3D_VK_KHR_EXTERNAL_SEMAPHORE_WIN32,
+    WINED3D_VK_KHR_WIN32_KEYED_MUTEX,
     WINED3D_VK_KHR_MAINTENANCE2,
     WINED3D_VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE,
     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION,
@@ -797,6 +802,8 @@ HRESULT wined3d_context_vk_init(struct wined3d_context_vk *context_vk,
 void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context_vk,
         unsigned int wait_semaphore_count, const VkSemaphore *wait_semaphores, const VkPipelineStageFlags *wait_stages,
         unsigned int signal_semaphore_count, const VkSemaphore *signal_semaphores);
+VkResult wined3d_context_vk_submit_keyed_mutex(struct wined3d_context_vk *context_vk,
+        VkDeviceMemory memory, BOOL acquire, uint64_t key, uint32_t timeout);
 void wined3d_context_vk_wait_command_buffer(struct wined3d_context_vk *context_vk, uint64_t id);
 VkDescriptorSet wined3d_context_vk_create_vk_descriptor_set(struct wined3d_context_vk *context_vk,
         VkDescriptorSetLayout vk_set_layout);

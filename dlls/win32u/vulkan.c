@@ -926,6 +926,13 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
 
     if (import_win32)
     {
+        const char *trace_external = getenv( "WINE_VULKAN_EXTERNAL_TRACE" );
+
+        if (trace_external && trace_external[0] != '0')
+            WARN( "EXTERNAL_MEMORY_IMPORT pid %04x type %#x handle %p size %s memory type %u.\n",
+                    GetCurrentProcessId(), import_win32->handleType, import_win32->handle,
+                    wine_dbgstr_longlong( alloc_info->allocationSize ), alloc_info->memoryTypeIndex );
+
         switch (import_win32->handleType)
         {
         case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT:
@@ -1391,6 +1398,18 @@ static VkResult win32u_vkCreateImage( VkDevice client_device, const VkImageCreat
         host_external_info.pNext = create_info->pNext;
         host_external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
         ((VkImageCreateInfo *)create_info)->pNext = &host_external_info; /* cast away const, it has been copied in the thunks */
+    }
+
+    if (external_info)
+    {
+        const char *trace_external = getenv( "WINE_VULKAN_EXTERNAL_TRACE" );
+
+        if (trace_external && trace_external[0] != '0')
+            WARN( "EXTERNAL_IMAGE_CREATE pid %04x format %u extent %ux%ux%u mip %u layers %u "
+                    "tiling %u usage %#x flags %#x host handles %#x.\n", GetCurrentProcessId(),
+                    create_info->format, create_info->extent.width, create_info->extent.height,
+                    create_info->extent.depth, create_info->mipLevels, create_info->arrayLayers,
+                    create_info->tiling, create_info->usage, create_info->flags, external_info->handleTypes );
     }
 
     return device->p_vkCreateImage( device->host.device, create_info, NULL, image );
@@ -2075,6 +2094,10 @@ static VkResult acquire_keyed_mutexes( VkWin32KeyedMutexAcquireReleaseInfoKHR *m
             .deviceIndex = 0,
         };
 
+        TRACE( "Keyed acquire memory %p, mutex %#x, sync %#x, semaphore 0x%s, key 0x%s.\n",
+               memory, memory->mutex, memory->sync, wine_dbgstr_longlong( memory->semaphore ),
+               wine_dbgstr_longlong( mutex_info->pAcquireKeys[i] ) );
+
         if ((status = NtGdiDdDDIAcquireKeyedMutex( &acquire ))) goto error;
         submit.value = memory->semaphore_value = acquire.FenceValue;
         submits[count++] = submit;
@@ -2129,6 +2152,11 @@ static VkResult release_keyed_mutexes( VkWin32KeyedMutexAcquireReleaseInfoKHR *m
             .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             .deviceIndex = 0,
         };
+
+        TRACE( "Keyed release memory %p, mutex %#x, sync %#x, semaphore 0x%s, key 0x%s, value 0x%s.\n",
+               memory, memory->mutex, memory->sync, wine_dbgstr_longlong( memory->semaphore ),
+               wine_dbgstr_longlong( mutex_info->pReleaseKeys[i] ),
+               wine_dbgstr_longlong( release.FenceValue ) );
 
         if ((status = NtGdiDdDDIReleaseKeyedMutex( &release ))) goto failed;
         submit.value = memory->semaphore_value + 1;
@@ -2237,59 +2265,71 @@ static VkResult win32u_vkQueueSubmit( VkQueue client_queue, uint32_t count, cons
 
         if (wait_count) /* extra wait semaphores, need to update arrays and counts */
         {
-            if (!(wait_semaphores = mem_alloc( &pool, (submit->waitSemaphoreCount + wait_count) * sizeof(*wait_semaphores) ))) goto failed;
-            memcpy( wait_semaphores, submit->pWaitSemaphores, submit->waitSemaphoreCount * sizeof(*wait_semaphores) );
+            const uint32_t base_count = submit->waitSemaphoreCount;
+            const uint32_t total_count = base_count + wait_count;
+
+            if (!(wait_semaphores = mem_alloc( &pool, total_count * sizeof(*wait_semaphores) ))) goto failed;
+            memcpy( wait_semaphores, submit->pWaitSemaphores, base_count * sizeof(*wait_semaphores) );
             submit->pWaitSemaphores = wait_semaphores;
 
-            if (!(wait_stages = mem_alloc( &pool, (submit->waitSemaphoreCount + wait_count) * sizeof(*wait_stages) ))) goto failed;
-            memcpy( wait_stages, submit->pWaitDstStageMask, submit->waitSemaphoreCount * sizeof(*wait_stages) );
+            if (!(wait_stages = mem_alloc( &pool, total_count * sizeof(*wait_stages) ))) goto failed;
+            memcpy( wait_stages, submit->pWaitDstStageMask, base_count * sizeof(*wait_stages) );
             submit->pWaitDstStageMask = wait_stages;
 
             for (uint32_t j = 0; j < wait_count; j++)
             {
-                wait_semaphores[submit->waitSemaphoreCount + j] = wait_infos[j].semaphore;
-                wait_stages[submit->waitSemaphoreCount + j] = wait_infos[j].stageMask;
+                wait_semaphores[base_count + j] = wait_infos[j].semaphore;
+                wait_stages[base_count + j] = wait_infos[j].stageMask;
             }
-            submit->waitSemaphoreCount += wait_count;
 
-            if (!(values = mem_alloc( &pool, (timeline->waitSemaphoreValueCount + wait_count) * sizeof(*values) ))) goto failed;
-            memcpy( values, timeline->pWaitSemaphoreValues, timeline->waitSemaphoreValueCount * sizeof(*values) );
-            for (uint32_t j = 0; j < wait_count; j++) values[submit->waitSemaphoreCount + j] = wait_infos[j].value;
-            timeline->waitSemaphoreValueCount = submit->waitSemaphoreCount;
+            if (!(values = mem_alloc( &pool, total_count * sizeof(*values) ))) goto failed;
+            memset( values, 0, base_count * sizeof(*values) );
+            if (timeline->pWaitSemaphoreValues)
+                memcpy( values, timeline->pWaitSemaphoreValues,
+                        min( base_count, timeline->waitSemaphoreValueCount ) * sizeof(*values) );
+            for (uint32_t j = 0; j < wait_count; j++) values[base_count + j] = wait_infos[j].value;
+            timeline->waitSemaphoreValueCount = total_count;
             timeline->pWaitSemaphoreValues = values;
 
             if (device_group)
             {
-                if (!(indexes = mem_alloc( &pool, submit->waitSemaphoreCount * sizeof(*indexes) ))) goto failed;
+                if (!(indexes = mem_alloc( &pool, total_count * sizeof(*indexes) ))) goto failed;
                 memcpy( indexes, device_group->pWaitSemaphoreDeviceIndices, device_group->waitSemaphoreCount * sizeof(*indexes) );
                 for (uint32_t j = 0; j < wait_count; j++) indexes[device_group->waitSemaphoreCount + j] = wait_infos[j].deviceIndex;
-                device_group->waitSemaphoreCount = submit->waitSemaphoreCount;
+                device_group->waitSemaphoreCount = total_count;
                 device_group->pWaitSemaphoreDeviceIndices = indexes;
             }
+            submit->waitSemaphoreCount = total_count;
         }
 
         if (signal_count) /* extra signal semaphores, need to update arrays and counts */
         {
-            if (!(signal_semaphores = mem_alloc( &pool, (submit->signalSemaphoreCount + signal_count) * sizeof(*signal_semaphores) ))) goto failed;
-            memcpy( signal_semaphores, submit->pSignalSemaphores, submit->signalSemaphoreCount * sizeof(*signal_semaphores) );
-            for (uint32_t j = 0; j < signal_count; j++) signal_semaphores[submit->signalSemaphoreCount + j] = signal_infos[j].semaphore;
-            submit->signalSemaphoreCount += signal_count;
+            const uint32_t base_count = submit->signalSemaphoreCount;
+            const uint32_t total_count = base_count + signal_count;
+
+            if (!(signal_semaphores = mem_alloc( &pool, total_count * sizeof(*signal_semaphores) ))) goto failed;
+            memcpy( signal_semaphores, submit->pSignalSemaphores, base_count * sizeof(*signal_semaphores) );
+            for (uint32_t j = 0; j < signal_count; j++) signal_semaphores[base_count + j] = signal_infos[j].semaphore;
             submit->pSignalSemaphores = signal_semaphores;
 
-            if (!(values = mem_alloc( &pool, submit->signalSemaphoreCount * sizeof(*values) ))) goto failed;
-            memcpy( values, timeline->pSignalSemaphoreValues, timeline->signalSemaphoreValueCount * sizeof(*values) );
-            for (uint32_t j = 0; j < signal_count; j++) values[submit->signalSemaphoreCount + j] = signal_infos[j].value;
-            timeline->signalSemaphoreValueCount = submit->signalSemaphoreCount;
+            if (!(values = mem_alloc( &pool, total_count * sizeof(*values) ))) goto failed;
+            memset( values, 0, base_count * sizeof(*values) );
+            if (timeline->pSignalSemaphoreValues)
+                memcpy( values, timeline->pSignalSemaphoreValues,
+                        min( base_count, timeline->signalSemaphoreValueCount ) * sizeof(*values) );
+            for (uint32_t j = 0; j < signal_count; j++) values[base_count + j] = signal_infos[j].value;
+            timeline->signalSemaphoreValueCount = total_count;
             timeline->pSignalSemaphoreValues = values;
 
             if (device_group)
             {
-                if (!(indexes = mem_alloc( &pool, submit->signalSemaphoreCount * sizeof(*indexes) ))) goto failed;
+                if (!(indexes = mem_alloc( &pool, total_count * sizeof(*indexes) ))) goto failed;
                 memcpy( indexes, device_group->pSignalSemaphoreDeviceIndices, device_group->signalSemaphoreCount * sizeof(*indexes) );
                 for (uint32_t j = 0; j < signal_count; j++) indexes[device_group->signalSemaphoreCount + j] = signal_infos[j].deviceIndex;
-                device_group->signalSemaphoreCount = submit->signalSemaphoreCount;
+                device_group->signalSemaphoreCount = total_count;
                 device_group->pSignalSemaphoreDeviceIndices = indexes;
             }
+            submit->signalSemaphoreCount = total_count;
         }
 
         /* insert the timeline semaphore values in the chain if it was there or has been created */

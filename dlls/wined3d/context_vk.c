@@ -630,9 +630,16 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
 {
     struct wined3d_adapter_vk *adapter_vk = wined3d_adapter_vk(context_vk->c.device->adapter);
     struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
-    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+    /* Extension entry points are loaded after vkCreateDevice() and therefore
+     * live in the per-device copy. The context points at the adapter copy,
+     * which only contains entry points obtainable from the instance. */
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
     VkMemoryRequirements memory_requirements;
     VkExternalMemoryImageCreateInfo external_info = {0};
+    VkPhysicalDeviceExternalImageFormatInfo external_format_info = {0};
+    VkExternalImageFormatProperties external_format_properties = {0};
+    VkPhysicalDeviceImageFormatInfo2 format_info = {0};
+    VkImageFormatProperties2 format_properties = {0};
     VkMemoryDedicatedAllocateInfo dedicated_info = {0};
     VkExportMemoryAllocateInfo export_info = {0};
     VkExportMemoryWin32HandleInfoKHR export_handle_info = {0};
@@ -660,7 +667,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
     {
         create_info.pNext = next;
     }
-    create_info.flags = flags;
+    create_info.flags = flags | (shared_handle ? VK_IMAGE_CREATE_ALIAS_BIT : 0);
     create_info.imageType = vk_image_type;
     create_info.format = vk_format;
     create_info.extent.width = width;
@@ -677,6 +684,38 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
     create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     image->command_buffer_id = 0;
+
+    if (shared_handle)
+    {
+        VkExternalMemoryFeatureFlags required_features = *shared_handle
+                ? VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT
+                : VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
+
+        external_format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+        external_format_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+        format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+        format_info.pNext = &external_format_info;
+        format_info.format = vk_format;
+        format_info.type = vk_image_type;
+        format_info.tiling = create_info.tiling;
+        format_info.usage = usage;
+        format_info.flags = create_info.flags;
+        external_format_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+        format_properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+        format_properties.pNext = &external_format_properties;
+
+        vr = VK_CALL(vkGetPhysicalDeviceImageFormatProperties2)(adapter_vk->physical_device,
+                &format_info, &format_properties);
+        if (vr != VK_SUCCESS || !(external_format_properties.externalMemoryProperties.externalMemoryFeatures
+                & required_features))
+        {
+            WARN("External image format %u, usage %#x, flags %#x does not support %s, vr %s, features %#x.\n",
+                    vk_format, usage, create_info.flags, *shared_handle ? "import" : "export",
+                    wined3d_debug_vkresult(vr),
+                    external_format_properties.externalMemoryProperties.externalMemoryFeatures);
+            return FALSE;
+        }
+    }
 
     vr = VK_CALL(vkCreateImage(device_vk->vk_device, &create_info, NULL, &image->vk_image));
     if (vr != VK_SUCCESS)
@@ -769,7 +808,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
         get_memory_win32_handle = vk_info->vk_ops.vkGetMemoryWin32HandleKHR;
         if (!get_memory_win32_handle
                 && vk_info->supported[WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32])
-            get_memory_win32_handle = (void *)VK_CALL(vkGetInstanceProcAddr)(vk_info->instance,
+            get_memory_win32_handle = (void *)VK_CALL(vkGetDeviceProcAddr)(device_vk->vk_device,
                     "vkGetMemoryWin32HandleKHR");
         if (!get_memory_win32_handle)
             vr = VK_ERROR_EXTENSION_NOT_PRESENT;
@@ -2170,12 +2209,12 @@ VkCommandBuffer wined3d_context_vk_get_command_buffer(struct wined3d_context_vk 
     return buffer->vk_command_buffer;
 }
 
-void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context_vk,
+static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_context_vk *context_vk,
         unsigned int wait_semaphore_count, const VkSemaphore *wait_semaphores, const VkPipelineStageFlags *wait_stages,
-        unsigned int signal_semaphore_count, const VkSemaphore *signal_semaphores)
+        unsigned int signal_semaphore_count, const VkSemaphore *signal_semaphores, const void *next)
 {
     struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
-    VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = next};
     const struct wined3d_vk_info *vk_info = context_vk->vk_info;
     struct wined3d_query_pool_vk *pool_vk, *pool_vk_next;
     struct wined3d_command_buffer_vk *buffer;
@@ -2189,8 +2228,8 @@ void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context
 
     buffer = &context_vk->current_command_buffer;
     if (!buffer->vk_command_buffer && !signal_semaphore_count
-            && !wait_semaphore_count && !context_vk->wait_semaphore_count)
-        return;
+            && !wait_semaphore_count && !context_vk->wait_semaphore_count && !next)
+        return VK_SUCCESS;
 
     if (buffer->vk_command_buffer)
     {
@@ -2270,7 +2309,7 @@ void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context
     context_vk->wait_semaphore_count = 0;
 
     if (!buffer->vk_command_buffer)
-        return;
+        return vr;
 
     if (!wined3d_array_reserve((void **)&context_vk->submitted.buffers, &context_vk->submitted.buffers_size,
             context_vk->submitted.buffer_count + 1, sizeof(*context_vk->submitted.buffers)))
@@ -2288,6 +2327,41 @@ void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context
     }
     context_vk->retired_bo_size = 0;
     wined3d_context_vk_cleanup_resources(context_vk, VK_NULL_HANDLE);
+    return vr;
+}
+
+void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context_vk,
+        unsigned int wait_semaphore_count, const VkSemaphore *wait_semaphores, const VkPipelineStageFlags *wait_stages,
+        unsigned int signal_semaphore_count, const VkSemaphore *signal_semaphores)
+{
+    wined3d_context_vk_submit_command_buffer_next(context_vk, wait_semaphore_count,
+            wait_semaphores, wait_stages, signal_semaphore_count, signal_semaphores, NULL);
+}
+
+VkResult wined3d_context_vk_submit_keyed_mutex(struct wined3d_context_vk *context_vk,
+        VkDeviceMemory memory, BOOL acquire, uint64_t key, uint32_t timeout)
+{
+    VkWin32KeyedMutexAcquireReleaseInfoKHR mutex_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
+    };
+
+    if (acquire)
+    {
+        mutex_info.acquireCount = 1;
+        mutex_info.pAcquireSyncs = &memory;
+        mutex_info.pAcquireKeys = &key;
+        mutex_info.pAcquireTimeouts = &timeout;
+    }
+    else
+    {
+        mutex_info.releaseCount = 1;
+        mutex_info.pReleaseSyncs = &memory;
+        mutex_info.pReleaseKeys = &key;
+    }
+
+    return wined3d_context_vk_submit_command_buffer_next(context_vk,
+            0, NULL, NULL, 0, NULL, &mutex_info);
 }
 
 void wined3d_context_vk_wait_command_buffer(struct wined3d_context_vk *context_vk, uint64_t id)

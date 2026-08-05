@@ -331,6 +331,7 @@ struct wayland_surface
     struct wayland_window_config window;
     int content_width, content_height;
     HCURSOR hcursor;
+    UINT dcomp_cursor_id;
 };
 
 /**********************************************************************

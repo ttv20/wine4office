@@ -171,6 +171,7 @@ struct wined3d_physical_device_info
     VkPhysicalDeviceShaderDrawParametersFeatures draw_parameters_features;
     VkPhysicalDeviceTransformFeedbackFeaturesEXT xfb_features;
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT vertex_divisor_features;
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline_semaphore_features;
 
     VkPhysicalDeviceFeatures2 features2;
 };
@@ -302,11 +303,16 @@ static void get_physical_device_info(const struct wined3d_adapter_vk *adapter_vk
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *dynamic_state_features = &info->dynamic_state_features;
     VkPhysicalDeviceHostQueryResetFeatures *host_query_reset_features = &info->host_query_reset_features;
     VkPhysicalDeviceTransformFeedbackFeaturesEXT *xfb_features = &info->xfb_features;
+    VkPhysicalDeviceTimelineSemaphoreFeatures *timeline_semaphore_features = &info->timeline_semaphore_features;
     VkPhysicalDevice physical_device = adapter_vk->physical_device;
     const struct wined3d_vk_info *vk_info = &adapter_vk->vk_info;
     VkPhysicalDeviceFeatures2 *features2 = &info->features2;
 
     memset(info, 0, sizeof(*info));
+
+    timeline_semaphore_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    if (vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX])
+        add_structure(features2, timeline_semaphore_features);
 
     draw_parameters_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
     if (vk_info->api_version >= VK_API_VERSION_1_1)
@@ -2089,6 +2095,7 @@ static BOOL wined3d_init_vulkan(struct wined3d_vk_info *vk_info)
         vk_ops->core_pfn = (void *)VK_CALL(vkGetInstanceProcAddr(instance, #ext_pfn));
     MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties2, vkGetPhysicalDeviceProperties2KHR)
     MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures2, vkGetPhysicalDeviceFeatures2KHR)
+    MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceImageFormatProperties2, vkGetPhysicalDeviceImageFormatProperties2KHR)
 #undef MAP_INSTANCE_FUNCTION
 
     vk_info->instance = instance;
@@ -2296,6 +2303,13 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
 
     get_physical_device_info(adapter_vk, &device_info);
 
+    if (vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX]
+            && !device_info.timeline_semaphore_features.timelineSemaphore)
+    {
+        WARN("Timeline semaphores are unavailable; disabling native Win32 keyed mutex support.\n");
+        vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX] = false;
+    }
+
     if (!device_info.dynamic_state_features.extendedDynamicState)
         adapter_vk->vk_info.supported[WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE] = FALSE;
 
@@ -2410,6 +2424,7 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,    VK_API_VERSION_1_3},
         {VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,    ~0u},
         {VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,            VK_API_VERSION_1_2},
+        {VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,        ~0u},
         {VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME,       VK_API_VERSION_1_2},
         {VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME,       ~0u},
         {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME,          ~0u},
@@ -2418,6 +2433,8 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_KHR_MAINTENANCE2_EXTENSION_NAME,                VK_API_VERSION_1_1},
         {VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,             VK_API_VERSION_1_1},
         {VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,       ~0u},
+        {VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,    ~0u},
+        {VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME,           ~0u},
         {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,VK_API_VERSION_1_2},
         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,    VK_API_VERSION_1_1},
         {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,      VK_API_VERSION_1_1},
@@ -2440,11 +2457,14 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,     WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE2},
         {VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,     WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE3},
         {VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,             WINED3D_VK_EXT_HOST_QUERY_RESET},
+        {VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,         WINED3D_VK_EXT_QUEUE_FAMILY_FOREIGN},
         {VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME,        WINED3D_VK_EXT_SAMPLER_FILTER_MINMAX},
         {VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME,        WINED3D_VK_EXT_SHADER_STENCIL_EXPORT},
         {VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME,           WINED3D_VK_EXT_TRANSFORM_FEEDBACK},
         {VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME,     WINED3D_VK_EXT_VERTEX_ATTRIBUTE_DIVISOR},
         {VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,        WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32},
+        {VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,     WINED3D_VK_KHR_EXTERNAL_SEMAPHORE_WIN32},
+        {VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME,            WINED3D_VK_KHR_WIN32_KEYED_MUTEX},
         {VK_KHR_MAINTENANCE2_EXTENSION_NAME,                 WINED3D_VK_KHR_MAINTENANCE2},
         {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, WINED3D_VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE},
         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION},

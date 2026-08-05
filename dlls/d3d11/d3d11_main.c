@@ -164,10 +164,6 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
             adapter, debug_d3d_driver_type(driver_type), swrast, flags, feature_levels, levels, sdk_version,
             device_out, obtained_feature_level, immediate_context);
 
-    if (GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
-        WARN("OFFICE_D3D11 CreateDevice adapter %p driver_type %s flags %#x requested levels %u.\n",
-                adapter, debug_d3d_driver_type(driver_type), flags, levels);
-
     if (device_out)
         *device_out = NULL;
     if (obtained_feature_level)
@@ -276,10 +272,6 @@ static HRESULT d3d11_create_device(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver
 
     if (obtained_feature_level)
         *obtained_feature_level = ID3D11Device_GetFeatureLevel(device);
-
-    if (GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
-        WARN("OFFICE_D3D11 CreateDevice success device %p feature level %#x.\n",
-                device, ID3D11Device_GetFeatureLevel(device));
 
     if (immediate_context)
         ID3D11Device_GetImmediateContext(device, immediate_context);

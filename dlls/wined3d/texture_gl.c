@@ -2651,6 +2651,9 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
 
 static const struct wined3d_texture_ops texture_gl_ops =
 {
+    NULL,
+    NULL,
+    NULL,
     wined3d_texture_gl_prepare_location,
     wined3d_texture_gl_load_location,
     wined3d_texture_gl_unload_location,

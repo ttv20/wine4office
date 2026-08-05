@@ -99,6 +99,7 @@ struct d3d11_shared_texture
     D3DKMT_HANDLE global_keyed_mutex;
     D3DKMT_HANDLE sync_object;
     HANDLE backing_handle;
+    BOOL native_backing;
     HANDLE mapping;
     void *view;
     SIZE_T mapping_size;

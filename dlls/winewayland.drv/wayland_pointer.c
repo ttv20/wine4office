@@ -134,6 +134,8 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
             'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
     static const WCHAR direct_input_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
             'h','a','r','d','w','a','r','e','_','i','n','p','u','t',0};
+    static const WCHAR cursor_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','w','i','n','d','o','w',0};
     HWND target, parent, input_window, root;
 
     if (keyboard)
@@ -155,6 +157,7 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
     input_window = parent;
     NtUserSetProp(parent, input_prop, input_window);
     NtUserSetProp(input_window, direct_input_prop, (HANDLE)(ULONG_PTR)0x57444952);
+    NtUserSetProp(input_window, cursor_window_prop, hwnd);
     if ((root = NtUserGetAncestor(target, GA_ROOT)))
         NtUserSetProp(root, keyboard_prop, input_window);
     TRACE("DComp input presentation hwnd %p -> target %p parent %p input %p root %p\n",
@@ -171,6 +174,8 @@ static HWND wayland_get_pointer_input_hwnd(HWND hwnd)
 {
     return wayland_get_input_hwnd_internal(hwnd, FALSE);
 }
+
+static void wayland_pointer_update_dcomp_cursor(HWND hwnd);
 
 static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 {
@@ -213,6 +218,7 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
           screen.x, screen.y);
 
     NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), SEND_HWMSG_RAWINPUT, &input, 0);
+    wayland_pointer_update_dcomp_cursor(hwnd);
 }
 
 static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
@@ -497,6 +503,7 @@ static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_point
     TRACE("hwnd=%p axis=%u value120=%d\n", hwnd, axis, value120);
 
     NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), SEND_HWMSG_RAWINPUT, &input, 0);
+    wayland_pointer_update_dcomp_cursor(hwnd);
 }
 
 static void pointer_handle_axis_discrete(void *data, struct wl_pointer *wl_pointer,
@@ -938,6 +945,39 @@ static BOOL wayland_pointer_set_cursor_shape(HCURSOR hcursor)
     return TRUE;
 }
 
+static BOOL wayland_pointer_set_cursor_shape_id(UINT cursor_id)
+{
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    enum wp_cursor_shape_device_v1_shape shape = 0;
+    uint32_t proto_version;
+    unsigned int i;
+
+    if (!process_wayland.wp_cursor_shape_manager_v1 || !cursor_id) return FALSE;
+
+    proto_version = wp_cursor_shape_manager_v1_get_version(
+        process_wayland.wp_cursor_shape_manager_v1);
+    for (i = 0; user32_cursors[i].id; ++i)
+    {
+        if (user32_cursors[i].id != cursor_id) continue;
+        shape = user32_cursors[i].shape;
+        break;
+    }
+    if (!shape || (shape >= WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK && proto_version < 2))
+        return FALSE;
+
+    if (!pointer->wp_cursor_shape_device_v1)
+    {
+        pointer->wp_cursor_shape_device_v1 =
+            wp_cursor_shape_manager_v1_get_pointer(
+                process_wayland.wp_cursor_shape_manager_v1, pointer->wl_pointer);
+        if (!pointer->wp_cursor_shape_device_v1) return FALSE;
+    }
+
+    wp_cursor_shape_device_v1_set_shape(pointer->wp_cursor_shape_device_v1,
+                                        pointer->enter_serial, shape);
+    return TRUE;
+}
+
 static void wayland_pointer_clear_cursor_shape(void)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
@@ -949,13 +989,70 @@ static void wayland_pointer_clear_cursor_shape(void)
     }
 }
 
+static void wayland_pointer_update_dcomp_cursor(HWND hwnd)
+{
+    static const WCHAR cursor_id_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','i','d',0};
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    struct wayland_surface *surface;
+    struct wayland_win_data *data;
+    UINT value, cursor_id;
+
+    if (!(value = (UINT)(ULONG_PTR)NtUserGetProp(hwnd, cursor_id_prop))) return;
+    cursor_id = value - 1;
+
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    if (!(surface = data->wayland_surface) || surface->dcomp_cursor_id == value)
+    {
+        wayland_win_data_release(data);
+        return;
+    }
+    surface->dcomp_cursor_id = value;
+    wayland_win_data_release(data);
+
+    pthread_mutex_lock(&pointer->mutex);
+    if (pointer->focused_hwnd == hwnd)
+    {
+        TRACE("applying published DComp cursor id %#x to presentation hwnd %p\n",
+              cursor_id, hwnd);
+        if (wayland_pointer_set_cursor_shape_id(cursor_id))
+        {
+            wayland_pointer_clear_cursor_surface();
+        }
+        else
+        {
+            wayland_pointer_clear_cursor_shape();
+            wayland_pointer_clear_cursor_surface();
+            wl_pointer_set_cursor(pointer->wl_pointer, pointer->enter_serial,
+                                  NULL, 0, 0);
+        }
+        wl_display_flush(process_wayland.wl_display);
+    }
+    pthread_mutex_unlock(&pointer->mutex);
+}
+
 static void wayland_set_cursor(HWND hwnd, HCURSOR hcursor, BOOL use_hcursor)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
     struct wayland_surface *surface;
     struct wayland_win_data *data;
+    HWND focused_hwnd;
     double scale;
     BOOL reapply_clip = FALSE;
+
+    /* Hardware input for a detached DirectComposition presentation surface
+     * is routed to its host window. WM_SETCURSOR is consequently handled by
+     * the host, but only the focused presentation window owns the Wayland
+     * surface on which the compositor cursor can be set. Apply the host's
+     * cursor update to that focused surface. */
+    focused_hwnd = wayland_pointer_get_focused_hwnd();
+    if (focused_hwnd && focused_hwnd != hwnd &&
+        wayland_get_pointer_input_hwnd(focused_hwnd) == hwnd)
+    {
+        TRACE("redirecting cursor hwnd %p to focused presentation hwnd %p\n",
+              hwnd, focused_hwnd);
+        hwnd = focused_hwnd;
+    }
 
     if ((data = wayland_win_data_get(hwnd)))
     {

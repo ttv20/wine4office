@@ -2956,6 +2956,10 @@ ULONG __cdecl wined3d_texture_decref(struct wined3d_texture *texture);
 void __cdecl wined3d_texture_disable_shared_handle(struct wined3d_texture *texture);
 HRESULT __cdecl wined3d_texture_get_dc(struct wined3d_texture *texture, unsigned int sub_resource_idx, HDC *dc);
 HRESULT __cdecl wined3d_texture_get_shared_handle(struct wined3d_texture *texture, HANDLE *handle);
+HRESULT __cdecl wined3d_texture_sync_shared(struct wined3d_texture *texture,
+        BOOL acquire, uint64_t key, uint32_t timeout);
+HRESULT __cdecl wined3d_texture_reopen_shared(struct wined3d_texture *texture, HANDLE handle);
+HRESULT __cdecl wined3d_texture_create_shared_sync(struct wined3d_texture *texture, HANDLE *handle);
 unsigned int __cdecl wined3d_texture_get_level_count(const struct wined3d_texture *texture);
 unsigned int __cdecl wined3d_texture_get_lod(const struct wined3d_texture *texture);
 unsigned int __cdecl wined3d_texture_set_lod(struct wined3d_texture *texture, unsigned int lod);

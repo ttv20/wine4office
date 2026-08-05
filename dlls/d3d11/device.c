@@ -790,27 +790,12 @@ static void STDMETHODCALLTYPE d3d11_device_context_Draw(ID3D11DeviceContext4 *if
     wined3d_device_context_draw(context->wined3d_context, start_vertex_location, vertex_count, 0, 0);
 }
 
-static BOOL d3d11_target_diag_texture(ID3D11Resource *resource, D3D11_TEXTURE2D_DESC *desc)
-{
-    ID3D11Texture2D *texture;
-
-    if (!resource || !GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0)
-            || FAILED(ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture)))
-        return FALSE;
-
-    ID3D11Texture2D_GetDesc(texture, desc);
-    ID3D11Texture2D_Release(texture);
-    return desc->Format == DXGI_FORMAT_NV12 && desc->Width == 700 && desc->Height == 394;
-}
-
 static HRESULT STDMETHODCALLTYPE d3d11_device_context_Map(ID3D11DeviceContext4 *iface, ID3D11Resource *resource,
         UINT subresource_idx, D3D11_MAP map_type, UINT map_flags, D3D11_MAPPED_SUBRESOURCE *mapped_subresource)
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_resource;
     struct wined3d_map_desc map_desc;
-    D3D11_TEXTURE2D_DESC desc;
-    BOOL target;
     HRESULT hr;
 
     TRACE("iface %p, resource %p, subresource_idx %u, map_type %u, map_flags %#x, mapped_subresource %p.\n",
@@ -825,11 +810,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Map(ID3D11DeviceContext4 *
             && map_type != D3D11_MAP_WRITE_DISCARD && map_type != D3D11_MAP_WRITE_NO_OVERWRITE)
         return E_INVALIDARG;
 
-    target = d3d11_target_diag_texture(resource, &desc);
-    if (target)
-        WARN("OFFICE_D3D11 NV12 Map begin context %p resource %p subresource %u type %u flags %#x.\n",
-                iface, resource, subresource_idx, map_type, map_flags);
-
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
 
     if (SUCCEEDED(hr = wined3d_device_context_map(context->wined3d_context, wined3d_resource, subresource_idx,
@@ -840,11 +820,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Map(ID3D11DeviceContext4 *
         mapped_subresource->DepthPitch = map_desc.slice_pitch;
     }
 
-    if (target)
-        WARN("OFFICE_D3D11 NV12 Map end resource %p hr %#lx data %p row_pitch %u depth_pitch %u.\n",
-                resource, hr, mapped_subresource->pData, mapped_subresource->RowPitch,
-                mapped_subresource->DepthPitch);
-
     return hr;
 }
 
@@ -853,13 +828,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_Unmap(ID3D11DeviceContext4 *i
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_resource;
-    D3D11_TEXTURE2D_DESC desc;
 
     TRACE("iface %p, resource %p, subresource_idx %u.\n", iface, resource, subresource_idx);
-
-    if (d3d11_target_diag_texture(resource, &desc))
-        WARN("OFFICE_D3D11 NV12 Unmap context %p resource %p subresource %u.\n",
-                iface, resource, subresource_idx);
 
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
 
@@ -1371,7 +1341,6 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion(ID3D11D
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_dst_resource, *wined3d_src_resource;
     struct wined3d_box wined3d_src_box;
-    D3D11_TEXTURE2D_DESC desc;
 
     TRACE("iface %p, dst_resource %p, dst_subresource_idx %u, dst_x %u, dst_y %u, dst_z %u, "
             "src_resource %p, src_subresource_idx %u, src_box %p.\n",
@@ -1380,10 +1349,6 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopySubresourceRegion(ID3D11D
 
     if (!dst_resource || !src_resource)
         return;
-
-    if (d3d11_target_diag_texture(dst_resource, &desc) || d3d11_target_diag_texture(src_resource, &desc))
-        WARN("OFFICE_D3D11 NV12 CopySubresourceRegion context %p dst %p src %p.\n",
-                iface, dst_resource, src_resource);
 
     if (src_box)
         wined3d_box_set(&wined3d_src_box, src_box->left, src_box->top,
@@ -1400,13 +1365,8 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopyResource(ID3D11DeviceCont
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_dst_resource, *wined3d_src_resource;
-    D3D11_TEXTURE2D_DESC desc;
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst_resource, src_resource);
-
-    if (d3d11_target_diag_texture(dst_resource, &desc) || d3d11_target_diag_texture(src_resource, &desc))
-        WARN("OFFICE_D3D11 NV12 CopyResource context %p dst %p src %p.\n",
-                iface, dst_resource, src_resource);
 
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
@@ -1420,14 +1380,9 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource(ID3D11Devic
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_resource;
     struct wined3d_box wined3d_box;
-    D3D11_TEXTURE2D_DESC desc;
 
     TRACE("iface %p, resource %p, subresource_idx %u, box %p, data %p, row_pitch %u, depth_pitch %u.\n",
             iface, resource, subresource_idx, box, data, row_pitch, depth_pitch);
-
-    if (d3d11_target_diag_texture(resource, &desc))
-        WARN("OFFICE_D3D11 NV12 UpdateSubresource context %p resource %p subresource %u row_pitch %u depth_pitch %u.\n",
-                iface, resource, subresource_idx, row_pitch, depth_pitch);
 
     if (box)
         wined3d_box_set(&wined3d_box, box->left, box->top, box->right, box->bottom, box->front, box->back);
@@ -4121,13 +4076,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateTexture2D(ID3D11Device5 *ifa
     HRESULT hr;
 
     TRACE("iface %p, desc %p, data %p, texture %p.\n", iface, desc, data, texture);
-    if (desc && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
-        WARN("OFFICE_D3D11 CreateTexture2D device %p size %ux%u mips %u array %u format %#x "
-                "samples %u/%u usage %#x bind %#x cpu %#x misc %#x.\n", iface,
-                desc->Width, desc->Height, desc->MipLevels, desc->ArraySize, desc->Format,
-                desc->SampleDesc.Count, desc->SampleDesc.Quality, desc->Usage,
-                desc->BindFlags, desc->CPUAccessFlags, desc->MiscFlags);
-
     if (FAILED(hr = d3d_texture2d_create(device, desc, NULL, data, NULL, FALSE, &object)))
         return hr;
 
@@ -4158,16 +4106,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateShaderResourceView(ID3D11Dev
 {
     struct d3d_device *device = impl_from_ID3D11Device5(iface);
     struct d3d_shader_resource_view *object;
-    D3D11_TEXTURE2D_DESC texture_desc;
-    BOOL target;
     HRESULT hr;
 
     TRACE("iface %p, resource %p, desc %p, view %p.\n", iface, resource, desc, view);
-
-    target = d3d11_target_diag_texture(resource, &texture_desc);
-    if (target)
-        WARN("OFFICE_D3D11 NV12 CreateShaderResourceView begin device %p resource %p format %#x dimension %#x.\n",
-                iface, resource, desc ? desc->Format : 0, desc ? desc->ViewDimension : 0);
 
     *view = NULL;
 
@@ -4176,15 +4117,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateShaderResourceView(ID3D11Dev
 
     if (FAILED(hr = d3d_shader_resource_view_create(device, resource, desc, &object)))
     {
-        if (target)
-            WARN("OFFICE_D3D11 NV12 CreateShaderResourceView failed hr %#lx.\n", hr);
         return hr;
     }
 
     *view = &object->ID3D11ShaderResourceView_iface;
-
-    if (target)
-        WARN("OFFICE_D3D11 NV12 CreateShaderResourceView success view %p.\n", *view);
 
     return S_OK;
 }
@@ -4212,24 +4148,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateRenderTargetView(ID3D11Devic
         ID3D11Resource *resource, const D3D11_RENDER_TARGET_VIEW_DESC *desc, ID3D11RenderTargetView **view)
 {
     struct d3d_device *device = impl_from_ID3D11Device5(iface);
-    D3D11_TEXTURE2D_DESC texture_desc = {0};
-    ID3D11Texture2D *texture2d = NULL;
     struct d3d_rendertarget_view *object;
     HRESULT hr;
 
     TRACE("iface %p, resource %p, desc %p, view %p.\n", iface, resource, desc, view);
-
-    if (resource && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0)
-            && SUCCEEDED(ID3D11Resource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture2d)))
-    {
-        ID3D11Texture2D_GetDesc(texture2d, &texture_desc);
-        WARN("OFFICE_D3D11 CreateRenderTargetView device %p resource %p size %ux%u format %#x "
-                "bind %#x misc %#x view_format %#x dimension %#x.\n", iface, resource,
-                texture_desc.Width, texture_desc.Height, texture_desc.Format,
-                texture_desc.BindFlags, texture_desc.MiscFlags,
-                desc ? desc->Format : 0, desc ? desc->ViewDimension : 0);
-        ID3D11Texture2D_Release(texture2d);
-    }
 
     *view = NULL;
 
@@ -5027,10 +4949,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
                 | D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
     }
 
-    if (format == DXGI_FORMAT_NV12 && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
-        WARN("OFFICE_D3D11 NV12 CheckFormatSupport result flags %#x feature level %#x.\n",
-                *format_support, feature_level);
-
     return *format_support ? S_OK : E_FAIL;
 }
 
@@ -5615,6 +5533,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 
     shared->allocation = allocation.hAllocation;
     shared->keyed_mutex = open.hKeyedMutex;
     shared->sync_object = open.hSyncObject;
+    shared->native_backing = metadata.native_backing;
 
     return d3d11_device_finish_open_shared_texture(device, &metadata, shared, handle, iid, resource);
 }
@@ -5667,10 +5586,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateTexture2D1(ID3D11Device5 *if
         ID3D11Texture2D1 **texture)
 {
     FIXME("iface %p, desc %p, initial_data %p, texture %p stub!\n", iface, desc, initial_data, texture);
-    if (desc && GetEnvironmentVariableA("WINE_D3D11_TARGET_DIAG", NULL, 0))
-        WARN("OFFICE_D3D11 CreateTexture2D1 size %ux%u format %#x bind %#x misc %#x layout %#x STUB.\n",
-                desc->Width, desc->Height, desc->Format, desc->BindFlags, desc->MiscFlags, desc->TextureLayout);
-
     return E_NOTIMPL;
 }
 
