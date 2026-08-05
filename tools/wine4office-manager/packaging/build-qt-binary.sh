@@ -41,6 +41,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --exclude-module PySide6 \
     --exclude-module wine4office_qt \
     --hidden-import wine4office_backend \
+    --hidden-import wine4office_incident \
     "$HERE/wine4office_preload.py"
 
 "$PYTHON" -m PyInstaller \
@@ -59,6 +60,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --add-data "$BUILD/CHANNEL:." \
     --add-binary "$BUILD/helper-dist/Wine4OfficePreloadWorker:." \
     --hidden-import wine4office_backend \
+    --hidden-import wine4office_incident \
     --hidden-import wine4office_post_install \
     --hidden-import wine4office_qt \
     --hidden-import zstandard \
