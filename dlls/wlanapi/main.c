@@ -173,6 +173,24 @@ DWORD WINAPI WlanQueryInterface(HANDLE handle, const GUID *guid, WLAN_INTF_OPCOD
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
+DWORD WINAPI WlanSetInterface(HANDLE handle, const GUID *guid, WLAN_INTF_OPCODE opcode,
+                              DWORD data_size, const void *data, void *reserved)
+{
+    struct wine_wlan *wlan;
+
+    FIXME("(%p, %s, %#x, %lu, %p, %p) semi-stub\n", handle,
+          wine_dbgstr_guid(guid), opcode, data_size, data, reserved);
+
+    if (!handle || !guid || !data || reserved)
+        return ERROR_INVALID_PARAMETER;
+
+    wlan = handle_index(handle);
+    if (!wlan)
+        return ERROR_INVALID_HANDLE;
+
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
 DWORD WINAPI WlanHostedNetworkQueryProperty(HANDLE handle, WLAN_HOSTED_NETWORK_OPCODE opcode,
                                             DWORD *data_size, void **data,
                                             WLAN_OPCODE_VALUE_TYPE *opcode_type, void *reserved)
