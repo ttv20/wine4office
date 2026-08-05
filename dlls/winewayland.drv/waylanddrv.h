@@ -327,6 +327,7 @@ struct wayland_surface
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
     BOOL plasma_positioned;
+    BOOL dcomp_overlay;
     BOOL stacked;
     struct wayland_window_config window;
     int content_width, content_height;
@@ -425,6 +426,7 @@ struct wayland_win_data
     BOOL contents_presented;
     BOOL dcomp_only_host;
     BOOL plasma_positioned;
+    BOOL dcomp_overlay;
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);

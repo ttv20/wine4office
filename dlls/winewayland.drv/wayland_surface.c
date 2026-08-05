@@ -433,7 +433,7 @@ static void wayland_surface_set_plasma_position(struct wayland_surface *surface)
 {
     POINT position = {surface->window.rect.left, surface->window.rect.top};
 
-    if (!surface->org_kde_plasma_surface ||
+    if (!surface->org_kde_plasma_surface || surface->dcomp_overlay ||
         (surface->plasma_position_valid &&
          surface->plasma_position.x == position.x &&
          surface->plasma_position.y == position.y))
@@ -458,6 +458,9 @@ static void wayland_surface_enable_plasma_positioning(struct wayland_surface *su
 
     if (skip_taskbar)
     {
+        if (surface->dcomp_overlay)
+            org_kde_plasma_surface_set_role(surface->org_kde_plasma_surface,
+                    ORG_KDE_PLASMA_SURFACE_ROLE_NOTIFICATION);
         org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, 1);
         org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, 1);
     }

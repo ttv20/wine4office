@@ -342,6 +342,17 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
         const DXGI_PRESENT_PARAMETERS *parameters);
 static HRESULT d3d11_swapchain_restore_present1_contents(struct d3d11_swapchain *swapchain);
 
+static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+{
+    HWND root;
+
+    if (!GetPropW(window, L"__wine_dcomp_client_rect")) return GetWindowRect(target, rect);
+    if ((root = GetAncestor(target, GA_ROOT))) target = root;
+    if (!GetClientRect(target, rect)) return FALSE;
+    MapWindowPoints(target, NULL, (POINT *)rect, 2);
+    return TRUE;
+}
+
 static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
 {
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
@@ -383,7 +394,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
         return;
     }
 
-    if (!GetWindowRect(target, &rect)) return;
+    if (!d3d11_composition_window_get_rect(window, target, &rect)) return;
     if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
             && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
     {

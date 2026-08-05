@@ -39,6 +39,8 @@ static const WCHAR dcomp_foreign_parent_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','p','a','r','e','n','t','_','a','t','o','m',0};
 static const WCHAR dcomp_detached_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_background_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
 
 
 static int wayland_win_data_cmp_rb(const void *key,
@@ -421,6 +423,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     if (input_region) wl_region_destroy(input_region);
 
     surface->plasma_positioned = role == WAYLAND_SURFACE_ROLE_TOPLEVEL && data->plasma_positioned;
+    surface->dcomp_overlay = data->dcomp_overlay;
 
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
@@ -828,6 +831,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     data->owner = !managed && owner && owner != hwnd ? owner : NULL;
     data->dcomp_only_host = notification;
     data->plasma_positioned = notification || NtUserGetProp(hwnd, dcomp_detached_window_prop);
+    data->dcomp_overlay = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
+                          !NtUserGetProp(hwnd, dcomp_background_prop);
 
     if (!surface)
     {
