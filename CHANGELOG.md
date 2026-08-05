@@ -16,6 +16,7 @@
 - Add the Windows AppCapability access operations used by modern Office
   components.
 - Add Media Foundation sensor monitoring and Office network-manager detection.
+- Make Teams camera video render through shared NV12 textures.
 
 [Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.9...wine4office-v0.1.10)
 

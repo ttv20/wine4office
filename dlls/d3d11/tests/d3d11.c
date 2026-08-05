@@ -36529,6 +36529,8 @@ static void test_nv12(void)
         release_test_context(&test_context);
         return;
     }
+    ok(support & D3D11_FORMAT_SUPPORT_RENDER_TARGET,
+            "Expected NV12 render-target support, got flags %#x.\n", support);
 
     bytecode = compile_shader(cs_code, sizeof(cs_code) - 1, "cs_5_0");
     hr = ID3D11Device_CreateComputeShader(device, ID3D10Blob_GetBufferPointer(bytecode),

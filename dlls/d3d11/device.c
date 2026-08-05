@@ -4912,6 +4912,21 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
 
         *format_support |= flag_mapping[i].flag;
     }
+
+    /* Vulkan does not expose a multi-planar image itself as a colour
+     * attachment, but D3D11 render-target views select one plane at a time.
+     * Report NV12 render-target support when both plane formats can be used as
+     * 2D render targets. This also makes the reported capability agree with
+     * CreateTexture2D() and CreateRenderTargetView(). */
+    if (format == DXGI_FORMAT_NV12
+            && (*format_support & D3D11_FORMAT_SUPPORT_TEXTURE2D)
+            && wined3d_check_device_format(wined3d, wined3d_adapter, params.device_type,
+                    WINED3DFMT_UNKNOWN, 0, WINED3D_BIND_RENDER_TARGET,
+                    WINED3D_RTYPE_TEXTURE_2D, WINED3DFMT_R8_UINT) == WINED3D_OK
+            && wined3d_check_device_format(wined3d, wined3d_adapter, params.device_type,
+                    WINED3DFMT_UNKNOWN, 0, WINED3D_BIND_RENDER_TARGET,
+                    WINED3D_RTYPE_TEXTURE_2D, WINED3DFMT_R8G8_UINT) == WINED3D_OK)
+        *format_support |= D3D11_FORMAT_SUPPORT_RENDER_TARGET;
     wined3d_mutex_unlock();
 
     if (feature_level < D3D_FEATURE_LEVEL_10_0)
