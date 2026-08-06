@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Disable XVidMode by default for new and existing X11 Office environments to
+  prevent XRDP gamma failures from crashing installers and Office apps.
+
 ## 0.1.11-rc.1 — 2026-08-06 (prerelease)
 
 - Make the standalone Manager use KDE's native theme while preserving its
