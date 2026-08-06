@@ -78,7 +78,7 @@ APP_META = {
         "exe": "EXCEL.EXE",
         "icon": "wine4office-excel.svg",
         "categories": "Office;Spreadsheet;",
-        "mime": "application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;",
+        "mime": "text/csv;application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;",
     },
     "powerpoint": {
         "name": "Microsoft PowerPoint (Wine4Office)",
@@ -322,6 +322,8 @@ def default_config() -> dict:
         "include_prereleases": False,
         "automatic_update_checks": False,
         "automatic_update_checks_prompted": False,
+        "incident_reporting_mode": "ask",
+        "reliability_prompted": False,
     }
 
 
@@ -1026,8 +1028,16 @@ def _windows_document_path(document: str, wine: Path, env: dict[str, str]) -> st
 
 
 
-def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
-               documents: Iterable[str] = (), use_x11: bool = True) -> int:
+def launch_app_process(
+        prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
+        documents: Iterable[str] = (), use_x11: bool = True,
+        *, capture_diagnostics: bool = False) -> subprocess.Popen:
+    """Launch one Office application and return its process handle.
+
+    Diagnostic capture is deliberately narrow: Wine's noisy default channels are
+    disabled and only exception messages are enabled.  The supervisor drains the
+    pipe into a bounded ring so a broken application cannot fill the user's disk.
+    """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     executable = find_office_app(str(prefix), app)
@@ -1041,9 +1051,24 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
     if app == "outlook":
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)
-    process = subprocess.Popen([str(wine), str(executable), *arguments], env=env,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               start_new_session=True)
+    if capture_diagnostics:
+        env["WINEDEBUG"] = "-all,+seh,+timestamp"
+        stdout = subprocess.PIPE
+        stderr = subprocess.STDOUT
+    else:
+        stdout = subprocess.DEVNULL
+        stderr = subprocess.DEVNULL
+    return subprocess.Popen(
+        [str(wine), str(executable), *arguments], env=env,
+        stdout=stdout, stderr=stderr, start_new_session=True,
+    )
+
+
+def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
+               documents: Iterable[str] = (), use_x11: bool = True) -> int:
+    process = launch_app_process(
+        prefix_value, wine_value, app, helper, documents, use_x11,
+    )
     return process.pid
 
 
@@ -1341,6 +1366,8 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         'export PATH="${wine%/*}${PATH:+:$PATH}"',
         'export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-riched20=n;mscoree=;mshtml=b}"',
         'config_file="${XDG_CONFIG_HOME:-"$HOME/.config"}/wine4office/config.json"',
+        'host_display=${DISPLAY-}',
+        'host_wayland_display=${WAYLAND_DISPLAY-}',
         "use_x11=true",
         'if [[ -r "$config_file" ]]; then',
         "    while IFS= read -r config_line; do",
@@ -1416,12 +1443,80 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         ])
     lines.extend([
         "documents=()",
+        "materialization_root=",
         'winepath="${wine%/*}/winepath"',
+        "decode_file_url_path() {",
+        "    local encoded=$1 decoded= byte hex",
+        "    while [[ -n $encoded ]]; do",
+        "        if [[ $encoded =~ ^%([[:xdigit:]]{2})(.*)$ ]]; then",
+        '            hex=${BASH_REMATCH[1]}',
+        r'''            printf -v byte '%b' "\\x$hex"''',
+        '            decoded+=$byte',
+        '            encoded=${BASH_REMATCH[2]}',
+        "        else",
+        '            decoded+=${encoded:0:1}',
+        '            encoded=${encoded:1}',
+        "        fi",
+        "    done",
+        "    printf '%s' \"$decoded\"",
+        "}",
         'for document in "$@"; do',
+        '    local_document=$document',
+        '    if [[ $document == file://* ]]; then',
+        '        encoded_path=${document#file://}',
+        '        case $encoded_path in',
+        '            /*) ;;',
+        '            localhost/*) encoded_path=/${encoded_path#localhost/} ;;',
+        '            *) encoded_path= ;;',
+        '        esac',
+        '        if [[ -n $encoded_path ]]; then',
+        r'            encoded_path=${encoded_path%%\?*}',
+        r'            encoded_path=${encoded_path%%\#*}',
+        '            local_document=$(decode_file_url_path "$encoded_path")',
+        '        fi',
+        '    fi',
+        '    if [[ $local_document =~ ^[[:alpha:]][[:alnum:]+.-]*: ]]; then',
+        '        kio_client=',
+        '        for candidate in kioclient kioclient6 kioclient5; do',
+        '            if command -v "$candidate" >/dev/null 2>&1; then',
+        '                kio_client=$(command -v "$candidate")',
+        '                break',
+        '            fi',
+        '        done',
+        '        if [[ -z $kio_client ]]; then',
+        "            printf 'Wine4Office launcher: cannot open non-local document without KIO: %s\\n' \"$document\" >&2",
+        "            exit 1",
+        "        fi",
+        '        if [[ -z $materialization_root ]]; then',
+        '            runtime_root=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}',
+        '            materialization_base="$runtime_root/wine4office-open"',
+        '            mkdir -p -- "$materialization_base"',
+        '            chmod 700 "$materialization_base"',
+        '            materialization_root=$(mktemp -d "$materialization_base/launch.XXXXXX")',
+        '        fi',
+        '        download_dir=$(mktemp -d "$materialization_root/item.XXXXXX")',
+        '        if [[ -n $host_wayland_display || -n $host_display ]]; then',
+        '            kio_environment=(env "DISPLAY=$host_display" "WAYLAND_DISPLAY=$host_wayland_display")',
+        '        else',
+        '            kio_environment=(env QT_QPA_PLATFORM=offscreen)',
+        '        fi',
+        '        if ! "${kio_environment[@]}" "$kio_client" copy "$document" "$download_dir/" >/dev/null; then',
+        "            printf 'Wine4Office launcher: could not copy non-local document: %s\\n' \"$document\" >&2",
+        "            exit 1",
+        "        fi",
+        '        shopt -s nullglob dotglob',
+        '        downloaded=("$download_dir"/*)',
+        '        shopt -u nullglob dotglob',
+        '        if (( ${#downloaded[@]} != 1 )) || [[ ! -f ${downloaded[0]} ]]; then',
+        "            printf 'Wine4Office launcher: KIO did not produce one local file for: %s\\n' \"$document\" >&2",
+        "            exit 1",
+        "        fi",
+        '        local_document=${downloaded[0]}',
+        '    fi',
         '    if [[ -x "$winepath" ]]; then',
-        '        windows_document=$("$winepath" -w "$document")',
+        '        windows_document=$("$winepath" -w "$local_document")',
         "    else",
-        '        windows_document=$("$wine" winepath.exe -w "$document")',
+        '        windows_document=$("$wine" winepath.exe -w "$local_document")',
         "    fi",
         '    if [[ -z "$windows_document" ]]; then',
         '        printf \'Wine4Office launcher: could not convert document path: %s\\n\' "$document" >&2',
@@ -1468,7 +1563,7 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: PathValue, wine_valu
         )
         command = [str(launcher)]
         if meta["mime"]:
-            command.append("%F")
+            command.append("%U")
         filename = f"wine4office-{app}.desktop"
         menu_file = data_home() / "applications" / filename
         write_desktop_file(menu_file, meta["name"], f"Launch {meta['name']} in {prefix}", command,
@@ -1527,7 +1622,7 @@ def refresh_managed_app_shortcuts(prefix_value: PathValue, wine_value: PathValue
         )
         command = [str(launcher)]
         if meta["mime"]:
-            command.append("%F")
+            command.append("%U")
         for path in paths:
             write_desktop_file(
                 path, meta["name"], f"Launch {meta['name']} in {prefix}",

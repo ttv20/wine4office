@@ -17,6 +17,18 @@ else:
     HELPER = HERE / "register-office-cloud-fonts.sh"
 
 import wine4office_backend as backend  # noqa: E402
+import wine4office_incident as incident  # noqa: E402
+
+
+def manager_command() -> list[str]:
+    installed = HERE / "wine4office-manager"
+    if installed.is_file() and installed != Path(__file__).resolve():
+        return [str(installed)]
+    development = HERE / "wine4office_manager.py"
+    if development.is_file():
+        return [sys.executable, str(development)]
+    library_entry = LIB / "wine4office_manager.py"
+    return [sys.executable, str(library_entry)]
 
 
 def main() -> int:
@@ -29,10 +41,20 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.target in backend.APP_META:
-            backend.launch_app(
-                args.prefix, args.wine, args.target, HELPER, args.documents,
-                use_x11=defaults["use_x11"],
-            )
+            if incident.monitoring_enabled(defaults):
+                process = backend.launch_app_process(
+                    args.prefix, args.wine, args.target, HELPER, args.documents,
+                    use_x11=defaults["use_x11"], capture_diagnostics=True,
+                )
+                return incident.supervise_process(
+                    process, app=args.target, prefix=Path(args.prefix),
+                    use_x11=defaults["use_x11"],
+                    manager_version=backend.current_version(),
+                    runner_version=backend.current_wine_version(),
+                    review_command=manager_command(),
+                )
+            backend.launch_app(args.prefix, args.wine, args.target, HELPER, args.documents,
+                               use_x11=defaults["use_x11"])
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Detect Office crashes and XWayland hangs and keep a bounded local trace.
+- Let users review, edit, attach context or a file, and manually send reports.
+- Add first-open reliability and daily update-check choices; updates remain manual.
+
 ## 0.1.10 — 2026-08-04 (prerelease)
 
 - Bundle and install Wine Gecko for both 32-bit and 64-bit Office components
@@ -26,6 +32,8 @@
   right-to-left layouts.
 - Prevent modern Teams calls from crashing when C++ thread operations report
   an error.
+- Open CSV files in Excel and Office documents directly from archives browsed
+  in KDE Dolphin.
 
 [Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.9...wine4office-v0.1.10)
 

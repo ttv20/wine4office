@@ -61,6 +61,8 @@ class QtManagerTests(unittest.TestCase):
             "office_telemetry_disabled": {},
             "automatic_update_checks": False,
             "automatic_update_checks_prompted": True,
+            "incident_reporting_mode": "ask",
+            "reliability_prompted": True,
         }
 
         self.old_prefix = self._make_prefix(Path(self.config["prefix"]))
@@ -526,28 +528,58 @@ class QtManagerTests(unittest.TestCase):
             "Office settings",
         )
 
-    def test_first_launch_asks_before_enabling_background_update_checks(self):
+    def test_first_launch_combines_reporting_and_24_hour_update_choice(self):
         with self.state.lock:
-            self.state.config["automatic_update_checks_prompted"] = False
+            self.state.config["reliability_prompted"] = False
         enabled = {
             **self.state.config,
             "automatic_update_checks": True,
             "automatic_update_checks_prompted": True,
+            "incident_reporting_mode": "ask",
+            "reliability_prompted": True,
         }
-        with mock.patch.object(
-            QMessageBox, "question",
-            return_value=QMessageBox.StandardButton.Yes,
-        ) as question, mock.patch.object(
-            self.state, "set_automatic_update_checks", return_value=enabled
-        ) as set_checks:
-            self.window.prompt_automatic_update_checks_on_first_launch()
+        dialog, ask, updates = self.window._reliability_dialog()
+        self.assertTrue(ask.isChecked())
+        self.assertTrue(updates.isChecked())
+        self.assertIn("never downloaded or installed automatically", updates.toolTip())
+        self.window.reporting_available = True
+        with mock.patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted), \
+             mock.patch.object(
+                 self.window, "_reliability_dialog", return_value=(dialog, ask, updates)
+             ), mock.patch.object(
+                 self.state, "set_reliability_preferences", return_value=enabled
+             ) as save, mock.patch.object(
+                 self.window, "_set_config_fields"
+             ), mock.patch.object(self.window, "_route_after_first_open") as route:
+            self.window.prompt_reliability_on_first_launch()
 
-        set_checks.assert_called_once_with(True, prompted=True)
+        save.assert_called_once_with("ask", True)
+        route.assert_called_once_with()
+
+    def test_startup_finishes_reliability_choice_before_other_prompts(self):
+        incident_path = self.home / "incident.json"
+        self.window.initial_incident = incident_path
+        calls = []
+        with mock.patch.object(
+            self.window, "prompt_reliability_on_first_launch",
+            side_effect=lambda: calls.append("reliability"),
+        ), mock.patch.object(
+            self.window, "start_background_update_check",
+            side_effect=lambda: calls.append("updates"),
+        ), mock.patch.object(
+            self.window, "review_incident",
+            side_effect=lambda path: calls.append(("incident", path)),
+        ):
+            self.window.finish_startup()
+
         self.assertEqual(
-            question.call_args.args[-1], QMessageBox.StandardButton.No
+            calls,
+            ["reliability", "updates", ("incident", incident_path)],
         )
-        self.assertIn("whenever you open it", question.call_args.args[2])
-        self.assertTrue(self.window.automatic_update_checks.isChecked())
+
+    def test_build_without_openobserve_environment_hides_reporting_controls(self):
+        self.assertFalse(self.window.reporting_available)
+        self.assertFalse(hasattr(self.window, "incident_ask"))
 
     def test_background_update_checkbox_explains_manager_open_check_remains(self):
         self.assertFalse(self.window.automatic_update_checks.isChecked())
@@ -810,9 +842,11 @@ class QtManagerTests(unittest.TestCase):
 
         def slow_launch(*args, **kwargs):
             time.sleep(0.35)
-            return 4321
+            return mock.Mock(pid=4321)
 
-        with mock.patch.object(backend, "launch_app", side_effect=slow_launch) as launch:
+        with mock.patch.object(
+            qt_module.subprocess, "Popen", side_effect=slow_launch
+        ) as launch:
             started = time.monotonic()
             self.window.launch_selected()
             elapsed = time.monotonic() - started
@@ -827,8 +861,12 @@ class QtManagerTests(unittest.TestCase):
 
         task = self.state.snapshot()["task"]
         self.assertEqual(task["status"], "completed")
-        self.assertIn("Application started (PID 4321)", task["log"])
-        self.assertFalse(launch.call_args.kwargs["use_x11"])
+        self.assertIn("Application supervisor started (PID 4321)", task["log"])
+        self.assertIn(
+            [str(self.window.launcher), "word"],
+            [call.args[0] for call in launch.call_args_list],
+        )
+        self.assertFalse(self.state.config["use_x11"])
 
     def test_wine_tool_launch_propagates_native_wayland_choice(self):
         self.window.use_x11.setChecked(False)
