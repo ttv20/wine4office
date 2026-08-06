@@ -23,6 +23,7 @@
   components.
 - Add Media Foundation sensor monitoring and Office network-manager detection.
 - Make Teams camera video render through shared NV12 textures.
+- Place DirectComposition notifications at their requested desktop coordinates.
 - Expose the WLAN interface setter used when Teams starts calls.
 - Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
   including working minimize and restore behavior.

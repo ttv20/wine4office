@@ -457,7 +457,8 @@ static void wayland_surface_set_plasma_position(struct wayland_surface *surface)
 {
     POINT position = {surface->window.rect.left, surface->window.rect.top};
 
-    if (!surface->org_kde_plasma_surface || surface->dcomp_overlay ||
+    if (!surface->org_kde_plasma_surface ||
+        (surface->dcomp_overlay && !surface->dcomp_notification) ||
         (surface->plasma_position_valid &&
          surface->plasma_position.x == position.x &&
          surface->plasma_position.y == position.y))
