@@ -791,10 +791,15 @@ LONG WINAPI UnhandledExceptionFilter( EXCEPTION_POINTERS *epointers )
 /***********************************************************************
  *         WerGetFlags   (kernelbase.@)
  */
+static LONG wer_flags;
+
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerGetFlags( HANDLE process, DWORD *flags )
 {
-    FIXME( "(%p, %p) stub\n", process, flags );
-    return E_NOTIMPL;
+    TRACE( "(%p, %p)\n", process, flags );
+    if (!process || !flags) return E_INVALIDARG;
+    if (!GetProcessId( process )) return HRESULT_FROM_WIN32( GetLastError() );
+    *flags = InterlockedCompareExchange( &wer_flags, 0, 0 );
+    return S_OK;
 }
 
 
@@ -804,6 +809,17 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerGetFlags( HANDLE process, DWORD *flags
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterCustomMetadata( const WCHAR *key, const WCHAR *value )
 {
     FIXME( "(%s, %s) stub\n", debugstr_w(key), debugstr_w(value) );
+    return S_OK;
+}
+
+
+/***********************************************************************
+ *         WerRegisterAdditionalProcess  (kernelbase.@)
+ */
+HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterAdditionalProcess( DWORD process_id, DWORD thread_id )
+{
+    TRACE( "(%lu, %lu)\n", process_id, thread_id );
+    if (!process_id) return E_INVALIDARG;
     return S_OK;
 }
 
@@ -844,7 +860,8 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterRuntimeExceptionModule( const 
  */
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerSetFlags( DWORD flags )
 {
-    FIXME("(%ld) stub\n", flags);
+    TRACE( "(%#lx)\n", flags );
+    InterlockedExchange( &wer_flags, flags );
     return S_OK;
 }
 
@@ -855,6 +872,17 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerSetFlags( DWORD flags )
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerUnregisterCustomMetadata( const WCHAR *key )
 {
     FIXME( "(%s) stub\n", debugstr_w(key));
+    return S_OK;
+}
+
+
+/***********************************************************************
+ *         WerUnregisterAdditionalProcess  (kernelbase.@)
+ */
+HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerUnregisterAdditionalProcess( DWORD process_id )
+{
+    TRACE( "(%lu)\n", process_id );
+    if (!process_id) return E_INVALIDARG;
     return S_OK;
 }
 

@@ -4,7 +4,7 @@
 
 # Wine4Office 🍷📎
 
-**Run modern Microsoft Office on Linux without a Windows VM.** 
+**Run modern Microsoft Office on Linux without a Windows VM.**
 
 
 > **AI disclosure:** Every Wine4Office investigation, code change, test, and
@@ -53,6 +53,10 @@ sudo make install
 
 Full dependencies: [WineHQ Build Guide](https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine)
 
+For Teams and other WebView-based Office apps, verify that configure detects
+FreeType, Fontconfig, GnuTLS, and D-Bus. Disabling them causes missing text,
+failed secure content, or broken desktop integration.
+
 ---
 
 ## Support this project ☕
@@ -68,6 +72,16 @@ buying me some tokens:
 ## Why Not WineHQ?
 
 WineHQ's Clean Room Guidelines ban LLM-generated code. This whole thing is AI soup, so it can't be upstreamed. It's a fork, not a patchset.
+
+---
+
+## Credits
+
+DirectComposition research and selected compatibility code were adapted from
+[Giang Nguyen's `giang17/wine` D2D1/DComp work](https://github.com/giang17/wine),
+licensed under the GNU LGPL 2.1 or later. Wine4Office retains its native
+Wayland/XWayland composition and input architecture rather than importing the
+fork's X11/BitBlt presentation backend.
 
 ---
 

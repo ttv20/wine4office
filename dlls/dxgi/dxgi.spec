@@ -4,3 +4,4 @@
 @ stdcall DXGID3D10CreateDevice(ptr ptr ptr long ptr long ptr)
 @ stdcall DXGID3D10RegisterLayers(ptr long)
 @ stdcall DXGIGetDebugInterface1(long ptr ptr)
+@ stdcall __wine_dxgi_bind_composition_window(long long)

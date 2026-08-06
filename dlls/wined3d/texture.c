@@ -721,6 +721,13 @@ static void wined3d_texture_destroy_object(void *object)
         }
     }
     resource->resource_ops->resource_unload(resource);
+
+    if (texture->shared_handle_owned && texture->shared_handle)
+    {
+        CloseHandle(texture->shared_handle);
+        texture->shared_handle = NULL;
+        texture->shared_handle_owned = false;
+    }
 }
 
 void wined3d_texture_cleanup(struct wined3d_texture *texture)
@@ -784,6 +791,152 @@ struct wined3d_resource * CDECL wined3d_texture_get_resource(struct wined3d_text
     TRACE("texture %p.\n", texture);
 
     return &texture->resource;
+}
+
+static void wined3d_texture_create_shared_handle(void *object)
+{
+    struct wined3d_texture *texture = object;
+    struct wined3d_context *context;
+    BOOL prepared;
+
+    context = context_acquire(texture->resource.device, NULL, 0);
+    /* A freshly-created texture may already have TEXTURE_RGB marked as its
+     * logical location before the backend image exists. Preparing the location
+     * is therefore required here; load_location() is allowed to return early. */
+    prepared = wined3d_texture_prepare_location(texture, 0, context, WINED3D_LOCATION_TEXTURE_RGB);
+    WARN("Shared texture %p prepare %u, flags %#x, format %s, handle %p.\n", texture,
+            prepared, texture->flags, debug_d3dformat(texture->resource.format->id), texture->shared_handle);
+    if (prepared && texture->shared_handle)
+        texture->shared_handle_owned = true;
+    context_release(context);
+}
+
+HRESULT CDECL wined3d_texture_get_shared_handle(struct wined3d_texture *texture, HANDLE *handle)
+{
+    TRACE("texture %p, handle %p.\n", texture, handle);
+
+    if (!handle || !(texture->flags & WINED3D_TEXTURE_SHARED_NTHANDLE))
+        return E_INVALIDARG;
+
+    if (!texture->shared_handle)
+    {
+        wined3d_cs_init_object(texture->resource.device->cs,
+                wined3d_texture_create_shared_handle, texture);
+        wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    }
+
+    if (!texture->shared_handle)
+        return E_FAIL;
+    *handle = texture->shared_handle;
+    return S_OK;
+}
+
+struct wined3d_texture_sync_shared_data
+{
+    struct wined3d_texture *texture;
+    BOOL acquire;
+    uint64_t key;
+    uint32_t timeout;
+    HRESULT hr;
+};
+
+static void wined3d_texture_sync_shared_cb(void *object)
+{
+    struct wined3d_texture_sync_shared_data *data = object;
+
+    data->hr = data->texture->texture_ops->texture_sync_shared
+            ? data->texture->texture_ops->texture_sync_shared(data->texture,
+                    data->acquire, data->key, data->timeout) : E_NOTIMPL;
+}
+
+HRESULT CDECL wined3d_texture_sync_shared(struct wined3d_texture *texture,
+        BOOL acquire, uint64_t key, uint32_t timeout)
+{
+    struct wined3d_texture_sync_shared_data data = {texture, acquire, key, timeout, E_FAIL};
+
+    TRACE("texture %p, acquire %u, key %s, timeout %u.\n",
+            texture, acquire, wine_dbgstr_longlong(key), timeout);
+
+    wined3d_cs_init_object(texture->resource.device->cs, wined3d_texture_sync_shared_cb, &data);
+    wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    return data.hr;
+}
+
+struct wined3d_texture_reopen_shared_data
+{
+    struct wined3d_texture *texture;
+    HANDLE handle;
+    HRESULT hr;
+};
+
+static void wined3d_texture_reopen_shared_cb(void *object)
+{
+    struct wined3d_texture_reopen_shared_data *data = object;
+
+    data->hr = data->texture->texture_ops->texture_reopen_shared
+            ? data->texture->texture_ops->texture_reopen_shared(data->texture, data->handle) : E_NOTIMPL;
+}
+
+HRESULT CDECL wined3d_texture_reopen_shared(struct wined3d_texture *texture, HANDLE handle)
+{
+    struct wined3d_texture_reopen_shared_data data = {texture, handle, E_FAIL};
+
+    TRACE("texture %p, handle %p.\n", texture, handle);
+
+    wined3d_cs_init_object(texture->resource.device->cs, wined3d_texture_reopen_shared_cb, &data);
+    wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    return data.hr;
+}
+
+struct wined3d_texture_create_shared_sync_data
+{
+    struct wined3d_texture *texture;
+    HANDLE *handle;
+    HRESULT hr;
+};
+
+static void wined3d_texture_create_shared_sync_cb(void *object)
+{
+    struct wined3d_texture_create_shared_sync_data *data = object;
+
+    data->hr = data->texture->texture_ops->texture_create_shared_sync
+            ? data->texture->texture_ops->texture_create_shared_sync(data->texture, data->handle) : E_NOTIMPL;
+}
+
+HRESULT CDECL wined3d_texture_create_shared_sync(struct wined3d_texture *texture, HANDLE *handle)
+{
+    struct wined3d_texture_create_shared_sync_data data = {texture, handle, E_FAIL};
+
+    if (!handle)
+        return E_INVALIDARG;
+    *handle = NULL;
+    wined3d_cs_init_object(texture->resource.device->cs, wined3d_texture_create_shared_sync_cb, &data);
+    wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    return data.hr;
+}
+
+void CDECL wined3d_texture_disable_shared_handle(struct wined3d_texture *texture)
+{
+    TRACE("texture %p.\n", texture);
+
+    if (texture->shared_handle_owned && texture->shared_handle)
+        CloseHandle(texture->shared_handle);
+    texture->shared_handle = NULL;
+    texture->shared_handle_owned = false;
+    texture->flags &= ~WINED3D_TEXTURE_SHARED_NTHANDLE;
+}
+
+HRESULT CDECL wined3d_texture_set_shared_handle(struct wined3d_texture *texture, HANDLE handle)
+{
+    TRACE("texture %p, handle %p.\n", texture, handle);
+
+    if (!handle || !(texture->flags & WINED3D_TEXTURE_SHARED_NTHANDLE)
+            || texture->shared_handle)
+        return E_INVALIDARG;
+
+    texture->shared_handle = handle;
+    texture->shared_handle_owned = false;
+    return S_OK;
 }
 
 /* Context activation is done by the caller */
@@ -1554,6 +1707,9 @@ HRESULT wined3d_texture_init(struct wined3d_texture *texture, const struct wined
             wined3d_texture_dirty_region_add(texture, i, NULL);
     }
 
+    if (flags & WINED3D_TEXTURE_CREATE_SHARED_NTHANDLE)
+        texture->flags |= WINED3D_TEXTURE_SHARED_NTHANDLE;
+
     if (wined3d_texture_use_pbo(texture, d3d_info))
         texture->resource.map_binding = WINED3D_LOCATION_BUFFER;
 
@@ -2257,6 +2413,9 @@ static void wined3d_texture_no3d_unload_location(struct wined3d_texture *texture
 
 static const struct wined3d_texture_ops wined3d_texture_no3d_ops =
 {
+    NULL,
+    NULL,
+    NULL,
     wined3d_texture_no3d_prepare_location,
     wined3d_texture_no3d_load_location,
     wined3d_texture_no3d_unload_location,

@@ -1067,6 +1067,19 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
 
     device = dst_resource->device;
 
+    /* A framebuffer blit cannot supply the opaque desktop backdrop requested
+     * for a base composition surface. Let the GLSL blitter do that conversion. */
+    if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain
+            && GetPropW(dst_texture->swapchain->win_handle,
+            L"__wine_dcomp_composite_alpha_background"))
+    {
+        if (!(next = blitter->next))
+            return dst_location;
+        return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx,
+                src_location, src_rect, dst_texture, dst_sub_resource_idx, dst_location,
+                dst_rect, colour_key, filter, resolve_format);
+    }
+
     if (blit_op == WINED3D_BLIT_OP_RAW_BLIT && dst_resource->format->id == src_resource->format->id)
     {
         if (dst_resource->format->depth_size || dst_resource->format->stencil_size)
@@ -2638,6 +2651,9 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
 
 static const struct wined3d_texture_ops texture_gl_ops =
 {
+    NULL,
+    NULL,
+    NULL,
     wined3d_texture_gl_prepare_location,
     wined3d_texture_gl_load_location,
     wined3d_texture_gl_unload_location,

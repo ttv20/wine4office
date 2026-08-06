@@ -518,6 +518,9 @@ static POINT map_event_coords( HWND hwnd, Window window, Window event_root, POIN
 
 static void send_mouse_input( HWND hwnd, POINT pos, UINT flags, UINT data, UINT time, const struct raw_mouse *raw )
 {
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    HWND input_hwnd = hwnd, root;
     INPUT input = { .type = INPUT_MOUSE };
 
     if ((flags & MOUSEEVENTF_ABSOLUTE) || pos.x || pos.y) flags |= MOUSEEVENTF_MOVE;
@@ -528,7 +531,22 @@ static void send_mouse_input( HWND hwnd, POINT pos, UINT flags, UINT data, UINT 
     input.mi.mouseData = data;
     input.mi.time = time;
 
-    NtUserSendHardwareInput( hwnd, SEND_HWMSG_RAWINPUT, &input, (LPARAM)raw );
+    if (hwnd)
+    {
+        if (!(input_hwnd = NtUserGetProp(hwnd, input_prop)))
+        {
+            root = NtUserGetAncestor(hwnd, GA_ROOT);
+            input_hwnd = root ? NtUserGetProp(root, input_prop) : NULL;
+        }
+        if (!input_hwnd) input_hwnd = hwnd;
+    }
+    if (input_hwnd != hwnd)
+        TRACE("routing DComp mouse input hwnd %p to %p flags %#x\n", hwnd, input_hwnd,
+                input.mi.dwFlags);
+    NtUserSendHardwareInput( input_hwnd, SEND_HWMSG_RAWINPUT, &input, (LPARAM)raw );
+    if (input_hwnd != hwnd && (input.mi.dwFlags &
+            (MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEUP)))
+        NtUserPostMessage(input_hwnd, 0x80000ff0, 0, 0);
 }
 
 #ifdef SONAME_LIBXCURSOR

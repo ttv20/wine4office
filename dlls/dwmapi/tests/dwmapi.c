@@ -17,10 +17,12 @@
  */
 
 #include "dwmapi.h"
+#include "winternl.h"
 #include "wine/test.h"
 
 static void test_DwmIsCompositionEnabled(void)
 {
+    RTL_OSVERSIONINFOEXW version = {0};
     BOOL enabled;
     HRESULT hr;
 
@@ -31,6 +33,13 @@ static void test_DwmIsCompositionEnabled(void)
     hr = DwmIsCompositionEnabled(&enabled);
     ok(hr == S_OK, "Expected %#lx, got %#lx.\n", S_OK, hr);
     ok(enabled == TRUE || enabled == FALSE, "Got unexpected %#x.\n", enabled);
+
+    version.dwOSVersionInfoSize = sizeof(version);
+    ok(!RtlGetVersion(&version), "RtlGetVersion failed.\n");
+    if (version.dwMajorVersion > 6 ||
+        (version.dwMajorVersion == 6 && version.dwMinorVersion >= 2))
+        ok(enabled, "Composition disabled for Windows %lu.%lu.\n",
+           version.dwMajorVersion, version.dwMinorVersion);
 }
 
 static void test_DwmGetCompositionTimingInfo(void)
@@ -81,6 +90,65 @@ static void test_DwmGetCompositionTimingInfo(void)
     ok(timing_info.qpcRefreshPeriod == refresh_period
             || broken(timing_info.qpcRefreshPeriod == display_frequency), /* win10 v1507 */
             "Got wrong monitor refresh period %s.\n", wine_dbgstr_longlong(timing_info.qpcRefreshPeriod));
+}
+
+static void test_DwmWindowAttributes(void)
+{
+    RTL_OSVERSIONINFOEXW version = {0};
+    enum DWMNCRENDERINGPOLICY policy;
+    HWND hwnd;
+    BOOL enabled, dark;
+    HRESULT hr;
+
+    hwnd = CreateWindowW(L"static", L"static", WS_OVERLAPPEDWINDOW,
+                         10, 10, 200, 200, NULL, NULL, NULL, NULL);
+    ok(!!hwnd, "Failed to create a test window.\n");
+
+    hr = DwmIsCompositionEnabled(&enabled);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (!enabled)
+    {
+        skip("DWM is disabled.\n");
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    enabled = FALSE;
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_NCRENDERING_ENABLED, &enabled, sizeof(enabled));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(enabled, "Non-client rendering is disabled by default.\n");
+
+    policy = DWMNCRP_DISABLED;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    enabled = TRUE;
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_NCRENDERING_ENABLED, &enabled, sizeof(enabled));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(!enabled, "Non-client rendering is still enabled.\n");
+
+    policy = DWMNCRP_ENABLED;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    enabled = FALSE;
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_NCRENDERING_ENABLED, &enabled, sizeof(enabled));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(enabled, "Non-client rendering was not enabled.\n");
+
+    version.dwOSVersionInfoSize = sizeof(version);
+    ok(!RtlGetVersion(&version), "RtlGetVersion failed.\n");
+    dark = TRUE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    if (version.dwMajorVersion > 10 ||
+        (version.dwMajorVersion == 10 && version.dwBuildNumber >= 19041))
+    {
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        dark = FALSE;
+        hr = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    }
+    else ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
+
+    DestroyWindow(hwnd);
 }
 
 static void test_DWMWA_EXTENDED_FRAME_BOUNDS(void)
@@ -142,9 +210,9 @@ cleanup:
 
 static void test_DWMWA_CAPTION_BUTTON_BOUNDS(void)
 {
-    RECT rect;
+    RECT rect, ltr_rect, rtl_rect;
     HWND hwnd, child;
-    BOOL enabled;
+    BOOL enabled, rtl;
     HRESULT hr;
 
     hwnd = CreateWindowW(L"static", L"static", WS_OVERLAPPEDWINDOW | WS_POPUP | WS_VISIBLE,
@@ -165,6 +233,23 @@ static void test_DWMWA_CAPTION_BUTTON_BOUNDS(void)
             "Got invalid horizontal bounds %s.\n", wine_dbgstr_rect(&rect));
     ok(rect.top == 0 && rect.bottom > rect.top,
             "Got invalid vertical bounds %s.\n", wine_dbgstr_rect(&rect));
+
+    rtl = FALSE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NONCLIENT_RTL_LAYOUT, &rtl, sizeof(rtl));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &ltr_rect, sizeof(ltr_rect));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(ltr_rect.right == 400 && ltr_rect.left < ltr_rect.right,
+            "Expected right-aligned bounds, got %s.\n", wine_dbgstr_rect(&ltr_rect));
+
+    rtl = TRUE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NONCLIENT_RTL_LAYOUT, &rtl, sizeof(rtl));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rtl_rect, sizeof(rtl_rect));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(rtl_rect.left == 0 && rtl_rect.right - rtl_rect.left == ltr_rect.right - ltr_rect.left,
+            "Expected mirrored bounds for %s, got %s.\n",
+            wine_dbgstr_rect(&ltr_rect), wine_dbgstr_rect(&rtl_rect));
     hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, NULL, sizeof(rect));
     ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
     hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rect, sizeof(BOOL));
@@ -210,6 +295,7 @@ static void test_DwmFlush(void)
 START_TEST(dwmapi)
 {
     test_DwmIsCompositionEnabled();
+    test_DwmWindowAttributes();
     test_DwmGetCompositionTimingInfo();
     test_DWMWA_EXTENDED_FRAME_BOUNDS();
     test_DWMWA_CAPTION_BUTTON_BOUNDS();

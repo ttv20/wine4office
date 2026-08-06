@@ -21,6 +21,21 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(mfsensorgroup);
 
+HRESULT WINAPI MFCreateSensorGroup(const WCHAR *symbolic_link, void **sensor_group)
+{
+    TRACE("symbolic_link %s, sensor_group %p.\n", debugstr_w(symbolic_link), sensor_group);
+
+    if (!sensor_group)
+        return E_POINTER;
+
+    *sensor_group = NULL;
+    if (!symbolic_link)
+        return E_INVALIDARG;
+
+    FIXME("Sensor groups are not implemented for %s.\n", debugstr_w(symbolic_link));
+    return MF_E_NOT_FOUND;
+}
+
 struct sensor_activity_monitor
 {
     IMFSensorActivityMonitor IMFSensorActivityMonitor_iface;

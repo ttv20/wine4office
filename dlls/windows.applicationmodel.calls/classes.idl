@@ -1,0 +1,6 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "windows.applicationmodel.calls.idl";
+
+namespace Windows.ApplicationModel.Calls { runtimeclass VoipCallCoordinator; }

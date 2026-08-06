@@ -101,7 +101,7 @@
 @ stdcall CloseEncryptedFileRaw(ptr)
 @ stdcall CloseEventLog (long)
 @ stdcall -import CloseServiceHandle(long)
-# @ stub CloseThreadWaitChainSession
+@ stdcall CloseThreadWaitChainSession(ptr)
 @ stdcall -import CloseTrace(int64)
 @ stdcall CommandLineFromMsiDescriptor(wstr ptr ptr)
 # @ stub ComputeAccessTokenFromCodeAuthzLevel

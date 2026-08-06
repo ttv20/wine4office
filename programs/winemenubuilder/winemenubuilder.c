@@ -2818,6 +2818,219 @@ static WCHAR *next_token( LPWSTR *p )
     return token;
 }
 
+static WCHAR *read_utf8_text_file( const WCHAR *path )
+{
+    LARGE_INTEGER size;
+    HANDLE file;
+    WCHAR *text = NULL;
+    char *bytes = NULL;
+    DWORD read, chars;
+
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    if (!GetFileSizeEx( file, &size ) || !size.QuadPart || size.QuadPart > 4 * 1024 * 1024 ||
+        !(bytes = malloc( size.QuadPart )) ||
+        !ReadFile( file, bytes, size.QuadPart, &read, NULL ) || read != size.QuadPart)
+        goto done;
+    if (!(chars = MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, bytes, read, NULL, 0 )) ||
+        !(text = malloc( (chars + 1) * sizeof(*text) )))
+        goto done;
+    MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, bytes, read, text, chars );
+    text[chars] = 0;
+
+done:
+    free( bytes );
+    CloseHandle( file );
+    return text;
+}
+
+static WCHAR *xml_attribute( const WCHAR *element, const WCHAR *end, const WCHAR *name )
+{
+    SIZE_T name_len = wcslen( name );
+    const WCHAR *value, *value_end;
+    WCHAR *result;
+
+    for (value = element; value + name_len + 2 < end; ++value)
+    {
+        if (value != element && value[-1] != ' ' && value[-1] != '\t' &&
+            value[-1] != '\r' && value[-1] != '\n')
+            continue;
+        if (wcsncmp( value, name, name_len ) || value[name_len] != '=' || value[name_len + 1] != '"')
+            continue;
+        value += name_len + 2;
+        if (!(value_end = wcschr( value, '"' )) || value_end > end) return NULL;
+        if (!(result = malloc( (value_end - value + 1) * sizeof(*result) ))) return NULL;
+        memcpy( result, value, (value_end - value) * sizeof(*result) );
+        result[value_end - value] = 0;
+        return result;
+    }
+    return NULL;
+}
+
+static BOOL copy_package_icon( const WCHAR *source, const WCHAR *icon_name, UINT size )
+{
+    WCHAR *directory, *destination;
+    BOOL ret;
+
+    directory = heap_wprintf( L"%s\\icons\\hicolor\\%ux%u\\apps", xdg_data_dir, size, size );
+    create_directories( directory );
+    destination = heap_wprintf( L"%s\\%s.png", directory, icon_name );
+    ret = CopyFileW( source, destination, FALSE );
+    if (!ret)
+        WINE_WARN( "failed to export package icon %s to %s, error %lu\n",
+                   wine_dbgstr_w(source), wine_dbgstr_w(destination), GetLastError() );
+    free( destination );
+    free( directory );
+    return ret;
+}
+
+static BOOL export_package_icons( const WCHAR *root, const WCHAR *logo, const WCHAR *icon_name )
+{
+    WIN32_FIND_DATAW data;
+    WCHAR *base, *extension, *pattern, *directory, *source, *qualifier;
+    HANDLE find;
+    BOOL exported = FALSE;
+    UINT size;
+
+    base = heap_wprintf( L"%s\\%s", root, logo );
+    for (extension = base; *extension; ++extension) if (*extension == '/') *extension = '\\';
+    if (!(extension = wcsrchr( base, '.' ))) goto done;
+    *extension = 0;
+    pattern = heap_wprintf( L"%s.targetsize-*_altform-unplated.png", base );
+    if ((find = FindFirstFileW( pattern, &data )) != INVALID_HANDLE_VALUE)
+    {
+        directory = wcsdup( pattern );
+        if ((extension = wcsrchr( directory, '\\' ))) extension[1] = 0;
+        do
+        {
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (!(qualifier = wcsstr( data.cFileName, L".targetsize-" ))) continue;
+            size = wcstoul( qualifier + 12, &extension, 10 );
+            if (!size || _wcsicmp( extension, L"_altform-unplated.png" )) continue;
+            source = heap_wprintf( L"%s%s", directory, data.cFileName );
+            exported |= copy_package_icon( source, icon_name, size );
+            free( source );
+        } while (FindNextFileW( find, &data ));
+        FindClose( find );
+        free( directory );
+    }
+    free( pattern );
+    if (!exported)
+    {
+        pattern = heap_wprintf( L"%s.scale-*.png", base );
+        if ((find = FindFirstFileW( pattern, &data )) != INVALID_HANDLE_VALUE)
+        {
+            directory = wcsdup( pattern );
+            if ((extension = wcsrchr( directory, '\\' ))) extension[1] = 0;
+            do
+            {
+                UINT scale;
+
+                if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                if (!(qualifier = wcsstr( data.cFileName, L".scale-" ))) continue;
+                scale = wcstoul( qualifier + 7, &extension, 10 );
+                if (!scale || _wcsicmp( extension, L".png" )) continue;
+                size = (44 * scale + 50) / 100;
+                source = heap_wprintf( L"%s%s", directory, data.cFileName );
+                exported |= copy_package_icon( source, icon_name, size );
+                free( source );
+            } while (FindNextFileW( find, &data ));
+            FindClose( find );
+            free( directory );
+        }
+        free( pattern );
+    }
+    if (!exported)
+    {
+        source = heap_wprintf( L"%s%s", base, L".png" );
+        exported = copy_package_icon( source, icon_name, 44 );
+        free( source );
+    }
+
+done:
+    if (exported)
+    {
+        directory = heap_wprintf( L"%s\\icons\\hicolor", xdg_data_dir );
+        refresh_icon_cache( directory );
+        free( directory );
+    }
+    free( base );
+    return exported;
+}
+
+static BOOL write_package_desktop_entry( const WCHAR *root, const WCHAR *executable,
+                                         const WCHAR *display_name, const WCHAR *icon_name )
+{
+    WCHAR *applications, *location, *path;
+    BOOL ret;
+
+    applications = heap_wprintf( L"%s\\applications", xdg_data_dir );
+    create_directories( applications );
+    location = heap_wprintf( L"%s\\%s.desktop", applications, icon_name );
+    path = heap_wprintf( L"%s\\%s", root, executable );
+    ret = write_desktop_entry( NULL, location, display_name, path, NULL, NULL, root,
+                               icon_name, icon_name );
+    free( path );
+    free( location );
+    free( applications );
+    return ret;
+}
+
+static BOOL process_package( const WCHAR *root )
+{
+    WCHAR *manifest_path, *manifest, *application, *application_end, *next_application;
+    WCHAR *visual, *visual_end, *executable, *logo, *display_name, *app_list, *icon_name;
+    const WCHAR *basename;
+    BOOL ret = FALSE;
+
+    manifest_path = heap_wprintf( L"%s\\AppxManifest.xml", root );
+    manifest = read_utf8_text_file( manifest_path );
+    free( manifest_path );
+    if (!manifest)
+    {
+        WINE_WARN( "could not read package manifest from %s\n", wine_dbgstr_w(root) );
+        return FALSE;
+    }
+
+    for (application = wcsstr( manifest, L"<Application " ); application; application = next_application)
+    {
+        next_application = wcsstr( application + 1, L"<Application " );
+        application_end = wcsstr( application, L"</Application>" );
+        if (!application_end || (next_application && application_end > next_application)) continue;
+        visual = wcsstr( application, L":VisualElements " );
+        if (!visual || visual > application_end || !(visual_end = wcschr( visual, '>' ))) continue;
+        if (!(application_end = wcschr( application, '>' )) || application_end > visual) continue;
+
+        executable = xml_attribute( application, application_end, L"Executable" );
+        logo = xml_attribute( visual, visual_end, L"Square44x44Logo" );
+        display_name = xml_attribute( visual, visual_end, L"DisplayName" );
+        app_list = xml_attribute( visual, visual_end, L"AppListEntry" );
+        if (!executable || !logo || (app_list && !_wcsicmp( app_list, L"none" ))) goto next;
+
+        basename = PathFindFileNameW( executable );
+        if (!(icon_name = wcsdup( basename ))) goto next;
+        CharLowerW( icon_name );
+        if (!display_name || !*display_name || !_wcsnicmp( display_name, L"ms-resource:", 12 ))
+        {
+            free( display_name );
+            display_name = wcsdup( icon_name );
+        }
+        if (export_package_icons( root, logo, icon_name ) &&
+            write_package_desktop_entry( root, executable, display_name, icon_name ))
+            ret = TRUE;
+        free( icon_name );
+
+next:
+        free( executable );
+        free( logo );
+        free( display_name );
+        free( app_list );
+    }
+    free( manifest );
+    return ret;
+}
+
 static BOOL init_xdg(void)
 {
     WCHAR *p;
@@ -2901,6 +3114,12 @@ int PASCAL wWinMain (HINSTANCE hInstance, HINSTANCE prev, LPWSTR cmdline, int sh
         {
             if (associations_enabled())
                 RefreshFileTypeAssociations();
+            continue;
+        }
+        if( !wcscmp( token, L"-p" ) )
+        {
+            WCHAR *package = next_token( &p );
+            if (!package || !process_package( package )) ret = 1;
             continue;
         }
         if( !wcscmp( token, L"-r" ) )

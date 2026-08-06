@@ -4,6 +4,7 @@ IMPORTS = combase advapi32 user32
 SOURCES = \
 	accessibilitysettings.c \
 	classes.idl \
+	compositor.c \
 	corewindow.c \
 	inputpane.c \
 	main.c \

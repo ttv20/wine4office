@@ -115,6 +115,143 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+struct application_data_container
+{
+    IApplicationDataContainer IApplicationDataContainer_iface;
+    LONG ref;
+    IPropertySet *values;
+};
+
+static struct application_data_container local_settings;
+static INIT_ONCE local_settings_once = INIT_ONCE_STATIC_INIT;
+static HRESULT local_settings_hr;
+
+static inline struct application_data_container *impl_from_IApplicationDataContainer( IApplicationDataContainer *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainer_iface );
+}
+
+static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IApplicationDataContainer ))
+    {
+        *out = iface;
+        IApplicationDataContainer_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI container_AddRef( IApplicationDataContainer *iface )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI container_Release( IApplicationDataContainer *iface )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    **iids = IID_IApplicationDataContainer;
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI container_GetRuntimeClassName( IApplicationDataContainer *iface, HSTRING *name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Storage_ApplicationDataContainer,
+            wcslen( RuntimeClass_Windows_Storage_ApplicationDataContainer ), name );
+}
+
+static HRESULT WINAPI container_GetTrustLevel( IApplicationDataContainer *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI container_get_Name( IApplicationDataContainer *iface, HSTRING *value )
+{
+    static const WCHAR name[] = L"Local";
+    if (!value) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, value );
+}
+
+static HRESULT WINAPI container_get_Locality( IApplicationDataContainer *iface, ApplicationDataLocality *value )
+{
+    if (!value) return E_POINTER;
+    *value = ApplicationDataLocality_Local;
+    return S_OK;
+}
+
+static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IPropertySet **value )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+    if (!value) return E_POINTER;
+    IPropertySet_AddRef( *value = impl->values );
+    return S_OK;
+}
+
+static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface,
+        IMapView_HSTRING_ApplicationDataContainer **value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI container_CreateContainer( IApplicationDataContainer *iface, HSTRING name,
+        ApplicationDataCreateDisposition disposition, IApplicationDataContainer **value )
+{
+    FIXME( "iface %p, name %s, disposition %u, value %p stub!\n", iface,
+            debugstr_hstring( name ), disposition, value );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI container_DeleteContainer( IApplicationDataContainer *iface, HSTRING name )
+{
+    FIXME( "iface %p, name %s stub!\n", iface, debugstr_hstring( name ) );
+    return E_NOTIMPL;
+}
+
+static const struct IApplicationDataContainerVtbl container_vtbl =
+{
+    container_QueryInterface,
+    container_AddRef,
+    container_Release,
+    container_GetIids,
+    container_GetRuntimeClassName,
+    container_GetTrustLevel,
+    container_get_Name,
+    container_get_Locality,
+    container_get_Values,
+    container_get_Containers,
+    container_CreateContainer,
+    container_DeleteContainer,
+};
+
+static BOOL CALLBACK init_local_settings( INIT_ONCE *once, void *param, void **context )
+{
+    HSTRING_HEADER header;
+    HSTRING class_name;
+
+    local_settings.IApplicationDataContainer_iface.lpVtbl = &container_vtbl;
+    local_settings.ref = 1;
+    local_settings_hr = WindowsCreateStringReference( RuntimeClass_Windows_Foundation_Collections_PropertySet,
+            wcslen( RuntimeClass_Windows_Foundation_Collections_PropertySet ), &header, &class_name );
+    if (SUCCEEDED(local_settings_hr))
+        local_settings_hr = RoActivateInstance( class_name, (IInspectable **)&local_settings.values );
+    return TRUE;
+}
+
 struct application_data
 {
     IApplicationData IApplicationData_iface;
@@ -211,8 +348,13 @@ static HRESULT WINAPI application_data_ClearAsync( IApplicationData *iface, Appl
 
 static HRESULT WINAPI application_data_get_LocalSettings( IApplicationData *iface, IApplicationDataContainer **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    InitOnceExecuteOnce( &local_settings_once, init_local_settings, NULL, NULL );
+    if (FAILED(local_settings_hr)) return local_settings_hr;
+    IApplicationDataContainer_AddRef( *value = &local_settings.IApplicationDataContainer_iface );
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_get_RoamingSettings( IApplicationData *iface, IApplicationDataContainer **value )

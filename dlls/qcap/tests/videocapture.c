@@ -222,6 +222,13 @@ static void test_stream_config(IPin *pin)
         ok(IsEqualGUID(&vscc.guid, &FORMAT_VideoInfo)
                 || IsEqualGUID(&vscc.guid, &FORMAT_VideoInfo2), "Got wrong guid: %s.\n",
                 debugstr_guid(&vscc.guid));
+        video_info = (VIDEOINFOHEADER *)format->pbFormat;
+        ok(video_info->AvgTimePerFrame >= vscc.MinFrameInterval
+                && video_info->AvgTimePerFrame <= vscc.MaxFrameInterval,
+                "Got unexpected frame interval %s, min %s, max %s.\n",
+                wine_dbgstr_longlong(video_info->AvgTimePerFrame),
+                wine_dbgstr_longlong(vscc.MinFrameInterval),
+                wine_dbgstr_longlong(vscc.MaxFrameInterval));
 
         hr = IAMStreamConfig_SetFormat(stream_config, format);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
@@ -533,7 +540,15 @@ static HRESULT WINAPI testsink_Receive(struct strmbase_sink *iface, IMediaSample
     if (winetest_debug > 1) trace("Receive()\n");
 
     hr = IMediaSample_GetTime(sample, &start, &end);
-    ok(hr == S_OK || hr == VFW_E_SAMPLE_TIME_NOT_SET, "Got hr %#lx.\n", hr);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (hr == S_OK)
+    {
+        ok(start >= 0, "Got negative start time %s.\n", wine_dbgstr_longlong(start));
+        ok(end > start, "Got start %s, end %s.\n",
+                wine_dbgstr_longlong(start), wine_dbgstr_longlong(end));
+    }
+    hr = IMediaSample_IsSyncPoint(sample);
+    ok(hr == S_OK, "Expected a sync point, got hr %#lx.\n", hr);
 
     SetEvent(filter->got_sample);
 

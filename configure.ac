@@ -52,6 +52,7 @@ AC_ARG_WITH(opengl,    AS_HELP_STRING([--without-opengl],[do not use OpenGL]))
 AC_ARG_WITH(oss,       AS_HELP_STRING([--without-oss],[do not use the OSS sound support]))
 AC_ARG_WITH(pcap,      AS_HELP_STRING([--without-pcap],[do not use the Packet Capture library]))
 AC_ARG_WITH(pcsclite,  AS_HELP_STRING([--without-pcsclite],[do not use PCSC lite]))
+AC_ARG_WITH(pipewire,  AS_HELP_STRING([--without-pipewire],[do not use PipeWire screen capture]))
 AC_ARG_WITH(pthread,   AS_HELP_STRING([--without-pthread],[do not use the pthread library]))
 AC_ARG_WITH(pulse,     AS_HELP_STRING([--without-pulse],[do not use PulseAudio sound support]))
 AC_ARG_WITH(sane,      AS_HELP_STRING([--without-sane],[do not use SANE (scanner support)]))
@@ -1555,6 +1556,16 @@ case $host_os in
   *) WINE_NOTICE_WITH(dbus,[test "x$ac_cv_lib_soname_dbus_1" = "x"],
                       [libdbus ${notice_platform}development files not found, no dynamic device support.]) ;;
 esac
+
+dnl **** Check for PipeWire ****
+if test "x$with_pipewire" != "xno"
+then
+    WINE_PACKAGE_FLAGS(PIPEWIRE,[libpipewire-0.3])
+fi
+test -z "$PIPEWIRE_CFLAGS" -o -z "$DBUS_CFLAGS" || AC_DEFINE(HAVE_PIPEWIRE,1,
+                                        [Define if PipeWire screen capture is available.])
+WINE_NOTICE_WITH(pipewire,[test -z "$PIPEWIRE_CFLAGS" -o -z "$DBUS_CFLAGS"],
+                 [PipeWire or DBus development files not found, Wayland desktop capture won't be supported.])
 
 dnl **** Check for libgnutls ****
 if test "x$with_gnutls" != "xno"
@@ -3380,6 +3391,7 @@ WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers)
 WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.core.textinput)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.core.textinput/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.ui.notifications)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.xaml)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.xaml/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui)

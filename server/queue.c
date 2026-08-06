@@ -1795,7 +1795,12 @@ static user_handle_t find_hardware_message_window( struct desktop *desktop, stru
         break;
     case QS_MOUSEMOVE:
     case QS_MOUSEBUTTON:
-        if (!input || !(win = input_shm->capture))
+        if (is_direct_hardware_input_window( msg->win ))
+        {
+            win = msg->win;
+            *thread = window_thread_from_point( win, msg->x, msg->y );
+        }
+        else if (!input || !(win = input_shm->capture))
         {
             if (is_window_visible( msg->win ) && !is_window_transparent( msg->win )) win = msg->win;
             else win = shallow_window_from_point( desktop, msg->x, msg->y );

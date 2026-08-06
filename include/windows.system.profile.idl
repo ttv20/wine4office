@@ -37,11 +37,13 @@ namespace Windows.System.Profile {
     interface IRetailInfoStatics;
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
+    interface IWindowsIntegrityPolicyStatics;
     runtimeclass AnalyticsVersionInfo;
     runtimeclass AnalyticsInfo;
     runtimeclass RetailInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
+    runtimeclass WindowsIntegrityPolicy;
 
     [contract(Windows.Foundation.UniversalApiContract, 3.0)]
     enum SystemIdentificationSource
@@ -109,6 +111,22 @@ namespace Windows.System.Profile {
     }
 
     [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.System.Profile.WindowsIntegrityPolicy),
+        uuid(7d1d81db-8d63-4789-9ea5-ddcf65a94f3c)
+    ]
+    interface IWindowsIntegrityPolicyStatics : IInspectable
+    {
+        [propget] HRESULT IsEnabled([out, retval] boolean *value);
+        [propget] HRESULT IsEnabledForTrial([out, retval] boolean *value);
+        [propget] HRESULT CanDisable([out, retval] boolean *value);
+        [propget] HRESULT IsDisableSupported([out, retval] boolean *value);
+        [eventadd] HRESULT PolicyChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler,
+                                         [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT PolicyChanged([in] EventRegistrationToken token);
+    }
+
+    [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
         threading(both)
@@ -158,5 +176,15 @@ namespace Windows.System.Profile {
     runtimeclass SystemIdentificationInfo
     {
         [default] interface Windows.System.Profile.ISystemIdentificationInfo;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IWindowsIntegrityPolicyStatics, Windows.Foundation.UniversalApiContract, 7.0),
+        threading(both)
+    ]
+    runtimeclass WindowsIntegrityPolicy
+    {
     }
 }

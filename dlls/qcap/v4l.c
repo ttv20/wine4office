@@ -378,6 +378,7 @@ static void fill_caps(__u32 pixelformat, __u32 width, __u32 height,
 
     memset(caps, 0, sizeof(*caps));
     caps->video_info.dwBitRate = width * height * depth * TICKSPERSEC / min_frame_interval;
+    caps->video_info.AvgTimePerFrame = min_frame_interval;
     caps->video_info.bmiHeader.biSize = sizeof(caps->video_info.bmiHeader);
     caps->video_info.bmiHeader.biWidth = width;
     caps->video_info.bmiHeader.biHeight = height;

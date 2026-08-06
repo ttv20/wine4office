@@ -31,10 +31,12 @@
 #include <xkbcommon/xkbregistry.h>
 #include "cursor-shape-v1-client-protocol.h"
 #include "pointer-constraints-unstable-v1-client-protocol.h"
+#include "plasma-shell-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
+#include "xdg-foreign-unstable-v2-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "wlr-data-control-unstable-v1-client-protocol.h"
 #include "xdg-toplevel-icon-v1-client-protocol.h"
@@ -70,6 +72,7 @@ enum wayland_window_message
     WM_WAYLAND_INIT_DISPLAY_DEVICES = WM_WINE_FIRST_DRIVER_MSG,
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
+    WM_WAYLAND_DCOMP_EXPORT,
     WM_WAYLAND_SET_KEYBOARD_LAYOUT,
 };
 
@@ -78,7 +81,8 @@ enum wayland_surface_config_state
     WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED = (1 << 0),
     WAYLAND_SURFACE_CONFIG_STATE_RESIZING = (1 << 1),
     WAYLAND_SURFACE_CONFIG_STATE_TILED = (1 << 2),
-    WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN = (1 << 3)
+    WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN = (1 << 3),
+    WAYLAND_SURFACE_CONFIG_STATE_ACTIVATED = (1 << 4)
 };
 
 enum wayland_surface_role
@@ -179,6 +183,7 @@ struct wayland
     struct zxdg_output_manager_v1 *zxdg_output_manager_v1;
     struct wl_compositor *wl_compositor;
     struct xdg_wm_base *xdg_wm_base;
+    struct org_kde_plasma_shell *org_kde_plasma_shell;
     struct wl_shm *wl_shm;
     struct wp_viewporter *wp_viewporter;
     struct wl_subcompositor *wl_subcompositor;
@@ -192,6 +197,8 @@ struct wayland
     struct wp_cursor_shape_manager_v1 *wp_cursor_shape_manager_v1;
     struct wp_pointer_warp_v1 *wp_pointer_warp_v1;
     struct wp_alpha_modifier_v1 *wp_alpha_modifier_v1;
+    struct zxdg_exporter_v2 *zxdg_exporter_v2;
+    struct zxdg_importer_v2 *zxdg_importer_v2;
     struct wayland_seat seat;
     struct wayland_keyboard keyboard;
     struct wayland_pointer pointer;
@@ -310,12 +317,24 @@ struct wayland_surface
         };
     };
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+    struct org_kde_plasma_surface *org_kde_plasma_surface;
+    POINT plasma_position;
+    BOOL plasma_position_valid;
+    struct zxdg_exported_v2 *zxdg_exported_v2;
+    struct zxdg_imported_v2 *zxdg_imported_v2;
+    ATOM dcomp_foreign_atom;
 
     struct wayland_surface_config pending, requested, processing, current;
-    BOOL resizing, stacked;
+    BOOL resizing;
+    BOOL plasma_positioned;
+    BOOL dcomp_overlay;
+    BOOL dcomp_notification;
+    BOOL dcomp_base_presentation;
+    BOOL stacked;
     struct wayland_window_config window;
     int content_width, content_height;
     HCURSOR hcursor;
+    UINT dcomp_cursor_id;
 };
 
 /**********************************************************************
@@ -345,6 +364,8 @@ void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *parent);
 void wayland_surface_clear_role(struct wayland_surface *surface);
+BOOL wayland_surface_export_toplevel(struct wayland_surface *surface);
+BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom);
 void wayland_surface_attach_shm(struct wayland_surface *surface,
                                 struct wayland_shm_buffer *shm_buffer,
                                 HRGN surface_damage_region);
@@ -405,6 +426,11 @@ struct wayland_win_data
     BOOL layered_attribs_set;
     BOOL defer_cursor_clip;
     BOOL contents_presented;
+    BOOL dcomp_only_host;
+    BOOL plasma_positioned;
+    BOOL dcomp_overlay;
+    BOOL dcomp_notification;
+    BOOL dcomp_base_presentation;
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);
@@ -437,6 +463,7 @@ void activate_keyboard_hkl(HWND hwnd, BOOL ime);
  */
 
 void wayland_pointer_init(struct wl_pointer *wl_pointer);
+HWND wayland_get_input_hwnd(HWND hwnd);
 void wayland_pointer_deinit(void);
 void wayland_pointer_clear_constraint(void);
 
@@ -488,6 +515,8 @@ void WAYLAND_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha, DWO
 void WAYLAND_SetWindowIcons(HWND hwnd, HICON icon, const ICONINFO *ii, HICON icon_small, const ICONINFO *ii_small);
 void WAYLAND_SetWindowStyle(HWND hwnd, INT offset, STYLESTRUCT *style);
 void WAYLAND_SetWindowText(HWND hwnd, LPCWSTR text);
+LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data);
+void WAYLAND_CleanupIcons(HWND hwnd);
 LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT *pos);
 void WAYLAND_UpdateLayeredWindow(HWND hwnd, BYTE alpha, UINT flags);
 UINT WAYLAND_UpdateDisplayDevices(const struct gdi_device_manager *device_manager, void *param);

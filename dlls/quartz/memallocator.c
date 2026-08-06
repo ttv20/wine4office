@@ -559,9 +559,22 @@ static HRESULT WINAPI StdMediaSample2_GetTime(IMediaSample2 * iface, REFERENCE_T
 static HRESULT WINAPI StdMediaSample2_SetTime(IMediaSample2 *iface, REFERENCE_TIME *start, REFERENCE_TIME *end)
 {
     StdMediaSample2 *sample = impl_from_IMediaSample2(iface);
+    static LONG logged_large_timestamp;
 
     TRACE("sample %p, start %s, end %s.\n", sample, start ? debugstr_time(*start) : "(null)",
             end ? debugstr_time(*end) : "(null)");
+
+    if (start && *start > 1000000000000000ll && GetEnvironmentVariableA("WINE_QCAP_TARGET_DIAG", NULL, 0)
+            && !InterlockedCompareExchange(&logged_large_timestamp, 1, 0))
+    {
+        void *frames[16];
+        USHORT count = CaptureStackBackTrace(0, ARRAY_SIZE(frames), frames, NULL);
+        unsigned int i;
+
+        WARN("OFFICE_QCAP large timestamp %s stack frames %u.\n", debugstr_time(*start), count);
+        for (i = 0; i < count; ++i)
+            WARN("OFFICE_QCAP frame %u %p.\n", i, frames[i]);
+    }
 
     if (start)
     {

@@ -1003,6 +1003,16 @@ static struct window *child_window_from_point( struct window *parent, int x, int
     return parent;  /* not found any child */
 }
 
+static int window_has_direct_hardware_input( struct window *win )
+{
+    int i;
+
+    for (i = 0; i < win->prop_inuse; i++)
+        if (win->properties[i].type != PROP_TYPE_FREE &&
+            win->properties[i].data == 0x57444952) return 1;
+    return 0;
+}
+
 /* find all children of 'parent' that contain the given point */
 static int get_window_children_from_point( struct window *parent, int x, int y,
                                            struct user_handle_array *array )
@@ -1058,9 +1068,21 @@ struct thread *window_thread_from_point( user_handle_t scope, int x, int y )
     map_point_raw_to_virt( win->desktop, &x, &y );
 
     screen_to_client( win, &x, &y, no_dpi );
-    win = child_window_from_point( win, x, y );
+    if (!window_has_direct_hardware_input( win ))
+        win = child_window_from_point( win, x, y );
     if (!win->thread) return NULL;
     return (struct thread *)grab_object( win->thread );
+}
+
+/* Return whether the display driver explicitly selected this window as the
+ * hardware input endpoint. This is used for detached cross-process surfaces,
+ * where a presentation child belonging to another thread covers the input
+ * window and a parent capture must not split a click across two HWNDs. */
+int is_direct_hardware_input_window( user_handle_t handle )
+{
+    struct window *win = get_user_object( handle, NTUSER_OBJ_WINDOW );
+
+    return win && window_has_direct_hardware_input( win );
 }
 
 /* return list of all windows containing point (in absolute coords) */

@@ -128,6 +128,12 @@ jobs:
             echo "Wine configure did not enable NTSYNC support." >&2
             exit 1
           }
+          for feature in SONAME_LIBFREETYPE SONAME_LIBFONTCONFIG SONAME_LIBGNUTLS SONAME_LIBDBUS_1; do
+            grep -q "^#define $feature " include/config.h || {
+              echo "Wine configure did not enable $feature; Office web content requires fonts, TLS, and desktop integration." >&2
+              exit 1
+            }
+          done
           echo "Building with $(nproc) parallel jobs"
           make -j"$(nproc)"
           make DESTDIR="$GITHUB_WORKSPACE/stage" install

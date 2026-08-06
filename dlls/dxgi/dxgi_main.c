@@ -19,6 +19,7 @@
 
 #define DXGI_INIT_GUID
 #include "dxgi_private.h"
+#include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
@@ -42,6 +43,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(inst);
+            __wine_init_unix_call();
             break;
 
         case DLL_PROCESS_DETACH:

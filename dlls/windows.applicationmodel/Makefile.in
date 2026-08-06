@@ -4,5 +4,6 @@ IMPORTS = combase kernelbase
 SOURCES = \
 	classes.idl \
 	designmode.c \
+	limited_access.c \
 	main.c \
 	package.c

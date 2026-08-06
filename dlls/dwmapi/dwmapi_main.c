@@ -26,11 +26,39 @@
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
+#include "winreg.h"
 #include "winuser.h"
 #include "dwmapi.h"
 #include "wine/debug.h"
+#include "wine/dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
+
+static BOOL system_uses_dark_mode(void)
+{
+    static const WCHAR personalizeW[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    DWORD light_theme = TRUE, size = sizeof(light_theme);
+
+    RegGetValueW(HKEY_CURRENT_USER, personalizeW, L"SystemUsesLightTheme",
+                 RRF_RT_REG_DWORD, NULL, &light_theme, &size);
+    return !light_theme;
+}
+
+static BOOL window_uses_rtl_nonclient(HWND hwnd)
+{
+    HANDLE layout_attribute = GetPropW(hwnd, wine_dwm_nonclient_rtl_layout_prop);
+    DWORD reading_layout = 0;
+
+    if (layout_attribute)
+        return wine_dwm_decode_window_attribute(layout_attribute, FALSE);
+    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
+        return TRUE;
+    if (!GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
+            (WCHAR *)&reading_layout, sizeof(reading_layout) / sizeof(WCHAR)))
+        return FALSE;
+    return reading_layout == 1 || reading_layout == 3;
+}
 
 
 /**********************************************************************
@@ -38,17 +66,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
  */
 HRESULT WINAPI DwmIsCompositionEnabled(BOOL *enabled)
 {
-    RTL_OSVERSIONINFOEXW version;
-
     TRACE("%p\n", enabled);
 
     if (!enabled)
         return E_INVALIDARG;
 
-    *enabled = FALSE;
-    version.dwOSVersionInfoSize = sizeof(version);
-    if (!RtlGetVersion(&version))
-        *enabled = (version.dwMajorVersion > 6 || (version.dwMajorVersion == 6 && version.dwMinorVersion >= 3));
+    *enabled = wine_dwm_is_composition_enabled();
 
     return S_OK;
 }
@@ -68,7 +91,16 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    FIXME("(%p, %p) stub\n", hwnd, margins);
+    TRACE("(%p, %p)\n", hwnd, margins);
+
+    if (!hwnd || !IsWindow(hwnd)) return E_HANDLE;
+    if (!margins) return E_INVALIDARG;
+
+    if (margins->cyTopHeight > 0)
+        SetPropW(hwnd, wine_dwm_extended_frame_top_prop,
+                ULongToHandle((ULONG)margins->cyTopHeight + 1));
+    else
+        RemovePropW(hwnd, wine_dwm_extended_frame_top_prop);
 
     return S_OK;
 }
@@ -100,11 +132,56 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
  */
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
-    static BOOL once;
+    ULONG value;
 
-    if (!once++) FIXME("(%p, %lx, %p, %lx) stub\n", hwnd, attributenum, attribute, size);
+    TRACE("(%p, %lu, %p, %lu)\n", hwnd, attributenum, attribute, size);
 
-    return S_OK;
+    if (!wine_dwm_is_composition_enabled()) return DWM_E_COMPOSITIONDISABLED;
+    if (!IsWindow(hwnd)) return E_HANDLE;
+    switch (attributenum)
+    {
+    case DWMWA_NCRENDERING_POLICY:
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        value = *(const ULONG *)attribute;
+        if (value >= DWMNCRP_LAST) return E_INVALIDARG;
+        if (!SetPropW(hwnd, wine_dwm_nc_rendering_policy_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        SendMessageW(hwnd, WM_DWMNCRENDERINGCHANGED, 0, 0);
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+
+    case DWMWA_NONCLIENT_RTL_LAYOUT:
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        value = !!*(const BOOL *)attribute;
+        if (!SetPropW(hwnd, wine_dwm_nonclient_rtl_layout_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+
+    case DWMWA_USE_IMMERSIVE_DARK_MODE:
+    {
+        BOOL requested, system_dark;
+
+        if (!wine_dwm_supports_immersive_dark_mode()) return E_INVALIDARG;
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        requested = !!*(const ULONG *)attribute;
+        system_dark = system_uses_dark_mode();
+        value = requested && system_dark;
+        TRACE("immersive dark mode requested %u, system dark %u, effective %lu.\n",
+              requested, system_dark, value);
+        if (!SetPropW(hwnd, wine_dwm_immersive_dark_mode_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+    }
+
+    default:
+        FIXME("attribute %lu not implemented.\n", attributenum);
+        return S_OK;
+    }
 }
 
 /**********************************************************************
@@ -195,11 +272,27 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         return E_HANDLE;
 
     switch (attribute) {
+    case DWMWA_NCRENDERING_ENABLED:
+    {
+        enum DWMNCRENDERINGPOLICY policy;
+
+        if (!pv_attribute)
+            return E_INVALIDARG;
+        if (size < sizeof(BOOL))
+            return E_NOT_SUFFICIENT_BUFFER;
+        policy = wine_dwm_decode_window_attribute(
+            GetPropW(hwnd, wine_dwm_nc_rendering_policy_prop), DWMNCRP_USEWINDOWSTYLE);
+        *(BOOL *)pv_attribute = policy != DWMNCRP_DISABLED;
+        hr = S_OK;
+        break;
+    }
     case DWMWA_CAPTION_BUTTON_BOUNDS:
     {
         RECT *rect = pv_attribute;
         RECT window_rect;
         DWORD style;
+        DPI_AWARENESS_CONTEXT context;
+        BOOL rtl;
         UINT dpi;
         int button_count = 1;
         int button_width, button_height;
@@ -210,19 +303,34 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
             return E_NOT_SUFFICIENT_BUFFER;
         if (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)
             return E_HANDLE;
+        context = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
         if (!GetWindowRect(hwnd, &window_rect))
+        {
+            SetThreadDpiAwarenessContext(context);
             return HRESULT_FROM_WIN32(GetLastError());
+        }
 
         style = GetWindowLongW(hwnd, GWL_STYLE);
         if (style & WS_MINIMIZEBOX) ++button_count;
         if (style & WS_MAXIMIZEBOX) ++button_count;
         dpi = GetDpiForWindow(hwnd);
         button_width = MulDiv(46, dpi, USER_DEFAULT_SCREEN_DPI);
-        button_height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
-        rect->right = window_rect.right - window_rect.left;
-        rect->left = max(0, rect->right - button_count * button_width);
+        button_height = wine_dwm_get_caption_button_height(hwnd, dpi);
+        rtl = window_uses_rtl_nonclient(hwnd);
+        if (rtl)
+        {
+            rect->left = 0;
+            rect->right = min(window_rect.right - window_rect.left,
+                    button_count * button_width);
+        }
+        else
+        {
+            rect->right = window_rect.right - window_rect.left;
+            rect->left = max(0, rect->right - button_count * button_width);
+        }
         rect->top = 0;
         rect->bottom = button_height;
+        SetThreadDpiAwarenessContext(context);
         hr = S_OK;
         break;
     }

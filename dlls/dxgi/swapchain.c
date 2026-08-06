@@ -27,6 +27,8 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
+#define WM_WAYLAND_DCOMP_EXPORT 0x80001003
+
 static DXGI_SWAP_EFFECT dxgi_swap_effect_from_wined3d(enum wined3d_swap_effect swap_effect)
 {
     switch (swap_effect)
@@ -207,6 +209,12 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
+    swapchain->composition_window = window;
+}
+
 /* IUnknown methods */
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
@@ -256,6 +264,7 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     if (!refcount)
     {
         IWineDXGIDevice *device = swapchain->device;
+        HWND composition_window = swapchain->composition_window;
         if (swapchain->present1_shadow)
             ID3D11Texture2D_Release(swapchain->present1_shadow);
         if (swapchain->present1_scratch)
@@ -268,6 +277,8 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         IWineDXGIFactory_Release(swapchain->factory);
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
+        if (composition_window)
+            DestroyWindow(composition_window);
     }
 
     return refcount;
@@ -331,10 +342,91 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
         const DXGI_PRESENT_PARAMETERS *parameters);
 static HRESULT d3d11_swapchain_restore_present1_contents(struct d3d11_swapchain *swapchain);
 
+static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+{
+    HWND root;
+
+    if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
+        !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
+        return GetWindowRect(target, rect);
+    if ((root = GetAncestor(target, GA_ROOT))) target = root;
+    if (!GetClientRect(target, rect)) return FALSE;
+    MapWindowPoints(target, NULL, (POINT *)rect, 2);
+    return TRUE;
+}
+
+static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
+{
+    HWND window = d3d11_swapchain_get_hwnd(swapchain);
+    HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
+    ATOM foreign_atom, old_foreign_atom;
+    HWND base, foreign_parent, root;
+    RECT rect;
+    UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+
+    if (!target || !IsWindow(target))
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
+    root = GetAncestor(target, GA_ROOT);
+    if (!root)
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
+    base = GetPropW(target, L"__wine_dcomp_base_presentation");
+    foreign_parent = base && base != window ? base : root;
+    foreign_atom = HandleToULong(GetPropW(foreign_parent, L"__wine_dcomp_xdg_export_handle"));
+    if (foreign_atom)
+    {
+        old_foreign_atom = HandleToULong(GetPropW(window, L"__wine_dcomp_xdg_parent_atom"));
+        SetPropW(window, L"__wine_dcomp_xdg_parent_atom", ULongToHandle(foreign_atom));
+        /* The export handle is delivered asynchronously.  The composition
+         * window may therefore already have an unparented Wayland toplevel by
+         * the time it becomes available.  Force the driver through a real
+         * window update so it imports the foreign parent and restacks the
+         * surface above the DirectComposition target. */
+        if (old_foreign_atom != foreign_atom)
+            flags |= SWP_FRAMECHANGED;
+    }
+    else
+        PostMessageW(foreign_parent, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+    if (!IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
+    {
+        ShowWindow(window, SW_HIDE);
+        return;
+    }
+
+    if (!d3d11_composition_window_get_rect(window, target, &rect)) return;
+    if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
+            && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
+    {
+        if (!GetModuleHandleW(L"winewayland.drv")
+                && GetWindowTextLengthW(root) && GetForegroundWindow() == root
+                && !GetPropW(window, L"__wine_dcomp_raised_while_active"))
+            SetPropW(window, L"__wine_dcomp_raised_while_active", ULongToHandle(1));
+        else
+            flags |= SWP_NOZORDER;
+        if (GetModuleHandleW(L"winewayland.drv")
+                || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
+            RemovePropW(window, L"__wine_dcomp_raised_while_active");
+    }
+    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+            flags);
+}
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
+    struct wined3d_swapchain_desc desc;
+    RECT source_rect;
+    const RECT *source = NULL;
+    HWND window;
     HRESULT hr;
+
+    d3d11_swapchain_update_composition_window(swapchain);
 
     if (sync_interval > 4)
     {
@@ -353,7 +445,24 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL, NULL, sync_interval, 0)))
+    window = d3d11_swapchain_get_hwnd(swapchain);
+    if (GetPropW(window, L"__wine_dcomp_clip_enabled"))
+    {
+        source_rect.left = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_left"));
+        source_rect.top = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_top"));
+        source_rect.right = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_right"));
+        source_rect.bottom = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_bottom"));
+        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+        source_rect.left = max(source_rect.left, 0);
+        source_rect.top = max(source_rect.top, 0);
+        source_rect.right = min(source_rect.right, (LONG)desc.backbuffer_width);
+        source_rect.bottom = min(source_rect.bottom, (LONG)desc.backbuffer_height);
+        if (source_rect.right > source_rect.left && source_rect.bottom > source_rect.top)
+            source = &source_rect;
+    }
+
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
+            source, NULL, NULL, sync_interval, 0)))
     {
         InterlockedIncrement(&swapchain->present_count);
         if (FAILED(d3d11_swapchain_restore_present1_contents(swapchain)))

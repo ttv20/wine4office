@@ -22,6 +22,20 @@
 - Add the Windows AppCapability access operations used by modern Office
   components.
 - Add Media Foundation sensor monitoring and Office network-manager detection.
+- Make Teams camera video render through shared NV12 textures.
+- Place DirectComposition notifications at their requested desktop coordinates.
+- Expose the WLAN interface setter used when Teams starts calls.
+- Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
+  including working minimize and restore behavior.
+- Restore theme-aware window controls for DirectComposition apps on Wayland.
+- Keep DirectComposition content correctly sized when windows maximize or restore.
+- Keep DirectComposition window controls aligned for both left-to-right and
+  right-to-left layouts.
+- Match DirectComposition window controls to tall custom title bars.
+- Keep delegated DirectComposition windows synchronized when maximizing or
+  restoring them.
+- Prevent modern Teams calls from crashing when C++ thread operations report
+  an error.
 - Open CSV files in Excel and Office documents directly from archives browsed
   in KDE Dolphin.
 

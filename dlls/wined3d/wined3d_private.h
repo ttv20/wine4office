@@ -3356,6 +3356,10 @@ const char *wined3d_debug_location(uint32_t location);
 
 struct wined3d_texture_ops
 {
+    HRESULT (*texture_sync_shared)(struct wined3d_texture *texture,
+            BOOL acquire, uint64_t key, uint32_t timeout);
+    HRESULT (*texture_reopen_shared)(struct wined3d_texture *texture, HANDLE handle);
+    HRESULT (*texture_create_shared_sync)(struct wined3d_texture *texture, HANDLE *handle);
     BOOL (*texture_prepare_location)(struct wined3d_texture *texture, unsigned int sub_resource_idx,
             struct wined3d_context *context, unsigned int location);
     BOOL (*texture_load_location)(struct wined3d_texture *texture, unsigned int sub_resource_idx,
@@ -3386,6 +3390,7 @@ struct wined3d_texture_ops
 #define WINED3D_TEXTURE_GET_DC              0x00004000
 #define WINED3D_TEXTURE_GENERATE_MIPMAPS    0x00008000
 #define WINED3D_TEXTURE_DOWNLOADABLE        0x00010000
+#define WINED3D_TEXTURE_SHARED_NTHANDLE     0x00020000
 
 #define WINED3D_TEXTURE_ASYNC_COLOR_KEY     0x00000001
 
@@ -3401,6 +3406,9 @@ struct wined3d_texture
     unsigned int lod;
     uint32_t flags;
     DWORD update_map_binding;
+    HANDLE shared_handle;
+    bool shared_handle_owned;
+    bool shared_external_ownership;
 
     unsigned int row_pitch;
     unsigned int slice_pitch;

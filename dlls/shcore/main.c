@@ -41,6 +41,35 @@ WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
 static DWORD shcore_tls;
 static IUnknown *process_ref;
+static LONG global_counters[59];
+
+LONG WINAPI SHGlobalCounterGetValue( DWORD index )
+{
+    TRACE( "%lu.\n", index );
+    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    return InterlockedCompareExchange( &global_counters[index], 0, 0 );
+}
+
+LONG WINAPI SHGlobalCounterIncrement( DWORD index )
+{
+    TRACE( "%lu.\n", index );
+    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    return InterlockedIncrement( &global_counters[index] );
+}
+
+LONG WINAPI SHGlobalCounterDecrement( DWORD index )
+{
+    TRACE( "%lu.\n", index );
+    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    return InterlockedDecrement( &global_counters[index] );
+}
+
+LONG WINAPI SHGlobalCounterSetValue( DWORD index, LONG value )
+{
+    TRACE( "%lu, %ld.\n", index, value );
+    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    return InterlockedExchange( &global_counters[index], value );
+}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {

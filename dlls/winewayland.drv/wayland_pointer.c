@@ -37,6 +37,99 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(cursor);
 
+#define WM_WINE_DCOMP_FOCUS 0x80000ff0
+#define WM_WAYLAND_DCOMP_CAPTION_REDRAW (WM_APP + 0x104)
+
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_caption_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_caption_pointer_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','p','o','i','n','t','e','r',0};
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_base_presentation_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
+static const WCHAR dcomp_task_minimized_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','m','i','n','i','m','i','z','e','d',0};
+static const WCHAR dcomp_caption_root_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','o','o','t',0};
+static const WCHAR dcomp_caption_command_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','c','o','m','m','a','n','d',0};
+static const WCHAR dcomp_caption_hot_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','h','o','t',0};
+static const WCHAR dcomp_caption_rtl_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
+
+enum dcomp_caption_part
+{
+    DCOMP_CAPTION_NONE,
+    DCOMP_CAPTION_MINIMIZE,
+    DCOMP_CAPTION_MAXIMIZE,
+    DCOMP_CAPTION_CLOSE,
+};
+
+static void wayland_set_dcomp_caption_hot(HWND hwnd, enum dcomp_caption_part part)
+{
+    enum dcomp_caption_part old = HandleToUlong(NtUserGetProp(hwnd, dcomp_caption_hot_prop));
+
+    if (old == part) return;
+    if (part)
+        NtUserSetProp(hwnd, dcomp_caption_hot_prop, ULongToHandle(part));
+    else
+        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
+    send_message(hwnd, WM_WAYLAND_DCOMP_CAPTION_REDRAW, 0, 0);
+}
+
+static enum dcomp_caption_part wayland_caption_part_from_x(HWND hwnd, int screen_x)
+{
+    HWND root = NtUserGetProp(hwnd, dcomp_caption_root_prop);
+    DWORD style;
+    RECT rect;
+    int count, index;
+
+    if (!root || !NtUserGetWindowRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd)) ||
+        rect.right <= rect.left)
+        return DCOMP_CAPTION_NONE;
+    style = NtUserGetWindowLongW(root, GWL_STYLE);
+    count = 1 + !!(style & WS_MINIMIZEBOX) + !!(style & WS_MAXIMIZEBOX);
+    index = max(0, min(count - 1, (screen_x - rect.left) * count / (rect.right - rect.left)));
+    if (NtUserGetProp(hwnd, dcomp_caption_rtl_prop))
+    {
+        if (!index--) return DCOMP_CAPTION_CLOSE;
+        if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+        if ((style & WS_MINIMIZEBOX) && !index) return DCOMP_CAPTION_MINIMIZE;
+        return DCOMP_CAPTION_NONE;
+    }
+    if ((style & WS_MINIMIZEBOX) && !index--) return DCOMP_CAPTION_MINIMIZE;
+    if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+    return !index ? DCOMP_CAPTION_CLOSE : DCOMP_CAPTION_NONE;
+}
+
+static HWND wayland_get_dcomp_caption(HWND hwnd)
+{
+    HWND target, base, caption;
+
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop)) return hwnd;
+    if ((caption = NtUserGetProp(hwnd, dcomp_caption_window_prop))) return caption;
+    if (!(target = NtUserGetProp(hwnd, dcomp_detached_window_prop))) return NULL;
+    if (!(base = NtUserGetProp(target, dcomp_base_presentation_prop))) return NULL;
+    return NtUserGetProp(base, dcomp_caption_window_prop);
+}
+
+static void wayland_minimize_dcomp_base(HWND hwnd)
+{
+    struct wayland_win_data *data;
+
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface))
+    {
+        xdg_toplevel_set_minimized(data->wayland_surface->xdg_toplevel);
+        wl_display_flush(process_wayland.wl_display);
+    }
+    wayland_win_data_release(data);
+}
+
 /* The cursor-shape-v1 protocol file references the zwp_tablet_tool_v2
  * interface object. Since we don't currently use the tablet protocol,
  * provide a dummy object here to avoid linking errors. */
@@ -122,11 +215,66 @@ static HWND wayland_pointer_get_focused_hwnd(void)
     return hwnd;
 }
 
+static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
+{
+    static const WCHAR target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    static const WCHAR keyboard_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
+    static const WCHAR direct_input_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+            'h','a','r','d','w','a','r','e','_','i','n','p','u','t',0};
+    static const WCHAR cursor_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','w','i','n','d','o','w',0};
+    HWND target, parent, input_window, root;
+
+    if (keyboard)
+    {
+        if ((input_window = NtUserGetProp(hwnd, keyboard_prop))) return input_window;
+        if ((input_window = NtUserGetProp(NtUserGetAncestor(hwnd, GA_ROOT), keyboard_prop)))
+            return input_window;
+    }
+
+    /* Cross-process DirectComposition swapchains use a detached presentation
+     * window in Chromium's GPU process. That thread does not pump Win32 mouse
+     * messages. Route hardware input to the browser host window. Chromium's
+     * Aura dispatcher then forwards it to the renderer; its legacy
+     * RenderWidget child is not the native event endpoint. Marking the host as
+     * direct prevents the server from hit-testing back into the covering GPU
+     * child. */
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop)) return hwnd;
+    if (!(target = NtUserGetProp(hwnd, target_prop))) return hwnd;
+    if (!(parent = NtUserGetAncestor(target, GA_PARENT))) return hwnd;
+    input_window = parent;
+    NtUserSetProp(parent, input_prop, input_window);
+    NtUserSetProp(input_window, direct_input_prop, (HANDLE)(ULONG_PTR)0x57444952);
+    NtUserSetProp(input_window, cursor_window_prop, hwnd);
+    if ((root = NtUserGetAncestor(target, GA_ROOT)))
+        NtUserSetProp(root, keyboard_prop, input_window);
+    TRACE("DComp input presentation hwnd %p -> target %p parent %p input %p root %p\n",
+          hwnd, target, parent, input_window, root);
+    return input_window;
+}
+
+HWND wayland_get_input_hwnd(HWND hwnd)
+{
+    return wayland_get_input_hwnd_internal(hwnd, TRUE);
+}
+
+static HWND wayland_get_pointer_input_hwnd(HWND hwnd)
+{
+    return wayland_get_input_hwnd_internal(hwnd, FALSE);
+}
+
+static void wayland_pointer_update_dcomp_cursor(HWND hwnd);
+
 static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 {
     INPUT input = {0};
     RECT *window_rect;
-    HWND hwnd;
+    HWND hwnd, caption;
+    RECT caption_rect;
     POINT screen = { wl_fixed_to_double(sx), wl_fixed_to_double(sy) };
     struct wayland_surface *surface;
     struct wayland_win_data *data;
@@ -153,6 +301,20 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 
     wayland_win_data_release(data);
 
+    caption = wayland_get_dcomp_caption(hwnd);
+    if (caption && NtUserGetWindowRect(caption, &caption_rect, NtUserGetDpiForWindow(caption)) &&
+        PtInRect(&caption_rect, screen))
+    {
+        TRACE("DComp caption motion hwnd %p caption %p screen %d,%d part %u\n", hwnd, caption,
+                screen.x, screen.y, wayland_caption_part_from_x(caption, screen.x));
+        wayland_set_dcomp_caption_hot(caption,
+                wayland_caption_part_from_x(caption, screen.x));
+        if (caption != hwnd) NtUserSetProp(hwnd, dcomp_caption_pointer_prop, caption);
+        return;
+    }
+    if ((caption = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
+        wayland_set_dcomp_caption_hot(caption, DCOMP_CAPTION_NONE);
+
     input.type = INPUT_MOUSE;
     input.mi.dx = screen.x;
     input.mi.dy = screen.y;
@@ -162,7 +324,8 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
           hwnd, wl_fixed_to_double(sx), wl_fixed_to_double(sy),
           screen.x, screen.y);
 
-    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), SEND_HWMSG_RAWINPUT, &input, 0);
+    wayland_pointer_update_dcomp_cursor(hwnd);
 }
 
 static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
@@ -213,10 +376,17 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
                                  uint32_t serial, struct wl_surface *wl_surface)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
+    HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
     if (!wl_surface) return;
+
+    hwnd = wl_surface_get_user_data(wl_surface);
+    if (hwnd && NtUserGetProp(hwnd, dcomp_caption_overlay_prop))
+        wayland_set_dcomp_caption_hot(hwnd, DCOMP_CAPTION_NONE);
+    if (hwnd && (hwnd = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
+        wayland_set_dcomp_caption_hot(hwnd, DCOMP_CAPTION_NONE);
 
     TRACE("hwnd=%p\n", wl_surface_get_user_data(wl_surface));
 
@@ -275,7 +445,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     struct wayland_pointer *pointer = &process_wayland.pointer;
     BOOL edge_resize;
     INPUT input = {0};
-    HWND hwnd, root;
+    HWND hwnd, input_hwnd, root, command, caption;
     UINT resize_edge;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -298,6 +468,42 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     if (state == WL_POINTER_BUTTON_STATE_RELEASED && edge_resize) return;
     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
     if (!(root = NtUserGetAncestor(hwnd, GA_ROOT))) root = hwnd;
+
+    caption = NtUserGetProp(hwnd, dcomp_caption_overlay_prop) ? hwnd :
+            NtUserGetProp(hwnd, dcomp_caption_pointer_prop);
+    if (caption)
+    {
+        enum dcomp_caption_part part = HandleToUlong(NtUserGetProp(caption, dcomp_caption_hot_prop));
+
+        root = NtUserGetProp(caption, dcomp_caption_root_prop);
+        command = NtUserGetProp(caption, dcomp_caption_command_prop);
+        TRACE("DComp caption button hwnd %p caption %p root %p command %p part %u button %#x state %u\n",
+                hwnd, caption, root, command, part, button, state);
+        if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_RELEASED && command)
+        {
+            if (part == DCOMP_CAPTION_CLOSE)
+                NtUserPostMessage(root, WM_CLOSE, 0, 0);
+            else if (part == DCOMP_CAPTION_MAXIMIZE)
+            {
+                BOOL maximize = !(NtUserGetWindowLongW(root, GWL_STYLE) & WS_MAXIMIZE);
+
+                NtUserShowWindow(root, maximize ? SW_MAXIMIZE : SW_RESTORE);
+                if (command != root)
+                    NtUserShowWindow(command, maximize ? SW_MAXIMIZE : SW_RESTORE);
+            }
+            else if (part == DCOMP_CAPTION_MINIMIZE)
+            {
+                NtUserShowWindow(root, SW_MINIMIZE);
+                if (command != root)
+                {
+                    NtUserSetProp(command, dcomp_task_minimized_prop, ULongToHandle(1));
+                    wayland_minimize_dcomp_base(command);
+                    NtUserShowWindow(command, SW_MINIMIZE);
+                }
+            }
+        }
+        return;
+    }
 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED)
     {
@@ -342,7 +548,10 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
 
-    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+    input_hwnd = wayland_get_pointer_input_hwnd(hwnd);
+    NtUserSendHardwareInput(input_hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED && input_hwnd != hwnd)
+        NtUserPostMessage(input_hwnd, WM_WINE_DCOMP_FOCUS, 0, 0);
 }
 
 static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
@@ -443,7 +652,8 @@ static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_point
 
     TRACE("hwnd=%p axis=%u value120=%d\n", hwnd, axis, value120);
 
-    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), SEND_HWMSG_RAWINPUT, &input, 0);
+    wayland_pointer_update_dcomp_cursor(hwnd);
 }
 
 static void pointer_handle_axis_discrete(void *data, struct wl_pointer *wl_pointer,
@@ -525,7 +735,7 @@ static void relative_pointer_v1_relative_motion(void *private,
           hwnd, wl_fixed_to_double(dx), wl_fixed_to_double(dy), input.mi.dx, input.mi.dy,
           wl_fixed_to_double(dx_unaccel), wl_fixed_to_double(dy_unaccel), raw_pos.x, raw_pos.y);
 
-    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, (LPARAM)&raw);
+    NtUserSendHardwareInput(wayland_get_pointer_input_hwnd(hwnd), SEND_HWMSG_RAWINPUT, &input, (LPARAM)&raw);
 }
 
 static const struct zwp_relative_pointer_v1_listener relative_pointer_v1_listener =
@@ -885,6 +1095,39 @@ static BOOL wayland_pointer_set_cursor_shape(HCURSOR hcursor)
     return TRUE;
 }
 
+static BOOL wayland_pointer_set_cursor_shape_id(UINT cursor_id)
+{
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    enum wp_cursor_shape_device_v1_shape shape = 0;
+    uint32_t proto_version;
+    unsigned int i;
+
+    if (!process_wayland.wp_cursor_shape_manager_v1 || !cursor_id) return FALSE;
+
+    proto_version = wp_cursor_shape_manager_v1_get_version(
+        process_wayland.wp_cursor_shape_manager_v1);
+    for (i = 0; user32_cursors[i].id; ++i)
+    {
+        if (user32_cursors[i].id != cursor_id) continue;
+        shape = user32_cursors[i].shape;
+        break;
+    }
+    if (!shape || (shape >= WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK && proto_version < 2))
+        return FALSE;
+
+    if (!pointer->wp_cursor_shape_device_v1)
+    {
+        pointer->wp_cursor_shape_device_v1 =
+            wp_cursor_shape_manager_v1_get_pointer(
+                process_wayland.wp_cursor_shape_manager_v1, pointer->wl_pointer);
+        if (!pointer->wp_cursor_shape_device_v1) return FALSE;
+    }
+
+    wp_cursor_shape_device_v1_set_shape(pointer->wp_cursor_shape_device_v1,
+                                        pointer->enter_serial, shape);
+    return TRUE;
+}
+
 static void wayland_pointer_clear_cursor_shape(void)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
@@ -896,13 +1139,70 @@ static void wayland_pointer_clear_cursor_shape(void)
     }
 }
 
+static void wayland_pointer_update_dcomp_cursor(HWND hwnd)
+{
+    static const WCHAR cursor_id_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','i','d',0};
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    struct wayland_surface *surface;
+    struct wayland_win_data *data;
+    UINT value, cursor_id;
+
+    if (!(value = (UINT)(ULONG_PTR)NtUserGetProp(hwnd, cursor_id_prop))) return;
+    cursor_id = value - 1;
+
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    if (!(surface = data->wayland_surface) || surface->dcomp_cursor_id == value)
+    {
+        wayland_win_data_release(data);
+        return;
+    }
+    surface->dcomp_cursor_id = value;
+    wayland_win_data_release(data);
+
+    pthread_mutex_lock(&pointer->mutex);
+    if (pointer->focused_hwnd == hwnd)
+    {
+        TRACE("applying published DComp cursor id %#x to presentation hwnd %p\n",
+              cursor_id, hwnd);
+        if (wayland_pointer_set_cursor_shape_id(cursor_id))
+        {
+            wayland_pointer_clear_cursor_surface();
+        }
+        else
+        {
+            wayland_pointer_clear_cursor_shape();
+            wayland_pointer_clear_cursor_surface();
+            wl_pointer_set_cursor(pointer->wl_pointer, pointer->enter_serial,
+                                  NULL, 0, 0);
+        }
+        wl_display_flush(process_wayland.wl_display);
+    }
+    pthread_mutex_unlock(&pointer->mutex);
+}
+
 static void wayland_set_cursor(HWND hwnd, HCURSOR hcursor, BOOL use_hcursor)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
     struct wayland_surface *surface;
     struct wayland_win_data *data;
+    HWND focused_hwnd;
     double scale;
     BOOL reapply_clip = FALSE;
+
+    /* Hardware input for a detached DirectComposition presentation surface
+     * is routed to its host window. WM_SETCURSOR is consequently handled by
+     * the host, but only the focused presentation window owns the Wayland
+     * surface on which the compositor cursor can be set. Apply the host's
+     * cursor update to that focused surface. */
+    focused_hwnd = wayland_pointer_get_focused_hwnd();
+    if (focused_hwnd && focused_hwnd != hwnd &&
+        wayland_get_pointer_input_hwnd(focused_hwnd) == hwnd)
+    {
+        TRACE("redirecting cursor hwnd %p to focused presentation hwnd %p\n",
+              hwnd, focused_hwnd);
+        hwnd = focused_hwnd;
+    }
 
     if ((data = wayland_win_data_get(hwnd)))
     {

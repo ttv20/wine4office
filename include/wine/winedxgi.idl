@@ -30,6 +30,12 @@ interface IWineDXGIResourceSharing;
 interface IWineDXGIResourceSharing : IUnknown
 {
     HRESULT get_shared_handle([out] HANDLE *handle);
+    HRESULT create_shared_handle(
+        [in] const SECURITY_ATTRIBUTES *attributes,
+        [in] DWORD access,
+        [in] const WCHAR *name,
+        [out] HANDLE *handle
+    );
 }
 
 [

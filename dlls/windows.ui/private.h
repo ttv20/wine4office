@@ -30,11 +30,17 @@
 #include "activation.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_Foundation_Collections
+#define WIDL_using_Windows_Foundation_Numerics
 #include "windows.foundation.h"
+#define WIDL_using_Windows_Graphics_Effects
+#include "windows.graphics.effects.h"
 #define WIDL_using_Windows_UI
 #include "windows.ui.h"
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
+#define WIDL_using_Windows_UI_Composition
+#include "windows.ui.composition.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
 
@@ -43,6 +49,7 @@ extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
+extern IActivationFactory *compositor_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

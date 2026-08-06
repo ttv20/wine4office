@@ -29,6 +29,7 @@
 #endif
 
 #include <assert.h>
+#define OEMRESOURCE
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
 #include "wine/server.h"
@@ -76,7 +77,57 @@ static struct cursoricon_object *get_icon_ptr( HICON handle )
 
 BOOL process_wine_setcursor( HWND hwnd, HWND window, HCURSOR handle )
 {
+    static const WCHAR cursor_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','w','i','n','d','o','w',0};
+    static const WCHAR cursor_id_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'c','u','r','s','o','r','_','i','d',0};
+    struct cursoricon_object *obj;
+    HWND cursor_window;
+    WORD cursor_id = 0;
+
     TRACE( "hwnd %p, window %p, hcursor %p\n", hwnd, window, handle );
+
+    if ((cursor_window = NtUserGetProp( window, cursor_window_prop )))
+    {
+        if (handle && (obj = get_icon_ptr( handle )))
+        {
+            if (IS_INTRESOURCE( obj->resname ))
+            {
+                switch ((cursor_id = LOWORD( obj->resname )))
+                {
+                case OCR_NORMAL:
+                case OCR_IBEAM:
+                case OCR_WAIT:
+                case OCR_CROSS:
+                case OCR_UP:
+                case OCR_SIZENWSE:
+                case OCR_SIZENESW:
+                case OCR_SIZEWE:
+                case OCR_SIZENS:
+                case OCR_SIZEALL:
+                case OCR_NO:
+                case OCR_HAND:
+                case OCR_APPSTARTING:
+                case OCR_HELP:
+                    break;
+                default:
+                    cursor_id = 0;
+                    break;
+                }
+            }
+            release_user_handle_ptr( obj );
+        }
+
+        if (!handle || cursor_id)
+        {
+            TRACE( "publishing system cursor id %#x from input hwnd %p to presentation hwnd %p\n",
+                   cursor_id, window, cursor_window );
+            NtUserSetProp( cursor_window, cursor_id_prop,
+                           (HANDLE)(ULONG_PTR)(cursor_id + 1) );
+            return TRUE;
+        }
+    }
+
     user_driver->pSetCursor( window, handle );
     return TRUE;
 }

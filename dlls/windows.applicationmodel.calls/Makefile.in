@@ -1,0 +1,6 @@
+MODULE  = windows.applicationmodel.calls.dll
+IMPORTS = combase uuid
+
+SOURCES = \
+	classes.idl \
+	main.c

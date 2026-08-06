@@ -318,9 +318,47 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_ReclaimResources(IWineDXGIDevice *i
 
 static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *iface, HANDLE event)
 {
-    FIXME("iface %p, event %p stub!\n", iface, event);
+    struct dxgi_device *device = impl_from_IWineDXGIDevice(iface);
+    struct wined3d_query *query = NULL;
+    HANDLE event_copy;
+    HRESULT hr;
+    BOOL done;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p.\n", iface, event);
+
+    if (!event || !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(),
+            &event_copy, EVENT_MODIFY_STATE, FALSE, 0))
+        return E_INVALIDARG;
+
+    wined3d_mutex_lock();
+    hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT,
+            NULL, &dxgi_null_wined3d_parent_ops, &query);
+    if (SUCCEEDED(hr))
+        hr = wined3d_query_issue(query, WINED3DISSUE_END);
+    wined3d_mutex_unlock();
+
+    while (hr == S_OK)
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
+        wined3d_mutex_unlock();
+        if (hr != S_FALSE)
+            break;
+        hr = S_OK;
+        Sleep(0);
+    }
+
+    if (query)
+    {
+        wined3d_mutex_lock();
+        wined3d_query_decref(query);
+        wined3d_mutex_unlock();
+    }
+
+    if (SUCCEEDED(hr) && !SetEvent(event_copy))
+        hr = E_INVALIDARG;
+    CloseHandle(event_copy);
+    return hr;
 }
 
 static void STDMETHODCALLTYPE dxgi_device_Trim(IWineDXGIDevice *iface)

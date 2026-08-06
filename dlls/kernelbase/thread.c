@@ -1435,3 +1435,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadpoolStackInformation( PTP_POOL pool, PT
 {
     return set_ntstatus( TpQueryPoolStackInformation( pool, stack_info ));
 }
+
+/***********************************************************************
+ *           SetThreadpoolTimerEx   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolTimerEx( PTP_TIMER timer, FILETIME *timeout,
+                                                    DWORD period, DWORD window_length )
+{
+    TpSetTimer( timer, (LARGE_INTEGER *)timeout, period, window_length );
+    return TRUE;
+}

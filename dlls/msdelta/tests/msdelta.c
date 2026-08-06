@@ -9,6 +9,7 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#include <stdarg.h>
 #include <string.h>
 
 #include "windef.h"

@@ -149,8 +149,9 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsTypePresent(
 
     if (!type_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresent(
@@ -159,9 +160,9 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresent(
     FIXME("iface %p, type_name %s, method_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(method_name), value);
 
-    if (!type_name)
+    if (!type_name || !method_name)
         return E_INVALIDARG;
-
+    if (!value) return E_POINTER;
     *value = FALSE;
     return S_OK;
 }
@@ -174,10 +175,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresentWithArit
             iface, debugstr_hstring(type_name), debugstr_hstring(method_name),
             input_parameter_count, value);
 
-    if (!type_name)
+    if (!type_name || !method_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
@@ -186,10 +188,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
     FIXME("iface %p, type_name %s, event_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(event_name), value);
 
-    if (!type_name)
+    if (!type_name || !event_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
@@ -198,10 +201,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
     FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
 
-    if (!type_name)
+    if (!type_name || !property_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPresent(
@@ -211,10 +215,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPrese
     FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
 
-    if (!type_name)
+    if (!type_name || !property_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPresent(
@@ -223,10 +228,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPres
     FIXME("iface %p, type_name %s, property_name %s, value %p stub!\n", iface,
             debugstr_hstring(type_name), debugstr_hstring(property_name), value);
 
-    if (!type_name)
+    if (!type_name || !property_name)
         return E_INVALIDARG;
-
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent(

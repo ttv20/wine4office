@@ -34,6 +34,127 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static const WCHAR dcomp_foreign_handle_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','e','x','p','o','r','t','_','h','a','n','d','l','e',0};
+static const WCHAR dcomp_task_delegated_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+static const WCHAR dcomp_task_app_id_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_background_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_caption_rtl_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
+static const WCHAR dcomp_task_minimized_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','m','i','n','i','m','i','z','e','d',0};
+
+static void dcomp_exported_handle(void *data, struct zxdg_exported_v2 *exported,
+                                  const char *handle)
+{
+    struct wayland_surface *surface = data;
+    WCHAR name[256];
+    UNICODE_STRING name_str;
+    ATOM atom;
+    unsigned int i;
+
+    for (i = 0; handle[i] && i < ARRAY_SIZE(name) - 1; ++i) name[i] = (unsigned char)handle[i];
+    name[i] = 0;
+    RtlInitUnicodeString(&name_str, name);
+    if ((atom = NtUserRegisterWindowMessage(&name_str)))
+    {
+        surface->dcomp_foreign_atom = atom;
+        NtUserSetProp(surface->hwnd, dcomp_foreign_handle_prop, ULongToHandle(atom));
+        TRACE("exported DComp toplevel hwnd %p with atom %#x\n", surface->hwnd, atom);
+    }
+}
+
+static const struct zxdg_exported_v2_listener dcomp_exported_listener =
+{
+    dcomp_exported_handle,
+};
+
+static void dcomp_imported_destroyed(void *data, struct zxdg_imported_v2 *imported)
+{
+    struct wayland_surface *surface = data;
+
+    if (surface->zxdg_imported_v2 == imported)
+    {
+        zxdg_imported_v2_destroy(imported);
+        surface->zxdg_imported_v2 = NULL;
+        surface->dcomp_foreign_atom = 0;
+    }
+}
+
+static const struct zxdg_imported_v2_listener dcomp_imported_listener =
+{
+    dcomp_imported_destroyed,
+};
+
+static void wayland_surface_enable_plasma_positioning(struct wayland_surface *surface,
+                                                      BOOL skip_taskbar);
+
+BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
+{
+    BOOL task_delegated;
+
+    if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
+        !surface->xdg_toplevel)
+        return FALSE;
+
+    /* Detached cross-process DirectComposition surfaces are positioned in
+     * Win32 screen coordinates.  A regular managed xdg_toplevel may be placed
+     * elsewhere by the compositor, since Wayland has no standard toplevel
+     * positioning request.  Position the exported host through Plasma as
+     * well, so its Win32 screen coordinates and the detached surfaces share
+     * the same origin. */
+    task_delegated = !!NtUserGetProp(surface->hwnd, dcomp_task_delegated_prop);
+    wayland_surface_enable_plasma_positioning(surface, task_delegated);
+
+    if (surface->zxdg_exported_v2) return TRUE;
+
+    surface->zxdg_exported_v2 = zxdg_exporter_v2_export_toplevel(
+            process_wayland.zxdg_exporter_v2, surface->wl_surface);
+    if (!surface->zxdg_exported_v2) return FALSE;
+    zxdg_exported_v2_add_listener(surface->zxdg_exported_v2, &dcomp_exported_listener, surface);
+    wl_display_flush(process_wayland.wl_display);
+    return TRUE;
+}
+
+BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom)
+{
+    WCHAR name[256];
+    char handle[256];
+    UNICODE_STRING name_str = {0, sizeof(name), name};
+    unsigned int i, len;
+
+    if (surface->zxdg_imported_v2 && surface->dcomp_foreign_atom == atom) return TRUE;
+    TRACE("import request for hwnd %p role %u atom %#x\n", surface->hwnd, surface->role, atom);
+    if (!process_wayland.zxdg_importer_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
+        !surface->xdg_toplevel || !(len = NtUserGetAtomName(atom, &name_str)))
+        return FALSE;
+
+    if (surface->zxdg_imported_v2)
+    {
+        zxdg_imported_v2_destroy(surface->zxdg_imported_v2);
+        surface->zxdg_imported_v2 = NULL;
+    }
+    for (i = 0; i < len && i < ARRAY_SIZE(handle) - 1; ++i) handle[i] = name[i];
+    handle[i] = 0;
+    surface->zxdg_imported_v2 = zxdg_importer_v2_import_toplevel(
+            process_wayland.zxdg_importer_v2, handle);
+    if (!surface->zxdg_imported_v2) return FALSE;
+    zxdg_imported_v2_add_listener(surface->zxdg_imported_v2, &dcomp_imported_listener, surface);
+    zxdg_imported_v2_set_parent_of(surface->zxdg_imported_v2, surface->wl_surface);
+    surface->dcomp_foreign_atom = atom;
+    wl_surface_commit(surface->wl_surface);
+    wl_display_flush(process_wayland.wl_display);
+    TRACE("imported DComp parent for hwnd %p from atom %#x\n", surface->hwnd, atom);
+    return TRUE;
+}
+
 static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surface);
 
 static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_surface,
@@ -94,6 +215,7 @@ static void xdg_toplevel_handle_configure(void *private,
     uint32_t *state;
     enum wayland_surface_config_state config_state = 0;
     struct wayland_win_data *data;
+    HWND restore_root = NULL, target;
 
     wl_array_for_each(state, states)
     {
@@ -114,6 +236,9 @@ static void xdg_toplevel_handle_configure(void *private,
         case XDG_TOPLEVEL_STATE_FULLSCREEN:
             config_state |= WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN;
             break;
+        case XDG_TOPLEVEL_STATE_ACTIVATED:
+            config_state |= WAYLAND_SURFACE_CONFIG_STATE_ACTIVATED;
+            break;
         default:
             break;
         }
@@ -127,9 +252,15 @@ static void xdg_toplevel_handle_configure(void *private,
     {
         SetRect(&surface->pending.rect, 0, 0, width, height);
         surface->pending.state = config_state;
+        if (surface->dcomp_base_presentation &&
+            (config_state & WAYLAND_SURFACE_CONFIG_STATE_ACTIVATED) &&
+            NtUserRemoveProp(hwnd, dcomp_task_minimized_prop) &&
+            (target = NtUserGetProp(hwnd, dcomp_detached_window_prop)))
+            restore_root = NtUserGetAncestor(target, GA_ROOT);
     }
 
     wayland_win_data_release(data);
+    if (restore_root) NtUserShowWindow(restore_root, SW_RESTORE);
 }
 
 static void xdg_toplevel_handle_close(void *data, struct xdg_toplevel *xdg_toplevel)
@@ -322,6 +453,68 @@ static void wayland_surface_init_fractional_scale(struct wayland_surface *surfac
         surface->hwnd);
 }
 
+static void wayland_surface_set_plasma_position(struct wayland_surface *surface)
+{
+    POINT position = {surface->window.rect.left, surface->window.rect.top};
+
+    if (!surface->org_kde_plasma_surface ||
+        (surface->dcomp_overlay && !surface->dcomp_notification) ||
+        (surface->plasma_position_valid &&
+         surface->plasma_position.x == position.x &&
+         surface->plasma_position.y == position.y))
+        return;
+
+    org_kde_plasma_surface_set_position(surface->org_kde_plasma_surface,
+                                        position.x, position.y);
+    surface->plasma_position = position;
+    surface->plasma_position_valid = TRUE;
+}
+
+static void wayland_surface_enable_plasma_positioning(struct wayland_surface *surface,
+                                                      BOOL skip_taskbar)
+{
+    surface->plasma_positioned = TRUE;
+    if (!process_wayland.org_kde_plasma_shell) return;
+
+    if (!surface->org_kde_plasma_surface)
+    {
+        surface->org_kde_plasma_surface =
+            org_kde_plasma_shell_get_surface(process_wayland.org_kde_plasma_shell,
+                                             surface->wl_surface);
+        if (!surface->org_kde_plasma_surface) return;
+    }
+
+    if (skip_taskbar)
+    {
+        if (surface->dcomp_overlay)
+            org_kde_plasma_surface_set_role(surface->org_kde_plasma_surface,
+                    ORG_KDE_PLASMA_SURFACE_ROLE_NOTIFICATION);
+    }
+    org_kde_plasma_surface_set_skip_taskbar(surface->org_kde_plasma_surface, skip_taskbar);
+    org_kde_plasma_surface_set_skip_switcher(surface->org_kde_plasma_surface, skip_taskbar);
+    wayland_surface_set_plasma_position(surface);
+}
+
+static void wayland_surface_update_app_id(struct wayland_surface *surface)
+{
+    WCHAR name[MAX_PATH];
+    char app_id[MAX_PATH * 3];
+    UNICODE_STRING name_str = {0, sizeof(name), name};
+    ATOM atom;
+    DWORD len, size;
+
+    if (!surface->xdg_toplevel) return;
+    atom = HandleToULong(NtUserGetProp(surface->hwnd, dcomp_task_app_id_prop));
+    if (atom && (len = NtUserGetAtomName(atom, &name_str)) &&
+        !RtlUnicodeToUTF8N(app_id, sizeof(app_id) - 1, &size, name, len * sizeof(WCHAR)))
+    {
+        app_id[size] = 0;
+        xdg_toplevel_set_app_id(surface->xdg_toplevel, app_id);
+    }
+    else if (process_name)
+        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
+}
+
 /**********************************************************************
  *          wayland_surface_make_toplevel
  *
@@ -346,12 +539,15 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR 
     if (!surface->xdg_toplevel) goto err;
     xdg_toplevel_add_listener(surface->xdg_toplevel, &xdg_toplevel_listener, surface->hwnd);
 
-    if (process_name)
-        xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
+    wayland_surface_update_app_id(surface);
 
     wayland_surface_set_title(surface, title);
 
     wayland_surface_assign_icon(surface);
+
+    if (surface->plasma_positioned && process_wayland.org_kde_plasma_shell)
+        wayland_surface_enable_plasma_positioning(surface,
+                !surface->dcomp_base_presentation);
 
     wayland_surface_init_fractional_scale(surface, 1.0);
 
@@ -479,6 +675,26 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
     TRACE("surface=%p\n", surface);
 
     /* some objects are shared between several roles */
+
+    if (surface->org_kde_plasma_surface)
+    {
+        org_kde_plasma_surface_destroy(surface->org_kde_plasma_surface);
+        surface->org_kde_plasma_surface = NULL;
+        surface->plasma_position_valid = FALSE;
+    }
+
+    if (surface->zxdg_imported_v2)
+    {
+        zxdg_imported_v2_destroy(surface->zxdg_imported_v2);
+        surface->zxdg_imported_v2 = NULL;
+    }
+    if (surface->zxdg_exported_v2)
+    {
+        zxdg_exported_v2_destroy(surface->zxdg_exported_v2);
+        surface->zxdg_exported_v2 = NULL;
+        NtUserRemoveProp(surface->hwnd, dcomp_foreign_handle_prop);
+    }
+    surface->dcomp_foreign_atom = 0;
 
     if (surface->wp_fractional_scale_v1)
     {
@@ -852,6 +1068,8 @@ static BOOL wayland_surface_reconfigure_xdg(struct wayland_surface *surface, REC
 
     wayland_surface_reconfigure_geometry(surface, rect);
 
+    wayland_surface_set_plasma_position(surface);
+
     return TRUE;
 }
 
@@ -877,7 +1095,18 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
             wayland_surface_make_subsurface(surface, owner_surface);
         if (!surface->wl_subsurface) goto done;
 
-        OffsetRect(&rect, -owner_surface->window.rect.left, -owner_surface->window.rect.top);
+        if (NtUserGetProp(surface->hwnd, dcomp_caption_overlay_prop))
+        {
+            int owner_width = owner_surface->window.rect.right - owner_surface->window.rect.left;
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+
+            SetRect(&rect, 0, 0, width, height);
+            if (!NtUserGetProp(surface->hwnd, dcomp_caption_rtl_prop))
+                OffsetRect(&rect, max(0, owner_width - width), 0);
+        }
+        else
+            OffsetRect(&rect, -owner_surface->window.rect.left, -owner_surface->window.rect.top);
         rect = map_rect_to_surface(surface, rect);
 
         TRACE("hwnd=%p rect=%s\n", surface->hwnd, wine_dbgstr_rect(&rect));
@@ -1459,6 +1688,10 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         return wayland_client_surface_attach(client, NULL, NULL);
     }
 
+    /* A retained client buffer still needs mapped parent contents after its
+     * window is restored or its Wayland role is recreated. */
+    wayland_surface_ensure_contents(surface);
+
 
     if (client->toplevel != toplevel || client->parent_surface != surface->wl_surface)
     {
@@ -1510,6 +1743,8 @@ static const struct wl_buffer_listener dummy_buffer_listener =
 void wayland_surface_ensure_contents(struct wayland_surface *surface)
 {
     struct wayland_shm_buffer *dummy_shm_buffer;
+    ULONG_PTR backdrop;
+    uint32_t format;
     HRGN damage;
     int width, height;
     BOOL needs_contents;
@@ -1525,13 +1760,18 @@ void wayland_surface_ensure_contents(struct wayland_surface *surface)
 
     if (!needs_contents) return;
 
-    /* Create a transparent dummy buffer. */
-    dummy_shm_buffer = wayland_shm_buffer_create(width, height, WL_SHM_FORMAT_ARGB8888);
+    /* Composition bases define the backdrop underneath premultiplied client
+     * pixels. Other client surfaces retain the transparent parent used by the
+     * existing Wayland presentation path. */
+    backdrop = (ULONG_PTR)NtUserGetProp(surface->hwnd, dcomp_background_prop);
+    format = backdrop ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888;
+    dummy_shm_buffer = wayland_shm_buffer_create(width, height, format);
     if (!dummy_shm_buffer)
     {
         ERR("Failed to create dummy buffer\n");
         return;
     }
+    if (backdrop == 1) memset(dummy_shm_buffer->map_data, 0xff, dummy_shm_buffer->map_size);
     wl_buffer_add_listener(dummy_shm_buffer->wl_buffer, &dummy_buffer_listener,
                            dummy_shm_buffer);
 
@@ -1582,7 +1822,7 @@ void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR text)
  */
 void wayland_surface_set_icon_buffer(struct wayland_surface *surface, UINT type, const ICONINFO *ii)
 {
-    struct wayland_shm_buffer *icon_buf;
+    struct wayland_shm_buffer *icon_buf, *scaled_buf = NULL;
     HDC hDC;
 
     if (!process_wayland.xdg_toplevel_icon_manager_v1) return;
@@ -1594,6 +1834,50 @@ void wayland_surface_set_icon_buffer(struct wayland_surface *surface, UINT type,
     hDC = NtGdiCreateCompatibleDC(0);
     icon_buf = wayland_shm_buffer_from_color_bitmaps(hDC, ii->hbmColor, ii->hbmMask, TRUE);
     NtGdiDeleteObjectApp(hDC);
+
+    if (icon_buf)
+        TRACE("surface=%p type=%x icon size=%dx%d\n", surface, type,
+              icon_buf->width, icon_buf->height);
+
+    /* Windows applications commonly expose only the classic 32x32 icon even
+     * when Wayland panels request a larger logical size. Some compositors
+     * scale such buffers with nearest-neighbour filtering, producing visibly
+     * pixelated taskbar icons. Supply a smooth 64x64 choice as well. */
+    if (icon_buf && type == ICON_BIG && (icon_buf->width < 64 || icon_buf->height < 64) &&
+        (scaled_buf = wayland_shm_buffer_create(64, 64, WL_SHM_FORMAT_ARGB8888)))
+    {
+        const uint32_t *src = icon_buf->map_data;
+        uint32_t *dst = scaled_buf->map_data;
+        unsigned int x, y;
+
+        for (y = 0; y < 64; ++y)
+        {
+            unsigned int sy = y * (icon_buf->height - 1) * 256 / 63;
+            unsigned int y0 = sy >> 8, y1 = min(y0 + 1, icon_buf->height - 1), fy = sy & 255;
+
+            for (x = 0; x < 64; ++x)
+            {
+                unsigned int sx = x * (icon_buf->width - 1) * 256 / 63;
+                unsigned int x0 = sx >> 8, x1 = min(x0 + 1, icon_buf->width - 1), fx = sx & 255;
+                unsigned int weights[4] = {(256 - fx) * (256 - fy), fx * (256 - fy),
+                                           (256 - fx) * fy, fx * fy};
+                uint32_t pixels[4] = {src[y0 * icon_buf->width + x0], src[y0 * icon_buf->width + x1],
+                                      src[y1 * icon_buf->width + x0], src[y1 * icon_buf->width + x1]};
+                uint32_t value = 0;
+                unsigned int shift, i;
+
+                for (shift = 0; shift < 32; shift += 8)
+                {
+                    unsigned int channel = 0;
+                    for (i = 0; i < 4; ++i) channel += ((pixels[i] >> shift) & 0xff) * weights[i];
+                    value |= ((channel + 32768) >> 16) << shift;
+                }
+                dst[y * 64 + x] = value;
+            }
+        }
+        wayland_shm_buffer_unref(icon_buf);
+        icon_buf = scaled_buf;
+    }
 
     if (surface->big_icon_buffer && type == ICON_BIG)
     {
@@ -1646,7 +1930,10 @@ void wayland_surface_assign_icon(struct wayland_surface *surface)
                                             surface->small_icon_buffer->wl_buffer, 1);
         }
 
-        xdg_toplevel_icon_v1_set_name(surface->xdg_toplevel_icon, "");
+        /* Match the icon name to xdg_toplevel.app_id so the compositor can
+         * resolve an application icon exported by desktop integration.  The
+         * pixel buffers remain as a fallback when no themed icon exists. */
+        if (process_name) xdg_toplevel_icon_v1_set_name(surface->xdg_toplevel_icon, process_name);
 
         xdg_toplevel_icon_manager_v1_set_icon(process_wayland.xdg_toplevel_icon_manager_v1,
                                               surface->xdg_toplevel, surface->xdg_toplevel_icon);

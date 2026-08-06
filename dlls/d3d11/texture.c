@@ -579,6 +579,8 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_AddRef(ID3D11Texture2D *iface)
     return refcount;
 }
 
+static void d3d_texture2d_shared_stop_worker(struct d3d_texture2d *texture);
+
 static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
 {
     struct d3d_texture2d *texture = impl_from_ID3D11Texture2D(iface);
@@ -589,6 +591,7 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
     if (!refcount)
     {
         ID3D11Device5 *device = texture->device;
+        d3d_texture2d_shared_stop_worker(texture);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it
@@ -810,12 +813,65 @@ static HRESULT STDMETHODCALLTYPE d3d_texture2d_sharing_get_shared_handle(IWineDX
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE d3d_texture2d_sharing_create_shared_handle(IWineDXGIResourceSharing *iface,
+        const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
+{
+    struct d3d_texture2d *texture = impl_from_IWineDXGIResourceSharing(iface);
+    SECURITY_DESCRIPTOR *security = attributes ? attributes->lpSecurityDescriptor : NULL;
+    WCHAR name_buffer[MAX_PATH * 2];
+    UNICODE_STRING name_string = {0};
+    OBJECT_ATTRIBUTES object_attributes;
+    D3DKMT_HANDLE objects[3];
+    UINT object_count;
+    NTSTATUS status;
+
+    TRACE("iface %p, attributes %p, access %#lx, name %s, handle %p.\n",
+            iface, attributes, access, debugstr_w(name), handle);
+
+    if (!handle)
+        return E_INVALIDARG;
+    *handle = NULL;
+
+    if (!(texture->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+            || !texture->shared || !texture->shared->resource)
+        return E_INVALIDARG;
+
+    if (name)
+    {
+        int length = swprintf(name_buffer, ARRAY_SIZE(name_buffer),
+                L"\\Sessions\\%u\\BaseNamedObjects\\%s", RtlGetCurrentPeb()->SessionId, name);
+
+        if (length < 0 || length >= ARRAY_SIZE(name_buffer))
+            return E_INVALIDARG;
+        RtlInitUnicodeString(&name_string, name_buffer);
+    }
+    InitializeObjectAttributes(&object_attributes, name ? &name_string : NULL,
+            OBJ_CASE_INSENSITIVE, NULL, security);
+
+    objects[0] = texture->shared->resource;
+    if (texture->shared->keyed_mutex && texture->shared->sync_object)
+    {
+        objects[1] = texture->shared->keyed_mutex;
+        objects[2] = texture->shared->sync_object;
+        object_count = 3;
+    }
+    else
+    {
+        object_count = 1;
+    }
+    status = D3DKMTShareObjects(object_count, objects, &object_attributes, access, handle);
+    if (status == STATUS_OBJECT_NAME_COLLISION)
+        return DXGI_ERROR_NAME_ALREADY_EXISTS;
+    return status ? HRESULT_FROM_NT(status) : S_OK;
+}
+
 static const struct IWineDXGIResourceSharingVtbl d3d_texture2d_sharing_vtbl =
 {
     d3d_texture2d_sharing_QueryInterface,
     d3d_texture2d_sharing_AddRef,
     d3d_texture2d_sharing_Release,
     d3d_texture2d_sharing_get_shared_handle,
+    d3d_texture2d_sharing_create_shared_handle,
 };
 
 static inline struct d3d_texture2d *impl_from_IDXGIKeyedMutex(IDXGIKeyedMutex *iface)
@@ -917,6 +973,16 @@ static HRESULT d3d_texture2d_shared_ensure_staging(struct d3d_texture2d *texture
             &texture->shared->staging_texture);
 }
 
+static UINT d3d_texture2d_shared_row_count(const D3D11_TEXTURE2D_DESC *desc)
+{
+    return desc->Format == DXGI_FORMAT_NV12 ? desc->Height + desc->Height / 2 : desc->Height;
+}
+
+static UINT d3d_texture2d_shared_row_pitch(const D3D11_TEXTURE2D_DESC *desc)
+{
+    return desc->Format == DXGI_FORMAT_NV12 ? desc->Width : desc->Width * 4;
+}
+
 static HRESULT d3d_texture2d_shared_readback(struct d3d_texture2d *texture)
 {
     struct d3d11_shared_texture_payload *payload = texture->shared->view;
@@ -937,7 +1003,7 @@ static HRESULT d3d_texture2d_shared_readback(struct d3d_texture2d *texture)
             (ID3D11Resource *)texture->shared->staging_texture, 0, D3D11_MAP_READ, 0, &map)))
     {
         dst = (BYTE *)payload + payload->payload_offset;
-        for (y = 0; y < texture->desc.Height; ++y)
+        for (y = 0; y < d3d_texture2d_shared_row_count(&texture->desc); ++y)
             memcpy(dst + y * payload->payload_row_pitch,
                     (BYTE *)map.pData + y * map.RowPitch, payload->payload_row_pitch);
         ID3D11DeviceContext_Unmap(context,
@@ -948,6 +1014,72 @@ static HRESULT d3d_texture2d_shared_readback(struct d3d_texture2d *texture)
     }
     ID3D11DeviceContext_Release(context);
     return hr;
+}
+
+static void d3d_texture2d_trace_native_shared_pixels(struct d3d_texture2d *texture)
+{
+    static LONG frame_count;
+    ID3D11DeviceContext *context;
+    D3D11_MAPPED_SUBRESOURCE map;
+    char enabled[2];
+    unsigned int y_min = 0xff, y_max = 0, uv_min = 0xff, uv_max = 0;
+    uint64_t y_sum = 0, uv_sum = 0;
+    unsigned int x, y, y_count = 0, uv_count = 0;
+    LONG frame;
+
+    if (texture->desc.Format != DXGI_FORMAT_NV12
+            || !GetEnvironmentVariableA("WINE_D3D11_NATIVE_SHARED_TRACE", enabled, ARRAY_SIZE(enabled))
+            || enabled[0] == '0')
+        return;
+
+    frame = InterlockedIncrement(&frame_count);
+    if (frame != 1 && frame % 30)
+        return;
+    if (FAILED(d3d_texture2d_shared_ensure_staging(texture)))
+        return;
+
+    ID3D11Device5_GetImmediateContext(texture->device, &context);
+    ID3D11DeviceContext_CopySubresourceRegion(context,
+            (ID3D11Resource *)texture->shared->staging_texture, 0, 0, 0, 0,
+            (ID3D11Resource *)&texture->ID3D11Texture2D_iface, 0, NULL);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(context,
+            (ID3D11Resource *)texture->shared->staging_texture, 0, D3D11_MAP_READ, 0, &map)))
+    {
+        const BYTE *data = map.pData;
+        unsigned int x_step = max(1, texture->desc.Width / 64);
+        unsigned int y_step = max(1, texture->desc.Height / 64);
+
+        for (y = 0; y < texture->desc.Height; y += y_step)
+        {
+            const BYTE *row = data + y * map.RowPitch;
+            for (x = 0; x < texture->desc.Width; x += x_step)
+            {
+                y_min = min(y_min, row[x]);
+                y_max = max(y_max, row[x]);
+                y_sum += row[x];
+                ++y_count;
+            }
+        }
+        for (y = 0; y < texture->desc.Height / 2; y += y_step)
+        {
+            const BYTE *row = data + (texture->desc.Height + y) * map.RowPitch;
+            for (x = 0; x < texture->desc.Width; x += x_step)
+            {
+                uv_min = min(uv_min, row[x]);
+                uv_max = max(uv_max, row[x]);
+                uv_sum += row[x];
+                ++uv_count;
+            }
+        }
+        WARN("NATIVE_SHARED_NV12 frame %ld texture %p owner %u %ux%u pitch %u "
+                "Y %u..%u avg %u UV %u..%u avg %u.\n", frame, texture,
+                texture->shared->owner, texture->desc.Width, texture->desc.Height,
+                map.RowPitch, y_min, y_max, y_count ? (unsigned int)(y_sum / y_count) : 0,
+                uv_min, uv_max, uv_count ? (unsigned int)(uv_sum / uv_count) : 0);
+        ID3D11DeviceContext_Unmap(context,
+                (ID3D11Resource *)texture->shared->staging_texture, 0);
+    }
+    ID3D11DeviceContext_Release(context);
 }
 
 static HRESULT d3d_texture2d_shared_upload(struct d3d_texture2d *texture)
@@ -969,93 +1101,63 @@ static HRESULT d3d_texture2d_shared_upload(struct d3d_texture2d *texture)
     return S_OK;
 }
 
-static UINT64 d3d_texture2d_shared_sample_digest(struct d3d_texture2d *texture,
-        UINT *transparent, UINT *opaque, UINT *other)
+static DWORD WINAPI d3d_texture2d_shared_worker(void *parameter)
 {
-    struct d3d11_shared_texture_payload *payload = texture->shared->view;
-    const BYTE *data = (const BYTE *)payload + payload->payload_offset;
-    UINT64 digest = 1469598103934665603ULL;
-    UINT offset;
+    struct d3d_texture2d *texture = parameter;
+    HANDLE events[2] = {texture->shared->stop_event, texture->shared->change_event};
+    DWORD wait;
 
-    *transparent = *opaque = *other = 0;
-    for (offset = 0; offset + 3 < payload->payload_size; offset += 4096)
+    for (;;)
     {
-        UINT i;
-
-        for (i = 0; i < 4; ++i)
-            digest = (digest ^ data[offset + i]) * 1099511628211ULL;
-        if (!data[offset + 3])
-            ++*transparent;
-        else if (data[offset + 3] == 0xff)
-            ++*opaque;
-        else
-            ++*other;
+        wait = WaitForMultipleObjects(ARRAY_SIZE(events), events, FALSE, 16);
+        if (wait == WAIT_OBJECT_0)
+            break;
+        if (wait != WAIT_OBJECT_0 + 1 && wait != WAIT_TIMEOUT)
+        {
+            WARN("Shared texture worker for %p stopped after wait result %#lx.\n", texture, wait);
+            break;
+        }
+        if (FAILED(d3d_texture2d_shared_upload(texture)))
+            WARN("Failed to upload changed shared texture %p.\n", texture);
     }
-    return digest;
+    return 0;
 }
 
-static void d3d_texture2d_shared_log_transfer(const char *operation,
-        struct d3d_texture2d *texture, UINT64 key)
+static void d3d_texture2d_shared_start_worker(struct d3d_texture2d *texture)
 {
-    struct d3d11_shared_texture_payload *payload = texture->shared->view;
-    UINT transparent, opaque, other;
-    UINT64 digest;
+    struct d3d11_shared_texture *shared = texture->shared;
 
-    digest = d3d_texture2d_shared_sample_digest(texture, &transparent, &opaque, &other);
-    WARN("OFFICE_SHARED %s texture %p owner %u key %s local generation %s payload generation %s "
-            "digest %s alpha 0/%u 255/%u other/%u.\n", operation, texture,
-            texture->shared->owner, wine_dbgstr_longlong(key),
-            wine_dbgstr_longlong(texture->shared->generation),
-            wine_dbgstr_longlong(payload->generation), wine_dbgstr_longlong(digest),
-            transparent, opaque, other);
-}
-
-static void d3d_texture2d_shared_dump_payload(struct d3d_texture2d *texture, UINT64 key)
-{
-    struct d3d11_shared_texture_payload *payload = texture->shared->view;
-    static LONG dump_count;
-    WCHAR directory[MAX_PATH], filename[MAX_PATH], marker[MAX_PATH];
-    DWORD written;
-    HANDLE file;
-    LONG index;
-
-    if (!texture->shared->owner || key != 1 || texture->desc.Width != 1536
-            || texture->desc.Height != 1024)
+    /* Native shared resources refer to the same allocation in every process.
+     * Polling the CPU shadow for those resources is both unnecessary and can
+     * overwrite newer GPU contents with stale data. */
+    if (shared->native_backing || !shared->change_event)
         return;
-    if (!GetEnvironmentVariableW(L"WINE_D3D11_SHARED_DUMP_DIR", directory, ARRAY_SIZE(directory)))
-        return;
-    swprintf(marker, ARRAY_SIZE(marker), L"%s\\enable", directory);
-    if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES)
-        return;
-    index = InterlockedIncrement(&dump_count);
-    if (index > 48)
-        return;
-
-    CreateDirectoryW(directory, NULL);
-    swprintf(filename, ARRAY_SIZE(filename),
-            L"%s\\shared-%04ld-tex-%p-gen-%I64u-%ux%u-fmt-%u.bgra", directory,
-            index, texture, payload->generation, texture->desc.Width,
-            texture->desc.Height, texture->desc.Format);
-    if ((file = CreateFileW(filename, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)) == INVALID_HANDLE_VALUE)
+    if (!(shared->stop_event = CreateEventW(NULL, TRUE, FALSE, NULL)))
     {
-        WARN("Failed to create shared texture dump %s, error %lu.\n",
-                debugstr_w(filename), GetLastError());
+        WARN("Failed to create shared texture stop event, error %lu.\n", GetLastError());
+        CloseHandle(shared->change_event);
+        shared->change_event = NULL;
         return;
     }
-    if (!WriteFile(file, (BYTE *)payload + payload->payload_offset,
-            payload->payload_size, &written, NULL) || written != payload->payload_size)
-        WARN("Short shared texture dump %s: %lu/%u, error %lu.\n",
-                debugstr_w(filename), written, payload->payload_size, GetLastError());
-    CloseHandle(file);
+    if (!(shared->worker = CreateThread(NULL, 0, d3d_texture2d_shared_worker, texture, 0, NULL)))
+    {
+        WARN("Failed to create shared texture worker, error %lu.\n", GetLastError());
+        CloseHandle(shared->stop_event);
+        CloseHandle(shared->change_event);
+        shared->stop_event = shared->change_event = NULL;
+    }
 }
 
-static BOOL d3d_texture2d_shared_owner_readback_only(void)
+static void d3d_texture2d_shared_stop_worker(struct d3d_texture2d *texture)
 {
-    char value[2];
+    struct d3d11_shared_texture *shared = texture->shared;
 
-    return GetEnvironmentVariableA("WINE_D3D11_SHARED_OWNER_READBACK_ONLY", value, ARRAY_SIZE(value))
-            && value[0] != '0';
+    if (!shared || !shared->worker)
+        return;
+    SetEvent(shared->stop_event);
+    WaitForSingleObject(shared->worker, INFINITE);
+    CloseHandle(shared->worker);
+    shared->worker = NULL;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d_texture2d_keyed_mutex_AcquireSync(IDXGIKeyedMutex *iface,
@@ -1071,6 +1173,24 @@ static HRESULT STDMETHODCALLTYPE d3d_texture2d_keyed_mutex_AcquireSync(IDXGIKeye
 
     if (InterlockedCompareExchange(&texture->shared->acquired, 1, 0))
         return DXGI_ERROR_INVALID_CALL;
+
+    if (texture->shared->native_backing)
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_texture_sync_shared(texture->wined3d_texture,
+                TRUE, key, milliseconds);
+        wined3d_mutex_unlock();
+        if (FAILED(hr))
+        {
+            InterlockedExchange(&texture->shared->acquired, 0);
+            if (hr == HRESULT_FROM_WIN32(WAIT_TIMEOUT))
+                return WAIT_TIMEOUT;
+            WARN("Failed to acquire native shared texture, hr %#lx.\n", hr);
+            return hr;
+        }
+        texture->shared->acquiring_thread = GetCurrentThreadId();
+        return S_OK;
+    }
 
     acquire.hKeyedMutex = texture->shared->keyed_mutex;
     acquire.Key = key;
@@ -1089,7 +1209,6 @@ static HRESULT STDMETHODCALLTYPE d3d_texture2d_keyed_mutex_AcquireSync(IDXGIKeye
             WARN("Failed to upload shared texture, hr %#lx.\n", hr);
             return hr;
         }
-        d3d_texture2d_shared_log_transfer("acquire", texture, key);
         return S_OK;
     }
     InterlockedExchange(&texture->shared->acquired, 0);
@@ -1117,24 +1236,37 @@ static HRESULT STDMETHODCALLTYPE d3d_texture2d_keyed_mutex_ReleaseSync(IDXGIKeye
             || texture->shared->acquiring_thread != GetCurrentThreadId())
         return DXGI_ERROR_INVALID_CALL;
 
-    if (!texture->shared->owner && d3d_texture2d_shared_owner_readback_only())
+    if (texture->shared->native_backing)
     {
-        WARN("OFFICE_SHARED skipping non-owner readback for texture %p key %s.\n",
-                texture, wine_dbgstr_longlong(key));
-        transfer_hr = S_OK;
+        /* Transfer Vulkan queue ownership before releasing the CPU-side keyed
+         * mutex, so the next device can safely acquire the external image. */
+        d3d_texture2d_trace_native_shared_pixels(texture);
+        wined3d_mutex_lock();
+        transfer_hr = wined3d_texture_sync_shared(texture->wined3d_texture,
+                FALSE, key, 0);
+        wined3d_mutex_unlock();
     }
     else
     {
         transfer_hr = d3d_texture2d_shared_readback(texture);
         if (SUCCEEDED(transfer_hr))
         {
-            d3d_texture2d_shared_log_transfer("release", texture, key);
-            d3d_texture2d_shared_dump_payload(texture, key);
+            if (texture->shared->change_event)
+                SetEvent(texture->shared->change_event);
         }
     }
     if (FAILED(transfer_hr))
         WARN("Failed to read back shared texture, hr %#lx; releasing ownership with stale pixels.\n",
                 transfer_hr);
+
+    if (texture->shared->native_backing)
+    {
+        if (FAILED(transfer_hr))
+            return transfer_hr;
+        texture->shared->acquiring_thread = 0;
+        InterlockedExchange(&texture->shared->acquired, 0);
+        return S_OK;
+    }
 
     release.hKeyedMutex = texture->shared->keyed_mutex;
     release.Key = key;
@@ -1171,6 +1303,7 @@ static void d3d_texture2d_shared_cleanup(struct d3d_texture2d *texture)
     if (!shared)
         return;
 
+    d3d_texture2d_shared_stop_worker(texture);
     if (shared->staging_texture)
         ID3D11Texture2D_Release(shared->staging_texture);
     if (shared->resource)
@@ -1185,10 +1318,19 @@ static void d3d_texture2d_shared_cleanup(struct d3d_texture2d *texture)
         D3DKMT_DESTROYKEYEDMUTEX destroy = {shared->keyed_mutex};
         D3DKMTDestroyKeyedMutex(&destroy);
     }
+    if (shared->sync_object)
+    {
+        D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {shared->sync_object};
+        D3DKMTDestroySynchronizationObject(&destroy);
+    }
     if (shared->view)
         UnmapViewOfFile(shared->view);
     if (shared->mapping)
         CloseHandle(shared->mapping);
+    if (shared->change_event)
+        CloseHandle(shared->change_event);
+    if (shared->stop_event)
+        CloseHandle(shared->stop_event);
     free(shared);
     texture->shared = NULL;
 }
@@ -1382,10 +1524,19 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     struct d3d11_shared_texture_payload *payload;
     D3DKMT_CREATESTANDARDALLOCATION standard = {0};
     D3DKMT_CREATEKEYEDMUTEX create_mutex = {0};
+    D3DKMT_CREATEKEYEDMUTEX2 create_mutex2 = {0};
+    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create_sync = {0};
+    D3DKMT_OPENSYNCOBJECTFROMNTHANDLE2 open_sync = {0};
     D3DDDI_ALLOCATIONINFO allocation = {0};
     D3DKMT_CREATEALLOCATION create = {0};
+    struct wine_d3dkmt_allocation_backing backing = {0};
+    OBJECT_ATTRIBUTES object_attributes;
+    D3DKMT_HANDLE objects[3];
+    HANDLE native_handle = NULL;
+    HANDLE sync_handle = NULL;
     struct d3d11_shared_texture *shared;
     WCHAR name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
+    WCHAR event_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
     UINT64 payload_size, mapping_size;
     HRESULT hr = E_FAIL;
     NTSTATUS status;
@@ -1395,7 +1546,8 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     if (!(shared = calloc(1, sizeof(*shared))))
         return E_OUTOFMEMORY;
 
-    payload_size = (UINT64)texture->desc.Width * texture->desc.Height * 4;
+    payload_size = (UINT64)d3d_texture2d_shared_row_pitch(&texture->desc)
+            * d3d_texture2d_shared_row_count(&texture->desc);
     mapping_size = sizeof(*payload) + payload_size;
     if (payload_size > UINT_MAX || mapping_size > UINT_MAX)
         goto invalid;
@@ -1417,26 +1569,117 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     shared->mapping_size = mapping_size;
     shared->owner = TRUE;
 
+    if (texture->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE
+            && !GetEnvironmentVariableA("WINE_D3D11_FORCE_CPU_SHARED", NULL, 0))
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_texture_create_shared_sync(texture->wined3d_texture, &sync_handle);
+        wined3d_mutex_unlock();
+        if (FAILED(hr))
+        {
+            WARN("Native keyed sharing is unavailable, hr %#lx; using CPU shared-texture synchronization.\n", hr);
+            wined3d_mutex_lock();
+            wined3d_texture_disable_shared_handle(texture->wined3d_texture);
+            wined3d_mutex_unlock();
+            hr = S_OK;
+        }
+        else
+        {
+            wined3d_mutex_lock();
+            hr = wined3d_texture_get_shared_handle(texture->wined3d_texture,
+                    &shared->backing_handle);
+            wined3d_mutex_unlock();
+            if (FAILED(hr))
+            {
+                WARN("Native shared-texture backing is unavailable, hr %#lx.\n", hr);
+                goto failed;
+            }
+            shared->native_backing = TRUE;
+            WARN("Exported Vulkan backing memory as handle %p.\n", shared->backing_handle);
+        }
+    }
+    else if (texture->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+    {
+        wined3d_mutex_lock();
+        wined3d_texture_disable_shared_handle(texture->wined3d_texture);
+        wined3d_mutex_unlock();
+        WARN("Native shared-texture backing disabled; using CPU shared-texture synchronization.\n");
+    }
+    if (!swprintf(event_name, ARRAY_SIZE(event_name), L"Local\\WineD3D11Event-%08lx-%08lx-%p",
+            GetCurrentProcessId(), GetTickCount(), texture))
+        goto invalid;
+    if (!(shared->change_event = CreateEventW(NULL, FALSE, FALSE, event_name)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed;
+    }
+
     payload = shared->view;
     payload->size = sizeof(*payload);
     payload->version = D3D11_SHARED_TEXTURE_PAYLOAD_VERSION;
     payload->metadata_size = sizeof(metadata);
     payload->payload_offset = sizeof(*payload);
-    payload->payload_row_pitch = texture->desc.Width * 4;
+    payload->payload_row_pitch = d3d_texture2d_shared_row_pitch(&texture->desc);
     payload->payload_size = payload_size;
     payload->width = texture->desc.Width;
     payload->height = texture->desc.Height;
     payload->format = texture->desc.Format;
 
-    create_mutex.InitialValue = 0;
-    if ((status = D3DKMTCreateKeyedMutex(&create_mutex)))
+    if (texture->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
     {
-        WARN("Failed to create KMT keyed mutex, status %#lx.\n", status);
-        hr = HRESULT_FROM_NT(status);
-        goto failed;
+        create_mutex2.InitialValue = 0;
+        create_mutex2.Flags.NtSecuritySharing = 1;
+        if ((status = D3DKMTCreateKeyedMutex2(&create_mutex2)))
+        {
+            WARN("Failed to create NT KMT keyed mutex, status %#lx.\n", status);
+            hr = HRESULT_FROM_NT(status);
+            goto failed;
+        }
+        shared->keyed_mutex = create_mutex2.hKeyedMutex;
+
+        if (shared->native_backing)
+        {
+            open_sync.hNtHandle = sync_handle;
+            open_sync.hDevice = device->kmt_device;
+            open_sync.Flags.Shared = 1;
+            open_sync.Flags.NtSecuritySharing = 1;
+            if ((status = D3DKMTOpenSyncObjectFromNtHandle2(&open_sync)))
+            {
+                WARN("Failed to open Vulkan timeline semaphore as KMT sync, status %#lx.\n", status);
+                hr = HRESULT_FROM_NT(status);
+                goto failed;
+            }
+            shared->sync_object = open_sync.hSyncObject;
+            CloseHandle(sync_handle);
+            sync_handle = NULL;
+        }
+        else
+        {
+            create_sync.hDevice = device->kmt_device;
+            create_sync.Info.Type = D3DDDI_SYNCHRONIZATION_MUTEX;
+            create_sync.Info.Flags.Shared = 1;
+            create_sync.Info.Flags.NtSecuritySharing = 1;
+            if ((status = D3DKMTCreateSynchronizationObject2(&create_sync)))
+            {
+                WARN("Failed to create NT KMT synchronization object, status %#lx.\n", status);
+                hr = HRESULT_FROM_NT(status);
+                goto failed;
+            }
+            shared->sync_object = create_sync.hSyncObject;
+        }
     }
-    shared->keyed_mutex = create_mutex.hKeyedMutex;
-    shared->global_keyed_mutex = create_mutex.hSharedHandle;
+    else
+    {
+        create_mutex.InitialValue = 0;
+        if ((status = D3DKMTCreateKeyedMutex(&create_mutex)))
+        {
+            WARN("Failed to create KMT keyed mutex, status %#lx.\n", status);
+            hr = HRESULT_FROM_NT(status);
+            goto failed;
+        }
+        shared->keyed_mutex = create_mutex.hKeyedMutex;
+        shared->global_keyed_mutex = create_mutex.hSharedHandle;
+    }
 
     metadata.size = sizeof(metadata);
     metadata.version = D3D11_SHARED_TEXTURE_METADATA_VERSION;
@@ -1451,6 +1694,7 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     metadata.bind_flags = texture->desc.BindFlags;
     metadata.cpu_access_flags = texture->desc.CPUAccessFlags;
     metadata.misc_flags = texture->desc.MiscFlags;
+    metadata.native_backing = !!shared->backing_handle;
     metadata.adapter_luid_low = device->adapter_luid.LowPart;
     metadata.adapter_luid_high = device->adapter_luid.HighPart;
     metadata.keyed_mutex_global = shared->global_keyed_mutex;
@@ -1458,6 +1702,7 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     metadata.payload_row_pitch = payload->payload_row_pitch;
     metadata.payload_size = payload->payload_size;
     lstrcpynW(metadata.payload_name, name, ARRAY_SIZE(metadata.payload_name));
+    lstrcpynW(metadata.event_name, event_name, ARRAY_SIZE(metadata.event_name));
 
     allocation.pSystemMem = shared->view;
     standard.Type = D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP;
@@ -1470,8 +1715,17 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     create.pAllocationInfo = &allocation;
     create.Flags.CreateResource = 1;
     create.Flags.CreateShared = 1;
+    create.Flags.NtSecuritySharing = !!(texture->desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE);
     create.Flags.ExistingSysMem = 1;
     create.Flags.StandardAllocation = 1;
+    if (shared->backing_handle)
+    {
+        backing.magic = WINE_D3DKMT_ALLOCATION_BACKING_MAGIC;
+        backing.size = sizeof(backing);
+        backing.handle = shared->backing_handle;
+        allocation.pPrivateDriverData = &backing;
+        allocation.PrivateDriverDataSize = sizeof(backing);
+    }
     if ((status = D3DKMTCreateAllocation(&create)))
     {
         WARN("Failed to create shared KMT allocation, status %#lx.\n", status);
@@ -1481,7 +1735,36 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
     shared->resource = create.hResource;
     shared->allocation = allocation.hAllocation;
     shared->global_resource = create.hGlobalShare;
+
+    if (shared->native_backing)
+    {
+        InitializeObjectAttributes(&object_attributes, NULL, 0, NULL, NULL);
+        objects[0] = shared->resource;
+        objects[1] = shared->keyed_mutex;
+        objects[2] = shared->sync_object;
+        if ((status = D3DKMTShareObjects(ARRAY_SIZE(objects), objects,
+                &object_attributes, GENERIC_ALL, &native_handle)))
+        {
+            WARN("Failed to create native owner import handle, status %#lx.\n", status);
+            hr = HRESULT_FROM_NT(status);
+            goto failed;
+        }
+
+        wined3d_mutex_lock();
+        hr = wined3d_texture_reopen_shared(texture->wined3d_texture, native_handle);
+        wined3d_mutex_unlock();
+        CloseHandle(native_handle);
+        native_handle = NULL;
+        if (FAILED(hr))
+        {
+            WARN("Failed to associate native keyed mutex with owner texture, hr %#lx.\n", hr);
+            goto failed;
+        }
+        shared->backing_handle = NULL;
+    }
+
     texture->shared = shared;
+    d3d_texture2d_shared_start_worker(texture);
     WARN("Created shared Texture2D KMT resource %#x, keyed mutex %#x, mapping %s.\n",
             shared->global_resource, shared->global_keyed_mutex, debugstr_w(name));
     return S_OK;
@@ -1489,15 +1772,33 @@ static HRESULT d3d_texture2d_shared_create(struct d3d_texture2d *texture, struct
 invalid:
     hr = E_INVALIDARG;
 failed:
+    if (sync_handle)
+        CloseHandle(sync_handle);
+    if (native_handle)
+        CloseHandle(native_handle);
+    if (shared->resource)
+    {
+        D3DKMT_DESTROYALLOCATION destroy = {0};
+        destroy.hDevice = device->kmt_device;
+        destroy.hResource = shared->resource;
+        D3DKMTDestroyAllocation(&destroy);
+    }
     if (shared->keyed_mutex)
     {
         D3DKMT_DESTROYKEYEDMUTEX destroy = {shared->keyed_mutex};
         D3DKMTDestroyKeyedMutex(&destroy);
     }
+    if (shared->sync_object)
+    {
+        D3DKMT_DESTROYSYNCHRONIZATIONOBJECT destroy = {shared->sync_object};
+        D3DKMTDestroySynchronizationObject(&destroy);
+    }
     if (shared->view)
         UnmapViewOfFile(shared->view);
     if (shared->mapping)
         CloseHandle(shared->mapping);
+    if (shared->change_event)
+        CloseHandle(shared->change_event);
     free(shared);
     return hr;
 }
@@ -1510,12 +1811,15 @@ static BOOL validate_shared_texture2d_desc(const D3D11_TEXTURE2D_DESC *desc)
     if (!(desc->MiscFlags & shared_flags))
         return TRUE;
 
-    if (desc->MiscFlags != D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+    if ((desc->MiscFlags != D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+            && desc->MiscFlags != (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+                    | D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
             || desc->Usage != D3D11_USAGE_DEFAULT || desc->CPUAccessFlags
             || desc->MipLevels != 1 || desc->ArraySize != 1
             || desc->SampleDesc.Count != 1 || desc->SampleDesc.Quality
             || (desc->Format != DXGI_FORMAT_B8G8R8A8_UNORM
-            && desc->Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+            && desc->Format != DXGI_FORMAT_R8G8B8A8_UNORM
+            && desc->Format != DXGI_FORMAT_NV12)
             || !(desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE))
             || (desc->BindFlags & ~(D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)))
     {
@@ -1561,7 +1865,8 @@ static BOOL validate_texture2d_desc(const D3D11_TEXTURE2D_DESC *desc, D3D_FEATUR
 }
 
 HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
-        struct wined3d_texture *wined3d_texture, const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out)
+        struct wined3d_texture *wined3d_texture, const D3D11_SUBRESOURCE_DATA *data,
+        HANDLE shared_handle, BOOL open_shared, struct d3d_texture2d **out)
 {
     struct d3d_texture2d *texture;
     BOOL needs_surface;
@@ -1584,12 +1889,6 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
     texture->refcount = 1;
     wined3d_mutex_lock();
     texture->desc = *desc;
-    if (desc->Width == 1536 && desc->Height == 1024)
-        WARN("OFFICE_TEXTURE 1536x1024 format %#x usage %#x bind %#x cpu %#x misc %#x array %u mips %u samples %u/%u.\n",
-                desc->Format, desc->Usage, desc->BindFlags, desc->CPUAccessFlags,
-                desc->MiscFlags, desc->ArraySize, desc->MipLevels,
-                desc->SampleDesc.Count, desc->SampleDesc.Quality);
-
     if (wined3d_texture)
     {
         wined3d_resource_set_parent(wined3d_texture_get_resource(wined3d_texture),
@@ -1624,6 +1923,8 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
             flags |= WINED3D_TEXTURE_CREATE_GET_DC;
         if (desc->MiscFlags & D3D11_RESOURCE_MISC_GENERATE_MIPS)
             flags |= WINED3D_TEXTURE_CREATE_GENERATE_MIPMAPS;
+        if (desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+            flags |= WINED3D_TEXTURE_CREATE_SHARED_NTHANDLE;
 
         if (FAILED(hr = wined3d_texture_create(device->wined3d_device, &wined3d_desc,
                 desc->ArraySize, levels, flags, (struct wined3d_sub_resource_data *)data,
@@ -1637,6 +1938,16 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
             return hr;
         }
         texture->desc.MipLevels = levels;
+    }
+
+    if (shared_handle
+            && FAILED(hr = wined3d_texture_set_shared_handle(texture->wined3d_texture, shared_handle)))
+    {
+        WARN("Failed to attach shared Vulkan memory handle, hr %#lx.\n", hr);
+        wined3d_texture_decref(texture->wined3d_texture);
+        wined3d_mutex_unlock();
+        free(texture);
+        return hr;
     }
 
     needs_surface = desc->MipLevels == 1 && desc->ArraySize == 1;
@@ -1654,7 +1965,7 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
 
     ID3D11Device5_AddRef(texture->device = &device->ID3D11Device5_iface);
 
-    if (desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+    if (!open_shared && desc->MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
             && FAILED(hr = d3d_texture2d_shared_create(texture, device)))
     {
         WARN("Failed to create shared texture state, hr %#lx.\n", hr);
@@ -1675,6 +1986,7 @@ HRESULT d3d_texture2d_attach_shared(struct d3d_texture2d *texture,
         return E_INVALIDARG;
 
     texture->shared = shared;
+    d3d_texture2d_shared_start_worker(texture);
     return S_OK;
 }
 

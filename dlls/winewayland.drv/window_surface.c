@@ -32,6 +32,13 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_background_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+
 struct wayland_buffer_queue
 {
     struct wl_event_queue *wl_event_queue;
@@ -379,6 +386,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
     BOOL flushed = FALSE;
     BOOL update_full_shape = shape_changed;
+    BOOL dcomp_host;
     BOOL reapply_clip;
     HWND popup_restack_owner;
     HRGN surface_damage_region = NULL;
@@ -392,9 +400,11 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
      * from deadlocking against window updates taking the locks in reverse.
      */
     window_surface_unlock(window_surface);
+    dcomp_host = NtUserGetProp(window_surface->hwnd, dcomp_detached_window_prop) &&
+                 !NtUserGetProp(window_surface->hwnd, dcomp_background_prop) &&
+                 !NtUserGetProp(window_surface->hwnd, dcomp_caption_overlay_prop);
     wayland_window_surface_presented(window_surface->hwnd);
     window_surface_lock(window_surface);
-
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
                                                rect->left + dirty->right, rect->top + dirty->bottom);
     if (!surface_damage_region)
@@ -402,8 +412,10 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         ERR("failed to create surface damage region\n");
         goto done;
     }
-
-    buffer_format = (shape_bits || wws->layered) ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888;
+    if (dcomp_host)
+        NtGdiSetRectRgn(surface_damage_region, 0, 0, surface_rect.right, surface_rect.bottom);
+    buffer_format = (dcomp_host || shape_bits || wws->layered) ?
+                    WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888;
     if (wws->wayland_buffer_queue->format != buffer_format)
     {
         int width = wws->wayland_buffer_queue->width;
@@ -469,6 +481,17 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     if (shape_bits)
         wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
                                       shape_info, shape_bits);
+    if (dcomp_host)
+    {
+        UINT32 *pixel = shm_buffer->map_data;
+        size_t count = shm_buffer->map_size / sizeof(*pixel);
+
+        /* A fully transparent parent may be culled together with its GPU
+         * subsurfaces. Keep one pixel mapped while leaving the DComp shadow
+         * padding transparent; content is supplied by the client surface. */
+        memset(pixel, 0, count * sizeof(*pixel));
+        if (count) pixel[0] = 0xff000000;
+    }
 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 

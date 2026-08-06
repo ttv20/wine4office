@@ -3300,6 +3300,132 @@ static void test_overlapped_transport(BOOL msg_mode, BOOL msg_read_mode)
     CloseHandle(client);
 }
 
+static void test_iocp_partial_message(void)
+{
+    static const char message[] = "partial message";
+    HANDLE server, client, port;
+    OVERLAPPED connect = {0}, read = {0};
+    OVERLAPPED *result;
+    ULONG_PTR key;
+    DWORD count, written;
+    char buffer[4];
+    BOOL ret;
+
+    server = CreateNamedPipeA(PIPENAME "iocp_partial", PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                              PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                              1, 4096, 4096, NMPWAIT_USE_DEFAULT_WAIT, NULL);
+    ok(server != INVALID_HANDLE_VALUE, "CreateNamedPipe failed: %lu\n", GetLastError());
+
+    port = CreateIoCompletionPort(server, NULL, 0x1234, 0);
+    ok(port != NULL, "CreateIoCompletionPort failed: %lu\n", GetLastError());
+
+    ret = ConnectNamedPipe(server, &connect);
+    ok(!ret && GetLastError() == ERROR_IO_PENDING, "ConnectNamedPipe returned %x, error %lu\n",
+       ret, GetLastError());
+
+    client = CreateFileA(PIPENAME "iocp_partial", GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                         OPEN_EXISTING, 0, NULL);
+    ok(client != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+
+    ret = GetQueuedCompletionStatus(port, &count, &key, &result, 1000);
+    ok(ret, "connect completion failed: %lu\n", GetLastError());
+    ok(result == &connect, "got overlapped %p, expected %p\n", result, &connect);
+
+    ret = ReadFile(server, buffer, sizeof(buffer), NULL, &read);
+    ok(!ret && GetLastError() == ERROR_IO_PENDING, "ReadFile returned %x, error %lu\n",
+       ret, GetLastError());
+    ret = WriteFile(client, message, sizeof(message), &written, NULL);
+    ok(ret, "WriteFile failed: %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = GetQueuedCompletionStatus(port, &count, &key, &result, 1000);
+    ok(ret, "partial read completion failed: %lu\n", GetLastError());
+    ok(count == sizeof(buffer), "got count %lu, expected %Iu\n", count, sizeof(buffer));
+    ok(result == &read, "got overlapped %p, expected %p\n", result, &read);
+
+    count = 0xdeadbeef;
+    ret = GetOverlappedResult(server, &read, &count, FALSE);
+    ok(!ret && GetLastError() == ERROR_MORE_DATA,
+       "GetOverlappedResult returned %x, error %lu\n", ret, GetLastError());
+    ok(count == sizeof(buffer), "got count %lu, expected %Iu\n", count, sizeof(buffer));
+
+    CloseHandle(client);
+    CloseHandle(server);
+    CloseHandle(port);
+}
+
+static void test_readfileex_partial_message(void)
+{
+    static const char message[] = "partial message";
+    HANDLE server, client;
+    OVERLAPPED connect = {0}, read = {0};
+    DWORD count, written;
+    char buffer[4];
+    BOOL ret;
+
+    server = CreateNamedPipeA(PIPENAME "readfileex_partial", PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                              PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                              1, 4096, 4096, NMPWAIT_USE_DEFAULT_WAIT, NULL);
+    ok(server != INVALID_HANDLE_VALUE, "CreateNamedPipe failed: %lu\n", GetLastError());
+
+    connect.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ret = ConnectNamedPipe(server, &connect);
+    ok(!ret && GetLastError() == ERROR_IO_PENDING, "ConnectNamedPipe returned %x, error %lu\n",
+       ret, GetLastError());
+
+    client = CreateFileA(PIPENAME "readfileex_partial", GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                         OPEN_EXISTING, 0, NULL);
+    ok(client != INVALID_HANDLE_VALUE, "CreateFile failed: %lu\n", GetLastError());
+    ret = GetOverlappedResult(server, &connect, &count, TRUE);
+    ok(ret, "connect completion failed: %lu\n", GetLastError());
+
+    completion_called = 0;
+    completion_errorcode = 0xdeadbeef;
+    completion_num_bytes = 0xdeadbeef;
+    read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ret = ReadFileEx(server, buffer, sizeof(buffer), &read, completion_routine);
+    ok(ret, "ReadFileEx failed: %lu\n", GetLastError());
+    ret = WriteFile(client, message, sizeof(message), &written, NULL);
+    ok(ret, "WriteFile failed: %lu\n", GetLastError());
+    SleepEx(1000, TRUE);
+    ok(completion_called == 1, "completion routine called %d times\n", completion_called);
+    ok(completion_errorcode == ERROR_SUCCESS, "completion routine got error %lu\n",
+       completion_errorcode);
+    ok(completion_num_bytes == sizeof(buffer), "got count %lu, expected %Iu\n",
+       completion_num_bytes, sizeof(buffer));
+
+    count = 0xdeadbeef;
+    ret = GetOverlappedResult(server, &read, &count, FALSE);
+    ok(!ret && GetLastError() == ERROR_MORE_DATA,
+       "GetOverlappedResult returned %x, error %lu\n", ret, GetLastError());
+    ok(count == sizeof(buffer), "got count %lu, expected %Iu\n", count, sizeof(buffer));
+
+    completion_called = 0;
+    completion_errorcode = 0xdeadbeef;
+    completion_num_bytes = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
+    ret = ReadFileEx(server, buffer, sizeof(buffer), &read, completion_routine);
+    ok(ret, "synchronous partial ReadFileEx failed: %lu\n", GetLastError());
+    ok(GetLastError() == ERROR_MORE_DATA, "got error %lu, expected ERROR_MORE_DATA\n", GetLastError());
+    SleepEx(1000, TRUE);
+    ok(completion_called == 1, "completion routine called %d times\n", completion_called);
+    ok(completion_errorcode == ERROR_SUCCESS, "completion routine got error %lu\n",
+       completion_errorcode);
+    ok(completion_num_bytes == sizeof(buffer), "got count %lu, expected %Iu\n",
+       completion_num_bytes, sizeof(buffer));
+
+    count = 0xdeadbeef;
+    ret = GetOverlappedResult(server, &read, &count, FALSE);
+    ok(!ret && GetLastError() == ERROR_MORE_DATA,
+       "GetOverlappedResult returned %x, error %lu\n", ret, GetLastError());
+    ok(count == sizeof(buffer), "got count %lu, expected %Iu\n", count, sizeof(buffer));
+
+    CloseHandle(read.hEvent);
+    CloseHandle(connect.hEvent);
+    CloseHandle(client);
+    CloseHandle(server);
+}
+
 static void test_transact(HANDLE caller, HANDLE callee, DWORD write_buf_size, DWORD read_buf_size)
 {
     OVERLAPPED overlapped, overlapped2, read_overlapped, write_overlapped;
@@ -4372,6 +4498,8 @@ START_TEST(pipe)
     test_overlapped_transport(TRUE, FALSE);
     test_overlapped_transport(TRUE, TRUE);
     test_overlapped_transport(FALSE, FALSE);
+    test_iocp_partial_message();
+    test_readfileex_partial_message();
     test_TransactNamedPipe();
     test_namedpipe_process_id();
     test_namedpipe_session_id();

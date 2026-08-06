@@ -1263,7 +1263,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetQueuedCompletionStatus( HANDLE port, LPDWORD co
     if (status == STATUS_SUCCESS)
     {
         *count = iosb.Information;
-        if (iosb.Status >= 0) return TRUE;
+        /* Warning statuses describe completed I/O, not failed I/O.  Keep the
+         * warning in OVERLAPPED.Internal for GetOverlappedResult(), but report
+         * a successfully dequeued completion packet here. */
+        if (!NT_ERROR( iosb.Status )) return TRUE;
         SetLastError( RtlNtStatusToDosError(iosb.Status) );
         return FALSE;
     }

@@ -36,13 +36,13 @@
 #include "initguid.h"
 #endif
 #include "wine/wined3d.h"
+#include "wine/d3dkmt.h"
 #include "wine/winedxgi.h"
 #include "wine/rbtree.h"
 
 #define D3D11_SHARED_TEXTURE_METADATA_VERSION 1
 #define D3D11_SHARED_TEXTURE_PAYLOAD_VERSION 1
 #define D3D11_SHARED_TEXTURE_NAME_LENGTH 64
-
 struct d3d11_shared_texture_metadata
 {
     UINT size;
@@ -58,6 +58,7 @@ struct d3d11_shared_texture_metadata
     UINT bind_flags;
     UINT cpu_access_flags;
     UINT misc_flags;
+    UINT native_backing;
     UINT adapter_luid_low;
     INT adapter_luid_high;
     UINT keyed_mutex_global;
@@ -65,6 +66,7 @@ struct d3d11_shared_texture_metadata
     UINT payload_row_pitch;
     UINT payload_size;
     WCHAR payload_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
+    WCHAR event_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
 };
 
 struct d3d11_shared_texture_payload
@@ -82,7 +84,7 @@ struct d3d11_shared_texture_payload
     UINT64 generation;
 };
 
-C_ASSERT(sizeof(struct d3d11_shared_texture_metadata) == 204);
+C_ASSERT(sizeof(struct d3d11_shared_texture_metadata) == 336);
 C_ASSERT(sizeof(struct d3d11_shared_texture_payload) == 48);
 
 struct d3d11_shared_texture
@@ -95,9 +97,15 @@ struct d3d11_shared_texture
     D3DKMT_HANDLE global_resource;
     D3DKMT_HANDLE keyed_mutex;
     D3DKMT_HANDLE global_keyed_mutex;
+    D3DKMT_HANDLE sync_object;
+    HANDLE backing_handle;
+    BOOL native_backing;
     HANDLE mapping;
     void *view;
     SIZE_T mapping_size;
+    HANDLE change_event;
+    HANDLE stop_event;
+    HANDLE worker;
     ID3D11Texture2D *staging_texture;
     UINT64 generation;
 };
@@ -220,7 +228,8 @@ static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *i
 
 HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DESC *desc,
         struct wined3d_texture *wined3d_texture,
-        const D3D11_SUBRESOURCE_DATA *data, struct d3d_texture2d **out);
+        const D3D11_SUBRESOURCE_DATA *data, HANDLE shared_handle, BOOL open_shared,
+        struct d3d_texture2d **out);
 HRESULT d3d_texture2d_attach_shared(struct d3d_texture2d *texture,
         struct d3d11_shared_texture *shared);
 struct d3d_texture2d *unsafe_impl_from_ID3D11Texture2D(ID3D11Texture2D *iface);

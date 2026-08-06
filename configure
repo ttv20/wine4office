@@ -676,6 +676,8 @@ HWLOC_LIBS
 HWLOC_CFLAGS
 GNUTLS_LIBS
 GNUTLS_CFLAGS
+PIPEWIRE_LIBS
+PIPEWIRE_CFLAGS
 DBUS_LIBS
 DBUS_CFLAGS
 INOTIFY_LIBS
@@ -963,6 +965,7 @@ with_opengl
 with_oss
 with_pcap
 with_pcsclite
+with_pipewire
 with_pthread
 with_pulse
 with_sane
@@ -1558,6 +1561,7 @@ enable_windows_storage
 enable_windows_system_profile_systemid
 enable_windows_system_profile_systemmanufacturers
 enable_windows_ui_core_textinput
+enable_windows_ui_notifications
 enable_windows_ui_xaml
 enable_windows_ui
 enable_windows_web
@@ -1804,6 +1808,9 @@ enable_view
 enable_wevtutil
 enable_where
 enable_whoami
+enable_wine4office_appv_preload
+enable_wine4officeauth
+enable_wine4officeclose
 enable_wineboot
 enable_winebrowser
 enable_winecfg
@@ -1924,6 +1931,8 @@ INOTIFY_CFLAGS
 INOTIFY_LIBS
 DBUS_CFLAGS
 DBUS_LIBS
+PIPEWIRE_CFLAGS
+PIPEWIRE_LIBS
 GNUTLS_CFLAGS
 GNUTLS_LIBS
 HWLOC_CFLAGS
@@ -2632,6 +2641,7 @@ Optional Packages:
   --without-oss           do not use the OSS sound support
   --without-pcap          do not use the Packet Capture library
   --without-pcsclite      do not use PCSC lite
+  --without-pipewire      do not use PipeWire screen capture
   --without-pthread       do not use the pthread library
   --without-pulse         do not use PulseAudio sound support
   --without-sane          do not use SANE (scanner support)
@@ -2813,6 +2823,10 @@ Some influential environment variables:
               Linker flags for libinotify, overriding pkg-config
   DBUS_CFLAGS C compiler flags for dbus-1, overriding pkg-config
   DBUS_LIBS   Linker flags for dbus-1, overriding pkg-config
+  PIPEWIRE_CFLAGS
+              C compiler flags for libpipewire-0.3, overriding pkg-config
+  PIPEWIRE_LIBS
+              Linker flags for libpipewire-0.3, overriding pkg-config
   GNUTLS_CFLAGS
               C compiler flags for gnutls, overriding pkg-config
   GNUTLS_LIBS Linker flags for gnutls, overriding pkg-config
@@ -4483,6 +4497,13 @@ fi
 if test ${with_pcsclite+y}
 then :
   withval=$with_pcsclite;
+fi
+
+
+# Check whether --with-pipewire was given.
+if test ${with_pipewire+y}
+then :
+  withval=$with_pipewire;
 fi
 
 
@@ -17488,6 +17509,59 @@ esac
 fi ;;
 esac
 
+if test "x$with_pipewire" != "xno"
+then
+    rm -f conftest.err
+if ${PIPEWIRE_CFLAGS:+false} :
+then :
+  if test ${PKG_CONFIG+y}
+then :
+  PIPEWIRE_CFLAGS=`$PKG_CONFIG --cflags libpipewire-0.3 2>conftest.err`
+fi
+fi
+
+if ${PIPEWIRE_LIBS:+false} :
+then :
+  if test ${PKG_CONFIG+y}
+then :
+  PIPEWIRE_LIBS=`$PKG_CONFIG --libs libpipewire-0.3 2>/dev/null`
+fi
+fi
+
+
+printf '%s\n' "$as_me:${as_lineno-$LINENO}: libpipewire-0.3 cflags: $PIPEWIRE_CFLAGS" >&5
+printf '%s\n' "$as_me:${as_lineno-$LINENO}: libpipewire-0.3 libs: $PIPEWIRE_LIBS" >&5
+if test -s conftest.err; then
+     printf %s "$as_me:${as_lineno-$LINENO}: libpipewire-0.3 errors: " >&5
+     cat conftest.err >&5
+fi
+rm -f conftest.err
+if test -n "$PIPEWIRE_CFLAGS$PIPEWIRE_LIBS"
+then :
+  ac_save_pkg_CPPFLAGS=$CPPFLAGS
+ac_save_pkg_LIBS=$LIBS
+CPPFLAGS="$CPPFLAGS $PIPEWIRE_CFLAGS"
+LIBS="$PIPEWIRE_LIBS $LIBS"
+
+CPPFLAGS=$ac_save_pkg_CPPFLAGS
+LIBS=$ac_save_pkg_LIBS
+fi
+
+fi
+test -z "$PIPEWIRE_CFLAGS" -o -z "$DBUS_CFLAGS" ||
+printf '%s\n' "#define HAVE_PIPEWIRE 1" >>confdefs.h
+
+if test -z "$PIPEWIRE_CFLAGS" -o -z "$DBUS_CFLAGS"
+then :
+  case "x$with_pipewire" in
+  x)   as_fn_append wine_notices "|PipeWire or DBus development files not found, Wayland desktop capture won't be supported." ;;
+  xno) ;;
+  *)   as_fn_error $? "PipeWire or DBus development files not found, Wayland desktop capture won't be supported.
+This is an error since --with-pipewire was requested." "$LINENO" 5 ;;
+esac
+
+fi
+
 if test "x$with_gnutls" != "xno"
 then
     rm -f conftest.err
@@ -23088,6 +23162,7 @@ wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers enable_w
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.core.textinput enable_windows_ui_core_textinput
 wine_fn_config_makefile dlls/windows.ui.core.textinput/tests enable_tests
+wine_fn_config_makefile dlls/windows.ui.notifications enable_windows_ui_notifications
 wine_fn_config_makefile dlls/windows.ui.xaml enable_windows_ui_xaml
 wine_fn_config_makefile dlls/windows.ui.xaml/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui enable_windows_ui
@@ -24418,6 +24493,8 @@ INOTIFY_CFLAGS = $INOTIFY_CFLAGS
 INOTIFY_LIBS = $INOTIFY_LIBS
 DBUS_CFLAGS = $DBUS_CFLAGS
 DBUS_LIBS = $DBUS_LIBS
+PIPEWIRE_CFLAGS = $PIPEWIRE_CFLAGS
+PIPEWIRE_LIBS = $PIPEWIRE_LIBS
 GNUTLS_CFLAGS = $GNUTLS_CFLAGS
 GNUTLS_LIBS = $GNUTLS_LIBS
 HWLOC_CFLAGS = $HWLOC_CFLAGS

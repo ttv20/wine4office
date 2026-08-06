@@ -16,7 +16,7 @@
 @ stdcall DCompositionCreateDevice2(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice(ptr ptr ptr)
-@ stub DCompositionCreateSurfaceHandle
+@ stdcall DCompositionCreateSurfaceHandle(long ptr ptr)
 @ stub DeserializeEffectDescription
 @ stdcall -private DllCanUnloadNow()
 @ stub DllGetActivationFactory

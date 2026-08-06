@@ -35,6 +35,15 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
+static const WCHAR dcomp_foreign_parent_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','p','a','r','e','n','t','_','a','t','o','m',0};
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_background_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+
 
 static int wayland_win_data_cmp_rb(const void *key,
                                    const struct rb_entry *entry)
@@ -380,7 +389,11 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         !data->contents_presented && !state->has_background)
         visible = FALSE;
 
-    if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
+    /* A DirectComposition-only notification host is a logical Win32 target,
+     * not a presentation surface. Keep it role-less and let the detached
+     * composition window be the only compositor-visible surface. */
+    if (!visible || (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
+        role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
 
@@ -402,14 +415,19 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         return FALSE;
     if (!data->wayland_surface && recreated) *recreated = TRUE;
 
-    /* Pass through mouse events for layered, transparent windows, to match
-     * Windows behavior. */
-    input_region = ((state->exstyle & WS_EX_TRANSPARENT) &&
-                    (state->exstyle & WS_EX_LAYERED)) ?
+    /* Pass through mouse events for transparent windows. X11 uses an empty
+     * input shape for WS_EX_TRANSPARENT as well, and requiring WS_EX_LAYERED
+     * here prevents non-layered presentation surfaces from forwarding input. */
+    input_region = (state->exstyle & WS_EX_TRANSPARENT) ?
                    wl_compositor_create_region(process_wayland.wl_compositor) :
                    NULL;
     wl_surface_set_input_region(surface->wl_surface, input_region);
     if (input_region) wl_region_destroy(input_region);
+
+    surface->plasma_positioned = role == WAYLAND_SURFACE_ROLE_TOPLEVEL && data->plasma_positioned;
+    surface->dcomp_overlay = data->dcomp_overlay;
+    surface->dcomp_notification = data->dcomp_notification;
+    surface->dcomp_base_presentation = data->dcomp_base_presentation;
 
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
@@ -421,14 +439,22 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         break;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         wayland_surface_make_toplevel(surface, state->title);
+        /* A task-delegating opaque DComp base must remain independent.  Making
+         * it transient would cause desktop task managers to filter it out. */
+        if (!surface->dcomp_base_presentation &&
+            NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop))
+            wayland_surface_import_toplevel(surface,
+                    HandleToULong(NtUserGetProp(data->hwnd, dcomp_foreign_parent_prop)));
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
 
-    wayland_win_data_get_config(data, state, &surface->window);
+    if (role == WAYLAND_SURFACE_ROLE_TOPLEVEL && surface->dcomp_base_presentation)
+        wayland_surface_export_toplevel(surface);
 
+    wayland_win_data_get_config(data, state, &surface->window);
     /* Size/position changes affect the effective pointer constraint, so update
      * it as needed. A new xdg_toplevel cannot safely accept a constraint until
      * it has been configured and mapped; Weston otherwise intersects the
@@ -630,19 +656,29 @@ static HWND find_adjacent_window(HWND hwnd, const RECT *rect)
  */
 static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
 {
+    static const WCHAR nui_dialog_class[] = {'N','U','I','D','i','a','l','o','g',0};
+    WCHAR class_buffer[64];
+    UNICODE_STRING class_name = {.Buffer = class_buffer, .MaximumLength = sizeof(class_buffer)};
     DWORD style, ex_style;
+    BOOL office_nui_dialog = FALSE;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
-    /* Captionless owned popups without a thick frame must remain
-     * owner-relative. Captioned dialogs need to be managed so that their
-     * activation and input follow the compositor toplevel. Thin companion
-     * border surfaces are attached through find_adjacent_window(). */
+    if (NtUserGetClassName(hwnd, FALSE, &class_name))
+        office_nui_dialog = !wcscmp(class_buffer, nui_dialog_class);
+    /* Owned popups without a thick frame must remain owner-relative, even when
+     * active. Office NUIDialog also uses WS_CAPTION but ships companion
+     * MSO_BORDEREFFECT surfaces that are not owned by the dialog; if the dialog
+     * becomes a free-floating xdg_toplevel while those strips are Word-relative
+     * subsurfaces, the border/shadow chrome drifts. Captionless menus/galleries
+     * take the same path. Other captioned owned popups, such as embedded-browser
+     * authentication dialogs, must remain managed to avoid being clipped below
+     * the owner's GPU client surface. */
     if ((style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
-        !(style & (WS_CAPTION | WS_THICKFRAME)) &&
-        !(ex_style & WS_EX_APPWINDOW))
+        !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW) &&
+        (!(style & WS_CAPTION) || office_nui_dialog))
     {
         TRACE("keeping owned popup hwnd=%p owner-relative\n", hwnd);
         return FALSE;
@@ -667,6 +703,42 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     if (has_owned_popups(hwnd)) return TRUE;
     /* default: not managed */
     return FALSE;
+}
+
+/* Notification hosts are short-lived, non-activating tool windows which need
+ * compositor placement on Wayland. Keep this deliberately narrower than the
+ * general popup classification so menus and owned tool windows retain their
+ * existing subsurface or xdg_toplevel handling. */
+static BOOL is_notification_window(HWND hwnd, UINT swp_flags, const RECT *rect)
+{
+    DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+    DWORD ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
+    LONG width = rect->right - rect->left;
+    LONG height = rect->bottom - rect->top;
+
+    return !(swp_flags & SWP_HIDEWINDOW) &&
+           ((swp_flags & SWP_NOACTIVATE) || (ex_style & WS_EX_NOREDIRECTIONBITMAP)) &&
+           (style & WS_POPUP) && !(style & WS_CHILD) &&
+           (ex_style & WS_EX_TOOLWINDOW) && (ex_style & WS_EX_TOPMOST) &&
+           !NtUserGetWindowRelative(hwnd, GW_OWNER) &&
+           width > 0 && height > 0 && width <= 640 && height <= 320;
+}
+
+/* Detached DirectComposition presentation windows are owned by their target,
+ * so their own styles cannot identify a notification. Classify the Win32 root
+ * which owns the presentation instead. */
+static BOOL is_dcomp_notification_window(HWND hwnd)
+{
+    HWND target, root;
+    RECT rect;
+
+    if (!(target = NtUserGetProp(hwnd, dcomp_detached_window_prop)) ||
+        !(root = NtUserGetAncestor(target, GA_ROOT)) ||
+        !NtUserIsWindowVisible(root) ||
+        !NtUserGetWindowRect(root, &rect, NtUserGetDpiForWindow(root)))
+        return FALSE;
+
+    return is_notification_window(root, SWP_NOACTIVATE, &rect);
 }
 
 /***********************************************************************
@@ -711,6 +783,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
     BOOL managed, retry_client_surfaces = FALSE, surface_recreated = FALSE;
+    BOOL notification;
     BOOL reapply_clip = FALSE;
     BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
     struct wayland_window_state state;
@@ -756,6 +829,13 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     }
     if (transient_owner) transient_owner = NtUserGetAncestor(transient_owner, GA_ROOT);
 
+    /* The synthetic DComp caption is part of its presentation window. It must
+     * be clipped and positioned as a subsurface, not managed as an independent
+     * desktop toplevel merely because it carries topmost Win32 styling. */
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop) &&
+        (owner = NtUserGetWindowRelative(hwnd, GW_OWNER)))
+        managed = FALSE;
+
     get_wayland_window_state(hwnd, &state);
     if (!(data = wayland_win_data_get(hwnd))) return;
     {
@@ -781,7 +861,15 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     data->is_fullscreen = fullscreen;
     data->resizeable = swp_flags & WINE_SWP_RESIZABLE;
     data->managed = managed;
+    notification = is_notification_window(hwnd, swp_flags, &new_rects->window);
     data->owner = !managed && owner && owner != hwnd ? owner : NULL;
+    data->dcomp_only_host = notification;
+    data->plasma_positioned = notification || NtUserGetProp(hwnd, dcomp_detached_window_prop);
+    data->dcomp_overlay = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
+                          !NtUserGetProp(hwnd, dcomp_background_prop);
+    data->dcomp_notification = data->dcomp_overlay && is_dcomp_notification_window(hwnd);
+    data->dcomp_base_presentation = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
+                                    NtUserGetProp(hwnd, dcomp_background_prop);
 
     if (!surface)
     {
@@ -979,6 +1067,18 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_SET_FOREGROUND:
         NtUserSetForegroundWindowInternal(hwnd);
         return 0;
+    case WM_WAYLAND_DCOMP_EXPORT:
+    {
+        struct wayland_win_data *data;
+
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface)
+                wayland_surface_export_toplevel(data->wayland_surface);
+            wayland_win_data_release(data);
+        }
+        return 0;
+    }
     case WM_WAYLAND_SET_KEYBOARD_LAYOUT:
         NtUserActivateKeyboardLayout((HKL)lp, 0);
         return 0;
