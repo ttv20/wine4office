@@ -488,6 +488,8 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
                 BOOL maximize = !(NtUserGetWindowLongW(root, GWL_STYLE) & WS_MAXIMIZE);
 
                 NtUserShowWindow(root, maximize ? SW_MAXIMIZE : SW_RESTORE);
+                if (command != root)
+                    NtUserShowWindow(command, maximize ? SW_MAXIMIZE : SW_RESTORE);
             }
             else if (part == DCOMP_CAPTION_MINIMIZE)
             {

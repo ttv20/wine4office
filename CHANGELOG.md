@@ -30,6 +30,9 @@
 - Keep DirectComposition content correctly sized when windows maximize or restore.
 - Keep DirectComposition window controls aligned for both left-to-right and
   right-to-left layouts.
+- Match DirectComposition window controls to tall custom title bars.
+- Keep delegated DirectComposition windows synchronized when maximizing or
+  restoring them.
 - Prevent modern Teams calls from crashing when C++ thread operations report
   an error.
 - Open CSV files in Excel and Office documents directly from archives browsed

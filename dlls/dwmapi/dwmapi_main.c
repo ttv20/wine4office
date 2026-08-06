@@ -91,7 +91,16 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    FIXME("(%p, %p) stub\n", hwnd, margins);
+    TRACE("(%p, %p)\n", hwnd, margins);
+
+    if (!hwnd || !IsWindow(hwnd)) return E_HANDLE;
+    if (!margins) return E_INVALIDARG;
+
+    if (margins->cyTopHeight > 0)
+        SetPropW(hwnd, wine_dwm_extended_frame_top_prop,
+                ULongToHandle((ULONG)margins->cyTopHeight + 1));
+    else
+        RemovePropW(hwnd, wine_dwm_extended_frame_top_prop);
 
     return S_OK;
 }
@@ -306,7 +315,7 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         if (style & WS_MAXIMIZEBOX) ++button_count;
         dpi = GetDpiForWindow(hwnd);
         button_width = MulDiv(46, dpi, USER_DEFAULT_SCREEN_DPI);
-        button_height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
+        button_height = wine_dwm_get_caption_button_height(hwnd, dpi);
         rtl = window_uses_rtl_nonclient(hwnd);
         if (rtl)
         {

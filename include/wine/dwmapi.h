@@ -28,10 +28,13 @@ static const WCHAR wine_dwm_immersive_dark_mode_prop[] =
      '_','m','o','d','e',0};
 static const WCHAR wine_dwm_nonclient_rtl_layout_prop[] =
     {'_','_','w','i','n','e','_','d','w','m','_','n','o','n','c','l','i','e','n','t','_','r','t','l','_','l','a','y','o','u','t',0};
+static const WCHAR wine_dwm_extended_frame_top_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','e','x','t','e','n','d','e','d','_','f','r','a','m','e','_','t','o','p',0};
 #else
 static const WCHAR wine_dwm_nc_rendering_policy_prop[] = L"__wine_dwm_nc_rendering_policy";
 static const WCHAR wine_dwm_immersive_dark_mode_prop[] = L"__wine_dwm_immersive_dark_mode";
 static const WCHAR wine_dwm_nonclient_rtl_layout_prop[] = L"__wine_dwm_nonclient_rtl_layout";
+static const WCHAR wine_dwm_extended_frame_top_prop[] = L"__wine_dwm_extended_frame_top";
 #endif
 
 /* Keep DWM API reporting and non-client rendering on the same winecfg
@@ -80,5 +83,46 @@ static inline ULONG wine_dwm_decode_window_attribute(HANDLE value, ULONG default
 {
     return value ? HandleToULong( value ) - 1 : default_value;
 }
+
+#ifndef _WIN32U_
+/* Prefer the frame margin declared through DwmExtendFrameIntoClientArea.
+ * Composition-based custom title bars may instead expose a layered,
+ * no-redirection input surface spanning the top of the client area. */
+static inline int wine_dwm_get_caption_button_height(HWND hwnd, UINT dpi)
+{
+    int standard_height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
+    RECT client_rect, child_rect;
+    HANDLE value;
+    HWND child;
+
+    if ((value = GetPropW(hwnd, wine_dwm_extended_frame_top_prop)))
+    {
+        int height = HandleToULong(value) - 1;
+
+        if (height > standard_height && height <= standard_height * 2) return height;
+    }
+
+    if (!GetClientRect(hwnd, &client_rect)) return standard_height;
+    MapWindowPoints(hwnd, NULL, (POINT *)&client_rect, 2);
+    for (child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+    {
+        int height;
+
+        DWORD exstyle = GetWindowLongW(child, GWL_EXSTYLE);
+
+        if (!IsWindowVisible(child) ||
+            (exstyle & (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP)) !=
+                    (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP) ||
+            !GetWindowRect(child, &child_rect))
+            continue;
+        height = child_rect.bottom - child_rect.top;
+        if (child_rect.left <= client_rect.left && child_rect.right >= client_rect.right &&
+            child_rect.top == client_rect.top && height > standard_height &&
+            height <= standard_height * 2)
+            return height;
+    }
+    return standard_height;
+}
+#endif
 
 #endif /* __WINE_WINE_DWMAPI_H */

@@ -623,7 +623,13 @@ static LRESULT CALLBACK dxgi_caption_window_proc(HWND window, UINT message,
         if (part == DCOMP_CAPTION_CLOSE)
             PostMessageW(root, WM_SYSCOMMAND, SC_CLOSE, 0);
         else if (part == DCOMP_CAPTION_MAXIMIZE)
-            PostMessageW(root, WM_SYSCOMMAND, IsZoomed(root) ? SC_RESTORE : SC_MAXIMIZE, 0);
+        {
+            BOOL maximize = !IsZoomed(root);
+
+            PostMessageW(root, WM_SYSCOMMAND, maximize ? SC_MAXIMIZE : SC_RESTORE, 0);
+            if (command && command != root)
+                ShowWindow(command, maximize ? SW_MAXIMIZE : SW_RESTORE);
+        }
         else if (part == DCOMP_CAPTION_MINIMIZE)
         {
             PostMessageW(root, WM_SYSCOMMAND, SC_MINIMIZE, 0);
@@ -723,7 +729,7 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     count = 1 + !!(style & WS_MINIMIZEBOX) + !!(style & WS_MAXIMIZEBOX);
     dpi = GetDpiForWindow(root);
     width = MulDiv(46 * count, dpi, USER_DEFAULT_SCREEN_DPI);
-    height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
+    height = wine_dwm_get_caption_button_height(root, dpi);
     if (!GetWindowRect(root, &root_rect)) return;
     width = min(width, root_rect.right - root_rect.left);
     x = dxgi_caption_buttons_are_rtl(root) ? root_rect.left : root_rect.right - width;
