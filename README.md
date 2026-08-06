@@ -20,6 +20,7 @@
 |-----|--------|-------|
 | **Word** | ✅ **Great** | Create, edit, save, sign in, updates, RTL languages, PDF export—all smooth |
 | **Excel** | ✅ **Pretty Good** | Formulas, charts, CSV, print/PDF work. VBA untested |
+| **Teams** | ⚠️ **Initial Support** | Chat, notifications, audio/video calls, and screen sharing work. Expect rough edges |
 | **PowerPoint** | ⚠️ **Opens** | Not functionally tested (slides might slide, might not) |
 | **Outlook** | ❌ **Nope** | Still in the "we've heard of email" phase |
 

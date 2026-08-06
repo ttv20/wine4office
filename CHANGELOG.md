@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Document initial Microsoft Teams support and currently working features.
 - Detect Office crashes and XWayland hangs and keep a bounded local trace.
 - Let users review, edit, attach context or a file, and manually send reports.
 - Add first-open reliability and daily update-check choices; updates remain manual.
