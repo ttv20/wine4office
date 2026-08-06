@@ -210,9 +210,9 @@ cleanup:
 
 static void test_DWMWA_CAPTION_BUTTON_BOUNDS(void)
 {
-    RECT rect;
+    RECT rect, ltr_rect, rtl_rect;
     HWND hwnd, child;
-    BOOL enabled;
+    BOOL enabled, rtl;
     HRESULT hr;
 
     hwnd = CreateWindowW(L"static", L"static", WS_OVERLAPPEDWINDOW | WS_POPUP | WS_VISIBLE,
@@ -233,6 +233,23 @@ static void test_DWMWA_CAPTION_BUTTON_BOUNDS(void)
             "Got invalid horizontal bounds %s.\n", wine_dbgstr_rect(&rect));
     ok(rect.top == 0 && rect.bottom > rect.top,
             "Got invalid vertical bounds %s.\n", wine_dbgstr_rect(&rect));
+
+    rtl = FALSE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NONCLIENT_RTL_LAYOUT, &rtl, sizeof(rtl));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &ltr_rect, sizeof(ltr_rect));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(ltr_rect.right == 400 && ltr_rect.left < ltr_rect.right,
+            "Expected right-aligned bounds, got %s.\n", wine_dbgstr_rect(&ltr_rect));
+
+    rtl = TRUE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_NONCLIENT_RTL_LAYOUT, &rtl, sizeof(rtl));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rtl_rect, sizeof(rtl_rect));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(rtl_rect.left == 0 && rtl_rect.right - rtl_rect.left == ltr_rect.right - ltr_rect.left,
+            "Expected mirrored bounds for %s, got %s.\n",
+            wine_dbgstr_rect(&ltr_rect), wine_dbgstr_rect(&rtl_rect));
     hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, NULL, sizeof(rect));
     ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
     hr = DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rect, sizeof(BOOL));

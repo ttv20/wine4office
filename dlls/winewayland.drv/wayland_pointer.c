@@ -38,6 +38,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(cursor);
 
 #define WM_WINE_DCOMP_FOCUS 0x80000ff0
+#define WM_WAYLAND_DCOMP_CAPTION_REDRAW (WM_APP + 0x104)
 
 static const WCHAR dcomp_caption_overlay_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
@@ -67,6 +68,18 @@ enum dcomp_caption_part
     DCOMP_CAPTION_MAXIMIZE,
     DCOMP_CAPTION_CLOSE,
 };
+
+static void wayland_set_dcomp_caption_hot(HWND hwnd, enum dcomp_caption_part part)
+{
+    enum dcomp_caption_part old = HandleToUlong(NtUserGetProp(hwnd, dcomp_caption_hot_prop));
+
+    if (old == part) return;
+    if (part)
+        NtUserSetProp(hwnd, dcomp_caption_hot_prop, ULongToHandle(part));
+    else
+        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
+    send_message(hwnd, WM_WAYLAND_DCOMP_CAPTION_REDRAW, 0, 0);
+}
 
 static enum dcomp_caption_part wayland_caption_part_from_x(HWND hwnd, int screen_x)
 {
@@ -294,13 +307,13 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
     {
         TRACE("DComp caption motion hwnd %p caption %p screen %d,%d part %u\n", hwnd, caption,
                 screen.x, screen.y, wayland_caption_part_from_x(caption, screen.x));
-        NtUserSetProp(caption, dcomp_caption_hot_prop,
-                ULongToHandle(wayland_caption_part_from_x(caption, screen.x)));
+        wayland_set_dcomp_caption_hot(caption,
+                wayland_caption_part_from_x(caption, screen.x));
         if (caption != hwnd) NtUserSetProp(hwnd, dcomp_caption_pointer_prop, caption);
         return;
     }
     if ((caption = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
-        NtUserRemoveProp(caption, dcomp_caption_hot_prop);
+        wayland_set_dcomp_caption_hot(caption, DCOMP_CAPTION_NONE);
 
     input.type = INPUT_MOUSE;
     input.mi.dx = screen.x;
@@ -371,9 +384,9 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
 
     hwnd = wl_surface_get_user_data(wl_surface);
     if (hwnd && NtUserGetProp(hwnd, dcomp_caption_overlay_prop))
-        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
+        wayland_set_dcomp_caption_hot(hwnd, DCOMP_CAPTION_NONE);
     if (hwnd && (hwnd = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
-        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
+        wayland_set_dcomp_caption_hot(hwnd, DCOMP_CAPTION_NONE);
 
     TRACE("hwnd=%p\n", wl_surface_get_user_data(wl_surface));
 

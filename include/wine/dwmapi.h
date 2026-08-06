@@ -26,9 +26,12 @@ static const WCHAR wine_dwm_nc_rendering_policy_prop[] =
 static const WCHAR wine_dwm_immersive_dark_mode_prop[] =
     {'_','_','w','i','n','e','_','d','w','m','_','i','m','m','e','r','s','i','v','e','_','d','a','r','k',
      '_','m','o','d','e',0};
+static const WCHAR wine_dwm_nonclient_rtl_layout_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','n','o','n','c','l','i','e','n','t','_','r','t','l','_','l','a','y','o','u','t',0};
 #else
 static const WCHAR wine_dwm_nc_rendering_policy_prop[] = L"__wine_dwm_nc_rendering_policy";
 static const WCHAR wine_dwm_immersive_dark_mode_prop[] = L"__wine_dwm_immersive_dark_mode";
+static const WCHAR wine_dwm_nonclient_rtl_layout_prop[] = L"__wine_dwm_nonclient_rtl_layout";
 #endif
 
 /* Keep DWM API reporting and non-client rendering on the same winecfg

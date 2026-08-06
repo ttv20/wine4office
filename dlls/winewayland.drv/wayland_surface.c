@@ -46,6 +46,8 @@ static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
 static const WCHAR dcomp_caption_overlay_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_caption_rtl_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
 static const WCHAR dcomp_task_minimized_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','m','i','n','i','m','i','z','e','d',0};
 
@@ -1093,7 +1095,15 @@ static void wayland_surface_reconfigure_subsurface(struct wayland_surface *surfa
         if (!surface->wl_subsurface) goto done;
 
         if (NtUserGetProp(surface->hwnd, dcomp_caption_overlay_prop))
-            OffsetRect(&rect, -rect.left, -rect.top);
+        {
+            int owner_width = owner_surface->window.rect.right - owner_surface->window.rect.left;
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+
+            SetRect(&rect, 0, 0, width, height);
+            if (!NtUserGetProp(surface->hwnd, dcomp_caption_rtl_prop))
+                OffsetRect(&rect, max(0, owner_width - width), 0);
+        }
         else
             OffsetRect(&rect, -owner_surface->window.rect.left, -owner_surface->window.rect.top);
         rect = map_rect_to_surface(surface, rect);

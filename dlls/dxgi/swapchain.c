@@ -420,6 +420,10 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
+    struct wined3d_swapchain_desc desc;
+    RECT source_rect;
+    const RECT *source = NULL;
+    HWND window;
     HRESULT hr;
 
     d3d11_swapchain_update_composition_window(swapchain);
@@ -441,7 +445,24 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL, NULL, sync_interval, 0)))
+    window = d3d11_swapchain_get_hwnd(swapchain);
+    if (GetPropW(window, L"__wine_dcomp_clip_enabled"))
+    {
+        source_rect.left = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_left"));
+        source_rect.top = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_top"));
+        source_rect.right = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_right"));
+        source_rect.bottom = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_bottom"));
+        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+        source_rect.left = max(source_rect.left, 0);
+        source_rect.top = max(source_rect.top, 0);
+        source_rect.right = min(source_rect.right, (LONG)desc.backbuffer_width);
+        source_rect.bottom = min(source_rect.bottom, (LONG)desc.backbuffer_height);
+        if (source_rect.right > source_rect.left && source_rect.bottom > source_rect.top)
+            source = &source_rect;
+    }
+
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
+            source, NULL, NULL, sync_interval, 0)))
     {
         InterlockedIncrement(&swapchain->present_count);
         if (FAILED(d3d11_swapchain_restore_present1_contents(swapchain)))

@@ -45,6 +45,21 @@ static BOOL system_uses_dark_mode(void)
     return !light_theme;
 }
 
+static BOOL window_uses_rtl_nonclient(HWND hwnd)
+{
+    HANDLE layout_attribute = GetPropW(hwnd, wine_dwm_nonclient_rtl_layout_prop);
+    DWORD reading_layout = 0;
+
+    if (layout_attribute)
+        return wine_dwm_decode_window_attribute(layout_attribute, FALSE);
+    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)
+        return TRUE;
+    if (!GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
+            (WCHAR *)&reading_layout, sizeof(reading_layout) / sizeof(WCHAR)))
+        return FALSE;
+    return reading_layout == 1 || reading_layout == 3;
+}
+
 
 /**********************************************************************
  *           DwmIsCompositionEnabled         (DWMAPI.@)
@@ -124,6 +139,15 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
                       wine_dwm_encode_window_attribute(value)))
             return HRESULT_FROM_WIN32(GetLastError());
         SendMessageW(hwnd, WM_DWMNCRENDERINGCHANGED, 0, 0);
+        RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+        return S_OK;
+
+    case DWMWA_NONCLIENT_RTL_LAYOUT:
+        if (!attribute || size != sizeof(value)) return E_INVALIDARG;
+        value = !!*(const BOOL *)attribute;
+        if (!SetPropW(hwnd, wine_dwm_nonclient_rtl_layout_prop,
+                      wine_dwm_encode_window_attribute(value)))
+            return HRESULT_FROM_WIN32(GetLastError());
         RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
         return S_OK;
 
@@ -258,6 +282,8 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         RECT *rect = pv_attribute;
         RECT window_rect;
         DWORD style;
+        DPI_AWARENESS_CONTEXT context;
+        BOOL rtl;
         UINT dpi;
         int button_count = 1;
         int button_width, button_height;
@@ -268,8 +294,12 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
             return E_NOT_SUFFICIENT_BUFFER;
         if (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)
             return E_HANDLE;
+        context = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
         if (!GetWindowRect(hwnd, &window_rect))
+        {
+            SetThreadDpiAwarenessContext(context);
             return HRESULT_FROM_WIN32(GetLastError());
+        }
 
         style = GetWindowLongW(hwnd, GWL_STYLE);
         if (style & WS_MINIMIZEBOX) ++button_count;
@@ -277,10 +307,21 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         dpi = GetDpiForWindow(hwnd);
         button_width = MulDiv(46, dpi, USER_DEFAULT_SCREEN_DPI);
         button_height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
-        rect->right = window_rect.right - window_rect.left;
-        rect->left = max(0, rect->right - button_count * button_width);
+        rtl = window_uses_rtl_nonclient(hwnd);
+        if (rtl)
+        {
+            rect->left = 0;
+            rect->right = min(window_rect.right - window_rect.left,
+                    button_count * button_width);
+        }
+        else
+        {
+            rect->right = window_rect.right - window_rect.left;
+            rect->left = max(0, rect->right - button_count * button_width);
+        }
         rect->top = 0;
         rect->bottom = button_height;
+        SetThreadDpiAwarenessContext(context);
         hr = S_OK;
         break;
     }

@@ -21,6 +21,9 @@
 - Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
   including working minimize and restore behavior.
 - Restore theme-aware window controls for DirectComposition apps on Wayland.
+- Keep DirectComposition content correctly sized when windows maximize or restore.
+- Keep DirectComposition window controls aligned for both left-to-right and
+  right-to-left layouts.
 - Prevent modern Teams calls from crashing when C++ thread operations report
   an error.
 

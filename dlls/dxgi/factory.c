@@ -19,10 +19,12 @@
 
 #include "dxgi_private.h"
 #include "dwmapi.h"
+#include "wine/dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
 #define WM_WAYLAND_DCOMP_EXPORT 0x80001003
+#define WM_WAYLAND_DCOMP_CAPTION_REDRAW (WM_APP + 0x104)
 #define WM_WINE_DCOMP_FOCUS     0x80000ff0
 
 static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *iface)
@@ -447,10 +449,6 @@ static const WCHAR dcomp_caption_rtl_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
 static const WCHAR dcomp_caption_class[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n',0};
-static const WCHAR dwm_nc_rendering_policy_prop[] =
-    {'_','_','w','i','n','e','_','d','w','m','_','n','c','_','r','e','n','d','e','r','i','n','g','_',
-     'p','o','l','i','c','y',0};
-
 enum dcomp_caption_part
 {
     DCOMP_CAPTION_NONE,
@@ -461,13 +459,15 @@ enum dcomp_caption_part
 
 static BOOL dxgi_caption_buttons_are_rtl(HWND root)
 {
-    DWORD layout = 0;
+    HANDLE layout = GetPropW(root, wine_dwm_nonclient_rtl_layout_prop);
+    DWORD reading_layout = 0;
 
+    if (layout) return wine_dwm_decode_window_attribute(layout, FALSE);
     if (GetWindowLongW(root, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) return TRUE;
     if (!GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
-            (WCHAR *)&layout, sizeof(layout) / sizeof(WCHAR)))
+            (WCHAR *)&reading_layout, sizeof(reading_layout) / sizeof(WCHAR)))
         return FALSE;
-    return layout == 1 || layout == 3;
+    return reading_layout == 1 || reading_layout == 3;
 }
 
 static int dxgi_caption_button_count(HWND root)
@@ -549,6 +549,11 @@ static LRESULT CALLBACK dxgi_caption_window_proc(HWND window, UINT message,
 
     switch (message)
     {
+    case WM_WAYLAND_DCOMP_CAPTION_REDRAW:
+        InvalidateRect(window, NULL, FALSE);
+        UpdateWindow(window);
+        return 0;
+
     case WM_ERASEBKGND:
         return 1;
 
@@ -650,7 +655,7 @@ static BOOL dxgi_composition_window_has_dwm_caption(HWND root)
 {
     RECT window_rect, client_rect;
     DWORD style = GetWindowLongW(root, GWL_STYLE);
-    HANDLE policy = GetPropW(root, dwm_nc_rendering_policy_prop);
+    HANDLE policy = GetPropW(root, wine_dwm_nc_rendering_policy_prop);
     UINT dpi;
 
     if ((style & (WS_CAPTION | WS_SYSMENU)) != (WS_CAPTION | WS_SYSMENU) ||
@@ -667,7 +672,7 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     static INIT_ONCE caption_class_once = INIT_ONCE_STATIC_INIT;
     HWND caption = GetPropW(window, dcomp_caption_window_prop);
     ATOM foreign_atom, old_foreign_atom;
-    RECT window_rect;
+    RECT root_rect;
     DWORD style;
     UINT dpi;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
@@ -719,9 +724,10 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     dpi = GetDpiForWindow(root);
     width = MulDiv(46 * count, dpi, USER_DEFAULT_SCREEN_DPI);
     height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
-    if (!GetWindowRect(root, &window_rect)) return;
-    x = dxgi_caption_buttons_are_rtl(root) ? window_rect.left : window_rect.right - width;
-    y = window_rect.top;
+    if (!GetWindowRect(root, &root_rect)) return;
+    width = min(width, root_rect.right - root_rect.left);
+    x = dxgi_caption_buttons_are_rtl(root) ? root_rect.left : root_rect.right - width;
+    y = root_rect.top;
     SetWindowPos(caption, HWND_TOPMOST, x, y, width, height,
             flags | SWP_NOOWNERZORDER);
     InvalidateRect(caption, NULL, FALSE);

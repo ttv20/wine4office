@@ -46,6 +46,8 @@ struct dcomp_visual
     IUnknown *content;
     HWND target_window;
     struct dcomp_visual_child *children;
+    D2D_RECT_F clip;
+    BOOL has_clip;
 };
 
 struct dcomp_visual_child
@@ -123,8 +125,58 @@ VISUAL_OBJECT_METHOD(SetTransformParent, IDCompositionVisual)
 VISUAL_OBJECT_METHOD(SetEffect, IDCompositionEffect)
 VISUAL_ENUM_METHOD(SetBitmapInterpolationMode, DCOMPOSITION_BITMAP_INTERPOLATION_MODE)
 VISUAL_ENUM_METHOD(SetBorderMode, DCOMPOSITION_BORDER_MODE)
-VISUAL_OBJECT_METHOD(SetClipObject, IDCompositionClip)
-VISUAL_OBJECT_METHOD(SetClip, const D2D_RECT_F)
+
+static void dcomp_visual_apply_clip(struct dcomp_visual *visual)
+{
+    IDXGISwapChain1 *swapchain;
+    HWND window;
+
+    if (!visual->content || FAILED(visual->content->lpVtbl->QueryInterface(visual->content,
+            &IID_IDXGISwapChain1, (void **)&swapchain)))
+        return;
+    if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
+    {
+        if (visual->has_clip)
+        {
+            SetPropW(window, L"__wine_dcomp_clip_enabled", ULongToHandle(1));
+            SetPropW(window, L"__wine_dcomp_clip_left", ULongToHandle((ULONG)(LONG)visual->clip.left));
+            SetPropW(window, L"__wine_dcomp_clip_top", ULongToHandle((ULONG)(LONG)visual->clip.top));
+            SetPropW(window, L"__wine_dcomp_clip_right", ULongToHandle((ULONG)(LONG)visual->clip.right));
+            SetPropW(window, L"__wine_dcomp_clip_bottom", ULongToHandle((ULONG)(LONG)visual->clip.bottom));
+        }
+        else
+        {
+            RemovePropW(window, L"__wine_dcomp_clip_enabled");
+            RemovePropW(window, L"__wine_dcomp_clip_left");
+            RemovePropW(window, L"__wine_dcomp_clip_top");
+            RemovePropW(window, L"__wine_dcomp_clip_right");
+            RemovePropW(window, L"__wine_dcomp_clip_bottom");
+        }
+    }
+    swapchain->lpVtbl->Release(swapchain);
+}
+
+static HRESULT WINAPI dcomp_visual_SetClipObject(IDCompositionVisual2 *iface, IDCompositionClip *value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (value) return E_NOTIMPL;
+    visual->has_clip = FALSE;
+    dcomp_visual_apply_clip(visual);
+    return S_OK;
+}
+
+static HRESULT WINAPI dcomp_visual_SetClip(IDCompositionVisual2 *iface, const D2D_RECT_F *value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (!value || value->right < value->left || value->bottom < value->top)
+        return E_INVALIDARG;
+    visual->clip = *value;
+    visual->has_clip = TRUE;
+    dcomp_visual_apply_clip(visual);
+    return S_OK;
+}
 
 static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
 {
@@ -139,6 +191,11 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
         return;
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
+        RemovePropW(window, L"__wine_dcomp_clip_enabled");
+        RemovePropW(window, L"__wine_dcomp_clip_left");
+        RemovePropW(window, L"__wine_dcomp_clip_top");
+        RemovePropW(window, L"__wine_dcomp_clip_right");
+        RemovePropW(window, L"__wine_dcomp_clip_bottom");
         if ((dxgi = GetModuleHandleW(L"dxgi.dll")) &&
             (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
                     "__wine_dxgi_bind_composition_window")))
@@ -179,6 +236,7 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
         TRACE("Bound composition window %p to target %p.\n", window, visual->target_window);
     }
     swapchain->lpVtbl->Release(swapchain);
+    dcomp_visual_apply_clip(visual);
 }
 
 static void dcomp_visual_set_target_window(struct dcomp_visual *visual, HWND target_window)
