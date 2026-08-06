@@ -740,6 +740,7 @@ void __cdecl DECLSPEC_NORETURN _Xlength_error(const char*);
 void __cdecl DECLSPEC_NORETURN _Xmem(void);
 void __cdecl DECLSPEC_NORETURN _Xout_of_range(const char*);
 void __cdecl DECLSPEC_NORETURN _Xruntime_error(const char*);
+const char* __cdecl _Syserror_map(int);
 void DECLSPEC_NORETURN throw_exception(const char*);
 void DECLSPEC_NORETURN throw_failure(const char*);
 void DECLSPEC_NORETURN throw_range_error(const char*);

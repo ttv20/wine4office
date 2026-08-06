@@ -1242,6 +1242,48 @@ void __cdecl _Throw_C_error(int code)
     _CxxThrowException(&se, &system_error_exception_type);
 }
 
+/* ?_Throw_Cpp_error@std@@YAXH@Z */
+void __cdecl DECLSPEC_NORETURN _Throw_Cpp_error(int code)
+{
+    static const char * const messages[] =
+    {
+        "device or resource busy",
+        "invalid argument",
+        "no such process",
+        "not enough memory",
+        "operation not permitted",
+        "resource deadlock would occur",
+        "resource unavailable try again",
+    };
+    static const errno_t errors[] =
+    {
+        EBUSY,
+        EINVAL,
+        ESRCH,
+        ENOMEM,
+        EPERM,
+        EDEADLK,
+        EAGAIN,
+    };
+    char buffer[128];
+    const char *message, *system_message;
+    system_error se;
+
+    TRACE("(%d)\n", code);
+
+    if (code < 0 || code >= ARRAY_SIZE(messages)) abort();
+
+    system_message = _Syserror_map(errors[code]);
+    snprintf(buffer, sizeof(buffer), "%s: %s", messages[code], system_message);
+    message = buffer;
+    MSVCP_runtime_error_ctor(&se.base, &message);
+    se.code.code = errors[code];
+    se.code.category = std_generic_category();
+    se.base.e.vtable = &system_error_vtable;
+
+    _CxxThrowException(&se, &system_error_exception_type);
+}
+
 /* compute the this pointer for a base class of a given type */
 static inline void *get_this_pointer( const this_ptr_offsets *off, void *object )
 {

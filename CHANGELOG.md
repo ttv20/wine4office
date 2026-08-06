@@ -20,6 +20,8 @@
 - Expose the WLAN interface setter used when Teams starts calls.
 - Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
   including working minimize and restore behavior.
+- Prevent modern Teams calls from crashing when C++ thread operations report
+  an error.
 
 [Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.9...wine4office-v0.1.10)
 
