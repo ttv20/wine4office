@@ -39,6 +39,84 @@ WINE_DEFAULT_DEBUG_CHANNEL(cursor);
 
 #define WM_WINE_DCOMP_FOCUS 0x80000ff0
 
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_caption_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_caption_pointer_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','p','o','i','n','t','e','r',0};
+static const WCHAR dcomp_detached_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_base_presentation_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
+static const WCHAR dcomp_task_minimized_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','m','i','n','i','m','i','z','e','d',0};
+static const WCHAR dcomp_caption_root_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','o','o','t',0};
+static const WCHAR dcomp_caption_command_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','c','o','m','m','a','n','d',0};
+static const WCHAR dcomp_caption_hot_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','h','o','t',0};
+static const WCHAR dcomp_caption_rtl_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
+
+enum dcomp_caption_part
+{
+    DCOMP_CAPTION_NONE,
+    DCOMP_CAPTION_MINIMIZE,
+    DCOMP_CAPTION_MAXIMIZE,
+    DCOMP_CAPTION_CLOSE,
+};
+
+static enum dcomp_caption_part wayland_caption_part_from_x(HWND hwnd, int screen_x)
+{
+    HWND root = NtUserGetProp(hwnd, dcomp_caption_root_prop);
+    DWORD style;
+    RECT rect;
+    int count, index;
+
+    if (!root || !NtUserGetWindowRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd)) ||
+        rect.right <= rect.left)
+        return DCOMP_CAPTION_NONE;
+    style = NtUserGetWindowLongW(root, GWL_STYLE);
+    count = 1 + !!(style & WS_MINIMIZEBOX) + !!(style & WS_MAXIMIZEBOX);
+    index = max(0, min(count - 1, (screen_x - rect.left) * count / (rect.right - rect.left)));
+    if (NtUserGetProp(hwnd, dcomp_caption_rtl_prop))
+    {
+        if (!index--) return DCOMP_CAPTION_CLOSE;
+        if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+        if ((style & WS_MINIMIZEBOX) && !index) return DCOMP_CAPTION_MINIMIZE;
+        return DCOMP_CAPTION_NONE;
+    }
+    if ((style & WS_MINIMIZEBOX) && !index--) return DCOMP_CAPTION_MINIMIZE;
+    if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+    return !index ? DCOMP_CAPTION_CLOSE : DCOMP_CAPTION_NONE;
+}
+
+static HWND wayland_get_dcomp_caption(HWND hwnd)
+{
+    HWND target, base, caption;
+
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop)) return hwnd;
+    if ((caption = NtUserGetProp(hwnd, dcomp_caption_window_prop))) return caption;
+    if (!(target = NtUserGetProp(hwnd, dcomp_detached_window_prop))) return NULL;
+    if (!(base = NtUserGetProp(target, dcomp_base_presentation_prop))) return NULL;
+    return NtUserGetProp(base, dcomp_caption_window_prop);
+}
+
+static void wayland_minimize_dcomp_base(HWND hwnd)
+{
+    struct wayland_win_data *data;
+
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface))
+    {
+        xdg_toplevel_set_minimized(data->wayland_surface->xdg_toplevel);
+        wl_display_flush(process_wayland.wl_display);
+    }
+    wayland_win_data_release(data);
+}
+
 /* The cursor-shape-v1 protocol file references the zwp_tablet_tool_v2
  * interface object. Since we don't currently use the tablet protocol,
  * provide a dummy object here to avoid linking errors. */
@@ -152,6 +230,7 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
      * RenderWidget child is not the native event endpoint. Marking the host as
      * direct prevents the server from hit-testing back into the covering GPU
      * child. */
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop)) return hwnd;
     if (!(target = NtUserGetProp(hwnd, target_prop))) return hwnd;
     if (!(parent = NtUserGetAncestor(target, GA_PARENT))) return hwnd;
     input_window = parent;
@@ -181,7 +260,8 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 {
     INPUT input = {0};
     RECT *window_rect;
-    HWND hwnd;
+    HWND hwnd, caption;
+    RECT caption_rect;
     POINT screen = { wl_fixed_to_double(sx), wl_fixed_to_double(sy) };
     struct wayland_surface *surface;
     struct wayland_win_data *data;
@@ -207,6 +287,20 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
     else if (screen.y < window_rect->top) screen.y = window_rect->top;
 
     wayland_win_data_release(data);
+
+    caption = wayland_get_dcomp_caption(hwnd);
+    if (caption && NtUserGetWindowRect(caption, &caption_rect, NtUserGetDpiForWindow(caption)) &&
+        PtInRect(&caption_rect, screen))
+    {
+        TRACE("DComp caption motion hwnd %p caption %p screen %d,%d part %u\n", hwnd, caption,
+                screen.x, screen.y, wayland_caption_part_from_x(caption, screen.x));
+        NtUserSetProp(caption, dcomp_caption_hot_prop,
+                ULongToHandle(wayland_caption_part_from_x(caption, screen.x)));
+        if (caption != hwnd) NtUserSetProp(hwnd, dcomp_caption_pointer_prop, caption);
+        return;
+    }
+    if ((caption = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
+        NtUserRemoveProp(caption, dcomp_caption_hot_prop);
 
     input.type = INPUT_MOUSE;
     input.mi.dx = screen.x;
@@ -269,10 +363,17 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
                                  uint32_t serial, struct wl_surface *wl_surface)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
+    HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
     if (!wl_surface) return;
+
+    hwnd = wl_surface_get_user_data(wl_surface);
+    if (hwnd && NtUserGetProp(hwnd, dcomp_caption_overlay_prop))
+        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
+    if (hwnd && (hwnd = NtUserRemoveProp(hwnd, dcomp_caption_pointer_prop)))
+        NtUserRemoveProp(hwnd, dcomp_caption_hot_prop);
 
     TRACE("hwnd=%p\n", wl_surface_get_user_data(wl_surface));
 
@@ -331,7 +432,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     struct wayland_pointer *pointer = &process_wayland.pointer;
     BOOL edge_resize;
     INPUT input = {0};
-    HWND hwnd, input_hwnd, root;
+    HWND hwnd, input_hwnd, root, command, caption;
     UINT resize_edge;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -354,6 +455,40 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     if (state == WL_POINTER_BUTTON_STATE_RELEASED && edge_resize) return;
     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
     if (!(root = NtUserGetAncestor(hwnd, GA_ROOT))) root = hwnd;
+
+    caption = NtUserGetProp(hwnd, dcomp_caption_overlay_prop) ? hwnd :
+            NtUserGetProp(hwnd, dcomp_caption_pointer_prop);
+    if (caption)
+    {
+        enum dcomp_caption_part part = HandleToUlong(NtUserGetProp(caption, dcomp_caption_hot_prop));
+
+        root = NtUserGetProp(caption, dcomp_caption_root_prop);
+        command = NtUserGetProp(caption, dcomp_caption_command_prop);
+        TRACE("DComp caption button hwnd %p caption %p root %p command %p part %u button %#x state %u\n",
+                hwnd, caption, root, command, part, button, state);
+        if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_RELEASED && command)
+        {
+            if (part == DCOMP_CAPTION_CLOSE)
+                NtUserPostMessage(root, WM_CLOSE, 0, 0);
+            else if (part == DCOMP_CAPTION_MAXIMIZE)
+            {
+                BOOL maximize = !(NtUserGetWindowLongW(root, GWL_STYLE) & WS_MAXIMIZE);
+
+                NtUserShowWindow(root, maximize ? SW_MAXIMIZE : SW_RESTORE);
+            }
+            else if (part == DCOMP_CAPTION_MINIMIZE)
+            {
+                NtUserShowWindow(root, SW_MINIMIZE);
+                if (command != root)
+                {
+                    NtUserSetProp(command, dcomp_task_minimized_prop, ULongToHandle(1));
+                    wayland_minimize_dcomp_base(command);
+                    NtUserShowWindow(command, SW_MINIMIZE);
+                }
+            }
+        }
+        return;
+    }
 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED)
     {

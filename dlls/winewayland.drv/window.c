@@ -41,6 +41,8 @@ static const WCHAR dcomp_detached_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
 static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
 
 
 static int wayland_win_data_cmp_rb(const void *key,
@@ -808,6 +810,13 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         }
     }
     if (transient_owner) transient_owner = NtUserGetAncestor(transient_owner, GA_ROOT);
+
+    /* The synthetic DComp caption is part of its presentation window. It must
+     * be clipped and positioned as a subsurface, not managed as an independent
+     * desktop toplevel merely because it carries topmost Win32 styling. */
+    if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop) &&
+        (owner = NtUserGetWindowRelative(hwnd, GW_OWNER)))
+        managed = FALSE;
 
     get_wayland_window_state(hwnd, &state);
     if (!(data = wayland_win_data_get(hwnd))) return;

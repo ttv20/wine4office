@@ -36,6 +36,8 @@ static const WCHAR dcomp_detached_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','d','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
 static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
 
 struct wayland_buffer_queue
 {
@@ -399,7 +401,8 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
      */
     window_surface_unlock(window_surface);
     dcomp_host = NtUserGetProp(window_surface->hwnd, dcomp_detached_window_prop) &&
-                 !NtUserGetProp(window_surface->hwnd, dcomp_background_prop);
+                 !NtUserGetProp(window_surface->hwnd, dcomp_background_prop) &&
+                 !NtUserGetProp(window_surface->hwnd, dcomp_caption_overlay_prop);
     wayland_window_surface_presented(window_surface->hwnd);
     window_surface_lock(window_surface);
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,

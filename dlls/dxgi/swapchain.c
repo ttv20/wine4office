@@ -346,7 +346,9 @@ static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *re
 {
     HWND root;
 
-    if (!GetPropW(window, L"__wine_dcomp_client_rect")) return GetWindowRect(target, rect);
+    if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
+        !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
+        return GetWindowRect(target, rect);
     if ((root = GetAncestor(target, GA_ROOT))) target = root;
     if (!GetClientRect(target, rect)) return FALSE;
     MapWindowPoints(target, NULL, (POINT *)rect, 2);
@@ -358,7 +360,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
     ATOM foreign_atom, old_foreign_atom;
-    HWND root;
+    HWND base, foreign_parent, root;
     RECT rect;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
@@ -373,7 +375,9 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
         ShowWindow(window, SW_HIDE);
         return;
     }
-    foreign_atom = HandleToULong(GetPropW(root, L"__wine_dcomp_xdg_export_handle"));
+    base = GetPropW(target, L"__wine_dcomp_base_presentation");
+    foreign_parent = base && base != window ? base : root;
+    foreign_atom = HandleToULong(GetPropW(foreign_parent, L"__wine_dcomp_xdg_export_handle"));
     if (foreign_atom)
     {
         old_foreign_atom = HandleToULong(GetPropW(window, L"__wine_dcomp_xdg_parent_atom"));
@@ -387,7 +391,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
             flags |= SWP_FRAMECHANGED;
     }
     else
-        PostMessageW(root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+        PostMessageW(foreign_parent, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
     if (!IsWindowVisible(root) || IsIconic(root) || !IsWindowVisible(target))
     {
         ShowWindow(window, SW_HIDE);

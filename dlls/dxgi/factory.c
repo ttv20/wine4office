@@ -18,6 +18,7 @@
  */
 
 #include "dxgi_private.h"
+#include "dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
@@ -409,7 +410,9 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
 {
     HWND root;
 
-    if (!GetPropW(window, L"__wine_dcomp_client_rect")) return GetWindowRect(target, rect);
+    if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
+        !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
+        return GetWindowRect(target, rect);
     if ((root = GetAncestor(target, GA_ROOT))) target = root;
     if (!GetClientRect(target, rect)) return FALSE;
     MapWindowPoints(target, NULL, (POINT *)rect, 2);
@@ -430,6 +433,300 @@ static const WCHAR dcomp_task_delegated_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
 static const WCHAR dcomp_task_app_id_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
+static const WCHAR dcomp_caption_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_caption_root_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','o','o','t',0};
+static const WCHAR dcomp_caption_command_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','c','o','m','m','a','n','d',0};
+static const WCHAR dcomp_caption_hot_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','h','o','t',0};
+static const WCHAR dcomp_caption_overlay_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_caption_rtl_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
+static const WCHAR dcomp_caption_class[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n',0};
+static const WCHAR dwm_nc_rendering_policy_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','n','c','_','r','e','n','d','e','r','i','n','g','_',
+     'p','o','l','i','c','y',0};
+
+enum dcomp_caption_part
+{
+    DCOMP_CAPTION_NONE,
+    DCOMP_CAPTION_MINIMIZE,
+    DCOMP_CAPTION_MAXIMIZE,
+    DCOMP_CAPTION_CLOSE,
+};
+
+static BOOL dxgi_caption_buttons_are_rtl(HWND root)
+{
+    DWORD layout = 0;
+
+    if (GetWindowLongW(root, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) return TRUE;
+    if (!GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
+            (WCHAR *)&layout, sizeof(layout) / sizeof(WCHAR)))
+        return FALSE;
+    return layout == 1 || layout == 3;
+}
+
+static int dxgi_caption_button_count(HWND root)
+{
+    DWORD style = GetWindowLongW(root, GWL_STYLE);
+
+    return 1 + !!(style & WS_MINIMIZEBOX) + !!(style & WS_MAXIMIZEBOX);
+}
+
+static enum dcomp_caption_part dxgi_caption_part_from_point(HWND window, int x)
+{
+    HWND root = GetPropW(window, dcomp_caption_root_prop);
+    DWORD style;
+    RECT rect;
+    int count, index;
+
+    if (!root || !GetClientRect(window, &rect) || rect.right <= 0) return DCOMP_CAPTION_NONE;
+    style = GetWindowLongW(root, GWL_STYLE);
+    count = dxgi_caption_button_count(root);
+    index = max(0, min(count - 1, x * count / rect.right));
+    if (dxgi_caption_buttons_are_rtl(root))
+    {
+        if (!index--) return DCOMP_CAPTION_CLOSE;
+        if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+        if ((style & WS_MINIMIZEBOX) && !index) return DCOMP_CAPTION_MINIMIZE;
+        return DCOMP_CAPTION_NONE;
+    }
+    if ((style & WS_MINIMIZEBOX) && !index--) return DCOMP_CAPTION_MINIMIZE;
+    if ((style & WS_MAXIMIZEBOX) && !index--) return DCOMP_CAPTION_MAXIMIZE;
+    return !index ? DCOMP_CAPTION_CLOSE : DCOMP_CAPTION_NONE;
+}
+
+static void dxgi_caption_draw_glyph(HDC dc, const RECT *rect, enum dcomp_caption_part part,
+        BOOL maximized, COLORREF color)
+{
+    int cx = (rect->left + rect->right) / 2;
+    int cy = (rect->top + rect->bottom) / 2;
+    HPEN pen = CreatePen(PS_SOLID, 1, color), old_pen;
+    HBRUSH old_brush;
+
+    old_pen = SelectObject(dc, pen);
+    old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    switch (part)
+    {
+    case DCOMP_CAPTION_MINIMIZE:
+        MoveToEx(dc, cx - 5, cy + 4, NULL);
+        LineTo(dc, cx + 6, cy + 4);
+        break;
+    case DCOMP_CAPTION_MAXIMIZE:
+        if (maximized)
+        {
+            Rectangle(dc, cx - 4, cy - 3, cx + 5, cy + 6);
+            MoveToEx(dc, cx - 2, cy - 5, NULL);
+            LineTo(dc, cx + 7, cy - 5);
+            LineTo(dc, cx + 7, cy + 3);
+        }
+        else Rectangle(dc, cx - 5, cy - 5, cx + 6, cy + 6);
+        break;
+    case DCOMP_CAPTION_CLOSE:
+        MoveToEx(dc, cx - 5, cy - 5, NULL);
+        LineTo(dc, cx + 6, cy + 6);
+        MoveToEx(dc, cx + 5, cy - 5, NULL);
+        LineTo(dc, cx - 6, cy + 6);
+        break;
+    default:
+        break;
+    }
+    SelectObject(dc, old_brush);
+    SelectObject(dc, old_pen);
+    DeleteObject(pen);
+}
+
+static LRESULT CALLBACK dxgi_caption_window_proc(HWND window, UINT message,
+        WPARAM wparam, LPARAM lparam)
+{
+    enum dcomp_caption_part hot, part;
+    HWND root = GetPropW(window, dcomp_caption_root_prop);
+    HWND command = GetPropW(window, dcomp_caption_command_prop);
+
+    switch (message)
+    {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+    {
+        BOOL light = dxgi_apps_use_light_theme();
+        BOOL maximized = root && IsZoomed(root);
+        COLORREF background = light ? RGB(255, 255, 255) : RGB(32, 32, 32);
+        COLORREF foreground = light ? RGB(0, 0, 0) : RGB(255, 255, 255);
+        PAINTSTRUCT paint;
+        RECT client, button;
+        HBRUSH brush;
+        HDC dc;
+        int count, i;
+
+        dc = BeginPaint(window, &paint);
+        GetClientRect(window, &client);
+        brush = CreateSolidBrush(background);
+        FillRect(dc, &client, brush);
+        DeleteObject(brush);
+        hot = HandleToULong(GetPropW(window, dcomp_caption_hot_prop));
+        count = root ? dxgi_caption_button_count(root) : 1;
+        for (i = 0; i < count; ++i)
+        {
+            button = client;
+            button.left = client.right * i / count;
+            button.right = client.right * (i + 1) / count;
+            part = dxgi_caption_part_from_point(window, (button.left + button.right) / 2);
+            if (part == hot)
+            {
+                brush = CreateSolidBrush(part == DCOMP_CAPTION_CLOSE ? RGB(196, 43, 28) :
+                        (light ? RGB(229, 229, 229) : RGB(60, 60, 60)));
+                FillRect(dc, &button, brush);
+                DeleteObject(brush);
+                if (part == DCOMP_CAPTION_CLOSE) foreground = RGB(255, 255, 255);
+            }
+            dxgi_caption_draw_glyph(dc, &button, part, maximized, foreground);
+            foreground = light ? RGB(0, 0, 0) : RGB(255, 255, 255);
+        }
+        EndPaint(window, &paint);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+    {
+        TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, window, 0};
+
+        part = dxgi_caption_part_from_point(window, (short)LOWORD(lparam));
+        hot = HandleToULong(GetPropW(window, dcomp_caption_hot_prop));
+        if (hot != part)
+        {
+            SetPropW(window, dcomp_caption_hot_prop, ULongToHandle(part));
+            InvalidateRect(window, NULL, FALSE);
+        }
+        TrackMouseEvent(&track);
+        return 0;
+    }
+
+    case WM_MOUSELEAVE:
+        RemovePropW(window, dcomp_caption_hot_prop);
+        InvalidateRect(window, NULL, FALSE);
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (!root) return 0;
+        part = dxgi_caption_part_from_point(window, (short)LOWORD(lparam));
+        if (part == DCOMP_CAPTION_CLOSE)
+            PostMessageW(root, WM_SYSCOMMAND, SC_CLOSE, 0);
+        else if (part == DCOMP_CAPTION_MAXIMIZE)
+            PostMessageW(root, WM_SYSCOMMAND, IsZoomed(root) ? SC_RESTORE : SC_MAXIMIZE, 0);
+        else if (part == DCOMP_CAPTION_MINIMIZE)
+        {
+            PostMessageW(root, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+            if (command && command != root) ShowWindow(command, SW_MINIMIZE);
+        }
+        return 0;
+
+    case WM_DESTROY:
+        RemovePropW(window, dcomp_caption_root_prop);
+        RemovePropW(window, dcomp_caption_command_prop);
+        RemovePropW(window, dcomp_caption_hot_prop);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static BOOL CALLBACK dxgi_caption_register_class(INIT_ONCE *once, void *param, void **context)
+{
+    WNDCLASSW class = {0};
+
+    class.lpfnWndProc = dxgi_caption_window_proc;
+    class.hInstance = GetModuleHandleW(L"dxgi.dll");
+    class.hCursor = LoadCursorW(NULL, (const WCHAR *)IDC_ARROW);
+    class.lpszClassName = dcomp_caption_class;
+    return RegisterClassW(&class) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+static BOOL dxgi_composition_window_has_dwm_caption(HWND root)
+{
+    RECT window_rect, client_rect;
+    DWORD style = GetWindowLongW(root, GWL_STYLE);
+    HANDLE policy = GetPropW(root, dwm_nc_rendering_policy_prop);
+    UINT dpi;
+
+    if ((style & (WS_CAPTION | WS_SYSMENU)) != (WS_CAPTION | WS_SYSMENU) ||
+        (policy && HandleToULong(policy) == DWMNCRP_DISABLED + 1) ||
+        !GetWindowRect(root, &window_rect) || !GetClientRect(root, &client_rect))
+        return FALSE;
+    MapWindowPoints(root, NULL, (POINT *)&client_rect, 2);
+    dpi = GetDpiForWindow(root);
+    return client_rect.top - window_rect.top < MulDiv(16, dpi, USER_DEFAULT_SCREEN_DPI);
+}
+
+static void dxgi_composition_window_update_caption(HWND window, HWND root)
+{
+    static INIT_ONCE caption_class_once = INIT_ONCE_STATIC_INIT;
+    HWND caption = GetPropW(window, dcomp_caption_window_prop);
+    ATOM foreign_atom, old_foreign_atom;
+    RECT window_rect;
+    DWORD style;
+    UINT dpi;
+    UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    int count, width, height, x, y;
+
+    if (!dxgi_composition_window_has_dwm_caption(root))
+    {
+        if (caption) DestroyWindow(caption);
+        RemovePropW(window, dcomp_caption_window_prop);
+        return;
+    }
+    if (!IsWindowVisible(root) || IsIconic(root))
+    {
+        if (caption) ShowWindow(caption, SW_HIDE);
+        return;
+    }
+    if (!caption)
+    {
+        if (!InitOnceExecuteOnce(&caption_class_once, dxgi_caption_register_class, NULL, NULL)) return;
+        caption = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                dcomp_caption_class, NULL,
+                WS_POPUP, 0, 0, 1, 1, NULL, NULL, GetModuleHandleW(L"dxgi.dll"), NULL);
+        if (!caption) return;
+        SetPropW(caption, dcomp_caption_root_prop, root);
+        SetPropW(caption, dcomp_caption_overlay_prop, ULongToHandle(1));
+        SetPropW(caption, L"__wine_dcomp_detached_window", window);
+        SetWindowLongPtrW(caption, GWLP_HWNDPARENT, (LONG_PTR)window);
+        SetPropW(window, dcomp_caption_window_prop, caption);
+    }
+    else SetPropW(caption, dcomp_caption_root_prop, root);
+    SetPropW(caption, dcomp_caption_command_prop,
+            GetPropW(root, dcomp_task_delegated_prop) == window ? window : root);
+    if (dxgi_caption_buttons_are_rtl(root))
+        SetPropW(caption, dcomp_caption_rtl_prop, ULongToHandle(1));
+    else
+        RemovePropW(caption, dcomp_caption_rtl_prop);
+
+    foreign_atom = HandleToULong(GetPropW(window, L"__wine_dcomp_xdg_export_handle"));
+    old_foreign_atom = HandleToULong(GetPropW(caption, L"__wine_dcomp_xdg_parent_atom"));
+    if (foreign_atom)
+    {
+        SetPropW(caption, L"__wine_dcomp_xdg_parent_atom", ULongToHandle(foreign_atom));
+        if (foreign_atom != old_foreign_atom) flags |= SWP_FRAMECHANGED;
+    }
+    else PostMessageW(window, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+
+    style = GetWindowLongW(root, GWL_STYLE);
+    count = 1 + !!(style & WS_MINIMIZEBOX) + !!(style & WS_MAXIMIZEBOX);
+    dpi = GetDpiForWindow(root);
+    width = MulDiv(46 * count, dpi, USER_DEFAULT_SCREEN_DPI);
+    height = MulDiv(32, dpi, USER_DEFAULT_SCREEN_DPI);
+    if (!GetWindowRect(root, &window_rect)) return;
+    x = dxgi_caption_buttons_are_rtl(root) ? window_rect.left : window_rect.right - width;
+    y = window_rect.top;
+    SetWindowPos(caption, HWND_TOPMOST, x, y, width, height,
+            flags | SWP_NOOWNERZORDER);
+    InvalidateRect(caption, NULL, FALSE);
+    UpdateWindow(caption);
+}
 
 static void dxgi_composition_window_clear_task_delegate(HWND window, HWND target)
 {
@@ -523,6 +820,9 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
                     dxgi_composition_window_update_backdrop(window);
                 root = GetAncestor(target, GA_ROOT);
+                if (root && GetPropW(target, L"__wine_dcomp_base_presentation") == window &&
+                    GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
+                    dxgi_composition_window_update_caption(window, root);
                 if (!root || !IsWindowVisible(root) || !IsWindowVisible(target))
                     ShowWindow(window, SW_HIDE);
                 else if (GetPropW(root, dcomp_task_delegated_prop) == window &&
@@ -599,6 +899,8 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 break;
 
             case WM_DESTROY:
+                if ((root = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(root);
+                RemovePropW(window, dcomp_caption_window_prop);
                 KillTimer(window, 1);
                 if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
                 {
@@ -662,6 +964,8 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
 
     if (!target)
     {
+        if ((input_window = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(input_window);
+        RemovePropW(window, dcomp_caption_window_prop);
         dxgi_composition_window_clear_task_delegate(window, old_target);
         ShowWindow(window, SW_HIDE);
         RemovePropW(window, L"__wine_dcomp_detached_window");
@@ -712,6 +1016,8 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     }
     else
         dxgi_composition_window_update_backdrop(window);
+    if (base_presentation && !transparent_base && target_root)
+        dxgi_composition_window_update_caption(window, target_root);
     if (transparent_base)
         SetPropW(window, L"__wine_dcomp_client_rect", ULongToHandle(1));
     else

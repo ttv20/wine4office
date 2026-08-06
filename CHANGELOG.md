@@ -20,6 +20,7 @@
 - Expose the WLAN interface setter used when Teams starts calls.
 - Keep DirectComposition apps visible and correctly identified in KDE's taskbar,
   including working minimize and restore behavior.
+- Restore theme-aware window controls for DirectComposition apps on Wayland.
 - Prevent modern Teams calls from crashing when C++ thread operations report
   an error.
 
