@@ -12,10 +12,12 @@ from pathlib import Path
 from PySide6.QtCore import QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
+    QBrush,
     QCloseEvent,
     QDesktopServices,
     QFont,
     QIcon,
+    QPalette,
     QShowEvent,
     QTextCursor,
 )
@@ -762,7 +764,9 @@ class ManagerWindow(QMainWindow):
         self.apps_environment_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.apps_environment_label)
         self.app_tree = QTreeWidget()
-        self.app_tree.setHeaderLabels(["Application", "Installation status"])
+        self.app_tree.setHeaderLabels(
+            ["Application", "Installation status", "Compatibility"]
+        )
         self.app_tree.setRootIsDecorated(False)
         self.app_tree.setAlternatingRowColors(True)
         self.app_tree.setUniformRowHeights(True)
@@ -771,12 +775,16 @@ class ManagerWindow(QMainWindow):
         header = self.app_tree.header()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.app_items: dict[str, QTreeWidgetItem] = {}
         names = {"word": "Microsoft Word", "excel": "Microsoft Excel",
                  "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook",
+                 "teams": "Microsoft Teams",
                  "setlang": "Microsoft Office Language Preferences"}
         for app, name in names.items():
-            item = QTreeWidgetItem([name, "Checking…"])
+            item = QTreeWidgetItem([
+                name, "Checking…", backend.APP_META[app]["compatibility"]
+            ])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setIcon(0, QIcon(str(self.icons / backend.APP_META[app]["icon"])))
@@ -2059,22 +2067,16 @@ class ManagerWindow(QMainWindow):
             self.restart_manager()
 
     def restart_manager(self) -> None:
-        try:
-            subprocess.Popen(
-                self.restart_command,
-                env=os.environ.copy(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
-            )
-        except OSError as error:
-            self.show_error(f"Could not restart Wine4Office Manager: {error}")
+        command = list(self.restart_command)
+        if not command:
+            self.show_error("Could not restart Wine4Office Manager: restart command is empty.")
             return
-        self._automatic_close = True
         self.timer.stop()
-        self.close()
+        try:
+            os.execvpe(command[0], command, os.environ.copy())
+        except OSError as error:
+            self.timer.start(100)
+            self.show_error(f"Could not restart Wine4Office Manager: {error}")
 
     def finish_successful_removal(self) -> None:
         QMessageBox.information(
@@ -2153,12 +2155,21 @@ class ManagerWindow(QMainWindow):
         for app, installed in status["apps"].items():
             item = self.app_items[app]
             item.setText(1, self._tr(
-                "Installed" if installed else "Not installed in selected environment"
+                "Installed" if installed else "Not installed"
             ))
+            item.setText(2, self._tr(backend.APP_META[app]["compatibility"]))
             item.setIcon(1, self._standard_icon(
                 QStyle.StandardPixmap.SP_DialogApplyButton if installed
                 else QStyle.StandardPixmap.SP_MessageBoxInformation
             ))
+            foreground = (
+                QBrush()
+                if installed else self.palette().brush(
+                    QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text
+                )
+            )
+            for column in range(item.columnCount()):
+                item.setForeground(column, foreground)
 
         self.version_label.setText(
             f"{self._tr('Manager:')} {snapshot['version']}"

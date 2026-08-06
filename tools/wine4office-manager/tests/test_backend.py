@@ -709,6 +709,38 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertFalse(launcher.exists())
         self.assertFalse(installed_helper.exists())
 
+    def test_teams_detection_prefers_newest_windowsapps_package_and_creates_shortcut(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        windows_apps = prefix / "drive_c/Program Files/WindowsApps"
+        older = windows_apps / "MSTeams_24193.1805.3040.8975_x64__8wekyb3d8bbwe"
+        newer = windows_apps / "MSTeams_24295.605.3225.8804_x64__8wekyb3d8bbwe"
+        older.mkdir(parents=True)
+        newer.mkdir()
+        (older / "ms-teams.exe").write_bytes(b"old")
+        teams = newer / "ms-teams.exe"
+        teams.write_bytes(b"new")
+
+        status = backend.environment_status(str(prefix), str(self.wine))
+        self.assertTrue(status["apps"]["teams"])
+        self.assertEqual(backend.find_office_app(str(prefix), "teams"), teams)
+
+        with mock.patch.object(
+            backend, "extract_office_icon", side_effect=lambda _exe, icon: (
+                icon.parent.mkdir(parents=True, exist_ok=True), icon.write_bytes(b"icon"), icon
+            )[-1]
+        ):
+            created = backend.create_app_shortcuts(
+                ["teams"], str(prefix), str(self.wine), False,
+            )
+
+        self.assertEqual(len(created), 1)
+        desktop_file = backend.data_home() / "applications/wine4office-teams.desktop"
+        launcher = backend.shortcut_launcher_path("teams")
+        self.assertIn("Name=Microsoft Teams (Wine4Office)", desktop_file.read_text())
+        self.assertIn(f"executable={shlex.quote(str(teams))}", launcher.read_text())
+        self.assertNotIn("%U", desktop_file.read_text())
+
     def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
@@ -1861,6 +1893,26 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(status["state"], "mismatch")
         self.assertFalse(status["selected_matches"])
 
+    def test_preload_status_ignores_foreground_display_mode_difference(self):
+        binding = self._preload_binding()
+        binding["use_x11"] = False
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[(True, "enabled"), (False, "inactive")],
+        ):
+            status = backend.preload_service_status(
+                binding["prefix"], binding["wine"], True
+            )
+
+        self.assertTrue(status["selected_matches"])
+        self.assertEqual(status["state"], "inactive")
+
     def test_disable_and_start_actions_are_separate(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
@@ -2025,6 +2077,20 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [binding["wine"], "tasklist.exe", "/FO", "CSV", "/NH"],
         )
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_office_detection_does_not_treat_teams_as_preloaded_office(self):
+        binding = self._preload_binding()
+        completed = mock.Mock(
+            returncode=0,
+            stdout='"ms-teams.exe","101","Console","1","12 K"\n',
+            stderr="",
+        )
+        with mock.patch.object(backend.subprocess, "run", return_value=completed):
+            found = backend.preload_office_processes(
+                binding["prefix"], binding["wine"], True
+            )
+
+        self.assertEqual(found, [])
 
     def test_stop_refuses_active_or_unknown_office_without_systemctl_stop(self):
         binding = self._preload_binding()
@@ -2443,6 +2509,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_runner_update_rebinds_and_restarts_owned_background_service(self):
         old = self._preload_binding()
+        old["use_x11"] = False
         backend._preload_json_write(backend.preload_binding_path(), old)
         backend._preload_atomic_write(
             backend.preload_unit_path(),
@@ -2484,6 +2551,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         updated = backend._read_preload_binding()
         self.assertEqual(updated["prefix"], old["prefix"])
         self.assertEqual(updated["wine"], str(new_wine.resolve()))
+        self.assertFalse(updated["use_x11"])
 
     def test_manager_update_replaces_legacy_preload_executor(self):
         binding = self._preload_binding()

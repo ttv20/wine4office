@@ -15,7 +15,7 @@ sys.path.insert(0, str(MANAGER_DIR))
 
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtGui import QBrush, QCloseEvent
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -444,22 +444,29 @@ class QtManagerTests(unittest.TestCase):
         prompt.assert_called_once_with(True)
         self.assertTrue(self.window.restart_prompted)
 
-    def test_restart_now_starts_fresh_manager_and_closes_current_window(self):
+    def test_restart_now_replaces_current_manager_process(self):
         command = ["/updated/Wine4OfficeManager"]
         self.window.restart_command = command
         with mock.patch.object(
             qt_module.QMessageBox, "question",
             return_value=QMessageBox.StandardButton.Yes,
-        ), mock.patch.object(
-            qt_module.subprocess, "Popen"
-        ) as popen, mock.patch.object(
-            self.window, "close"
-        ) as close:
+        ), mock.patch.object(qt_module.os, "execvpe") as execvpe:
             self.window.prompt_manager_restart(True)
 
-        self.assertEqual(popen.call_args.args[0], command)
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        close.assert_called_once()
+        execvpe.assert_called_once_with(command[0], command, mock.ANY)
+        self.assertFalse(self.window.timer.isActive())
+
+    def test_failed_restart_keeps_current_manager_open(self):
+        self.window.restart_command = ["/missing/Wine4OfficeManager"]
+        with mock.patch.object(
+            qt_module.os, "execvpe", side_effect=FileNotFoundError("missing")
+        ), mock.patch.object(self.window, "show_error") as show_error, \
+             mock.patch.object(self.window, "close") as close:
+            self.window.restart_manager()
+
+        show_error.assert_called_once()
+        close.assert_not_called()
+        self.assertTrue(self.window.timer.isActive())
 
     def test_successful_removal_shows_confirmation_then_closes_manager(self):
         snapshot = self._preload_snapshot(task={
@@ -527,6 +534,29 @@ class QtManagerTests(unittest.TestCase):
             ).text(),
             "Office settings",
         )
+        self.assertIn("teams", self.window.app_items)
+        self.assertEqual(
+            self.window.app_items["teams"].text(0), "Microsoft Teams"
+        )
+        self.assertEqual(self.window.app_tree.columnCount(), 3)
+        self.assertEqual(
+            self.window.app_tree.headerItem().text(2), "Compatibility"
+        )
+        expected_compatibility = {
+            "word": "Good",
+            "excel": "Good",
+            "powerpoint": "Open",
+            "outlook": "Not working",
+            "teams": "Basic functionality",
+            "setlang": "Good",
+        }
+        for app, compatibility in expected_compatibility.items():
+            self.assertEqual(self.window.app_items[app].text(2), compatibility)
+        self.assertEqual(self.window.app_items["teams"].text(1), "Not installed")
+        self.assertNotEqual(
+            self.window.app_items["teams"].foreground(0), QBrush()
+        )
+        self.assertEqual(self.window.app_items["word"].foreground(0), QBrush())
 
     def test_first_launch_combines_reporting_and_24_hour_update_choice(self):
         with self.state.lock:

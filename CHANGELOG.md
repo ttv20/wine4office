@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add Teams shortcuts and show application compatibility in the Manager.
+- Restart the Manager in place after installing an update.
+- Do not treat an app display-mode change as a different background-service environment.
+
 ## 0.1.11-rc.1 — 2026-08-06 (prerelease)
 
 - Make the standalone Manager use KDE's native theme while preserving its

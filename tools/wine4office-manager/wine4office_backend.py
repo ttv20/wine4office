@@ -72,6 +72,7 @@ APP_META = {
         "icon": "wine4office-word.svg",
         "categories": "Office;WordProcessor;",
         "mime": "application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;",
+        "compatibility": "Good",
     },
     "excel": {
         "name": "Microsoft Excel (Wine4Office)",
@@ -79,6 +80,7 @@ APP_META = {
         "icon": "wine4office-excel.svg",
         "categories": "Office;Spreadsheet;",
         "mime": "text/csv;application/vnd.ms-excel;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;",
+        "compatibility": "Good",
     },
     "powerpoint": {
         "name": "Microsoft PowerPoint (Wine4Office)",
@@ -86,6 +88,7 @@ APP_META = {
         "icon": "wine4office-powerpoint.svg",
         "categories": "Office;Presentation;",
         "mime": "application/vnd.ms-powerpoint;application/vnd.openxmlformats-officedocument.presentationml.presentation;",
+        "compatibility": "Open",
     },
     "outlook": {
         "name": "Microsoft Outlook (Wine4Office)",
@@ -93,6 +96,16 @@ APP_META = {
         "icon": "wine4office-outlook.svg",
         "categories": "Office;Email;Network;",
         "mime": "x-scheme-handler/mailto;",
+        "compatibility": "Not working",
+    },
+    "teams": {
+        "name": "Microsoft Teams (Wine4Office)",
+        "exe": "ms-teams.exe",
+        "icon": "wine4office-teams.svg",
+        "categories": "Network;Chat;VideoConference;",
+        "mime": "",
+        "preload_process": False,
+        "compatibility": "Basic functionality",
     },
     "setlang": {
         "name": "Microsoft Office Language Preferences (Wine4Office)",
@@ -100,6 +113,7 @@ APP_META = {
         "icon": "wine4office-setlang.svg",
         "categories": "Office;Settings;",
         "mime": "",
+        "compatibility": "Good",
     },
 }
 
@@ -911,12 +925,37 @@ def office_candidates(prefix: Path, executable: str) -> Iterable[Path]:
         yield root / executable
 
 
+def teams_candidates(prefix: Path) -> Iterable[Path]:
+    """Yield installed new-Teams executables, newest package version first."""
+    windows_apps = prefix / "drive_c/Program Files/WindowsApps"
+    packages: list[tuple[tuple[int, ...], str, Path]] = []
+    for package_pattern in (
+            "MSTeams_*__8wekyb3d8bbwe",
+            "Microsoft.MSTeams_*__8wekyb3d8bbwe"):
+        for package in windows_apps.glob(package_pattern):
+            if not package.is_dir():
+                continue
+            parts = package.name.split("_")
+            try:
+                version = tuple(int(part) for part in parts[1].split("."))
+            except (IndexError, ValueError):
+                continue
+            packages.append((version, package.name, package))
+    for _version, _name, package in sorted(packages, reverse=True):
+        yield package / "ms-teams.exe"
+        yield package / "MSTeams.exe"
+
+
 def find_office_app(prefix_value: str, app: str) -> Path | None:
     if app not in APP_META:
         raise ValueError(f"Unknown Office application: {app}")
     prefix = validate_prefix(prefix_value)
     executable = APP_META[app]["exe"]
-    for candidate in office_candidates(prefix, executable):
+    candidates = (
+        teams_candidates(prefix)
+        if app == "teams" else office_candidates(prefix, executable)
+    )
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None
@@ -3326,7 +3365,8 @@ def systemd_user_available() -> bool:
 
 
 def _preload_selected_matches(binding: dict, prefix_value: str | None,
-                              wine_value: str | None, use_x11: bool | None) -> bool:
+                              wine_value: str | None, _use_x11: bool | None) -> bool:
+    """Match the Wine environment; display mode is a foreground-app choice."""
     if prefix_value is None or wine_value is None:
         return True
     try:
@@ -3335,9 +3375,8 @@ def _preload_selected_matches(binding: dict, prefix_value: str | None,
     except (OSError, ValueError):
         return False
     return (
-        str(prefix) == binding["prefix"]
-        and str(wine) == binding["wine"]
-        and (use_x11 is None or bool(use_x11) == binding["use_x11"])
+        paths_equivalent(str(prefix), binding["prefix"])
+        and paths_equivalent(str(wine), binding["wine"])
     )
 
 
@@ -3725,7 +3764,11 @@ def install_preload_service(prefix_value: str, wine_value: str,
             "The installed preload service has no valid binding; disable and stop it "
             "before repairing it."
         )
-    if existing is not None and existing != binding and (was_enabled or was_active):
+    if (existing is not None
+            and not _preload_selected_matches(
+                existing, binding["prefix"], binding["wine"], None
+            )
+            and (was_enabled or was_active)):
         raise RuntimeError(
             "The existing preload service is bound to a different Wine environment. "
             "Disable it at login and stop it before explicitly rebinding."
@@ -3768,10 +3811,7 @@ def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> di
     except (FileNotFoundError, OSError, ValueError):
         return None
     prefix = validate_prefix(prefix_value)
-    if (
-        not paths_equivalent(binding["prefix"], str(prefix))
-        or binding["use_x11"] != bool(use_x11)
-    ):
+    if not paths_equivalent(binding["prefix"], str(prefix)):
         return None
     enabled, _ = _systemctl_property("is-enabled")
     active, _ = _systemctl_property("is-active")
@@ -3865,7 +3905,11 @@ def preload_office_processes(prefix_value: str, wine_value: str,
         raise RuntimeError(
             f"Wine process detection failed; refusing to stop preload: {detail or completed.returncode}"
         )
-    office_names = {metadata["exe"].casefold() for metadata in APP_META.values()}
+    office_names = {
+        metadata["exe"].casefold()
+        for metadata in APP_META.values()
+        if metadata.get("preload_process", True)
+    }
     found: list[str] = []
     try:
         rows = csv.reader(io.StringIO(completed.stdout), strict=True)
@@ -3927,17 +3971,14 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
 
 
 def _preload_active_for_environment(prefix_value: str, _wine_value: str,
-                                    use_x11: bool) -> bool:
+                                    _use_x11: bool) -> bool:
     supported, _ = _systemd_user_capability()
     if not supported or not preload_unit_path().is_file():
         return False
     try:
         binding = _read_preload_binding()
         prefix = validate_prefix(prefix_value)
-        if (
-            not paths_equivalent(binding["prefix"], str(prefix))
-            or binding["use_x11"] != bool(use_x11)
-        ):
+        if not paths_equivalent(binding["prefix"], str(prefix)):
             return False
         active, _ = _systemctl_property("is-active")
         return active
