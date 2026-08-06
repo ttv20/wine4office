@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make the standalone Manager use KDE's native theme while preserving its
+  standard Qt behavior on other desktops.
+- Translate the Manager into 47 languages with correct right-to-left layouts.
 - Document initial Microsoft Teams support and currently working features.
 - Detect Office crashes and XWayland hangs and keep a bounded local trace.
 - Let users review, edit, attach context or a file, and manually send reports.

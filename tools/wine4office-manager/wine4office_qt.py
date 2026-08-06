@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, Qt, QUrl
 from PySide6.QtGui import (
+    QAction,
     QCloseEvent,
     QDesktopServices,
     QFont,
@@ -19,6 +20,7 @@ from PySide6.QtGui import (
     QTextCursor,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QApplication,
     QButtonGroup,
@@ -57,6 +59,8 @@ from PySide6.QtWidgets import (
 
 import wine4office_backend as backend
 import wine4office_incident as incident
+import wine4office_desktop as desktop
+import wine4office_i18n as i18n
 
 
 class ManagerWindow(QMainWindow):
@@ -99,6 +103,7 @@ class ManagerWindow(QMainWindow):
         self.reporting_available = incident.reporting_available()
         self.initial_incident = review_incident
         self._startup_scheduled = False
+        self.language = i18n.system_language()
 
         self.setWindowTitle("Wine4Office Manager")
         self.setWindowIcon(QIcon(str(icons / "wine4office-manager.png")))
@@ -110,6 +115,8 @@ class ManagerWindow(QMainWindow):
         self.timer.timeout.connect(self.refresh_state)
         self.timer.start(1200)
         self.refresh_state()
+        self._translate_ui()
+
     def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(icon)
 
@@ -118,6 +125,48 @@ class ManagerWindow(QMainWindow):
         if not self._startup_scheduled:
             self._startup_scheduled = True
             QTimer.singleShot(0, self.finish_startup)
+
+    def _tr(self, text: str) -> str:
+        return i18n.translate(text, self.language)
+
+    def _translate_tree_item(self, item: QTreeWidgetItem) -> None:
+        for column in range(item.columnCount()):
+            item.setText(column, self._tr(item.text(column)))
+        for row in range(item.childCount()):
+            self._translate_tree_item(item.child(row))
+
+    def _translate_ui(self, root: QWidget | None = None) -> None:
+        """Translate the constructed widget tree without changing backend values."""
+        root = root or self
+        root.setWindowTitle(self._tr(root.windowTitle()))
+        for action in root.findChildren(QAction):
+            action.setText(self._tr(action.text()))
+            action.setToolTip(self._tr(action.toolTip()))
+        for widget in root.findChildren(QWidget):
+            if isinstance(widget, QAbstractButton):
+                widget.setText(self._tr(widget.text()))
+            elif isinstance(widget, QLabel):
+                widget.setText(self._tr(widget.text()))
+            elif isinstance(widget, QGroupBox):
+                widget.setTitle(self._tr(widget.title()))
+            if isinstance(widget, QLineEdit):
+                widget.setPlaceholderText(self._tr(widget.placeholderText()))
+            if isinstance(widget, QComboBox):
+                for row in range(widget.count()):
+                    widget.setItemText(row, self._tr(widget.itemText(row)))
+            widget.setToolTip(self._tr(widget.toolTip()))
+            widget.setAccessibleName(self._tr(widget.accessibleName()))
+            widget.setAccessibleDescription(self._tr(widget.accessibleDescription()))
+        if root is self:
+            for row in range(self.navigation.count()):
+                item = self.navigation.item(row)
+                item.setText(self._tr(item.text()))
+            header = self.app_tree.headerItem()
+            if header is not None:
+                self._translate_tree_item(header)
+            for row in range(self.app_tree.topLevelItemCount()):
+                self._translate_tree_item(self.app_tree.topLevelItem(row))
+            self.statusBar().showMessage(self._tr(self.statusBar().currentMessage()))
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Main")
@@ -399,7 +448,7 @@ class ManagerWindow(QMainWindow):
         selected = str(snapshot["config"]["prefix"])
         binding = preload.get("binding")
         bound = binding.get("prefix") if isinstance(binding, dict) else binding
-        bound_text = str(bound) if bound else "Not configured"
+        bound_text = str(bound) if bound else self._tr("Not configured")
         self.preload_selected_label.setText(selected)
         self.preload_binding_label.setText(bound_text)
 
@@ -433,7 +482,7 @@ class ManagerWindow(QMainWindow):
             detail = detail or "Enabled at login, but not running."
         else:
             detail = detail or ""
-        self.preload_detail_label.setText(detail)
+        self.preload_detail_label.setText(self._tr(detail))
         self.preload_rebind = (
             (bound_text, selected)
             if mismatch and installed and not enabled and not active
@@ -630,6 +679,7 @@ class ManagerWindow(QMainWindow):
         delete_button = dialog.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
         dialog.setDefaultButton(keep_button)
         dialog.setEscapeButton(keep_button)
+        self._translate_ui(dialog)
         dialog.exec()
         if dialog.clickedButton() is not delete_button:
             self.notify("Office deployment XML kept.")
@@ -836,6 +886,7 @@ class ManagerWindow(QMainWindow):
             return
         current = backend.office_compatibility_settings(config)
         dialog, checkboxes = self._compatibility_settings_dialog(current)
+        self._translate_ui(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         desired = {
@@ -892,6 +943,7 @@ class ManagerWindow(QMainWindow):
         if config is None:
             return
         dialog, telemetry = self._privacy_settings_dialog(config)
+        self._translate_ui(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -1135,6 +1187,7 @@ class ManagerWindow(QMainWindow):
         )
         dialog.addButton(QMessageBox.StandardButton.Cancel)
         dialog.setDefaultButton(preserve_button)
+        self._translate_ui(dialog)
         dialog.exec()
         clicked = dialog.clickedButton()
         if clicked is delete_button:
@@ -1782,8 +1835,8 @@ class ManagerWindow(QMainWindow):
         if self._close_when_idle or self._automatic_close:
             return
         labels = {
-            "manager": "Wine4Office Manager",
-            "wine": "Wine runner",
+            "manager": self._tr("Wine4Office Manager"),
+            "wine": self._tr("Wine runner"),
         }
         selected = [
             name for name in ("manager", "wine")
@@ -1797,17 +1850,17 @@ class ManagerWindow(QMainWindow):
         )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Question)
-        dialog.setWindowTitle("Wine4Office update available")
-        dialog.setText("Updates are available.")
+        dialog.setWindowTitle(self._tr("Wine4Office update available"))
+        dialog.setText(self._tr("Updates are available."))
         dialog.setInformativeText(
-            f"{versions}\n\nNothing downloads until you approve this update."
+            f"{versions}\n\n{self._tr('Nothing downloads until you approve this update.')}"
         )
         install_button = dialog.addButton(
-            "Download and install", QMessageBox.ButtonRole.AcceptRole
+            self._tr("Download and install"), QMessageBox.ButtonRole.AcceptRole
         )
-        later_button = dialog.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        later_button = dialog.addButton(self._tr("Later"), QMessageBox.ButtonRole.RejectRole)
         skip_button = dialog.addButton(
-            "Skip these versions", QMessageBox.ButtonRole.DestructiveRole
+            self._tr("Skip these versions"), QMessageBox.ButtonRole.DestructiveRole
         )
         with self.state.lock:
             automatic_enabled = (
@@ -1815,7 +1868,7 @@ class ManagerWindow(QMainWindow):
             )
         disable_button = (
             dialog.addButton(
-                "Disable automatic checks", QMessageBox.ButtonRole.ActionRole
+                self._tr("Disable automatic checks"), QMessageBox.ButtonRole.ActionRole
             )
             if automatic_enabled else None
         )
@@ -2012,16 +2065,16 @@ class ManagerWindow(QMainWindow):
         self.notify("Cancellation requested.")
 
     def notify(self, message: str) -> None:
-        self.statusBar().showMessage(message, 5000)
+        self.statusBar().showMessage(self._tr(message), 5000)
 
     def show_error(self, error) -> None:
-        QMessageBox.critical(self, "Wine4Office Manager", str(error))
+        QMessageBox.critical(self, self._tr("Wine4Office Manager"), self._tr(str(error)))
 
     def refresh_state(self) -> None:
         try:
             snapshot = self.state.snapshot()
         except Exception as error:
-            self.health.setText("Status unavailable")
+            self.health.setText(self._tr("Status unavailable"))
             self.health_icon.setPixmap(self._standard_icon(
                 QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(20, 20))
             self.statusBar().showMessage(str(error), 4000)
@@ -2042,21 +2095,26 @@ class ManagerWindow(QMainWindow):
         else:
             health_text = "Environment not created"
             health_icon = QStyle.StandardPixmap.SP_MessageBoxWarning
-        self.health.setText(health_text)
+        self.health.setText(self._tr(health_text))
         self.health_icon.setPixmap(self._standard_icon(health_icon).pixmap(20, 20))
 
-        self.apps_environment_label.setText(f"Selected environment: {snapshot['config']['prefix']}")
+        self.apps_environment_label.setText(
+            f"{self._tr('Selected environment:')} {snapshot['config']['prefix']}"
+        )
         self.installed_apps = {app for app, installed in status["apps"].items() if installed}
         for app, installed in status["apps"].items():
             item = self.app_items[app]
-            item.setText(1, "Installed" if installed else "Not installed in selected environment")
+            item.setText(1, self._tr(
+                "Installed" if installed else "Not installed in selected environment"
+            ))
             item.setIcon(1, self._standard_icon(
                 QStyle.StandardPixmap.SP_DialogApplyButton if installed
                 else QStyle.StandardPixmap.SP_MessageBoxInformation
             ))
 
         self.version_label.setText(
-            f"Manager: {snapshot['version']}; Wine: {snapshot['wine_version']}"
+            f"{self._tr('Manager:')} {snapshot['version']}"
+            f"{self._tr('; Wine:')} {snapshot['wine_version']}"
         )
         updater = snapshot["updater"]
         automatic_enabled = (
@@ -2093,7 +2151,11 @@ class ManagerWindow(QMainWindow):
                     lambda current=config_path, digest=expected_digest:
                     self.prompt_office_xml_cleanup(current, digest),
                 )
-        self.task_label.setText(f"{task['kind']}: running" if task["running"] else task["status"].capitalize())
+        task_text = (
+            f"{self._tr(task['kind'])}: {self._tr('running')}"
+            if task["running"] else self._tr(task["status"].capitalize())
+        )
+        self.task_label.setText(task_text)
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])
         self.cancel_button.setEnabled(task["running"])
@@ -2103,7 +2165,7 @@ class ManagerWindow(QMainWindow):
             self._set_config_fields(snapshot["config"])
             self.pending_environment_transition = False
         if task["log"] != self.last_log:
-            self.log.setPlainText(task["log"] or "No operation running.")
+            self.log.setPlainText(task["log"] or self._tr("No operation running."))
             self.log.moveCursor(QTextCursor.MoveOperation.End)
             self.last_log = task["log"]
         task_state = f"{task['running']}:{task['status']}"
@@ -2165,7 +2227,16 @@ def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
                 smoke_test: bool = False, screenshot: Path | None = None,
                 open_maintenance: bool = False,
                 review_incident: Path | None = None) -> int:
+    plugin_bridge = desktop.prepare_kde_plugin_bridge()
+    if plugin_bridge is not None:
+        QApplication.addLibraryPath(str(plugin_bridge))
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    language = i18n.system_language()
+    app.setLayoutDirection(
+        Qt.LayoutDirection.RightToLeft
+        if language in i18n.RTL_LANGUAGES
+        else Qt.LayoutDirection.LeftToRight
+    )
     app.setApplicationName("Wine4Office Manager")
     app.setOrganizationName("Wine4Office")
     app.setDesktopFileName("wine4office-manager")
