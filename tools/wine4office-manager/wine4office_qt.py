@@ -199,7 +199,8 @@ class ManagerWindow(QMainWindow):
 
         sections = [
             ("Environment", QStyle.StandardPixmap.SP_DriveHDIcon, self._environment_page()),
-            ("Install Office", QStyle.StandardPixmap.SP_ArrowDown, self._office_install_page()),
+            ("Install Office & Teams", QStyle.StandardPixmap.SP_ArrowDown,
+             self._office_install_page()),
             ("Applications", QStyle.StandardPixmap.SP_FileDialogListView, self._applications_page()),
             ("Office settings", QStyle.StandardPixmap.SP_FileDialogContentsView,
              self._office_settings_page()),
@@ -501,8 +502,9 @@ class ManagerWindow(QMainWindow):
 
     def _office_install_page(self) -> QWidget:
         page, layout = self._new_page(
-            "Install Microsoft Office",
-            "Install a supported 64-bit Office product with Microsoft's Office Deployment Tool.",
+            "Install Office & Teams",
+            "Install Office with Microsoft's deployment tool or install Microsoft Teams "
+            "with its standalone bootstrapper.",
         )
         installer = QGroupBox("Office Deployment Tool")
         installer_layout = QVBoxLayout(installer)
@@ -556,13 +558,59 @@ class ManagerWindow(QMainWindow):
             QStyle.StandardPixmap.SP_DialogOpenButton,
         ))
         buttons.addWidget(self._action_button(
-            "Generate XML and install…", self.install_office_from_generated_xml,
+            "Install Office", self.install_office_from_generated_xml,
             QStyle.StandardPixmap.SP_ArrowDown,
         ))
         installer_layout.addLayout(buttons)
         layout.addWidget(installer)
+
+        teams = QGroupBox("Microsoft Teams")
+        teams_layout = QVBoxLayout(teams)
+        teams_explanation = QLabel(
+            "Install Teams separately from Office with Microsoft's standalone bootstrapper. "
+            "The installer is downloaded automatically; Teams support in Wine is experimental."
+        )
+        teams_explanation.setWordWrap(True)
+        teams_layout.addWidget(teams_explanation)
+        teams_buttons = QHBoxLayout()
+        teams_buttons.addStretch()
+        self.teams_install_button = self._action_button(
+            "Install Teams", self.install_teams,
+            QStyle.StandardPixmap.SP_ArrowDown,
+        )
+        self.teams_install_button.setAccessibleName(
+            "Install Microsoft Teams with the standalone installer"
+        )
+        teams_buttons.addWidget(self.teams_install_button)
+        teams_layout.addLayout(teams_buttons)
+        layout.addWidget(teams)
         layout.addStretch()
         return page
+
+    def install_teams(self) -> None:
+        if not self.ensure_idle():
+            return
+        config = self.save_config()
+        if not config:
+            return
+        try:
+            self.state.start_task(
+                "teams-install",
+                lambda: backend.install_teams_with_bootstrapper(
+                    config["prefix"],
+                    config["wine"],
+                    self.state.output,
+                    cancel_event=self.state.cancel_event,
+                    process_callback=self.state.set_process,
+                    use_x11=config.get("use_x11", True),
+                ),
+            )
+            self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
+            self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
+            self.notify("Microsoft Teams installation started.")
+            self.refresh_state()
+        except Exception as error:
+            self.show_error(error)
 
     def update_office_product_details(self) -> None:
         product = self.office_product_combo.currentData()
@@ -592,21 +640,7 @@ class ManagerWindow(QMainWindow):
         except Exception as error:
             self.show_error(error)
             return
-        filename, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Office deployment configuration",
-            str(Path.home() / "office-deployment.xml"),
-            "Office deployment XML (*.xml);;All files (*)",
-        )
-        if not filename:
-            return
-        config_path = Path(filename)
-        try:
-            config_path.write_text(xml, encoding="utf-8")
-        except Exception as error:
-            self.show_error(f"Could not save the Office deployment configuration:\n{error}")
-            return
-        self._start_office_install(config_path)
+        self._start_office_install_payload(xml.encode("utf-8"))
 
     def install_office_from_custom_xml(self) -> None:
         if not self.ensure_idle():
@@ -628,6 +662,16 @@ class ManagerWindow(QMainWindow):
         except Exception as error:
             self.show_error(error)
             return
+        self._start_office_install_payload(
+            configuration_payload,
+            validated_path,
+            config_digest,
+        )
+
+    def _start_office_install_payload(
+            self, configuration_payload: bytes,
+            config_path: Path | None = None,
+            config_digest: str | None = None) -> None:
         config = self.save_config()
         if not config:
             return
@@ -637,14 +681,18 @@ class ManagerWindow(QMainWindow):
                 lambda payload=configuration_payload: backend.install_office_with_odt(
                     config["prefix"],
                     config["wine"],
-                    validated_path,
+                    config_path,
                     self.state.output,
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     configuration_payload=payload,
                 ),
             )
-            self.pending_odt_xml = (validated_path, configuration_payload, config_digest)
+            self.pending_odt_xml = (
+                (config_path, configuration_payload, config_digest)
+                if config_path is not None and config_digest is not None
+                else None
+            )
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
             self.notify("Office installation started.")

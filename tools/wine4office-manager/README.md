@@ -63,6 +63,8 @@ The manager defaults to:
 
 - Create or rollback-safely recreate a selected Wine prefix.
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
+- Install supported Office products through the current Office Deployment Tool,
+  or separately download and run Microsoft's standalone Teams bootstrapper.
 - Create/update/remove Word, Excel, PowerPoint, Outlook, and Office Language Preferences shortcuts.
 - Apply curated per-prefix Office compatibility and privacy policies without
   exposing Windows-only Group Policy infrastructure.

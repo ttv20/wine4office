@@ -1491,6 +1491,97 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [preserved],
         )
 
+    def test_teams_bootstrapper_download_is_atomic_and_microsoft_hosted(self):
+        destination = self.home / "teamsbootstrapper.exe"
+        destination.write_bytes(b"previous installer")
+        payload = b"MZ" + (b"teams" * 300)
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return (
+                    "https://statics.teams.cdn.office.net/production-teamsprovision/"
+                    "lkg/teamsbootstrapper.exe"
+                )
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        output = []
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ) as microsoft_opener:
+            result = backend.download_teams_bootstrapper(destination, output.append)
+
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertIn(str(destination), result)
+        self.assertIn(f"Saved Microsoft Teams installer to {destination}", output)
+        microsoft_opener.assert_called_once_with(backend._TEAMS_DOWNLOAD_HOSTS)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, backend.TEAMS_BOOTSTRAPPER_URL)
+        self.assertFalse(list(destination.parent.glob(".teamsbootstrapper.exe.*.part")))
+
+    def test_invalid_teams_bootstrapper_preserves_existing_destination(self):
+        destination = self.home / "teamsbootstrapper.exe"
+        previous = b"previous installer"
+        destination.write_bytes(previous)
+        payload = b"not-a-windows-executable" * 100
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return (
+                    "https://statics.teams.cdn.office.net/production-teamsprovision/"
+                    "lkg/teamsbootstrapper.exe"
+                )
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ), self.assertRaisesRegex(ValueError, "not a valid Windows executable"):
+            backend.download_teams_bootstrapper(destination, lambda line: None)
+
+        self.assertEqual(destination.read_bytes(), previous)
+        self.assertFalse(list(destination.parent.glob(".teamsbootstrapper.exe.*.part")))
+
+    def test_teams_install_downloads_then_runs_bootstrapper_in_selected_prefix(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        environment = {"WINEPREFIX": str(prefix)}
+        downloaded_paths = []
+
+        def download(destination, output, cancel_event):
+            destination = Path(destination)
+            destination.write_bytes(b"MZ" + (b"teams" * 300))
+            downloaded_paths.append(destination)
+            return "downloaded"
+
+        with mock.patch.object(
+            backend, "download_teams_bootstrapper", side_effect=download
+        ) as download_bootstrapper, mock.patch.object(
+            backend, "wine_environment", return_value=environment
+        ) as wine_environment, mock.patch.object(
+            backend, "_stream_command"
+        ) as stream:
+            result = backend.install_teams_with_bootstrapper(
+                str(prefix), str(self.wine), lambda line: None, use_x11=False
+            )
+
+        self.assertEqual(result, "Microsoft Teams installation completed successfully.")
+        download_bootstrapper.assert_called_once_with(
+            mock.ANY, mock.ANY, None
+        )
+        wine_environment.assert_called_once_with(prefix.resolve(), self.wine.resolve(), False)
+        self.assertEqual(len(downloaded_paths), 1)
+        bootstrapper = downloaded_paths[0]
+        self.assertEqual(
+            stream.call_args.args[:3],
+            ([str(self.wine.resolve()), str(bootstrapper), "-p"], environment, mock.ANY),
+        )
+        self.assertEqual(stream.call_args.kwargs["cwd"], bootstrapper.parent)
+        self.assertFalse(bootstrapper.exists())
+
     def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix)

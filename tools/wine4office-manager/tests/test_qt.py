@@ -1154,6 +1154,14 @@ class QtManagerTests(unittest.TestCase):
             update_prompt.assert_not_called()
 
     def test_office_install_page_defaults_and_product_metadata(self):
+        self.assertEqual(
+            self.window.navigation.item(self.window.INSTALL_PAGE).text(),
+            "Install Office & Teams",
+        )
+        self.assertEqual(
+            self.window.teams_install_button.accessibleName(),
+            "Install Microsoft Teams with the standalone installer",
+        )
         self.assertEqual(self.window.office_languages_edit.text(), "en-US")
         self.assertEqual(
             self.window.office_product_combo.count(),
@@ -1175,50 +1183,67 @@ class QtManagerTests(unittest.TestCase):
                 self.assertIn(product["product_id"], details)
                 self.assertIn(product["channel"], details)
 
-    def test_generated_office_install_waits_for_save_selection(self):
-        configuration = self.home / "generated deployment.xml"
+    def test_teams_install_downloads_and_runs_without_save_dialog(self):
+        with mock.patch.object(
+            qt_module.QFileDialog, "getSaveFileName"
+        ) as save_dialog, mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            backend, "install_teams_with_bootstrapper", return_value="installed"
+        ) as install, mock.patch.object(
+            self.state, "start_task"
+        ) as start:
+            self.window.install_teams()
+            start.call_args.args[1]()
+
+        save_dialog.assert_not_called()
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0], "teams-install")
+        install.assert_called_once_with(
+            self.config["prefix"],
+            self.config["wine"],
+            self.state.output,
+            cancel_event=self.state.cancel_event,
+            process_callback=self.state.set_process,
+            use_x11=True,
+        )
+        self.assertEqual(self.window.pages.currentIndex(), self.window.MAINTENANCE_PAGE)
+
+    def test_generated_office_install_starts_without_save_dialog(self):
         generated_xml = "<Configuration><Add /></Configuration>\n"
         configuration_payload = generated_xml.encode("utf-8")
-        config_digest = "a" * 64
 
         with mock.patch.object(
-            qt_module.QFileDialog,
-            "getSaveFileName",
-            side_effect=[("", ""), (str(configuration), "Office deployment XML (*.xml)")],
+            qt_module.QFileDialog, "getSaveFileName"
+        ) as save_dialog, mock.patch.object(
+            backend, "install_office_with_odt", return_value="installed"
+        ) as install, mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
         ), mock.patch.object(
             backend, "validate_office_languages", return_value=["en-us"]
         ) as validate_languages, mock.patch.object(
             backend, "build_office_configuration", return_value=generated_xml
         ) as build, mock.patch.object(
-            backend,
-            "load_office_configuration",
-            return_value=(
-                configuration.resolve(),
-                configuration_payload,
-                config_digest,
-            ),
-        ) as load, mock.patch.object(
-            self.window, "save_config", return_value=dict(self.config)
-        ), mock.patch.object(
             self.state, "start_task"
         ) as start:
             self.window.install_office_from_generated_xml()
-            start.assert_not_called()
-            load.assert_not_called()
-            self.assertFalse(configuration.exists())
+            start.call_args.args[1]()
 
-            self.window.install_office_from_generated_xml()
-
+        save_dialog.assert_not_called()
         validate_languages.assert_called_with("en-US")
-        load.assert_called_once_with(configuration)
         build.assert_called_with("O365ProPlusRetail", ["en-us"])
-        self.assertEqual(configuration.read_text(encoding="utf-8"), generated_xml)
         start.assert_called_once()
         self.assertEqual(start.call_args.args[0], "odt-install")
-        self.assertEqual(
-            self.window.pending_odt_xml,
-            (configuration.resolve(), configuration_payload, config_digest),
+        install.assert_called_once_with(
+            self.config["prefix"],
+            self.config["wine"],
+            None,
+            self.state.output,
+            cancel_event=self.state.cancel_event,
+            process_callback=self.state.set_process,
+            configuration_payload=configuration_payload,
         )
+        self.assertIsNone(self.window.pending_odt_xml)
 
     def test_custom_office_install_waits_for_open_selection(self):
         configuration = self.home / "custom deployment.xml"

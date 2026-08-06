@@ -99,7 +99,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(i18n.translate("Environment", language), "סביבה")
 
     def test_hebrew_and_arabic_have_core_navigation_catalogs(self):
-        keys = ("Environment", "Install Office", "Applications", "Office settings",
+        keys = ("Environment", "Install Office & Teams", "Applications", "Office settings",
                 "Wine tools", "Maintenance")
         for language in ("he", "ar"):
             for key in keys:

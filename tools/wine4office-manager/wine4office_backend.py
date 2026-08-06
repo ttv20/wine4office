@@ -142,10 +142,18 @@ _ODT_DOWNLOAD_HOSTS = frozenset({"download.microsoft.com"})
 _ODT_LINK_PATTERN = re.compile(
     r"/officedeploymenttool_[0-9]{4,6}-[0-9]{4,6}\.exe$", re.IGNORECASE
 )
+TEAMS_BOOTSTRAPPER_URL = (
+    "https://go.microsoft.com/fwlink/?clcid=0x409&linkid=2243204"
+)
+_TEAMS_DOWNLOAD_HOSTS = frozenset({
+    "go.microsoft.com",
+    "statics.teams.cdn.office.net",
+})
 MAX_OFFICE_XML_SIZE = 1024 * 1024
 MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
 MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
+MAX_TEAMS_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 WINE_GECKO_VERSION = "2.47.4"
 WINE_GECKO_ARCHITECTURES = ("x86", "x86_64")
 
@@ -2510,6 +2518,86 @@ def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def download_teams_bootstrapper(destination, output: Output,
+                                cancel_event=None) -> str:
+    """Download Microsoft's current Teams bootstrapper to a user-selected path."""
+    try:
+        raw_destination = os.fspath(destination)
+    except TypeError as error:
+        raise ValueError("Choose a valid destination for the Teams installer.") from error
+    if not isinstance(raw_destination, str) or not raw_destination.strip():
+        raise ValueError("Choose a destination for the Teams installer.")
+    destination_path = Path(os.path.abspath(os.path.expandvars(
+        os.path.expanduser(raw_destination)
+    )))
+    parent = destination_path.parent
+    if not destination_path.name:
+        raise ValueError("Choose a file name for the Teams installer.")
+    if not parent.is_dir():
+        raise FileNotFoundError(f"Teams installer destination does not exist: {parent}")
+    if os.path.lexists(destination_path) and not destination_path.is_file():
+        raise ValueError(f"Teams installer destination is not a file: {destination_path}")
+
+    url = _trusted_microsoft_url(
+        TEAMS_BOOTSTRAPPER_URL, _TEAMS_DOWNLOAD_HOSTS, "Teams installer download"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Wine4OfficeManager/1"})
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "wb", dir=parent, prefix=f".{destination_path.name}.",
+                suffix=".part", delete=False) as target:
+            temporary_path = Path(target.name)
+            output("Downloading the standalone Microsoft Teams installer.")
+            with _microsoft_opener(_TEAMS_DOWNLOAD_HOSTS).open(
+                    request, timeout=60) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                _trusted_microsoft_url(
+                    final_url, _TEAMS_DOWNLOAD_HOSTS, "Final Teams installer download"
+                )
+                downloaded, signature = _copy_bounded_response(
+                    response, target, MAX_TEAMS_BOOTSTRAPPER_SIZE,
+                    "Teams installer download", cancel_event,
+                )
+            if downloaded < 1024 or signature != b"MZ":
+                raise ValueError(
+                    "Microsoft Teams installer download is not a valid Windows executable."
+                )
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+        output(f"Saved Microsoft Teams installer to {destination_path}")
+        return f"Microsoft Teams standalone installer downloaded to {destination_path}."
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def install_teams_with_bootstrapper(prefix, wine, output: Output,
+                                    cancel_event=None, process_callback=None, *,
+                                    use_x11: bool = True) -> str:
+    """Download and run Microsoft's Teams bootstrapper in a Wine environment."""
+    prefix_path = validate_prefix(prefix)
+    if not (prefix_path / "system.reg").is_file():
+        raise FileNotFoundError(f"Wine environment is not initialized: {prefix_path}")
+    wine_path = require_wine(str(wine))
+    environment = wine_environment(prefix_path, wine_path, use_x11)
+    with tempfile.TemporaryDirectory(prefix="wine4office-teams-") as temporary:
+        work_directory = Path(temporary)
+        bootstrapper = work_directory / "teamsbootstrapper.exe"
+        download_teams_bootstrapper(bootstrapper, output, cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        output("Installing Microsoft Teams with the standalone bootstrapper.")
+        _stream_command(
+            [str(wine_path), str(bootstrapper), "-p"],
+            environment, output, cwd=work_directory,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
+    return "Microsoft Teams installation completed successfully."
 
 
 def _require_extracted_setup(path: Path) -> Path:

@@ -2,13 +2,19 @@
 
 ## Unreleased
 
+## 0.1.11-rc.1 — 2026-08-06 (prerelease)
+
 - Make the standalone Manager use KDE's native theme while preserving its
   standard Qt behavior on other desktops.
 - Translate the Manager into 47 languages with correct right-to-left layouts.
+- Install Office directly without asking users to save generated ODT XML.
+- Install Teams separately with Microsoft's standalone bootstrapper.
+- Add opt-in incident reports with bounded local traces, review, editing, and
+  attachments.
+- Add first-open reliability choices and optional daily update checks.
 - Document initial Microsoft Teams support and currently working features.
-- Detect Office crashes and XWayland hangs and keep a bounded local trace.
-- Let users review, edit, attach context or a file, and manually send reports.
-- Add first-open reliability and daily update-check choices; updates remain manual.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.10...wine4office-v0.1.11-rc.1)
 
 ## 0.1.10 — 2026-08-04 (prerelease)
 
