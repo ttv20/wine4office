@@ -49,9 +49,10 @@ install -m 0644 "$HERE/wine4office_post_install.py" "$LIB/wine4office_post_insta
 install -m 0644 "$HERE/wine4office_qt.py" "$LIB/wine4office_qt.py"
 install -m 0644 "$HERE/wine4office_desktop.py" "$LIB/wine4office_desktop.py"
 install -m 0644 "$HERE/wine4office_i18n.py" "$LIB/wine4office_i18n.py"
-install -m 0644 "$HERE/wine4office_i18n_extra.py" "$LIB/wine4office_i18n_extra.py"
-install -m 0644 "$HERE/wine4office_i18n_more.py" "$LIB/wine4office_i18n_more.py"
-install -m 0644 "$HERE/wine4office_i18n_even_more.py" "$LIB/wine4office_i18n_even_more.py"
+install -d -m 0755 "$LIB/translations"
+install -m 0644 "$HERE"/translations/*.json "$LIB/translations/"
+rm -f "$LIB/wine4office_i18n_extra.py" "$LIB/wine4office_i18n_more.py" \
+    "$LIB/wine4office_i18n_even_more.py"
 install -m 0755 "$HERE/register-office-cloud-fonts.sh" "$LIB/register-office-cloud-fonts.sh"
 rm -f "$LIB/ui.html"
 if [[ -x "$HERE/wine4office-manager-qt" ]]; then

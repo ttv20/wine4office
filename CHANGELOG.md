@@ -5,6 +5,9 @@
 - Add Teams shortcuts and show application compatibility in the Manager.
 - Restart the Manager in place after installing an update.
 - Do not treat an app display-mode change as a different background-service environment.
+- Show persistent action status and an Office-installer startup popup in the Manager.
+- Add Access, OneNote, Publisher, Visio, and Project shortcuts, plus Visio and Project install choices.
+- Store every Manager translation in its own locale file and localize all application statuses.
 
 ## 0.1.11-rc.1 — 2026-08-06 (prerelease)
 

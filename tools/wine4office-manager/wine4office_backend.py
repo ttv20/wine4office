@@ -98,6 +98,46 @@ APP_META = {
         "mime": "x-scheme-handler/mailto;",
         "compatibility": "Not working",
     },
+    "access": {
+        "name": "Microsoft Access (Wine4Office)",
+        "exe": "MSACCESS.EXE",
+        "icon": "wine4office-access.svg",
+        "categories": "Office;Database;",
+        "mime": "",
+        "compatibility": "Not tested",
+    },
+    "onenote": {
+        "name": "Microsoft OneNote (Wine4Office)",
+        "exe": "ONENOTE.EXE",
+        "icon": "wine4office-onenote.svg",
+        "categories": "Office;Utility;",
+        "mime": "",
+        "compatibility": "Not tested",
+    },
+    "publisher": {
+        "name": "Microsoft Publisher (Wine4Office)",
+        "exe": "MSPUB.EXE",
+        "icon": "wine4office-publisher.svg",
+        "categories": "Office;Graphics;",
+        "mime": "",
+        "compatibility": "Not tested",
+    },
+    "visio": {
+        "name": "Microsoft Visio (Wine4Office)",
+        "exe": "VISIO.EXE",
+        "icon": "wine4office-visio.svg",
+        "categories": "Office;Graphics;",
+        "mime": "",
+        "compatibility": "Not tested",
+    },
+    "project": {
+        "name": "Microsoft Project (Wine4Office)",
+        "exe": "WINPROJ.EXE",
+        "icon": "wine4office-project.svg",
+        "categories": "Office;ProjectManagement;",
+        "mime": "",
+        "compatibility": "Not tested",
+    },
     "teams": {
         "name": "Microsoft Teams (Wine4Office)",
         "exe": "ms-teams.exe",
@@ -137,6 +177,26 @@ OFFICE_PRODUCTS = (
     {
         "label": "Office LTSC Standard 2024",
         "product_id": "Standard2024Volume",
+        "channel": "PerpetualVL2024",
+    },
+    {
+        "label": "Microsoft Visio Professional (subscription)",
+        "product_id": "VisioProRetail",
+        "channel": "Current",
+    },
+    {
+        "label": "Microsoft Project Professional (subscription)",
+        "product_id": "ProjectProRetail",
+        "channel": "Current",
+    },
+    {
+        "label": "Visio LTSC Professional 2024",
+        "product_id": "VisioPro2024Volume",
+        "channel": "PerpetualVL2024",
+    },
+    {
+        "label": "Project LTSC Professional 2024",
+        "product_id": "ProjectPro2024Volume",
         "channel": "PerpetualVL2024",
     },
 )
@@ -2655,7 +2715,8 @@ def _require_extracted_setup(path: Path) -> Path:
 
 def install_office_with_odt(prefix, wine, config_path, output,
                             cancel_event=None, process_callback=None, *,
-                            configuration_payload=None) -> str:
+                            configuration_payload=None,
+                            installer_started_callback=None) -> str:
     """Snapshot configuration, fetch current ODT, then run setup /configure."""
     prefix_path = validate_prefix(prefix)
     if not (prefix_path / "system.reg").is_file():
@@ -2698,10 +2759,17 @@ def install_office_with_odt(prefix, wine, config_path, output,
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
             output("Installing Office with the selected configuration.")
+
+            def setup_process_callback(process) -> None:
+                if process_callback:
+                    process_callback(process)
+                if process is not None and installer_started_callback:
+                    installer_started_callback()
+
             _stream_command(
                 [str(wine_path), str(setup), "/configure", windows_configuration],
                 environment, output, cwd=extraction_directory,
-                cancel_event=cancel_event, process_callback=process_callback,
+                cancel_event=cancel_event, process_callback=setup_process_callback,
             )
     finally:
         if odt is not None:

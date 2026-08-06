@@ -741,6 +741,31 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn(f"executable={shlex.quote(str(teams))}", launcher.read_text())
         self.assertNotIn("%U", desktop_file.read_text())
 
+    def test_additional_office_applications_are_detected(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        office.mkdir(parents=True)
+        executables = {
+            "access": "MSACCESS.EXE",
+            "onenote": "ONENOTE.EXE",
+            "publisher": "MSPUB.EXE",
+            "visio": "VISIO.EXE",
+            "project": "WINPROJ.EXE",
+        }
+        for executable in executables.values():
+            (office / executable).write_bytes(b"exe")
+
+        status = backend.environment_status(str(prefix), str(self.wine))
+
+        for app, executable in executables.items():
+            with self.subTest(app=app):
+                self.assertTrue(status["apps"][app])
+                self.assertEqual(
+                    backend.find_office_app(str(prefix), app), office / executable
+                )
+                self.assertEqual(backend.APP_META[app]["compatibility"], "Not tested")
+
     def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
         prefix = self.home / ".wine4office"
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
@@ -1357,6 +1382,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         cases = (
             ("O365ProPlusRetail", "Current", ["en-us", "de-de"]),
             ("ProPlus2024Volume", "PerpetualVL2024", ["fr-fr"]),
+            ("VisioProRetail", "Current", ["en-us"]),
+            ("ProjectProRetail", "Current", ["en-us"]),
+            ("VisioPro2024Volume", "PerpetualVL2024", ["en-us"]),
+            ("ProjectPro2024Volume", "PerpetualVL2024", ["en-us"]),
         )
         for product_id, channel, languages in cases:
             with self.subTest(product_id=product_id):
@@ -1628,6 +1657,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         converted_paths = []
         snapshot_payloads = []
         odt_url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+        installer_started = mock.Mock()
 
         def resolve_latest(cancel_event):
             configuration.write_bytes(changed_payload)
@@ -1660,6 +1690,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 configuration,
                 lambda line: None,
                 configuration_payload=original_payload,
+                installer_started_callback=installer_started,
             )
 
         self.assertEqual(result, "Office installation completed successfully.")
@@ -1695,6 +1726,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ),
         )
         self.assertEqual(stream.call_args_list[1].kwargs["cwd"], extraction_directory)
+        setup_process_callback = stream.call_args_list[1].kwargs["process_callback"]
+        setup_process_callback(mock.Mock())
+        installer_started.assert_called_once_with()
+        setup_process_callback(None)
+        installer_started.assert_called_once_with()
         self.assertEqual(converted_paths[0], extraction_directory)
         self.assertEqual(converted_paths[1].name, "configuration.xml")
         self.assertEqual(converted_paths[1].parent, extraction_directory.parent)

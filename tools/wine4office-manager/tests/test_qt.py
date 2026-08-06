@@ -538,6 +538,9 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(
             self.window.app_items["teams"].text(0), "Microsoft Teams"
         )
+        self.assertEqual(
+            set(self.window.app_items), set(backend.APP_META)
+        )
         self.assertEqual(self.window.app_tree.columnCount(), 3)
         self.assertEqual(
             self.window.app_tree.headerItem().text(2), "Compatibility"
@@ -547,6 +550,11 @@ class QtManagerTests(unittest.TestCase):
             "excel": "Good",
             "powerpoint": "Open",
             "outlook": "Not working",
+            "access": "Not tested",
+            "onenote": "Not tested",
+            "publisher": "Not tested",
+            "visio": "Not tested",
+            "project": "Not tested",
             "teams": "Basic functionality",
             "setlang": "Good",
         }
@@ -909,6 +917,16 @@ class QtManagerTests(unittest.TestCase):
         launch.assert_called_once()
         self.assertFalse(launch.call_args.kwargs["use_x11"])
 
+    def test_stop_wine_shows_persistent_status_bar_message(self):
+        with mock.patch.object(
+            self.state, "start_task"
+        ), mock.patch.object(
+            self.window.statusBar(), "showMessage"
+        ) as show_message:
+            self.window.launch_tool("stop")
+
+        show_message.assert_any_call("Stopping Wine environment…", 0)
+
     def test_equivalent_symlink_path_saves_without_prompts(self):
         alias = self.home / "prefix-alias"
         alias.symlink_to(self.old_prefix, target_is_directory=True)
@@ -1197,6 +1215,12 @@ class QtManagerTests(unittest.TestCase):
             self.window.office_product_combo.count(),
             len(backend.OFFICE_PRODUCTS),
         )
+        self.assertTrue({
+            "VisioProRetail",
+            "ProjectProRetail",
+            "VisioPro2024Volume",
+            "ProjectPro2024Volume",
+        }.issubset({product["product_id"] for product in backend.OFFICE_PRODUCTS}))
 
         for index, product in enumerate(backend.OFFICE_PRODUCTS):
             with self.subTest(product_id=product["product_id"]):
@@ -1272,8 +1296,33 @@ class QtManagerTests(unittest.TestCase):
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
             configuration_payload=configuration_payload,
+            installer_started_callback=self.state.mark_foreground_ready,
         )
         self.assertIsNone(self.window.pending_odt_xml)
+
+    def test_office_startup_popup_is_indeterminate_until_installer_starts(self):
+        self.window._show_office_startup_progress()
+        self.application.processEvents()
+
+        self.assertTrue(self.window.office_startup_dialog.isVisible())
+        self.assertEqual(self.window.office_startup_bar.minimum(), 0)
+        self.assertEqual(self.window.office_startup_bar.maximum(), 0)
+        self.window._refresh_office_startup_progress({
+            "kind": "odt-install",
+            "running": True,
+            "foreground_ready": False,
+        })
+        self.assertIsNotNone(self.window.office_startup_dialog)
+
+        self.window._refresh_office_startup_progress({
+            "kind": "odt-install",
+            "running": True,
+            "foreground_ready": True,
+        })
+        self.assertIsNone(self.window.office_startup_dialog)
+        self.assertEqual(
+            self.window.statusBar().currentMessage(), "Office installer opened."
+        )
 
     def test_custom_office_install_waits_for_open_selection(self):
         configuration = self.home / "custom deployment.xml"

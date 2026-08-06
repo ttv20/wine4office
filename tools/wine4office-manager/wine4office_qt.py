@@ -102,6 +102,9 @@ class ManagerWindow(QMainWindow):
         self.update_progress_log: QPlainTextEdit | None = None
         self.update_progress_button: QPushButton | None = None
         self.update_progress_finished = False
+        self.office_startup_dialog: QDialog | None = None
+        self.office_startup_status: QLabel | None = None
+        self.office_startup_bar: QProgressBar | None = None
         self.reporting_available = incident.reporting_available()
         self.initial_incident = review_incident
         self._startup_scheduled = False
@@ -688,6 +691,7 @@ class ManagerWindow(QMainWindow):
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     configuration_payload=payload,
+                    installer_started_callback=self.state.mark_foreground_ready,
                 ),
             )
             self.pending_odt_xml = (
@@ -695,12 +699,65 @@ class ManagerWindow(QMainWindow):
                 if config_path is not None and config_digest is not None
                 else None
             )
+            self.last_task_state = "True:running"
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
-            self.notify("Office installation started.")
+            self._show_office_startup_progress()
+            self.notify("Preparing Office installer…", 0)
             self.refresh_state()
         except Exception as error:
             self.show_error(error)
+
+    def _show_office_startup_progress(self) -> None:
+        if self.office_startup_dialog is not None:
+            self.office_startup_dialog.close()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Starting Office installation")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        status = QLabel(
+            "Preparing the Office Deployment Tool. The installer will open shortly."
+        )
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        progress.setAccessibleName("Office installer startup progress")
+        layout.addWidget(progress)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel installation")
+        cancel.clicked.connect(self.cancel_task)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        self.office_startup_dialog = dialog
+        self.office_startup_status = status
+        self.office_startup_bar = progress
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._clear_office_startup_progress(current)
+        )
+        self._translate_ui(dialog)
+        dialog.show()
+
+    def _clear_office_startup_progress(self, dialog: QDialog) -> None:
+        if self.office_startup_dialog is not dialog:
+            return
+        self.office_startup_dialog = None
+        self.office_startup_status = None
+        self.office_startup_bar = None
+
+    def _refresh_office_startup_progress(self, task: dict) -> None:
+        dialog = self.office_startup_dialog
+        if dialog is None or task.get("kind") != "odt-install":
+            return
+        ready = bool(task.get("foreground_ready"))
+        if task.get("running") and not ready:
+            return
+        dialog.accept()
+        if ready:
+            self.notify("Office installer opened.")
 
     def prompt_office_xml_cleanup(self, config_path: Path, expected_digest: str) -> None:
         def configuration_is_unchanged() -> bool:
@@ -777,10 +834,19 @@ class ManagerWindow(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.app_items: dict[str, QTreeWidgetItem] = {}
-        names = {"word": "Microsoft Word", "excel": "Microsoft Excel",
-                 "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook",
-                 "teams": "Microsoft Teams",
-                 "setlang": "Microsoft Office Language Preferences"}
+        names = {
+            "word": "Microsoft Word",
+            "excel": "Microsoft Excel",
+            "powerpoint": "Microsoft PowerPoint",
+            "outlook": "Microsoft Outlook",
+            "access": "Microsoft Access",
+            "onenote": "Microsoft OneNote",
+            "publisher": "Microsoft Publisher",
+            "visio": "Microsoft Visio",
+            "project": "Microsoft Project",
+            "teams": "Microsoft Teams",
+            "setlang": "Microsoft Office Language Preferences",
+        }
         for app, name in names.items():
             item = QTreeWidgetItem([
                 name, "Checking…", backend.APP_META[app]["compatibility"]
@@ -1467,7 +1533,12 @@ class ManagerWindow(QMainWindow):
 
         try:
             self.state.start_task("tool", launch)
-            self.notify("Wine tool operation started.")
+            self.last_task_state = "True:running"
+            self.notify(
+                "Stopping Wine environment…" if tool == "stop"
+                else "Opening Wine tool…",
+                0 if tool == "stop" else 5000,
+            )
             self.refresh_state()
         except Exception as error:
             self.show_error(error)
@@ -2114,8 +2185,8 @@ class ManagerWindow(QMainWindow):
         self.state.cancel()
         self.notify("Cancellation requested.")
 
-    def notify(self, message: str) -> None:
-        self.statusBar().showMessage(self._tr(message), 5000)
+    def notify(self, message: str, timeout: int = 5000) -> None:
+        self.statusBar().showMessage(self._tr(message), timeout)
 
     def show_error(self, error) -> None:
         QMessageBox.critical(self, self._tr("Wine4Office Manager"), self._tr(str(error)))
@@ -2200,6 +2271,7 @@ class ManagerWindow(QMainWindow):
             QTimer.singleShot(0, lambda current=offer: self.prompt_update_offer(current))
         task = snapshot["task"]
         self._refresh_update_progress(task)
+        self._refresh_office_startup_progress(task)
         if (self.pending_odt_xml is not None
                 and task["kind"] == "odt-install" and not task["running"]):
             config_path, _configuration_payload, expected_digest = self.pending_odt_xml

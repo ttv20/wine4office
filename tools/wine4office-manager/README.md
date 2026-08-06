@@ -6,6 +6,8 @@ Wine4Office Manager is included in the Wine4Office source tree at `tools/wine4of
 
 The interface is a native Qt Widgets desktop application. It does not start an HTTP server, embed a web view, or open a browser. Releases provide a standalone Wine4Office Manager binary, so end users do not need to install Python packages.
 
+Manager translations are stored as one JSON catalog per locale in `translations/`.
+
 ## Install
 
 End users download `Wine4OfficeManager-<version>-x86_64` and its `.sha256` file from the [GitHub release](https://github.com/ttv20/wine4office/releases). Verify the checksum, make the binary executable, and run it without root:
@@ -65,7 +67,7 @@ The manager defaults to:
 - Run an Office installer or any selected `.exe` inside that prefix through a native Qt file picker, with optional arguments.
 - Install supported Office products through the current Office Deployment Tool,
   or separately download and run Microsoft's standalone Teams bootstrapper.
-- Create/update/remove Word, Excel, PowerPoint, Outlook, Teams, and Office Language Preferences shortcuts.
+- Create/update/remove shortcuts for installed Office desktop applications, Teams, and Office Language Preferences.
 - Apply curated per-prefix Office compatibility and privacy policies without
   exposing Windows-only Group Policy infrastructure.
 - Optionally start Office Click-to-Run and App-V background services at login

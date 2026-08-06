@@ -55,6 +55,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --specpath "$BUILD/spec" \
     --paths "$HERE" \
     --add-data "$HERE/icons:icons" \
+    --add-data "$HERE/translations:translations" \
     --add-data "$HERE/register-office-cloud-fonts.sh:." \
     --add-data "$BUILD/VERSION:." \
     --add-data "$BUILD/CHANNEL:." \

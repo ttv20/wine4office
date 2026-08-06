@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import shutil
 import sys
 import tempfile
@@ -76,6 +77,22 @@ class DesktopIntegrationTests(unittest.TestCase):
 
 
 class TranslationTests(unittest.TestCase):
+    def test_each_supported_language_has_its_own_json_catalog(self):
+        expected = {
+            f"{language}.json" for language in i18n.SUPPORTED_LANGUAGES
+        }
+        self.assertEqual(
+            {path.name for path in i18n.TRANSLATIONS_DIR.glob("*.json")},
+            expected,
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            with self.subTest(language=language):
+                path = i18n.TRANSLATIONS_DIR / f"{language}.json"
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    i18n.CATALOGS[language],
+                )
+
     def test_supported_system_locales_select_translation_and_direction(self):
         self.assertEqual(i18n.system_language({"LANG": "he_IL.UTF-8"}), "he")
         self.assertEqual(i18n.system_language({"LANG": "ar_EG.UTF-8"}), "ar")
@@ -104,6 +121,18 @@ class TranslationTests(unittest.TestCase):
         for language in ("he", "ar"):
             for key in keys:
                 self.assertNotEqual(i18n.translate(key, language), key)
+
+    def test_application_statuses_are_translated_in_every_supported_language(self):
+        texts = (
+            "Compatibility", "Good", "Open", "Basic functionality",
+            "Not working", "Not tested", "Not installed",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            if language == "en":
+                continue
+            for source in texts:
+                with self.subTest(language=language, source=source):
+                    self.assertNotEqual(i18n.translate(source, language), source)
 
     def test_additional_language_catalogs_are_complete_and_ltr(self):
         expected = {

@@ -60,6 +60,7 @@ class ManagerState:
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
             "restart_required": False, "progress_label": "", "progress_value": None,
+            "foreground_ready": False,
         }
         self.cancel_event = threading.Event()
         self.process: subprocess.Popen | None = None
@@ -801,6 +802,11 @@ class ManagerState:
                 max(0, min(100, int(value))) if value is not None else None
             )
 
+    def mark_foreground_ready(self) -> None:
+        """Signal that a task's external foreground window is starting."""
+        with self.lock:
+            self.task["foreground_ready"] = True
+
     def start_task(self, kind: str, operation) -> None:
         with self.lock:
             if self.task["running"]:
@@ -809,6 +815,7 @@ class ManagerState:
                 "running": True, "kind": kind, "status": "running", "log": "",
                 "restart_required": False,
                 "progress_label": "Preparing operation", "progress_value": None,
+                "foreground_ready": False,
             }
             self.cancel_event.clear()
 
