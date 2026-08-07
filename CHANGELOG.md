@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.11-rc.2 — 2026-08-07 (prerelease)
+
 - Add Teams shortcuts and show application compatibility in the Manager.
 - Restart the Manager in place after installing an update.
 - Do not treat an app display-mode change as a different background-service environment.
@@ -14,6 +16,8 @@
   prevent XRDP gamma failures from crashing installers and Office apps.
 - Fix Microsoft 365 sign-in and activation by returning WAM token expiration
   values in Windows epoch seconds and using Office's working network fallback.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.11-rc.1...wine4office-v0.1.11-rc.2)
 
 ## 0.1.11-rc.1 — 2026-08-06 (prerelease)
 
