@@ -6,6 +6,8 @@
   DirectComposition target, fixing Office startup windows that stayed blank.
 - Disable XVidMode by default for new and existing X11 Office environments to
   prevent XRDP gamma failures from crashing installers and Office apps.
+- Fix Microsoft 365 sign-in and activation by returning WAM token expiration
+  values in Windows epoch seconds and using Office's working network fallback.
 
 ## 0.1.11-rc.1 — 2026-08-06 (prerelease)
 
