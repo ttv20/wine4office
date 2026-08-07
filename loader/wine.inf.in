@@ -563,6 +563,7 @@ HKLM,%MciExtStr%,"wvx",,"MPEGVideo"
 
 [Misc]
 HKCU,"Software\Wine\X11 Driver","Decorated",2,"N"
+HKCU,"Software\Wine\X11 Driver","UseXVidMode",2,"N"
 HKLM,Software\Borland\Database Engine\Settings\SYSTEM\INIT,SHAREDMEMLOCATION,,9000
 HKLM,Software\Clients,,16
 HKLM,Software\Clients\Mail,,2,"Native Mail Client"

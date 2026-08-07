@@ -5420,6 +5420,12 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
     hr = IDXGIFactory_CreateSwapChain(factory, device, &swapchain_desc, &swapchain);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
+    ShowWindow(swapchain_desc.OutputWindow, SW_SHOW);
+    ok(IsWindowVisible(swapchain_desc.OutputWindow), "Output window is not visible.\n");
+    hr = IDXGISwapChain_Present(swapchain, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(IsWindowVisible(swapchain_desc.OutputWindow), "Present hid the output window.\n");
+
     for (i = 0; i < 10; ++i)
     {
         hr = IDXGISwapChain_Present(swapchain, i, 0);

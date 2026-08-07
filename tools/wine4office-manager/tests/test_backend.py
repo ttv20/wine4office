@@ -381,6 +381,46 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(wayland["WAYLAND_DISPLAY"], "wayland-7")
         self.assertNotIn("DISPLAY", wayland)
 
+    def test_existing_x11_prefix_gets_safe_xvidmode_default(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        missing = mock.Mock(returncode=1, stdout="", stderr="not found")
+        added = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(
+            backend.subprocess, "run", side_effect=[missing, added]
+        ) as run:
+            changed = backend.ensure_safe_x11_defaults(
+                str(prefix), str(self.wine), True
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(run.call_args_list[1].args[0], [
+            str(self.wine), "reg", "add", backend.WINE_X11_DRIVER_KEY,
+            "/v", backend.WINE_XVIDMODE_VALUE, "/t", "REG_SZ", "/d", "N", "/f",
+        ])
+
+    def test_existing_x11_prefix_preserves_explicit_xvidmode_choice(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        present = mock.Mock(returncode=0, stdout="UseXVidMode REG_SZ Y\n", stderr="")
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=present
+        ) as run:
+            changed = backend.ensure_safe_x11_defaults(
+                str(prefix), str(self.wine), True
+            )
+
+        self.assertFalse(changed)
+        run.assert_called_once()
+
+    def test_native_wayland_does_not_change_xvidmode(self):
+        prefix = self._make_prefix(self.home / "selected-prefix")
+        with mock.patch.object(backend.subprocess, "run") as run:
+            changed = backend.ensure_safe_x11_defaults(
+                str(prefix), str(self.wine), False
+            )
+
+        self.assertFalse(changed)
+        run.assert_not_called()
+
     def test_native_mode_keeps_display_when_wayland_is_unavailable(self):
         with mock.patch.dict(os.environ, {"DISPLAY": ":7"}, clear=False):
             os.environ.pop("WAYLAND_DISPLAY", None)
@@ -531,7 +571,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         installer.parent.mkdir()
         installer.write_bytes(b"MZ")
         process = mock.Mock(pid=4321)
-        with mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
             pid = backend.launch_executable(str(prefix), str(self.wine), str(installer),
                                             '/configure "/home/user/office.xml"')
         self.assertEqual(pid, 4321)
@@ -574,9 +615,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         working_directory = self.home / "installer files"
         working_directory.mkdir()
 
-        with mock.patch.object(
-            backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
-        ) as popen:
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(
+                 backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
+             ) as popen:
             backend.launch_executable(
                 str(prefix),
                 str(self.wine),
@@ -593,9 +635,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         installer.parent.mkdir()
         installer.write_bytes(b"MZ")
 
-        with mock.patch.object(
-            backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
-        ) as popen:
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(
+                 backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
+             ) as popen:
             backend.launch_executable(
                 str(prefix),
                 str(self.wine),
@@ -613,7 +656,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         installer.write_bytes(b"MZ")
         missing = self.home / "missing working folder"
 
-        with mock.patch.object(backend.subprocess, "Popen") as popen, \
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(backend.subprocess, "Popen") as popen, \
              self.assertRaisesRegex(NotADirectoryError, "Working directory was not found"):
             backend.launch_executable(
                 str(prefix),
@@ -1052,7 +1096,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertNotIn("MimeType=", shortcut)
 
         process = mock.Mock(pid=3210)
-        with mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
             pid = backend.launch_app(str(prefix), str(self.wine), "setlang")
         self.assertEqual(pid, 3210)
         self.assertEqual(popen.call_args.args[0], [str(self.wine), str(setlang)])
@@ -1167,7 +1212,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             "Z:\\home\\Documents\\מסמך שני.docx\n",
         ]
         process = mock.Mock(pid=7654)
-        with mock.patch.object(
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), mock.patch.object(
             backend.subprocess, "run",
             side_effect=[mock.Mock(stdout=value) for value in converted],
         ) as run, mock.patch.object(
@@ -1199,7 +1244,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             mock.Mock(returncode=0, stdout="Locale    REG_SZ    0000040d\n"),
             mock.Mock(returncode=0, stdout=""),
         ]
-        with mock.patch.object(backend.subprocess, "run", side_effect=run_results) as run, \
+        with mock.patch.object(backend, "ensure_safe_x11_defaults"), \
+             mock.patch.object(backend.subprocess, "run", side_effect=run_results) as run, \
              mock.patch.object(backend.subprocess, "Popen", return_value=process) as popen:
             pid = backend.launch_app(str(prefix), str(self.wine), "outlook")
         self.assertEqual(pid, 7654)

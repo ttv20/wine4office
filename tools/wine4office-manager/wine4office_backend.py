@@ -37,6 +37,8 @@ OFFICE_TELEMETRY_POLICY_KEY = (
 )
 OFFICE_TELEMETRY_POLICY_VALUE = "SendTelemetry"
 OFFICE_TELEMETRY_DISABLED = "3"
+WINE_X11_DRIVER_KEY = r"HKCU\Software\Wine\X11 Driver"
+WINE_XVIDMODE_VALUE = "UseXVidMode"
 OFFICE_COMPATIBILITY_POLICIES = {
     "disable_animations": {
         "label": "Disable Office animations",
@@ -668,6 +670,33 @@ def wine_environment(prefix: str | Path, wine: str | Path,
     return env
 
 
+def ensure_safe_x11_defaults(prefix_value: str, wine_value: str,
+                             use_x11: bool = True) -> bool:
+    """Disable XVidMode for an existing X11 prefix unless the user chose a value."""
+    if not use_x11:
+        return False
+    prefix = validate_prefix(prefix_value)
+    if classify_prefix(str(prefix)) != "valid":
+        return False
+    wine = require_wine(wine_value)
+    env = wine_environment(prefix, wine, True)
+    query = subprocess.run(
+        [str(wine), "reg", "query", WINE_X11_DRIVER_KEY,
+         "/v", WINE_XVIDMODE_VALUE],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=30, check=False,
+    )
+    if query.returncode == 0:
+        return False
+    subprocess.run(
+        [str(wine), "reg", "add", WINE_X11_DRIVER_KEY,
+         "/v", WINE_XVIDMODE_VALUE, "/t", "REG_SZ", "/d", "N", "/f"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=30, check=True,
+    )
+    return True
+
+
 def _apply_managed_office_dword(
         prefix_value: str, wine_value: str, key: str, value: str, data: int,
         enabled: bool, *, remove_managed: bool = False,
@@ -1150,6 +1179,7 @@ def launch_app_process(
     executable = find_office_app(str(prefix), app)
     if not executable:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
     if app == "word":
         prepare_office_building_blocks(prefix)
     register_cloud_fonts(prefix, wine, helper, use_x11)
@@ -1187,6 +1217,7 @@ def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
     if not (prefix / "system.reg").is_file():
         raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
     wine = require_wine(wine_value)
+    ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
     executable = normalize_path(executable_value)
     if not executable.is_file():
         raise FileNotFoundError(f"Windows executable was not found: {executable}")

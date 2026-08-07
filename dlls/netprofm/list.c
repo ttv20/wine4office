@@ -39,10 +39,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(netprofm);
 
-/* Undocumented marker queried by Microsoft Office to detect NLM support. */
-static const GUID IID_INetworkListManagerOffice =
-    {0xe19c7100, 0x9709, 0x4db7, {0x93, 0x73, 0xe7, 0xb5, 0x18, 0xb4, 0x70, 0x86}};
-
 struct network
 {
     INetwork             INetwork_iface;
@@ -1198,10 +1194,6 @@ static HRESULT WINAPI list_manager_QueryInterface(
     else if (IsEqualGUID( riid, &IID_IConnectionPointContainer ))
     {
         *obj = &mgr->IConnectionPointContainer_iface;
-    }
-    else if (IsEqualGUID( riid, &IID_INetworkListManagerOffice ))
-    {
-        *obj = iface;
     }
     else
     {

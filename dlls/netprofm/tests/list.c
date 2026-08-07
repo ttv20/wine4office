@@ -26,9 +26,6 @@
 #include "netlistmgr.h"
 #include "wine/test.h"
 
-static const GUID IID_INetworkListManagerOffice =
-    {0xe19c7100, 0x9709, 0x4db7, {0x93, 0x73, 0xe7, 0xb5, 0x18, 0xb4, 0x70, 0x86}};
-
 static void test_INetwork( INetwork *network, INetworkConnection *conn )
 {
     NLM_NETWORK_CATEGORY category;
@@ -263,7 +260,6 @@ static void test_INetworkListManager( void )
 {
     IConnectionPointContainer *cpc, *cpc2;
     INetworkListManager *mgr;
-    IUnknown *office_marker, *identity;
     INetworkCostManager *cost_mgr;
     NLM_CONNECTIVITY connectivity;
     VARIANT_BOOL connected;
@@ -283,21 +279,6 @@ static void test_INetworkListManager( void )
     {
         win_skip( "can't create instance of NetworkListManager\n" );
         return;
-    }
-
-    office_marker = NULL;
-    hr = INetworkListManager_QueryInterface( mgr, &IID_INetworkListManagerOffice,
-            (void **)&office_marker );
-    ok( hr == S_OK, "got %08lx\n", hr );
-    ok( !!office_marker, "marker not set\n" );
-    if (office_marker)
-    {
-        identity = NULL;
-        hr = IUnknown_QueryInterface( office_marker, &IID_IUnknown, (void **)&identity );
-        ok( hr == S_OK, "got %08lx\n", hr );
-        ok( identity == (IUnknown *)mgr, "got unexpected identity %p\n", identity );
-        if (identity) IUnknown_Release( identity );
-        IUnknown_Release( office_marker );
     }
 
     connectivity = 0xdeadbeef;

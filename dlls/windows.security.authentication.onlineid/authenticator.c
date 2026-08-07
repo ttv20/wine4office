@@ -2404,6 +2404,23 @@ done:
     return hr;
 }
 
+static WCHAR *format_token_expiration( const WCHAR *value )
+{
+    static const ULONGLONG unix_epoch_seconds = 11644473600ULL;
+    WCHAR formatted[21];
+    WCHAR *end;
+    ULONGLONG seconds;
+
+    if (!value || !*value) return NULL;
+    seconds = wcstoull( value, &end, 10 );
+    if (*end) return wcsdup( value );
+
+    /* WAM exposes TokenExpiresOn as seconds since 1601, while OAuth returns Unix seconds. */
+    if (seconds < unix_epoch_seconds) seconds += unix_epoch_seconds;
+    swprintf( formatted, ARRAY_SIZE(formatted), L"%llu", seconds );
+    return wcsdup( formatted );
+}
+
 static HRESULT token_response_vector_create( const WCHAR *token, const WCHAR *scopes,
                                              IInspectable *account, IInspectable **out )
 {
@@ -2434,7 +2451,8 @@ static HRESULT token_response_vector_create( const WCHAR *token, const WCHAR *sc
         token_response_Release( response ); free( vector ); return hr;
     }
     {
-        WCHAR *expires_on = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+        WCHAR *expires_value = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+        WCHAR *expires_on = format_token_expiration( expires_value );
         WCHAR *authority = load_wam_token_file( L"C:\\wam-account-authority.txt" );
         WCHAR *client_info = load_wam_token_file( L"C:\\wam-client-info.txt" );
         WCHAR *id_token = load_wam_token_file( L"C:\\wam-id-token.txt" );
@@ -2450,6 +2468,7 @@ static HRESULT token_response_vector_create( const WCHAR *token, const WCHAR *sc
             if (SUCCEEDED(hr))
                 hr = response_property_insert( response->properties, L"wamcompat_id_token", id_token );
         }
+        free( expires_value );
         free( expires_on );
         free( authority );
         free( client_info );
