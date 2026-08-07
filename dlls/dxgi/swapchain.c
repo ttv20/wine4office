@@ -364,7 +364,9 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
     RECT rect;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
-    if (!target || !IsWindow(target))
+    /* Regular HWND swapchains do not have a detached DComp target. */
+    if (!target) return;
+    if (!IsWindow(target))
     {
         ShowWindow(window, SW_HIDE);
         return;

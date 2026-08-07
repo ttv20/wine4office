@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevent regular DXGI windows from being hidden while presenting without a
+  DirectComposition target, fixing Office startup windows that stayed blank.
 - Disable XVidMode by default for new and existing X11 Office environments to
   prevent XRDP gamma failures from crashing installers and Office apps.
 
