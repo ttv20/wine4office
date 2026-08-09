@@ -223,9 +223,14 @@ TEAMS_BOOTSTRAPPER_URL = (
     "https://go.microsoft.com/fwlink/?clcid=0x409&linkid=2243204"
 )
 TEAMS_X64_MSIX_URL = "https://go.microsoft.com/fwlink/?linkid=2196106"
+WEBVIEW2_BOOTSTRAPPER_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 _TEAMS_DOWNLOAD_HOSTS = frozenset({
     "go.microsoft.com",
     "statics.teams.cdn.office.net",
+})
+_WEBVIEW2_DOWNLOAD_HOSTS = frozenset({
+    "go.microsoft.com",
+    "msedge.sf.dl.delivery.mp.microsoft.com",
 })
 MAX_OFFICE_XML_SIZE = 1024 * 1024
 MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
@@ -233,6 +238,7 @@ MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
 MAX_TEAMS_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 MAX_TEAMS_MSIX_SIZE = 512 * 1024 * 1024
+MAX_WEBVIEW2_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 WINE_GECKO_VERSION = "2.47.4"
 WINE_GECKO_ARCHITECTURES = ("x86", "x86_64")
 
@@ -2660,6 +2666,116 @@ def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
             temporary_path.unlink(missing_ok=True)
 
 
+def webview2_candidates(prefix: Path) -> Iterable[Path]:
+    """Yield installed WebView2 runtime executables, newest version first."""
+    root = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
+    if not root.is_dir():
+        return
+    for version in sorted(root.iterdir(), key=lambda path: path.name, reverse=True):
+        executable = version / "msedgewebview2.exe"
+        if executable.is_file():
+            yield executable
+
+
+def download_webview2_bootstrapper(destination, output: Output,
+                                   cancel_event=None) -> str:
+    """Download Microsoft's current Evergreen WebView2 bootstrapper."""
+    destination_path = Path(destination).expanduser().resolve()
+    parent = destination_path.parent
+    if not destination_path.name or not parent.is_dir():
+        raise ValueError("Choose a valid destination for the WebView2 installer.")
+    if os.path.lexists(destination_path) and not destination_path.is_file():
+        raise ValueError("WebView2 installer destination is not a file.")
+
+    url = _trusted_microsoft_url(
+        WEBVIEW2_BOOTSTRAPPER_URL, _WEBVIEW2_DOWNLOAD_HOSTS,
+        "WebView2 installer download",
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Wine4OfficeManager/1"})
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "wb", dir=parent, prefix=f".{destination_path.name}.",
+                suffix=".part", delete=False) as target:
+            temporary_path = Path(target.name)
+            output("Downloading Microsoft Edge WebView2 Runtime.")
+            with _microsoft_opener(_WEBVIEW2_DOWNLOAD_HOSTS).open(
+                    request, timeout=60) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                _trusted_microsoft_url(
+                    final_url, _WEBVIEW2_DOWNLOAD_HOSTS,
+                    "Final WebView2 installer download",
+                )
+                downloaded, signature = _copy_bounded_response(
+                    response, target, MAX_WEBVIEW2_BOOTSTRAPPER_SIZE,
+                    "WebView2 installer download", cancel_event,
+                )
+            if downloaded < 1024 or signature != b"MZ":
+                raise ValueError("Microsoft WebView2 installer is not a valid executable.")
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+        return str(destination_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def ensure_teams_wow64_registration(prefix: Path, wine: Path,
+                                    environment: dict[str, str], output: Output,
+                                    cancel_event=None, process_callback=None) -> bool:
+    """Refresh 32-bit AppModel registration in prefixes created by older runners."""
+    key = (r"HKLM\Software\Microsoft\WindowsRuntime\ActivatableClassId"
+           r"\Windows.Management.Deployment.StagePackageOptions")
+    query = [str(wine), "reg", "query", key, "/reg:32"]
+    result = subprocess.run(
+        query, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=30, check=False,
+    )
+    if result.returncode == 0:
+        return False
+
+    wine_inf = wine.parent.parent / "share/wine/wine.inf"
+    if not wine_inf.is_file():
+        raise FileNotFoundError(f"Wine registration file is missing: {wine_inf}")
+    wine_inf_windows = _windows_document_path(str(wine_inf), wine, environment)
+    output("Refreshing the 32-bit Wine AppModel registration required by Teams.")
+    _stream_command([
+        str(wine), r"C:\windows\syswow64\rundll32.exe",
+        "setupapi,InstallHinfSection", "Wow64Install.ntx86", "128",
+        wine_inf_windows,
+    ], environment, output, cancel_event=cancel_event,
+        process_callback=process_callback)
+    result = subprocess.run(
+        query, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=30, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Wine did not register the 32-bit Teams AppModel classes.")
+    return True
+
+
+def ensure_teams_webview2(prefix: Path, wine: Path,
+                          environment: dict[str, str], output: Output,
+                          cancel_event=None, process_callback=None) -> bool:
+    """Install WebView2 when Teams cannot find an existing runtime."""
+    if next(webview2_candidates(prefix), None) is not None:
+        return False
+    with tempfile.TemporaryDirectory(prefix="wine4office-webview2-") as temporary:
+        installer = Path(temporary) / "MicrosoftEdgeWebview2Setup.exe"
+        download_webview2_bootstrapper(installer, output, cancel_event)
+        output("Installing Microsoft Edge WebView2 Runtime for Teams.")
+        _stream_command(
+            [str(wine), str(installer), "/silent", "/install"],
+            environment, output, cwd=installer.parent,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
+    if next(webview2_candidates(prefix), None) is None:
+        raise RuntimeError("WebView2 installation completed without installing the runtime.")
+    return True
+
+
 def download_teams_bootstrapper(destination, output: Output,
                                 cancel_event=None) -> str:
     """Download Microsoft's current Teams bootstrapper to a user-selected path."""
@@ -2777,6 +2893,16 @@ def install_teams_with_bootstrapper(prefix, wine, output: Output,
         raise FileNotFoundError(f"Wine environment is not initialized: {prefix_path}")
     wine_path = require_wine(str(wine))
     environment = wine_environment(prefix_path, wine_path, use_x11)
+    if progress_callback is not None:
+        progress_callback("Preparing Microsoft Teams dependencies…", None)
+    ensure_teams_wow64_registration(
+        prefix_path, wine_path, environment, output,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
+    ensure_teams_webview2(
+        prefix_path, wine_path, environment, output,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
     with tempfile.TemporaryDirectory(prefix="wine4office-teams-") as temporary:
         work_directory = Path(temporary)
         bootstrapper = work_directory / "teamsbootstrapper.exe"

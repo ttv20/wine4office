@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Fix Teams installation and show its progress without leaving the Install page.
+- Install WebView2 and refresh 32-bit AppModel registration before installing Teams.
+- Fix DirectComposition tree updates, transforms, ordering, cleanup, and input state for Teams.
+- Fix white Microsoft 365 sign-in windows in Word.
 
 ## 0.1.11-rc.2 — 2026-08-07 (prerelease)
 

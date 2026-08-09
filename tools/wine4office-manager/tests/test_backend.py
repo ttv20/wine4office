@@ -1599,6 +1599,92 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [preserved],
         )
 
+    def test_webview2_bootstrapper_download_is_atomic_and_microsoft_hosted(self):
+        destination = self.home / "MicrosoftEdgeWebview2Setup.exe"
+        payload = b"MZ" + (b"webview2" * 200)
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return ("https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/"
+                        "files/test/MicrosoftEdgeWebview2Setup.exe")
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ) as microsoft_opener:
+            result = backend.download_webview2_bootstrapper(
+                destination, lambda line: None
+            )
+
+        self.assertEqual(result, str(destination.resolve()))
+        self.assertEqual(destination.read_bytes(), payload)
+        microsoft_opener.assert_called_once_with(backend._WEBVIEW2_DOWNLOAD_HOSTS)
+        self.assertEqual(
+            opener.open.call_args.args[0].full_url,
+            backend.WEBVIEW2_BOOTSTRAPPER_URL,
+        )
+        self.assertFalse(list(destination.parent.glob(
+            ".MicrosoftEdgeWebview2Setup.exe.*.part"
+        )))
+
+    def test_teams_webview2_is_installed_only_when_missing(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        environment = {"WINEPREFIX": str(prefix)}
+
+        def download(destination, output, cancel_event):
+            Path(destination).write_bytes(b"MZ" + b"webview2" * 200)
+            return str(destination)
+
+        def install(command, env, output, **kwargs):
+            runtime = (prefix / "drive_c/Program Files (x86)/Microsoft/"
+                       "EdgeWebView/Application/151.0.0.0/msedgewebview2.exe")
+            runtime.parent.mkdir(parents=True)
+            runtime.write_bytes(b"MZ")
+
+        with mock.patch.object(
+            backend, "download_webview2_bootstrapper", side_effect=download
+        ), mock.patch.object(
+            backend, "_stream_command", side_effect=install
+        ) as stream:
+            self.assertTrue(backend.ensure_teams_webview2(
+                prefix, self.wine, environment, lambda line: None
+            ))
+            self.assertFalse(backend.ensure_teams_webview2(
+                prefix, self.wine, environment, lambda line: None
+            ))
+
+        stream.assert_called_once()
+        self.assertEqual(stream.call_args.args[0][2:], ["/silent", "/install"])
+
+    def test_teams_wow64_registration_is_refreshed_when_missing(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        wine_inf = self.wine.parent.parent / "share/wine/wine.inf"
+        wine_inf.parent.mkdir(parents=True)
+        wine_inf.write_text("[Version]\n")
+        environment = {"WINEPREFIX": str(prefix)}
+        missing = mock.Mock(returncode=1)
+        present = mock.Mock(returncode=0)
+
+        with mock.patch.object(
+            backend.subprocess, "run", side_effect=[missing, present]
+        ) as run, mock.patch.object(
+            backend, "_windows_document_path", return_value=r"Z:\runner\wine.inf"
+        ), mock.patch.object(backend, "_stream_command") as stream:
+            refreshed = backend.ensure_teams_wow64_registration(
+                prefix, self.wine, environment, lambda line: None
+            )
+
+        self.assertTrue(refreshed)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(stream.call_args.args[0], [
+            str(self.wine), r"C:\windows\syswow64\rundll32.exe",
+            "setupapi,InstallHinfSection", "Wow64Install.ntx86", "128",
+            r"Z:\runner\wine.inf",
+        ])
+
     def test_teams_bootstrapper_download_is_atomic_and_microsoft_hosted(self):
         destination = self.home / "teamsbootstrapper.exe"
         destination.write_bytes(b"previous installer")
@@ -1709,6 +1795,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ) as download_bootstrapper, mock.patch.object(
             backend, "download_teams_msix", side_effect=download
         ) as download_msix, mock.patch.object(
+            backend, "ensure_teams_wow64_registration"
+        ) as ensure_wow64, mock.patch.object(
+            backend, "ensure_teams_webview2"
+        ) as ensure_webview2, mock.patch.object(
             backend, "wine_environment", return_value=environment
         ) as wine_environment, mock.patch.object(
             backend, "_windows_document_path", return_value=r"C:\\MSTeams-x64.msix"
@@ -1729,6 +1819,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         download_msix.assert_called_once()
         wine_environment.assert_called_once_with(prefix.resolve(), self.wine.resolve(), False)
+        ensure_wow64.assert_called_once_with(
+            prefix.resolve(), self.wine.resolve(), environment, mock.ANY,
+            cancel_event=None, process_callback=None,
+        )
+        ensure_webview2.assert_called_once_with(
+            prefix.resolve(), self.wine.resolve(), environment, mock.ANY,
+            cancel_event=None, process_callback=None,
+        )
         self.assertEqual(len(downloaded_paths), 2)
         bootstrapper = downloaded_paths[0]
         self.assertEqual(
@@ -1750,6 +1848,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend, "download_teams_bootstrapper"
         ), mock.patch.object(
             backend, "download_teams_msix"
+        ), mock.patch.object(
+            backend, "ensure_teams_wow64_registration"
+        ), mock.patch.object(
+            backend, "ensure_teams_webview2"
         ), mock.patch.object(
             backend, "_windows_document_path", return_value=r"C:\\MSTeams-x64.msix"
         ), mock.patch.object(

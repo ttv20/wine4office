@@ -411,13 +411,34 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
 static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 {
     HWND root;
+    LONG offset_x, offset_y, scale_x = 10000, scale_y = 10000;
+    LONG width, height;
 
     if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
         !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
-        return GetWindowRect(target, rect);
-    if ((root = GetAncestor(target, GA_ROOT))) target = root;
-    if (!GetClientRect(target, rect)) return FALSE;
-    MapWindowPoints(target, NULL, (POINT *)rect, 2);
+    {
+        if (!GetWindowRect(target, rect)) return FALSE;
+    }
+    else
+    {
+        if ((root = GetAncestor(target, GA_ROOT))) target = root;
+        if (!GetClientRect(target, rect)) return FALSE;
+        MapWindowPoints(target, NULL, (POINT *)rect, 2);
+    }
+
+    offset_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_offset_x"));
+    offset_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_offset_y"));
+    if (GetPropW(window, L"__wine_dcomp_transform_enabled"))
+    {
+        scale_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_x"));
+        scale_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_y"));
+    }
+    width = MulDiv(rect->right - rect->left, scale_x, 10000);
+    height = MulDiv(rect->bottom - rect->top, scale_y, 10000);
+    rect->left += offset_x;
+    rect->top += offset_y;
+    rect->right = rect->left + width;
+    rect->bottom = rect->top + height;
     return TRUE;
 }
 
@@ -959,7 +980,7 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
 void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
 {
     HWND old_target = GetPropW(window, L"__wine_dcomp_detached_window");
-    HWND input_window, target_root;
+    HWND input_window, old_input_window, old_target_root, target_root;
     BOOL base_presentation;
     DWORD exstyle, target_style, target_exstyle;
     BOOL transparent_base;
@@ -967,6 +988,9 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
 
     TRACE("Binding composition window %p to target %p (old target %p).\n",
             window, target, old_target);
+
+    old_input_window = GetPropW(window, L"__wine_dcomp_input_window");
+    old_target_root = old_target ? GetAncestor(old_target, GA_ROOT) : NULL;
 
     if (old_target && old_target != target
             && GetPropW(old_target, L"__wine_dcomp_base_presentation") == window)
@@ -989,6 +1013,19 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
         RemovePropW(window, L"__wine_dcomp_task_identity");
         RemovePropW(window, dcomp_task_app_id_prop);
         RemovePropW(window, L"__wine_dcomp_client_rect");
+        if (old_input_window && GetPropW(old_input_window,
+                L"__wine_direct_hardware_input_owner") == window)
+        {
+            RemovePropW(old_input_window, L"__wine_direct_hardware_input");
+            RemovePropW(old_input_window, L"__wine_direct_hardware_input_owner");
+        }
+        if (old_target_root)
+        {
+            if (GetPropW(old_target_root, L"__wine_dcomp_input_window") == old_input_window)
+                RemovePropW(old_target_root, L"__wine_dcomp_input_window");
+            if (GetPropW(old_target_root, L"__wine_dcomp_keyboard_window") == old_input_window)
+                RemovePropW(old_target_root, L"__wine_dcomp_keyboard_window");
+        }
         return;
     }
 
@@ -1040,6 +1077,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
         SetPropW(window, L"__wine_dcomp_input_window", input_window);
         SetPropW(window, L"__wine_dcomp_keyboard_window", input_window);
         SetPropW(input_window, L"__wine_direct_hardware_input", ULongToHandle(0x57444952));
+        SetPropW(input_window, L"__wine_direct_hardware_input_owner", window);
         if (target_root)
         {
             SetPropW(target_root, L"__wine_dcomp_input_window", input_window);

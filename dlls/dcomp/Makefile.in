@@ -1,4 +1,5 @@
 MODULE    = dcomp.dll
+IMPORTLIB = dcomp
 IMPORTS   = user32
 
 VER_PRODUCTVERSION = 10,0,14393,0
