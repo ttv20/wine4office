@@ -10,6 +10,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 from xml.etree import ElementTree as ET
@@ -1653,12 +1654,51 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(destination.read_bytes(), previous)
         self.assertFalse(list(destination.parent.glob(".teamsbootstrapper.exe.*.part")))
 
+    def test_teams_msix_download_is_atomic_validated_and_reports_progress(self):
+        destination = self.home / "MSTeams-x64.msix"
+        payload_stream = io.BytesIO()
+        with zipfile.ZipFile(payload_stream, "w") as package:
+            package.writestr("AppxManifest.xml", "<Package />")
+            package.writestr("AppxBlockMap.xml", "<BlockMap />")
+            package.writestr("AppxSignature.p7x", b"signature")
+            package.writestr("app/ms-teams.exe", b"MZ" + b"teams" * 300)
+        payload = payload_stream.getvalue()
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return (
+                    "https://statics.teams.cdn.office.net/production-windows-x64/"
+                    "enterprise/webview2/lkg/MSTeams-x64.msix"
+                )
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        progress = []
+        output = []
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ) as microsoft_opener:
+            result = backend.download_teams_msix(
+                destination, output.append, progress_callback=progress.append
+            )
+
+        self.assertEqual(result, str(destination.resolve()))
+        self.assertEqual(destination.read_bytes(), payload)
+        self.assertEqual(progress[0], 0)
+        self.assertEqual(progress[-1], 100)
+        self.assertIn(f"Saved Microsoft Teams MSIX package to {destination}", output)
+        microsoft_opener.assert_called_once_with(backend._TEAMS_DOWNLOAD_HOSTS)
+        self.assertEqual(opener.open.call_args.args[0].full_url, backend.TEAMS_X64_MSIX_URL)
+        self.assertFalse(list(destination.parent.glob(".MSTeams-x64.msix.*.part")))
+
     def test_teams_install_downloads_then_runs_bootstrapper_in_selected_prefix(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         environment = {"WINEPREFIX": str(prefix)}
         downloaded_paths = []
 
-        def download(destination, output, cancel_event):
+        def download(destination, output, cancel_event, progress_callback=None):
             destination = Path(destination)
             destination.write_bytes(b"MZ" + (b"teams" * 300))
             downloaded_paths.append(destination)
@@ -1667,27 +1707,59 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         with mock.patch.object(
             backend, "download_teams_bootstrapper", side_effect=download
         ) as download_bootstrapper, mock.patch.object(
+            backend, "download_teams_msix", side_effect=download
+        ) as download_msix, mock.patch.object(
             backend, "wine_environment", return_value=environment
         ) as wine_environment, mock.patch.object(
+            backend, "_windows_document_path", return_value=r"C:\\MSTeams-x64.msix"
+        ) as windows_path, mock.patch.object(
             backend, "_stream_command"
-        ) as stream:
+        ) as stream, mock.patch.object(
+            backend, "find_office_app", return_value=self.home / "ms-teams.exe"
+        ) as find_teams:
+            progress = mock.Mock()
             result = backend.install_teams_with_bootstrapper(
-                str(prefix), str(self.wine), lambda line: None, use_x11=False
+                str(prefix), str(self.wine), lambda line: None,
+                progress_callback=progress, use_x11=False
             )
 
         self.assertEqual(result, "Microsoft Teams installation completed successfully.")
         download_bootstrapper.assert_called_once_with(
             mock.ANY, mock.ANY, None
         )
+        download_msix.assert_called_once()
         wine_environment.assert_called_once_with(prefix.resolve(), self.wine.resolve(), False)
-        self.assertEqual(len(downloaded_paths), 1)
+        self.assertEqual(len(downloaded_paths), 2)
         bootstrapper = downloaded_paths[0]
         self.assertEqual(
             stream.call_args.args[:3],
-            ([str(self.wine.resolve()), str(bootstrapper), "-p"], environment, mock.ANY),
+            ([str(self.wine.resolve()), str(bootstrapper), "-p", "-o",
+              r"C:\\MSTeams-x64.msix"], environment, mock.ANY),
         )
         self.assertEqual(stream.call_args.kwargs["cwd"], bootstrapper.parent)
         self.assertFalse(bootstrapper.exists())
+        windows_path.assert_called_once_with(
+            mock.ANY, self.wine.resolve(), environment
+        )
+        find_teams.assert_called_once_with(str(prefix.resolve()), "teams")
+        self.assertEqual(progress.call_args.args, ("Microsoft Teams installed", 100))
+
+    def test_teams_install_rejects_false_success_without_installed_app(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "download_teams_bootstrapper"
+        ), mock.patch.object(
+            backend, "download_teams_msix"
+        ), mock.patch.object(
+            backend, "_windows_document_path", return_value=r"C:\\MSTeams-x64.msix"
+        ), mock.patch.object(
+            backend, "_stream_command"
+        ), mock.patch.object(
+            backend, "find_office_app", return_value=None
+        ), self.assertRaisesRegex(RuntimeError, "exited without installing Teams"):
+            backend.install_teams_with_bootstrapper(
+                str(prefix), str(self.wine), lambda line: None
+            )
 
     def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
         prefix = self.home / ".wine4office"

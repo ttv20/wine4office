@@ -102,6 +102,13 @@ class ManagerWindow(QMainWindow):
         self.update_progress_log: QPlainTextEdit | None = None
         self.update_progress_button: QPushButton | None = None
         self.update_progress_finished = False
+        self.update_progress_task_kind = "update"
+        self.update_progress_fallback = "Updating Wine4Office…"
+        self.update_progress_messages = {
+            "completed": "Update completed.",
+            "cancelled": "Update cancelled.",
+            "failed": "Update failed. Review the details below.",
+        }
         self.office_startup_dialog: QDialog | None = None
         self.office_startup_status: QLabel | None = None
         self.office_startup_bar: QProgressBar | None = None
@@ -607,11 +614,21 @@ class ManagerWindow(QMainWindow):
                     self.state.output,
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
+                    progress_callback=self.state.set_progress,
                     use_x11=config.get("use_x11", True),
                 ),
             )
-            self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
-            self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
+            self._show_task_progress(
+                "teams-install",
+                "Installing Microsoft Teams",
+                "Microsoft Teams",
+                "Preparing Microsoft Teams installation…",
+                {
+                    "completed": "Microsoft Teams installation completed.",
+                    "cancelled": "Microsoft Teams installation cancelled.",
+                    "failed": "Microsoft Teams installation failed. Review the details below.",
+                },
+            )
             self.notify("Microsoft Teams installation started.")
             self.refresh_state()
         except Exception as error:
@@ -2019,37 +2036,52 @@ class ManagerWindow(QMainWindow):
                 self.show_error(error)
 
     def _show_update_progress(self, offer: dict, selected: list[str]) -> None:
-        if self.update_progress_dialog is not None:
-            self.update_progress_dialog.close()
         labels = {"manager": "Wine4Office Manager", "wine": "Wine runner"}
         versions = " · ".join(
             f"{labels[name]} {offer['updates'][name]['version']}"
             for name in selected
         )
+        self._show_task_progress(
+            "update",
+            "Updating Wine4Office",
+            versions,
+            "Preparing update…",
+            {
+                "completed": "Update completed.",
+                "cancelled": "Update cancelled.",
+                "failed": "Update failed. Review the details below.",
+            },
+        )
+
+    def _show_task_progress(self, task_kind: str, title: str, heading_text: str,
+                            preparing_text: str,
+                            messages: dict[str, str]) -> None:
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
         dialog = QDialog(self)
-        dialog.setWindowTitle("Updating Wine4Office")
+        dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
         dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
-        heading = QLabel(versions)
+        heading = QLabel(heading_text)
         heading.setWordWrap(True)
         layout.addWidget(heading)
-        status = QLabel("Preparing update…")
-        status.setAccessibleName("Update progress status")
+        status = QLabel(preparing_text)
+        status.setAccessibleName("Operation progress status")
         layout.addWidget(status)
         progress = QProgressBar()
         progress.setRange(0, 0)
-        progress.setAccessibleName("Update progress")
+        progress.setAccessibleName("Operation progress")
         layout.addWidget(progress)
         details = QPlainTextEdit()
         details.setReadOnly(True)
         details.setMaximumHeight(130)
-        details.setPlaceholderText("Update details will appear here.")
+        details.setPlaceholderText("Operation details will appear here.")
         layout.addWidget(details)
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel = QPushButton("Cancel update")
+        cancel = QPushButton("Cancel update" if task_kind == "update" else "Cancel")
         cancel.clicked.connect(self.cancel_task)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
@@ -2059,6 +2091,9 @@ class ManagerWindow(QMainWindow):
         self.update_progress_log = details
         self.update_progress_button = cancel
         self.update_progress_finished = False
+        self.update_progress_task_kind = task_kind
+        self.update_progress_fallback = preparing_text
+        self.update_progress_messages = dict(messages)
         dialog.finished.connect(
             lambda _result, current=dialog: self._clear_update_progress(current)
         )
@@ -2073,12 +2108,15 @@ class ManagerWindow(QMainWindow):
         self.update_progress_log = None
         self.update_progress_button = None
         self.update_progress_finished = False
+        self.update_progress_task_kind = "update"
+        self.update_progress_fallback = "Updating Wine4Office…"
+        self.update_progress_messages = {}
 
     def _refresh_update_progress(self, task: dict) -> None:
         dialog = self.update_progress_dialog
-        if dialog is None or task.get("kind") != "update":
+        if dialog is None or task.get("kind") != self.update_progress_task_kind:
             return
-        label = str(task.get("progress_label") or "Updating Wine4Office…")
+        label = str(task.get("progress_label") or self.update_progress_fallback)
         if self.update_progress_status is not None:
             self.update_progress_status.setText(label)
         value = task.get("progress_value")
@@ -2097,13 +2135,10 @@ class ManagerWindow(QMainWindow):
             return
         self.update_progress_finished = True
         if self.update_progress_status is not None:
-            messages = {
-                "completed": "Update completed.",
-                "cancelled": "Update cancelled.",
-                "failed": "Update failed. Review the details below.",
-            }
             self.update_progress_status.setText(
-                messages.get(str(task.get("status")), "Update finished.")
+                self.update_progress_messages.get(
+                    str(task.get("status")), "Operation finished."
+                )
             )
         if self.update_progress_bar is not None:
             self.update_progress_bar.setRange(0, 100)
@@ -2117,7 +2152,7 @@ class ManagerWindow(QMainWindow):
                 pass
             self.update_progress_button.setText("Close")
             self.update_progress_button.clicked.connect(dialog.accept)
-        if task.get("restart_required"):
+        if task.get("kind") == "update" and task.get("restart_required"):
             QTimer.singleShot(500, dialog.accept)
 
     def prompt_manager_restart(self, update_succeeded: bool) -> None:

@@ -1238,6 +1238,7 @@ class QtManagerTests(unittest.TestCase):
                 self.assertIn(product["channel"], details)
 
     def test_teams_install_downloads_and_runs_without_save_dialog(self):
+        original_page = self.window.pages.currentIndex()
         with mock.patch.object(
             qt_module.QFileDialog, "getSaveFileName"
         ) as save_dialog, mock.patch.object(
@@ -1259,9 +1260,16 @@ class QtManagerTests(unittest.TestCase):
             self.state.output,
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
+            progress_callback=self.state.set_progress,
             use_x11=True,
         )
-        self.assertEqual(self.window.pages.currentIndex(), self.window.MAINTENANCE_PAGE)
+        self.assertEqual(self.window.pages.currentIndex(), original_page)
+        self.assertTrue(self.window.update_progress_dialog.isVisible())
+        self.assertEqual(
+            self.window.update_progress_dialog.windowTitle(),
+            "Installing Microsoft Teams",
+        )
+        self.assertEqual(self.window.update_progress_task_kind, "teams-install")
 
     def test_generated_office_install_starts_without_save_dialog(self):
         generated_xml = "<Configuration><Add /></Configuration>\n"

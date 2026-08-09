@@ -26,6 +26,7 @@ import time
 import uuid
 import urllib.parse
 import urllib.request
+import zipfile
 from contextlib import contextmanager
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -221,6 +222,7 @@ _ODT_LINK_PATTERN = re.compile(
 TEAMS_BOOTSTRAPPER_URL = (
     "https://go.microsoft.com/fwlink/?clcid=0x409&linkid=2243204"
 )
+TEAMS_X64_MSIX_URL = "https://go.microsoft.com/fwlink/?linkid=2196106"
 _TEAMS_DOWNLOAD_HOSTS = frozenset({
     "go.microsoft.com",
     "statics.teams.cdn.office.net",
@@ -230,6 +232,7 @@ MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
 MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
 MAX_TEAMS_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
+MAX_TEAMS_MSIX_SIZE = 512 * 1024 * 1024
 WINE_GECKO_VERSION = "2.47.4"
 WINE_GECKO_ARCHITECTURES = ("x86", "x86_64")
 
@@ -2541,7 +2544,7 @@ def _read_bounded_response(response, maximum: int, description: str,
     return bytes(payload)
 
 def _copy_bounded_response(response, target, maximum: int, description: str,
-                           cancel_event=None) -> tuple[int, bytes]:
+                           cancel_event=None, progress_callback=None) -> tuple[int, bytes]:
     headers = getattr(response, "headers", None)
     declared_size = headers.get("Content-Length") if headers is not None else None
     if declared_size is not None:
@@ -2553,6 +2556,8 @@ def _copy_bounded_response(response, target, maximum: int, description: str,
             raise ValueError(f"{description} is larger than the allowed limit.")
     downloaded = 0
     signature = bytearray()
+    if progress_callback is not None:
+        progress_callback(0 if declared_size else None)
     while True:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Operation cancelled.")
@@ -2565,6 +2570,11 @@ def _copy_bounded_response(response, target, maximum: int, description: str,
         if len(signature) < 2:
             signature.extend(chunk[:2 - len(signature)])
         target.write(chunk)
+        if progress_callback is not None:
+            progress_callback(
+                min(100, downloaded * 100 // declared_size)
+                if declared_size else None
+            )
     if declared_size is not None and downloaded != declared_size:
         raise ValueError(f"{description} size does not match Content-Length.")
     return downloaded, bytes(signature)
@@ -2706,8 +2716,60 @@ def download_teams_bootstrapper(destination, output: Output,
             temporary_path.unlink(missing_ok=True)
 
 
+def download_teams_msix(destination, output: Output, cancel_event=None,
+                        progress_callback=None) -> str:
+    """Download and validate Microsoft's current x64 Teams MSIX package."""
+    destination_path = Path(destination).expanduser().resolve()
+    parent = destination_path.parent
+    if not destination_path.name or not parent.is_dir():
+        raise ValueError("Choose a valid destination for the Teams MSIX package.")
+    if os.path.lexists(destination_path) and not destination_path.is_file():
+        raise ValueError(f"Teams MSIX destination is not a file: {destination_path}")
+
+    url = _trusted_microsoft_url(
+        TEAMS_X64_MSIX_URL, _TEAMS_DOWNLOAD_HOSTS, "Teams MSIX download"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Wine4OfficeManager/1"})
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "wb", dir=parent, prefix=f".{destination_path.name}.",
+                suffix=".part", delete=False) as target:
+            temporary_path = Path(target.name)
+            output("Downloading the Microsoft Teams x64 MSIX package.")
+            with _microsoft_opener(_TEAMS_DOWNLOAD_HOSTS).open(
+                    request, timeout=60) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                _trusted_microsoft_url(
+                    final_url, _TEAMS_DOWNLOAD_HOSTS, "Final Teams MSIX download"
+                )
+                downloaded, signature = _copy_bounded_response(
+                    response, target, MAX_TEAMS_MSIX_SIZE, "Teams MSIX download",
+                    cancel_event, progress_callback,
+                )
+            if downloaded < 1024 or signature != b"PK":
+                raise ValueError("Microsoft Teams MSIX download is not a valid package.")
+            target.flush()
+            os.fsync(target.fileno())
+        with zipfile.ZipFile(temporary_path) as package:
+            members = set(package.namelist())
+            required = {"AppxManifest.xml", "AppxBlockMap.xml", "AppxSignature.p7x"}
+            if not required.issubset(members) or not any(
+                    name.casefold().endswith("/ms-teams.exe")
+                    or name.casefold() == "ms-teams.exe" for name in members):
+                raise ValueError("Microsoft Teams MSIX is missing required package files.")
+        os.replace(temporary_path, destination_path)
+        temporary_path = None
+        output(f"Saved Microsoft Teams MSIX package to {destination_path}")
+        return str(destination_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def install_teams_with_bootstrapper(prefix, wine, output: Output,
                                     cancel_event=None, process_callback=None, *,
+                                    progress_callback=None,
                                     use_x11: bool = True) -> str:
     """Download and run Microsoft's Teams bootstrapper in a Wine environment."""
     prefix_path = validate_prefix(prefix)
@@ -2718,15 +2780,40 @@ def install_teams_with_bootstrapper(prefix, wine, output: Output,
     with tempfile.TemporaryDirectory(prefix="wine4office-teams-") as temporary:
         work_directory = Path(temporary)
         bootstrapper = work_directory / "teamsbootstrapper.exe"
+        teams_msix = work_directory / "MSTeams-x64.msix"
+        if progress_callback is not None:
+            progress_callback("Downloading Microsoft Teams installer…", 0)
         download_teams_bootstrapper(bootstrapper, output, cancel_event)
+        download_teams_msix(
+            teams_msix, output, cancel_event,
+            (lambda value: progress_callback(
+                f"Downloading Microsoft Teams… {value}%" if value is not None
+                else "Downloading Microsoft Teams…",
+                value,
+            )) if progress_callback is not None else None,
+        )
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Operation cancelled.")
+        if progress_callback is not None:
+            progress_callback("Installing Microsoft Teams…", None)
         output("Installing Microsoft Teams with the standalone bootstrapper.")
+        teams_msix_windows = _windows_document_path(
+            str(teams_msix), wine_path, environment
+        )
         _stream_command(
-            [str(wine_path), str(bootstrapper), "-p"],
+            [str(wine_path), str(bootstrapper), "-p", "-o", teams_msix_windows],
             environment, output, cwd=work_directory,
             cancel_event=cancel_event, process_callback=process_callback,
         )
+    if progress_callback is not None:
+        progress_callback("Verifying Microsoft Teams installation…", None)
+    if find_office_app(str(prefix_path), "teams") is None:
+        raise RuntimeError(
+            "The Microsoft Teams bootstrapper exited without installing Teams. "
+            "Review drive_c/windows/temp/teamsprovision.log.* in this Wine environment."
+        )
+    if progress_callback is not None:
+        progress_callback("Microsoft Teams installed", 100)
     return "Microsoft Teams installation completed successfully."
 
 
