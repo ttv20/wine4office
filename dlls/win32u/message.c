@@ -49,6 +49,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
 static const struct ratio no_dpi;
+static const WCHAR dcomp_synthetic_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
 
 static LONG atomic_load_long( const volatile LONG *ptr )
 {
@@ -4153,6 +4155,10 @@ static BOOL broadcast_message( struct send_message_info *info, DWORD_PTR *res_pt
         for (i = 0; list[i]; i++)
         {
             if (!is_window(list[i])) continue;
+            /* Wine uses top-level HWNDs as presentation details for otherwise
+             * windowless DirectComposition swapchains. They have no Windows
+             * counterpart and must not participate in HWND_BROADCAST. */
+            if (NtUserGetProp(list[i], dcomp_synthetic_window_prop)) continue;
             if ((get_window_long( list[i], GWL_STYLE ) & (WS_POPUP|WS_CHILD)) == WS_CHILD)
                 continue;
 

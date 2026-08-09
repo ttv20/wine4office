@@ -326,6 +326,7 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
         ERR("Failed to create a window.\n");
         goto fail;
     }
+    wined3d_mark_internal_window(ctx->wnd);
 
     ctx->dc = GetDC(ctx->wnd);
     if (!ctx->dc)

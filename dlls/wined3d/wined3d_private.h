@@ -42,6 +42,7 @@
 #include "winreg.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "imm.h"
 #include "winternl.h"
 #include "dxva.h"
 #include "ddk/d3dkmthk.h"
@@ -51,6 +52,17 @@
 #include "wine/wined3d.h"
 #include "wine/list.h"
 #include "wine/rbtree.h"
+
+static inline void wined3d_mark_internal_window(HWND window)
+{
+    static const WCHAR internal_window_prop[] =
+        {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
+    HWND ime_window;
+
+    SetPropW(window, internal_window_prop, ULongToHandle(1));
+    if ((ime_window = ImmGetDefaultIMEWnd(window)))
+        SetPropW(ime_window, internal_window_prop, ULongToHandle(1));
+}
 
 static inline size_t align(size_t addr, size_t alignment)
 {

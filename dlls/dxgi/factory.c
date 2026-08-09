@@ -19,6 +19,7 @@
 
 #include "dxgi_private.h"
 #include "dwmapi.h"
+#include "imm.h"
 #include "wine/dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
@@ -26,6 +27,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 #define WM_WAYLAND_DCOMP_EXPORT 0x80001003
 #define WM_WAYLAND_DCOMP_CAPTION_REDRAW (WM_APP + 0x104)
 #define WM_WINE_DCOMP_FOCUS     0x80000ff0
+
+static const WCHAR dcomp_synthetic_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
 
 static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *iface)
 {
@@ -1102,7 +1106,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
 {
     BOOL own_window = TRUE;
     HRESULT hr;
-    HWND window;
+    HWND window, ime_window;
 
     TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
@@ -1116,6 +1120,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             "static", "DXGI composition window", WS_POPUP,
             0, 0, max(desc->Width, 1), max(desc->Height, 1), NULL, NULL, NULL, NULL)))
         return E_FAIL;
+
+    /* Composition swapchains are windowless on Windows. The HWND and default
+     * IME window created here are Wine presentation details, often owned by a
+     * render thread which has no Win32 message loop. Keep them out of
+     * HWND_BROADCAST delivery. */
+    SetPropW(window, dcomp_synthetic_window_prop, ULongToHandle(1));
+    if ((ime_window = ImmGetDefaultIMEWnd(window)))
+        SetPropW(ime_window, dcomp_synthetic_window_prop, ULongToHandle(1));
 
     if (FAILED(hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window, desc, NULL, output, swapchain)))
     {
@@ -1357,6 +1369,8 @@ HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended)
 
 HWND dxgi_factory_get_device_window(struct dxgi_factory *factory)
 {
+    HWND ime_window;
+
     wined3d_mutex_lock();
 
     if (!factory->device_window)
@@ -1368,6 +1382,9 @@ HWND dxgi_factory_get_device_window(struct dxgi_factory *factory)
             ERR("Failed to create a window.\n");
             return NULL;
         }
+        SetPropW(factory->device_window, dcomp_synthetic_window_prop, ULongToHandle(1));
+        if ((ime_window = ImmGetDefaultIMEWnd(factory->device_window)))
+            SetPropW(ime_window, dcomp_synthetic_window_prop, ULongToHandle(1));
         SetWindowPos(factory->device_window, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         TRACE("Created device window %p for factory %p.\n", factory->device_window, factory);
     }

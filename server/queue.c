@@ -1247,6 +1247,14 @@ static int is_queue_hung( struct msg_queue *queue )
     return get_queue_status( queue ) && monotonic_time - queue->shared->access_time > 5 * TICKS_PER_SEC;
 }
 
+/* SendMessageTimeout(SMTO_ABORTIFHUNG) considers a receiving thread hung when
+ * it has not called GetMessage or a similar queue function for five seconds.
+ * This does not depend on the queue already containing another message. */
+static int is_queue_hung_for_send( struct msg_queue *queue )
+{
+    return monotonic_time - queue->shared->access_time > 5 * TICKS_PER_SEC;
+}
+
 static struct object *msg_queue_get_sync( struct object *obj )
 {
     struct msg_queue *queue = (struct msg_queue *)obj;
@@ -3165,7 +3173,7 @@ DECL_HANDLER(send_message)
         release_object( thread );
         return;
     }
-    if ((req->flags & SEND_MSG_ABORT_IF_HUNG) && is_queue_hung(recv_queue))
+    if ((req->flags & SEND_MSG_ABORT_IF_HUNG) && is_queue_hung_for_send(recv_queue))
     {
         set_error( STATUS_TIMEOUT );
         release_object( thread );

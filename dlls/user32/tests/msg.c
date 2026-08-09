@@ -13355,6 +13355,25 @@ struct sendmsg_info
     HANDLE ready;
 };
 
+struct hung_window_info
+{
+    HWND hwnd;
+    HANDLE ready;
+    HANDLE done;
+};
+
+static DWORD CALLBACK hung_window_thread( void *arg )
+{
+    struct hung_window_info *info = arg;
+
+    info->hwnd = CreateWindowA( "TestWindowClass", NULL, WS_OVERLAPPEDWINDOW,
+                                0, 0, 100, 100, 0, 0, 0, NULL );
+    SetEvent( info->ready );
+    WaitForSingleObject( info->done, INFINITE );
+    DestroyWindow( info->hwnd );
+    return 0;
+}
+
 static DWORD CALLBACK send_msg_thread( LPVOID arg )
 {
     struct sendmsg_info *info = arg;
@@ -13386,7 +13405,8 @@ static void test_SendMessageTimeout(void)
 {
     HANDLE thread;
     struct sendmsg_info info;
-    DWORD tid;
+    struct hung_window_info hung_info;
+    DWORD elapsed, start, tid;
     BOOL is_win9x;
 
     info.ready = CreateEventA( NULL, 0, 0, NULL );
@@ -13472,6 +13492,29 @@ static void test_SendMessageTimeout(void)
     /* we should time out but still get the message */
     ok( info.ret == 0, "SendMessageTimeout failed\n" );
     ok_sequence( WmUser, "WmUser", FALSE );
+
+    /* SMTO_ABORTIFHUNG considers a thread unresponsive after five seconds
+     * without calling GetMessage or a similar function, even when its message
+     * queue was empty before the send. */
+    hung_info.hwnd = NULL;
+    hung_info.ready = CreateEventA( NULL, TRUE, FALSE, NULL );
+    hung_info.done = CreateEventA( NULL, TRUE, FALSE, NULL );
+    thread = CreateThread( NULL, 0, hung_window_thread, &hung_info, 0, &tid );
+    WaitForSingleObject( hung_info.ready, INFINITE );
+    ok( !!hung_info.hwnd, "failed to create hung test window\n" );
+    Sleep(5500);
+    SetLastError( 0xdeadbeef );
+    start = GetTickCount();
+    info.ret = SendMessageTimeoutA( hung_info.hwnd, WM_NULL, 0, 0,
+                                    SMTO_ABORTIFHUNG, 2000, NULL );
+    elapsed = GetTickCount() - start;
+    ok( !info.ret, "SendMessageTimeout succeeded\n" );
+    ok( elapsed < 1000, "SendMessageTimeout waited %lu ms\n", elapsed );
+    SetEvent( hung_info.done );
+    WaitForSingleObject( thread, INFINITE );
+    CloseHandle( thread );
+    CloseHandle( hung_info.done );
+    CloseHandle( hung_info.ready );
 
     DestroyWindow( info.hwnd );
     CloseHandle( info.ready );
