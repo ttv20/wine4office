@@ -8,6 +8,7 @@
 - Support cross-device DirectComposition visual trees and device-scoped commits.
 - Fix white Microsoft 365 sign-in windows in Word.
 - Prevent PowerPoint ribbon galleries from stalling after they close on Wayland.
+- Prevent PowerPoint transition previews from freezing on Wayland.
 
 ## 0.1.11-rc.2 — 2026-08-07 (prerelease)
 

@@ -3411,9 +3411,15 @@ static void wined3d_cs_mt_finish(struct wined3d_device_context *context, enum wi
         return wined3d_cs_st_finish(context, queue_id);
 
     TRACE_(d3d_perf)("Waiting for queue %u to be empty.\n", queue_id);
-    wined3d_cs_wake(cs);
     while (cs->queue[queue_id].head != *(volatile ULONG *)&cs->queue[queue_id].tail)
+    {
+        /* A wake can race with the command stream entering its wait. Retry it
+         * while the queue remains non-empty so a lost wake cannot leave the
+         * client spinning forever. */
+        if (!(spin_count % WINED3D_PAUSE_SPIN_COUNT))
+            wined3d_cs_wake(cs);
         wined3d_pause(&spin_count);
+    }
     TRACE_(d3d_perf)("Queue is now empty.\n");
 }
 
