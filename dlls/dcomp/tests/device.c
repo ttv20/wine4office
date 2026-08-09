@@ -60,8 +60,14 @@ static void test_visual_tree_validation(void)
     ok(FAILED(hr), "Adding a visual to a second parent succeeded.\n");
     hr = IDCompositionVisual_AddVisual(parent, other, TRUE, foreign);
     ok(FAILED(hr), "AddVisual accepted a foreign reference visual.\n");
-    hr = IDCompositionVisual_AddVisual(parent, foreign, TRUE, NULL);
-    ok(FAILED(hr), "AddVisual accepted a visual from another device.\n");
+    hr = IDCompositionVisual_AddVisual(parent, foreign, TRUE, child);
+    ok(hr == S_OK, "Adding a cross-device visual failed, hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(device);
+    ok(hr == S_OK, "Committing cross-device topology failed, hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(other_device);
+    ok(hr == S_OK, "Committing cross-device visual properties failed, hr %#lx.\n", hr);
+    hr = IDCompositionVisual_RemoveVisual(parent, foreign);
+    ok(hr == S_OK, "Removing a cross-device visual failed, hr %#lx.\n", hr);
 
     hr = IDCompositionVisual_RemoveVisual(parent, child);
     ok(hr == S_OK, "RemoveVisual failed, hr %#lx.\n", hr);
