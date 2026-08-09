@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix Teams installation and show its progress without leaving the Install page.
+- Fix white Microsoft 365 sign-in windows in Word.
 
 ## 0.1.11-rc.2 — 2026-08-07 (prerelease)
 

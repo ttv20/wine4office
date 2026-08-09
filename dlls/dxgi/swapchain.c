@@ -340,7 +340,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
-static HRESULT d3d11_swapchain_restore_present1_contents(struct d3d11_swapchain *swapchain);
 
 static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 {
@@ -463,13 +462,12 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
             source = &source_rect;
     }
 
+    /* The shadow is merged into the current back buffer before Present.  Do not
+     * restore it afterward: flip-model presentation has already rotated to the
+     * next back buffer, which the application is then free to start rendering. */
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             source, NULL, NULL, sync_interval, 0)))
-    {
         InterlockedIncrement(&swapchain->present_count);
-        if (FAILED(d3d11_swapchain_restore_present1_contents(swapchain)))
-            WARN("Failed to retain presentation contents in the next back buffer.\n");
-    }
     return hr;
 }
 
@@ -1043,30 +1041,6 @@ done:
         ID3D11Device_Release(device);
     ID3D11Texture2D_Release(back);
     return hr;
-}
-
-static HRESULT d3d11_swapchain_restore_present1_contents(struct d3d11_swapchain *swapchain)
-{
-    ID3D11DeviceContext *context = NULL;
-    ID3D11Texture2D *back = NULL;
-    ID3D11Device *device = NULL;
-    HRESULT hr;
-
-    if (!swapchain->present1_shadow_valid)
-        return S_OK;
-
-    if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
-            0, &IID_ID3D11Texture2D, (void **)&back)))
-        return hr;
-    ID3D11Texture2D_GetDevice(back, &device);
-    ID3D11Device_GetImmediateContext(device, &context);
-    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)back,
-            (ID3D11Resource *)swapchain->present1_shadow);
-
-    ID3D11DeviceContext_Release(context);
-    ID3D11Device_Release(device);
-    ID3D11Texture2D_Release(back);
-    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface,
