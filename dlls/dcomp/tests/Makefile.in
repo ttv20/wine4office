@@ -1,5 +1,5 @@
 TESTDLL = dcomp.dll
-IMPORTS = dcomp user32 uuid
+IMPORTS = dcomp gdi32 user32 uuid
 
 SOURCES = \
 	device.c

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Connect Windows.UI composition objects to transactional DirectComposition rendering.
 - Make Direct2D render-target pooling and flush behavior device-safe.
 - Scope WAM credentials transactionally and reject unsupported licensing policy claims.
 - Implement packaged-app lifecycle, identity, enterprise policy, and honest VoIP contracts.

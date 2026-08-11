@@ -10,6 +10,7 @@
  */
 #include <stdarg.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -18,6 +19,7 @@
 #include "dxgi.h"
 #include "dxgi1_2.h"
 #include "dcomp.h"
+#include "wine/dcomp.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
@@ -36,6 +38,8 @@ struct dcomp_device
     BOOL dirty;
 };
 
+
+
 struct dcomp_target
 {
     IDCompositionTarget IDCompositionTarget_iface;
@@ -51,6 +55,7 @@ struct dcomp_target
 struct dcomp_visual
 {
     IDCompositionVisual2 IDCompositionVisual2_iface;
+    IDCompositionVisualPrivate IDCompositionVisualPrivate_iface;
     LONG ref;
     struct dcomp_device *device;
     IUnknown *content;
@@ -75,10 +80,22 @@ struct dcomp_visual
     float committed_offset_y;
     D2D_MATRIX_3X2_F committed_transform;
     BOOL committed_has_transform;
+    BOOL visible;
+    BOOL committed_visible;
+    BOOL effective_visible;
     float applied_offset_x;
     float applied_offset_y;
     float applied_scale_x;
     float applied_scale_y;
+    struct wine_dcomp_visual_desc description;
+    struct wine_dcomp_visual_desc committed_description;
+    struct wine_dcomp_visual_desc applied_description;
+    BOOL has_description;
+    BOOL committed_has_description;
+    enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode, committed_interpolation_mode;
+    enum DCOMPOSITION_BORDER_MODE border_mode, committed_border_mode;
+    enum DCOMPOSITION_COMPOSITE_MODE composite_mode, committed_composite_mode;
+    enum DCOMPOSITION_BACKFACE_VISIBILITY backface_visibility, committed_backface_visibility;
 };
 
 struct dcomp_visual_child
@@ -110,13 +127,194 @@ static void dcomp_global_leave(void)
 {
     LeaveCriticalSection(&dcomp_global_lock);
 }
+static HRESULT dcomp_validate_offset(float value)
+{
+    if (!isfinite(value) || (double)value < (double)INT_MIN || (double)value > (double)INT_MAX)
+        return E_INVALIDARG;
+    return S_OK;
+}
+
+static HRESULT dcomp_validate_scale(float value)
+{
+    if (!isfinite(value) || (double)value > (double)INT_MAX / 10000.0)
+        return E_INVALIDARG;
+    if (value <= 0.0f)
+        return E_NOTIMPL;
+    return S_OK;
+}
+static void dcomp_matrix_identity(float *matrix)
+{
+    unsigned int i;
+
+    memset(matrix, 0, 16 * sizeof(*matrix));
+    for (i = 0; i < 4; ++i) matrix[i * 4 + i] = 1.0f;
+}
+static void dcomp_description_identity(struct wine_dcomp_visual_desc *desc)
+{
+    memset(desc, 0, sizeof(*desc));
+    desc->version = WINE_DCOMP_VISUAL_DESC_VERSION;
+    desc->flags = WINE_DCOMP_VISUAL_RENDERER_ACTIVE;
+    desc->opacity = 1.0f;
+    dcomp_matrix_identity(desc->transform);
+}
+
+
+static void dcomp_matrix_multiply(float *result, const float *left, const float *right)
+{
+    float value[16];
+    unsigned int row, column, i;
+
+    for (row = 0; row < 4; ++row)
+        for (column = 0; column < 4; ++column)
+        {
+            value[row * 4 + column] = 0.0f;
+            for (i = 0; i < 4; ++i)
+                value[row * 4 + column] += left[row * 4 + i] * right[i * 4 + column];
+        }
+    memcpy(result, value, sizeof(value));
+}
+
+static HRESULT dcomp_validate_description(const struct wine_dcomp_visual_desc *desc)
+{
+    const float *values = desc->transform;
+    unsigned int i;
+
+    if (desc->version != WINE_DCOMP_VISUAL_DESC_VERSION
+            || !(desc->flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE))
+        return E_INVALIDARG;
+    for (i = 0; i < 16; ++i)
+        if (!isfinite(values[i])) return E_INVALIDARG;
+    if (!isfinite(desc->size[0]) || !isfinite(desc->size[1])
+            || desc->size[0] < 0.0f || desc->size[1] < 0.0f
+            || !isfinite(desc->opacity) || desc->opacity < 0.0f || desc->opacity > 1.0f
+            || !isfinite(desc->content_rect[0]) || !isfinite(desc->content_rect[1])
+            || !isfinite(desc->content_rect[2]) || !isfinite(desc->content_rect[3])
+            || desc->content_rect[2] < desc->content_rect[0]
+            || desc->content_rect[3] < desc->content_rect[1])
+        return E_INVALIDARG;
+    if ((desc->flags & WINE_DCOMP_VISUAL_HAS_CLIP)
+            && (!isfinite(desc->clip[0]) || !isfinite(desc->clip[1])
+            || !isfinite(desc->clip[2]) || !isfinite(desc->clip[3])
+            || desc->clip[2] < desc->clip[0] || desc->clip[3] < desc->clip[1]))
+        return E_INVALIDARG;
+    if (desc->interpolation_mode > 9 || desc->border_mode > 2 || desc->composite_mode > 3)
+        return E_INVALIDARG;
+    return S_OK;
+}
+
+static BOOL dcomp_project_point(const struct wine_dcomp_visual_desc *desc, float x, float y,
+        float *out_x, float *out_y)
+{
+    const float *m = desc->transform;
+    float tx = x * m[0] + y * m[4] + m[12];
+    float ty = x * m[1] + y * m[5] + m[13];
+    float tw = x * m[3] + y * m[7] + m[15];
+
+    if (!isfinite(tx) || !isfinite(ty) || !isfinite(tw) || fabsf(tw) < 1.0e-7f)
+        return FALSE;
+    *out_x = tx / tw;
+    *out_y = ty / tw;
+    return isfinite(*out_x) && isfinite(*out_y);
+}
+
+static HRESULT dcomp_description_get_bounds(struct wine_dcomp_visual_desc *desc, LONG *x,
+        LONG *y, LONG *width, LONG *height)
+{
+    float left = desc->content_rect[0], top = desc->content_rect[1];
+    float right = desc->content_rect[2], bottom = desc->content_rect[3];
+    float px[4], py[4], min_x, min_y, max_x, max_y;
+    double floor_x, floor_y, ceil_x, ceil_y;
+    unsigned int i;
+
+    if (desc->flags & WINE_DCOMP_VISUAL_HAS_SIZE)
+    {
+        left = max(left, 0.0f);
+        top = max(top, 0.0f);
+        right = min(right, desc->size[0]);
+        bottom = min(bottom, desc->size[1]);
+    }
+    if (desc->flags & WINE_DCOMP_VISUAL_HAS_CLIP)
+    {
+        left = max(left, desc->clip[0]);
+        top = max(top, desc->clip[1]);
+        right = min(right, desc->clip[2]);
+        bottom = min(bottom, desc->clip[3]);
+    }
+    if (!(right > left && bottom > top))
+    {
+        *x = *y = 0;
+        *width = *height = 1;
+        return S_FALSE;
+    }
+    if (!dcomp_project_point(desc, left, top, &px[0], &py[0])
+            || !dcomp_project_point(desc, right, top, &px[1], &py[1])
+            || !dcomp_project_point(desc, left, bottom, &px[2], &py[2])
+            || !dcomp_project_point(desc, right, bottom, &px[3], &py[3]))
+        return E_INVALIDARG;
+    min_x = max_x = px[0];
+    min_y = max_y = py[0];
+    for (i = 1; i < 4; ++i)
+    {
+        min_x = min(min_x, px[i]);
+        min_y = min(min_y, py[i]);
+        max_x = max(max_x, px[i]);
+        max_y = max(max_y, py[i]);
+    }
+    floor_x = floor(min_x);
+    floor_y = floor(min_y);
+    ceil_x = ceil(max_x);
+    ceil_y = ceil(max_y);
+    if (floor_x < INT_MIN || floor_y < INT_MIN || ceil_x > INT_MAX || ceil_y > INT_MAX
+            || ceil_x - floor_x > INT_MAX || ceil_y - floor_y > INT_MAX)
+        return E_INVALIDARG;
+    *x = floor_x;
+    *y = floor_y;
+    *width = max((LONG)(ceil_x - floor_x), 1);
+    *height = max((LONG)(ceil_y - floor_y), 1);
+    desc->render_origin[0] = *x;
+    desc->render_origin[1] = *y;
+    return S_OK;
+}
+
+
+static HRESULT dcomp_float_to_long(float value, LONG *result)
+{
+    HRESULT hr;
+
+    if (FAILED(hr = dcomp_validate_offset(value)))
+        return hr;
+    *result = (LONG)value;
+    return S_OK;
+}
+
+static HRESULT dcomp_scale_to_fixed(float value, LONG *result)
+{
+    double scaled;
+    HRESULT hr;
+
+    if (FAILED(hr = dcomp_validate_scale(value)))
+        return hr;
+    scaled = (double)value * 10000.0;
+    if (scaled >= (double)INT_MAX - 0.5)
+        *result = INT_MAX;
+    else
+        *result = (LONG)(scaled + 0.5);
+    if (!*result) *result = 1;
+    return S_OK;
+}
 
 static ULONG WINAPI dcomp_device_Release(IDCompositionDevice *iface);
 static const IDCompositionVisual2Vtbl dcomp_visual_vtbl;
+static const IDCompositionVisualPrivateVtbl dcomp_visual_private_vtbl;
 
 static inline struct dcomp_visual *impl_from_IDCompositionVisual2(IDCompositionVisual2 *iface)
 {
     return CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisual2_iface);
+}
+
+static inline struct dcomp_visual *impl_from_IDCompositionVisualPrivate(IDCompositionVisualPrivate *iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisualPrivate_iface);
 }
 
 static void dcomp_visual_child_list_free(struct dcomp_visual_child *child, BOOL clear_parent)
@@ -156,12 +354,86 @@ static HRESULT dcomp_visual_child_list_clone(struct dcomp_visual_child *source,
     return S_OK;
 }
 
+static HRESULT dcomp_visual_validate_target_state(struct dcomp_visual *visual,
+        struct dcomp_device *pending_device, const struct wine_dcomp_visual_desc *parent_desc)
+{
+    struct wine_dcomp_visual_desc local, world;
+    struct dcomp_visual_child *child;
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
+    IDXGISwapChain1 *swapchain;
+    IUnknown *content;
+    float content_width = 1.0f, content_height = 1.0f;
+    BOOL pending = visual->device == pending_device;
+    BOOL has_description = pending ? visual->has_description : visual->committed_has_description;
+    LONG x, y, width, height;
+    HRESULT hr;
+
+    if (has_description)
+    {
+        local = pending ? visual->description : visual->committed_description;
+        if (FAILED(hr = dcomp_validate_description(&local))) return hr;
+    }
+    else
+    {
+        const D2D_MATRIX_3X2_F *transform;
+
+        content = pending ? visual->content : visual->applied_content;
+        if (content && SUCCEEDED(content->lpVtbl->QueryInterface(content,
+                &IID_IDXGISwapChain1, (void **)&swapchain)))
+        {
+            if (SUCCEEDED(swapchain->lpVtbl->GetDesc1(swapchain, &swapchain_desc)))
+            {
+                content_width = max(swapchain_desc.Width, 1);
+                content_height = max(swapchain_desc.Height, 1);
+            }
+            swapchain->lpVtbl->Release(swapchain);
+        }
+        dcomp_description_identity(&local);
+        local.flags |= WINE_DCOMP_VISUAL_HAS_SIZE;
+        local.size[0] = local.source_size[0] = content_width;
+        local.size[1] = local.source_size[1] = content_height;
+        local.content_rect[2] = content_width;
+        local.content_rect[3] = content_height;
+        local.transform[12] = pending ? visual->offset_x : visual->committed_offset_x;
+        local.transform[13] = pending ? visual->offset_y : visual->committed_offset_y;
+        if (pending ? visual->has_transform : visual->committed_has_transform)
+        {
+            transform = pending ? &visual->transform : &visual->committed_transform;
+            local.transform[0] = transform->_11;
+            local.transform[1] = transform->_12;
+            local.transform[4] = transform->_21;
+            local.transform[5] = transform->_22;
+            local.transform[12] += transform->_31;
+            local.transform[13] += transform->_32;
+        }
+    }
+    world = local;
+    if (!(local.flags & WINE_DCOMP_VISUAL_TRANSFORM_ABSOLUTE))
+        dcomp_matrix_multiply(world.transform, local.transform, parent_desc->transform);
+    if ((double)fabsf(world.transform[0]) > (double)INT_MAX / 10000.0
+            || (double)fabsf(world.transform[1]) > (double)INT_MAX / 10000.0
+            || (double)fabsf(world.transform[4]) > (double)INT_MAX / 10000.0
+            || (double)fabsf(world.transform[5]) > (double)INT_MAX / 10000.0)
+        return E_INVALIDARG;
+    world.opacity = local.opacity * parent_desc->opacity;
+    if (FAILED(hr = dcomp_description_get_bounds(&world, &x, &y, &width, &height)))
+        return hr;
+
+    for (child = pending ? visual->children : visual->applied_children; child; child = child->next)
+        if (FAILED(hr = dcomp_visual_validate_target_state(impl_from_IDCompositionVisual2(
+                (IDCompositionVisual2 *)child->visual), pending_device, &world)))
+            return hr;
+    return S_OK;
+}
+
 static void dcomp_visual_unbind_content(struct dcomp_visual *visual);
 static void dcomp_visual_apply_target(struct dcomp_visual *visual, HWND target_window, BOOL topmost,
-        float offset_x, float offset_y, float scale_x, float scale_y);
+        const struct wine_dcomp_visual_desc *desc, BOOL visible);
 
 static HRESULT WINAPI dcomp_visual_QueryInterface(IDCompositionVisual2 *iface, REFIID iid, void **out)
 {
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
     if (!out) return E_POINTER;
     *out = NULL;
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual)
@@ -169,6 +441,13 @@ static HRESULT WINAPI dcomp_visual_QueryInterface(IDCompositionVisual2 *iface, R
     {
         *out = iface;
         iface->lpVtbl->AddRef(iface);
+        return S_OK;
+    }
+    if (IsEqualGUID(iid, &IID_IDCompositionVisualPrivate))
+    {
+        *out = &visual->IDCompositionVisualPrivate_iface;
+        visual->IDCompositionVisualPrivate_iface.lpVtbl->AddRef(
+                &visual->IDCompositionVisualPrivate_iface);
         return S_OK;
     }
     return E_NOINTERFACE;
@@ -209,6 +488,76 @@ static ULONG WINAPI dcomp_visual_Release(IDCompositionVisual2 *iface)
     return ref;
 }
 
+static HRESULT WINAPI dcomp_visual_private_QueryInterface(IDCompositionVisualPrivate *iface,
+        REFIID iid, void **out)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisualPrivate(iface);
+
+    return dcomp_visual_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
+}
+
+static ULONG WINAPI dcomp_visual_private_AddRef(IDCompositionVisualPrivate *iface)
+{
+    return InterlockedIncrement(&impl_from_IDCompositionVisualPrivate(iface)->ref);
+}
+
+static ULONG WINAPI dcomp_visual_private_Release(IDCompositionVisualPrivate *iface)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisualPrivate(iface);
+    return dcomp_visual_Release(&visual->IDCompositionVisual2_iface);
+}
+
+static HRESULT WINAPI dcomp_visual_private_SetIsVisible(IDCompositionVisualPrivate *iface,
+        BOOL visible)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisualPrivate(iface);
+
+    TRACE("iface %p, visible %d.\n", iface, visible);
+    EnterCriticalSection(&visual->device->lock);
+    visual->visible = !!visible;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
+static HRESULT WINAPI dcomp_visual_private_SetDescription(IDCompositionVisualPrivate *iface,
+        const struct wine_dcomp_visual_desc *desc)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisualPrivate(iface);
+    HRESULT hr;
+
+    TRACE("iface %p, desc %p.\n", iface, desc);
+    if (desc && FAILED(hr = dcomp_validate_description(desc))) return hr;
+    EnterCriticalSection(&visual->device->lock);
+    if (desc) visual->description = *desc;
+    visual->has_description = !!desc;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
+
+
+static HRESULT WINAPI dcomp_visual_private_GetEffectiveVisibility(IDCompositionVisualPrivate *iface,
+        BOOL *visible)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisualPrivate(iface);
+
+    if (!visible) return E_POINTER;
+    dcomp_global_enter();
+    *visible = visual->effective_visible;
+    dcomp_global_leave();
+    return S_OK;
+}
+
+static const IDCompositionVisualPrivateVtbl dcomp_visual_private_vtbl =
+{
+    dcomp_visual_private_QueryInterface,
+    dcomp_visual_private_AddRef,
+    dcomp_visual_private_Release,
+    dcomp_visual_private_SetIsVisible,
+    dcomp_visual_private_SetDescription,
+    dcomp_visual_private_GetEffectiveVisibility,
+};
+
 #define VISUAL_NOTIMPL_OBJECT_METHOD(name, type) \
 static HRESULT WINAPI dcomp_visual_##name(IDCompositionVisual2 *iface, type *value) \
 { FIXME("iface %p, value %p: unsupported.\n", iface, value); return E_NOTIMPL; }
@@ -218,17 +567,64 @@ static HRESULT WINAPI dcomp_visual_##name(IDCompositionVisual2 *iface, enum type
 
 VISUAL_NOTIMPL_OBJECT_METHOD(SetOffsetXAnimation, IDCompositionAnimation)
 VISUAL_NOTIMPL_OBJECT_METHOD(SetOffsetYAnimation, IDCompositionAnimation)
-VISUAL_NOTIMPL_OBJECT_METHOD(SetTransformObject, IDCompositionTransform)
+static HRESULT WINAPI dcomp_visual_SetTransformObject(IDCompositionVisual2 *iface,
+        IDCompositionTransform *value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    TRACE("iface %p, value %p.\n", iface, value);
+    if (value)
+    {
+        FIXME("Transform objects are not supported.\n");
+        return E_NOTIMPL;
+    }
+    EnterCriticalSection(&visual->device->lock);
+    visual->has_transform = FALSE;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
 VISUAL_NOTIMPL_OBJECT_METHOD(SetTransformParent, IDCompositionVisual)
 VISUAL_NOTIMPL_OBJECT_METHOD(SetEffect, IDCompositionEffect)
-VISUAL_NOTIMPL_ENUM_METHOD(SetBitmapInterpolationMode, DCOMPOSITION_BITMAP_INTERPOLATION_MODE)
-VISUAL_NOTIMPL_ENUM_METHOD(SetBorderMode, DCOMPOSITION_BORDER_MODE)
+static HRESULT WINAPI dcomp_visual_SetBitmapInterpolationMode(IDCompositionVisual2 *iface,
+        enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (value != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+            && value != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR
+            && value != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT)
+        return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->lock);
+    visual->interpolation_mode = value;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
+
+static HRESULT WINAPI dcomp_visual_SetBorderMode(IDCompositionVisual2 *iface,
+        enum DCOMPOSITION_BORDER_MODE value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (value != DCOMPOSITION_BORDER_MODE_SOFT && value != DCOMPOSITION_BORDER_MODE_HARD
+            && value != DCOMPOSITION_BORDER_MODE_INHERIT)
+        return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->lock);
+    visual->border_mode = value;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
 
 static HRESULT WINAPI dcomp_visual_SetOffsetX(IDCompositionVisual2 *iface, float value)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+    HRESULT hr;
 
     TRACE("iface %p, value %.8e.\n", iface, value);
+    if (FAILED(hr = dcomp_validate_offset(value)))
+        return hr;
     EnterCriticalSection(&visual->device->lock);
     visual->offset_x = value;
     visual->device->dirty = TRUE;
@@ -239,8 +635,11 @@ static HRESULT WINAPI dcomp_visual_SetOffsetX(IDCompositionVisual2 *iface, float
 static HRESULT WINAPI dcomp_visual_SetOffsetY(IDCompositionVisual2 *iface, float value)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+    HRESULT hr;
 
     TRACE("iface %p, value %.8e.\n", iface, value);
+    if (FAILED(hr = dcomp_validate_offset(value)))
+        return hr;
     EnterCriticalSection(&visual->device->lock);
     visual->offset_y = value;
     visual->device->dirty = TRUE;
@@ -252,6 +651,7 @@ static HRESULT WINAPI dcomp_visual_SetTransform(IDCompositionVisual2 *iface,
         const D2D_MATRIX_3X2_F *value)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+    HRESULT hr;
 
     TRACE("iface %p, value %p.\n", iface, value);
     if (!value)
@@ -262,11 +662,11 @@ static HRESULT WINAPI dcomp_visual_SetTransform(IDCompositionVisual2 *iface,
         LeaveCriticalSection(&visual->device->lock);
         return S_OK;
     }
-    if (value->_12 != 0.0f || value->_21 != 0.0f)
-    {
-        FIXME("Rotation and skew transforms are unsupported.\n");
-        return E_NOTIMPL;
-    }
+    if (!isfinite(value->_11) || !isfinite(value->_12) || !isfinite(value->_21)
+            || !isfinite(value->_22) || !isfinite(value->_31) || !isfinite(value->_32))
+        return E_INVALIDARG;
+    if (FAILED(hr = dcomp_validate_offset(value->_31)) || FAILED(hr = dcomp_validate_offset(value->_32)))
+        return hr;
     EnterCriticalSection(&visual->device->lock);
     visual->transform = *value;
     visual->has_transform = TRUE;
@@ -274,6 +674,7 @@ static HRESULT WINAPI dcomp_visual_SetTransform(IDCompositionVisual2 *iface,
     LeaveCriticalSection(&visual->device->lock);
     return S_OK;
 }
+
 
 static void dcomp_visual_apply_clip(struct dcomp_visual *visual)
 {
@@ -335,7 +736,10 @@ static HRESULT WINAPI dcomp_visual_SetClip(IDCompositionVisual2 *iface, const D2
 static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
 {
     typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
+    typedef HRESULT (WINAPI *set_composition_description_t)(IDXGISwapChain1 *,
+            const struct wine_dcomp_visual_desc *);
     bind_composition_window_t bind_composition_window;
+    set_composition_description_t set_composition_description;
     IDXGISwapChain1 *swapchain;
     HMODULE dxgi;
     HWND window;
@@ -344,6 +748,10 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
             visual->applied_content,
             &IID_IDXGISwapChain1, (void **)&swapchain)))
         return;
+    if ((dxgi = GetModuleHandleW(L"dxgi.dll"))
+            && (set_composition_description = (set_composition_description_t)GetProcAddress(dxgi,
+            "__wine_dxgi_set_composition_description")))
+        set_composition_description(swapchain, NULL);
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
         RemovePropW(window, L"__wine_dcomp_clip_enabled");
@@ -357,6 +765,13 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
         RemovePropW(window, L"__wine_dcomp_scale_y");
         RemovePropW(window, L"__wine_dcomp_transform_enabled");
         RemovePropW(window, L"__wine_dcomp_target_topmost");
+        RemovePropW(window, L"__wine_dcomp_visibility");
+        RemovePropW(window, L"__wine_dcomp_bounds_enabled");
+        RemovePropW(window, L"__wine_dcomp_bounds_x");
+        RemovePropW(window, L"__wine_dcomp_bounds_y");
+        RemovePropW(window, L"__wine_dcomp_bounds_width");
+        RemovePropW(window, L"__wine_dcomp_bounds_height");
+        KillTimer(window, 1);
         if ((dxgi = GetModuleHandleW(L"dxgi.dll")) &&
             (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
                     "__wine_dxgi_bind_composition_window")))
@@ -371,7 +786,10 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
 {
     typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
     bind_composition_window_t bind_composition_window;
+    typedef HRESULT (WINAPI *set_composition_description_t)(IDXGISwapChain1 *,
+            const struct wine_dcomp_visual_desc *);
     IDXGISwapChain1 *swapchain;
+    set_composition_description_t set_composition_description;
     HMODULE dxgi;
     HWND window;
     RECT rect;
@@ -381,12 +799,36 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
             &IID_IDXGISwapChain1, (void **)&swapchain)))
         return;
 
+    if ((dxgi = GetModuleHandleW(L"dxgi.dll"))
+            && (set_composition_description = (set_composition_description_t)GetProcAddress(dxgi,
+            "__wine_dxgi_set_composition_description")))
+        set_composition_description(swapchain, &visual->applied_description);
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
-        LONG offset_x = (LONG)visual->applied_offset_x;
-        LONG offset_y = (LONG)visual->applied_offset_y;
-        LONG scale_x = (LONG)(visual->applied_scale_x * 10000.0f);
-        LONG scale_y = (LONG)(visual->applied_scale_y * 10000.0f);
+        LONG offset_x, offset_y, scale_x, scale_y;
+        LONG bounds_x, bounds_y, bounds_width, bounds_height;
+
+        if (SUCCEEDED(dcomp_description_get_bounds(&visual->applied_description,
+                &bounds_x, &bounds_y, &bounds_width, &bounds_height)))
+        {
+            SetPropW(window, L"__wine_dcomp_bounds_x", ULongToHandle((ULONG)bounds_x));
+            SetPropW(window, L"__wine_dcomp_bounds_y", ULongToHandle((ULONG)bounds_y));
+            SetPropW(window, L"__wine_dcomp_bounds_width", ULongToHandle((ULONG)bounds_width));
+            SetPropW(window, L"__wine_dcomp_bounds_height", ULongToHandle((ULONG)bounds_height));
+            SetPropW(window, L"__wine_dcomp_bounds_enabled", ULongToHandle(1));
+        }
+
+        if (FAILED(dcomp_float_to_long(visual->applied_offset_x, &offset_x))
+                || FAILED(dcomp_float_to_long(visual->applied_offset_y, &offset_y))
+                || FAILED(dcomp_scale_to_fixed(visual->applied_scale_x, &scale_x))
+                || FAILED(dcomp_scale_to_fixed(visual->applied_scale_y, &scale_y)))
+        {
+            FIXME("Invalid composed transform %.8e,%.8e,%.8e,%.8e.\n",
+                    visual->applied_offset_x, visual->applied_offset_y,
+                    visual->applied_scale_x, visual->applied_scale_y);
+            swapchain->lpVtbl->Release(swapchain);
+            return;
+        }
         SetPropW(window, L"__wine_dcomp_offset_x", ULongToHandle((ULONG)offset_x));
         SetPropW(window, L"__wine_dcomp_offset_y", ULongToHandle((ULONG)offset_y));
         SetPropW(window, L"__wine_dcomp_scale_x", ULongToHandle((ULONG)scale_x));
@@ -408,51 +850,141 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
             SetWindowPos(window, HWND_TOP, 0, 0, max(rect.right, 1), max(rect.bottom, 1),
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
+        SetPropW(window, L"__wine_dcomp_visibility",
+                ULongToHandle(visual->effective_visible && !!visual->target_window));
+        if (visual->effective_visible && visual->target_window)
+            ShowWindow(window, SW_SHOW);
+        else
+        {
+            KillTimer(window, 1);
+            ShowWindow(window, SW_HIDE);
+        }
+        if (visual->effective_visible && visual->target_window
+                && FAILED(swapchain->lpVtbl->Present(swapchain, 0, 0)))
+            WARN("Failed to present committed composition content.\n");
         TRACE("Bound composition window %p to target %p.\n", window, visual->target_window);
     }
     swapchain->lpVtbl->Release(swapchain);
     dcomp_visual_apply_clip(visual);
 }
 
-static void dcomp_visual_apply_target(struct dcomp_visual *visual, HWND target_window, BOOL topmost,
-        float offset_x, float offset_y, float scale_x, float scale_y)
+static void dcomp_visual_get_local_description(struct dcomp_visual *visual,
+        struct wine_dcomp_visual_desc *desc)
 {
+    IDXGISwapChain1 *swapchain;
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
+    float width = 1.0f, height = 1.0f;
+
+    if (visual->committed_has_description)
+    {
+        *desc = visual->committed_description;
+        return;
+    }
+    if (visual->applied_content && SUCCEEDED(visual->applied_content->lpVtbl->QueryInterface(
+            visual->applied_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
+    {
+        if (SUCCEEDED(swapchain->lpVtbl->GetDesc1(swapchain, &swapchain_desc)))
+        {
+            width = max(swapchain_desc.Width, 1);
+            height = max(swapchain_desc.Height, 1);
+        }
+        swapchain->lpVtbl->Release(swapchain);
+    }
+    memset(desc, 0, sizeof(*desc));
+    desc->version = WINE_DCOMP_VISUAL_DESC_VERSION;
+    desc->flags = WINE_DCOMP_VISUAL_RENDERER_ACTIVE | WINE_DCOMP_VISUAL_HAS_SIZE;
+    dcomp_matrix_identity(desc->transform);
+    desc->transform[12] = visual->committed_offset_x;
+    desc->transform[13] = visual->committed_offset_y;
+    if (visual->committed_has_transform)
+    {
+        desc->transform[0] = visual->committed_transform._11;
+        desc->transform[1] = visual->committed_transform._12;
+        desc->transform[4] = visual->committed_transform._21;
+        desc->transform[5] = visual->committed_transform._22;
+        desc->transform[12] += visual->committed_transform._31;
+        desc->transform[13] += visual->committed_transform._32;
+    }
+    desc->size[0] = desc->source_size[0] = width;
+    desc->size[1] = desc->source_size[1] = height;
+    desc->content_rect[2] = width;
+    desc->content_rect[3] = height;
+    desc->opacity = 1.0f;
+    desc->interpolation_mode = visual->committed_interpolation_mode
+            == DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR ? 0 : 1;
+    if (visual->committed_border_mode == DCOMPOSITION_BORDER_MODE_SOFT)
+        desc->border_mode = 1;
+    else if (visual->committed_border_mode == DCOMPOSITION_BORDER_MODE_HARD)
+        desc->border_mode = 2;
+    switch (visual->committed_composite_mode)
+    {
+        case DCOMPOSITION_COMPOSITE_MODE_SOURCE_OVER:
+            desc->composite_mode = 1;
+            break;
+        case DCOMPOSITION_COMPOSITE_MODE_DESTINATION_INVERT:
+            desc->composite_mode = 2;
+            break;
+        case DCOMPOSITION_COMPOSITE_MODE_MIN_BLEND:
+            desc->composite_mode = 3;
+            break;
+        default:
+            desc->composite_mode = 0;
+            break;
+    }
+    if (visual->committed_backface_visibility == DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN)
+        desc->flags |= WINE_DCOMP_VISUAL_BACKFACE_HIDDEN;
+    if (visual->committed_has_clip)
+    {
+        desc->flags |= WINE_DCOMP_VISUAL_HAS_CLIP;
+        desc->clip[0] = visual->committed_clip.left;
+        desc->clip[1] = visual->committed_clip.top;
+        desc->clip[2] = visual->committed_clip.right;
+        desc->clip[3] = visual->committed_clip.bottom;
+    }
+}
+
+static void dcomp_visual_apply_target(struct dcomp_visual *visual, HWND target_window, BOOL topmost,
+        const struct wine_dcomp_visual_desc *desc, BOOL visible)
+{
+    struct wine_dcomp_visual_desc applied = *desc;
+    LONG x, y, width, height;
+    HRESULT hr;
+
+    hr = dcomp_description_get_bounds(&applied, &x, &y, &width, &height);
     dcomp_visual_unbind_content(visual);
     visual->target_window = target_window;
     visual->target_topmost = topmost;
-    visual->applied_offset_x = offset_x;
-    visual->applied_offset_y = offset_y;
-    visual->applied_scale_x = scale_x;
-    visual->applied_scale_y = scale_y;
+    visual->applied_offset_x = 0.0f;
+    visual->applied_offset_y = 0.0f;
+    visual->applied_scale_x = 1.0f;
+    visual->applied_scale_y = 1.0f;
+    visual->applied_description = applied;
+    visual->effective_visible = !!target_window && visible && hr == S_OK && applied.opacity > 0.0f;
     dcomp_visual_bind_content(visual);
 }
 
-static void dcomp_visual_set_target_window(struct dcomp_visual *visual, HWND target_window, BOOL topmost,
-        float parent_offset_x, float parent_offset_y, float parent_scale_x, float parent_scale_y)
+
+static void dcomp_visual_set_target_window(struct dcomp_visual *visual, HWND target_window,
+        BOOL topmost, const struct wine_dcomp_visual_desc *parent_desc, BOOL parent_visible)
 {
+    struct wine_dcomp_visual_desc local, world;
     struct dcomp_visual_child *child;
-    float offset_x = visual->committed_offset_x, offset_y = visual->committed_offset_y;
-    float scale_x = 1.0f, scale_y = 1.0f;
+    BOOL visible = parent_visible && visual->committed_visible;
 
-    if (visual->committed_has_transform)
-    {
-        offset_x += visual->committed_transform._31;
-        offset_y += visual->committed_transform._32;
-        scale_x = visual->committed_transform._11;
-        scale_y = visual->committed_transform._22;
-    }
-    offset_x = parent_offset_x + offset_x * parent_scale_x;
-    offset_y = parent_offset_y + offset_y * parent_scale_y;
-    scale_x *= parent_scale_x;
-    scale_y *= parent_scale_y;
+    dcomp_visual_get_local_description(visual, &local);
+    world = local;
+    if (!(local.flags & WINE_DCOMP_VISUAL_TRANSFORM_ABSOLUTE))
+        dcomp_matrix_multiply(world.transform, local.transform, parent_desc->transform);
+    world.opacity = local.opacity * parent_desc->opacity;
+    if (!world.border_mode) world.border_mode = parent_desc->border_mode;
+    if (!world.composite_mode) world.composite_mode = parent_desc->composite_mode;
 
-    dcomp_visual_apply_target(visual, target_window, topmost,
-            offset_x, offset_y, scale_x, scale_y);
+    dcomp_visual_apply_target(visual, target_window, topmost, &world, visible);
     for (child = visual->applied_children; child; child = child->next)
         dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
-                (IDCompositionVisual2 *)child->visual), target_window, topmost,
-                offset_x, offset_y, scale_x, scale_y);
+                (IDCompositionVisual2 *)child->visual), target_window, topmost, &world, visible);
 }
+
 
 static HRESULT WINAPI dcomp_visual_SetContent(IDCompositionVisual2 *iface, IUnknown *content)
 {
@@ -531,10 +1063,13 @@ static HRESULT WINAPI dcomp_visual_AddVisual(IDCompositionVisual2 *iface, IDComp
     child->visual = visual;
     visual->lpVtbl->AddRef(visual);
 
-    if (!reference && insert_above)
-        link = &parent->children;
-    else if (!reference)
-        for (link = &parent->children; *link; link = &(*link)->next);
+    if (!reference)
+    {
+        if (insert_above)
+            for (link = &parent->children; *link; link = &(*link)->next);
+        else
+            link = &parent->children;
+    }
     else
     {
         for (link = &parent->children; *link && (*link)->visual != reference;
@@ -601,7 +1136,22 @@ static HRESULT WINAPI dcomp_visual_RemoveAllVisuals(IDCompositionVisual2 *iface)
     return S_OK;
 }
 
-VISUAL_NOTIMPL_ENUM_METHOD(SetCompositeMode, DCOMPOSITION_COMPOSITE_MODE)
+static HRESULT WINAPI dcomp_visual_SetCompositeMode(IDCompositionVisual2 *iface,
+        enum DCOMPOSITION_COMPOSITE_MODE value)
+{
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (value != DCOMPOSITION_COMPOSITE_MODE_INHERIT
+            && value != DCOMPOSITION_COMPOSITE_MODE_SOURCE_OVER
+            && value != DCOMPOSITION_COMPOSITE_MODE_DESTINATION_INVERT
+            && value != DCOMPOSITION_COMPOSITE_MODE_MIN_BLEND)
+        return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->lock);
+    visual->composite_mode = value;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
+}
 
 static HRESULT WINAPI dcomp_visual_SetOpacityMode(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_OPACITY_MODE mode)
@@ -611,10 +1161,19 @@ static HRESULT WINAPI dcomp_visual_SetOpacityMode(IDCompositionVisual2 *iface,
 }
 
 static HRESULT WINAPI dcomp_visual_SetBackFaceVisibility(IDCompositionVisual2 *iface,
-        enum DCOMPOSITION_BACKFACE_VISIBILITY visibility)
+        enum DCOMPOSITION_BACKFACE_VISIBILITY value)
 {
-    TRACE("iface %p, visibility %#x.\n", iface, visibility);
-    return E_NOTIMPL;
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
+    if (value != DCOMPOSITION_BACKFACE_VISIBILITY_VISIBLE
+            && value != DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN
+            && value != DCOMPOSITION_BACKFACE_VISIBILITY_INHERIT)
+        return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->lock);
+    visual->backface_visibility = value;
+    visual->device->dirty = TRUE;
+    LeaveCriticalSection(&visual->device->lock);
+    return S_OK;
 }
 
 static const IDCompositionVisual2Vtbl dcomp_visual_vtbl =
@@ -674,6 +1233,7 @@ static ULONG WINAPI dcomp_target_Release(IDCompositionTarget *iface)
     {
         struct dcomp_target **link;
         const WCHAR *property = target->topmost ? dcomp_target_above_prop : dcomp_target_below_prop;
+        struct wine_dcomp_visual_desc parent_desc;
 
         dcomp_global_enter();
         EnterCriticalSection(&target->device->lock);
@@ -686,11 +1246,12 @@ static ULONG WINAPI dcomp_target_Release(IDCompositionTarget *iface)
         target->device->dirty = TRUE;
         LeaveCriticalSection(&target->device->lock);
 
+        dcomp_description_identity(&parent_desc);
         if (target->applied_root)
         {
             dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
                     (IDCompositionVisual2 *)target->applied_root), NULL, FALSE,
-                    0.0f, 0.0f, 1.0f, 1.0f);
+                    &parent_desc, TRUE);
             target->applied_root->lpVtbl->Release(target->applied_root);
         }
         if (target->root) target->root->lpVtbl->Release(target->root);
@@ -830,6 +1391,7 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
     struct dcomp_visual *visual, *failed_visual;
     struct dcomp_target *target;
     unsigned int topmost;
+    struct wine_dcomp_visual_desc parent_desc;
     HRESULT hr;
 
     TRACE("iface %p.\n", iface);
@@ -841,6 +1403,27 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
         dcomp_global_leave();
         return S_OK;
     }
+
+    dcomp_description_identity(&parent_desc);
+    /* Validate the complete pending geometry before changing any committed
+     * state or touching helper windows. */
+    for (other_device = dcomp_devices; other_device; other_device = other_device->next_global)
+        for (target = other_device->targets; target; target = target->next)
+        {
+            struct dcomp_visual *root = other_device == device
+                    ? (target->root ? impl_from_IDCompositionVisual2(
+                    (IDCompositionVisual2 *)target->root) : NULL)
+                    : (target->applied_root ? impl_from_IDCompositionVisual2(
+                    (IDCompositionVisual2 *)target->applied_root) : NULL);
+
+            if (root && FAILED(hr = dcomp_visual_validate_target_state(root, device,
+                    &parent_desc)))
+            {
+                LeaveCriticalSection(&device->lock);
+                dcomp_global_leave();
+                return hr;
+            }
+        }
 
     /* Cross-device trees are supported by DirectComposition. The topology is
      * part of the parent visual's transaction; properties are committed by the
@@ -880,6 +1463,14 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
         visual->committed_has_transform = visual->has_transform;
         visual->committed_clip = visual->clip;
         visual->committed_has_clip = visual->has_clip;
+        visual->committed_visible = visual->visible;
+        visual->committed_description = visual->description;
+        visual->committed_has_description = visual->has_description;
+        visual->committed_interpolation_mode = visual->interpolation_mode;
+        visual->committed_border_mode = visual->border_mode;
+        visual->committed_composite_mode = visual->composite_mode;
+        visual->committed_backface_visibility = visual->backface_visibility;
+        visual->effective_visible = visual->committed_visible;
     }
 
     for (target = device->targets; target; target = target->next)
@@ -900,7 +1491,7 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
     {
         EnterCriticalSection(&other_device->lock);
         for (visual = other_device->visuals; visual; visual = visual->next_device)
-            dcomp_visual_apply_target(visual, NULL, FALSE, 0.0f, 0.0f, 1.0f, 1.0f);
+            dcomp_visual_apply_target(visual, NULL, FALSE, &parent_desc, FALSE);
         LeaveCriticalSection(&other_device->lock);
     }
     for (topmost = 0; topmost <= 1; ++topmost)
@@ -911,8 +1502,8 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
             {
                 if (target->topmost != topmost || !target->applied_root) continue;
                 dcomp_visual_set_target_window(impl_from_IDCompositionVisual2(
-                        (IDCompositionVisual2 *)target->applied_root), target->hwnd, target->topmost,
-                        0.0f, 0.0f, 1.0f, 1.0f);
+                        (IDCompositionVisual2 *)target->applied_root), target->hwnd,
+                        target->topmost, &parent_desc, TRUE);
             }
             LeaveCriticalSection(&other_device->lock);
         }
@@ -995,8 +1586,12 @@ static HRESULT WINAPI dcomp_device_CreateVisual(IDCompositionDevice *iface, IDCo
     *out = NULL;
     if (!(visual = calloc(1, sizeof(*visual)))) return E_OUTOFMEMORY;
     visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl;
+    visual->IDCompositionVisualPrivate_iface.lpVtbl = &dcomp_visual_private_vtbl;
     visual->ref = 1;
     visual->device = device;
+    visual->visible = TRUE;
+    visual->committed_visible = TRUE;
+    visual->effective_visible = TRUE;
     iface->lpVtbl->AddRef(iface);
     visual->transform._11 = 1.0f;
     visual->transform._22 = 1.0f;
@@ -1446,9 +2041,8 @@ static const IDCompositionDevice3Vtbl dcomp_device3_vtbl =
     dcomp_device3_CreateAffineTransform2DEffect,
 };
 
-/* Adapted from giang17/wine. Chromium and WebView2 use the export as a
- * DirectComposition capability check. The surface-handle consumers remain
- * separate from Wine365's HWND-backed composition swapchain path. */
+/* Surface-handle consumers are not implemented by the HWND-backed
+ * composition path. */
 HRESULT WINAPI DCompositionCreateSurfaceHandle(DWORD desired_access,
         SECURITY_ATTRIBUTES *security_attributes, HANDLE *surface_handle)
 {
@@ -1456,8 +2050,8 @@ HRESULT WINAPI DCompositionCreateSurfaceHandle(DWORD desired_access,
             desired_access, security_attributes, surface_handle);
 
     if (!surface_handle) return E_INVALIDARG;
-    *surface_handle = CreateEventW(security_attributes, FALSE, FALSE, NULL);
-    return *surface_handle ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+    *surface_handle = NULL;
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **out)
