@@ -270,6 +270,12 @@ static void vkd3d_log_callback(const char *fmt, va_list args)
     __wine_dbg_output(buffer);
 }
 
+static LRESULT CALLBACK wined3d_internal_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_NCCREATE) wined3d_mark_internal_window(window);
+    return DefWindowProcA(window, message, wparam, lparam);
+}
+
 static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
 {
     DWORD wined3d_context_tls_idx;
@@ -294,7 +300,7 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
     /* We might need CS_OWNDC in the future if we notice strange things on Windows.
      * Various articles/posts about OpenGL problems on Windows recommend this. */
     wc.style                = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc          = DefWindowProcA;
+    wc.lpfnWndProc          = wined3d_internal_window_proc;
     wc.cbClsExtra           = 0;
     wc.cbWndExtra           = 0;
     wc.hInstance            = hInstDLL;

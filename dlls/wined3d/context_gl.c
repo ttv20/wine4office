@@ -5116,15 +5116,43 @@ static void apply_texture_blit_state(const struct wined3d_gl_info *gl_info, stru
     texture->sampler_desc.srgb_decode = FALSE;
     texture->sampler_desc.mip_base_level = level;
 }
+static BOOL dcomp_project_point(const struct wine_dcomp_visual_desc *desc, float x, float y,
+        unsigned int width, unsigned int height, float *out_x, float *out_y)
+{
+    const float *m = desc->transform;
+    float tx, ty, tw;
+
+    tx = x * m[0] + y * m[4] + m[12];
+    ty = x * m[1] + y * m[5] + m[13];
+    tw = x * m[3] + y * m[7] + m[15];
+    if (!isfinite(tx) || !isfinite(ty) || !isfinite(tw) || fabsf(tw) < 1.0e-7f)
+        return FALSE;
+    tx = tx / tw - desc->render_origin[0];
+    ty = ty / tw - desc->render_origin[1];
+    if (desc->border_mode == 2)
+    {
+        tx = floorf(tx + 0.5f);
+        ty = floorf(ty + 0.5f);
+    }
+    if (!isfinite(tx) || !isfinite(ty))
+        return FALSE;
+    *out_x = tx * 2.0f / width - 1.0f;
+    *out_y = (height - ty) * 2.0f / height - 1.0f;
+    return TRUE;
+}
+
 
 /* Context activation is done by the caller. */
-void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, struct wined3d_texture_gl *texture_gl,
-        unsigned int sub_resource_idx, const RECT *src_rect, const RECT *dst_rect,
-        enum wined3d_texture_filter_type filter)
+void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl,
+        struct wined3d_texture_gl *texture_gl, unsigned int sub_resource_idx,
+        const RECT *src_rect, const RECT *dst_rect, enum wined3d_texture_filter_type filter,
+        const struct wine_dcomp_visual_desc *composition_desc)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    BOOL composition = composition_desc && (composition_desc->flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE);
     struct wined3d_blt_info info;
     unsigned int level, w, h, i;
+    float left, top, right, bottom;
     SIZE dst_size;
     struct blit_vertex
     {
@@ -5137,6 +5165,8 @@ void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, 
 
     level = sub_resource_idx % texture_gl->t.level_count;
     wined3d_context_gl_bind_texture(context_gl, info.bind_target, texture_gl->texture_rgb.name);
+    if (composition)
+        filter = composition_desc->interpolation_mode ? WINED3D_TEXF_LINEAR : WINED3D_TEXF_POINT;
     apply_texture_blit_state(gl_info, &texture_gl->texture_rgb, info.bind_target, level, filter);
     gl_info->gl_ops.gl.p_glTexParameteri(info.bind_target, GL_TEXTURE_MAX_LEVEL, level);
 
@@ -5146,23 +5176,80 @@ void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, 
     w = dst_size.cx;
     h = dst_size.cy;
 
-    quad[0].x = dst_rect->left * 2.0f / w - 1.0f;
-    quad[0].y = dst_rect->top * 2.0f / h - 1.0f;
-    quad[0].texcoord = info.texcoords[0];
+    if (composition)
+    {
+        float u[4], v[4], x[4], y[4], content_width, content_height, area;
 
-    quad[1].x = dst_rect->right * 2.0f / w - 1.0f;
-    quad[1].y = dst_rect->top * 2.0f / h - 1.0f;
-    quad[1].texcoord = info.texcoords[1];
+        left = composition_desc->content_rect[0];
+        top = composition_desc->content_rect[1];
+        right = composition_desc->content_rect[2];
+        bottom = composition_desc->content_rect[3];
+        if (composition_desc->flags & WINE_DCOMP_VISUAL_HAS_SIZE)
+        {
+            left = max(left, 0.0f);
+            top = max(top, 0.0f);
+            right = min(right, composition_desc->size[0]);
+            bottom = min(bottom, composition_desc->size[1]);
+        }
+        if (composition_desc->flags & WINE_DCOMP_VISUAL_HAS_CLIP)
+        {
+            left = max(left, composition_desc->clip[0]);
+            top = max(top, composition_desc->clip[1]);
+            right = min(right, composition_desc->clip[2]);
+            bottom = min(bottom, composition_desc->clip[3]);
+        }
+        content_width = composition_desc->content_rect[2] - composition_desc->content_rect[0];
+        content_height = composition_desc->content_rect[3] - composition_desc->content_rect[1];
+        if (!(right > left && bottom > top && content_width > 0.0f && content_height > 0.0f))
+            goto done;
 
-    quad[2].x = dst_rect->left * 2.0f / w - 1.0f;
-    quad[2].y = dst_rect->bottom * 2.0f / h - 1.0f;
-    quad[2].texcoord = info.texcoords[2];
+        x[0] = x[2] = left;
+        x[1] = x[3] = right;
+        y[0] = y[1] = top;
+        y[2] = y[3] = bottom;
+        u[0] = u[2] = (left - composition_desc->content_rect[0]) / content_width;
+        u[1] = u[3] = (right - composition_desc->content_rect[0]) / content_width;
+        v[0] = v[1] = (top - composition_desc->content_rect[1]) / content_height;
+        v[2] = v[3] = (bottom - composition_desc->content_rect[1]) / content_height;
 
-    quad[3].x = dst_rect->right * 2.0f / w - 1.0f;
-    quad[3].y = dst_rect->bottom * 2.0f / h - 1.0f;
-    quad[3].texcoord = info.texcoords[3];
+        for (i = 0; i < ARRAY_SIZE(quad); ++i)
+        {
+            if (!dcomp_project_point(composition_desc, x[i], y[i], w, h, &quad[i].x, &quad[i].y))
+                goto done;
+            quad[i].texcoord.x = info.texcoords[0].x
+                    + u[i] * (info.texcoords[1].x - info.texcoords[0].x)
+                    + v[i] * (info.texcoords[2].x - info.texcoords[0].x);
+            quad[i].texcoord.y = info.texcoords[0].y
+                    + u[i] * (info.texcoords[1].y - info.texcoords[0].y)
+                    + v[i] * (info.texcoords[2].y - info.texcoords[0].y);
+            quad[i].texcoord.z = info.texcoords[0].z
+                    + u[i] * (info.texcoords[1].z - info.texcoords[0].z)
+                    + v[i] * (info.texcoords[2].z - info.texcoords[0].z);
+        }
+        area = (quad[1].x - quad[0].x) * (quad[2].y - quad[0].y)
+                - (quad[1].y - quad[0].y) * (quad[2].x - quad[0].x);
+        if ((composition_desc->flags & WINE_DCOMP_VISUAL_BACKFACE_HIDDEN) && area >= 0.0f)
+            goto done;
+    }
+    else
+    {
+        quad[0].x = dst_rect->left * 2.0f / w - 1.0f;
+        quad[0].y = dst_rect->top * 2.0f / h - 1.0f;
+        quad[0].texcoord = info.texcoords[0];
 
-    /* Draw a quad. */
+        quad[1].x = dst_rect->right * 2.0f / w - 1.0f;
+        quad[1].y = dst_rect->top * 2.0f / h - 1.0f;
+        quad[1].texcoord = info.texcoords[1];
+
+        quad[2].x = dst_rect->left * 2.0f / w - 1.0f;
+        quad[2].y = dst_rect->bottom * 2.0f / h - 1.0f;
+        quad[2].texcoord = info.texcoords[2];
+
+        quad[3].x = dst_rect->right * 2.0f / w - 1.0f;
+        quad[3].y = dst_rect->bottom * 2.0f / h - 1.0f;
+        quad[3].texcoord = info.texcoords[3];
+    }
+
     if (gl_info->supported[ARB_VERTEX_BUFFER_OBJECT])
     {
         if (!context_gl->blit_vbo)
@@ -5199,6 +5286,8 @@ void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, 
     }
     checkGLcall("draw");
 
-    gl_info->gl_ops.gl.p_glTexParameteri(info.bind_target, GL_TEXTURE_MAX_LEVEL, texture_gl->t.level_count - 1);
+done:
+    gl_info->gl_ops.gl.p_glTexParameteri(info.bind_target, GL_TEXTURE_MAX_LEVEL,
+            texture_gl->t.level_count - 1);
     wined3d_context_gl_bind_texture(context_gl, info.bind_target, 0);
 }

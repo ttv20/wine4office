@@ -691,6 +691,12 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
                 ? VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT
                 : VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT;
 
+        if (!vk_info->vk_ops.vkGetPhysicalDeviceImageFormatProperties2)
+        {
+            WARN("External image format queries are not supported by this Vulkan instance.\n");
+            return FALSE;
+        }
+
         external_format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
         external_format_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
         format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;

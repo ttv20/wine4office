@@ -2261,6 +2261,7 @@ struct wined3d_decoder_output_view;
 struct wined3d_depth_stencil_state;
 struct wined3d_device;
 struct wined3d_device_context;
+struct wine_dcomp_visual_desc;
 struct wined3d_output;
 struct wined3d_palette;
 struct wined3d_query;
@@ -2932,6 +2933,8 @@ HRESULT __cdecl wined3d_swapchain_set_gamma_ramp(const struct wined3d_swapchain 
 HRESULT __cdecl wined3d_swapchain_set_max_frame_latency(struct wined3d_swapchain *swapchain, unsigned int latency);
 void __cdecl wined3d_swapchain_set_palette(struct wined3d_swapchain *swapchain, struct wined3d_palette *palette);
 void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWND window);
+void __cdecl wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swapchain,
+        const struct wine_dcomp_visual_desc *desc);
 
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,

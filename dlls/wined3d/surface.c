@@ -340,7 +340,7 @@ static struct wined3d_texture *surface_convert_format(struct wined3d_texture *sr
     return dst_texture;
 }
 
-void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned int sub_resource_idx,
+BOOL texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned int sub_resource_idx,
         struct wined3d_context *context, DWORD src_location, DWORD dst_location)
 {
     struct wined3d_resource *resource = &texture->resource;
@@ -354,18 +354,24 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     struct wined3d_bo_address data;
     bool restore_context = false;
     unsigned int restore_idx;
-    BYTE *row, *top, *bottom;
+    BYTE *row = NULL, *top, *bottom;
+    uintptr_t buffer_offset = 0;
+    void *read_ptr, *mem;
+    BOOL mapped = FALSE, success = FALSE;
     BOOL src_is_upside_down;
-    BYTE *mem = NULL;
-    uint8_t *offset;
     unsigned int i;
 
     TRACE("texture %p, sub_resource_idx %u, context %p, src_location %s, dst_location %s.\n",
             texture, sub_resource_idx, context, wined3d_debug_location(src_location), wined3d_debug_location(dst_location));
 
+    if (!wined3d_texture_validate_sub_resource_idx(texture, sub_resource_idx))
+        return FALSE;
+
     /* dst_location was already prepared by the caller. */
     wined3d_texture_get_bo_address(texture, sub_resource_idx, &data, dst_location);
-    offset = data.addr;
+    if (!data.buffer_object && !data.addr)
+        return FALSE;
+    read_ptr = data.addr;
 
     restore_texture = context->current_rt.texture;
     restore_idx = context->current_rt.sub_resource_idx;
@@ -410,7 +416,8 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     {
         GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, wined3d_bo_gl(data.buffer_object)->id));
         checkGLcall("glBindBuffer");
-        offset += data.buffer_object->buffer_offset;
+        buffer_offset = (uintptr_t)data.addr + data.buffer_object->buffer_offset;
+        read_ptr = (void *)buffer_offset;
     }
     else
     {
@@ -421,6 +428,8 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     level = sub_resource_idx % texture->level_count;
     wined3d_texture_get_pitch(texture, level, &row_pitch, &slice_pitch);
     format_gl = wined3d_format_gl(resource->format);
+    if (!format_gl->f.byte_count || row_pitch % format_gl->f.byte_count)
+        goto cleanup;
 
     /* Setup pixel store pack state -- to glReadPixels into the correct place */
     gl_info->gl_ops.gl.p_glPixelStorei(GL_PACK_ROW_LENGTH, row_pitch / format_gl->f.byte_count);
@@ -429,7 +438,7 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
     width = wined3d_texture_get_level_width(texture, level);
     height = wined3d_texture_get_level_height(texture, level);
     gl_info->gl_ops.gl.p_glReadPixels(0, 0, width, height,
-            format_gl->format, format_gl->type, offset);
+            format_gl->format, format_gl->type, read_ptr);
     checkGLcall("glReadPixels");
 
     /* Reset previous pixel store pack state */
@@ -442,14 +451,21 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
          * prevent this. Flip the lines in software. */
 
         if (!(row = malloc(row_pitch)))
-            goto error;
+            goto cleanup;
 
         if (data.buffer_object)
         {
             mem = GL_EXTCALL(glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_WRITE));
             checkGLcall("glMapBuffer");
+            if (!mem)
+                goto cleanup;
+            mapped = TRUE;
+            mem = (BYTE *)mem + buffer_offset;
         }
-        mem += (uintptr_t)offset;
+        else
+        {
+            mem = data.addr;
+        }
 
         top = mem;
         bottom = mem + row_pitch * (height - 1);
@@ -462,12 +478,21 @@ void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned i
             bottom -= row_pitch;
         }
         free(row);
+        row = NULL;
 
-        if (data.buffer_object)
+        if (mapped)
+        {
             GL_EXTCALL(glUnmapBuffer(GL_PIXEL_PACK_BUFFER));
+            mapped = FALSE;
+        }
     }
 
-error:
+    success = TRUE;
+
+cleanup:
+    free(row);
+    if (mapped)
+        GL_EXTCALL(glUnmapBuffer(GL_PIXEL_PACK_BUFFER));
     if (data.buffer_object)
     {
         GL_EXTCALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, 0));
@@ -477,6 +502,8 @@ error:
 
     if (restore_context)
         context_restore(context, restore_texture, restore_idx);
+
+    return success;
 }
 
 /* Context activation is done by the caller. */
@@ -1385,20 +1412,31 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     struct wined3d_texture_sub_resource *src_sub_resource, *dst_sub_resource;
     struct wined3d_device *device = dst_texture->resource.device;
     struct wined3d_swapchain *src_swapchain, *dst_swapchain;
-    BOOL scale, convert, resolve, resolve_typeless = FALSE;
+    BOOL scale, convert, resolve, src_ds, dst_ds, resolve_typeless = FALSE;
     const struct wined3d_format *resolve_format = NULL;
     const struct wined3d_color_key *colour_key = NULL;
     DWORD dst_location, valid_locations;
     struct wined3d_context *context;
     enum wined3d_blit_op blit_op;
     RECT src_rect, dst_rect;
-    bool src_ds, dst_ds;
+    HRESULT hr = WINED3DERR_INVALIDCALL;
 
     static const DWORD simple_blit = WINED3D_BLT_SRC_CKEY
             | WINED3D_BLT_SRC_CKEY_OVERRIDE
             | WINED3D_BLT_ALPHA_TEST
             | WINED3D_BLT_RAW;
 
+    if (!dst_box || !src_box || !wined3d_texture_validate_sub_resource_idx(dst_texture, dst_sub_resource_idx)
+            || !wined3d_texture_validate_sub_resource_idx(src_texture, src_sub_resource_idx)
+            || FAILED(hr = wined3d_resource_check_box_dimensions(&dst_texture->resource,
+            dst_sub_resource_idx, dst_box))
+            || FAILED(hr = wined3d_resource_check_box_dimensions(&src_texture->resource,
+            src_sub_resource_idx, src_box)))
+    {
+        WARN("Invalid blit boxes, source %s, destination %s.\n",
+                src_box ? debug_box(src_box) : "(null)", dst_box ? debug_box(dst_box) : "(null)");
+        return FAILED(hr) ? hr : WINED3DERR_INVALIDCALL;
+    }
     TRACE("dst_texture %p, dst_sub_resource_idx %u, dst_box %s, src_texture %p, "
             "src_sub_resource_idx %u, src_box %s, flags %#x, fx %p, filter %s.\n",
             dst_texture, dst_sub_resource_idx, debug_box(dst_box), src_texture, src_sub_resource_idx,
@@ -1585,67 +1623,14 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
             TRACE("Not doing download because the source format needs conversion.\n");
         else if (!(src_texture->flags & WINED3D_TEXTURE_DOWNLOADABLE))
             TRACE("Not doing download because texture is not downloadable.\n");
-        else if (src_texture->resource.format_attrs & WINED3D_FORMAT_ATTR_COMPRESSED
-                && (!wined3d_texture_is_full_rect(src_texture,
-                src_sub_resource_idx % src_texture->level_count, &src_rect)
-                || !wined3d_texture_is_full_rect(dst_texture,
-                dst_sub_resource_idx % dst_texture->level_count, &dst_rect)))
-            TRACE("Not doing a partial download of a compressed texture.\n");
         else
         {
-            bool full_copy = wined3d_texture_is_full_rect(src_texture,
-                    src_sub_resource_idx % src_texture->level_count, &src_rect)
-                    && wined3d_texture_is_full_rect(dst_texture,
-                    dst_sub_resource_idx % dst_texture->level_count, &dst_rect);
-            bool pair_matches = false;
-
-            if (full_copy)
+            if (!wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx,
+                    dst_box->left, dst_box->top, dst_box->front,
+                    src_texture, src_sub_resource_idx, src_box))
             {
-                if (!src_sub_resource->staging_destination_id)
-                    src_sub_resource->staging_destination_id = dst_texture->object_id;
-                else if (src_sub_resource->staging_destination_id != dst_texture->object_id)
-                    src_sub_resource->staging_multi_consumer = true;
-                pair_matches = !src_sub_resource->staging_multi_consumer
-                        && src_sub_resource->staging_destination_id == dst_texture->object_id;
-            }
-
-            /* Keep read-only staging resources as CPU shadows of their source.
-             * When a render target is copied repeatedly, downloading only the
-             * GPU-written rectangle avoids re-reading unchanged atlas pixels. */
-            if (full_copy && pair_matches
-                    && dst_sub_resource->staging_source_id == src_texture->object_id
-                    && dst_sub_resource->staging_source_sub_resource_idx == src_sub_resource_idx
-                    && dst_sub_resource->locations & dst_texture->resource.map_binding
-                    && !src_sub_resource->gpu_dirty_full)
-            {
-                if (src_sub_resource->gpu_dirty_valid)
-                {
-                    struct wined3d_box dirty_box;
-
-                    wined3d_box_set(&dirty_box, src_sub_resource->gpu_dirty_rect.left,
-                            src_sub_resource->gpu_dirty_rect.top, src_sub_resource->gpu_dirty_rect.right,
-                            src_sub_resource->gpu_dirty_rect.bottom, 0, 1);
-                    wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx,
-                            dirty_box.left, dirty_box.top, 0,
-                            src_texture, src_sub_resource_idx, &dirty_box);
-                }
-            }
-            else
-            {
-                wined3d_texture_download_from_texture(dst_texture, dst_sub_resource_idx,
-                        dst_box->left, dst_box->top, dst_box->front,
-                        src_texture, src_sub_resource_idx, src_box);
-            }
-
-            if (full_copy)
-            {
-                dst_sub_resource->staging_source_id = src_texture->object_id;
-                dst_sub_resource->staging_source_sub_resource_idx = src_sub_resource_idx;
-                if (pair_matches)
-                {
-                    src_sub_resource->gpu_dirty_valid = false;
-                    src_sub_resource->gpu_dirty_full = false;
-                }
+                WARN("Failed to download source texture into destination.\n");
+                return WINED3DERR_INVALIDCALL;
             }
             return WINED3D_OK;
         }

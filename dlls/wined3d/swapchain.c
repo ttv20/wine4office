@@ -141,6 +141,11 @@ void wined3d_swapchain_vk_cleanup(struct wined3d_swapchain_vk *swapchain_vk)
 
     wined3d_cs_destroy_object(cs, wined3d_swapchain_vk_destroy_object, swapchain_vk);
     wined3d_cs_finish(cs, WINED3D_CS_QUEUE_DEFAULT);
+    if (swapchain_vk->composition_source)
+        wined3d_texture_decref( swapchain_vk->composition_source );
+    swapchain_vk->composition_source = NULL;
+    swapchain_vk->composition_image = VK_NULL_HANDLE;
+    swapchain_vk->composition_command_buffer_id = 0;
 
     wined3d_swapchain_cleanup(&swapchain_vk->s);
 }
@@ -212,6 +217,17 @@ void CDECL wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWN
     if (!(swapchain->dc = GetDCEx(swapchain->win_handle, 0, DCX_USESTYLE | DCX_CACHE)))
         WARN("Failed to retrieve device context, trying swapchain backup.\n");
 }
+void CDECL wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swapchain,
+        const struct wine_dcomp_visual_desc *desc)
+{
+    TRACE("swapchain %p, desc %p.\n", swapchain, desc);
+
+    if (!desc)
+        memset(&swapchain->composition_desc, 0, sizeof(swapchain->composition_desc));
+    else
+        swapchain->composition_desc = *desc;
+}
+
 
 HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
@@ -1081,6 +1097,267 @@ static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *
     wined3d_swapchain_vk_recreate(swapchain_vk);
 }
 
+static BYTE dcomp_sample_byte( const BYTE *data, UINT width, UINT height, UINT row_pitch,
+        float x, float y, unsigned int channel, BOOL linear )
+{
+    int x0, y0, x1, y1;
+    float fx, fy, value;
+
+    x = max( 0.0f, min( x, (float)width - 1.0f ));
+    y = max( 0.0f, min( y, (float)height - 1.0f ));
+    if (!linear)
+        return data[(UINT)(y + 0.5f) * row_pitch + (UINT)(x + 0.5f) * 4 + channel];
+    x0 = floorf( x );
+    y0 = floorf( y );
+    x1 = min( x0 + 1, (int)width - 1 );
+    y1 = min( y0 + 1, (int)height - 1 );
+    fx = x - x0;
+    fy = y - y0;
+    value = (1.0f - fy) * ((1.0f - fx) * data[y0 * row_pitch + x0 * 4 + channel]
+            + fx * data[y0 * row_pitch + x1 * 4 + channel])
+            + fy * ((1.0f - fx) * data[y1 * row_pitch + x0 * 4 + channel]
+            + fx * data[y1 * row_pitch + x1 * 4 + channel]);
+    return value + 0.5f;
+}
+
+static BOOL dcomp_project_vk( const struct wine_dcomp_visual_desc *desc,
+        float x, float y, float *out_x, float *out_y )
+{
+    const float *m = desc->transform;
+    float tx = x * m[0] + y * m[4] + m[12];
+    float ty = x * m[1] + y * m[5] + m[13];
+    float tw = x * m[3] + y * m[7] + m[15];
+
+    if (!isfinite( tx ) || !isfinite( ty ) || !isfinite( tw ) || fabsf( tw ) < 1.0e-7f)
+        return FALSE;
+    *out_x = tx / tw - desc->render_origin[0];
+    *out_y = ty / tw - desc->render_origin[1];
+    return isfinite( *out_x ) && isfinite( *out_y );
+}
+
+static BOOL dcomp_inverse_vk( const struct wine_dcomp_visual_desc *desc,
+        float x, float y, float *out_x, float *out_y )
+{
+    const float *m = desc->transform;
+    float a = m[0], b = m[4], c = m[12];
+    float d = m[1], e = m[5], f = m[13];
+    float g = m[3], h = m[7], i = m[15];
+    float det, tx, ty, tw;
+
+    x += desc->render_origin[0];
+    y += desc->render_origin[1];
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!isfinite( det ) || fabsf( det ) < 1.0e-7f) return FALSE;
+    tx = ((e * i - f * h) * x + (c * h - b * i) * y + (b * f - c * e)) / det;
+    ty = ((f * g - d * i) * x + (a * i - c * g) * y + (c * d - a * f)) / det;
+    tw = ((d * h - e * g) * x + (b * g - a * h) * y + (a * e - b * d)) / det;
+    if (!isfinite( tx ) || !isfinite( ty ) || !isfinite( tw ) || fabsf( tw ) < 1.0e-7f)
+        return FALSE;
+    *out_x = tx / tw;
+    *out_y = ty / tw;
+    return isfinite( *out_x ) && isfinite( *out_y );
+}
+
+static BOOL wined3d_swapchain_vk_apply_composition(struct wined3d_swapchain *swapchain,
+        const struct wine_dcomp_visual_desc *desc, const RECT *src_rect,
+        struct wined3d_texture **source_backup)
+{
+    struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
+    struct wined3d_texture *source_texture = NULL, *output_texture = NULL;
+    struct wined3d_resource_desc staging_desc;
+    struct wined3d_map_desc source_map, output_map;
+    struct wined3d_box box;
+    float left, top, right, bottom, source_width, source_height, area, sx, sy, u, v;
+    float corner_x[4], corner_y[4], min_x, min_y, max_x, max_y;
+    UINT source_width_pixels, source_height_pixels, x, y;
+    unsigned int channel;
+    BYTE *source_data, *output_data, *dst;
+    UINT source_row_pitch, output_row_pitch;
+    BOOL linear, source_mapped = FALSE, output_mapped = FALSE;
+    HRESULT hr;
+    if (!source_backup) return FALSE;
+    *source_backup = NULL;
+    if (back_buffer->resource.format->byte_count != 4
+            || (back_buffer->resource.format->attrs & WINED3D_FORMAT_ATTR_BLOCKS))
+    {
+        WARN("Vulkan composition requires an uncompressed four-byte surface.\n");
+        return FALSE;
+    }
+    source_width_pixels = wined3d_texture_get_level_width( back_buffer, 0 );
+    source_height_pixels = wined3d_texture_get_level_height( back_buffer, 0 );
+    if (!source_width_pixels || !source_height_pixels
+            || src_rect->left < 0 || src_rect->top < 0
+            || src_rect->right > (LONG)source_width_pixels
+            || src_rect->bottom > (LONG)source_height_pixels
+            || src_rect->right <= src_rect->left || src_rect->bottom <= src_rect->top)
+        return FALSE;
+
+    staging_desc.resource_type = WINED3D_RTYPE_TEXTURE_2D;
+    staging_desc.format = back_buffer->resource.format->id;
+    staging_desc.multisample_type = 0;
+    staging_desc.multisample_quality = 0;
+    staging_desc.usage = 0;
+    staging_desc.bind_flags = 0;
+    staging_desc.access = WINED3D_RESOURCE_ACCESS_CPU
+            | WINED3D_RESOURCE_ACCESS_MAP_R | WINED3D_RESOURCE_ACCESS_MAP_W;
+    staging_desc.width = source_width_pixels;
+    staging_desc.height = source_height_pixels;
+    staging_desc.depth = 1;
+    staging_desc.size = 0;
+    if (FAILED(hr = wined3d_texture_create( back_buffer->resource.device, &staging_desc, 1, 1, 0,
+            NULL, NULL, &wined3d_null_parent_ops, &source_texture )))
+        return FALSE;
+    if (FAILED(hr = wined3d_texture_create( back_buffer->resource.device, &staging_desc, 1, 1, 0,
+            NULL, NULL, &wined3d_null_parent_ops, &output_texture )))
+        goto failed;
+    wined3d_box_set( &box, 0, 0, source_width_pixels, source_height_pixels, 0, 1 );
+    if (!wined3d_texture_download_from_texture( source_texture, 0, 0, 0, 0,
+            back_buffer, 0, &box ))
+        goto failed;
+    if (FAILED(hr = wined3d_resource_map( &source_texture->resource, 0, &source_map,
+            NULL, WINED3D_MAP_READ )))
+        goto failed;
+    source_data = source_map.data;
+    source_row_pitch = source_map.row_pitch;
+    source_mapped = TRUE;
+    if (FAILED(hr = wined3d_resource_map( &output_texture->resource, 0, &output_map,
+            NULL, WINED3D_MAP_WRITE )))
+        goto failed;
+    output_mapped = TRUE;
+    output_data = output_map.data;
+    output_row_pitch = output_map.row_pitch;
+    for (y = 0; y < source_height_pixels; ++y)
+        memset( output_data + y * output_row_pitch, 0, source_width_pixels * 4 );
+
+    left = desc->content_rect[0];
+    top = desc->content_rect[1];
+    right = desc->content_rect[2];
+    bottom = desc->content_rect[3];
+    if (desc->flags & WINE_DCOMP_VISUAL_HAS_SIZE)
+    {
+        left = max( left, 0.0f );
+        top = max( top, 0.0f );
+        right = min( right, desc->size[0] );
+        bottom = min( bottom, desc->size[1] );
+    }
+    if (desc->flags & WINE_DCOMP_VISUAL_HAS_CLIP)
+    {
+        left = max( left, desc->clip[0] );
+        top = max( top, desc->clip[1] );
+        right = min( right, desc->clip[2] );
+        bottom = min( bottom, desc->clip[3] );
+    }
+    source_width = desc->content_rect[2] - desc->content_rect[0];
+    source_height = desc->content_rect[3] - desc->content_rect[1];
+    if (!(right > left && bottom > top && source_width > 0.0f && source_height > 0.0f))
+        goto output_done;
+    if (!dcomp_project_vk( desc, left, top, &corner_x[0], &corner_y[0])
+            || !dcomp_project_vk( desc, right, top, &corner_x[1], &corner_y[1])
+            || !dcomp_project_vk( desc, left, bottom, &corner_x[2], &corner_y[2])
+            || !dcomp_project_vk( desc, right, bottom, &corner_x[3], &corner_y[3]))
+        goto output_done;
+    if (desc->border_mode == 2)
+        for (x = 0; x < ARRAY_SIZE(corner_x); ++x)
+        {
+            corner_x[x] = floorf( corner_x[x] + 0.5f );
+            corner_y[x] = floorf( corner_y[x] + 0.5f );
+        }
+    area = (corner_x[1] - corner_x[0]) * (corner_y[2] - corner_y[0])
+            - (corner_y[1] - corner_y[0]) * (corner_x[2] - corner_x[0]);
+    if ((desc->flags & WINE_DCOMP_VISUAL_BACKFACE_HIDDEN) && area <= 0.0f)
+        goto output_done;
+    min_x = max_x = corner_x[0];
+    min_y = max_y = corner_y[0];
+    for (x = 1; x < ARRAY_SIZE(corner_x); ++x)
+    {
+        min_x = min( min_x, corner_x[x] );
+        min_y = min( min_y, corner_y[x] );
+        max_x = max( max_x, corner_x[x] );
+        max_y = max( max_y, corner_y[x] );
+    }
+    min_x = max( min_x, 0.0f );
+    min_y = max( min_y, 0.0f );
+    max_x = min( max_x, (float)source_width_pixels );
+    max_y = min( max_y, (float)source_height_pixels );
+    linear = !!desc->interpolation_mode;
+    for (y = (UINT)min_y; y < (UINT)max_y; ++y)
+        for (x = (UINT)min_x; x < (UINT)max_x; ++x)
+        {
+            if (!dcomp_inverse_vk( desc, x + 0.5f, y + 0.5f, &sx, &sy)
+                    || sx < left || sx >= right || sy < top || sy >= bottom)
+                continue;
+            u = (sx - desc->content_rect[0]) / source_width;
+            v = (sy - desc->content_rect[1]) / source_height;
+            dst = output_data + y * output_row_pitch + x * 4;
+            for (channel = 0; channel < 4; ++channel)
+            {
+                BYTE value = dcomp_sample_byte( source_data, source_width_pixels,
+                        source_height_pixels, source_row_pitch,
+                        src_rect->left + u * (src_rect->right - src_rect->left),
+                        src_rect->top + v * (src_rect->bottom - src_rect->top),
+                        channel, linear );
+                dst[channel] = (BYTE)(value * desc->opacity + 0.5f);
+            }
+            if (desc->composite_mode == 2)
+            {
+                for (channel = 0; channel < 3; ++channel)
+                    dst[channel] = 255 - dst[channel];
+            }
+            else if (desc->composite_mode == 3)
+            {
+                memset( dst, 0, 3 );
+            }
+        }
+output_done:
+    if (output_mapped) wined3d_resource_unmap( &output_texture->resource, 0 );
+    if (source_mapped) wined3d_resource_unmap( &source_texture->resource, 0 );
+    wined3d_box_set( &box, 0, 0, source_width_pixels, source_height_pixels, 0, 1 );
+    wined3d_texture_upload_from_texture( back_buffer, 0, 0, 0, 0, output_texture, 0, &box );
+    *source_backup = source_texture;
+    source_texture = NULL;
+    wined3d_texture_decref( output_texture );
+    return TRUE;
+
+failed:
+    if (output_mapped) wined3d_resource_unmap( &output_texture->resource, 0 );
+    if (source_mapped) wined3d_resource_unmap( &source_texture->resource, 0 );
+    if (output_texture) wined3d_texture_decref( output_texture );
+    if (source_texture) wined3d_texture_decref( source_texture );
+    return FALSE;
+}
+static void wined3d_swapchain_vk_restore_composition(struct wined3d_swapchain_vk *swapchain_vk,
+        struct wined3d_context_vk *context_vk)
+{
+    struct wined3d_texture *back_buffer = NULL;
+    struct wined3d_box box;
+    unsigned int i;
+
+    if (!swapchain_vk->composition_source) return;
+    if (swapchain_vk->composition_command_buffer_id)
+        wined3d_context_vk_wait_command_buffer( context_vk,
+                swapchain_vk->composition_command_buffer_id );
+    for (i = 0; i < swapchain_vk->s.state.desc.backbuffer_count; ++i)
+    {
+        if (wined3d_texture_vk( swapchain_vk->s.back_buffers[i] )->image.vk_image
+                == swapchain_vk->composition_image)
+        {
+            back_buffer = swapchain_vk->s.back_buffers[i];
+            break;
+        }
+    }
+    if (back_buffer)
+    {
+        wined3d_box_set( &box, 0, 0, wined3d_texture_get_level_width( back_buffer, 0 ),
+                wined3d_texture_get_level_height( back_buffer, 0 ), 0, 1 );
+        wined3d_texture_upload_from_texture( back_buffer, 0, 0, 0, 0,
+                swapchain_vk->composition_source, 0, &box );
+    }
+    wined3d_texture_decref( swapchain_vk->composition_source );
+    swapchain_vk->composition_source = NULL;
+    swapchain_vk->composition_image = VK_NULL_HANDLE;
+    swapchain_vk->composition_command_buffer_id = 0;
+}
+
 static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain_vk,
         struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval)
 {
@@ -1103,6 +1380,18 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
 
     TRACE("swapchain_vk %p, context_vk %p, src_rect %s, dst_rect %s, swap_interval %u.\n",
             swapchain_vk, context_vk, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect), swap_interval);
+    wined3d_swapchain_vk_restore_composition( swapchain_vk, context_vk );
+    if (swapchain_vk->s.composition_desc.flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE)
+    {
+        if (!wined3d_swapchain_vk_apply_composition( &swapchain_vk->s,
+                &swapchain_vk->s.composition_desc, src_rect, &swapchain_vk->composition_source ))
+        {
+            ERR("Failed to apply Vulkan composition descriptor.\n");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+    }
+    if (swapchain_vk->composition_source)
+        swapchain_vk->composition_image = back_buffer_vk->image.vk_image;
 
     wined3d_swapchain_vk_set_swap_interval(swapchain_vk, swap_interval);
 
@@ -1195,6 +1484,8 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     wined3d_context_vk_submit_command_buffer(context_vk,
             1, &swapchain_vk->vk_semaphores[present_idx].available, &wait_stage,
             1, &swapchain_vk->vk_semaphores[present_idx].presentable);
+    if (swapchain_vk->composition_source)
+        swapchain_vk->composition_command_buffer_id = context_vk->current_command_buffer.id;
 
     present_desc.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_desc.pNext = NULL;

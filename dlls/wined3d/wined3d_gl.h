@@ -755,9 +755,10 @@ void wined3d_context_gl_copy_bo_address(struct wined3d_context_gl *context_gl,
         unsigned int range_count, const struct wined3d_range *ranges, uint32_t map_flags);
 void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl);
 void wined3d_context_gl_destroy_bo(struct wined3d_context_gl *context_gl, struct wined3d_bo_gl *bo);
-void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl, struct wined3d_texture_gl *texture_gl,
-        unsigned int sub_resource_idx, const RECT *src_rect, const RECT *dst_rect,
-        enum wined3d_texture_filter_type filter);
+void wined3d_context_gl_draw_shaded_quad(struct wined3d_context_gl *context_gl,
+        struct wined3d_texture_gl *texture_gl, unsigned int sub_resource_idx,
+        const RECT *src_rect, const RECT *dst_rect, enum wined3d_texture_filter_type filter,
+        const struct wine_dcomp_visual_desc *composition_desc);
 void wined3d_context_gl_enable_clip_distances(struct wined3d_context_gl *context_gl, uint32_t mask);
 void wined3d_context_gl_end_transform_feedback(struct wined3d_context_gl *context_gl);
 void wined3d_context_gl_flush_bo_address(struct wined3d_context_gl *context_gl,
@@ -1023,7 +1024,7 @@ struct wined3d_blt_info
 
 void texture2d_get_blt_info(const struct wined3d_texture_gl *texture_gl, unsigned int sub_resource_idx,
         const RECT *rect, struct wined3d_blt_info *info);
-void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned int sub_resource_idx,
+BOOL texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned int sub_resource_idx,
         struct wined3d_context *context, DWORD src_location, DWORD dst_location);
 
 void wined3d_gl_texture_swizzle_from_color_fixup(GLint swizzle[4], struct color_fixup_desc fixup);

@@ -42,7 +42,6 @@
 #include "winreg.h"
 #include "wingdi.h"
 #include "winuser.h"
-#include "imm.h"
 #include "winternl.h"
 #include "dxva.h"
 #include "ddk/d3dkmthk.h"
@@ -50,6 +49,7 @@
 
 #include "objbase.h"
 #include "wine/wined3d.h"
+#include "wine/dcomp.h"
 #include "wine/list.h"
 #include "wine/rbtree.h"
 
@@ -57,11 +57,7 @@ static inline void wined3d_mark_internal_window(HWND window)
 {
     static const WCHAR internal_window_prop[] =
         {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
-    HWND ime_window;
-
     SetPropW(window, internal_window_prop, ULongToHandle(1));
-    if ((ime_window = ImmGetDefaultIMEWnd(window)))
-        SetPropW(ime_window, internal_window_prop, ULongToHandle(1));
 }
 
 static inline size_t align(size_t addr, size_t alignment)
@@ -3382,7 +3378,7 @@ struct wined3d_texture_ops
             const struct wined3d_format *src_format, const struct wined3d_box *src_box, unsigned int src_row_pitch,
             unsigned int src_slice_pitch, struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
             unsigned int dst_location, unsigned int dst_x, unsigned int dst_y, unsigned int dst_z);
-    void (*texture_download_data)(struct wined3d_context *context, struct wined3d_texture *src_texture,
+    BOOL (*texture_download_data)(struct wined3d_context *context, struct wined3d_texture *src_texture,
             unsigned int src_sub_resource_idx, unsigned int src_location, const struct wined3d_box *src_box,
             const struct wined3d_bo_address *dst_bo_addr, const struct wined3d_format *dst_format,
             unsigned int dst_x, unsigned int dst_y, unsigned int dst_z,
@@ -3574,7 +3570,7 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
         const struct wined3d_blt_fx *blt_fx, enum wined3d_texture_filter_type filter);
 
 void wined3d_texture_cleanup(struct wined3d_texture *texture);
-void wined3d_texture_download_from_texture(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
+BOOL wined3d_texture_download_from_texture(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
         unsigned int dst_x, unsigned int dst_y, unsigned int dst_z,
         struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, const struct wined3d_box *src_box);
 void wined3d_texture_get_bo_address(const struct wined3d_texture *texture,
@@ -4161,6 +4157,7 @@ struct wined3d_swapchain
 
     struct wined3d_swapchain_state state;
     HWND win_handle;
+    struct wine_dcomp_visual_desc composition_desc;
     HDC dc;
 };
 

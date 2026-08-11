@@ -40,7 +40,6 @@ struct wined3d_device_vk;
     VK_INSTANCE_PFN(vkGetPhysicalDeviceFeatures) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceFormatProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties) \
-    VK_INSTANCE_PFN(vkGetPhysicalDeviceImageFormatProperties2) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceMemoryProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceProperties) \
     VK_INSTANCE_PFN(vkGetPhysicalDeviceQueueFamilyProperties) \
@@ -249,6 +248,7 @@ struct vulkan_ops
 
     PFN_vkCreateInstance vkCreateInstance;
     PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
+    PFN_vkGetPhysicalDeviceImageFormatProperties2 vkGetPhysicalDeviceImageFormatProperties2;
 };
 
 enum wined3d_vk_extension
@@ -283,6 +283,7 @@ struct wined3d_vk_info
 
     VkInstance instance;
     unsigned int api_version;
+    BOOL khr_get_physical_device_properties2;
 
     BOOL supported[WINED3D_VK_EXT_COUNT];
     HMODULE vulkan_lib;
@@ -296,6 +297,20 @@ struct wined3d_vk_info
     bool dynamic_rasterizer_state;
     bool uav_read_without_format;
 };
+
+static inline PFN_vkGetPhysicalDeviceImageFormatProperties2 wined3d_vk_resolve_image_format_properties2(
+        PFN_vkGetInstanceProcAddr get_instance_proc_addr, VkInstance instance,
+        uint32_t api_version, BOOL khr_get_physical_device_properties2)
+{
+    /* Query the core name only for Vulkan 1.1; Vulkan 1.0 uses the KHR alias. */
+    if (api_version >= VK_API_VERSION_1_1)
+        return (void *)get_instance_proc_addr(instance, "vkGetPhysicalDeviceImageFormatProperties2");
+
+    if (khr_get_physical_device_properties2)
+        return (void *)get_instance_proc_addr(instance, "vkGetPhysicalDeviceImageFormatProperties2KHR");
+
+    return NULL;
+}
 
 #define VK_CALL(f) (vk_info->vk_ops.f)
 
@@ -1175,6 +1190,9 @@ struct wined3d_swapchain_vk
     unsigned int current, image_count;
     unsigned int width, height;
     unsigned int client_width, client_height;
+    struct wined3d_texture *composition_source;
+    VkImage composition_image;
+    uint64_t composition_command_buffer_id;
 };
 
 static inline struct wined3d_swapchain_vk *wined3d_swapchain_vk(struct wined3d_swapchain *swapchain)

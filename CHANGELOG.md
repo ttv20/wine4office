@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fail unsupported GPU transfers safely and stabilize OpenGL/Vulkan presentation.
 - Make DXGI duplication output-aware, deadline-bound, and safe across clients.
 - Retain shared D3D resources in wineserver and validate cross-process metadata.
 - Connect Windows.UI composition objects to transactional DirectComposition rendering.

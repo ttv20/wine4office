@@ -5367,8 +5367,6 @@ HDC wined3d_device_gl_get_backup_dc(struct wined3d_device_gl *device_gl)
             ERR("Failed to create a window.\n");
             return NULL;
         }
-        wined3d_mark_internal_window(device_gl->backup_wnd);
-
         if (!(device_gl->backup_dc = GetDC(device_gl->backup_wnd)))
         {
             ERR("Failed to get a DC.\n");

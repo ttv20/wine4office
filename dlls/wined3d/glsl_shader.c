@@ -12595,10 +12595,15 @@ static void glsl_blitter_generate_plain_shader(struct wined3d_string_buffer *buf
         const struct wined3d_gl_info *gl_info, const struct glsl_blitter_args *args,
         const char *output, const char *tex_type, const char *swizzle)
 {
+    shader_addline(buffer, "uniform float dcomp_opacity;\n");
+    shader_addline(buffer, "uniform int dcomp_composite_mode;\n");
     shader_addline(buffer, "\nvoid main()\n{\n");
     shader_addline(buffer, "    %s = texture%s(sampler, out_texcoord.%s);\n",
             output, needs_legacy_glsl_syntax(gl_info) ? tex_type : "", swizzle);
     shader_glsl_color_correction_ext(buffer, output, WINED3DSP_WRITEMASK_ALL, args->fixup);
+    shader_addline(buffer, "    %s *= dcomp_opacity;\n", output);
+    shader_addline(buffer, "    if (dcomp_composite_mode == 2) %s.rgb = vec3(1.0) - %s.rgb;\n",
+            output, output);
     if (args->composite_alpha_background)
     {
         if (args->composite_alpha_background == 1)
@@ -12728,8 +12733,12 @@ static GLuint glsl_blitter_generate_program(struct wined3d_glsl_blitter *blitter
     shader_glsl_validate_link(gl_info, program);
 
     GL_EXTCALL(glUseProgram(program));
+    loc = GL_EXTCALL(glGetUniformLocation(program, "dcomp_composite_mode"));
+    GL_EXTCALL(glUniform1i(loc, 0));
     loc = GL_EXTCALL(glGetUniformLocation(program, "sampler"));
     GL_EXTCALL(glUniform1i(loc, 0));
+    loc = GL_EXTCALL(glGetUniformLocation(program, "dcomp_opacity"));
+    GL_EXTCALL(glUniform1f(loc, 1.0f));
     if (complex_fixup == COMPLEX_FIXUP_P8)
     {
         loc = GL_EXTCALL(glGetUniformLocation(program, "sampler_palette"));
@@ -12910,6 +12919,7 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
     struct wined3d_context_gl *context_gl = wined3d_context_gl(context);
     struct wined3d_device *device = dst_texture->resource.device;
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    const struct wine_dcomp_visual_desc *composition_desc = NULL;
     struct wined3d_texture *staging_texture = NULL;
     struct wined3d_glsl_blitter *glsl_blitter;
     struct wined3d_color_key alpha_test_key;
@@ -12997,6 +13007,13 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         wined3d_texture_translate_drawable_coords(dst_texture, context_gl->window, &d);
         dst_rect = &d;
     }
+    if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain
+            && (dst_texture->swapchain->composition_desc.flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE))
+    {
+        composition_desc = &dst_texture->swapchain->composition_desc;
+        gl_info->gl_ops.gl.p_glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
+    }
 
     if (op == WINED3D_BLIT_OP_COLOR_BLIT_ALPHATEST)
     {
@@ -13019,6 +13036,24 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         return dst_location;
     }
     GL_EXTCALL(glUseProgram(program->id));
+    location = GL_EXTCALL(glGetUniformLocation(program->id, "dcomp_opacity"));
+    if (location >= 0)
+        GL_EXTCALL(glUniform1f(location, composition_desc ? composition_desc->opacity : 1.0f));
+    location = GL_EXTCALL(glGetUniformLocation(program->id, "dcomp_composite_mode"));
+    if (location >= 0)
+        GL_EXTCALL(glUniform1i(location, composition_desc ? composition_desc->composite_mode : 0));
+    if (composition_desc && composition_desc->composite_mode == 3)
+    {
+        if (gl_info->supported[EXT_BLEND_SUBTRACT] && gl_info->supported[EXT_BLEND_FUNC_SEPARATE]
+                && gl_info->supported[EXT_BLEND_EQUATION_SEPARATE])
+        {
+            gl_info->gl_ops.gl.p_glEnable(GL_BLEND);
+            GL_EXTCALL(glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ZERO));
+            GL_EXTCALL(glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD));
+        }
+        else
+            WARN("MinBlend composition is unavailable on this OpenGL implementation.\n");
+    }
     switch (get_complex_fixup(program->args.fixup))
     {
         case COMPLEX_FIXUP_P8:
@@ -13049,7 +13084,8 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         location = GL_EXTCALL(glGetUniformLocation(program->id, "colour_key.high"));
         GL_EXTCALL(glUniform4fv(location, 1, &float_key[1].r));
     }
-    wined3d_context_gl_draw_shaded_quad(context_gl, src_texture_gl, src_sub_resource_idx, src_rect, dst_rect, filter);
+    wined3d_context_gl_draw_shaded_quad(context_gl, src_texture_gl, src_sub_resource_idx,
+            src_rect, dst_rect, filter, composition_desc);
     GL_EXTCALL(glUseProgram(0));
 
     if (dst_texture->swapchain && (dst_texture->swapchain->front_buffer == dst_texture))

@@ -1944,7 +1944,7 @@ vulkan_instance_extensions[] =
 };
 
 static BOOL enable_vulkan_instance_extensions(uint32_t *extension_count,
-        const char *enabled_extensions[], const struct wined3d_vk_info *vk_info)
+        const char *enabled_extensions[], struct wined3d_vk_info *vk_info)
 {
     PFN_vkEnumerateInstanceExtensionProperties pfn_vkEnumerateInstanceExtensionProperties;
     VkExtensionProperties *extensions = NULL;
@@ -1953,6 +1953,7 @@ static BOOL enable_vulkan_instance_extensions(uint32_t *extension_count,
     VkResult vr;
 
     *extension_count = 0;
+    vk_info->khr_get_physical_device_properties2 = FALSE;
 
     if (!(pfn_vkEnumerateInstanceExtensionProperties
             = (void *)VK_CALL(vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceExtensionProperties"))))
@@ -1981,6 +1982,15 @@ static BOOL enable_vulkan_instance_extensions(uint32_t *extension_count,
     for (i = 0; i < count; ++i)
     {
         TRACE("    - %s.\n", debugstr_a(extensions[i].extensionName));
+    }
+
+    for (j = 0; j < count; ++j)
+    {
+        if (!strcmp(extensions[j].extensionName, VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
+        {
+            vk_info->khr_get_physical_device_properties2 = TRUE;
+            break;
+        }
     }
 
     for (i = 0; i < ARRAY_SIZE(vulkan_instance_extensions); ++i)
@@ -2085,6 +2095,11 @@ static BOOL wined3d_init_vulkan(struct wined3d_vk_info *vk_info)
 #define VK_DEVICE_EXT_PFN   LOAD_INSTANCE_OPT_PFN
     VK_INSTANCE_FUNCS()
     VK_DEVICE_FUNCS()
+
+    vk_ops->vkGetPhysicalDeviceImageFormatProperties2 = wined3d_vk_resolve_image_format_properties2(
+            VK_CALL(vkGetInstanceProcAddr), instance, vk_info->api_version,
+            vk_info->khr_get_physical_device_properties2);
+
 #undef VK_INSTANCE_PFN
 #undef VK_INSTANCE_EXT_PFN
 #undef VK_DEVICE_PFN
@@ -2095,7 +2110,7 @@ static BOOL wined3d_init_vulkan(struct wined3d_vk_info *vk_info)
         vk_ops->core_pfn = (void *)VK_CALL(vkGetInstanceProcAddr(instance, #ext_pfn));
     MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties2, vkGetPhysicalDeviceProperties2KHR)
     MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures2, vkGetPhysicalDeviceFeatures2KHR)
-    MAP_INSTANCE_FUNCTION(vkGetPhysicalDeviceImageFormatProperties2, vkGetPhysicalDeviceImageFormatProperties2KHR)
+
 #undef MAP_INSTANCE_FUNCTION
 
     vk_info->instance = instance;

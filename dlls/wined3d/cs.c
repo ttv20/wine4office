@@ -3639,8 +3639,6 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         const enum wined3d_feature_level *levels, unsigned int level_count)
 {
     const struct wined3d_d3d_info *d3d_info = &device->adapter->d3d_info;
-    char sync_device_thread[16];
-    bool force_single_threaded;
     struct wined3d_cs *cs;
 
     if (!(cs = calloc(1, sizeof(*cs))))
@@ -3665,13 +3663,7 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
     if (!(cs->data = malloc(cs->data_size)))
         goto fail;
 
-    force_single_threaded = GetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD",
-            sync_device_thread, sizeof(sync_device_thread))
-            && strtoul(sync_device_thread, NULL, 10) == GetCurrentThreadId();
-    if (force_single_threaded)
-        TRACE("Using a synchronous command stream for a Direct2D internal device.\n");
-
-    if (!force_single_threaded && wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE)
+    if (wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE)
     {
         if (!d3d_info->fences)
         {
@@ -3680,7 +3672,7 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         }
     }
 
-    if (!force_single_threaded && wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE
+    if (wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE
             && !RtlIsCriticalSectionLockedByThread(NtCurrentTeb()->Peb->LoaderLock))
     {
         cs->c.ops = &wined3d_cs_mt_ops;

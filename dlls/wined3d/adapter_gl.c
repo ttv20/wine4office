@@ -326,8 +326,6 @@ static BOOL wined3d_caps_gl_ctx_create(struct wined3d_adapter_gl *adapter_gl, st
         ERR("Failed to create a window.\n");
         goto fail;
     }
-    wined3d_mark_internal_window(ctx->wnd);
-
     ctx->dc = GetDC(ctx->wnd);
     if (!ctx->dc)
     {
@@ -375,7 +373,10 @@ fail:
     ctx->gl_ctx = NULL;
     if (ctx->dc) ReleaseDC(ctx->wnd, ctx->dc);
     ctx->dc = NULL;
-    if (ctx->wnd) DestroyWindow(ctx->wnd);
+    if (ctx->wnd)
+    {
+        DestroyWindow(ctx->wnd);
+    }
     ctx->wnd = NULL;
     if (ctx->restore_gl_ctx && !wglMakeCurrent(ctx->restore_dc, ctx->restore_gl_ctx))
         ERR("Failed to restore previous GL context.\n");
