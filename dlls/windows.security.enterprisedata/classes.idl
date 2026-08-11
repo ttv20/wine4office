@@ -1,0 +1,14 @@
+/* Runtime classes for windows.security.enterprisedata.dll. */
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "windows.security.enterprisedata.idl";
+
+namespace Windows.Security.EnterpriseData {
+    runtimeclass ProtectionPolicyManager;
+    runtimeclass ProtectionPolicyAuditInfo;
+    runtimeclass ProtectedAccessResumedEventArgs;
+    runtimeclass ProtectedAccessSuspendingEventArgs;
+    runtimeclass ProtectedContentRevokedEventArgs;
+    runtimeclass ThreadNetworkContext;
+}

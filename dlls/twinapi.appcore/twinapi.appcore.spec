@@ -125,3 +125,4 @@
 @ stdcall RegisterAppStateChangeNotification(ptr ptr ptr)
 @ stdcall UnregisterAppConstrainedChangeNotification(ptr)
 @ stdcall UnregisterAppStateChangeNotification(ptr)
+@ stdcall -private __wine_appcore_broker_set_state(wstr wstr long)

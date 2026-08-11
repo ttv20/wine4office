@@ -30,6 +30,8 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     struct retail_info_factory *impl = impl_from_IActivationFactory( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    if (!out) return E_POINTER;
+    *out = NULL;
 
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
@@ -44,7 +46,6 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
     return E_NOINTERFACE;
 }
 
@@ -63,17 +64,21 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
     FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    if (iid_count) *iid_count = 0;
+    if (iids) *iids = NULL;
     return E_NOTIMPL;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
+    if (!class_name) return E_POINTER;
     return WindowsCreateString( RuntimeClass_Windows_System_Profile_RetailInfo,
                                 wcslen( RuntimeClass_Windows_System_Profile_RetailInfo ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
+    if (!trust_level) return E_POINTER;
     *trust_level = BaseTrust;
     return S_OK;
 }
@@ -100,6 +105,7 @@ DEFINE_IINSPECTABLE( statics, IRetailInfoStatics, struct retail_info_factory, IA
 static HRESULT WINAPI statics_get_IsDemoModeEnabled( IRetailInfoStatics *iface, boolean *value )
 {
     TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
     *value = FALSE;
     return S_OK;
 }
@@ -114,6 +120,7 @@ static HRESULT WINAPI statics_get_Properties( IRetailInfoStatics *iface,
     HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
     *value = NULL;
 
     WindowsCreateStringReference( RuntimeClass_Windows_Foundation_Collections_PropertySet,

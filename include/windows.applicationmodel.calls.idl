@@ -6,10 +6,28 @@
 #endif
 
 import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
 
 namespace Windows.ApplicationModel.Calls
 {
+    typedef enum VoipPhoneCallResourceReservationStatus VoipPhoneCallResourceReservationStatus;
     runtimeclass VoipCallCoordinator;
+    runtimeclass VoipPhoneCall;
+
+    declare
+    {
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.ApplicationModel.Calls.VoipPhoneCallResourceReservationStatus>;
+        interface Windows.Foundation.IAsyncOperation<Windows.ApplicationModel.Calls.VoipPhoneCallResourceReservationStatus>;
+        interface Windows.Foundation.Collections.IIterable<HSTRING>;
+        interface Windows.Foundation.Collections.IIterator<HSTRING>;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum VoipPhoneCallResourceReservationStatus
+    {
+        Success = 0,
+        ResourcesNotAvailable = 1,
+    };
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -23,6 +41,95 @@ namespace Windows.ApplicationModel.Calls
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Calls.VoipCallCoordinator),
+        uuid(4f118bcf-e8ef-4434-9c5f-a8d893fafe79)
+    ]
+    interface IVoipCallCoordinator : IInspectable
+    {
+        HRESULT ReserveCallResourcesAsync([in] HSTRING task,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.ApplicationModel.Calls.VoipPhoneCallResourceReservationStatus> **operation);
+        [eventadd] HRESULT MuteStateChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT MuteStateChanged([in] EventRegistrationToken token);
+        HRESULT RequestNewIncomingCall([in] HSTRING context, [in] HSTRING contact_name, [in] HSTRING contact_number,
+                [in] IInspectable *contact_image, [in] HSTRING service_name, [in] IInspectable *branding_image,
+                [in] HSTRING call_details, [in] IInspectable *ringtone, [in] UINT32 media, [in] INT64 timeout,
+                [out, retval] IInspectable **call);
+        HRESULT RequestNewOutgoingCall([in] HSTRING context, [in] HSTRING contact_name, [in] HSTRING service_name,
+                [in] UINT32 media, [out, retval] IInspectable **call);
+        HRESULT NotifyMuted();
+        HRESULT NotifyUnmuted();
+        HRESULT RequestOutgoingUpgradeToVideoCall([in] GUID id, [in] HSTRING context, [in] HSTRING name,
+                [in] HSTRING service, [out, retval] IInspectable **call);
+        HRESULT RequestIncomingUpgradeToVideoCall([in] HSTRING context, [in] HSTRING name, [in] HSTRING number,
+                [in] IInspectable *image, [in] HSTRING service, [in] IInspectable *branding,
+                [in] HSTRING details, [in] IInspectable *ringtone, [in] INT64 timeout,
+                [out, retval] IInspectable **call);
+        HRESULT TerminateCellularCall([in] GUID id);
+        HRESULT CancelUpgrade([in] GUID id);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Calls.VoipPhoneCall),
+        uuid(6cf1f19a-7794-4a5a-8c68-ae87947a6990)
+    ]
+    interface IVoipPhoneCall : IInspectable
+    {
+        [eventadd] HRESULT EndRequested([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT EndRequested([in] EventRegistrationToken token);
+        [eventadd] HRESULT HoldRequested([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT HoldRequested([in] EventRegistrationToken token);
+        [eventadd] HRESULT ResumeRequested([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ResumeRequested([in] EventRegistrationToken token);
+        [eventadd] HRESULT AnswerRequested([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AnswerRequested([in] EventRegistrationToken token);
+        [eventadd] HRESULT RejectRequested([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT RejectRequested([in] EventRegistrationToken token);
+        HRESULT NotifyCallHeld();
+        HRESULT NotifyCallActive();
+        HRESULT NotifyCallEnded();
+        [propget] HRESULT ContactName([out, retval] HSTRING *value);
+        [propput] HRESULT ContactName([in] HSTRING value);
+        [propget] HRESULT StartTime([out, retval] INT64 *value);
+        [propput] HRESULT StartTime([in] INT64 value);
+        [propget] HRESULT CallMedia([out, retval] UINT32 *value);
+        [propput] HRESULT CallMedia([in] UINT32 value);
+        HRESULT NotifyCallReady();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Calls.VoipPhoneCall),
+        uuid(741b46e1-245f-41f3-9399-3141d25b52e3)
+    ]
+    interface IVoipPhoneCall2 : IInspectable
+    {
+        HRESULT TryShowAppUI();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Calls.VoipPhoneCall),
+        uuid(0d891522-e258-4aa9-907a-1aa413c25523)
+    ]
+    interface IVoipPhoneCall3 : IInspectable
+    {
+        HRESULT NotifyCallAccepted([in] UINT32 media);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Calls.VoipPhoneCall),
+        uuid(eba66290-ad6d-5899-bdda-81bfe9f999a1)
+    ]
+    interface IVoipPhoneCall4 : IInspectable
+    {
+        [propget] HRESULT IsUsingAssociatedDevicesList([out, retval] boolean *value);
+        HRESULT NotifyCallActiveOnDevices([in] Windows.Foundation.Collections.IIterable<HSTRING> *devices);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
         static(Windows.ApplicationModel.Calls.IVoipCallCoordinatorStatics,
                 Windows.Foundation.UniversalApiContract, 1.0),
@@ -30,5 +137,19 @@ namespace Windows.ApplicationModel.Calls
     ]
     runtimeclass VoipCallCoordinator
     {
+        [default] interface Windows.ApplicationModel.Calls.IVoipCallCoordinator;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass VoipPhoneCall
+    {
+        [default] interface Windows.ApplicationModel.Calls.IVoipPhoneCall;
+        interface Windows.ApplicationModel.Calls.IVoipPhoneCall2;
+        interface Windows.ApplicationModel.Calls.IVoipPhoneCall3;
+        interface Windows.ApplicationModel.Calls.IVoipPhoneCall4;
     }
 }

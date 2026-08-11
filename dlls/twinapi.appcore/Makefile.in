@@ -1,6 +1,6 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
-IMPORTS   = combase advapi32
+IMPORTS   = combase xmllite shlwapi advapi32
 
 SOURCES = \
 	advertising_manager.c \
@@ -9,6 +9,7 @@ SOURCES = \
 	classes.idl \
 	client_device_information.c \
 	core_application.c \
+	lifecycle.c \
 	data_transfer.c \
 	main.c \
 	retail_info.c

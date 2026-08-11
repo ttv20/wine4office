@@ -1,0 +1,11 @@
+MODULE = wine4office-voip-broker.exe
+UNIXLIB = wine4office-voip-broker.so
+IMPORTS = ntdll
+UNIX_CFLAGS = $(DBUS_CFLAGS)
+UNIX_LIBS = $(DBUS_LIBS)
+
+EXTRADLLFLAGS = -mconsole -municode
+
+SOURCES = \
+	main.c \
+	unixlib.c

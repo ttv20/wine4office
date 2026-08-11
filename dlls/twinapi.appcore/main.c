@@ -26,34 +26,16 @@ WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
  */
 ULONG WINAPI RegisterAppConstrainedChangeNotification( PAPPCONSTRAIN_CHANGE_ROUTINE routine, void *context, PAPPCONSTRAIN_REGISTRATION *reg )
 {
-    FIXME( "routine %p, context %p, reg %p - stub.\n", routine, context, reg );
+    if (reg) *reg = NULL;
+    FIXME( "routine %p, context %p, reg %p - unsupported.\n", routine, context, reg );
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
-/***********************************************************************
- *           RegisterAppStateChangeNotification (twinapi.appcore.@)
- */
-ULONG WINAPI RegisterAppStateChangeNotification( PAPPSTATE_CHANGE_ROUTINE routine, void *context, PAPPSTATE_REGISTRATION *reg )
-{
-    FIXME( "routine %p, context %p, reg %p - stub.\n", routine, context, reg );
-    return ERROR_CALL_NOT_IMPLEMENTED;
-}
-
-/***********************************************************************
- *           UnregisterAppConstrainedChangeNotification (twinapi.appcore.@)
- */
 void WINAPI UnregisterAppConstrainedChangeNotification( PAPPCONSTRAIN_REGISTRATION reg )
 {
-    FIXME( "reg %p - stub.\n", reg );
+    FIXME( "reg %p - unsupported.\n", reg );
 }
 
-/***********************************************************************
- *           UnregisterAppStateChangeNotification (twinapi.appcore.@)
- */
-void WINAPI UnregisterAppStateChangeNotification( PAPPSTATE_REGISTRATION reg )
-{
-    FIXME( "reg %p - stub.\n", reg );
-}
 
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 {

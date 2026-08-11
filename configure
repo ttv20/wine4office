@@ -1809,6 +1809,7 @@ enable_wevtutil
 enable_where
 enable_whoami
 enable_wine4office_appv_preload
+enable_wine4office_voip_broker
 enable_wine4officeauth
 enable_wine4officeclose
 enable_wineboot
@@ -7162,10 +7163,8 @@ test -n "$ICOTOOL" || ICOTOOL="false"
   test "$FONTFORGE" != "false" || as_fn_error $? "You need fontforge to rebuild fonts in maintainer mode." "$LINENO" 5
   test "$RSVG" != "false" || as_fn_error $? "You need rsvg to rebuild icons in maintainer mode." "$LINENO" 5
 
-    if test "$CONVERT" = false
+    if test "$CONVERT" != false
   then
-    as_fn_error $? "You need imagemagick to rebuild icons in maintainer mode." "$LINENO" 5
-  else
     { printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking for recent enough imagemagick" >&5
 printf %s "checking for recent enough imagemagick... " >&6; }
     convert_version=`convert --version | head -n1`
@@ -7182,7 +7181,7 @@ printf %s "checking for recent enough imagemagick... " >&6; }
     then
       { printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: no ($convert_version_major.$convert_version_minor)" >&5
 printf '%s\n' "no ($convert_version_major.$convert_version_minor)" >&6; }
-      as_fn_error $? "You need imagemagick version 6.6 or newer to rebuild icons in maintainer mode." "$LINENO" 5
+      as_fn_append wine_warnings "|ImageMagick version 6.6 or newer is needed for legacy SVG crop assets."
     else
       { printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: yes ($convert_version_major.$convert_version_minor)" >&5
 printf '%s\n' "yes ($convert_version_major.$convert_version_minor)" >&6; }
@@ -22265,6 +22264,7 @@ wine_fn_config_makefile dlls/apphelp enable_apphelp
 wine_fn_config_makefile dlls/apphelp/tests enable_tests
 wine_fn_config_makefile dlls/appwiz.cpl enable_appwiz_cpl
 wine_fn_config_makefile dlls/appxdeploymentclient enable_appxdeploymentclient
+wine_fn_config_makefile dlls/appxdeploymentclient/tests enable_tests
 wine_fn_config_makefile dlls/atl enable_atl
 wine_fn_config_makefile dlls/atl/tests enable_tests
 wine_fn_config_makefile dlls/atl100 enable_atl100
@@ -23114,6 +23114,8 @@ wine_fn_config_makefile dlls/winbrand enable_winbrand
 wine_fn_config_makefile dlls/windebug.dll16 enable_win16
 wine_fn_config_makefile dlls/windows.applicationmodel enable_windows_applicationmodel
 wine_fn_config_makefile dlls/windows.applicationmodel/tests enable_tests
+wine_fn_config_makefile dlls/windows.applicationmodel.calls enable_windows_applicationmodel_calls
+wine_fn_config_makefile dlls/windows.applicationmodel.calls/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.bluetooth enable_windows_devices_bluetooth
 wine_fn_config_makefile dlls/windows.devices.bluetooth/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.enumeration enable_windows_devices_enumeration
@@ -23153,6 +23155,8 @@ wine_fn_config_makefile dlls/windows.security.authentication.onlineid enable_win
 wine_fn_config_makefile dlls/windows.security.authentication.onlineid/tests enable_tests
 wine_fn_config_makefile dlls/windows.security.credentials.ui.userconsentverifier enable_windows_security_credentials_ui_userconsentverifier
 wine_fn_config_makefile dlls/windows.security.credentials.ui.userconsentverifier/tests enable_tests
+wine_fn_config_makefile dlls/windows.security.enterprisedata enable_windows_security_enterprisedata
+wine_fn_config_makefile dlls/windows.security.enterprisedata/tests enable_tests
 wine_fn_config_makefile dlls/windows.storage.applicationdata enable_windows_storage_applicationdata
 wine_fn_config_makefile dlls/windows.storage.applicationdata/tests enable_tests
 wine_fn_config_makefile dlls/windows.storage enable_windows_storage
@@ -23163,7 +23167,10 @@ wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers enable_w
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.core.textinput enable_windows_ui_core_textinput
 wine_fn_config_makefile dlls/windows.ui.core.textinput/tests enable_tests
+wine_fn_config_makefile dlls/windows.data.xml.dom enable_windows_data_xml_dom
+wine_fn_config_makefile dlls/windows.data.xml.dom/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.notifications enable_windows_ui_notifications
+wine_fn_config_makefile dlls/windows.ui.notifications/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.xaml enable_windows_ui_xaml
 wine_fn_config_makefile dlls/windows.ui.xaml/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui enable_windows_ui
@@ -23465,8 +23472,10 @@ wine_fn_config_makefile programs/wevtutil enable_wevtutil
 wine_fn_config_makefile programs/where enable_where
 wine_fn_config_makefile programs/whoami enable_whoami
 wine_fn_config_makefile programs/wine4office-appv-preload enable_wine4office_appv_preload
+wine_fn_config_makefile programs/wine4office-voip-broker enable_wine4office_voip_broker
 wine_fn_config_makefile programs/wine4officeauth enable_wine4officeauth
 wine_fn_config_makefile programs/wine4officeclose enable_wine4officeclose
+wine_fn_config_makefile programs/wine4officeclose/tests enable_tests
 wine_fn_config_makefile programs/wineboot enable_wineboot
 wine_fn_config_makefile programs/winebrowser enable_winebrowser
 wine_fn_config_makefile programs/winecfg enable_winecfg

@@ -1,6 +1,11 @@
 MODULE  = windows.applicationmodel.calls.dll
+IMPORTLIB = windows_applicationmodel_calls
+UNIXLIB = windows.applicationmodel.calls.so
 IMPORTS = combase uuid
+UNIX_CFLAGS = $(DBUS_CFLAGS)
+UNIX_LIBS = $(DBUS_LIBS) $(PTHREAD_LIBS)
 
 SOURCES = \
 	classes.idl \
-	main.c
+	main.c \
+	unixlib.c

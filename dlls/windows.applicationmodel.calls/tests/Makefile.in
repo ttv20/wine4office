@@ -1,0 +1,5 @@
+TESTDLL = windows.applicationmodel.calls.dll
+IMPORTS = combase
+
+SOURCES = \
+	calls.c

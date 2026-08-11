@@ -20,13 +20,6 @@ struct limited_access_factory
     LONG ref;
 };
 
-struct limited_access_result
-{
-    ILimitedAccessFeatureRequestResult ILimitedAccessFeatureRequestResult_iface;
-    LONG ref;
-    HSTRING feature_id;
-};
-
 static inline struct limited_access_factory *factory_from_activation( IActivationFactory *iface )
 {
     return CONTAINING_RECORD( iface, struct limited_access_factory, IActivationFactory_iface );
@@ -93,93 +86,6 @@ static const IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
-static inline struct limited_access_result *result_from_iface( ILimitedAccessFeatureRequestResult *iface )
-{
-    return CONTAINING_RECORD( iface, struct limited_access_result, ILimitedAccessFeatureRequestResult_iface );
-}
-
-static HRESULT WINAPI result_QueryInterface( ILimitedAccessFeatureRequestResult *iface, REFIID iid, void **out )
-{
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILimitedAccessFeatureRequestResult ))
-        *out = iface;
-    if (!*out) return E_NOINTERFACE;
-    ILimitedAccessFeatureRequestResult_AddRef( iface );
-    return S_OK;
-}
-
-static ULONG WINAPI result_AddRef( ILimitedAccessFeatureRequestResult *iface )
-{
-    return InterlockedIncrement( &result_from_iface( iface )->ref );
-}
-
-static ULONG WINAPI result_Release( ILimitedAccessFeatureRequestResult *iface )
-{
-    struct limited_access_result *impl = result_from_iface( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref)
-    {
-        WindowsDeleteString( impl->feature_id );
-        free( impl );
-    }
-    return ref;
-}
-
-static HRESULT WINAPI result_GetIids( ILimitedAccessFeatureRequestResult *iface, ULONG *count, IID **iids )
-{
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI result_GetRuntimeClassName( ILimitedAccessFeatureRequestResult *iface, HSTRING *name )
-{
-    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatureRequestResult,
-            wcslen( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatureRequestResult ), name );
-}
-
-static HRESULT WINAPI result_GetTrustLevel( ILimitedAccessFeatureRequestResult *iface, TrustLevel *level )
-{
-    if (!level) return E_POINTER;
-    *level = BaseTrust;
-    return S_OK;
-}
-
-static HRESULT WINAPI result_get_FeatureId( ILimitedAccessFeatureRequestResult *iface, HSTRING *value )
-{
-    if (!value) return E_POINTER;
-    return WindowsDuplicateString( result_from_iface( iface )->feature_id, value );
-}
-
-static HRESULT WINAPI result_get_Status( ILimitedAccessFeatureRequestResult *iface,
-        LimitedAccessFeatureStatus *value )
-{
-    if (!value) return E_POINTER;
-    *value = LimitedAccessFeatureStatus_Available;
-    return S_OK;
-}
-
-static HRESULT WINAPI result_get_EstimatedRemovalDate( ILimitedAccessFeatureRequestResult *iface,
-        IReference_DateTime **value )
-{
-    if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
-}
-
-static const ILimitedAccessFeatureRequestResultVtbl result_vtbl =
-{
-    result_QueryInterface,
-    result_AddRef,
-    result_Release,
-    result_GetIids,
-    result_GetRuntimeClassName,
-    result_GetTrustLevel,
-    result_get_FeatureId,
-    result_get_Status,
-    result_get_EstimatedRemovalDate,
-};
-
 static inline struct limited_access_factory *factory_from_statics( ILimitedAccessFeaturesStatics *iface )
 {
     return CONTAINING_RECORD( iface, struct limited_access_factory, ILimitedAccessFeaturesStatics_iface );
@@ -215,19 +121,132 @@ static HRESULT WINAPI statics_GetTrustLevel( ILimitedAccessFeaturesStatics *ifac
     return factory_GetTrustLevel( &factory_from_statics( iface )->IActivationFactory_iface, level );
 }
 
-static HRESULT WINAPI statics_TryUnlockFeature( ILimitedAccessFeaturesStatics *iface, HSTRING feature_id,
-        HSTRING token, HSTRING attestation, ILimitedAccessFeatureRequestResult **result )
+static BOOL valid_hstring( HSTRING value )
+{
+    BOOL embedded_null;
+    const WCHAR *buffer;
+    UINT32 length;
+
+    if (!value) return FALSE;
+    buffer = WindowsGetStringRawBuffer( value, &length );
+    if (!buffer || !length || buffer[length]) return FALSE;
+    if (FAILED(WindowsStringHasEmbeddedNull( value, &embedded_null ))) return FALSE;
+    return !embedded_null;
+}
+
+struct limited_access_result
+{
+    ILimitedAccessFeatureRequestResult ILimitedAccessFeatureRequestResult_iface;
+    LONG ref;
+    HSTRING feature_id;
+    LimitedAccessFeatureStatus status;
+};
+
+static inline struct limited_access_result *result_from_iface( ILimitedAccessFeatureRequestResult *iface )
+{
+    return CONTAINING_RECORD( iface, struct limited_access_result, ILimitedAccessFeatureRequestResult_iface );
+}
+
+static HRESULT WINAPI result_QueryInterface( ILimitedAccessFeatureRequestResult *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILimitedAccessFeatureRequestResult ))
+        *out = iface;
+    if (!*out) return E_NOINTERFACE;
+    ILimitedAccessFeatureRequestResult_AddRef( iface );
+    return S_OK;
+}
+
+static ULONG WINAPI result_AddRef( ILimitedAccessFeatureRequestResult *iface )
+{
+    return InterlockedIncrement( &result_from_iface( iface )->ref );
+}
+
+static ULONG WINAPI result_Release( ILimitedAccessFeatureRequestResult *iface )
+{
+    struct limited_access_result *impl = result_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        WindowsDeleteString( impl->feature_id );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI result_GetIids( ILimitedAccessFeatureRequestResult *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    **iids = IID_ILimitedAccessFeatureRequestResult;
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI result_GetRuntimeClassName( ILimitedAccessFeatureRequestResult *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatureRequestResult,
+            wcslen( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatureRequestResult ), name );
+}
+
+static HRESULT WINAPI result_GetTrustLevel( ILimitedAccessFeatureRequestResult *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI result_get_FeatureId( ILimitedAccessFeatureRequestResult *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( result_from_iface( iface )->feature_id, value );
+}
+
+static HRESULT WINAPI result_get_Status( ILimitedAccessFeatureRequestResult *iface,
+        LimitedAccessFeatureStatus *value )
+{
+    if (!value) return E_POINTER;
+    *value = result_from_iface( iface )->status;
+    return S_OK;
+}
+
+static HRESULT WINAPI result_get_EstimatedRemovalDate( ILimitedAccessFeatureRequestResult *iface,
+        IReference_DateTime **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const ILimitedAccessFeatureRequestResultVtbl result_vtbl =
+{
+    result_QueryInterface,
+    result_AddRef,
+    result_Release,
+    result_GetIids,
+    result_GetRuntimeClassName,
+    result_GetTrustLevel,
+    result_get_FeatureId,
+    result_get_Status,
+    result_get_EstimatedRemovalDate,
+};
+
+static HRESULT limited_access_result_create( HSTRING feature_id, LimitedAccessFeatureStatus status,
+        ILimitedAccessFeatureRequestResult **result )
 {
     struct limited_access_result *impl;
     HRESULT hr;
 
-    TRACE( "feature %s, token %s, attestation %s, result %p.\n", debugstr_hstring(feature_id),
-            debugstr_hstring(token), debugstr_hstring(attestation), result );
-    if (!feature_id || !token || !attestation || !result) return E_INVALIDARG;
-    *result = NULL;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->ILimitedAccessFeatureRequestResult_iface.lpVtbl = &result_vtbl;
     impl->ref = 1;
+    impl->status = status;
     if (FAILED(hr = WindowsDuplicateString( feature_id, &impl->feature_id )))
     {
         free( impl );
@@ -235,6 +254,26 @@ static HRESULT WINAPI statics_TryUnlockFeature( ILimitedAccessFeaturesStatics *i
     }
     *result = &impl->ILimitedAccessFeatureRequestResult_iface;
     return S_OK;
+}
+
+
+static HRESULT WINAPI statics_TryUnlockFeature( ILimitedAccessFeaturesStatics *iface, HSTRING feature_id,
+        HSTRING token, HSTRING attestation, ILimitedAccessFeatureRequestResult **result )
+{
+    if (result) *result = NULL;
+    TRACE( "feature %p, token <redacted>, attestation <redacted>, result %p.\n",
+            feature_id, result );
+    if (!result) return E_INVALIDARG;
+    if (!valid_hstring( feature_id ) || !valid_hstring( token ) || !valid_hstring( attestation ))
+        return E_INVALIDARG;
+
+    /*
+     * Limited-access tokens are issued and validated by Microsoft. No public token grammar,
+     * signing key, trust anchor, or test vector exists, so caller-controlled data must never
+     * unlock a feature. Report Unavailable, the public status for denied access, until a
+     * trusted feature catalog and compatible verifier are available.
+     */
+    return limited_access_result_create( feature_id, LimitedAccessFeatureStatus_Unavailable, result );
 }
 
 static const ILimitedAccessFeaturesStaticsVtbl statics_vtbl =

@@ -5,15 +5,6 @@
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
 #ifdef __WIDL__
@@ -25,22 +16,285 @@ import "asyncinfo.idl";
 import "eventtoken.idl";
 import "windowscontracts.idl";
 import "windows.foundation.idl";
+import "windows.networking.idl";
+import "windows.storage.idl";
 
 namespace Windows.Security.EnterpriseData {
+    typedef enum DataProtectionStatus DataProtectionStatus;
+    typedef enum EnforcementLevel EnforcementLevel;
+    typedef enum ProtectionPolicyAuditAction ProtectionPolicyAuditAction;
     typedef enum ProtectionPolicyEvaluationResult ProtectionPolicyEvaluationResult;
+    typedef enum ProtectionPolicyRequestAccessBehavior ProtectionPolicyRequestAccessBehavior;
+
+    interface IProtectionPolicyAuditInfo;
+    interface IProtectionPolicyAuditInfoFactory;
+    interface IProtectionPolicyManager;
+    interface IProtectionPolicyManager2;
+    interface IProtectionPolicyManagerStatics;
+    interface IProtectionPolicyManagerStatics2;
+    interface IProtectionPolicyManagerStatics3;
+    interface IProtectionPolicyManagerStatics4;
+    interface IProtectedAccessResumedEventArgs;
+    interface IProtectedAccessSuspendingEventArgs;
+    interface IProtectedContentRevokedEventArgs;
+    interface IThreadNetworkContext;
+
+    runtimeclass ProtectionPolicyAuditInfo;
+    runtimeclass ProtectionPolicyManager;
+    runtimeclass ProtectedAccessResumedEventArgs;
+    runtimeclass ProtectedAccessSuspendingEventArgs;
+    runtimeclass ProtectedContentRevokedEventArgs;
+    runtimeclass ThreadNetworkContext;
 
     declare {
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult>;
+        interface Windows.Foundation.EventHandler<IInspectable *>;
+        interface Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedAccessResumedEventArgs *>;
+        interface Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedAccessSuspendingEventArgs *>;
+        interface Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedContentRevokedEventArgs *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult>;
+        interface Windows.Foundation.IAsyncOperation<HSTRING>;
     }
 
-    [
-        contract(Windows.Foundation.UniversalApiContract, 1.0)
-    ]
-    enum ProtectionPolicyEvaluationResult
-    {
-        Allowed         = 0,
-        Blocked         = 1,
-        ConsentRequired = 2,
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum DataProtectionStatus {
+        ProtectedToOtherIdentity = 0, Protected = 1, Revoked = 2,
+        Unprotected = 3, LicenseExpired = 4, AccessSuspended = 5
     };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum EnforcementLevel { NoProtection = 0, Silent = 1, Override = 2, Block = 3 };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum ProtectionPolicyAuditAction {
+        Decrypt = 0, CopyToLocation = 1, SendToRecipient = 2, Other = 3
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum ProtectionPolicyEvaluationResult { Allowed = 0, Blocked = 1, ConsentRequired = 2 };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum ProtectionPolicyRequestAccessBehavior { Decrypt = 0, TreatOverridePolicyAsBlock = 1 };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo),
+        uuid(425ab7e4-feb7-44fc-b3bb-c3c4d7ecbebb)
+    ]
+    interface IProtectionPolicyAuditInfo : IInspectable {
+        HRESULT SetAction([in] Windows.Security.EnterpriseData.ProtectionPolicyAuditAction value);
+        [propget] HRESULT Action([out, retval] Windows.Security.EnterpriseData.ProtectionPolicyAuditAction *value);
+        HRESULT SetDataDescription([in] HSTRING value);
+        [propget] HRESULT DataDescription([out, retval] HSTRING *value);
+        HRESULT SetSourceDescription([in] HSTRING value);
+        [propget] HRESULT SourceDescription([out, retval] HSTRING *value);
+        HRESULT SetTargetDescription([in] HSTRING value);
+        [propget] HRESULT TargetDescription([out, retval] HSTRING *value);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo),
+        uuid(7ed4180b-92e8-42d5-83d4-25440b423549)
+    ]
+    interface IProtectionPolicyAuditInfoFactory : IInspectable {
+        HRESULT Create(Windows.Security.EnterpriseData.ProtectionPolicyAuditAction action,
+                       HSTRING data_description, HSTRING source_description, HSTRING target_description,
+                       [out, retval] Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo **result);
+        HRESULT CreateWithActionAndDataDescription(Windows.Security.EnterpriseData.ProtectionPolicyAuditAction action,
+                       HSTRING data_description,
+                       [out, retval] Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo **result);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(d5703e18-a08d-47e6-a240-9934d7165eb5)
+    ]
+    interface IProtectionPolicyManager : IInspectable {
+        HRESULT SetIdentity(HSTRING value);
+        [propget] HRESULT Identity([out, retval] HSTRING *value);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(abf7527a-8435-417f-99b6-51beaf365888)
+    ]
+    interface IProtectionPolicyManager2 : IInspectable {
+        [propput] HRESULT ShowEnterpriseIndicator(boolean value);
+        [propget] HRESULT ShowEnterpriseIndicator([out, retval] boolean *value);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(c0bffc66-8c3d-4d56-8804-c68f0ad32ec5)
+    ]
+    interface IProtectionPolicyManagerStatics : IInspectable {
+        HRESULT IsIdentityManaged(HSTRING identity, [out, retval] boolean *value);
+        HRESULT TryApplyProcessUIPolicy(HSTRING identity, [out, retval] boolean *value);
+        HRESULT ClearProcessUIPolicy();
+        HRESULT CreateCurrentThreadNetworkContext(HSTRING identity,
+                [out, retval] Windows.Security.EnterpriseData.ThreadNetworkContext **context);
+        HRESULT GetPrimaryManagedIdentityForNetworkEndpointAsync(Windows.Networking.HostName *endpoint_host,
+                [out, retval] Windows.Foundation.IAsyncOperation<HSTRING> **operation);
+        HRESULT RevokeContent(HSTRING identity);
+        HRESULT GetForCurrentView([out, retval] Windows.Security.EnterpriseData.ProtectionPolicyManager **manager);
+        [eventadd] HRESULT ProtectedAccessSuspending(
+                Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedAccessSuspendingEventArgs *> *handler,
+                [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ProtectedAccessSuspending(EventRegistrationToken token);
+        [eventadd] HRESULT ProtectedAccessResumed(
+                Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedAccessResumedEventArgs *> *handler,
+                [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ProtectedAccessResumed(EventRegistrationToken token);
+        [eventadd] HRESULT ProtectedContentRevoked(
+                Windows.Foundation.EventHandler<Windows.Security.EnterpriseData.ProtectedContentRevokedEventArgs *> *handler,
+                [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ProtectedContentRevoked(EventRegistrationToken token);
+        HRESULT CheckAccess(HSTRING source_identity, HSTRING target_identity,
+                [out, retval] Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult *result);
+        HRESULT RequestAccessAsync(HSTRING source_identity, HSTRING target_identity,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(b68f9a8c-39e0-4649-b2e4-070ab8a579b3)
+    ]
+    interface IProtectionPolicyManagerStatics2 : IInspectable {
+        HRESULT HasContentBeenRevokedSince(HSTRING identity, Windows.Foundation.DateTime since,
+                [out, retval] boolean *revoked);
+        HRESULT CheckAccessForApp(HSTRING source_identity, HSTRING app_package_family_name,
+                [out, retval] Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult *result);
+        HRESULT RequestAccessForAppAsync(HSTRING source_identity, HSTRING app_package_family_name,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT GetEnforcementLevel(HSTRING identity,
+                [out, retval] Windows.Security.EnterpriseData.EnforcementLevel *level);
+        HRESULT IsUserDecryptionAllowed(HSTRING identity, [out, retval] boolean *allowed);
+        HRESULT IsProtectionUnderLockRequired(HSTRING identity, [out, retval] boolean *required);
+        [eventadd] HRESULT PolicyChanged(Windows.Foundation.EventHandler<IInspectable *> *handler,
+                [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT PolicyChanged(EventRegistrationToken token);
+        HRESULT IsProtectionEnabled([out, retval] boolean *enabled);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(48ff9e8c-6a6f-4d9f-bced-18ab537aa015)
+    ]
+    interface IProtectionPolicyManagerStatics3 : IInspectable {
+        HRESULT RequestAccessWithAuditingInfoAsync(HSTRING source_identity, HSTRING target_identity,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessWithMessageAsync(HSTRING source_identity, HSTRING target_identity,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info, HSTRING message_from_app,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessForAppWithAuditingInfoAsync(HSTRING source_identity, HSTRING app_package_family_name,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessForAppWithMessageAsync(HSTRING source_identity, HSTRING app_package_family_name,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info, HSTRING message_from_app,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT LogAuditEvent(HSTRING source_identity, HSTRING target_identity,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectionPolicyManager),
+        uuid(20b794db-ccbd-490f-8c83-49ccb77aea6c)
+    ]
+    interface IProtectionPolicyManagerStatics4 : IInspectable {
+        HRESULT IsRoamableProtectionEnabled(HSTRING identity, [out, retval] boolean *value);
+        HRESULT RequestAccessWithBehaviorAsync(HSTRING source_identity, HSTRING target_identity,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info, HSTRING message_from_app,
+                Windows.Security.EnterpriseData.ProtectionPolicyRequestAccessBehavior behavior,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessForAppWithBehaviorAsync(HSTRING source_identity, HSTRING app_package_family_name,
+                Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info, HSTRING message_from_app,
+                Windows.Security.EnterpriseData.ProtectionPolicyRequestAccessBehavior behavior,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessToFilesForAppAsync(
+                Windows.Foundation.Collections.IIterable<Windows.Storage.IStorageItem *> *source_item_list,
+                HSTRING app_package_family_name, Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessToFilesForAppWithMessageAndBehaviorAsync(
+                Windows.Foundation.Collections.IIterable<Windows.Storage.IStorageItem *> *source_item_list,
+                HSTRING app_package_family_name, Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                HSTRING message_from_app, Windows.Security.EnterpriseData.ProtectionPolicyRequestAccessBehavior behavior,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessToFilesForProcessAsync(
+                Windows.Foundation.Collections.IIterable<Windows.Storage.IStorageItem *> *source_item_list,
+                UINT32 process_id, Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT RequestAccessToFilesForProcessWithMessageAndBehaviorAsync(
+                Windows.Foundation.Collections.IIterable<Windows.Storage.IStorageItem *> *source_item_list,
+                UINT32 process_id, Windows.Security.EnterpriseData.ProtectionPolicyAuditInfo *audit_info,
+                HSTRING message_from_app, Windows.Security.EnterpriseData.ProtectionPolicyRequestAccessBehavior behavior,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Security.EnterpriseData.ProtectionPolicyEvaluationResult> **operation);
+        HRESULT IsFileProtectionRequiredAsync(Windows.Storage.IStorageItem *target, HSTRING identity,
+                [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+        HRESULT IsFileProtectionRequiredForNewFileAsync(Windows.Storage.IStorageFolder *parent_folder, HSTRING identity,
+                HSTRING desired_name, [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+        [propget] HRESULT PrimaryManagedIdentity([out, retval] HSTRING *identity);
+        HRESULT GetPrimaryManagedIdentityForIdentity(HSTRING identity, [out, retval] HSTRING *managed_identity);
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectedAccessResumedEventArgs),
+        uuid(ac4dca59-5d80-4e95-8c5f-8539450eebe0)
+    ]
+    interface IProtectedAccessResumedEventArgs : IInspectable {
+        [propget] HRESULT Identities([out, retval] Windows.Foundation.Collections.IVectorView<HSTRING> **value);
+    };
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectedAccessSuspendingEventArgs),
+        uuid(75a193e0-a344-429f-b975-04fc1f88c185)
+    ]
+    interface IProtectedAccessSuspendingEventArgs : IInspectable {
+        [propget] HRESULT Identities([out, retval] Windows.Foundation.Collections.IVectorView<HSTRING> **value);
+    };
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ProtectedContentRevokedEventArgs),
+        uuid(63686821-58b9-47ee-93d9-f0f741cf43f0)
+    ]
+    interface IProtectedContentRevokedEventArgs : IInspectable {
+        [propget] HRESULT Identity([out, retval] HSTRING *value);
+    };
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.EnterpriseData.ThreadNetworkContext),
+        uuid(fa4ea8e9-ef13-405a-b12c-d7348c6f41fc)
+    ]
+    interface IThreadNetworkContext : IInspectable {};
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile),
+        static(Windows.Security.EnterpriseData.IProtectionPolicyManagerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.Security.EnterpriseData.IProtectionPolicyManagerStatics2, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.Security.EnterpriseData.IProtectionPolicyManagerStatics3, Windows.Foundation.UniversalApiContract, 3.0),
+        static(Windows.Security.EnterpriseData.IProtectionPolicyManagerStatics4, Windows.Foundation.UniversalApiContract, 5.0),
+        threading(both)
+    ]
+    runtimeclass ProtectionPolicyManager {
+        [default] interface Windows.Security.EnterpriseData.IProtectionPolicyManager;
+        interface Windows.Security.EnterpriseData.IProtectionPolicyManager2;
+    };
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass ProtectionPolicyAuditInfo { [default] interface Windows.Security.EnterpriseData.IProtectionPolicyAuditInfo; };
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass ProtectedAccessResumedEventArgs { [default] interface Windows.Security.EnterpriseData.IProtectedAccessResumedEventArgs; };
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass ProtectedAccessSuspendingEventArgs { [default] interface Windows.Security.EnterpriseData.IProtectedAccessSuspendingEventArgs; };
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass ProtectedContentRevokedEventArgs { [default] interface Windows.Security.EnterpriseData.IProtectedContentRevokedEventArgs; };
+    [contract(Windows.Foundation.UniversalApiContract, 1.0), marshaling_behavior(agile)]
+    runtimeclass ThreadNetworkContext { [default] interface Windows.Security.EnterpriseData.IThreadNetworkContext; };
 }

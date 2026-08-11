@@ -32,6 +32,10 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_ApplicationModel
+#define WIDL_using_Windows_ApplicationModel_Core
+#include "windows.applicationmodel.h"
+#include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
 #include "windows.security.exchangeactivesyncprovisioning.h"
 #define WIDL_using_Windows_System_Profile
@@ -40,8 +44,6 @@
 #include "windows.system.userprofile.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
-#define WIDL_using_Windows_ApplicationModel_Core
-#include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
 
@@ -54,6 +56,14 @@ extern IActivationFactory *retail_info_factory;
 extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
+HRESULT core_application_get_current_application_id( HSTRING *value );
+IInspectable *core_application_get_event_sender( void );
+HRESULT lifecycle_add_suspending( __FIEventHandler_1_Windows__CApplicationModel__CSuspendingEventArgs *handler,
+        EventRegistrationToken *token );
+HRESULT lifecycle_remove_suspending( EventRegistrationToken token );
+HRESULT lifecycle_add_resuming( __FIEventHandler_1_IInspectable *handler, EventRegistrationToken *token );
+HRESULT lifecycle_remove_resuming( EventRegistrationToken token );
+HRESULT appcore_broker_set_state( const WCHAR *family, const WCHAR *application, BOOL quiesced );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

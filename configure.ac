@@ -286,11 +286,10 @@ else
   test "$FONTFORGE" != "false" || AC_MSG_ERROR([You need fontforge to rebuild fonts in maintainer mode.])
   test "$RSVG" != "false" || AC_MSG_ERROR([You need rsvg to rebuild icons in maintainer mode.])
 
-  dnl Check the imagemagick version
-  if test "$CONVERT" = false
+  dnl ImageMagick is needed only for legacy SVG crop directives.  Standard
+  dnl single-image ICO sources use rsvg-convert directly.
+  if test "$CONVERT" != false
   then
-    AC_MSG_ERROR([You need imagemagick to rebuild icons in maintainer mode.])
-  else
     AC_MSG_CHECKING([for recent enough imagemagick])
     convert_version=`convert --version | head -n1`
     if test "x$convert_version" != "x"
@@ -305,7 +304,7 @@ else
     if test "$CONVERT" = false
     then
       AC_MSG_RESULT([no ($convert_version_major.$convert_version_minor)])
-      AC_MSG_ERROR([You need imagemagick version 6.6 or newer to rebuild icons in maintainer mode.])
+      WINE_WARNING([ImageMagick version 6.6 or newer is needed for legacy SVG crop assets.])
     else
       AC_MSG_RESULT([yes ($convert_version_major.$convert_version_minor)])
     fi
@@ -2494,6 +2493,7 @@ WINE_CONFIG_MAKEFILE(dlls/apphelp)
 WINE_CONFIG_MAKEFILE(dlls/apphelp/tests)
 WINE_CONFIG_MAKEFILE(dlls/appwiz.cpl)
 WINE_CONFIG_MAKEFILE(dlls/appxdeploymentclient)
+WINE_CONFIG_MAKEFILE(dlls/appxdeploymentclient/tests)
 WINE_CONFIG_MAKEFILE(dlls/atl)
 WINE_CONFIG_MAKEFILE(dlls/atl/tests)
 WINE_CONFIG_MAKEFILE(dlls/atl100)
@@ -3343,6 +3343,8 @@ WINE_CONFIG_MAKEFILE(dlls/winbrand)
 WINE_CONFIG_MAKEFILE(dlls/windebug.dll16)
 WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel)
 WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel.calls)
+WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel.calls/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.devices.enumeration)
@@ -3382,6 +3384,8 @@ WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.onlineid)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.onlineid/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.credentials.ui.userconsentverifier)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.credentials.ui.userconsentverifier/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.security.enterprisedata)
+WINE_CONFIG_MAKEFILE(dlls/windows.security.enterprisedata/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.storage.applicationdata)
 WINE_CONFIG_MAKEFILE(dlls/windows.storage.applicationdata/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.storage)
@@ -3392,7 +3396,10 @@ WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers)
 WINE_CONFIG_MAKEFILE(dlls/windows.system.profile.systemmanufacturers/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.core.textinput)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.core.textinput/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.data.xml.dom)
+WINE_CONFIG_MAKEFILE(dlls/windows.data.xml.dom/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.notifications)
+WINE_CONFIG_MAKEFILE(dlls/windows.ui.notifications/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.xaml)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui.xaml/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.ui)
@@ -3694,8 +3701,10 @@ WINE_CONFIG_MAKEFILE(programs/wevtutil)
 WINE_CONFIG_MAKEFILE(programs/where)
 WINE_CONFIG_MAKEFILE(programs/whoami)
 WINE_CONFIG_MAKEFILE(programs/wine4office-appv-preload)
+WINE_CONFIG_MAKEFILE(programs/wine4office-voip-broker)
 WINE_CONFIG_MAKEFILE(programs/wine4officeauth)
 WINE_CONFIG_MAKEFILE(programs/wine4officeclose)
+WINE_CONFIG_MAKEFILE(programs/wine4officeclose/tests)
 WINE_CONFIG_MAKEFILE(programs/wineboot)
 WINE_CONFIG_MAKEFILE(programs/winebrowser)
 WINE_CONFIG_MAKEFILE(programs/winecfg)

@@ -3,4 +3,8 @@
 
 import "windows.applicationmodel.calls.idl";
 
-namespace Windows.ApplicationModel.Calls { runtimeclass VoipCallCoordinator; }
+namespace Windows.ApplicationModel.Calls
+{
+    runtimeclass VoipCallCoordinator;
+    runtimeclass VoipPhoneCall;
+}

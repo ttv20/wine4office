@@ -1,0 +1,7 @@
+MODULE  = windows.security.enterprisedata.dll
+IMPORTLIB = windows_security_enterprisedata
+IMPORTS = advapi32 combase uuid
+
+SOURCES = \
+	classes.idl \
+	main.c

@@ -710,6 +710,95 @@ static void test_DesignMode(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void expect_limited_access_failure( ILimitedAccessFeaturesStatics *statics, HSTRING feature,
+        HSTRING token, HSTRING attestation, HRESULT expected )
+{
+    ILimitedAccessFeatureRequestResult *result = (void *)0xdeadbeef;
+    HRESULT hr;
+
+    hr = ILimitedAccessFeaturesStatics_TryUnlockFeature( statics, feature, token, attestation, &result );
+    ok( hr == expected, "got hr %#lx, expected %#lx.\n", hr, expected );
+    ok( !result, "got result %p after failure %#lx.\n", result, expected );
+}
+
+static void test_LimitedAccessFeatures(void)
+{
+    static const WCHAR embedded_text[] = L"wine\0.feature";
+    ILimitedAccessFeaturesStatics *statics;
+    ILimitedAccessFeatureRequestResult *request_result;
+    IReference_DateTime *removal_date;
+    LimitedAccessFeatureStatus status;
+    INT32 order;
+    IActivationFactory *factory;
+    HSTRING class, feature, token, attestation, empty, embedded, result_feature;
+    HRESULT hr;
+
+    WindowsCreateString( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatures,
+            wcslen( RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatures ), &class );
+    hr = RoGetActivationFactory( class, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( class );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ILimitedAccessFeaturesStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IActivationFactory_Release( factory );
+    if (FAILED(hr)) return;
+
+    ok( WindowsCreateString( L"wine.test.feature", 17, &feature ) == S_OK, "failed to create feature.\n" );
+    ok( WindowsCreateString( L"invalid-token", 13, &token ) == S_OK, "failed to create token.\n" );
+    ok( WindowsCreateString( L"invalid-attestation", 19, &attestation ) == S_OK,
+            "failed to create attestation.\n" );
+    ok( WindowsCreateString( L"", 0, &empty ) == S_OK && !empty, "failed to create empty HSTRING.\n" );
+    ok( WindowsCreateString( embedded_text, ARRAY_SIZE(embedded_text) - 1, &embedded ) == S_OK,
+            "failed to create embedded-NUL HSTRING.\n" );
+
+    request_result = NULL;
+    hr = ILimitedAccessFeaturesStatics_TryUnlockFeature( statics, feature, token, attestation, &request_result );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!request_result, "got no fail-closed result.\n" );
+    if (request_result)
+    {
+        status = 0xdeadbeef;
+        hr = ILimitedAccessFeatureRequestResult_get_Status( request_result, &status );
+        ok( hr == S_OK && status == LimitedAccessFeatureStatus_Unavailable,
+                "got hr %#lx, status %u.\n", hr, status );
+        result_feature = NULL;
+        hr = ILimitedAccessFeatureRequestResult_get_FeatureId( request_result, &result_feature );
+        ok( hr == S_OK, "get_FeatureId returned %#lx.\n", hr );
+        order = 0xdeadbeef;
+        hr = WindowsCompareStringOrdinal( feature, result_feature, &order );
+        ok( hr == S_OK && !order, "got hr %#lx, order %d, feature %s.\n",
+                hr, order, debugstr_hstring(result_feature) );
+        WindowsDeleteString( result_feature );
+        removal_date = (void *)0xdeadbeef;
+        hr = ILimitedAccessFeatureRequestResult_get_EstimatedRemovalDate( request_result, &removal_date );
+        ok( hr == S_OK && !removal_date, "got hr %#lx, date %p.\n", hr, removal_date );
+        ILimitedAccessFeatureRequestResult_Release( request_result );
+    }
+
+    /* Every malformed input must also clear a caller-provided sentinel. */
+    expect_limited_access_failure( statics, NULL, token, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, empty, token, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, NULL, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, empty, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, token, NULL, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, token, empty, E_INVALIDARG );
+    expect_limited_access_failure( statics, embedded, token, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, embedded, attestation, E_INVALIDARG );
+    expect_limited_access_failure( statics, feature, token, embedded, E_INVALIDARG );
+
+    hr = ILimitedAccessFeaturesStatics_TryUnlockFeature( statics, feature, token, attestation, NULL );
+    ok( hr == E_INVALIDARG, "got hr %#lx for NULL result.\n", hr );
+
+    WindowsDeleteString( embedded );
+    WindowsDeleteString( empty );
+    WindowsDeleteString( attestation );
+    WindowsDeleteString( token );
+    WindowsDeleteString( feature );
+    ILimitedAccessFeaturesStatics_Release( statics );
+}
+
 START_TEST(model)
 {
     HRESULT hr;
@@ -721,6 +810,7 @@ START_TEST(model)
     test_StagePackageOptions();
     test_PackageStatics();
     test_DesignMode();
+    test_LimitedAccessFeatures();
 
     RoUninitialize();
 }
