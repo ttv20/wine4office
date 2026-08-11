@@ -4491,6 +4491,120 @@ done:
     DestroyWindow(window);
 }
 
+static void gpu_to_sysmem_update_surface_test(void)
+{
+    static const DWORD source_color = 0xff00ff00;
+    static const DWORD destination_color = 0x11223344;
+    IDirect3DSurface9 *src_surface = NULL, *dst_surface = NULL;
+    IDirect3DDevice9 *device = NULL;
+    IDirect3D9 *d3d;
+    D3DLOCKED_RECT locked_rect;
+    RECT src_rect;
+    POINT dst_point;
+    HWND window;
+    HRESULT hr;
+    ULONG refcount;
+
+    window = create_window();
+    d3d = Direct3DCreate9(D3D_SDK_VERSION);
+    ok(!!d3d, "Failed to create a D3D object.\n");
+    if (!(device = create_device(d3d, window, window, TRUE)))
+    {
+        skip("Failed to create a D3D device, skipping tests.\n");
+        goto done;
+    }
+
+    hr = IDirect3DDevice9_CreateOffscreenPlainSurface(device, 16, 16, D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT, &src_surface, NULL);
+    ok(SUCCEEDED(hr), "Failed to create source surface, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto cleanup;
+
+    hr = IDirect3DDevice9_CreateOffscreenPlainSurface(device, 16, 16, D3DFMT_A8R8G8B8,
+            D3DPOOL_SYSTEMMEM, &dst_surface, NULL);
+    ok(SUCCEEDED(hr), "Failed to create destination surface, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto cleanup;
+
+    hr = IDirect3DDevice9_ColorFill(device, src_surface, NULL, source_color);
+    ok(SUCCEEDED(hr), "Failed to fill source surface, hr %#lx.\n", hr);
+
+    fill_surface(dst_surface, destination_color, 0);
+    src_rect.left = 4;
+    src_rect.top = 3;
+    src_rect.right = 12;
+    src_rect.bottom = 11;
+    dst_point.x = 2;
+    dst_point.y = 1;
+    /* GL supports boxed downloads; Vulkan currently rejects them. */
+    hr = IDirect3DDevice9_UpdateSurface(device, src_surface, &src_rect, dst_surface, &dst_point);
+    ok(hr == D3D_OK || hr == D3DERR_INVALIDCALL,
+            "Got unexpected result for partial update, hr %#lx.\n", hr);
+    if (hr == D3D_OK)
+    {
+        ok(getPixelColorFromSurface(dst_surface, 2, 1) == source_color,
+                "Partial update did not write the destination region.\n");
+        ok(getPixelColorFromSurface(dst_surface, 9, 8) == source_color,
+                "Partial update did not write the destination region.\n");
+        ok(getPixelColorFromSurface(dst_surface, 0, 0) == destination_color,
+                "Partial update overwrote data outside the destination region.\n");
+        ok(getPixelColorFromSurface(dst_surface, 15, 15) == destination_color,
+                "Partial update overwrote data outside the destination region.\n");
+    }
+
+    fill_surface(dst_surface, destination_color, 0);
+    src_rect.left = 14;
+    src_rect.top = 14;
+    src_rect.right = 18;
+    src_rect.bottom = 18;
+    dst_point.x = 0;
+    dst_point.y = 0;
+    hr = IDirect3DDevice9_UpdateSurface(device, src_surface, &src_rect, dst_surface, &dst_point);
+    ok(hr == D3DERR_INVALIDCALL, "Got unexpected result for invalid update, hr %#lx.\n", hr);
+    hr = IDirect3DSurface9_LockRect(dst_surface, &locked_rect, NULL, D3DLOCK_READONLY);
+    ok(SUCCEEDED(hr), "Failed to lock destination surface, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ok(((DWORD *)locked_rect.pBits)[0] == destination_color,
+                "Failed update modified the destination surface.\n");
+        hr = IDirect3DSurface9_UnlockRect(dst_surface);
+        ok(SUCCEEDED(hr), "Failed to unlock destination surface, hr %#lx.\n", hr);
+    }
+
+    fill_surface(dst_surface, destination_color, 0);
+    src_rect.left = 4;
+    src_rect.top = 3;
+    src_rect.right = 12;
+    src_rect.bottom = 11;
+    dst_point.x = 14;
+    dst_point.y = 14;
+    hr = IDirect3DDevice9_UpdateSurface(device, src_surface, &src_rect, dst_surface, &dst_point);
+    ok(hr == D3DERR_INVALIDCALL, "Got unexpected result for invalid destination, hr %#lx.\n", hr);
+    hr = IDirect3DSurface9_LockRect(dst_surface, &locked_rect, NULL, D3DLOCK_READONLY);
+    ok(SUCCEEDED(hr), "Failed to lock destination surface, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ok(((DWORD *)locked_rect.pBits)[0] == destination_color,
+                "Failed update modified the destination surface.\n");
+        hr = IDirect3DSurface9_UnlockRect(dst_surface);
+        ok(SUCCEEDED(hr), "Failed to unlock destination surface, hr %#lx.\n", hr);
+    }
+
+cleanup:
+    if (dst_surface)
+        IDirect3DSurface9_Release(dst_surface);
+    if (src_surface)
+        IDirect3DSurface9_Release(src_surface);
+    if (device)
+    {
+        refcount = IDirect3DDevice9_Release(device);
+        ok(!refcount, "Device has %lu references left.\n", refcount);
+    }
+done:
+    IDirect3D9_Release(d3d);
+    DestroyWindow(window);
+}
+
 static void test_multisample_stretch_rect(void)
 {
     static const D3DTEXTUREFILTERTYPE filters[] =
@@ -29277,6 +29391,7 @@ START_TEST(visual)
     test_sanity();
     depth_clamp_test();
     stretchrect_test();
+    gpu_to_sysmem_update_surface_test();
     test_multisample_stretch_rect();
     lighting_test();
     test_specular_lighting();

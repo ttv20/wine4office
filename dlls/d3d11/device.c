@@ -4607,10 +4607,6 @@ static BOOL d3d11_shared_texture_metadata_valid(struct d3d_device *device,
             || metadata->adapter_luid_high != device->adapter_luid.HighPart
             || (!metadata->keyed_mutex_global
                     && !(metadata->misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
-            || !metadata->payload_name[0]
-            || !metadata->event_name[0]
-            || metadata->payload_name[D3D11_SHARED_TEXTURE_NAME_LENGTH - 1]
-            || metadata->event_name[D3D11_SHARED_TEXTURE_NAME_LENGTH - 1]
             || metadata->payload_offset != sizeof(struct d3d11_shared_texture_payload))
         return FALSE;
 
@@ -4641,7 +4637,10 @@ static BOOL d3d11_shared_texture_metadata_valid(struct d3d_device *device,
             || desc.Format == DXGI_FORMAT_NV12)
             && desc.SampleDesc.Count == 1 && !desc.SampleDesc.Quality
             && desc.Usage == D3D11_USAGE_DEFAULT && !desc.CPUAccessFlags
-            && (desc.MiscFlags == D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+            && (desc.MiscFlags == D3D11_RESOURCE_MISC_SHARED
+            || desc.MiscFlags == (D3D11_RESOURCE_MISC_SHARED
+                    | D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+            || desc.MiscFlags == D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
             || desc.MiscFlags == (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
                     | D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
             && (desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE))
@@ -4697,6 +4696,8 @@ static HRESULT d3d11_device_finish_open_shared_texture(struct d3d_device *device
         const struct d3d11_shared_texture_metadata *metadata, struct d3d11_shared_texture *shared,
         HANDLE nt_handle, REFIID iid, void **out)
 {
+    D3DKMT_ESCAPE escape = {0};
+    struct wine_d3dkmt_shared_handles handles = {0};
     D3DKMT_OPENKEYEDMUTEX open_mutex = {0};
     D3D11_TEXTURE2D_DESC desc = {0};
     struct d3d_texture2d *texture;
@@ -4709,17 +4710,19 @@ static HRESULT d3d11_device_finish_open_shared_texture(struct d3d_device *device
         hr = E_INVALIDARG;
         goto failed;
     }
-    if (!(shared->change_event = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE,
-            FALSE, metadata->event_name)))
+    handles.size = sizeof(handles);
+    escape.hDevice = device->kmt_device;
+    escape.hContext = shared->resource;
+    escape.Type = D3DKMT_ESCAPE_GET_SHARED_HANDLES_WINE;
+    escape.pPrivateDriverData = &handles;
+    escape.PrivateDriverDataSize = sizeof(handles);
+    if ((status = D3DKMTEscape(&escape)))
     {
-        hr = HRESULT_FROM_WIN32(GetLastError());
+        hr = HRESULT_FROM_NT(status);
         goto failed;
     }
-    if (!(shared->mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, metadata->payload_name)))
-    {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        goto failed;
-    }
+    shared->mapping = handles.mapping;
+    shared->change_event = handles.event;
     if (!(shared->view = MapViewOfFile(shared->mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0)))
     {
         hr = HRESULT_FROM_WIN32(GetLastError());

@@ -2705,6 +2705,7 @@ enum message_type
     unsigned int   style;       /* window style */
     unsigned int   ex_style;    /* window extended style */
     unsigned int   ansi;        /* window created as ansi */
+    user_handle_t  broadcast_owner; /* helper owning broadcast exclusion */
     VARARG(class,unicode_str);  /* class name */
 @REPLY
     user_handle_t  handle;      /* created window */
@@ -2717,6 +2718,26 @@ enum message_type
 /* Destroy a window */
 @REQ(destroy_window)
     user_handle_t  handle;      /* handle to the window */
+@END
+
+/* Update the broadcast exclusion owned by a window */
+@REQ(update_window_broadcast_exclusion)
+    user_handle_t  window;      /* helper window */
+    user_handle_t  target;      /* target window, for adding an exclusion */
+    unsigned int   flags;       /* operation flags */
+@REPLY
+    user_handle_t  target;      /* current target window */
+    unsigned int   refcount;    /* target exclusion reference count */
+    unsigned int   excluded;    /* whether the window is excluded */
+@END
+
+/* Retrieve a window broadcast exclusion */
+@REQ(get_window_broadcast_exclusion)
+    user_handle_t  window;      /* window to query */
+@REPLY
+    user_handle_t  target;       /* current target window */
+    unsigned int   refcount;    /* target exclusion reference count */
+    unsigned int   excluded;    /* whether the window is excluded */
 @END
 
 
@@ -4220,12 +4241,50 @@ struct handle_info
 /* Suspend a process */
 @REQ(suspend_process)
     obj_handle_t handle;       /* process handle */
+@REPLY
+    int transitioned;             /* process became lifecycle-suspended */
 @END
 
 
 /* Resume a process */
 @REQ(resume_process)
     obj_handle_t handle;       /* process handle */
+@REPLY
+    int transitioned;             /* process became runnable */
+@END
+
+/* Register the calling process for AppModel lifecycle notifications */
+@REQ(register_appcore_lifecycle)
+@REPLY
+    obj_handle_t request;      /* event signaled when a transition is pending */
+@END
+
+/* Retrieve the pending AppModel lifecycle transition for the calling process */
+@REQ(get_appcore_lifecycle_state)
+@REPLY
+    unsigned int sequence;     /* transition sequence number */
+    int          quiesced;     /* whether the process is being suspended */
+@END
+
+/* Notify a registered process of an AppModel lifecycle transition */
+@REQ(prepare_appcore_lifecycle)
+    obj_handle_t process;      /* target process handle */
+    int          quiesced;     /* whether the process is being suspended */
+@REPLY
+    unsigned int sequence;     /* transition sequence number */
+    obj_handle_t completion;   /* event signaled after target-side delivery */
+@END
+
+/* Complete an AppModel lifecycle transition in the calling process */
+@REQ(complete_appcore_lifecycle)
+    unsigned int sequence;     /* completed transition sequence number */
+@END
+
+/* Commit or roll back an AppModel lifecycle source transition */
+@REQ(finish_appcore_lifecycle)
+    obj_handle_t process;      /* target process handle */
+    int          quiesced;     /* requested lifecycle state */
+    int          success;      /* whether the source transition succeeded */
 @END
 
 /* Iterate processes using global process list */
@@ -4302,6 +4361,22 @@ enum inproc_sync_type
     unsigned int        type;           /* d3dkmt object type */
     d3dkmt_handle_t     global;         /* global d3dkmt handle */
     VARARG(runtime,bytes);              /* client runtime data */
+@END
+
+
+/* Attach client objects whose lifetime belongs to a shared d3dkmt resource */
+@REQ(d3dkmt_object_set_shared_handles)
+    d3dkmt_handle_t     global;         /* global d3dkmt resource handle */
+    obj_handle_t        mapping;        /* shared payload section */
+    obj_handle_t        event;          /* shared change event */
+@END
+
+/* Duplicate resource-attached client objects into the requesting process */
+@REQ(d3dkmt_object_get_shared_handles)
+    d3dkmt_handle_t     global;         /* global d3dkmt resource handle */
+@REPLY
+    obj_handle_t        mapping;        /* shared payload section */
+    obj_handle_t        event;          /* shared change event */
 @END
 
 

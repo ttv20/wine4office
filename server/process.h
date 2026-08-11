@@ -76,6 +76,13 @@ struct process
     enum startup_state   startup_state;   /* startup state */
     struct startup_info *startup_info;    /* startup info while init is in progress */
     struct event        *idle_event;      /* event for input idle */
+    struct event        *appcore_request; /* AppModel lifecycle request event */
+    struct event        *appcore_complete;/* AppModel lifecycle completion event */
+    unsigned int         appcore_sequence;/* pending lifecycle transition sequence */
+    process_id_t         appcore_controller; /* process that initiated pending transition */
+    unsigned int         appcore_pending:1; /* lifecycle transition awaiting completion */
+    unsigned int         appcore_delivered:1; /* transition delivered in target */
+    unsigned int         appcore_quiesced:1;/* last requested lifecycle state */
     obj_handle_t         winstation;      /* main handle to process window station */
     obj_handle_t         desktop;         /* handle to desktop to use for new threads */
     struct token        *token;           /* security token associated with this process */
@@ -85,6 +92,7 @@ struct process
     unsigned int         trace_data;      /* opaque data used by the process tracing mechanism */
     struct rawinput_device *rawinput_devices;     /* list of registered rawinput devices */
     unsigned int         rawinput_device_count;   /* number of registered rawinput devices */
+    file_pos_t           key_value_query_size;    /* retained registry query names */
     const struct rawinput_device *rawinput_mouse; /* rawinput mouse device, if any */
     const struct rawinput_device *rawinput_kbd;   /* rawinput keyboard device, if any */
     struct list          rawinput_entry;  /* entry in the rawinput process list */

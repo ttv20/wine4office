@@ -65,8 +65,9 @@ struct d3d11_shared_texture_metadata
     UINT payload_offset;
     UINT payload_row_pitch;
     UINT payload_size;
-    WCHAR payload_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
-    WCHAR event_name[D3D11_SHARED_TEXTURE_NAME_LENGTH];
+    /* Kept for private-runtime-data layout compatibility; handles are
+     * duplicated from the exported resource object, not opened by name. */
+    WCHAR reserved[D3D11_SHARED_TEXTURE_NAME_LENGTH * 2];
 };
 
 struct d3d11_shared_texture_payload

@@ -42,6 +42,7 @@
 #include "d3d12.h"
 
 #include "wine/vulkan.h"
+#include "wine/d3dkmt.h"
 #include "wine/wgl.h"
 #include "wine/test.h"
 
@@ -2802,6 +2803,8 @@ static void test_D3DKMTCreateAllocation( void )
 
 static void test_D3DKMTShareObjects( void )
 {
+    static const WCHAR mapping_name[] = L"Local\\__WineTest_D3DKMT_SharedMapping";
+    static const WCHAR event_name[] = L"Local\\__WineTest_D3DKMT_SharedEvent";
     OBJECT_ATTRIBUTES attr = {.Length = sizeof(attr)};
     UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\BaseNamedObjects\\__WineTest_D3DKMT" );
     UNICODE_STRING name2 = RTL_CONSTANT_STRING( L"\\BaseNamedObjects\\__WineTest_D3DKMT_2" );
@@ -2836,9 +2839,11 @@ static void test_D3DKMTShareObjects( void )
     char driver_data[0x1000], runtime_data[0x100];
     char alloc_data[0x400], mutex_data[0x100];
     D3DKMT_HANDLE objects[4], next_local = 0;
+    struct wine_d3dkmt_shared_handles shared_handles;
+    D3DKMT_ESCAPE escape = {0};
 
     NTSTATUS status;
-    HANDLE handle;
+    HANDLE handle, mapping, event;
 
     HMODULE gdi32;
     NTSTATUS (WINAPI *pD3DKMTOpenKeyedMutexFromNtHandle)( D3DKMT_OPENKEYEDMUTEXFROMNTHANDLE* );
@@ -3108,6 +3113,30 @@ static void test_D3DKMTShareObjects( void )
 
     check_object_type( handle, L"DxgkSharedResource" );
     check_object_name( handle, name.Buffer );
+
+    mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 0x1000, mapping_name );
+    ok( !!mapping, "failed to create mapping, error %lu\n", GetLastError() );
+    event = CreateEventW( NULL, FALSE, FALSE, event_name );
+    ok( !!event, "failed to create event, error %lu\n", GetLastError() );
+    shared_handles.size = sizeof(shared_handles);
+    shared_handles.mapping = mapping;
+    shared_handles.event = event;
+    escape.Type = D3DKMT_ESCAPE_SET_SHARED_HANDLES_WINE;
+    escape.hDevice = create_device.hDevice;
+    escape.hContext = create_alloc.hResource;
+    escape.pPrivateDriverData = &shared_handles;
+    escape.PrivateDriverDataSize = sizeof(shared_handles);
+    status = D3DKMTEscape( &escape );
+    ok_nt( STATUS_SUCCESS, status );
+    CloseHandle( mapping );
+    CloseHandle( event );
+
+    mapping = OpenFileMappingW( FILE_MAP_READ, FALSE, mapping_name );
+    ok( !!mapping, "server did not retain mapping, error %lu\n", GetLastError() );
+    event = OpenEventW( SYNCHRONIZE, FALSE, event_name );
+    ok( !!event, "server did not retain event, error %lu\n", GetLastError() );
+    CloseHandle( mapping );
+    CloseHandle( event );
 
 
     status = D3DKMTOpenNtHandleFromName( &open_resource_name );

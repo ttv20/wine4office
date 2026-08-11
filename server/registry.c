@@ -116,6 +116,8 @@ struct key_value
 };
 
 #define MAX_QUERY_VALUE_COUNT 0x10000
+#define MAX_QUERY_VALUE_NAMES_SIZE (16 * 1024 * 1024)
+#define MAX_PROCESS_QUERY_VALUE_NAMES_SIZE (64 * 1024 * 1024)
 
 struct key_value_query_chunk
 {
@@ -128,6 +130,7 @@ struct key_value_query
 {
     struct object obj;
     struct key *key;
+    struct process *owner;
     struct list chunks;
     file_pos_t names_size;
     unsigned int count;
@@ -735,6 +738,12 @@ static void key_value_query_destroy( struct object *obj )
             LIST_ENTRY( ptr, struct key_value_query_chunk, entry );
         list_remove( ptr );
         free( chunk );
+    }
+    if (query->owner)
+    {
+        assert( query->owner->key_value_query_size >= query->names_size );
+        query->owner->key_value_query_size -= query->names_size;
+        release_object( query->owner );
     }
     if (query->key) release_object( query->key );
     free( query->results );
@@ -2563,6 +2572,7 @@ DECL_HANDLER(create_key_value_query)
     if ((query = alloc_object( &key_value_query_ops )))
     {
         query->key = key;
+        query->owner = (struct process *)grab_object( current->process );
         list_init( &query->chunks );
         query->names_size = 0;
         query->count = req->count;
@@ -2600,17 +2610,26 @@ DECL_HANDLER(append_key_value_query)
             if (query->executed || req->offset != query->names_size ||
                 query->names_size > max_size || size > max_size - query->names_size)
                 set_error( STATUS_INVALID_PARAMETER );
+            else if (query->names_size > MAX_QUERY_VALUE_NAMES_SIZE ||
+                     size > MAX_QUERY_VALUE_NAMES_SIZE - query->names_size ||
+                     query->owner->key_value_query_size > MAX_PROCESS_QUERY_VALUE_NAMES_SIZE ||
+                     size > MAX_PROCESS_QUERY_VALUE_NAMES_SIZE - query->owner->key_value_query_size)
+                set_error( STATUS_INSUFFICIENT_RESOURCES );
             else if (size)
             {
                 struct key_value_query_chunk *chunk;
-                size_t alloc_size = offsetof( struct key_value_query_chunk, data ) + size;
 
-                if ((chunk = mem_alloc( alloc_size )))
+                if (size > ~(size_t)0 - offsetof( struct key_value_query_chunk, data ))
+                    set_error( STATUS_INSUFFICIENT_RESOURCES );
+                else if (!(chunk = mem_alloc( offsetof( struct key_value_query_chunk, data ) + size )))
+                    set_error( STATUS_INSUFFICIENT_RESOURCES );
+                else
                 {
                     chunk->size = size;
                     memcpy( chunk->data, get_req_data(), size );
                     list_add_tail( &query->chunks, &chunk->entry );
                     query->names_size += size;
+                    query->owner->key_value_query_size += size;
                 }
             }
         }

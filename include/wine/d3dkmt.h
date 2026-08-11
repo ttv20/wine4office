@@ -26,4 +26,13 @@ struct wine_d3dkmt_allocation_backing
     HANDLE handle;
 };
 
+/* SET_SHARED_HANDLES consumes the two handles; GET_SHARED_HANDLES fills them
+ * with handles duplicated from the exported resource object. */
+struct wine_d3dkmt_shared_handles
+{
+    UINT size;
+    HANDLE mapping;
+    HANDLE event;
+};
+
 #endif /* __WINE_D3DKMT_H */

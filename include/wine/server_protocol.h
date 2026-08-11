@@ -3595,7 +3595,9 @@ struct create_window_request
     unsigned int   style;
     unsigned int   ex_style;
     unsigned int   ansi;
+    user_handle_t  broadcast_owner;
     /* VARARG(class,unicode_str); */
+    char __pad_60[4];
 };
 struct create_window_reply
 {
@@ -3617,6 +3619,38 @@ struct destroy_window_request
 struct destroy_window_reply
 {
     struct reply_header __header;
+};
+
+
+struct update_window_broadcast_exclusion_request
+{
+    struct request_header __header;
+    user_handle_t  window;
+    user_handle_t  target;
+    unsigned int   flags;
+};
+struct update_window_broadcast_exclusion_reply
+{
+    struct reply_header __header;
+    user_handle_t  target;
+    unsigned int   refcount;
+    unsigned int   excluded;
+    char __pad_20[4];
+};
+
+
+struct get_window_broadcast_exclusion_request
+{
+    struct request_header __header;
+    user_handle_t  window;
+};
+struct get_window_broadcast_exclusion_reply
+{
+    struct reply_header __header;
+    user_handle_t  target;
+    unsigned int   refcount;
+    unsigned int   excluded;
+    char __pad_20[4];
 };
 
 
@@ -6052,6 +6086,8 @@ struct suspend_process_request
 struct suspend_process_reply
 {
     struct reply_header __header;
+    int transitioned;
+    char __pad_12[4];
 };
 
 
@@ -6062,6 +6098,73 @@ struct resume_process_request
     obj_handle_t handle;
 };
 struct resume_process_reply
+{
+    struct reply_header __header;
+    int transitioned;
+    char __pad_12[4];
+};
+
+
+struct register_appcore_lifecycle_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct register_appcore_lifecycle_reply
+{
+    struct reply_header __header;
+    obj_handle_t request;
+    char __pad_12[4];
+};
+
+
+struct get_appcore_lifecycle_state_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_appcore_lifecycle_state_reply
+{
+    struct reply_header __header;
+    unsigned int sequence;
+    int          quiesced;
+};
+
+
+struct prepare_appcore_lifecycle_request
+{
+    struct request_header __header;
+    obj_handle_t process;
+    int          quiesced;
+    char __pad_20[4];
+};
+struct prepare_appcore_lifecycle_reply
+{
+    struct reply_header __header;
+    unsigned int sequence;
+    obj_handle_t completion;
+};
+
+
+struct complete_appcore_lifecycle_request
+{
+    struct request_header __header;
+    unsigned int sequence;
+};
+struct complete_appcore_lifecycle_reply
+{
+    struct reply_header __header;
+};
+
+
+struct finish_appcore_lifecycle_request
+{
+    struct request_header __header;
+    obj_handle_t process;
+    int          quiesced;
+    int          success;
+};
+struct finish_appcore_lifecycle_reply
 {
     struct reply_header __header;
 };
@@ -6183,6 +6286,33 @@ struct d3dkmt_object_update_request
 struct d3dkmt_object_update_reply
 {
     struct reply_header __header;
+};
+
+
+
+struct d3dkmt_object_set_shared_handles_request
+{
+    struct request_header __header;
+    d3dkmt_handle_t     global;
+    obj_handle_t        mapping;
+    obj_handle_t        event;
+};
+struct d3dkmt_object_set_shared_handles_reply
+{
+    struct reply_header __header;
+};
+
+
+struct d3dkmt_object_get_shared_handles_request
+{
+    struct request_header __header;
+    d3dkmt_handle_t     global;
+};
+struct d3dkmt_object_get_shared_handles_reply
+{
+    struct reply_header __header;
+    obj_handle_t        mapping;
+    obj_handle_t        event;
 };
 
 
@@ -6463,6 +6593,8 @@ enum request
     REQ_set_named_pipe_info,
     REQ_create_window,
     REQ_destroy_window,
+    REQ_update_window_broadcast_exclusion,
+    REQ_get_window_broadcast_exclusion,
     REQ_get_desktop_window,
     REQ_set_window_owner,
     REQ_get_window_info,
@@ -6613,6 +6745,11 @@ enum request
     REQ_terminate_job,
     REQ_suspend_process,
     REQ_resume_process,
+    REQ_register_appcore_lifecycle,
+    REQ_get_appcore_lifecycle_state,
+    REQ_prepare_appcore_lifecycle,
+    REQ_complete_appcore_lifecycle,
+    REQ_finish_appcore_lifecycle,
     REQ_get_next_process,
     REQ_get_next_thread,
     REQ_set_keyboard_repeat,
@@ -6620,6 +6757,8 @@ enum request
     REQ_get_inproc_alert_fd,
     REQ_d3dkmt_object_create,
     REQ_d3dkmt_object_update,
+    REQ_d3dkmt_object_set_shared_handles,
+    REQ_d3dkmt_object_get_shared_handles,
     REQ_d3dkmt_object_query,
     REQ_d3dkmt_object_open,
     REQ_d3dkmt_share_objects,
@@ -6782,6 +6921,8 @@ union generic_request
     struct set_named_pipe_info_request set_named_pipe_info_request;
     struct create_window_request create_window_request;
     struct destroy_window_request destroy_window_request;
+    struct update_window_broadcast_exclusion_request update_window_broadcast_exclusion_request;
+    struct get_window_broadcast_exclusion_request get_window_broadcast_exclusion_request;
     struct get_desktop_window_request get_desktop_window_request;
     struct set_window_owner_request set_window_owner_request;
     struct get_window_info_request get_window_info_request;
@@ -6932,6 +7073,11 @@ union generic_request
     struct terminate_job_request terminate_job_request;
     struct suspend_process_request suspend_process_request;
     struct resume_process_request resume_process_request;
+    struct register_appcore_lifecycle_request register_appcore_lifecycle_request;
+    struct get_appcore_lifecycle_state_request get_appcore_lifecycle_state_request;
+    struct prepare_appcore_lifecycle_request prepare_appcore_lifecycle_request;
+    struct complete_appcore_lifecycle_request complete_appcore_lifecycle_request;
+    struct finish_appcore_lifecycle_request finish_appcore_lifecycle_request;
     struct get_next_process_request get_next_process_request;
     struct get_next_thread_request get_next_thread_request;
     struct set_keyboard_repeat_request set_keyboard_repeat_request;
@@ -6939,6 +7085,8 @@ union generic_request
     struct get_inproc_alert_fd_request get_inproc_alert_fd_request;
     struct d3dkmt_object_create_request d3dkmt_object_create_request;
     struct d3dkmt_object_update_request d3dkmt_object_update_request;
+    struct d3dkmt_object_set_shared_handles_request d3dkmt_object_set_shared_handles_request;
+    struct d3dkmt_object_get_shared_handles_request d3dkmt_object_get_shared_handles_request;
     struct d3dkmt_object_query_request d3dkmt_object_query_request;
     struct d3dkmt_object_open_request d3dkmt_object_open_request;
     struct d3dkmt_share_objects_request d3dkmt_share_objects_request;
@@ -7099,6 +7247,8 @@ union generic_reply
     struct set_named_pipe_info_reply set_named_pipe_info_reply;
     struct create_window_reply create_window_reply;
     struct destroy_window_reply destroy_window_reply;
+    struct update_window_broadcast_exclusion_reply update_window_broadcast_exclusion_reply;
+    struct get_window_broadcast_exclusion_reply get_window_broadcast_exclusion_reply;
     struct get_desktop_window_reply get_desktop_window_reply;
     struct set_window_owner_reply set_window_owner_reply;
     struct get_window_info_reply get_window_info_reply;
@@ -7249,6 +7399,11 @@ union generic_reply
     struct terminate_job_reply terminate_job_reply;
     struct suspend_process_reply suspend_process_reply;
     struct resume_process_reply resume_process_reply;
+    struct register_appcore_lifecycle_reply register_appcore_lifecycle_reply;
+    struct get_appcore_lifecycle_state_reply get_appcore_lifecycle_state_reply;
+    struct prepare_appcore_lifecycle_reply prepare_appcore_lifecycle_reply;
+    struct complete_appcore_lifecycle_reply complete_appcore_lifecycle_reply;
+    struct finish_appcore_lifecycle_reply finish_appcore_lifecycle_reply;
     struct get_next_process_reply get_next_process_reply;
     struct get_next_thread_reply get_next_thread_reply;
     struct set_keyboard_repeat_reply set_keyboard_repeat_reply;
@@ -7256,6 +7411,8 @@ union generic_reply
     struct get_inproc_alert_fd_reply get_inproc_alert_fd_reply;
     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
     struct d3dkmt_object_update_reply d3dkmt_object_update_reply;
+    struct d3dkmt_object_set_shared_handles_reply d3dkmt_object_set_shared_handles_reply;
+    struct d3dkmt_object_get_shared_handles_reply d3dkmt_object_get_shared_handles_reply;
     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
     struct d3dkmt_share_objects_reply d3dkmt_share_objects_reply;
@@ -7265,6 +7422,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 959
+#define SERVER_PROTOCOL_VERSION 964
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -1742,6 +1742,7 @@ static void dump_create_window_request( const struct create_window_request *req 
     fprintf( stderr, ", style=%08x", req->style );
     fprintf( stderr, ", ex_style=%08x", req->ex_style );
     fprintf( stderr, ", ansi=%08x", req->ansi );
+    fprintf( stderr, ", broadcast_owner=%08x", req->broadcast_owner );
     dump_varargs_unicode_str( ", class=", cur_size );
 }
 
@@ -1756,6 +1757,32 @@ static void dump_create_window_reply( const struct create_window_reply *req )
 static void dump_destroy_window_request( const struct destroy_window_request *req )
 {
     fprintf( stderr, " handle=%08x", req->handle );
+}
+
+static void dump_update_window_broadcast_exclusion_request( const struct update_window_broadcast_exclusion_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+    fprintf( stderr, ", target=%08x", req->target );
+    fprintf( stderr, ", flags=%08x", req->flags );
+}
+
+static void dump_update_window_broadcast_exclusion_reply( const struct update_window_broadcast_exclusion_reply *req )
+{
+    fprintf( stderr, " target=%08x", req->target );
+    fprintf( stderr, ", refcount=%08x", req->refcount );
+    fprintf( stderr, ", excluded=%08x", req->excluded );
+}
+
+static void dump_get_window_broadcast_exclusion_request( const struct get_window_broadcast_exclusion_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+}
+
+static void dump_get_window_broadcast_exclusion_reply( const struct get_window_broadcast_exclusion_reply *req )
+{
+    fprintf( stderr, " target=%08x", req->target );
+    fprintf( stderr, ", refcount=%08x", req->refcount );
+    fprintf( stderr, ", excluded=%08x", req->excluded );
 }
 
 static void dump_get_desktop_window_request( const struct get_desktop_window_request *req )
@@ -3404,9 +3431,62 @@ static void dump_suspend_process_request( const struct suspend_process_request *
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_suspend_process_reply( const struct suspend_process_reply *req )
+{
+    fprintf( stderr, " transitioned=%d", req->transitioned );
+}
+
 static void dump_resume_process_request( const struct resume_process_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_resume_process_reply( const struct resume_process_reply *req )
+{
+    fprintf( stderr, " transitioned=%d", req->transitioned );
+}
+
+static void dump_register_appcore_lifecycle_request( const struct register_appcore_lifecycle_request *req )
+{
+}
+
+static void dump_register_appcore_lifecycle_reply( const struct register_appcore_lifecycle_reply *req )
+{
+    fprintf( stderr, " request=%04x", req->request );
+}
+
+static void dump_get_appcore_lifecycle_state_request( const struct get_appcore_lifecycle_state_request *req )
+{
+}
+
+static void dump_get_appcore_lifecycle_state_reply( const struct get_appcore_lifecycle_state_reply *req )
+{
+    fprintf( stderr, " sequence=%08x", req->sequence );
+    fprintf( stderr, ", quiesced=%d", req->quiesced );
+}
+
+static void dump_prepare_appcore_lifecycle_request( const struct prepare_appcore_lifecycle_request *req )
+{
+    fprintf( stderr, " process=%04x", req->process );
+    fprintf( stderr, ", quiesced=%d", req->quiesced );
+}
+
+static void dump_prepare_appcore_lifecycle_reply( const struct prepare_appcore_lifecycle_reply *req )
+{
+    fprintf( stderr, " sequence=%08x", req->sequence );
+    fprintf( stderr, ", completion=%04x", req->completion );
+}
+
+static void dump_complete_appcore_lifecycle_request( const struct complete_appcore_lifecycle_request *req )
+{
+    fprintf( stderr, " sequence=%08x", req->sequence );
+}
+
+static void dump_finish_appcore_lifecycle_request( const struct finish_appcore_lifecycle_request *req )
+{
+    fprintf( stderr, " process=%04x", req->process );
+    fprintf( stderr, ", quiesced=%d", req->quiesced );
+    fprintf( stderr, ", success=%d", req->success );
 }
 
 static void dump_get_next_process_request( const struct get_next_process_request *req )
@@ -3487,6 +3567,24 @@ static void dump_d3dkmt_object_update_request( const struct d3dkmt_object_update
     fprintf( stderr, " type=%08x", req->type );
     fprintf( stderr, ", global=%08x", req->global );
     dump_varargs_bytes( ", runtime=", cur_size );
+}
+
+static void dump_d3dkmt_object_set_shared_handles_request( const struct d3dkmt_object_set_shared_handles_request *req )
+{
+    fprintf( stderr, " global=%08x", req->global );
+    fprintf( stderr, ", mapping=%04x", req->mapping );
+    fprintf( stderr, ", event=%04x", req->event );
+}
+
+static void dump_d3dkmt_object_get_shared_handles_request( const struct d3dkmt_object_get_shared_handles_request *req )
+{
+    fprintf( stderr, " global=%08x", req->global );
+}
+
+static void dump_d3dkmt_object_get_shared_handles_reply( const struct d3dkmt_object_get_shared_handles_reply *req )
+{
+    fprintf( stderr, " mapping=%04x", req->mapping );
+    fprintf( stderr, ", event=%04x", req->event );
 }
 
 static void dump_d3dkmt_object_query_request( const struct d3dkmt_object_query_request *req )
@@ -3734,6 +3832,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_named_pipe_info_request,
     (dump_func)dump_create_window_request,
     (dump_func)dump_destroy_window_request,
+    (dump_func)dump_update_window_broadcast_exclusion_request,
+    (dump_func)dump_get_window_broadcast_exclusion_request,
     (dump_func)dump_get_desktop_window_request,
     (dump_func)dump_set_window_owner_request,
     (dump_func)dump_get_window_info_request,
@@ -3884,6 +3984,11 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_terminate_job_request,
     (dump_func)dump_suspend_process_request,
     (dump_func)dump_resume_process_request,
+    (dump_func)dump_register_appcore_lifecycle_request,
+    (dump_func)dump_get_appcore_lifecycle_state_request,
+    (dump_func)dump_prepare_appcore_lifecycle_request,
+    (dump_func)dump_complete_appcore_lifecycle_request,
+    (dump_func)dump_finish_appcore_lifecycle_request,
     (dump_func)dump_get_next_process_request,
     (dump_func)dump_get_next_thread_request,
     (dump_func)dump_set_keyboard_repeat_request,
@@ -3891,6 +3996,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_inproc_alert_fd_request,
     (dump_func)dump_d3dkmt_object_create_request,
     (dump_func)dump_d3dkmt_object_update_request,
+    (dump_func)dump_d3dkmt_object_set_shared_handles_request,
+    (dump_func)dump_d3dkmt_object_get_shared_handles_request,
     (dump_func)dump_d3dkmt_object_query_request,
     (dump_func)dump_d3dkmt_object_open_request,
     (dump_func)dump_d3dkmt_share_objects_request,
@@ -4050,6 +4157,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_create_window_reply,
     NULL,
+    (dump_func)dump_update_window_broadcast_exclusion_reply,
+    (dump_func)dump_get_window_broadcast_exclusion_reply,
     (dump_func)dump_get_desktop_window_reply,
     (dump_func)dump_set_window_owner_reply,
     (dump_func)dump_get_window_info_reply,
@@ -4198,6 +4307,11 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_get_job_info_reply,
     NULL,
+    (dump_func)dump_suspend_process_reply,
+    (dump_func)dump_resume_process_reply,
+    (dump_func)dump_register_appcore_lifecycle_reply,
+    (dump_func)dump_get_appcore_lifecycle_state_reply,
+    (dump_func)dump_prepare_appcore_lifecycle_reply,
     NULL,
     NULL,
     (dump_func)dump_get_next_process_reply,
@@ -4207,6 +4321,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_inproc_alert_fd_reply,
     (dump_func)dump_d3dkmt_object_create_reply,
     NULL,
+    NULL,
+    (dump_func)dump_d3dkmt_object_get_shared_handles_reply,
     (dump_func)dump_d3dkmt_object_query_reply,
     (dump_func)dump_d3dkmt_object_open_reply,
     (dump_func)dump_d3dkmt_share_objects_reply,
@@ -4366,6 +4482,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_named_pipe_info",
     "create_window",
     "destroy_window",
+    "update_window_broadcast_exclusion",
+    "get_window_broadcast_exclusion",
     "get_desktop_window",
     "set_window_owner",
     "get_window_info",
@@ -4516,6 +4634,11 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "terminate_job",
     "suspend_process",
     "resume_process",
+    "register_appcore_lifecycle",
+    "get_appcore_lifecycle_state",
+    "prepare_appcore_lifecycle",
+    "complete_appcore_lifecycle",
+    "finish_appcore_lifecycle",
     "get_next_process",
     "get_next_thread",
     "set_keyboard_repeat",
@@ -4523,6 +4646,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_inproc_alert_fd",
     "d3dkmt_object_create",
     "d3dkmt_object_update",
+    "d3dkmt_object_set_shared_handles",
+    "d3dkmt_object_get_shared_handles",
     "d3dkmt_object_query",
     "d3dkmt_object_open",
     "d3dkmt_share_objects",
@@ -4595,6 +4720,7 @@ static const struct
     { "INVALID_CID",                 STATUS_INVALID_CID },
     { "INVALID_CONNECTION",          STATUS_INVALID_CONNECTION },
     { "INVALID_DEVICE_REQUEST",      STATUS_INVALID_DEVICE_REQUEST },
+    { "INVALID_DEVICE_STATE",        STATUS_INVALID_DEVICE_STATE },
     { "INVALID_FILE_FOR_SECTION",    STATUS_INVALID_FILE_FOR_SECTION },
     { "INVALID_HANDLE",              STATUS_INVALID_HANDLE },
     { "INVALID_IMAGE_FORMAT",        STATUS_INVALID_IMAGE_FORMAT },

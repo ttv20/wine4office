@@ -42,6 +42,8 @@ struct d3dkmt_object
     void               *runtime;        /* client runtime data */
     data_size_t         runtime_size;   /* size of client runtime data */
     struct fd          *fd;             /* fd object for unix fds */
+    struct object      *shared_mapping; /* client payload section owned by resource */
+    struct object      *shared_event;   /* client change event owned by resource */
 };
 
 static void d3dkmt_object_dump( struct object *obj, int verbose );
@@ -315,6 +317,8 @@ static void d3dkmt_object_destroy( struct object *obj )
 
     if (object->global) free_object_handle( object->global );
     if (object->fd) release_object( object->fd );
+    if (object->shared_mapping) release_object( object->shared_mapping );
+    if (object->shared_event) release_object( object->shared_event );
     free( object->runtime );
 }
 
@@ -327,6 +331,8 @@ static struct d3dkmt_object *d3dkmt_object_create( enum d3dkmt_type type, data_s
     object->global          = 0;
     object->runtime_size    = runtime_size;
     object->fd              = NULL;
+    object->shared_mapping  = NULL;
+    object->shared_event    = NULL;
 
     if (!(object->runtime = memdup( runtime, runtime_size )) ||
         !(object->global = alloc_object_handle( object )))
@@ -361,6 +367,8 @@ static void d3dkmt_mutex_destroy( struct object *obj )
     }
 
     if (mutex->base.global) free_object_handle( mutex->base.global );
+    if (mutex->base.shared_mapping) release_object( mutex->base.shared_mapping );
+    if (mutex->base.shared_event) release_object( mutex->base.shared_event );
     free( mutex->base.runtime );
 }
 
@@ -373,6 +381,8 @@ static struct d3dkmt_object *d3dkmt_mutex_create( unsigned int key_value, data_s
     object->base.global          = 0;
     object->base.runtime_size    = runtime_size;
     object->base.fd              = NULL;
+    object->base.shared_mapping  = NULL;
+    object->base.shared_event    = NULL;
     object->key_value            = key_value;
     object->fence_value          = 0;
     object->abandoned            = false;
@@ -562,6 +572,55 @@ DECL_HANDLER(d3dkmt_object_update)
 
 done:
     free( runtime );
+}
+
+/* Attach a payload section and change event to a shared resource's server lifetime. */
+DECL_HANDLER(d3dkmt_object_set_shared_handles)
+{
+    struct d3dkmt_object *resource;
+    struct object *mapping, *event;
+
+    if (!(mapping = get_handle_obj( current->process, req->mapping, 0, NULL ))) return;
+    if (!(event = get_handle_obj( current->process, req->event, 0, NULL )))
+    {
+        release_object( mapping );
+        return;
+    }
+    if ((resource = d3dkmt_object_open( req->global, D3DKMT_RESOURCE )))
+    {
+        if (resource->shared_mapping) release_object( resource->shared_mapping );
+        if (resource->shared_event) release_object( resource->shared_event );
+        resource->shared_mapping = grab_object( mapping );
+        resource->shared_event = grab_object( event );
+        release_object( resource );
+    }
+    release_object( event );
+    release_object( mapping );
+}
+
+/* Duplicate a resource's attached payload section and change event into the
+ * requesting process. */
+DECL_HANDLER(d3dkmt_object_get_shared_handles)
+{
+    struct d3dkmt_object *resource;
+
+    reply->mapping = 0;
+    reply->event = 0;
+    if (!(resource = d3dkmt_object_open( req->global, D3DKMT_RESOURCE ))) return;
+    if (!resource->shared_mapping || !resource->shared_event)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        release_object( resource );
+        return;
+    }
+
+    reply->mapping = alloc_handle( current->process, resource->shared_mapping, SECTION_ALL_ACCESS, 0 );
+    if (!(reply->event = alloc_handle( current->process, resource->shared_event, EVENT_ALL_ACCESS, 0 )))
+    {
+        if (reply->mapping) close_handle( current->process, reply->mapping );
+        reply->mapping = 0;
+    }
+    release_object( resource );
 }
 
 /* query a global d3dkmt object */

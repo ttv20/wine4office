@@ -641,6 +641,13 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->startup_state   = STARTUP_IN_PROGRESS;
     process->startup_info    = NULL;
     process->idle_event      = NULL;
+    process->appcore_request = NULL;
+    process->appcore_complete = NULL;
+    process->appcore_sequence = 0;
+    process->appcore_pending = 0;
+    process->appcore_controller = 0;
+    process->appcore_delivered = 0;
+    process->appcore_quiesced = 0;
     process->peb             = 0;
     process->dir_cache       = NULL;
     process->winstation      = 0;
@@ -649,6 +656,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->trace_data      = 0;
     process->rawinput_devices = NULL;
     process->rawinput_device_count = 0;
+    process->key_value_query_size = 0;
     process->rawinput_mouse  = NULL;
     process->rawinput_kbd    = NULL;
     memset( &process->image_info, 0, sizeof(process->image_info) );
@@ -746,6 +754,12 @@ static void process_destroy( struct object *obj )
     if (process->console) release_object( process->console );
     if (process->msg_fd) release_object( process->msg_fd );
     if (process->idle_event) release_object( process->idle_event );
+    if (process->appcore_request) release_object( process->appcore_request );
+    if (process->appcore_complete)
+    {
+        set_event( process->appcore_complete );
+        release_object( process->appcore_complete );
+    }
     if (process->id) free_ptid( process->id );
     if (process->token) release_object( process->token );
     if (process->sync) release_object( process->sync );
@@ -935,6 +949,7 @@ static void process_killed( struct process *process )
 {
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
+    if (process->appcore_complete) set_event( process->appcore_complete );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;
@@ -1971,6 +1986,7 @@ DECL_HANDLER(set_job_completion_port)
 DECL_HANDLER(suspend_process)
 {
     struct process *process;
+    reply->transitioned = 0;
 
     if ((process = get_process_from_handle( req->handle, PROCESS_SUSPEND_RESUME )))
     {
@@ -1981,6 +1997,8 @@ DECL_HANDLER(suspend_process)
             struct thread *thread = LIST_ENTRY( ptr, struct thread, proc_entry );
             if (!thread->bypass_proc_suspend) suspend_thread( thread );
         }
+        if (process->appcore_pending && process->appcore_quiesced)
+            reply->transitioned = 1;
 
         release_object( process );
     }
@@ -1990,6 +2008,7 @@ DECL_HANDLER(suspend_process)
 DECL_HANDLER(resume_process)
 {
     struct process *process;
+    reply->transitioned = 0;
 
     if ((process = get_process_from_handle( req->handle, PROCESS_SUSPEND_RESUME )))
     {
@@ -2000,9 +2019,140 @@ DECL_HANDLER(resume_process)
             struct thread *thread = LIST_ENTRY( ptr, struct thread, proc_entry );
             if (!thread->bypass_proc_suspend) resume_thread( thread );
         }
+        if (process->appcore_request && process->appcore_quiesced && !process->suspend)
+        {
+            reply->transitioned = 1;
+            LIST_FOR_EACH( ptr, &process->thread_list )
+            {
+                struct thread *thread = LIST_ENTRY( ptr, struct thread, proc_entry );
+                if (!thread->bypass_proc_suspend && thread->suspend)
+                {
+                    reply->transitioned = 0;
+                    break;
+                }
+            }
+        }
 
         release_object( process );
     }
+}
+
+/* Register the calling process for AppModel lifecycle notifications */
+DECL_HANDLER(register_appcore_lifecycle)
+{
+    struct process *process = current->process;
+    struct event *request = NULL, *complete = NULL;
+
+    reply->request = 0;
+    if (process->is_terminating)
+    {
+        set_error( STATUS_PROCESS_IS_TERMINATING );
+        return;
+    }
+    if (process->appcore_request)
+    {
+        reply->request = alloc_handle( process, process->appcore_request, SYNCHRONIZE, 0 );
+        return;
+    }
+    if (!(request = create_event( NULL, NULL, 0, 1, 0, NULL )) ||
+        !(complete = create_event( NULL, NULL, 0, 1, 0, NULL ))) goto done;
+    if (!(reply->request = alloc_handle( process, request, SYNCHRONIZE, 0 ))) goto done;
+    process->appcore_request = request;
+    process->appcore_complete = complete;
+    request = complete = NULL;
+
+done:
+    if (request) release_object( request );
+    if (complete) release_object( complete );
+}
+
+/* Retrieve the calling process' pending AppModel lifecycle transition */
+DECL_HANDLER(get_appcore_lifecycle_state)
+{
+    struct process *process = current->process;
+
+    reply->sequence = 0;
+    reply->quiesced = 0;
+    if (!process->appcore_request || !process->appcore_pending)
+    {
+        set_error( STATUS_INVALID_DEVICE_STATE );
+        return;
+    }
+    reply->sequence = process->appcore_sequence;
+    reply->quiesced = process->appcore_quiesced;
+    reset_event( process->appcore_request );
+}
+
+/* Notify a registered target process of an AppModel lifecycle transition */
+DECL_HANDLER(prepare_appcore_lifecycle)
+{
+    struct process *process;
+
+    reply->completion = 0;
+    reply->sequence = 0;
+    if (!(process = get_process_from_handle( req->process, PROCESS_SUSPEND_RESUME ))) return;
+    if (!process->appcore_request || !process->appcore_complete)
+    {
+        set_error( STATUS_NOT_SUPPORTED );
+        goto done;
+    }
+    if (process->appcore_pending)
+    {
+        set_error( STATUS_DEVICE_BUSY );
+        goto done;
+    }
+    if (process->appcore_quiesced == !!req->quiesced)
+    {
+        set_error( STATUS_NOT_SUPPORTED );
+        goto done;
+    }
+    if (!(reply->completion = alloc_handle( current->process, process->appcore_complete,
+                                            SYNCHRONIZE, 0 ))) goto done;
+    if (!++process->appcore_sequence) ++process->appcore_sequence;
+    reply->sequence = process->appcore_sequence;
+    process->appcore_quiesced = !!req->quiesced;
+    process->appcore_pending = 1;
+    process->appcore_controller = current->process->id;
+    process->appcore_delivered = 0;
+    reset_event( process->appcore_complete );
+    set_event( process->appcore_request );
+
+done:
+    release_object( process );
+}
+
+/* Complete an AppModel lifecycle transition in the calling process */
+DECL_HANDLER(complete_appcore_lifecycle)
+{
+    struct process *process = current->process;
+
+    if (!process->appcore_pending || process->appcore_sequence != req->sequence)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    process->appcore_delivered = 1;
+    set_event( process->appcore_complete );
+}
+
+/* Commit or roll back an AppModel lifecycle source transition */
+DECL_HANDLER(finish_appcore_lifecycle)
+{
+    struct process *process;
+
+    if (!(process = get_process_from_handle( req->process, PROCESS_SUSPEND_RESUME ))) return;
+    if (!process->appcore_pending || !process->appcore_delivered ||
+        process->appcore_controller != current->process->id ||
+        process->appcore_quiesced != !!req->quiesced)
+        set_error( STATUS_INVALID_DEVICE_STATE );
+    else
+    {
+        if (!req->success) process->appcore_quiesced = !process->appcore_quiesced;
+        process->appcore_pending = 0;
+        process->appcore_delivered = 0;
+        process->appcore_controller = 0;
+    }
+    release_object( process );
 }
 
 /* Get a list of processes and threads currently running */

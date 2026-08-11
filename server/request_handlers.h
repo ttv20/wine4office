@@ -155,6 +155,8 @@ DECL_HANDLER(create_named_pipe);
 DECL_HANDLER(set_named_pipe_info);
 DECL_HANDLER(create_window);
 DECL_HANDLER(destroy_window);
+DECL_HANDLER(update_window_broadcast_exclusion);
+DECL_HANDLER(get_window_broadcast_exclusion);
 DECL_HANDLER(get_desktop_window);
 DECL_HANDLER(set_window_owner);
 DECL_HANDLER(get_window_info);
@@ -305,6 +307,11 @@ DECL_HANDLER(get_job_info);
 DECL_HANDLER(terminate_job);
 DECL_HANDLER(suspend_process);
 DECL_HANDLER(resume_process);
+DECL_HANDLER(register_appcore_lifecycle);
+DECL_HANDLER(get_appcore_lifecycle_state);
+DECL_HANDLER(prepare_appcore_lifecycle);
+DECL_HANDLER(complete_appcore_lifecycle);
+DECL_HANDLER(finish_appcore_lifecycle);
 DECL_HANDLER(get_next_process);
 DECL_HANDLER(get_next_thread);
 DECL_HANDLER(set_keyboard_repeat);
@@ -312,6 +319,8 @@ DECL_HANDLER(get_inproc_sync_fd);
 DECL_HANDLER(get_inproc_alert_fd);
 DECL_HANDLER(d3dkmt_object_create);
 DECL_HANDLER(d3dkmt_object_update);
+DECL_HANDLER(d3dkmt_object_set_shared_handles);
+DECL_HANDLER(d3dkmt_object_get_shared_handles);
 DECL_HANDLER(d3dkmt_object_query);
 DECL_HANDLER(d3dkmt_object_open);
 DECL_HANDLER(d3dkmt_share_objects);
@@ -471,6 +480,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_named_pipe_info,
     (req_handler)req_create_window,
     (req_handler)req_destroy_window,
+    (req_handler)req_update_window_broadcast_exclusion,
+    (req_handler)req_get_window_broadcast_exclusion,
     (req_handler)req_get_desktop_window,
     (req_handler)req_set_window_owner,
     (req_handler)req_get_window_info,
@@ -621,6 +632,11 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_terminate_job,
     (req_handler)req_suspend_process,
     (req_handler)req_resume_process,
+    (req_handler)req_register_appcore_lifecycle,
+    (req_handler)req_get_appcore_lifecycle_state,
+    (req_handler)req_prepare_appcore_lifecycle,
+    (req_handler)req_complete_appcore_lifecycle,
+    (req_handler)req_finish_appcore_lifecycle,
     (req_handler)req_get_next_process,
     (req_handler)req_get_next_thread,
     (req_handler)req_set_keyboard_repeat,
@@ -628,6 +644,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_inproc_alert_fd,
     (req_handler)req_d3dkmt_object_create,
     (req_handler)req_d3dkmt_object_update,
+    (req_handler)req_d3dkmt_object_set_shared_handles,
+    (req_handler)req_d3dkmt_object_get_shared_handles,
     (req_handler)req_d3dkmt_object_query,
     (req_handler)req_d3dkmt_object_open,
     (req_handler)req_d3dkmt_share_objects,
@@ -1524,7 +1542,8 @@ C_ASSERT( offsetof(struct create_window_request, dpi_context) == 40 );
 C_ASSERT( offsetof(struct create_window_request, style) == 44 );
 C_ASSERT( offsetof(struct create_window_request, ex_style) == 48 );
 C_ASSERT( offsetof(struct create_window_request, ansi) == 52 );
-C_ASSERT( sizeof(struct create_window_request) == 56 );
+C_ASSERT( offsetof(struct create_window_request, broadcast_owner) == 56 );
+C_ASSERT( sizeof(struct create_window_request) == 64 );
 C_ASSERT( offsetof(struct create_window_reply, handle) == 8 );
 C_ASSERT( offsetof(struct create_window_reply, parent) == 12 );
 C_ASSERT( offsetof(struct create_window_reply, owner) == 16 );
@@ -1532,6 +1551,20 @@ C_ASSERT( offsetof(struct create_window_reply, class_ptr) == 24 );
 C_ASSERT( sizeof(struct create_window_reply) == 32 );
 C_ASSERT( offsetof(struct destroy_window_request, handle) == 12 );
 C_ASSERT( sizeof(struct destroy_window_request) == 16 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, window) == 12 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, target) == 16 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, flags) == 20 );
+C_ASSERT( sizeof(struct update_window_broadcast_exclusion_request) == 24 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_reply, target) == 8 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_reply, refcount) == 12 );
+C_ASSERT( offsetof(struct update_window_broadcast_exclusion_reply, excluded) == 16 );
+C_ASSERT( sizeof(struct update_window_broadcast_exclusion_reply) == 24 );
+C_ASSERT( offsetof(struct get_window_broadcast_exclusion_request, window) == 12 );
+C_ASSERT( sizeof(struct get_window_broadcast_exclusion_request) == 16 );
+C_ASSERT( offsetof(struct get_window_broadcast_exclusion_reply, target) == 8 );
+C_ASSERT( offsetof(struct get_window_broadcast_exclusion_reply, refcount) == 12 );
+C_ASSERT( offsetof(struct get_window_broadcast_exclusion_reply, excluded) == 16 );
+C_ASSERT( sizeof(struct get_window_broadcast_exclusion_reply) == 24 );
 C_ASSERT( offsetof(struct get_desktop_window_request, force) == 12 );
 C_ASSERT( sizeof(struct get_desktop_window_request) == 16 );
 C_ASSERT( offsetof(struct get_desktop_window_reply, top_window) == 8 );
@@ -2334,8 +2367,31 @@ C_ASSERT( offsetof(struct terminate_job_request, status) == 16 );
 C_ASSERT( sizeof(struct terminate_job_request) == 24 );
 C_ASSERT( offsetof(struct suspend_process_request, handle) == 12 );
 C_ASSERT( sizeof(struct suspend_process_request) == 16 );
+C_ASSERT( offsetof(struct suspend_process_reply, transitioned) == 8 );
+C_ASSERT( sizeof(struct suspend_process_reply) == 16 );
 C_ASSERT( offsetof(struct resume_process_request, handle) == 12 );
 C_ASSERT( sizeof(struct resume_process_request) == 16 );
+C_ASSERT( offsetof(struct resume_process_reply, transitioned) == 8 );
+C_ASSERT( sizeof(struct resume_process_reply) == 16 );
+C_ASSERT( sizeof(struct register_appcore_lifecycle_request) == 16 );
+C_ASSERT( offsetof(struct register_appcore_lifecycle_reply, request) == 8 );
+C_ASSERT( sizeof(struct register_appcore_lifecycle_reply) == 16 );
+C_ASSERT( sizeof(struct get_appcore_lifecycle_state_request) == 16 );
+C_ASSERT( offsetof(struct get_appcore_lifecycle_state_reply, sequence) == 8 );
+C_ASSERT( offsetof(struct get_appcore_lifecycle_state_reply, quiesced) == 12 );
+C_ASSERT( sizeof(struct get_appcore_lifecycle_state_reply) == 16 );
+C_ASSERT( offsetof(struct prepare_appcore_lifecycle_request, process) == 12 );
+C_ASSERT( offsetof(struct prepare_appcore_lifecycle_request, quiesced) == 16 );
+C_ASSERT( sizeof(struct prepare_appcore_lifecycle_request) == 24 );
+C_ASSERT( offsetof(struct prepare_appcore_lifecycle_reply, sequence) == 8 );
+C_ASSERT( offsetof(struct prepare_appcore_lifecycle_reply, completion) == 12 );
+C_ASSERT( sizeof(struct prepare_appcore_lifecycle_reply) == 16 );
+C_ASSERT( offsetof(struct complete_appcore_lifecycle_request, sequence) == 12 );
+C_ASSERT( sizeof(struct complete_appcore_lifecycle_request) == 16 );
+C_ASSERT( offsetof(struct finish_appcore_lifecycle_request, process) == 12 );
+C_ASSERT( offsetof(struct finish_appcore_lifecycle_request, quiesced) == 16 );
+C_ASSERT( offsetof(struct finish_appcore_lifecycle_request, success) == 20 );
+C_ASSERT( sizeof(struct finish_appcore_lifecycle_request) == 24 );
 C_ASSERT( offsetof(struct get_next_process_request, last) == 12 );
 C_ASSERT( offsetof(struct get_next_process_request, access) == 16 );
 C_ASSERT( offsetof(struct get_next_process_request, attributes) == 20 );
@@ -2375,6 +2431,15 @@ C_ASSERT( sizeof(struct d3dkmt_object_create_reply) == 16 );
 C_ASSERT( offsetof(struct d3dkmt_object_update_request, type) == 12 );
 C_ASSERT( offsetof(struct d3dkmt_object_update_request, global) == 16 );
 C_ASSERT( sizeof(struct d3dkmt_object_update_request) == 24 );
+C_ASSERT( offsetof(struct d3dkmt_object_set_shared_handles_request, global) == 12 );
+C_ASSERT( offsetof(struct d3dkmt_object_set_shared_handles_request, mapping) == 16 );
+C_ASSERT( offsetof(struct d3dkmt_object_set_shared_handles_request, event) == 20 );
+C_ASSERT( sizeof(struct d3dkmt_object_set_shared_handles_request) == 24 );
+C_ASSERT( offsetof(struct d3dkmt_object_get_shared_handles_request, global) == 12 );
+C_ASSERT( sizeof(struct d3dkmt_object_get_shared_handles_request) == 16 );
+C_ASSERT( offsetof(struct d3dkmt_object_get_shared_handles_reply, mapping) == 8 );
+C_ASSERT( offsetof(struct d3dkmt_object_get_shared_handles_reply, event) == 12 );
+C_ASSERT( sizeof(struct d3dkmt_object_get_shared_handles_reply) == 16 );
 C_ASSERT( offsetof(struct d3dkmt_object_query_request, type) == 12 );
 C_ASSERT( offsetof(struct d3dkmt_object_query_request, global) == 16 );
 C_ASSERT( offsetof(struct d3dkmt_object_query_request, handle) == 20 );

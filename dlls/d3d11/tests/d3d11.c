@@ -35290,7 +35290,7 @@ static void test_shared_resource(D3D_FEATURE_LEVEL feature_level)
                     || broken(hr == E_OUTOFMEMORY) /* software device before Win8 */,
                     "got %#lx.\n", hr);
         else
-            todo_wine ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
+            ok(hr == E_INVALIDARG, "got %#lx.\n", hr);
         if (FAILED(hr))
             goto test_done;
 
@@ -35396,6 +35396,175 @@ test_done:
         ID3D11Device1_Release(device1);
     ref = ID3D11Device_Release(device);
     ok(!ref, "got %ld.\n", ref);
+}
+
+static void test_shared_resource_child(char **argv)
+{
+    HANDLE handle = (HANDLE)(ULONG_PTR)strtoull(argv[3], NULL, 0);
+    HANDLE ready = (HANDLE)(ULONG_PTR)strtoull(argv[4], NULL, 0);
+    HANDLE release = (HANDLE)(ULONG_PTR)strtoull(argv[5], NULL, 0);
+    ID3D11Device1 *device1 = NULL;
+    IDXGIKeyedMutex *keyed_mutex = NULL;
+    ID3D11Texture2D *texture = NULL;
+    ID3D11Device *device;
+    HRESULT hr;
+    DWORD wait;
+
+    if (!(device = create_device(NULL)))
+    {
+        SetEvent(ready);
+        return;
+    }
+    hr = ID3D11Device_QueryInterface(device, &IID_ID3D11Device1, (void **)&device1);
+    ok(hr == S_OK, "got %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11Device1_OpenSharedResource1(device1, handle, &IID_ID3D11Texture2D,
+                (void **)&texture);
+        ok(hr == S_OK, "got %#lx.\n", hr);
+    }
+    if (texture)
+    {
+        hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIKeyedMutex, (void **)&keyed_mutex);
+        ok(hr == S_OK, "got %#lx.\n", hr);
+    }
+    SetEvent(ready);
+
+    if (keyed_mutex)
+    {
+        wait = WaitForSingleObject(release, 10000);
+        ok(wait == WAIT_OBJECT_0, "Timed out waiting for exporter, result %#lx.\n", wait);
+        if (wait == WAIT_OBJECT_0)
+        {
+            hr = IDXGIKeyedMutex_AcquireSync(keyed_mutex, 0, 0);
+            ok(hr == S_OK, "got %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                hr = IDXGIKeyedMutex_ReleaseSync(keyed_mutex, 1);
+                ok(hr == S_OK, "got %#lx.\n", hr);
+            }
+        }
+    }
+
+    if (keyed_mutex)
+        IDXGIKeyedMutex_Release(keyed_mutex);
+    if (texture)
+        ID3D11Texture2D_Release(texture);
+    if (device1)
+        ID3D11Device1_Release(device1);
+    ID3D11Device_Release(device);
+}
+
+static void test_shared_resource_exporter_exit(void)
+{
+    SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, TRUE};
+    ID3D11Device1 *device1 = NULL;
+    IDXGIResource1 *resource = NULL;
+    ID3D11Texture2D *texture = NULL;
+    D3D11_TEXTURE2D_DESC desc = {0};
+    PROCESS_INFORMATION info = {0};
+    STARTUPINFOA startup = {0};
+    char **argv, command[MAX_PATH];
+    HANDLE ready, release, handle = NULL;
+    ID3D11Device *device;
+    DWORD wait, exit_code;
+    HRESULT hr;
+
+    if (!(device = create_device(NULL)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+    hr = ID3D11Device_QueryInterface(device, &IID_ID3D11Device1, (void **)&device1);
+    if (FAILED(hr))
+    {
+        win_skip("ID3D11Device1 is not supported.\n");
+        ID3D11Device_Release(device);
+        return;
+    }
+
+    desc.Width = 64;
+    desc.Height = 64;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+    hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &texture);
+    ok(hr == S_OK, "got %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource);
+    ok(hr == S_OK, "got %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    ready = CreateEventW(&attributes, TRUE, FALSE, NULL);
+    release = CreateEventW(&attributes, TRUE, FALSE, NULL);
+    ok(!!ready && !!release, "Failed to create synchronization events, error %lu.\n", GetLastError());
+    if (!ready || !release)
+    {
+        if (ready) CloseHandle(ready);
+        if (release) CloseHandle(release);
+        goto done;
+    }
+    hr = IDXGIResource1_CreateSharedHandle(resource, &attributes,
+            GENERIC_ALL | DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, NULL, &handle);
+    ok(hr == S_OK, "got %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        CloseHandle(ready);
+        CloseHandle(release);
+        goto done;
+    }
+
+    winetest_get_mainargs(&argv);
+    sprintf(command, "%s d3d11 test_shared_resource_child %p %p %p", argv[0], handle, ready, release);
+    startup.cb = sizeof(startup);
+    ok(CreateProcessA(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &info),
+            "CreateProcess failed, error %lu.\n", GetLastError());
+    if (!info.hProcess)
+    {
+        CloseHandle(handle);
+        CloseHandle(ready);
+        CloseHandle(release);
+        goto done;
+    }
+
+    wait = WaitForSingleObject(ready, 10000);
+    ok(wait == WAIT_OBJECT_0, "Timed out waiting for importer, result %#lx.\n", wait);
+    if (resource)
+        IDXGIResource1_Release(resource);
+    resource = NULL;
+    ID3D11Texture2D_Release(texture);
+    texture = NULL;
+    ID3D11Device1_Release(device1);
+    device1 = NULL;
+    ID3D11Device_Release(device);
+    device = NULL;
+    CloseHandle(handle);
+    handle = NULL;
+    SetEvent(release);
+    WaitForSingleObject(info.hProcess, INFINITE);
+    GetExitCodeProcess(info.hProcess, &exit_code);
+    ok(!exit_code, "Importer exited with code %lu.\n", exit_code);
+    CloseHandle(info.hThread);
+    CloseHandle(info.hProcess);
+    CloseHandle(ready);
+    CloseHandle(release);
+    return;
+
+done:
+    if (handle)
+        CloseHandle(handle);
+    if (resource)
+        IDXGIResource1_Release(resource);
+    if (texture)
+        ID3D11Texture2D_Release(texture);
+    if (device1)
+        ID3D11Device1_Release(device1);
+    ID3D11Device_Release(device);
 }
 
 static void test_keyed_mutex(void)
@@ -37606,6 +37775,11 @@ START_TEST(d3d11)
         test_create_device_child();
         return;
     }
+    if (argc == 6 && !strcmp(argv[2], "test_shared_resource_child"))
+    {
+        test_shared_resource_child(argv);
+        return;
+    }
 
     if ((wined3d = GetModuleHandleA("wined3d.dll")))
     {
@@ -37796,6 +37970,7 @@ START_TEST(d3d11)
     queue_test(test_vertex_formats);
     queue_test(test_dxgi_resources);
     queue_for_each_feature_level(test_shared_resource);
+    queue_test(test_shared_resource_exporter_exit);
     queue_test(test_keyed_mutex);
     queue_test(test_clear_during_render);
     queue_test(test_stencil_export);

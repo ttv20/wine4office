@@ -565,6 +565,60 @@ NTSTATUS WINAPI NtGdiDdDDIEscape( const D3DKMT_ESCAPE *desc )
         return STATUS_SUCCESS;
     }
 
+    case D3DKMT_ESCAPE_SET_SHARED_HANDLES_WINE:
+    {
+        const struct wine_d3dkmt_shared_handles *handles = desc->pPrivateDriverData;
+        struct d3dkmt_resource *resource;
+        NTSTATUS status;
+
+        if (desc->PrivateDriverDataSize != sizeof(*handles) || !handles ||
+            handles->size != sizeof(*handles) || !handles->mapping || !handles->event)
+            return STATUS_INVALID_PARAMETER;
+        if (!(resource = get_d3dkmt_object( desc->hContext, D3DKMT_RESOURCE )))
+            return STATUS_INVALID_PARAMETER;
+        SERVER_START_REQ( d3dkmt_object_set_shared_handles )
+        {
+            req->global = resource->obj.global;
+            req->mapping = wine_server_obj_handle( handles->mapping );
+            req->event = wine_server_obj_handle( handles->event );
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
+    case D3DKMT_ESCAPE_GET_SHARED_HANDLES_WINE:
+    {
+        struct wine_d3dkmt_shared_handles *handles = desc->pPrivateDriverData;
+        struct d3dkmt_resource *resource;
+        NTSTATUS status;
+
+        if (desc->PrivateDriverDataSize != sizeof(*handles) || !handles
+                || handles->size != sizeof(*handles))
+            return STATUS_INVALID_PARAMETER;
+        handles->mapping = handles->event = NULL;
+        if (!(resource = get_d3dkmt_object( desc->hContext, D3DKMT_RESOURCE )))
+            return STATUS_INVALID_PARAMETER;
+        SERVER_START_REQ( d3dkmt_object_get_shared_handles )
+        {
+            req->global = resource->obj.global;
+            status = wine_server_call( req );
+            if (!status)
+            {
+                handles->mapping = wine_server_ptr_handle( reply->mapping );
+                handles->event = wine_server_ptr_handle( reply->event );
+                if (!handles->mapping || !handles->event)
+                {
+                    if (handles->mapping) NtClose( handles->mapping );
+                    handles->mapping = handles->event = NULL;
+                    status = STATUS_INVALID_PARAMETER;
+                }
+            }
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
     default:
         FIXME( "(%p): stub\n", desc );
         return STATUS_NO_MEMORY;

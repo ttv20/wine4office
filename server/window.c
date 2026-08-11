@@ -38,6 +38,9 @@
 
 static const struct ratio no_dpi;
 
+#define WINDOW_BROADCAST_EXCLUSION_ADD    0x01
+#define WINDOW_BROADCAST_EXCLUSION_REMOVE 0x02
+
 /* a window property */
 struct property
 {
@@ -63,8 +66,11 @@ struct window
     struct list      unlinked;        /* list of children not linked in the Z-order list */
     struct list      entry;           /* entry in parent's children list */
     user_handle_t    handle;          /* full handle for this window */
-    struct thread   *thread;          /* thread owning the window */
+    struct thread   *thread;          /* window owning thread */
     struct desktop  *desktop;         /* desktop that the window belongs to */
+    user_handle_t    broadcast_exclusion_target; /* target owned by this helper */
+    unsigned int     broadcast_exclusion_refcount; /* synthetic helper owners */
+    unsigned int     broadcast_exclusion_active; /* helper is excluded */
     struct window_class *class;       /* window class */
     atom_t           atom;            /* class atom */
     user_handle_t    last_active;     /* last active popup */
@@ -2138,8 +2144,20 @@ static void set_window_region( struct window *win, struct region *region, int re
     }
 
     if (old_vis_rgn) free_region( old_vis_rgn );
-    clear_error();  /* we ignore out of memory errors since the region has been set */
 }
+static void clear_window_broadcast_exclusion( struct window *win )
+{
+    struct window *target;
+
+    if (win->broadcast_exclusion_target &&
+        (target = get_window( win->broadcast_exclusion_target )) &&
+        target->broadcast_exclusion_refcount)
+        --target->broadcast_exclusion_refcount;
+    win->broadcast_exclusion_target = 0;
+    win->broadcast_exclusion_refcount = 0;
+    win->broadcast_exclusion_active = 0;
+}
+
 
 
 /* destroy a window */
@@ -2181,6 +2199,7 @@ void free_window_handle( struct window *win )
         else
             send_notify_message( child->handle, WM_WINE_DESTROYWINDOW, 0, 0 );
     }
+    clear_window_broadcast_exclusion( win );
 
     /* reset global window pointers, if the corresponding window is destroyed */
     if (win == win->desktop->shell_window) win->desktop->shell_window = NULL;
@@ -2230,7 +2249,7 @@ static void set_window_ex_style( struct window *win, unsigned int ex_style )
 /* create a window */
 DECL_HANDLER(create_window)
 {
-    struct window *win, *parent = NULL, *owner = NULL;
+    struct window *win, *parent = NULL, *owner = NULL, *broadcast_owner = NULL;
     struct unicode_str cls_name = get_req_unicode_str();
     struct atom_table *table = get_user_atom_table();
     unsigned int dpi_context = req->dpi_context;
@@ -2261,6 +2280,15 @@ DECL_HANDLER(create_window)
             while ((owner->style & (WS_POPUP|WS_CHILD)) == WS_CHILD && !is_desktop_window(owner->parent))
                 owner = owner->parent;
     }
+    if (req->broadcast_owner)
+    {
+        if (!(broadcast_owner = get_window( req->broadcast_owner ))) return;
+        if (broadcast_owner->thread != current || broadcast_owner->broadcast_exclusion_active)
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+    }
 
     if (!atom) atom = find_atom( table, &cls_name );
 
@@ -2284,6 +2312,12 @@ DECL_HANDLER(create_window)
 
     win->style = req->style;
     win->ex_style = req->ex_style;
+    if (broadcast_owner)
+    {
+        win->broadcast_exclusion_refcount = 1;
+        broadcast_owner->broadcast_exclusion_target = win->handle;
+        broadcast_owner->broadcast_exclusion_active = 1;
+    }
 
     reply->handle      = win->handle;
     reply->parent      = win->parent ? win->parent->handle : 0;
@@ -2352,6 +2386,77 @@ DECL_HANDLER(destroy_window)
         else if (win->thread == current) detach_window_thread( win );
         else set_error( STATUS_ACCESS_DENIED );
     }
+}
+/* Update a helper-owned broadcast exclusion. */
+DECL_HANDLER(update_window_broadcast_exclusion)
+{
+    struct window *win, *target = NULL;
+
+    reply->target = 0;
+    reply->refcount = 0;
+    reply->excluded = 0;
+    if (!(win = get_window( req->window ))) return;
+    if (win->thread != current)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
+    if (req->flags & WINDOW_BROADCAST_EXCLUSION_ADD)
+    {
+        if (req->flags != WINDOW_BROADCAST_EXCLUSION_ADD || win->broadcast_exclusion_active)
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            return;
+        }
+        if (req->target && (!(target = get_window( req->target )) ||
+                            target->thread != current || target->desktop != win->desktop))
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+        if (target && target->broadcast_exclusion_refcount == ~0u)
+        {
+            set_error( STATUS_INTEGER_OVERFLOW );
+            return;
+        }
+        win->broadcast_exclusion_active = 1;
+        win->broadcast_exclusion_target = target ? target->handle : 0;
+        if (target) ++target->broadcast_exclusion_refcount;
+    }
+    else if (req->flags == WINDOW_BROADCAST_EXCLUSION_REMOVE)
+    {
+        if (!win->broadcast_exclusion_active)
+        {
+            reply->target = win->broadcast_exclusion_target;
+            reply->excluded = 0;
+            return;
+        }
+        clear_window_broadcast_exclusion( win );
+    }
+    else
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+
+    reply->target = win->broadcast_exclusion_target;
+    reply->refcount = win->broadcast_exclusion_refcount;
+    reply->excluded = win->broadcast_exclusion_active;
+}
+
+/* Retrieve a helper-owned broadcast exclusion. */
+DECL_HANDLER(get_window_broadcast_exclusion)
+{
+    struct window *win;
+
+    reply->target = 0;
+    reply->refcount = 0;
+    reply->excluded = 0;
+    if (!(win = get_window( req->window ))) return;
+    reply->target = win->broadcast_exclusion_target;
+    reply->refcount = win->broadcast_exclusion_refcount;
+    reply->excluded = win->broadcast_exclusion_active;
 }
 
 
