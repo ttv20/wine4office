@@ -1,10 +1,13 @@
 MODULE  = windows.web.dll
-IMPORTS = combase
+IMPORTS = combase advapi32 ole32 uuid winhttp xmllite
 
 SOURCES = \
 	app_capability.c \
 	classes.idl \
+	http_async.c \
 	http_client.c \
+	http_cookie.c \
+	http_message.c \
 	json_array.c \
 	json_object.c \
 	json_value.c \

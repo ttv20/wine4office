@@ -21,8 +21,10 @@ struct http_client
     IStringable IStringable_iface;
     LONG ref;
     IHttpFilter *filter;
+    IHttpRequestHeaderCollection *default_headers;
+    SRWLOCK lock;
+    BOOL closed;
 };
-
 static inline struct http_client *impl_from_IHttpClient(IHttpClient *iface)
 {
     return CONTAINING_RECORD(iface, struct http_client, IHttpClient_iface);
@@ -53,6 +55,7 @@ static ULONG http_client_release(struct http_client *impl)
     if (!ref)
     {
         if (impl->filter) IHttpFilter_Release(impl->filter);
+        if (impl->default_headers) IHttpRequestHeaderCollection_Release(impl->default_headers);
         free(impl);
     }
     return ref;
@@ -126,88 +129,161 @@ static HRESULT WINAPI client_GetTrustLevel(IHttpClient *iface, TrustLevel *trust
     return S_OK;
 }
 
-static HRESULT async_not_implemented(IInspectable **operation)
+static HRESULT client_apply_default_headers(struct http_client *impl, IHttpRequestMessage *request)
 {
-    if (!operation) return E_POINTER;
-    *operation = NULL;
-    return E_NOTIMPL;
+    IHttpRequestHeaderCollection *defaults = NULL, *headers = NULL;
+    HSTRING text = NULL, name = NULL, value = NULL;
+    WCHAR *copy = NULL, *line, *ctx = NULL, *colon;
+    HRESULT hr = S_OK;
+
+    AcquireSRWLockShared(&impl->lock);
+    if (impl->default_headers) { defaults = impl->default_headers; IHttpRequestHeaderCollection_AddRef(defaults); }
+    ReleaseSRWLockShared(&impl->lock);
+    if (!defaults) return S_OK;
+    if (FAILED(hr = http_headers_to_string((IUnknown *)defaults, &text))) goto done;
+    if (!(copy = _wcsdup(WindowsGetStringRawBuffer(text, NULL)))) { hr = E_OUTOFMEMORY; goto done; }
+    if (FAILED(hr = http_request_get_headers(request, &headers))) goto done;
+    line = wcstok(copy, L"\r\n", &ctx);
+    while (line)
+    {
+        if ((colon = wcschr(line, ':')) != NULL)
+        {
+            *colon = 0;
+            while (colon[1] == ' ' || colon[1] == '\t') ++colon;
+            if (FAILED(hr = WindowsCreateString(line, wcslen(line), &name)) ||
+                FAILED(hr = WindowsCreateString(colon + 1, wcslen(colon + 1), &value))) break;
+            hr = IHttpRequestHeaderCollection_Append(headers, name, value);
+            WindowsDeleteString(name); WindowsDeleteString(value); name = value = NULL;
+            if (FAILED(hr)) break;
+        }
+        line = wcstok(NULL, L"\r\n", &ctx);
+    }
+done:
+    WindowsDeleteString(name); WindowsDeleteString(value); WindowsDeleteString(text);
+    if (headers) IHttpRequestHeaderCollection_Release(headers);
+    if (defaults) IHttpRequestHeaderCollection_Release(defaults);
+    free(copy);
+    return hr;
 }
 
-static HRESULT WINAPI client_DeleteAsync(IHttpClient *iface, IInspectable *uri, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, operation %p stub.\n", iface, uri, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_GetAsync(IHttpClient *iface, IInspectable *uri, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, operation %p stub.\n", iface, uri, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_GetWithOptionAsync(IHttpClient *iface, IInspectable *uri,
-                                                 HttpCompletionOption option, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, option %d, operation %p stub.\n", iface, uri, option, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_GetBufferAsync(IHttpClient *iface, IInspectable *uri, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, operation %p stub.\n", iface, uri, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_GetInputStreamAsync(IHttpClient *iface, IInspectable *uri, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, operation %p stub.\n", iface, uri, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_GetStringAsync(IHttpClient *iface, IInspectable *uri, IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, operation %p stub.\n", iface, uri, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_PostAsync(IHttpClient *iface, IInspectable *uri, IInspectable *content,
-                                       IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, content %p, operation %p stub.\n", iface, uri, content, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_PutAsync(IHttpClient *iface, IInspectable *uri, IInspectable *content,
-                                      IInspectable **operation)
-{
-    FIXME("iface %p, uri %p, content %p, operation %p stub.\n", iface, uri, content, operation);
-    return async_not_implemented(operation);
-}
-
-static HRESULT WINAPI client_SendRequestAsync(IHttpClient *iface, IInspectable *request, IInspectable **operation)
+static HRESULT client_send_simple(IHttpClient *iface, IUriRuntimeClass *uri, const WCHAR *method_name,
+        IHttpContent *content, enum http_async_kind kind, void **operation)
 {
     struct http_client *impl = impl_from_IHttpClient(iface);
+    IHttpFilter *filter = NULL;
+    IHttpMethod *method = NULL;
+    IHttpRequestMessage *request = NULL;
+    HSTRING method_string = NULL;
+    HRESULT hr;
 
-    TRACE("iface %p, request %p, operation %p.\n", iface, request, operation);
     if (!operation) return E_POINTER;
     *operation = NULL;
-    if (!impl->filter) return E_NOTIMPL;
-    return IHttpFilter_SendRequestAsync(impl->filter, request, operation);
+    if (!uri || !method_name) return E_INVALIDARG;
+    if (FAILED(hr = WindowsCreateString(method_name, wcslen(method_name), &method_string))) goto done;
+    if (FAILED(hr = http_method_create(method_string, &method))) goto done;
+    if (FAILED(hr = http_request_create(method, uri, &request))) goto done;
+    if (content && FAILED(hr = IHttpRequestMessage_put_Content(request, content))) goto done;
+    if (FAILED(hr = client_apply_default_headers(impl, request))) goto done;
+    AcquireSRWLockShared(&impl->lock);
+    if (impl->closed) hr = RO_E_CLOSED;
+    else if (!impl->filter) hr = E_NOTIMPL;
+    else { filter = impl->filter; IHttpFilter_AddRef(filter); hr = S_OK; }
+    ReleaseSRWLockShared(&impl->lock);
+    if (SUCCEEDED(hr)) hr = protocol_filter_async_create(filter, request, kind, operation);
+done:
+    if (filter) IHttpFilter_Release(filter);
+    if (request) IHttpRequestMessage_Release(request);
+    if (method) IHttpMethod_Release(method);
+    WindowsDeleteString(method_string);
+    return hr;
 }
 
-static HRESULT WINAPI client_SendRequestWithOptionAsync(IHttpClient *iface, IInspectable *request,
-                                                         HttpCompletionOption option, IInspectable **operation)
+static HRESULT WINAPI client_DeleteAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
 {
-    FIXME("iface %p, request %p, option %d, operation %p stub.\n", iface, request, option, operation);
+    return client_send_simple(iface, uri, L"DELETE", NULL, HTTP_ASYNC_RESPONSE, (void **)operation);
+}
+static HRESULT WINAPI client_GetAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"GET", NULL, HTTP_ASYNC_RESPONSE, (void **)operation);
+}
+static HRESULT WINAPI client_GetWithOptionAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        HttpCompletionOption option, IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    if (option != HttpCompletionOption_ResponseContentRead && option != HttpCompletionOption_ResponseHeadersRead)
+    {
+        if (operation) *operation = NULL;
+        return E_INVALIDARG;
+    }
+    return client_send_simple(iface, uri, L"GET", NULL, HTTP_ASYNC_RESPONSE, (void **)operation);
+}
+static HRESULT WINAPI client_GetBufferAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        IAsyncOperationWithProgress_IBuffer_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"GET", NULL, HTTP_ASYNC_BUFFER, (void **)operation);
+}
+static HRESULT WINAPI client_GetInputStreamAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        IAsyncOperationWithProgress_IInputStream_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"GET", NULL, HTTP_ASYNC_INPUT_STREAM, (void **)operation);
+}
+static HRESULT WINAPI client_GetStringAsync(IHttpClient *iface, IUriRuntimeClass *uri,
+        IAsyncOperationWithProgress_HSTRING_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"GET", NULL, HTTP_ASYNC_STRING, (void **)operation);
+}
+static HRESULT WINAPI client_PostAsync(IHttpClient *iface, IUriRuntimeClass *uri, IHttpContent *content,
+        IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"POST", content, HTTP_ASYNC_RESPONSE, (void **)operation);
+}
+static HRESULT WINAPI client_PutAsync(IHttpClient *iface, IUriRuntimeClass *uri, IHttpContent *content,
+        IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    return client_send_simple(iface, uri, L"PUT", content, HTTP_ASYNC_RESPONSE, (void **)operation);
+}
+static HRESULT WINAPI client_SendRequestAsync(IHttpClient *iface, IHttpRequestMessage *request,
+        IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    struct http_client *impl = impl_from_IHttpClient(iface);
+    IHttpFilter *filter = NULL;
+    HRESULT hr;
+
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    if (!request) return E_INVALIDARG;
+    AcquireSRWLockShared(&impl->lock);
+    if (impl->closed) hr = RO_E_CLOSED;
+    else if (!impl->filter) hr = E_NOTIMPL;
+    else { filter = impl->filter; IHttpFilter_AddRef(filter); hr = S_OK; }
+    ReleaseSRWLockShared(&impl->lock);
+    if (SUCCEEDED(hr)) hr = client_apply_default_headers(impl, request);
+    if (SUCCEEDED(hr)) hr = IHttpFilter_SendRequestAsync(filter, request, operation);
+    if (filter) IHttpFilter_Release(filter);
+    return hr;
+}
+static HRESULT WINAPI client_SendRequestWithOptionAsync(IHttpClient *iface, IHttpRequestMessage *request,
+        HttpCompletionOption option, IAsyncOperationWithProgress_HttpResponseMessage_HttpProgress **operation)
+{
+    if (option != HttpCompletionOption_ResponseContentRead && option != HttpCompletionOption_ResponseHeadersRead)
+    {
+        if (operation) *operation = NULL;
+        return E_INVALIDARG;
+    }
     return client_SendRequestAsync(iface, request, operation);
 }
-
-static HRESULT WINAPI client_get_DefaultRequestHeaders(IHttpClient *iface, IInspectable **value)
+static HRESULT WINAPI client_get_DefaultRequestHeaders(IHttpClient *iface,
+        IHttpRequestHeaderCollection **value)
 {
-    FIXME("iface %p, value %p stub.\n", iface, value);
+    struct http_client *impl = impl_from_IHttpClient(iface);
     if (!value) return E_POINTER;
     *value = NULL;
-    return E_NOTIMPL;
+    AcquireSRWLockShared(&impl->lock);
+    if (impl->closed) { ReleaseSRWLockShared(&impl->lock); return RO_E_CLOSED; }
+    if (impl->default_headers) { IHttpRequestHeaderCollection_AddRef(impl->default_headers); *value = impl->default_headers; }
+    ReleaseSRWLockShared(&impl->lock);
+    return *value ? S_OK : E_UNEXPECTED;
 }
 
 static const IHttpClientVtbl http_client_vtbl =
@@ -266,7 +342,19 @@ static HRESULT WINAPI client_closable_GetTrustLevel(IClosable *iface, TrustLevel
 
 static HRESULT WINAPI client_closable_Close(IClosable *iface)
 {
+    struct http_client *impl = impl_from_client_IClosable(iface);
+    IHttpFilter *filter = NULL;
+
     TRACE("iface %p.\n", iface);
+    AcquireSRWLockExclusive(&impl->lock);
+    if (!impl->closed)
+    {
+        impl->closed = TRUE;
+        filter = impl->filter;
+        impl->filter = NULL;
+    }
+    ReleaseSRWLockExclusive(&impl->lock);
+    if (filter) IHttpFilter_Release(filter);
     return S_OK;
 }
 
@@ -335,17 +423,37 @@ static const IStringableVtbl stringable_vtbl =
 static HRESULT http_client_create(IHttpFilter *filter, IHttpClient **client)
 {
     struct http_client *impl;
+    IInspectable *filter_instance = NULL;
+    HRESULT hr;
 
     if (!client) return E_POINTER;
     *client = NULL;
-    if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
-
+    if (!filter)
+    {
+        if (FAILED(hr = protocol_filter_create(&filter_instance))) return hr;
+        hr = IInspectable_QueryInterface(filter_instance, &IID_IHttpFilter, (void **)&filter);
+        IInspectable_Release(filter_instance);
+        if (FAILED(hr)) return hr;
+    }
+    else
+        IHttpFilter_AddRef(filter);
+    if (!(impl = calloc(1, sizeof(*impl))))
+    {
+        IHttpFilter_Release(filter);
+        return E_OUTOFMEMORY;
+    }
     impl->IHttpClient_iface.lpVtbl = &http_client_vtbl;
     impl->IClosable_iface.lpVtbl = &client_closable_vtbl;
     impl->IStringable_iface.lpVtbl = &stringable_vtbl;
+    InitializeSRWLock(&impl->lock);
     impl->ref = 1;
     impl->filter = filter;
-    if (filter) IHttpFilter_AddRef(filter);
+    if (FAILED(hr = http_headers_create(HEADER_REQUEST, &impl->default_headers, NULL, NULL)))
+    {
+        IHttpFilter_Release(filter);
+        free(impl);
+        return hr;
+    }
     *client = &impl->IHttpClient_iface;
     TRACE("created client %p with filter %p.\n", *client, filter);
     return S_OK;

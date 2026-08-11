@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Make Windows.Web HTTP, JSON, cookies, and async objects thread-safe and honest.
 - Harden toast XML parsing, event lifetimes, and desktop notification delivery.
 - Validate MSIX identities, contents, and staging transactions before publication.
 - Audit the custom Wine delta and document the remaining memory-safety work.

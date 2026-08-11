@@ -37,8 +37,16 @@ namespace Windows.Security.Authorization.AppCapabilityAccess {
 
 namespace Windows.Web.Http {
     runtimeclass HttpClient;
+    runtimeclass HttpContent;
+    runtimeclass HttpCookie;
+    runtimeclass HttpCookieCollection;
+    runtimeclass HttpCookieManager;
+    runtimeclass HttpMethod;
+    runtimeclass HttpRequestMessage;
+    runtimeclass HttpResponseMessage;
 }
 
 namespace Windows.Web.Http.Filters {
     runtimeclass HttpBaseProtocolFilter;
+    runtimeclass HttpCacheControl;
 }
