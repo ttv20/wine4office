@@ -3709,6 +3709,7 @@ static void test_EM_SETUNDOLIMIT(void)
  
   HWND hwndRichEdit = new_richedit(NULL);
   CHARRANGE cr;
+  HANDLE clipboard_data;
   int i;
   int result;
   
@@ -3718,6 +3719,32 @@ static void test_EM_SETUNDOLIMIT(void)
   SendMessageA(hwndRichEdit, EM_EXSETSEL, 0, (LPARAM)&cr);
 
   SendMessageA(hwndRichEdit, WM_COPY, 0, 0);
+  if (!OpenClipboard(hwndRichEdit))
+    clipboard_data = NULL;
+  else
+  {
+    clipboard_data = GetClipboardData(CF_TEXT);
+    CloseClipboard();
+  }
+  if (!clipboard_data)
+  {
+    win_skip("CF_TEXT clipboard data unavailable, skipping undo-limit paste tests.\n");
+    DestroyWindow(hwndRichEdit);
+    return;
+  }
+  SendMessageA(hwndRichEdit, EM_SETSEL, -1, -1);
+  result = SendMessageA(hwndRichEdit, WM_GETTEXTLENGTH, 0, 0);
+  SendMessageA(hwndRichEdit, WM_PASTE, 0, 0);
+  if (SendMessageA(hwndRichEdit, WM_GETTEXTLENGTH, 0, 0) == result)
+  {
+    win_skip("WM_PASTE unavailable, skipping undo-limit paste tests.\n");
+    DestroyWindow(hwndRichEdit);
+    return;
+  }
+  SendMessageA(hwndRichEdit, WM_SETTEXT, 0, (LPARAM)"x");
+  cr.cpMin = 0;
+  cr.cpMax = -1;
+  SendMessageA(hwndRichEdit, EM_EXSETSEL, 0, (LPARAM)&cr);
     /*Load "x" into the clipboard. Paste is an easy, undo'able operation.
       also, multiple pastes don't combine like WM_CHAR would */
 

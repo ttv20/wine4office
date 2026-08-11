@@ -41,33 +41,78 @@ WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
 static DWORD shcore_tls;
 static IUnknown *process_ref;
-static LONG global_counters[59];
+static INIT_ONCE global_counters_init_once = INIT_ONCE_STATIC_INIT;
+static HANDLE global_counters_mapping;
+static LONG *global_counters;
+
+#define GLOBAL_COUNTER_COUNT 59
+
+/* The mapping is the shared state; Interlocked* provides the cross-process
+ * synchronization required for each counter operation. */
+
+static BOOL CALLBACK init_global_counters( INIT_ONCE *once, void *param, void **context )
+{
+    static const WCHAR mapping_name[] = L"Local\\__wine_shcore_global_counters";
+
+    global_counters_mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                                  GLOBAL_COUNTER_COUNT * sizeof(*global_counters), mapping_name );
+    if (!global_counters_mapping) return FALSE;
+
+    global_counters = MapViewOfFile( global_counters_mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
+                                     GLOBAL_COUNTER_COUNT * sizeof(*global_counters) );
+    if (!global_counters)
+    {
+        CloseHandle( global_counters_mapping );
+        global_counters_mapping = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void cleanup_global_counters(void)
+{
+    if (global_counters)
+    {
+        UnmapViewOfFile( global_counters );
+        global_counters = NULL;
+    }
+    if (global_counters_mapping)
+    {
+        CloseHandle( global_counters_mapping );
+        global_counters_mapping = NULL;
+    }
+}
+
+static BOOL get_global_counters(void)
+{
+    return InitOnceExecuteOnce( &global_counters_init_once, init_global_counters, NULL, NULL );
+}
 
 LONG WINAPI SHGlobalCounterGetValue( DWORD index )
 {
     TRACE( "%lu.\n", index );
-    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    if (index >= GLOBAL_COUNTER_COUNT || !get_global_counters()) return 0;
     return InterlockedCompareExchange( &global_counters[index], 0, 0 );
 }
 
 LONG WINAPI SHGlobalCounterIncrement( DWORD index )
 {
     TRACE( "%lu.\n", index );
-    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    if (index >= GLOBAL_COUNTER_COUNT || !get_global_counters()) return 0;
     return InterlockedIncrement( &global_counters[index] );
 }
 
 LONG WINAPI SHGlobalCounterDecrement( DWORD index )
 {
     TRACE( "%lu.\n", index );
-    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    if (index >= GLOBAL_COUNTER_COUNT || !get_global_counters()) return 0;
     return InterlockedDecrement( &global_counters[index] );
 }
 
 LONG WINAPI SHGlobalCounterSetValue( DWORD index, LONG value )
 {
     TRACE( "%lu, %ld.\n", index, value );
-    if (index >= ARRAY_SIZE(global_counters)) return 0;
+    if (index >= GLOBAL_COUNTER_COUNT || !get_global_counters()) return 0;
     return InterlockedExchange( &global_counters[index], value );
 }
 
@@ -83,6 +128,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
             break;
         case DLL_PROCESS_DETACH:
             if (reserved) break;
+            cleanup_global_counters();
             if (shcore_tls != TLS_OUT_OF_INDEXES)
                 TlsFree(shcore_tls);
             break;

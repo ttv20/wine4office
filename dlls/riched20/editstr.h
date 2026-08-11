@@ -485,6 +485,8 @@ struct text_services
     LONG ref;
     ME_TextEditor *editor;
     struct text_selection *text_selection;
+    LONG typography_options;
+    LONG math_properties;
     struct list rangelist;
     struct list clientsites;
     char spare[256]; /* for bug #12179 */

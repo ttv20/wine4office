@@ -25,17 +25,12 @@
 #include "oleauto.h"
 #include "richole.h"
 #include "tom.h"
-#include "d2d1.h"
-#include "dwrite.h"
 #include "imm.h"
 #include "textserv.h"
 #include "wine/debug.h"
 #include "editstr.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(richedit);
-
-static const IID textservices_IID_IDWriteFactory =
-    {0xb859ee5a, 0xd838, 0x4b5b, {0xa2, 0xe8, 0x1a, 0xdc, 0x7d, 0x93, 0xdb, 0x48}};
 
 static inline struct text_services *impl_from_IUnknown( IUnknown *iface )
 {
@@ -572,50 +567,8 @@ DEFINE_THISCALL_WRAPPER(fnTextSrv_TxDrawD2D,20)
 static HRESULT __thiscall fnTextSrv_TxDrawD2D( ITextServices *iface, IUnknown *render_target,
                                                const RECTL *bounds, RECT *update, LONG view_id )
 {
-    ID2D1RenderTarget *target = (ID2D1RenderTarget *)render_target;
-    ID2D1SolidColorBrush *brush = NULL;
-    IDWriteTextFormat *format = NULL;
-    IDWriteFactory *factory = NULL;
-    D2D1_COLOR_F color = {0.0f, 0.0f, 0.0f, 1.0f};
-    D2D1_RECT_F layout;
-    BSTR text = NULL;
-    HRESULT hr;
-
-    TRACE( "iface %p, render_target %p, bounds %s, update %s, view_id %ld.\n",
-           iface, render_target, wine_dbgstr_rect( (RECT *)bounds ), wine_dbgstr_rect( update ), view_id );
-
-    if (!target || !bounds) return E_INVALIDARG;
-    if (bounds->right <= bounds->left || bounds->bottom <= bounds->top) return S_OK;
-
-    hr = fnTextSrv_TxGetText( iface, &text );
-    if (FAILED(hr) || !text || !SysStringLen(text)) goto done;
-    hr = DWriteCreateFactory( DWRITE_FACTORY_TYPE_SHARED, &textservices_IID_IDWriteFactory,
-                              (IUnknown **)&factory );
-    if (FAILED(hr)) goto done;
-    hr = IDWriteFactory_CreateTextFormat( factory, L"Segoe UI", NULL,
-                                          DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                                          DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-us", &format );
-    if (FAILED(hr)) goto done;
-    hr = ID2D1RenderTarget_CreateSolidColorBrush( target, &color, NULL, &brush );
-    if (FAILED(hr)) goto done;
-
-    layout.left = bounds->left;
-    layout.top = bounds->top;
-    layout.right = bounds->right;
-    layout.bottom = bounds->bottom;
-    ID2D1RenderTarget_DrawText( target, text, SysStringLen(text), format, &layout,
-                                (ID2D1Brush *)brush,
-                                D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL );
-    hr = S_OK;
-
-done:
-    if (brush) ID2D1SolidColorBrush_Release( brush );
-    if (format) IDWriteTextFormat_Release( format );
-    if (factory) IDWriteFactory_Release( factory );
-    SysFreeString( text );
-    if (FAILED(hr))
-        FIXME( "DirectWrite compatibility draw failed, hr %#lx.\n", hr );
-    return S_OK;
+    FIXME( "TxDrawD2D is not implemented for formatted rich text.\n" );
+    return E_NOTIMPL;
 }
 
 DEFINE_THISCALL_WRAPPER(fnTextSrv_TxGetNaturalSize2,40)
@@ -624,10 +577,17 @@ static HRESULT __thiscall fnTextSrv_TxGetNaturalSize2( ITextServices *iface, DWO
                                                        const SIZEL *extent, LONG *width, LONG *height,
                                                        LONG *ascent )
 {
+    struct text_services *services = impl_from_ITextServices( iface );
+    ME_Row *row;
     HRESULT hr;
 
     hr = fnTextSrv_TxGetNaturalSize( iface, aspect, draw, target, device, mode, extent, width, height );
-    if (SUCCEEDED(hr) && ascent) *ascent = 0;
+    if (SUCCEEDED(hr) && ascent)
+    {
+        row = para_first_row( editor_first_para( services->editor ) );
+        if (!row) return E_FAIL;
+        *ascent = row->nBaseline;
+    }
     return hr;
 }
 
@@ -809,8 +769,10 @@ static HRESULT WINAPI fnTextDoc2_GetStoryRanges2( ITextDocument2 *iface, ITextSt
 
 static HRESULT WINAPI fnTextDoc2_GetTypographyOptions( ITextDocument2 *iface, LONG *options )
 {
+    struct text_services *services = impl_from_ITextDocument2( iface );
+
     if (!options) return E_INVALIDARG;
-    *options = 0;
+    *options = services->typography_options;
     return S_OK;
 }
 
@@ -829,9 +791,41 @@ static HRESULT WINAPI fnTextDoc2_GetCallManager( ITextDocument2 *iface, IUnknown
 
 static HRESULT WINAPI fnTextDoc2_GetProperty( ITextDocument2 *iface, LONG type, LONG *value )
 {
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    HRESULT hr;
+    LRESULT result;
+
     if (!value) return E_INVALIDARG;
     *value = 0;
-    return S_OK;
+
+    switch (type)
+    {
+    case tomCanCopy:
+    {
+        LONG start, end;
+
+        ME_GetSelectionOfs( services->editor, &start, &end );
+        *value = start != end ? tomTrue : tomFalse;
+        return S_OK;
+    }
+    case tomCanUndo:
+        result = editor_handle_message( services->editor, EM_CANUNDO, 0, 0, &hr );
+        *value = result ? tomTrue : tomFalse;
+        return hr;
+    case tomCanRedo:
+        result = editor_handle_message( services->editor, EM_CANREDO, 0, 0, &hr );
+        *value = result ? tomTrue : tomFalse;
+        return hr;
+    case tomUndoLimit:
+        *value = services->editor->nUndoLimit;
+        return S_OK;
+    case tomDocAutoLink:
+        result = editor_handle_message( services->editor, EM_GETAUTOURLDETECT, 0, 0, &hr );
+        *value = result ? tomTrue : tomFalse;
+        return hr;
+    default:
+        return E_NOTIMPL;
+    }
 }
 
 static HRESULT WINAPI fnTextDoc2_GetStrings( ITextDocument2 *iface, ITextStrings **strings )
@@ -1041,8 +1035,6 @@ static HRESULT WINAPI fnTextRange2_GetFormattedText2( ITextRange2 *iface, ITextR
     if (!range) return E_INVALIDARG;
     *range = NULL;
     hr = ITextRange_GetFormattedText( proxy->range, &formatted );
-    if (hr == E_NOTIMPL)
-        hr = ITextRange_GetDuplicate( proxy->range, &formatted );
     if (FAILED(hr)) return hr;
     return create_text_range2_proxy( formatted, range );
 }
@@ -1051,20 +1043,12 @@ static HRESULT WINAPI fnTextRange2_SetFormattedText2( ITextRange2 *iface, ITextR
 {
     struct text_range2_proxy *proxy = impl_from_ITextRange2( iface );
     ITextRange *base_range;
-    BSTR text;
     HRESULT hr;
 
     if (!range) return E_INVALIDARG;
     hr = ITextRange2_QueryInterface( range, &IID_ITextRange, (void **)&base_range );
     if (FAILED(hr)) return hr;
     hr = ITextRange_SetFormattedText( proxy->range, base_range );
-    if (hr == E_NOTIMPL)
-    {
-        text = NULL;
-        hr = ITextRange_GetText( base_range, &text );
-        if (SUCCEEDED(hr)) hr = ITextRange_SetText( proxy->range, text );
-        SysFreeString( text );
-    }
     ITextRange_Release( base_range );
     return hr;
 }
@@ -1270,9 +1254,6 @@ static HRESULT WINAPI fnTextDoc2_Range2( ITextDocument2 *iface, LONG active, LON
     struct text_services *services = impl_from_ITextDocument2( iface );
     ITextRange *base_range;
     HRESULT hr;
-
-    if (!range) return E_INVALIDARG;
-    *range = NULL;
     hr = ITextDocument2Old_Range( &services->ITextDocument2Old_iface, active, anchor, &base_range );
     if (FAILED(hr)) return hr;
     return create_text_range2_proxy( base_range, range );
@@ -1292,23 +1273,45 @@ static HRESULT WINAPI fnTextDoc2_ReleaseCallManager( ITextDocument2 *iface, IUnk
 
 static HRESULT WINAPI fnTextDoc2_SetProperty( ITextDocument2 *iface, LONG type, LONG value )
 {
-    return S_OK;
+    struct text_services *services = impl_from_ITextDocument2( iface );
+    HRESULT hr;
+
+    switch (type)
+    {
+    case tomUndoLimit:
+        editor_handle_message( services->editor, EM_SETUNDOLIMIT, (WPARAM)(ULONG)value, 0, &hr );
+        return hr;
+    case tomDocAutoLink:
+        if (value != tomFalse && value != tomTrue) return E_INVALIDARG;
+        editor_handle_message( services->editor, EM_AUTOURLDETECT, value == tomTrue, 0, &hr );
+        return hr;
+    default:
+        return E_NOTIMPL;
+    }
 }
 
 static HRESULT WINAPI fnTextDoc2_SetTypographyOptions( ITextDocument2 *iface, LONG options, LONG mask )
 {
+    struct text_services *services = impl_from_ITextDocument2( iface );
+
+    services->typography_options = (services->typography_options & ~mask) | (options & mask);
     return S_OK;
 }
 
 static HRESULT WINAPI fnTextDoc2_GetMathProperties( ITextDocument2 *iface, LONG *options )
 {
+    struct text_services *services = impl_from_ITextDocument2( iface );
+
     if (!options) return E_INVALIDARG;
-    *options = 0;
+    *options = services->math_properties;
     return S_OK;
 }
 
 static HRESULT WINAPI fnTextDoc2_SetMathProperties( ITextDocument2 *iface, LONG options, LONG mask )
 {
+    struct text_services *services = impl_from_ITextDocument2( iface );
+
+    services->math_properties = (services->math_properties & ~mask) | (options & mask);
     return S_OK;
 }
 
@@ -1437,6 +1440,8 @@ HRESULT create_text_services( IUnknown *outer, ITextHost *text_host, IUnknown **
     else services->outer_unk = &services->IUnknown_inner;
 
     services->text_selection = NULL;
+    services->typography_options = 0;
+    services->math_properties = 0;
     list_init( &services->rangelist );
     list_init( &services->clientsites );
 

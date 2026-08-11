@@ -5408,6 +5408,23 @@ static void test_query_result_(const struct query_test *test, IXMLDOMNodeList *l
     }
 }
 
+static void test_wide_query(IXMLDOMDocument2 *doc, const WCHAR *query, const char *expected)
+{
+    IXMLDOMNodeList *list = NULL;
+    BSTR expression = SysAllocString(query);
+    HRESULT hr = IXMLDOMDocument2_selectNodes(doc, expression, &list);
+    ok(hr == S_OK, "Unexpected hr %#lx for %s.\n", hr, wine_dbgstr_w(query));
+    if (hr == S_OK)
+    {
+        expect_list_and_release(list, expected);
+    }
+    else if (list)
+    {
+        IXMLDOMNodeList_Release(list);
+    }
+    SysFreeString(expression);
+}
+
 static void test_XPath(void)
 {
     static const char node_value_cmp[] =
@@ -5445,6 +5462,19 @@ static void test_XPath(void)
         { "//elem[translate(@a, \"abc\", \"ABC\") = \"C\"]", "E3.E2.D1" },
         { "//elem[ms:string-compare(@a, \"c\") = 0]", "E3.E2.D1" },
         { "//elem[ms:string-compare(@a, \"C\", \"\", \"i\") = 0]", "E3.E2.D1" },
+        { "//elem[ms:string-compare(\"a\", \"A\", \"en-US\", \"i\") = 0]",
+          "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
+        { "//elem[ms:string-compare(\"A\", \"a\", \"en-US\", \"u\") < 0]",
+          "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
+        { "//elem[ms:string-compare(\"a\", \"b\", \"sv-SE\", \"\") < 0]",
+          "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
+        { "//elem[ms:string-compare(\"\", \"\", \"en-US\", \"\") = 0]",
+          "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
+        { "//elem[ms:string-compare(\"a\", \"b\") < 0]",
+          "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
+        { "//elem[ms:string-compare(\"a\", \"A\", \"en-US\", \"ii\") = 0]", NULL },
+        { "//elem[ms:string-compare(\"a\", \"A\", \"en-US\", \"iu\") = 0]", NULL },
+        { "//elem[ms:string-compare(\"a\", \"A\", \"not-a-language\", \"\") = 0]", NULL },
         { "//elem[@a != 0]", "E1.E2.D1 E2.E2.D1 E3.E2.D1" },
         { "//elem[string() = \"\"]", "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1" },
         { NULL },
@@ -5501,6 +5531,33 @@ static void test_XPath(void)
             IXMLDOMNodeList_Release(list);
 
         winetest_pop_context();
+    }
+
+    /* Keep non-ASCII XPath expressions wide so test input is not converted
+     * through the host ANSI code page. */
+    {
+        static const WCHAR case_width[] =
+            L"//elem[ms:string-compare(\"\xFF21\", \"a\", \"ja-JP\", \"i\") = 0]";
+        static const WCHAR kana[] =
+            L"//elem[ms:string-compare(\"\x3042\", \"\x30A2\", \"ja-JP\", \"i\") = 0]";
+        static const WCHAR diacritic_sensitive[] =
+            L"//elem[ms:string-compare(\"\x00E4\", \"a\", \"en-US\", \"\") > 0]";
+        static const WCHAR language[] =
+            L"//elem[ms:string-compare(\"\x00E4\", \"z\", \"sv-SE\", \"\") > 0]";
+        static const WCHAR empty[] =
+            L"//elem[ms:string-compare(\"\", \"\", \"en-US\", \"\") = 0]";
+        static const WCHAR equal_non_bmp[] =
+            L"//elem[ms:string-compare(\"\xD83D\xDE00\", \"\xD83D\xDE00\", \"en-US\", \"\") = 0]";
+        static const WCHAR ordered_non_bmp[] =
+            L"//elem[ms:string-compare(\"\xD83D\xDE00\", \"\xD83D\xDE01\", \"en-US\", \"\") < 0]";
+
+        test_wide_query(doc, case_width, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, kana, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, language, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, diacritic_sensitive, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, empty, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, equal_non_bmp, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
+        test_wide_query(doc, ordered_non_bmp, "E1.E2.D1 E2.E2.D1 E3.E2.D1 E4.E2.D1");
     }
 
     hr = IXMLDOMDocument2_loadXML(doc, _bstr_(pi), NULL);

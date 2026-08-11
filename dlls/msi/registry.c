@@ -1498,74 +1498,470 @@ static UINT enum_office_c2r_ui_qualifiers( const WCHAR *component, DWORD index, 
     return app_ret == ERROR_SUCCESS ? ret : app_ret;
 }
 
-static BOOL get_xml_attribute( const WCHAR *tag, const WCHAR *end, const WCHAR *name,
-                               WCHAR *value, DWORD value_size )
-{
-    const WCHAR *start, *stop;
-    SIZE_T name_len = wcslen( name ), len;
+/* C2R manifests use the MSI Package, Component and PublishComponent table
+ * relationships.  Keep the parser schema-aware: a PublishComponent is a
+ * record only when it is a direct child of the package's
+ * PublishComponentList, and its ComponentId resolves through ComponentList.
+ * In particular, do not infer identity or key paths from filenames or tag
+ * proximity. */
+#define OFFICE_C2R_MANIFEST_MAX_SIZE (16 * 1024 * 1024)
+#define OFFICE_C2R_MAX_XML_DEPTH 128
+#define OFFICE_C2R_MAX_COMPONENTS 4096
+#define OFFICE_C2R_MAX_PUBLISH_COMPONENTS 4096
 
-    for (start = tag; (start = wcsstr( start, name )) && start < end; start += name_len)
-    {
-        if (start + name_len + 2 >= end || start[name_len] != '=' || start[name_len + 1] != '"')
-            continue;
-        start += name_len + 2;
-        if (!(stop = wcschr( start, '"' )) || stop > end) return FALSE;
-        len = stop - start;
-        if (len >= value_size) return FALSE;
-        memcpy( value, start, len * sizeof(WCHAR) );
-        value[len] = 0;
-        return TRUE;
-    }
-    return FALSE;
+struct office_c2r_xml_tag
+{
+    const WCHAR *start, *end, *attrs;
+    WCHAR name[64];
+    BOOL closing, self_closing;
+};
+
+enum office_c2r_xml_result
+{
+    OFFICE_C2R_XML_EOF,
+    OFFICE_C2R_XML_START,
+    OFFICE_C2R_XML_END,
+    OFFICE_C2R_XML_ERROR,
+};
+
+struct office_c2r_component
+{
+    WCHAR id[GUID_SIZE];
+    WCHAR keypath[1024];
+    BOOL has_keypath;
+};
+
+struct office_c2r_publish_component
+{
+    WCHAR publish_component_id[GUID_SIZE];
+    WCHAR qualifier[256];
+    WCHAR component_id[GUID_SIZE];
+    WCHAR appdata[512];
+    WCHAR keyfile[1024];
+    BOOL has_keyfile;
+};
+
+struct office_c2r_manifest
+{
+    WCHAR product_code[GUID_SIZE];
+    struct office_c2r_component *components;
+    DWORD component_count;
+    struct office_c2r_publish_component *publish_components;
+    DWORD publish_component_count;
+};
+
+struct office_c2r_seen_key
+{
+    WCHAR publish_component_id[GUID_SIZE];
+    WCHAR qualifier[256];
+};
+
+static BOOL office_c2r_xml_space( WCHAR c )
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-static BOOL find_office_c2r_manifest_qualifier( const WCHAR *filename, const WCHAR *component,
-                                                DWORD wanted_index, DWORD *found, WCHAR *qualifier,
-                                                DWORD qualifier_size, WCHAR *appdata, DWORD appdata_size )
+static BOOL office_c2r_xml_name_char( WCHAR c )
 {
-    WCHAR component_id[GUID_SIZE], *buffer, *tag, *end;
-    LARGE_INTEGER size;
-    DWORD read;
-    HANDLE file;
-    BOOL ret = FALSE;
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == ':' || c == '-' || c == '.';
+}
 
+static const WCHAR *office_c2r_xml_find( const WCHAR *start, const WCHAR *end,
+                                         const WCHAR *needle )
+{
+    SIZE_T len = wcslen( needle );
+
+    for (; start + len <= end; start++)
+        if (!wcsncmp( start, needle, len )) return start;
+    return NULL;
+}
+
+static enum office_c2r_xml_result office_c2r_xml_next( const WCHAR **cursor, const WCHAR *limit,
+                                                        struct office_c2r_xml_tag *tag )
+{
+    const WCHAR *start, *p, *name_start, *close;
+    SIZE_T name_len;
+    WCHAR quote;
+
+    if (*cursor >= limit) return OFFICE_C2R_XML_EOF;
+    while (*cursor < limit)
+    {
+        start = *cursor;
+        while (start < limit && *start != '<') start++;
+        if (start == limit)
+        {
+            *cursor = start;
+            return OFFICE_C2R_XML_EOF;
+        }
+        if (start + 4 <= limit && !wcsncmp( start, L"<!--", 4 ))
+        {
+            if (!(close = office_c2r_xml_find( start + 4, limit, L"-->" )))
+                return OFFICE_C2R_XML_ERROR;
+            *cursor = close + 3;
+            continue;
+        }
+        if (start + 2 <= limit && start[1] == '?')
+        {
+            if (!(close = office_c2r_xml_find( start + 2, limit, L"?>" )))
+                return OFFICE_C2R_XML_ERROR;
+            *cursor = close + 2;
+            continue;
+        }
+        if (start + 9 <= limit && !wcsncmp( start, L"<![CDATA[", 9 ))
+        {
+            if (!(close = office_c2r_xml_find( start + 9, limit, L"]]>" )))
+                return OFFICE_C2R_XML_ERROR;
+            *cursor = close + 3;
+            continue;
+        }
+        if (start + 2 <= limit && start[1] == '!')
+        {
+            if (!(close = office_c2r_xml_find( start + 2, limit, L">" )))
+                return OFFICE_C2R_XML_ERROR;
+            *cursor = close + 1;
+            continue;
+        }
+        break;
+    }
+    if (*cursor >= limit || start == limit) return OFFICE_C2R_XML_EOF;
+    p = start + 1;
+    tag->closing = FALSE;
+    tag->self_closing = FALSE;
+    if (p < limit && *p == '/')
+    {
+        tag->closing = TRUE;
+        p++;
+    }
+    while (p < limit && office_c2r_xml_space( *p )) p++;
+    name_start = p;
+    while (p < limit && office_c2r_xml_name_char( *p )) p++;
+    name_len = p - name_start;
+    if (!name_len || name_len >= ARRAY_SIZE(tag->name) || tag->closing && p == name_start)
+        return OFFICE_C2R_XML_ERROR;
+    memcpy( tag->name, name_start, name_len * sizeof(WCHAR) );
+    tag->name[name_len] = 0;
+    tag->attrs = p;
+
+    quote = 0;
+    for (; p < limit; p++)
+    {
+        if (quote)
+        {
+            if (*p == quote) quote = 0;
+        }
+        else if (*p == '"' || *p == '\'') quote = *p;
+        else if (*p == '>')
+            break;
+    }
+    if (p == limit || quote) return OFFICE_C2R_XML_ERROR;
+    tag->start = start;
+    tag->end = p;
+    *cursor = p + 1;
+
+    if (tag->closing)
+    {
+        while (tag->attrs < tag->end && office_c2r_xml_space( *tag->attrs )) tag->attrs++;
+        if (tag->attrs != tag->end) return OFFICE_C2R_XML_ERROR;
+        return OFFICE_C2R_XML_END;
+    }
+
+    p = tag->attrs;
+    while (p < tag->end)
+    {
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end) break;
+        if (*p == '/')
+        {
+            tag->self_closing = TRUE;
+            p++;
+            while (p < tag->end && office_c2r_xml_space( *p )) p++;
+            if (p != tag->end) return OFFICE_C2R_XML_ERROR;
+            break;
+        }
+        name_start = p;
+        while (p < tag->end && office_c2r_xml_name_char( *p )) p++;
+        if (p == name_start) return OFFICE_C2R_XML_ERROR;
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end || *p++ != '=') return OFFICE_C2R_XML_ERROR;
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end || (*p != '"' && *p != '\'')) return OFFICE_C2R_XML_ERROR;
+        quote = *p++;
+        while (p < tag->end && *p != quote) p++;
+        if (p == tag->end) return OFFICE_C2R_XML_ERROR;
+        p++;
+    }
+    return OFFICE_C2R_XML_START;
+}
+
+static BOOL office_c2r_xml_attribute( const struct office_c2r_xml_tag *tag, const WCHAR *wanted,
+                                      WCHAR *value, DWORD value_size, BOOL *present )
+{
+    const WCHAR *p = tag->attrs, *name_start, *value_start;
+    SIZE_T name_len, value_len;
+    WCHAR quote;
+
+    *present = FALSE;
+    while (p < tag->end)
+    {
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end) break;
+        if (*p == '/')
+        {
+            p++;
+            while (p < tag->end && office_c2r_xml_space( *p )) p++;
+            if (p != tag->end) return FALSE;
+            break;
+        }
+        name_start = p;
+        while (p < tag->end && office_c2r_xml_name_char( *p )) p++;
+        name_len = p - name_start;
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end || *p++ != '=') return FALSE;
+        while (p < tag->end && office_c2r_xml_space( *p )) p++;
+        if (p == tag->end || (*p != '"' && *p != '\'')) return FALSE;
+        quote = *p++;
+        value_start = p;
+        while (p < tag->end && *p != quote) p++;
+        if (p == tag->end) return FALSE;
+        value_len = p - value_start;
+        p++;
+        if (name_len == wcslen( wanted ) && !wcsncmp( name_start, wanted, name_len ))
+        {
+            if (*present || value_len >= value_size) return FALSE;
+            memcpy( value, value_start, value_len * sizeof(WCHAR) );
+            value[value_len] = 0;
+            *present = TRUE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL office_c2r_valid_guid( const WCHAR *value )
+{
+    GUID guid;
+
+    return lstrlenW( value ) == GUID_SIZE - 1 && value[0] == '{' &&
+           value[GUID_SIZE - 2] == '}' && SUCCEEDED( CLSIDFromString( value, &guid ) );
+}
+
+static void office_c2r_manifest_free( struct office_c2r_manifest *manifest )
+{
+    free( manifest->components );
+    free( manifest->publish_components );
+    memset( manifest, 0, sizeof(*manifest) );
+}
+
+static BOOL office_c2r_manifest_add_component( struct office_c2r_manifest *manifest,
+                                               const struct office_c2r_xml_tag *tag )
+{
+    WCHAR id[GUID_SIZE], keypath[1024];
+    BOOL id_present, keypath_present;
+    struct office_c2r_component *new_components;
+    DWORD i;
+
+    if (!office_c2r_xml_attribute( tag, L"ComponentId", id, ARRAY_SIZE(id), &id_present ) ||
+        !id_present || !office_c2r_valid_guid( id ))
+        return TRUE; /* A malformed table row does not invalidate other rows. */
+    if (!office_c2r_xml_attribute( tag, L"KeyPath", keypath, ARRAY_SIZE(keypath), &keypath_present ))
+        return TRUE;
+
+    for (i = 0; i < manifest->component_count; i++)
+    {
+        if (wcsicmp( manifest->components[i].id, id )) continue;
+        if (!manifest->components[i].has_keypath && keypath_present && keypath[0])
+        {
+            lstrcpyW( manifest->components[i].keypath, keypath );
+            manifest->components[i].has_keypath = TRUE;
+        }
+        return TRUE;
+    }
+    if (manifest->component_count == OFFICE_C2R_MAX_COMPONENTS) return TRUE;
+    if (!(new_components = realloc( manifest->components,
+                                    (manifest->component_count + 1) *
+                                    sizeof(*manifest->components) )))
+        return FALSE;
+    manifest->components = new_components;
+    lstrcpyW( manifest->components[manifest->component_count].id, id );
+    manifest->components[manifest->component_count].has_keypath = keypath_present && keypath[0];
+    if (manifest->components[manifest->component_count].has_keypath)
+        lstrcpyW( manifest->components[manifest->component_count].keypath, keypath );
+    manifest->component_count++;
+    return TRUE;
+}
+
+static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifest *manifest,
+                                                       const struct office_c2r_xml_tag *tag )
+{
+    WCHAR publish_component_id[GUID_SIZE], qualifier[256], component_id[GUID_SIZE];
+    WCHAR appdata[512], feature[256], keyfile[1024];
+    BOOL publish_id_present, qualifier_present, component_id_present, feature_present;
+    BOOL appdata_present, keyfile_present;
+    struct office_c2r_publish_component *new_publish_components;
+    DWORD i;
+
+    if (!office_c2r_xml_attribute( tag, L"PublishComponentId", publish_component_id,
+                                   ARRAY_SIZE(publish_component_id), &publish_id_present ) ||
+        !office_c2r_xml_attribute( tag, L"Qualifier", qualifier, ARRAY_SIZE(qualifier),
+                                   &qualifier_present ) ||
+        !office_c2r_xml_attribute( tag, L"ComponentId", component_id, ARRAY_SIZE(component_id),
+                                   &component_id_present ) ||
+        !office_c2r_xml_attribute( tag, L"Feature", feature, ARRAY_SIZE(feature), &feature_present ) ||
+        !publish_id_present || !qualifier_present || !component_id_present || !feature_present ||
+        !office_c2r_valid_guid( publish_component_id ) || !office_c2r_valid_guid( component_id ))
+        return TRUE;
+    if (!office_c2r_xml_attribute( tag, L"AppData", appdata, ARRAY_SIZE(appdata), &appdata_present ) ||
+        !office_c2r_xml_attribute( tag, L"KeyFile", keyfile, ARRAY_SIZE(keyfile), &keyfile_present ))
+        return TRUE;
+
+    for (i = 0; i < manifest->publish_component_count; i++)
+    {
+        if (wcsicmp( manifest->publish_components[i].publish_component_id, publish_component_id ) ||
+            wcsicmp( manifest->publish_components[i].qualifier, qualifier ))
+            continue;
+        if (!manifest->publish_components[i].has_keyfile && keyfile_present && keyfile[0])
+        {
+            lstrcpyW( manifest->publish_components[i].keyfile, keyfile );
+            manifest->publish_components[i].has_keyfile = TRUE;
+        }
+        return TRUE;
+    }
+    if (manifest->publish_component_count == OFFICE_C2R_MAX_PUBLISH_COMPONENTS) return TRUE;
+    if (!(new_publish_components = realloc( manifest->publish_components,
+                                            (manifest->publish_component_count + 1) *
+                                            sizeof(*manifest->publish_components) )))
+        return FALSE;
+    manifest->publish_components = new_publish_components;
+    lstrcpyW( manifest->publish_components[manifest->publish_component_count].publish_component_id,
+              publish_component_id );
+    lstrcpyW( manifest->publish_components[manifest->publish_component_count].qualifier, qualifier );
+    lstrcpyW( manifest->publish_components[manifest->publish_component_count].component_id, component_id );
+    manifest->publish_components[manifest->publish_component_count].appdata[0] = 0;
+    if (appdata_present) lstrcpyW( manifest->publish_components[manifest->publish_component_count].appdata,
+                                   appdata );
+    manifest->publish_components[manifest->publish_component_count].has_keyfile =
+        keyfile_present && keyfile[0];
+    if (manifest->publish_components[manifest->publish_component_count].has_keyfile)
+        lstrcpyW( manifest->publish_components[manifest->publish_component_count].keyfile, keyfile );
+    manifest->publish_component_count++;
+    return TRUE;
+}
+
+static BOOL office_c2r_parse_manifest( const WCHAR *filename, struct office_c2r_manifest *manifest )
+{
+    WCHAR stack[OFFICE_C2R_MAX_XML_DEPTH][64];
+    WCHAR *buffer;
+    LARGE_INTEGER size;
+    const WCHAR *cursor, *limit;
+    struct office_c2r_xml_tag tag;
+    DWORD read, stack_count = 0;
+    BOOL product_present, root_seen = FALSE, root_done = FALSE;
+    enum office_c2r_xml_result result;
+    HANDLE file;
+
+    memset( manifest, 0, sizeof(*manifest) );
     file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE) return FALSE;
     if (!GetFileSizeEx( file, &size ) || size.QuadPart < sizeof(WCHAR) ||
-        size.QuadPart > 16 * 1024 * 1024 || (size.QuadPart & 1) ||
+        size.QuadPart > OFFICE_C2R_MANIFEST_MAX_SIZE || (size.QuadPart & 1) ||
         !(buffer = malloc( size.QuadPart + sizeof(WCHAR) )))
     {
         CloseHandle( file );
         return FALSE;
     }
     if (!ReadFile( file, buffer, size.QuadPart, &read, NULL ) || read != size.QuadPart)
-        goto done;
+        goto failed;
     buffer[read / sizeof(WCHAR)] = 0;
-    tag = buffer[0] == 0xfeff ? buffer + 1 : buffer;
-    if (tag[0] == 0xfffe) goto done;
+    cursor = buffer + (buffer[0] == 0xfeff);
+    limit = buffer + read / sizeof(WCHAR);
+    if (cursor >= limit || cursor[0] == 0xfffe) goto failed;
 
-    while ((tag = wcsstr( tag, L"<PublishComponent ")))
+    while ((result = office_c2r_xml_next( &cursor, limit, &tag )) != OFFICE_C2R_XML_EOF)
     {
-        if (!(end = wcschr( tag, '>' ))) break;
-        if (get_xml_attribute( tag, end, L"PublishComponentId", component_id,
-                               ARRAY_SIZE(component_id) ) && !wcsicmp( component_id, component ))
+        if (result == OFFICE_C2R_XML_ERROR) goto failed;
+        if (result == OFFICE_C2R_XML_START)
         {
-            if ((*found)++ == wanted_index)
+            if (!root_seen)
             {
-                if (!get_xml_attribute( tag, end, L"Qualifier", qualifier, qualifier_size )) break;
-                if (!get_xml_attribute( tag, end, L"AppData", appdata, appdata_size )) appdata[0] = 0;
-                ret = TRUE;
-                break;
+                if (stack_count || wcscmp( tag.name, L"Package" ) ||
+                    !office_c2r_xml_attribute( &tag, L"ProductCode", manifest->product_code,
+                                               ARRAY_SIZE(manifest->product_code), &product_present ) ||
+                    !product_present || !office_c2r_valid_guid( manifest->product_code ))
+                    goto failed;
+                root_seen = TRUE;
             }
-        }
-        tag = end + 1;
-    }
+            else if (root_done || !stack_count)
+                goto failed;
+            else if (stack_count == 2 && !wcscmp( stack[1], L"PublishComponentList" ) &&
+                     !wcscmp( tag.name, L"PublishComponent" ) &&
+                     !office_c2r_manifest_add_publish_component( manifest, &tag ))
+                goto failed;
+            else if (((stack_count == 2 && !wcscmp( stack[1], L"ComponentList" )) ||
+                      (stack_count >= 3 && !wcscmp( stack[1], L"SequencedData" ) &&
+                       !wcscmp( stack[stack_count - 1], L"ComponentList" ))) &&
+                     !wcscmp( tag.name, L"Component" ) &&
+                     !office_c2r_manifest_add_component( manifest, &tag ))
+                goto failed;
 
-done:
-    free( buffer );
+            if (!tag.self_closing)
+            {
+                if (stack_count == OFFICE_C2R_MAX_XML_DEPTH) goto failed;
+                lstrcpyW( stack[stack_count++], tag.name );
+            }
+            else if (!root_seen || !stack_count)
+                root_done = TRUE;
+        }
+        else
+        {
+            if (!stack_count || wcscmp( stack[stack_count - 1], tag.name )) goto failed;
+            stack_count--;
+            if (!stack_count) root_done = TRUE;
+        }
+    }
+    if (!root_seen || !root_done || stack_count)
+        goto failed;
     CloseHandle( file );
-    return ret;
+    free( buffer );
+    return TRUE;
+
+failed:
+    CloseHandle( file );
+    free( buffer );
+    office_c2r_manifest_free( manifest );
+    return FALSE;
+}
+
+static BOOL office_c2r_seen_key( const struct office_c2r_seen_key *seen, DWORD count,
+                                 const WCHAR *publish_component_id, const WCHAR *qualifier )
+{
+    DWORD i;
+    for (i = 0; i < count; i++)
+        if (!wcsicmp( seen[i].publish_component_id, publish_component_id ) &&
+            !wcsicmp( seen[i].qualifier, qualifier ))
+            return TRUE;
+    return FALSE;
+}
+
+static BOOL office_c2r_add_seen_key( struct office_c2r_seen_key **seen, DWORD *count, DWORD *capacity,
+                                     const WCHAR *publish_component_id, const WCHAR *qualifier )
+{
+    if (*count == OFFICE_C2R_MAX_PUBLISH_COMPONENTS) return TRUE;
+    if (*count == *capacity)
+    {
+        DWORD new_capacity = *capacity ? *capacity * 2 : 32;
+        struct office_c2r_seen_key *new_seen;
+
+        if (new_capacity > OFFICE_C2R_MAX_PUBLISH_COMPONENTS)
+            new_capacity = OFFICE_C2R_MAX_PUBLISH_COMPONENTS;
+        if (!(new_seen = realloc( *seen, new_capacity * sizeof(*new_seen) ))) return FALSE;
+        *seen = new_seen;
+        *capacity = new_capacity;
+    }
+    lstrcpyW( (*seen)[*count].publish_component_id, publish_component_id );
+    lstrcpyW( (*seen)[*count].qualifier, qualifier );
+    (*count)++;
+    return TRUE;
 }
 
 /* C2R keeps MSI PublishComponent records in generated UTF-16 manifests instead
@@ -1577,9 +1973,9 @@ static UINT enum_office_c2r_manifest_qualifiers( const WCHAR *component, DWORD i
 {
     static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
     WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], search[MAX_PATH], filename[MAX_PATH];
-    WCHAR qualifier[256], appdata[512];
+    struct office_c2r_seen_key *seen = NULL;
+    DWORD size, found = 0, seen_count = 0, seen_capacity = 0, i;
     WIN32_FIND_DATAW data;
-    DWORD size, found = 0;
     HANDLE find;
     HKEY key;
     UINT ret, app_ret;
@@ -1607,19 +2003,41 @@ static UINT enum_office_c2r_manifest_qualifiers( const WCHAR *component, DWORD i
     *wcsrchr( search, '\\' ) = 0;
     do
     {
+        struct office_c2r_manifest manifest;
+
         swprintf( filename, ARRAY_SIZE(filename), L"%s\\%s", search, data.cFileName );
-        if (find_office_c2r_manifest_qualifier( filename, component, index, &found, qualifier,
-                                                ARRAY_SIZE(qualifier), appdata, ARRAY_SIZE(appdata) ))
+        if (!office_c2r_parse_manifest( filename, &manifest )) continue;
+        for (i = 0; i < manifest.publish_component_count; i++)
         {
-            FindClose( find );
-            TRACE( "providing Office C2R manifest qualifier %s for component %s\n",
-                   debugstr_w(qualifier), debugstr_w(component) );
-            ret = msi_strcpy_to_awstring( qualifier, -1, qual_buf, qual_size );
-            app_ret = msi_strcpy_to_awstring( appdata, -1, app_buf, app_size );
-            return app_ret == ERROR_SUCCESS ? ret : app_ret;
+            if (wcsicmp( manifest.publish_components[i].publish_component_id, component ) ||
+                office_c2r_seen_key( seen, seen_count, manifest.publish_components[i].publish_component_id,
+                                     manifest.publish_components[i].qualifier ))
+                continue;
+            if (!office_c2r_add_seen_key( &seen, &seen_count, &seen_capacity,
+                                          manifest.publish_components[i].publish_component_id,
+                                          manifest.publish_components[i].qualifier ))
+            {
+                office_c2r_manifest_free( &manifest );
+                FindClose( find );
+                free( seen );
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            if (found++ == index)
+            {
+                ret = msi_strcpy_to_awstring( manifest.publish_components[i].qualifier, -1,
+                                              qual_buf, qual_size );
+                app_ret = msi_strcpy_to_awstring( manifest.publish_components[i].appdata, -1,
+                                                  app_buf, app_size );
+                office_c2r_manifest_free( &manifest );
+                FindClose( find );
+                free( seen );
+                return app_ret == ERROR_SUCCESS ? ret : app_ret;
+            }
         }
+        office_c2r_manifest_free( &manifest );
     } while (FindNextFileW( find, &data));
     FindClose( find );
+    free( seen );
     return found ? ERROR_NO_MORE_ITEMS : ERROR_UNKNOWN_COMPONENT;
 }
 
@@ -1629,12 +2047,16 @@ static BOOL expand_office_c2r_keypath( const WCHAR *keypath, WCHAR *path, DWORD 
     {
         const WCHAR *token;
         const WCHAR *environment;
+        const WCHAR *suffix;
     } replacements[] =
     {
-        {L"%SFT_PROGRAM_FILES_X64%", L"ProgramW6432"},
-        {L"%SFT_PROGRAM_FILES_X86%", L"ProgramFiles(x86)"},
-        {L"%SFT_PROGRAM_FILES_COMMON_X64%", L"CommonProgramW6432"},
-        {L"%SFT_PROGRAM_FILES_COMMON_X86%", L"CommonProgramFiles(x86)"},
+        {L"%SFT_PROGRAM_FILES_X64%", L"ProgramW6432", L""},
+        {L"%SFT_PROGRAM_FILES_X86%", L"ProgramFiles(x86)", L""},
+        {L"%SFT_PROGRAM_FILES_COMMON_X64%", L"CommonProgramW6432", L""},
+        {L"%SFT_PROGRAM_FILES_COMMON_X86%", L"CommonProgramFiles(x86)", L""},
+        {L"%CSIDL_PROGRAM_FILES%", L"ProgramFiles", L""},
+        {L"%CSIDL_PROGRAM_FILES_COMMON%", L"CommonProgramFiles", L""},
+        {L"%CSIDL_FONTS%", L"WINDIR", L"\\Fonts"},
     };
     WCHAR base[MAX_PATH];
     DWORD i, len, base_len;
@@ -1650,8 +2072,10 @@ static BOOL expand_office_c2r_keypath( const WCHAR *keypath, WCHAR *path, DWORD 
             else if (i == 2) base_len = GetEnvironmentVariableW( L"CommonProgramFiles", base, ARRAY_SIZE(base) );
         }
         if (!base_len || base_len >= ARRAY_SIZE(base) ||
-            base_len + wcslen( keypath + len ) >= path_size) return FALSE;
+            base_len + wcslen( replacements[i].suffix ) +
+            wcslen( keypath + len ) >= path_size) return FALSE;
         lstrcpyW( path, base );
+        lstrcatW( path, replacements[i].suffix );
         lstrcatW( path, keypath + len );
         return TRUE;
     }
@@ -1663,61 +2087,47 @@ static BOOL find_office_c2r_manifest_path( const WCHAR *filename, const WCHAR *c
                                            const WCHAR *qualifier, const WCHAR *product,
                                            WCHAR *path, DWORD path_size )
 {
-    WCHAR component_id[GUID_SIZE], product_code[GUID_SIZE], found_qualifier[256], keypath[1024];
-    WCHAR *buffer, *tag, *end, *component_tag, *component_end;
-    LARGE_INTEGER size;
-    DWORD read;
-    HANDLE file;
-    BOOL ret = FALSE;
+    struct office_c2r_manifest manifest;
+    DWORD i, j;
 
-    file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
-    if (file == INVALID_HANDLE_VALUE) return FALSE;
-    if (!GetFileSizeEx( file, &size ) || size.QuadPart < sizeof(WCHAR) ||
-        size.QuadPart > 16 * 1024 * 1024 || (size.QuadPart & 1) ||
-        !(buffer = malloc( size.QuadPart + sizeof(WCHAR) )))
+    if (!office_c2r_parse_manifest( filename, &manifest )) return FALSE;
+    if (product && wcsicmp( product, manifest.product_code ))
     {
-        CloseHandle( file );
+        office_c2r_manifest_free( &manifest );
         return FALSE;
     }
-    if (!ReadFile( file, buffer, size.QuadPart, &read, NULL ) || read != size.QuadPart)
-        goto done;
-    buffer[read / sizeof(WCHAR)] = 0;
-    tag = buffer[0] == 0xfeff ? buffer + 1 : buffer;
-    if (tag[0] == 0xfffe || !(tag = wcsstr( tag, L"<Package " )) ||
-        !(end = wcschr( tag, '>' )) ||
-        !get_xml_attribute( tag, end, L"ProductCode", product_code, ARRAY_SIZE(product_code) ) ||
-        (product && wcsicmp( product, product_code ))) goto done;
-
-    while ((tag = wcsstr( tag, L"<PublishComponent ")))
+    for (i = 0; i < manifest.publish_component_count; i++)
     {
-        if (!(end = wcschr( tag, '>' ))) break;
-        if (get_xml_attribute( tag, end, L"PublishComponentId", component_id,
-                               ARRAY_SIZE(component_id) ) && !wcsicmp( component_id, component ) &&
-            get_xml_attribute( tag, end, L"Qualifier", found_qualifier,
-                               ARRAY_SIZE(found_qualifier) ) && !wcscmp( found_qualifier, qualifier ))
+        const WCHAR *keypath = NULL;
+        if (wcsicmp( manifest.publish_components[i].publish_component_id, component ) ||
+            wcsicmp( manifest.publish_components[i].qualifier, qualifier ))
+            continue;
+        if (manifest.publish_components[i].has_keyfile)
+            keypath = manifest.publish_components[i].keyfile;
+        else
         {
-            for (component_tag = tag; component_tag > buffer; component_tag--)
-                if (*component_tag == '<' && !wcsncmp( component_tag, L"<Component ", 11 )) break;
-            if (component_tag == buffer || !(component_end = wcschr( component_tag, '>' )) ||
-                component_end > tag || !get_xml_attribute( component_tag, component_end, L"KeyPath",
-                                                            keypath, ARRAY_SIZE(keypath) )) break;
-            ret = expand_office_c2r_keypath( keypath, path, path_size );
-            break;
+            for (j = 0; j < manifest.component_count; j++)
+                if (!wcsicmp( manifest.components[j].id, manifest.publish_components[i].component_id ))
+                {
+                    if (manifest.components[j].has_keypath) keypath = manifest.components[j].keypath;
+                    break;
+                }
         }
-        tag = end + 1;
+        if (keypath && expand_office_c2r_keypath( keypath, path, path_size ))
+        {
+            office_c2r_manifest_free( &manifest );
+            return TRUE;
+        }
     }
-
-done:
-    free( buffer );
-    CloseHandle( file );
-    return ret;
+    office_c2r_manifest_free( &manifest );
+    return FALSE;
 }
 
 INSTALLSTATE msi_office_c2r_query_feature_state( const WCHAR *product, const WCHAR *feature )
 {
     static const WCHAR c2r_path[] = L"Software\\Microsoft\\Office\\ClickToRun";
-    WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], registered_product[GUID_SIZE], search[MAX_PATH];
+    WCHAR program_data[MAX_PATH], package_guid[GUID_SIZE], search[MAX_PATH], filename[MAX_PATH];
+    struct office_c2r_manifest manifest;
     WIN32_FIND_DATAW data;
     DWORD size;
     HANDLE find;
@@ -1732,19 +2142,34 @@ INSTALLSTATE msi_office_c2r_query_feature_state( const WCHAR *product, const WCH
         return INSTALLSTATE_UNKNOWN;
     }
     RegCloseKey( key );
-    if (package_guid[0] == '{') lstrcpyW( registered_product, package_guid );
-    else swprintf( registered_product, ARRAY_SIZE(registered_product), L"{%s}", package_guid );
-    if (wcsicmp( product, registered_product )) return INSTALLSTATE_UNKNOWN;
-
     size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
     if (!size || size >= ARRAY_SIZE(program_data)) return INSTALLSTATE_UNKNOWN;
-    swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\%s\\C2RManifest.Proof.Culture.msi.16.*.xml",
-              program_data, registered_product );
+    if (package_guid[0] == '{')
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\%s\\C2RManifest.Proof.Culture.msi.16.*.xml",
+                  program_data, package_guid );
+    else
+        swprintf( search, ARRAY_SIZE(search), L"%s\\Microsoft\\ClickToRun\\{%s}\\C2RManifest.Proof.Culture.msi.16.*.xml",
+                  program_data, package_guid );
     if ((find = FindFirstFileW( search, &data )) == INVALID_HANDLE_VALUE)
         return INSTALLSTATE_UNKNOWN;
+    *wcsrchr( search, '\\' ) = 0;
+    do
+    {
+        swprintf( filename, ARRAY_SIZE(filename), L"%s\\%s", search, data.cFileName );
+        if (office_c2r_parse_manifest( filename, &manifest ))
+        {
+            if (!wcsicmp( product, manifest.product_code ))
+            {
+                office_c2r_manifest_free( &manifest );
+                FindClose( find );
+                TRACE( "reporting installed Office C2R proofing feature for product %s\n", debugstr_w(product) );
+                return INSTALLSTATE_LOCAL;
+            }
+            office_c2r_manifest_free( &manifest );
+        }
+    } while (FindNextFileW( find, &data));
     FindClose( find );
-    TRACE( "reporting installed Office C2R proofing feature for product %s\n", debugstr_w(product) );
-    return INSTALLSTATE_LOCAL;
+    return INSTALLSTATE_UNKNOWN;
 }
 
 UINT msi_office_c2r_get_qualified_component_path( const WCHAR *component, const WCHAR *qualifier,

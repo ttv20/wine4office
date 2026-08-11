@@ -48,6 +48,10 @@ static DWORD (WINAPI *pSHRegGetPathA)(HKEY, const char *, const char *, char *, 
 static DWORD (WINAPI *pSHCopyKeyA)(HKEY, const char *, HKEY, DWORD);
 static HRESULT (WINAPI *pSHCreateStreamOnFileA)(const char *path, DWORD mode, IStream **stream);
 static HRESULT (WINAPI *pIStream_Size)(IStream *stream, ULARGE_INTEGER *size);
+static LONG (WINAPI *pSHGlobalCounterGetValue)(DWORD index);
+static LONG (WINAPI *pSHGlobalCounterIncrement)(DWORD index);
+static LONG (WINAPI *pSHGlobalCounterDecrement)(DWORD index);
+static LONG (WINAPI *pSHGlobalCounterSetValue)(DWORD index, LONG value);
 
 /* Keys used for testing */
 #define REG_TEST_KEY        "Software\\Wine\\Test"
@@ -83,7 +87,53 @@ static void init(HMODULE hshcore)
     X(SHCopyKeyA);
     X(SHCreateStreamOnFileA);
     X(IStream_Size);
+    X(SHGlobalCounterGetValue);
+    X(SHGlobalCounterIncrement);
+    X(SHGlobalCounterDecrement);
+    X(SHGlobalCounterSetValue);
 #undef X
+}
+
+static void test_global_counter(void)
+{
+    STARTUPINFOA startup = {sizeof(startup)};
+    PROCESS_INFORMATION process;
+    char command[MAX_PATH];
+    char **argv;
+    LONG previous;
+    BOOL ret;
+
+    if (!pSHGlobalCounterGetValue || !pSHGlobalCounterIncrement || !pSHGlobalCounterDecrement
+            || !pSHGlobalCounterSetValue)
+    {
+        win_skip("SHGlobalCounter functions are unavailable.\n");
+        return;
+    }
+
+    previous = pSHGlobalCounterSetValue( 58, 0x1234 );
+    winetest_get_mainargs( &argv );
+
+    sprintf( command, "\"%s\" shcore global_counter_child increment", argv[0] );
+    ret = CreateProcessA( argv[0], command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
+    ok( ret, "CreateProcess increment failed, error %lu.\n", GetLastError() );
+    if (ret)
+    {
+        wait_child_process( &process );
+        ok( pSHGlobalCounterGetValue( 58 ) == 0x1235,
+                "counter increment was not shared across processes.\n" );
+    }
+
+    sprintf( command, "\"%s\" shcore global_counter_child decrement", argv[0] );
+    ret = CreateProcessA( argv[0], command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
+    ok( ret, "CreateProcess decrement failed, error %lu.\n", GetLastError() );
+    if (ret)
+    {
+        wait_child_process( &process );
+        ok( pSHGlobalCounterGetValue( 58 ) == 0x1234,
+                "counter decrement was not shared across processes.\n" );
+    }
+
+    pSHGlobalCounterSetValue( 58, previous );
 }
 
 static HRESULT WINAPI unk_QI(IUnknown *iface, REFIID riid, void **obj)
@@ -846,6 +896,8 @@ static void test_AppUserModelID(void)
 START_TEST(shcore)
 {
     HMODULE hshcore = LoadLibraryA("shcore.dll");
+    char **argv;
+    int argc;
 
     if (!hshcore)
     {
@@ -855,6 +907,17 @@ START_TEST(shcore)
 
     init(hshcore);
 
+    argc = winetest_get_mainargs( &argv );
+    if (argc == 4 && !strcmp( argv[2], "global_counter_child" ))
+    {
+        if (!strcmp( argv[3], "increment" ) && pSHGlobalCounterIncrement)
+            pSHGlobalCounterIncrement( 58 );
+        else if (!strcmp( argv[3], "decrement" ) && pSHGlobalCounterDecrement)
+            pSHGlobalCounterDecrement( 58 );
+        return;
+    }
+
+    test_global_counter();
     test_AppUserModelID();
     test_process_reference();
     test_SHUnicodeToAnsi();

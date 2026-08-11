@@ -6769,7 +6769,10 @@ static WCHAR * xpath_pop_string(struct xpath_parser_context *ctxt)
 static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs)
 {
     WCHAR *left = NULL, *right = NULL, *language = NULL, *options = NULL;
-    int ret;
+    const WCHAR *locale;
+    DWORD flags = 0;
+    BOOL upper_first = FALSE, ordinal_fallback;
+    int i, ret;
 
     if (nargs < 2 || nargs > 4)
     {
@@ -6787,15 +6790,53 @@ static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs
     if (ctxt->error != XPATH_EXPRESSION_OK || !left || !right)
         goto done;
 
-    /* MSXML's "i" option ignores case, kana type, and character width.  The
-     * App-V metadata used by Office contains ASCII filesystem paths, for
-     * which a case-insensitive Unicode comparison has the same result. */
-    if (options && wcschr(options, 'i'))
-        ret = wcsicmp(left, right);
-    else
-        ret = wcscmp(left, right);
+    if (options)
+    {
+        for (i = 0; options[i]; ++i)
+        {
+            if (options[i] == 'i')
+            {
+                if (flags || upper_first) goto invalid_option;
+                flags = NORM_IGNORECASE | NORM_IGNOREKANATYPE | NORM_IGNOREWIDTH |
+                        NORM_LINGUISTIC_CASING;
+            }
+            else if (options[i] == 'u')
+            {
+                if (flags || upper_first) goto invalid_option;
+                upper_first = TRUE;
+            }
+            else
+                goto invalid_option;
+        }
+    }
+    if (upper_first)
+        flags = NORM_IGNORECASE | NORM_LINGUISTIC_CASING;
 
-    xpath_push_value(ctxt, xpath_new_number(ctxt, ret < 0 ? -1.0 : ret > 0 ? 1.0 : 0.0));
+    /* An omitted language and options use the default collation.  Keep a
+     * deterministic ordinal result for the default path if NLS data is
+     * unavailable, but never hide a failure for an explicit request. */
+    ordinal_fallback = (!language || !*language) && (!options || !*options);
+    locale = language && *language ? language : LOCALE_NAME_USER_DEFAULT;
+    ret = CompareStringEx(locale, flags, left, -1, right, -1, NULL, NULL, 0);
+    if (!ret && ordinal_fallback)
+        ret = CompareStringOrdinal(left, -1, right, -1, FALSE);
+    if (!ret) goto invalid_argument;
+
+    if (upper_first && ret == CSTR_EQUAL)
+    {
+        ret = CompareStringEx(locale, 0, left, -1, right, -1, NULL, NULL, 0);
+        if (!ret) goto invalid_argument;
+        if (ret != CSTR_EQUAL) ret = CSTR_GREATER_THAN + CSTR_LESS_THAN - ret;
+    }
+
+    xpath_push_value(ctxt, xpath_new_number(ctxt, ret == CSTR_LESS_THAN ? -1.0 :
+            ret == CSTR_GREATER_THAN ? 1.0 : 0.0));
+    goto done;
+
+invalid_option:
+    WARN("Unsupported string-compare option %s.\n", debugstr_w(options));
+invalid_argument:
+    xpath_parser_context_set_error(ctxt, XPATH_EXPR_ERROR);
 
 done:
     free(left);

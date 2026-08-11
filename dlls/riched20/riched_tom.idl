@@ -216,7 +216,25 @@ typedef enum tagTomConstants
     tomCharset = 0x80000000,
     tomRE10Mode = 0x1,
     tomNoIME   = 0x80000,
-    tomSelfIME = 0x40000
+    tomSelfIME = 0x40000,
+
+    /* ITextDocument2::GetProperty/SetProperty identifiers */
+    tomDocMathBuild  = 0x80,
+    tomMathLMargin   = 0x81,
+    tomMathRMargin   = 0x82,
+    tomMathWrapIndent = 0x83,
+    tomMathWrapRight = 0x84,
+    tomMathPreSpace  = 0x85,
+    tomMathPostSpace = 0x86,
+    tomMathInterSpace = 0x87,
+    tomMathIntraSpace = 0x88,
+    tomCanCopy       = 0x89,
+    tomCanRedo       = 0x8a,
+    tomCanUndo       = 0x8b,
+    tomUndoLimit     = 0x8c,
+    tomDocAutoLink   = 0x8d,
+    tomEllipsisMode  = 0x8e,
+    tomEllipsisState = 0x8f
 } tomConstants;
 
 interface ITextRange;

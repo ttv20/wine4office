@@ -22,6 +22,7 @@
 
 #include <stdarg.h>
 
+#include <limits.h>
 #include <windef.h>
 #include <winbase.h>
 #include <wingdi.h>
@@ -5035,6 +5036,257 @@ static void test_clipboard(void)
   ITextRange_Release(range);
 }
 
+static void check_tom2_property(ITextDocument2 *doc, LONG type, LONG expected)
+{
+  LONG value = 0xdeadbeef;
+  HRESULT hr;
+
+  hr = ITextDocument2_GetProperty(doc, type, &value);
+  ok(hr == S_OK, "GetProperty(%#lx) returned %#lx\n", type, hr);
+  ok(value == expected, "GetProperty(%#lx) returned %ld, expected %ld\n", type, value, expected);
+}
+
+static void test_tom2_undo_properties(void)
+{
+  static const struct
+  {
+    LONG type;
+    LONG value;
+  } defaults[] =
+  {
+    { tomCanUndo, tomFalse },
+    { tomCanRedo, tomFalse },
+    { tomUndoLimit, 100 },
+  };
+  static const struct
+  {
+    LONG value;
+    LONG expected;
+  } limits[] =
+  {
+    { 0, 0 },
+    { 1, 1 },
+    { 1000, 1000 },
+    { 1001, 1000 },
+    { LONG_MAX, 1000 },
+    { -1, 100 },
+    { LONG_MIN, 100 },
+  };
+  static const LONG read_only[] = { tomCanUndo, tomCanRedo, 0x7fffffff };
+  ITextDocument2 *doc2 = NULL;
+  ITextSelection *selection = NULL;
+  IRichEditOle *reole = NULL;
+  ITextDocument *doc = NULL;
+  HRESULT hr;
+  LONG value, count;
+  HWND hwnd;
+  unsigned int i;
+
+  create_interfaces(&hwnd, &reole, &doc, &selection);
+  hr = ITextDocument_QueryInterface(doc, &IID_ITextDocument2, (void **)&doc2);
+  ok(hr == S_OK, "ITextDocument2 QueryInterface returned %#lx\n", hr);
+  if (FAILED(hr)) goto done;
+
+  for (i = 0; i < ARRAY_SIZE(defaults); i++)
+    check_tom2_property(doc2, defaults[i].type, defaults[i].value);
+
+  value = 0xdeadbeef;
+  hr = ITextDocument2_GetProperty(doc2, 0x7fffffff, &value);
+  ok(hr == E_NOTIMPL, "GetProperty(unknown) returned %#lx\n", hr);
+  ok(value == 0, "GetProperty(unknown) returned %ld after failure\n", value);
+  hr = ITextDocument2_GetProperty(doc2, tomCanUndo, NULL);
+  ok(hr == E_INVALIDARG, "GetProperty(NULL) returned %#lx\n", hr);
+
+  for (i = 0; i < ARRAY_SIZE(read_only); i++)
+  {
+    hr = ITextDocument2_SetProperty(doc2, read_only[i], tomFalse);
+    ok(hr == E_NOTIMPL, "SetProperty(%#lx) returned %#lx\n", read_only[i], hr);
+  }
+
+  SendMessageA(hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
+  SendMessageA(hwnd, EM_SETSEL, 0, -1);
+  SendMessageA(hwnd, EM_REPLACESEL, TRUE, (LPARAM)"first edit");
+  check_tom2_property(doc2, tomCanUndo, tomTrue);
+  check_tom2_property(doc2, tomCanRedo, tomFalse);
+
+  count = 0xdeadbeef;
+  hr = ITextDocument_Undo(doc, 1, &count);
+  ok(hr == S_OK && count == 1, "Undo returned %#lx with count %ld\n", hr, count);
+  check_tom2_property(doc2, tomCanUndo, tomFalse);
+  check_tom2_property(doc2, tomCanRedo, tomTrue);
+  hr = ITextDocument2_SetProperty(doc2, tomUndoLimit, 2);
+  ok(hr == S_OK, "SetProperty(tomUndoLimit, 2) with redo returned %#lx\n", hr);
+  check_tom2_property(doc2, tomCanRedo, tomTrue);
+
+  count = 0xdeadbeef;
+  hr = ITextDocument_Redo(doc, 1, &count);
+  ok(hr == S_OK && count == 1, "Redo returned %#lx with count %ld\n", hr, count);
+  check_tom2_property(doc2, tomCanUndo, tomTrue);
+  check_tom2_property(doc2, tomCanRedo, tomFalse);
+
+  for (i = 0; i < ARRAY_SIZE(limits); i++)
+  {
+    hr = ITextDocument2_SetProperty(doc2, tomUndoLimit, limits[i].value);
+    ok(hr == S_OK, "SetProperty(tomUndoLimit, %ld) returned %#lx\n", limits[i].value, hr);
+    check_tom2_property(doc2, tomUndoLimit, limits[i].expected);
+  }
+
+  hr = ITextDocument2_SetProperty(doc2, tomUndoLimit, 0);
+  ok(hr == S_OK, "SetProperty(tomUndoLimit, 0) returned %#lx\n", hr);
+  SendMessageA(hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
+  SendMessageA(hwnd, EM_SETSEL, 0, -1);
+  SendMessageA(hwnd, EM_REPLACESEL, TRUE, (LPARAM)"limit zero");
+  check_tom2_property(doc2, tomCanUndo, tomFalse);
+  hr = ITextDocument_Undo(doc, tomFalse, NULL);
+  ok(hr == S_OK, "Undo(tomFalse) returned %#lx\n", hr);
+  hr = ITextDocument2_SetProperty(doc2, tomUndoLimit, 2);
+  ok(hr == S_OK, "SetProperty(tomUndoLimit, 2) after disable returned %#lx\n", hr);
+  SendMessageA(hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
+  SendMessageA(hwnd, EM_SETSEL, 0, -1);
+  SendMessageA(hwnd, EM_REPLACESEL, TRUE, (LPARAM)"re-enabled edit");
+  check_tom2_property(doc2, tomCanUndo, tomTrue);
+
+  hr = ITextDocument2_SetProperty(doc2, tomUndoLimit, 2);
+  ok(hr == S_OK, "SetProperty(tomUndoLimit, 2) returned %#lx\n", hr);
+  SendMessageA(hwnd, EM_EMPTYUNDOBUFFER, 0, 0);
+  for (i = 0; i < 3; i++)
+  {
+    SendMessageA(hwnd, EM_SETSEL, 0, -1);
+    SendMessageA(hwnd, EM_REPLACESEL, TRUE, (LPARAM)"bounded edit");
+  }
+
+  check_tom2_property(doc2, tomCanUndo, tomTrue);
+  count = 0xdeadbeef;
+  hr = ITextDocument_Undo(doc, 1, &count);
+  ok(hr == S_OK && count == 1, "first bounded Undo returned %#lx with count %ld\n", hr, count);
+  check_tom2_property(doc2, tomCanUndo, tomTrue);
+  count = 0xdeadbeef;
+  hr = ITextDocument_Undo(doc, 1, &count);
+  ok(hr == S_OK && count == 1, "second bounded Undo returned %#lx with count %ld\n", hr, count);
+  check_tom2_property(doc2, tomCanUndo, tomFalse);
+  check_tom2_property(doc2, tomCanRedo, tomTrue);
+
+done:
+  if (doc2) ITextDocument2_Release(doc2);
+  release_interfaces(&hwnd, &reole, &doc, &selection);
+}
+
+static void test_tom2_document_properties(void)
+{
+  static const struct
+  {
+    LONG start, end, expected;
+  } selections[] =
+  {
+    { 0, 0, tomFalse },
+    { 0, 3, tomTrue },
+    { 3, 0, tomTrue },
+    { 3, 3, tomFalse },
+  };
+  static const struct
+  {
+    LONG type;
+    HRESULT expected;
+  } unsupported[] =
+  {
+    { tomDocMathBuild, E_NOTIMPL },
+    { tomMathLMargin, E_NOTIMPL },
+    { tomMathRMargin, E_NOTIMPL },
+    { tomMathWrapIndent, E_NOTIMPL },
+    { tomMathWrapRight, E_NOTIMPL },
+    { tomMathPreSpace, E_NOTIMPL },
+    { tomMathPostSpace, E_NOTIMPL },
+    { tomMathInterSpace, E_NOTIMPL },
+    { tomMathIntraSpace, E_NOTIMPL },
+    { tomEllipsisMode, E_NOTIMPL },
+    { tomEllipsisState, E_NOTIMPL },
+  };
+  static const LONG invalid_values[] = { tomUndefined, 1, LONG_MAX };
+  ITextDocument2 *doc2 = NULL;
+  ITextSelection *selection = NULL;
+  IRichEditOle *reole = NULL;
+  ITextDocument *doc = NULL;
+  CHARFORMAT2A format;
+  LONG value, count;
+  HWND hwnd;
+  HRESULT hr;
+  unsigned int i;
+
+  create_interfaces(&hwnd, &reole, &doc, &selection);
+  hr = ITextDocument_QueryInterface(doc, &IID_ITextDocument2, (void **)&doc2);
+  ok(hr == S_OK, "ITextDocument2 QueryInterface returned %#lx\n", hr);
+  if (FAILED(hr)) goto done;
+
+  check_tom2_property(doc2, tomCanCopy, tomFalse);
+  check_tom2_property(doc2, tomDocAutoLink, tomFalse);
+
+  SendMessageA(hwnd, WM_SETTEXT, 0, (LPARAM)"copy text");
+  for (i = 0; i < ARRAY_SIZE(selections); i++)
+  {
+    SendMessageA(hwnd, EM_SETSEL, selections[i].start, selections[i].end);
+    check_tom2_property(doc2, tomCanCopy, selections[i].expected);
+  }
+  SendMessageA(hwnd, EM_SETSEL, 0, 1);
+  check_tom2_property(doc2, tomCanCopy, tomTrue);
+  hr = ITextDocument2_SetProperty(doc2, tomCanCopy, tomFalse);
+  ok(hr == E_NOTIMPL, "SetProperty(tomCanCopy) returned %#lx\n", hr);
+  check_tom2_property(doc2, tomCanCopy, tomTrue);
+  hr = ITextDocument2_GetProperty(doc2, 0x7fffffff, &value);
+  ok(hr == E_NOTIMPL && value == 0, "GetProperty(unknown) returned %#lx, %ld\n", hr, value);
+
+  for (i = 0; i < ARRAY_SIZE(unsupported); i++)
+  {
+    value = 0xdeadbeef;
+    hr = ITextDocument2_GetProperty(doc2, unsupported[i].type, &value);
+    ok(hr == unsupported[i].expected && value == 0,
+       "GetProperty(%#lx) returned %#lx, %ld\n", unsupported[i].type, hr, value);
+    hr = ITextDocument2_SetProperty(doc2, unsupported[i].type, tomTrue);
+    ok(hr == unsupported[i].expected, "SetProperty(%#lx) returned %#lx\n",
+       unsupported[i].type, hr);
+  }
+
+  for (i = 0; i < ARRAY_SIZE(invalid_values); i++)
+  {
+    hr = ITextDocument2_SetProperty(doc2, tomDocAutoLink, invalid_values[i]);
+    ok(hr == E_INVALIDARG, "SetProperty(tomDocAutoLink, %ld) returned %#lx\n",
+       invalid_values[i], hr);
+    check_tom2_property(doc2, tomDocAutoLink, tomFalse);
+  }
+
+  count = 0xdeadbeef;
+  hr = ITextDocument_Freeze(doc, &count);
+  ok(hr == S_OK && count == 1, "Freeze returned %#lx, count %ld\n", hr, count);
+  hr = ITextDocument2_SetProperty(doc2, tomDocAutoLink, tomTrue);
+  ok(hr == S_OK, "SetProperty(tomDocAutoLink, tomTrue) returned %#lx\n", hr);
+  check_tom2_property(doc2, tomDocAutoLink, tomTrue);
+  hr = ITextDocument2_SetProperty(doc2, tomDocAutoLink, 1);
+  ok(hr == E_INVALIDARG, "SetProperty(tomDocAutoLink, 1) returned %#lx\n", hr);
+  check_tom2_property(doc2, tomDocAutoLink, tomTrue);
+  hr = ITextDocument_Unfreeze(doc, &count);
+  ok(hr == S_OK && count == 0, "Unfreeze returned %#lx, count %ld\n", hr, count);
+
+  SendMessageA(hwnd, WM_SETTEXT, 0, (LPARAM)"http://winehq.org");
+  SendMessageA(hwnd, EM_SETSEL, 0, 1);
+  memset(&format, 0, sizeof(format));
+  format.cbSize = sizeof(format);
+  SendMessageA(hwnd, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&format);
+  ok(format.dwEffects & CFE_LINK, "Auto-link property did not mark URL text\n");
+
+  hr = ITextDocument2_SetProperty(doc2, tomDocAutoLink, tomFalse);
+  ok(hr == S_OK, "SetProperty(tomDocAutoLink, tomFalse) returned %#lx\n", hr);
+  check_tom2_property(doc2, tomDocAutoLink, tomFalse);
+  SendMessageA(hwnd, WM_SETTEXT, 0, (LPARAM)"http://winehq.org");
+  SendMessageA(hwnd, EM_SETSEL, 0, 1);
+  memset(&format, 0, sizeof(format));
+  format.cbSize = sizeof(format);
+  SendMessageA(hwnd, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&format);
+  ok(!(format.dwEffects & CFE_LINK), "Disabled auto-link property marked URL text\n");
+
+done:
+  if (doc2) ITextDocument2_Release(doc2);
+  release_interfaces(&hwnd, &reole, &doc, &selection);
+}
+
 static void subtest_undo(const char *dummy_text)
 {
   static const char *text_seq[] = {
@@ -5607,6 +5859,8 @@ START_TEST(richole)
   test_character_movement();
   test_clipboard();
   test_undo();
+  test_tom2_document_properties();
+  test_tom2_undo_properties();
   test_undo_control();
   test_freeze();
 }

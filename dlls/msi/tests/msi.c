@@ -13567,6 +13567,178 @@ static void test_command_line_parsing(void)
     delete_test_files();
 }
 
+static BOOL write_c2r_fixture( const WCHAR *path, const WCHAR *contents )
+{
+    HANDLE file;
+    DWORD written;
+    WCHAR bom = 0xfeff;
+    BOOL ret = FALSE;
+
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!WriteFile( file, &bom, sizeof(bom), &written, NULL ) || written != sizeof(bom) ||
+        !WriteFile( file, contents, lstrlenW(contents) * sizeof(WCHAR), &written, NULL ) ||
+        written != lstrlenW(contents) * sizeof(WCHAR))
+        goto done;
+    ret = TRUE;
+
+done:
+    CloseHandle( file );
+    return ret;
+}
+
+static void test_office_c2r_manifest(void)
+{
+    static const WCHAR package_guid[] = L"{D2D6E1E7-2C1C-4D3B-9D12-1AC7C6B3D8A1}";
+    static const WCHAR product_code[] = L"{F4AC0B32-6E6F-4C70-9E61-1B8A9F7D4C22}";
+    static const WCHAR other_product[] = L"{A42C2A7A-BA5E-4F1B-8C1D-6D7B9D0E2F33}";
+    static const WCHAR publish_component[] = L"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}";
+    static const WCHAR fixture_name[] = L"C2RManifest.c2r-msi.msi.16.x-none.xml";
+    static const WCHAR proof_name[] = L"C2RManifest.Proof.Culture.msi.16.c2r-msi.xml";
+    static const WCHAR fixture[] =
+        L"<Package Platform=\"x64\" ProductCode=\"{F4AC0B32-6E6F-4C70-9E61-1B8A9F7D4C22}\">\r\n"
+        L"  <PublishComponentList>\r\n"
+        L"    <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"direct\" ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"AppData=\"direct-app\" Feature=\"Main\" KeyFile=\"%CSIDL_FONTS%\\private\\direct.ttf\"></PublishComponent>\r\n"
+        L"    <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"DIRECT\" ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"AppData=\"duplicate\" Feature=\"Main\" KeyFile=\"bad-duplicate.ttf\"></PublishComponent>\r\n"
+        L"    <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"malformed\" ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"KeyFile=\"bad-malformed.ttf\"></PublishComponent>\r\n"
+        L"    <Nested>\r\n"
+        L"      <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"nested\" ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"AppData=\"nested\" Feature=\"Main\" KeyFile=\"nested.ttf\"></PublishComponent>\r\n"
+        L"    </Nested>\r\n"
+        L"    <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"component-key\" ComponentId=\"{4A7D8E91-2B3C-4D5E-8F60-7A8B9C0D1E2F}\" "
+        L"AppData=\"component\" Feature=\"Main\"></PublishComponent>\r\n"
+        L"  </PublishComponentList>\r\n"
+        L"  <FeatureList><Feature FeatureId=\"Main\" Parent=\"\"><PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"outside-list\" ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"AppData=\"outside\" Feature=\"Main\" KeyFile=\"outside.ttf\"></PublishComponent></Feature></FeatureList>\r\n"
+        L"  <SequencedData><ComponentList>\r\n"
+        L"    <Component ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\component-table.ttf\"></Component>\r\n"
+        L"    <Component ComponentId=\"{4A7D8E91-2B3C-4D5E-8F60-7A8B9C0D1E2F}\" "
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\component.ttf\"></Component>\r\n"
+        L"  </ComponentList></SequencedData>\r\n"
+        L"</Package>\r\n";
+    static const WCHAR proof_fixture[] =
+        L"<Package Platform=\"x64\" ProductCode=\"{F4AC0B32-6E6F-4C70-9E61-1B8A9F7D4C22}\"></Package>\r\n";
+    WCHAR program_data[MAX_PATH], directory[MAX_PATH], path[MAX_PATH], proof_path[MAX_PATH];
+    WCHAR windows[MAX_PATH], font_dir[MAX_PATH], direct_file[MAX_PATH], component_file[MAX_PATH];
+    WCHAR expected[MAX_PATH], saved_package_guid[GUID_SIZE];
+    WCHAR qualifier[256], appdata[512], component_path[MAX_PATH];
+    BOOL had_package_guid = FALSE;
+    DWORD size, result, type, qualifier_size, appdata_size, path_size;
+    HKEY key;
+
+    size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
+    path[0] = proof_path[0] = direct_file[0] = component_file[0] = 0;
+    ok(size && size < ARRAY_SIZE(program_data), "ProgramData unavailable\n");
+    if (!size || size >= ARRAY_SIZE(program_data)) return;
+    swprintf( directory, ARRAY_SIZE(directory), L"%s\\Microsoft", program_data );
+    CreateDirectoryW( directory, NULL );
+    swprintf( directory, ARRAY_SIZE(directory), L"%s\\Microsoft\\ClickToRun", program_data );
+    CreateDirectoryW( directory, NULL );
+    swprintf( directory, ARRAY_SIZE(directory), L"%s\\Microsoft\\ClickToRun\\%s", program_data, package_guid );
+    CreateDirectoryW( directory, NULL );
+    swprintf( path, ARRAY_SIZE(path), L"%s\\%s", directory, fixture_name );
+    swprintf( proof_path, ARRAY_SIZE(proof_path), L"%s\\%s", directory, proof_name );
+    ok(write_c2r_fixture( path, fixture ), "failed to create C2R fixture\n");
+    ok(write_c2r_fixture( proof_path, proof_fixture ), "failed to create proof fixture\n");
+
+    result = RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Office\\ClickToRun", 0, NULL,
+                              0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL );
+    ok(!result, "RegCreateKeyExW failed %lu\n", result);
+    if (result) goto cleanup_files;
+    size = sizeof(saved_package_guid);
+    if (!RegQueryValueExW( key, L"PackageGUID", NULL, &type, (BYTE *)saved_package_guid, &size ) &&
+        type == REG_SZ && size <= sizeof(saved_package_guid))
+        had_package_guid = TRUE;
+    RegSetValueExW( key, L"PackageGUID", 0, REG_SZ, (const BYTE *)package_guid,
+                    (lstrlenW(package_guid) + 1) * sizeof(WCHAR) );
+    RegCloseKey( key );
+
+    qualifier_size = ARRAY_SIZE(qualifier);
+    size = GetWindowsDirectoryW( windows, ARRAY_SIZE(windows) );
+    ok(size && size < ARRAY_SIZE(windows), "GetWindowsDirectoryW failed\n");
+    swprintf( font_dir, ARRAY_SIZE(font_dir), L"%s\\Fonts\\private", windows );
+    CreateDirectoryW( font_dir, NULL );
+    swprintf( direct_file, ARRAY_SIZE(direct_file), L"%s\\direct.ttf", font_dir );
+    swprintf( component_file, ARRAY_SIZE(component_file), L"%s\\component.ttf", font_dir );
+    ok(write_c2r_fixture( direct_file, L"direct fixture" ), "failed to create direct path fixture\n");
+    ok(write_c2r_fixture( component_file, L"component fixture" ), "failed to create component path fixture\n");
+    appdata_size = ARRAY_SIZE(appdata);
+    result = MsiEnumComponentQualifiersW( publish_component, 0, qualifier, &qualifier_size,
+                                          appdata, &appdata_size );
+    ok(result == ERROR_SUCCESS, "MsiEnumComponentQualifiersW returned %lu\n", result);
+    ok(!wcsicmp( qualifier, L"direct" ), "got qualifier %s\n", wine_dbgstr_w(qualifier));
+    ok(!wcscmp( appdata, L"direct-app" ), "got appdata %s\n", wine_dbgstr_w(appdata));
+    qualifier_size = ARRAY_SIZE(qualifier);
+    appdata_size = ARRAY_SIZE(appdata);
+    result = MsiEnumComponentQualifiersW( publish_component, 1, qualifier, &qualifier_size,
+                                          appdata, &appdata_size );
+    ok(result == ERROR_SUCCESS, "MsiEnumComponentQualifiersW (component-key) returned %lu\n", result);
+    ok(!wcsicmp( qualifier, L"component-key" ), "got qualifier %s\n", wine_dbgstr_w(qualifier));
+    qualifier_size = ARRAY_SIZE(qualifier);
+    appdata_size = ARRAY_SIZE(appdata);
+    result = MsiEnumComponentQualifiersW( publish_component, 2, qualifier, &qualifier_size,
+                                          appdata, &appdata_size );
+    ok(result == ERROR_NO_MORE_ITEMS, "duplicate/nested records returned %lu\n", result);
+
+    path_size = ARRAY_SIZE(component_path);
+    result = MsiProvideQualifiedComponentExW( publish_component, L"direct", INSTALLMODE_EXISTING,
+                                              product_code, 0, 0, component_path, &path_size );
+    ok(result == ERROR_SUCCESS, "direct path returned %lu\n", result);
+    size = GetWindowsDirectoryW( windows, ARRAY_SIZE(windows) );
+    ok(size && size < ARRAY_SIZE(windows), "GetWindowsDirectoryW failed\n");
+    swprintf( expected, ARRAY_SIZE(expected), L"%s\\Fonts\\private\\direct.ttf", windows );
+    ok(!wcsicmp( component_path, expected ), "direct path %s expected %s\n",
+       wine_dbgstr_w(component_path), wine_dbgstr_w(expected));
+
+    path_size = ARRAY_SIZE(component_path);
+    result = MsiProvideQualifiedComponentExW( publish_component, L"component-key", INSTALLMODE_EXISTING,
+                                              product_code, 0, 0, component_path, &path_size );
+    ok(result == ERROR_SUCCESS, "component-list fallback returned %lu\n", result);
+    swprintf( expected, ARRAY_SIZE(expected), L"%s\\Fonts\\private\\component.ttf", windows );
+    ok(!wcsicmp( component_path, expected ), "component path %s expected %s\n",
+       wine_dbgstr_w(component_path), wine_dbgstr_w(expected));
+
+    path_size = ARRAY_SIZE(component_path);
+    result = MsiProvideQualifiedComponentExW( publish_component, L"nested", INSTALLMODE_EXISTING,
+                                              product_code, 0, 0, component_path, &path_size );
+    ok(result != ERROR_SUCCESS, "nested record was incorrectly published\n");
+    path_size = ARRAY_SIZE(component_path);
+    result = MsiProvideQualifiedComponentExW( publish_component, L"direct", INSTALLMODE_EXISTING,
+                                              other_product, 0, 0, component_path, &path_size );
+    ok(result != ERROR_SUCCESS, "PackageGUID was incorrectly treated as ProductCode\n");
+    ok(MsiQueryFeatureStateW( product_code, L"OfficeMSProof6" ) == INSTALLSTATE_LOCAL,
+       "proof manifest ProductCode was not recognized\n");
+    ok(MsiQueryFeatureStateW( other_product, L"OfficeMSProof6" ) == INSTALLSTATE_UNKNOWN,
+       "proof manifest matched wrong ProductCode\n");
+
+    result = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Office\\ClickToRun", 0,
+                            KEY_SET_VALUE | KEY_WOW64_64KEY, &key );
+    if (!result)
+    {
+        if (had_package_guid)
+            RegSetValueExW( key, L"PackageGUID", 0, type, (const BYTE *)saved_package_guid,
+                            (lstrlenW(saved_package_guid) + 1) * sizeof(WCHAR) );
+        else
+            RegDeleteValueW( key, L"PackageGUID" );
+        RegCloseKey( key );
+    }
+cleanup_files:
+    DeleteFileW( path );
+    DeleteFileW( proof_path );
+    DeleteFileW( direct_file );
+    DeleteFileW( component_file );
+}
+
 START_TEST(msi)
 {
     DWORD len;
@@ -13626,6 +13798,7 @@ START_TEST(msi)
     test_concurrentinstall();
     test_command_line_parsing();
     test_MsiProvideQualifiedComponentEx();
+    test_office_c2r_manifest();
 
     SetCurrentDirectoryA(prev_path);
 }
