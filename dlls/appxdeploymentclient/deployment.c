@@ -9,10 +9,6 @@
  */
 
 #include "private.h"
-#include "wine/debug.h"
-
-WINE_DEFAULT_DEBUG_CHANNEL(appx);
-
 struct deployment_result
 {
     IDeploymentResult IDeploymentResult_iface;
@@ -30,6 +26,8 @@ struct deployment_operation
     IDeploymentResult *result;
     IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *completed;
     IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress *progress;
+    SRWLOCK lock;
+    BOOL closed;
 };
 
 static inline struct deployment_result *impl_from_IDeploymentResult( IDeploymentResult *iface )
@@ -134,6 +132,15 @@ static inline struct deployment_operation *impl_from_async_info( IAsyncInfo *ifa
     return CONTAINING_RECORD( iface, struct deployment_operation, async_info_iface );
 }
 
+static BOOL deployment_operation_is_closed( struct deployment_operation *impl )
+{
+    BOOL closed;
+    AcquireSRWLockShared( &impl->lock );
+    closed = impl->closed;
+    ReleaseSRWLockShared( &impl->lock );
+    return closed;
+}
+
 static HRESULT operation_query_interface( struct deployment_operation *impl, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
@@ -182,12 +189,15 @@ static ULONG WINAPI operation_Release( IAsyncOperationWithProgress_DeploymentRes
 static HRESULT WINAPI operation_GetIids( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
         ULONG *count, IID **iids )
 {
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
     return E_NOTIMPL;
 }
 
 static HRESULT WINAPI operation_GetRuntimeClassName( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
         HSTRING *name )
 {
+    if (name) *name = NULL;
     return E_NOTIMPL;
 }
 
@@ -203,10 +213,20 @@ static HRESULT WINAPI operation_put_Progress( IAsyncOperationWithProgress_Deploy
         IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress *handler )
 {
     struct deployment_operation *impl = impl_from_operation( iface );
-    if (impl->progress) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
-    impl->progress = handler;
+    HRESULT hr;
     if (handler) IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_AddRef( handler );
-    return S_OK;
+    AcquireSRWLockExclusive( &impl->lock );
+    if (impl->closed) hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->progress) hr = E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    else
+    {
+        impl->progress = handler;
+        handler = NULL;
+        hr = S_OK;
+    }
+    ReleaseSRWLockExclusive( &impl->lock );
+    if (handler) IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_Release( handler );
+    return hr;
 }
 
 static HRESULT WINAPI operation_get_Progress( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
@@ -214,8 +234,16 @@ static HRESULT WINAPI operation_get_Progress( IAsyncOperationWithProgress_Deploy
 {
     struct deployment_operation *impl = impl_from_operation( iface );
     if (!handler) return E_POINTER;
+    AcquireSRWLockShared( &impl->lock );
+    if (impl->closed)
+    {
+        ReleaseSRWLockShared( &impl->lock );
+        *handler = NULL;
+        return E_ILLEGAL_METHOD_CALL;
+    }
     *handler = impl->progress;
     if (*handler) IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_AddRef( *handler );
+    ReleaseSRWLockShared( &impl->lock );
     return S_OK;
 }
 
@@ -223,14 +251,29 @@ static HRESULT WINAPI operation_put_Completed( IAsyncOperationWithProgress_Deplo
         IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *handler )
 {
     struct deployment_operation *impl = impl_from_operation( iface );
-    if (impl->completed) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
-    impl->completed = handler;
-    if (handler)
+    IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *completed = NULL;
+    HRESULT hr = S_OK;
+
+    if (!handler) return E_POINTER;
+    IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( handler );
+    AcquireSRWLockExclusive( &impl->lock );
+    if (impl->closed) hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->completed) hr = E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    else
     {
-        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( handler );
-        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Invoke( handler, iface, Completed );
+        impl->completed = handler;
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( completed = handler );
+        handler = NULL;
     }
-    return S_OK;
+    ReleaseSRWLockExclusive( &impl->lock );
+    if (handler) IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( handler );
+    if (FAILED(hr) || !completed) return hr;
+    operation_AddRef( iface );
+    hr = IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Invoke(
+            completed, iface, Completed );
+    operation_Release( iface );
+    IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( completed );
+    return hr;
 }
 
 static HRESULT WINAPI operation_get_Completed( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
@@ -238,8 +281,16 @@ static HRESULT WINAPI operation_get_Completed( IAsyncOperationWithProgress_Deplo
 {
     struct deployment_operation *impl = impl_from_operation( iface );
     if (!handler) return E_POINTER;
+    AcquireSRWLockShared( &impl->lock );
+    if (impl->closed)
+    {
+        ReleaseSRWLockShared( &impl->lock );
+        *handler = NULL;
+        return E_ILLEGAL_METHOD_CALL;
+    }
     *handler = impl->completed;
     if (*handler) IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( *handler );
+    ReleaseSRWLockShared( &impl->lock );
     return S_OK;
 }
 
@@ -248,8 +299,16 @@ static HRESULT WINAPI operation_GetResults( IAsyncOperationWithProgress_Deployme
 {
     struct deployment_operation *impl = impl_from_operation( iface );
     if (!result) return E_POINTER;
+    AcquireSRWLockShared( &impl->lock );
+    if (impl->closed)
+    {
+        ReleaseSRWLockShared( &impl->lock );
+        *result = NULL;
+        return E_ILLEGAL_METHOD_CALL;
+    }
     *result = impl->result;
     IDeploymentResult_AddRef( *result );
+    ReleaseSRWLockShared( &impl->lock );
     return S_OK;
 }
 
@@ -285,11 +344,14 @@ static ULONG WINAPI async_info_Release( IAsyncInfo *iface )
 
 static HRESULT WINAPI async_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
 {
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
     return E_NOTIMPL;
 }
 
 static HRESULT WINAPI async_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
 {
+    if (name) *name = NULL;
     return E_NOTIMPL;
 }
 
@@ -302,32 +364,62 @@ static HRESULT WINAPI async_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *l
 
 static HRESULT WINAPI async_info_get_Id( IAsyncInfo *iface, UINT32 *id )
 {
+    struct deployment_operation *impl = impl_from_async_info( iface );
     if (!id) return E_POINTER;
+    if (deployment_operation_is_closed( impl )) return E_ILLEGAL_METHOD_CALL;
     *id = 1;
     return S_OK;
 }
 
 static HRESULT WINAPI async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
 {
+    struct deployment_operation *impl = impl_from_async_info( iface );
     if (!status) return E_POINTER;
+    if (deployment_operation_is_closed( impl )) return E_ILLEGAL_METHOD_CALL;
     *status = Completed;
     return S_OK;
 }
 
 static HRESULT WINAPI async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
 {
+    struct deployment_operation *impl = impl_from_async_info( iface );
     if (!error) return E_POINTER;
-    *error = S_OK;
+    AcquireSRWLockShared( &impl->lock );
+    if (impl->closed)
+    {
+        ReleaseSRWLockShared( &impl->lock );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    *error = impl_from_IDeploymentResult( impl->result )->extended_error;
+    ReleaseSRWLockShared( &impl->lock );
     return S_OK;
 }
 
 static HRESULT WINAPI async_info_Cancel( IAsyncInfo *iface )
 {
-    return S_OK;
+    return deployment_operation_is_closed( impl_from_async_info( iface ) ) ? E_ILLEGAL_METHOD_CALL : S_OK;
 }
 
 static HRESULT WINAPI async_info_Close( IAsyncInfo *iface )
 {
+    struct deployment_operation *impl = impl_from_async_info( iface );
+    IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *completed;
+    IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress *progress;
+
+    AcquireSRWLockExclusive( &impl->lock );
+    if (impl->closed)
+    {
+        ReleaseSRWLockExclusive( &impl->lock );
+        return S_OK;
+    }
+    impl->closed = TRUE;
+    completed = impl->completed;
+    progress = impl->progress;
+    impl->completed = NULL;
+    impl->progress = NULL;
+    ReleaseSRWLockExclusive( &impl->lock );
+    if (completed) IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( completed );
+    if (progress) IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_Release( progress );
     return S_OK;
 }
 
@@ -373,6 +465,7 @@ HRESULT deployment_operation_create( HRESULT extended_error, const WCHAR *error_
     }
     impl->operation_iface.lpVtbl = &operation_vtbl;
     impl->async_info_iface.lpVtbl = &async_info_vtbl;
+    InitializeSRWLock( &impl->lock );
     impl->ref = 1;
     impl->result = &result->IDeploymentResult_iface;
     *operation = &impl->operation_iface;

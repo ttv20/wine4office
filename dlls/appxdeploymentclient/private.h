@@ -26,8 +26,10 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
+#include "wincrypt.h"
 
 #include "activation.h"
+
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
@@ -38,13 +40,46 @@
 
 extern IActivationFactory *package_manager_factory;
 extern IActivationFactory *stage_package_options_factory;
+struct msix_staging_policy
+{
+    BOOL allow_unsigned;
+    BOOL developer_mode;
+    HCERTSTORE trust_store;
+};
+
+struct msix_stage_options
+{
+    struct msix_staging_policy policy;
+    const WCHAR *target_root;
+    const WCHAR *external_root;
+    StubPackageOption stub_package_option;
+    BOOL force_update_from_any_version;
+    BOOL install_all_resources;
+    BOOL required_content_group_only;
+    BOOL stage_in_place;
+};
+
+struct msix_stage_package
+{
+    const WCHAR *path;
+};
 
 HRESULT deployment_operation_create( HRESULT extended_error, const WCHAR *error_text,
         IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation );
 HRESULT msix_path_from_uri( IUriRuntimeClass *uri, WCHAR **path );
 HRESULT msix_validate_package( const WCHAR *path );
+HRESULT msix_validate_package_with_policy( const WCHAR *path, const struct msix_staging_policy *policy );
 HRESULT msix_stage_package( const WCHAR *path, WCHAR **full_name, WCHAR **family_name );
+HRESULT msix_stage_package_with_policy( const WCHAR *path, const struct msix_staging_policy *policy,
+        WCHAR **full_name, WCHAR **family_name );
+HRESULT msix_stage_package_set( const struct msix_stage_package *packages, UINT32 count,
+        const WCHAR *const *optional_families, UINT32 optional_family_count,
+        const struct msix_stage_options *options, UINT32 main_index,
+        WCHAR **full_name, WCHAR **family_name );
 HRESULT msix_get_staged_package( const WCHAR *family_name, WCHAR **path );
+HRESULT stage_package_options_get_policy( IStagePackageOptions *iface, struct msix_staging_policy *policy );
+HRESULT msix_set_stub_preference( const WCHAR *family_name, PackageStubPreference preference );
+HRESULT msix_get_stub_preference( const WCHAR *family_name, PackageStubPreference *preference );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

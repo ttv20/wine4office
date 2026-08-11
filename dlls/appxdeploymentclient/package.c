@@ -18,6 +18,7 @@
  */
 
 #include "private.h"
+#include "shlwapi.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
@@ -44,33 +45,9 @@ struct IPackageManager6
     const IPackageManager6Vtbl *lpVtbl;
 };
 
-typedef struct IPackageManager9 IPackageManager9;
-typedef struct IPackageManager9Vtbl
-{
-    HRESULT (WINAPI *QueryInterface)(IPackageManager9 *, REFIID, void **);
-    ULONG (WINAPI *AddRef)(IPackageManager9 *);
-    ULONG (WINAPI *Release)(IPackageManager9 *);
-    HRESULT (WINAPI *GetIids)(IPackageManager9 *, ULONG *, IID **);
-    HRESULT (WINAPI *GetRuntimeClassName)(IPackageManager9 *, HSTRING *);
-    HRESULT (WINAPI *GetTrustLevel)(IPackageManager9 *, TrustLevel *);
-    HRESULT (WINAPI *FindProvisionedPackages)(IPackageManager9 *, IIterable_Package **);
-    HRESULT (WINAPI *AddPackageByUriAsync)(IPackageManager9 *, IUriRuntimeClass *, void *, void **);
-    HRESULT (WINAPI *StagePackageByUriAsync)(IPackageManager9 *, IUriRuntimeClass *, IStagePackageOptions *, void **);
-    HRESULT (WINAPI *RegisterPackageByUriAsync)(IPackageManager9 *, IUriRuntimeClass *, void *, void **);
-    HRESULT (WINAPI *RegisterPackagesByFullNameAsync)(IPackageManager9 *, void *, void *, void **);
-    HRESULT (WINAPI *SetPackageStubPreference)(IPackageManager9 *, HSTRING, UINT);
-    HRESULT (WINAPI *GetPackageStubPreference)(IPackageManager9 *, HSTRING, UINT *);
-} IPackageManager9Vtbl;
-
-struct IPackageManager9
-{
-    const IPackageManager9Vtbl *lpVtbl;
-};
 
 static const GUID package_manager6_iid =
     {0x0847e909, 0x53cd, 0x4e4f, {0x83, 0x2e, 0x57, 0xd1, 0x80, 0xf6, 0xe4, 0x47}};
-static const GUID package_manager9_iid =
-    {0x1aa79035, 0xcc71, 0x4b2e, {0x80, 0xa6, 0xc7, 0x04, 0x1d, 0x85, 0x79, 0xa7}};
 
 struct package_manager
 {
@@ -316,7 +293,7 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &package_manager9_iid ))
+    if (IsEqualGUID( iid, &IID_IPackageManager9 ))
     {
         *out = &impl->IPackageManager9_iface;
         IInspectable_AddRef( *out );
@@ -738,25 +715,273 @@ static HRESULT WINAPI package_manager9_FindProvisionedPackages( IPackageManager9
 }
 
 static HRESULT WINAPI package_manager9_AddPackageByUriAsync( IPackageManager9 *iface,
-        IUriRuntimeClass *uri, void *options, void **operation )
+        IUriRuntimeClass *uri, IInspectable *options,
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, options %p, operation %p stub!\n", iface, uri, options, operation );
     if (operation) *operation = NULL;
     return E_NOTIMPL;
 }
 
+static void free_path_array( WCHAR **paths, UINT32 count )
+{
+    while (count) free( paths[--count] );
+    free( paths );
+}
+
+static HRESULT snapshot_uri_vector( IVector_Uri *vector, WCHAR ***paths, UINT32 *count )
+{
+    IUriRuntimeClass *uri = NULL;
+    WCHAR **result = NULL;
+    UINT32 size, i;
+    HRESULT hr;
+
+    if (!paths || !count) return E_POINTER;
+    *paths = NULL;
+    *count = 0;
+    if (FAILED(hr = IVector_Uri_get_Size( vector, &size ))) return hr;
+    if (size && !(result = calloc( size, sizeof(*result) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < size; ++i)
+    {
+        if (FAILED(hr = IVector_Uri_GetAt( vector, i, &uri )) ||
+            FAILED(hr = msix_path_from_uri( uri, &result[i] )))
+        {
+            if (uri) IUriRuntimeClass_Release( uri );
+            free_path_array( result, i );
+            return hr;
+        }
+        IUriRuntimeClass_Release( uri );
+        uri = NULL;
+    }
+    *paths = result;
+    *count = size;
+    return S_OK;
+}
+
+static HRESULT snapshot_string_vector( IVector_HSTRING *vector, WCHAR ***strings, UINT32 *count )
+{
+    WCHAR **result = NULL;
+    const WCHAR *raw;
+    HSTRING string = NULL;
+    UINT32 size, length, i;
+    HRESULT hr;
+
+    if (!strings || !count) return E_POINTER;
+    *strings = NULL;
+    *count = 0;
+    if (FAILED(hr = IVector_HSTRING_get_Size( vector, &size ))) return hr;
+    if (size && !(result = calloc( size, sizeof(*result) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < size; ++i)
+    {
+        if (FAILED(hr = IVector_HSTRING_GetAt( vector, i, &string )))
+        {
+            free_path_array( result, i );
+            return hr;
+        }
+        raw = WindowsGetStringRawBuffer( string, &length );
+        if (!length || !(result[i] = malloc( ((SIZE_T)length + 1) * sizeof(**result) )))
+        {
+            WindowsDeleteString( string );
+            free_path_array( result, i );
+            return length ? E_OUTOFMEMORY : E_INVALIDARG;
+        }
+        memcpy( result[i], raw, length * sizeof(**result) );
+        result[i][length] = 0;
+        WindowsDeleteString( string );
+        string = NULL;
+    }
+    *strings = result;
+    *count = size;
+    return S_OK;
+}
+
+static HRESULT canonicalize_stage_root( const WCHAR *path, WCHAR **root )
+{
+    DWORD length;
+    WCHAR *result, *file_part;
+    SIZE_T len;
+
+    if (!path || !root) return E_POINTER;
+    *root = NULL;
+    length = GetFullPathNameW( path, 0, NULL, NULL );
+    if (!length) return HRESULT_FROM_WIN32( GetLastError() );
+    if (!(result = malloc( (SIZE_T)length * sizeof(*result) ))) return E_OUTOFMEMORY;
+    if (!GetFullPathNameW( path, length, result, &file_part ))
+    {
+        HRESULT hr = HRESULT_FROM_WIN32( GetLastError() );
+        free( result );
+        return hr;
+    }
+    if (PathIsRelativeW( result ))
+    {
+        free( result );
+        return HRESULT_FROM_WIN32( ERROR_BAD_PATHNAME );
+    }
+    len = wcslen( result );
+    while (len > 3 && (result[len - 1] == '\\' || result[len - 1] == '/')) result[--len] = 0;
+    *root = result;
+    return S_OK;
+}
+
+static BOOL stage_path_is_contained( const WCHAR *root, const WCHAR *path )
+{
+    SIZE_T root_len = wcslen( root );
+
+    if (wcsnicmp( root, path, root_len )) return FALSE;
+    return !path[root_len] || path[root_len] == '\\' || path[root_len] == '/';
+}
+
+static HRESULT root_from_uri( IUriRuntimeClass *uri, WCHAR **root )
+{
+    WCHAR *path = NULL;
+    HRESULT hr;
+
+    if (FAILED(hr = msix_path_from_uri( uri, &path ))) return hr;
+    hr = canonicalize_stage_root( path, root );
+    free( path );
+    return hr;
+}
+
+static HRESULT resolve_stage_roots( IStagePackageOptions *options, WCHAR **target_root,
+        WCHAR **external_root )
+{
+    IUriRuntimeClass *uri = NULL;
+    IInspectable *target = NULL;
+    HRESULT hr;
+
+    *target_root = *external_root = NULL;
+    if (FAILED(hr = IStagePackageOptions_get_TargetVolume( options, &target ))) return hr;
+    if (target)
+    {
+        hr = IInspectable_QueryInterface( target, &IID_IUriRuntimeClass, (void **)&uri );
+        IInspectable_Release( target );
+        if (FAILED(hr)) return E_INVALIDARG;
+        hr = root_from_uri( uri, target_root );
+        IUriRuntimeClass_Release( uri );
+        uri = NULL;
+        if (FAILED(hr)) return hr;
+    }
+    if (FAILED(hr = IStagePackageOptions_get_ExternalLocationUri( options, &uri ))) goto failed;
+    if (uri)
+    {
+        hr = root_from_uri( uri, external_root );
+        IUriRuntimeClass_Release( uri );
+        if (FAILED(hr)) goto failed;
+        if (*target_root && !stage_path_is_contained( *target_root, *external_root ))
+        {
+            hr = HRESULT_FROM_WIN32( ERROR_BAD_PATHNAME );
+            goto failed;
+        }
+    }
+    return S_OK;
+
+failed:
+    free( *target_root );
+    free( *external_root );
+    *target_root = *external_root = NULL;
+    return hr;
+}
+
 static HRESULT WINAPI package_manager9_StagePackageByUriAsync( IPackageManager9 *iface,
-        IUriRuntimeClass *uri, IStagePackageOptions *options, void **operation )
+        IUriRuntimeClass *uri, IStagePackageOptions *options,
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *async_operation;
+    IVector_HSTRING *family_vector = NULL;
+    IVector_Uri *uri_vector = NULL;
+    struct msix_stage_package *packages = NULL;
+    struct msix_stage_options stage_options = {0};
+    WCHAR **dependencies = NULL, **optional = NULL, **related = NULL, **families = NULL;
     WCHAR *path = NULL, *full_name = NULL, *family_name = NULL;
+    WCHAR *target_root = NULL, *external_root = NULL;
+    UINT32 dependency_count = 0, optional_count = 0, related_count = 0, family_count = 0;
+    UINT32 count, index, i;
+    boolean value;
     HRESULT hr, create_hr;
 
     TRACE( "iface %p, uri %p, options %p, operation %p.\n", iface, uri, options, operation );
     if (!uri || !options || !operation) return E_POINTER;
     *operation = NULL;
-    if (SUCCEEDED(hr = msix_path_from_uri( uri, &path )))
-        hr = msix_stage_package( path, &full_name, &family_name );
+
+    if (FAILED(hr = stage_package_options_get_policy( options, &stage_options.policy )) ||
+        FAILED(hr = resolve_stage_roots( options, &target_root, &external_root )) ||
+        FAILED(hr = msix_path_from_uri( uri, &path ))) goto complete;
+    stage_options.target_root = target_root;
+    stage_options.external_root = external_root;
+
+    if (FAILED(hr = IStagePackageOptions_get_StubPackageOption( options,
+            &stage_options.stub_package_option )) ||
+        FAILED(hr = IStagePackageOptions_get_ForceUpdateFromAnyVersion( options, &value ))) goto complete;
+    stage_options.force_update_from_any_version = !!value;
+    if (FAILED(hr = IStagePackageOptions_get_InstallAllResources( options, &value ))) goto complete;
+    stage_options.install_all_resources = !!value;
+    if (FAILED(hr = IStagePackageOptions_get_RequiredContentGroupOnly( options, &value ))) goto complete;
+    stage_options.required_content_group_only = !!value;
+    if (FAILED(hr = IStagePackageOptions_get_StageInPlace( options, &value ))) goto complete;
+    stage_options.stage_in_place = !!value;
+
+    if (FAILED(hr = IStagePackageOptions_get_DependencyPackageUris( options, &uri_vector )) ||
+        FAILED(hr = snapshot_uri_vector( uri_vector, &dependencies, &dependency_count ))) goto complete;
+    IVector_Uri_Release( uri_vector );
+    uri_vector = NULL;
+    if (FAILED(hr = IStagePackageOptions_get_OptionalPackageUris( options, &uri_vector )) ||
+        FAILED(hr = snapshot_uri_vector( uri_vector, &optional, &optional_count ))) goto complete;
+    IVector_Uri_Release( uri_vector );
+    uri_vector = NULL;
+    if (FAILED(hr = IStagePackageOptions_get_RelatedPackageUris( options, &uri_vector )) ||
+        FAILED(hr = snapshot_uri_vector( uri_vector, &related, &related_count ))) goto complete;
+    IVector_Uri_Release( uri_vector );
+    uri_vector = NULL;
+    if (FAILED(hr = IStagePackageOptions_get_OptionalPackageFamilyNames( options, &family_vector )) ||
+        FAILED(hr = snapshot_string_vector( family_vector, &families, &family_count ))) goto complete;
+    IVector_HSTRING_Release( family_vector );
+    family_vector = NULL;
+
+    if ((ULONGLONG)dependency_count + optional_count + related_count + 1 > ~(UINT32)0)
+    {
+        hr = E_OUTOFMEMORY;
+        goto complete;
+    }
+    count = dependency_count + optional_count + related_count + 1;
+    if (!(packages = calloc( count, sizeof(*packages) )))
+    {
+        hr = E_OUTOFMEMORY;
+        goto complete;
+    }
+    index = 0;
+    for (i = 0; i < dependency_count; ++i) packages[index++].path = dependencies[i];
+    packages[index++].path = path;
+    for (i = 0; i < optional_count; ++i) packages[index++].path = optional[i];
+    for (i = 0; i < related_count; ++i) packages[index++].path = related[i];
+    if (stage_options.stage_in_place)
+    {
+        const WCHAR *root = external_root ? external_root : target_root;
+        for (i = 0; root && i < count; ++i)
+        {
+            WCHAR *canonical = NULL;
+            if (FAILED(hr = canonicalize_stage_root( packages[i].path, &canonical ))) goto complete;
+            if (!stage_path_is_contained( root, canonical ))
+            {
+                free( canonical );
+                hr = HRESULT_FROM_WIN32( ERROR_BAD_PATHNAME );
+                goto complete;
+            }
+            free( canonical );
+        }
+    }
+    hr = msix_stage_package_set( packages, count, (const WCHAR *const *)families, family_count,
+            &stage_options, dependency_count, &full_name, &family_name );
+
+complete:
+    if (uri_vector) IVector_Uri_Release( uri_vector );
+    if (family_vector) IVector_HSTRING_Release( family_vector );
+    free( packages );
+    free_path_array( dependencies, dependency_count );
+    free_path_array( optional, optional_count );
+    free_path_array( related, related_count );
+    free_path_array( families, family_count );
+    free( target_root );
+    free( external_root );
     free( path );
     free( full_name );
     free( family_name );
@@ -768,7 +993,8 @@ static HRESULT WINAPI package_manager9_StagePackageByUriAsync( IPackageManager9 
 }
 
 static HRESULT WINAPI package_manager9_RegisterPackageByUriAsync( IPackageManager9 *iface,
-        IUriRuntimeClass *uri, void *options, void **operation )
+        IUriRuntimeClass *uri, IInspectable *options,
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, options %p, operation %p stub!\n", iface, uri, options, operation );
     if (operation) *operation = NULL;
@@ -776,7 +1002,8 @@ static HRESULT WINAPI package_manager9_RegisterPackageByUriAsync( IPackageManage
 }
 
 static HRESULT WINAPI package_manager9_RegisterPackagesByFullNameAsync( IPackageManager9 *iface,
-        void *names, void *options, void **operation )
+        IIterable_HSTRING *names, IInspectable *options,
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, names %p, options %p, operation %p stub!\n", iface, names, options, operation );
     if (operation) *operation = NULL;
@@ -784,19 +1011,30 @@ static HRESULT WINAPI package_manager9_RegisterPackagesByFullNameAsync( IPackage
 }
 
 static HRESULT WINAPI package_manager9_SetPackageStubPreference( IPackageManager9 *iface,
-        HSTRING family_name, UINT preference )
+        HSTRING family_name, PackageStubPreference preference )
 {
-    FIXME( "iface %p, family_name %s, preference %u stub!\n", iface,
+    const WCHAR *raw;
+    UINT32 length;
+
+    raw = WindowsGetStringRawBuffer( family_name, &length );
+    if (!length) return E_INVALIDARG;
+    TRACE( "iface %p, family_name %s, preference %u.\n", iface,
             debugstr_hstring(family_name), preference );
-    return E_NOTIMPL;
+    return msix_set_stub_preference( raw, preference );
 }
 
 static HRESULT WINAPI package_manager9_GetPackageStubPreference( IPackageManager9 *iface,
-        HSTRING family_name, UINT *preference )
+        HSTRING family_name, PackageStubPreference *preference )
 {
-    FIXME( "iface %p, family_name %s, preference %p stub!\n", iface,
+    const WCHAR *raw;
+    UINT32 length;
+
+    if (!preference) return E_POINTER;
+    raw = WindowsGetStringRawBuffer( family_name, &length );
+    if (!length) return E_INVALIDARG;
+    TRACE( "iface %p, family_name %s, preference %p.\n", iface,
             debugstr_hstring(family_name), preference );
-    return E_NOTIMPL;
+    return msix_get_stub_preference( raw, preference );
 }
 
 static const IPackageManager9Vtbl package_manager9_vtbl =

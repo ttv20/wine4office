@@ -32,12 +32,14 @@ namespace Windows.Management.Deployment {
     typedef enum PackageTypes PackageTypes;
     typedef enum RemovalOptions RemovalOptions;
     typedef enum StubPackageOption StubPackageOption;
+    typedef enum PackageStubPreference PackageStubPreference;
 
     typedef struct DeploymentProgress DeploymentProgress;
 
     interface IDeploymentResult;
     interface IPackageManager;
     interface IPackageManager2;
+    interface IPackageManager9;
     interface IPackageUserInformation;
     interface IStagePackageOptions;
 
@@ -51,6 +53,8 @@ namespace Windows.Management.Deployment {
         interface Windows.Foundation.Collections.IIterator<Windows.Foundation.Uri *>;
         interface Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *>;
         interface Windows.Foundation.Collections.IVector<HSTRING>;
+        interface Windows.Foundation.Collections.IIterable<HSTRING>;
+        interface Windows.Foundation.Collections.IIterator<HSTRING>;
         interface Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.Package *>;
         interface Windows.Foundation.Collections.IIterator<Windows.ApplicationModel.Package *>;
         interface Windows.Foundation.Collections.IIterable<Windows.Management.Deployment.PackageUserInformation *>;
@@ -143,6 +147,13 @@ namespace Windows.Management.Deployment {
         InstallFull   = 1,
         InstallStub   = 2,
         UsePreference = 3,
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 10.0)]
+    enum PackageStubPreference
+    {
+        Full = 0,
+        Stub = 1,
     };
 
     [contract(Windows.Foundation.UniversalApiContract, 1.0)]
@@ -284,6 +295,27 @@ namespace Windows.Management.Deployment {
     }
 
     [
+        contract(Windows.Foundation.UniversalApiContract, 10.0),
+        exclusiveto(Windows.Management.Deployment.PackageManager),
+        uuid(1aa79035-cc71-4b2e-80a6-c7041d8579a7)
+    ]
+    interface IPackageManager9 : IInspectable
+    {
+        HRESULT FindProvisionedPackages([out, retval] Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.Package *> **packages);
+        HRESULT AddPackageByUriAsync([in] Windows.Foundation.Uri *uri, [in] IInspectable *options,
+                                     [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT StagePackageByUriAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Management.Deployment.StagePackageOptions *options,
+                                       [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT RegisterPackageByUriAsync([in] Windows.Foundation.Uri *uri, [in] IInspectable *options,
+                                          [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT RegisterPackagesByFullNameAsync([in] Windows.Foundation.Collections.IIterable<HSTRING> *package_full_names,
+                                                [in] IInspectable *options,
+                                                [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT SetPackageStubPreference([in] HSTRING package_family_name, [in] Windows.Management.Deployment.PackageStubPreference preference);
+        HRESULT GetPackageStubPreference([in] HSTRING package_family_name, [out, retval] Windows.Management.Deployment.PackageStubPreference *preference);
+    }
+
+    [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile)
     ]
@@ -309,7 +341,7 @@ namespace Windows.Management.Deployment {
         /* [contract(Windows.Foundation.UniversalApiContract, 5.0)] interface Windows.Management.Deployment.IPackageManager6; */
         /* [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.Management.Deployment.IPackageManager7; */
         /* [contract(Windows.Foundation.UniversalApiContract, 7.0)] interface Windows.Management.Deployment.IPackageManager8; */
-        /* [contract(Windows.Foundation.UniversalApiContract, 10.0)] interface Windows.Management.Deployment.IPackageManager9; */
+        [contract(Windows.Foundation.UniversalApiContract, 10.0)] interface Windows.Management.Deployment.IPackageManager9;
     }
 
     [

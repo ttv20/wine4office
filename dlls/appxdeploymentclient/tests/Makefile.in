@@ -1,11 +1,7 @@
-MODULE  = appxdeploymentclient.dll
+TESTDLL = appxdeploymentclient.dll
 IMPORTS = advapi32 bcrypt combase crypt32 shlwapi xmllite $(ZLIB_PE_LIBS)
 EXTRAINCL = $(ZLIB_PE_CFLAGS)
 
 SOURCES = \
-	classes.idl \
 	deployment.c \
-	main.c \
-	msix.c \
-	package.c \
-	stage_options.c
+	msix.c
