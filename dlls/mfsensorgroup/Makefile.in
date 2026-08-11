@@ -1,8 +1,10 @@
 MODULE    = mfsensorgroup.dll
 IMPORTLIB = mfsensorgroup
+UNIXLIB   = mfsensorgroup.so
 IMPORTS   = mfplat mfuuid uuid
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
 SOURCES = \
-	main.c
+	main.c \
+	unixlib.c

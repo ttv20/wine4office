@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report sensor monitoring as unsupported unless an active backend is available.
 - Validate runtime buffers, mappings, activation contexts, and thread cleanup paths.
 - Identify helper windows early and synchronize Wayland popup and systray lifetimes.
 - Fail unsupported GPU transfers safely and stabilize OpenGL/Vulkan presentation.

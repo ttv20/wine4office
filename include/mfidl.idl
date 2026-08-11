@@ -639,7 +639,57 @@ interface IMFSequencerSource : IUnknown
 }
 
 interface IMFPresentationClock;
+
+typedef enum MFSensorDeviceMode
+{
+    MFSensorDeviceMode_Controller = 0,
+    MFSensorDeviceMode_Shared = 1
+} MFSensorDeviceMode;
+
+interface IMFSensorProcessActivity;
+interface IMFSensorActivityReport;
 interface IMFSensorActivitiesReport;
+
+[
+    object,
+    uuid(39dc7f4a-b141-4719-813c-a7f46162a2b8),
+    local
+]
+interface IMFSensorProcessActivity : IUnknown
+{
+    HRESULT GetProcessId([out] ULONG *pid);
+    HRESULT GetStreamingState([out] BOOL *streaming);
+    HRESULT GetStreamingMode([out] MFSensorDeviceMode *mode);
+    HRESULT GetReportTime([out] FILETIME *report_time);
+}
+
+[
+    object,
+    uuid(3e8c4be1-a8c2-4528-90de-2851bde5fead),
+    local
+]
+interface IMFSensorActivityReport : IUnknown
+{
+    HRESULT GetFriendlyName([out] LPWSTR friendly_name, [in] ULONG cch_friendly_name,
+            [in, out] ULONG *written);
+    HRESULT GetSymbolicLink([out] LPWSTR symbolic_link, [in] ULONG cch_symbolic_link,
+            [in, out] ULONG *written);
+    HRESULT GetProcessCount([out] ULONG *count);
+    HRESULT GetProcessActivity([in] ULONG index, [out] IMFSensorProcessActivity **activity);
+}
+
+[
+    object,
+    uuid(683f7a5e-4a19-43cd-b1a9-dbf4ab3f7777),
+    local
+]
+interface IMFSensorActivitiesReport : IUnknown
+{
+    HRESULT GetCount([out] ULONG *count);
+    HRESULT GetActivityReport([in] ULONG index, [out] IMFSensorActivityReport **report);
+    HRESULT GetActivityReportByDeviceName([in] LPCWSTR symbolic_name,
+            [out] IMFSensorActivityReport **report);
+}
 
 [
     object,
