@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the public Wine4Office project website and installation overview.
 - Make manager updates, removal, supervision, incidents, and release packaging fail safely.
 - Restrict Office shutdown targets and discover the correct App-V subsystem architecture.
 - Preserve Hebrew fonts, regenerate shell icons, and scope Office desktop policy.
