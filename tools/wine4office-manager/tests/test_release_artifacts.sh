@@ -13,7 +13,7 @@ VERSION=2.3.4
 ROOT="wine4office-${VERSION}-x86_64"
 
 mkdir -p "$RUNNER/bin" "$RUNNER/lib/wine/x86_64-windows" \
-    "$RUNNER/share/wine4office" "$RUNNER/share/wine/gecko"
+    "$RUNNER/share/wine4office" "$RUNNER/share/wine/gecko" "$RUNNER/share/wine/mono"
 cat > "$RUNNER/bin/wine" <<'SH'
 #!/bin/sh
 exit 0
@@ -23,7 +23,13 @@ printf 'runner payload\n' > "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
 printf 'hidden payload\n' > "$RUNNER/.runner-metadata"
 printf 'gecko x86 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86.msi"
 printf 'gecko x86_64 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
+printf 'mono x86 fixture\n' > "$RUNNER/share/wine/mono/wine-mono-11.2.0-x86.msi"
 ln -s ../lib/wine/x86_64-windows/kernel32.dll "$RUNNER/bin/kernel32-link"
+printf 'shared hardlink payload\n' > "$RUNNER/share/wine4office/shared target"
+chmod 0640 "$RUNNER/share/wine4office/shared target"
+ln "$RUNNER/share/wine4office/shared target" "$RUNNER/bin/forward hardlink"
+ln "$RUNNER/share/wine4office/shared target" "$RUNNER/lib/wine/x86_64-windows/backward hardlink"
+ln -s "../share/wine4office/shared target" "$RUNNER/bin/shared symlink"
 cat > "$MANAGER" <<'SH'
 #!/bin/sh
 exit 0
@@ -43,12 +49,29 @@ if "$HERE/packaging/build-release-artifacts.sh" \
 fi
 grep -F "Runner is missing bundled Wine Gecko:" "$TMP/missing-gecko.log" >/dev/null
 
+MISSING_MONO_RUNNER="$TMP/missing-mono-runner"
+cp -a "$RUNNER" "$MISSING_MONO_RUNNER"
+rm "$MISSING_MONO_RUNNER/share/wine/mono/wine-mono-11.2.0-x86.msi"
+if "$HERE/packaging/build-release-artifacts.sh" \
+    "$MISSING_MONO_RUNNER" "$MANAGER" "$TMP/release-missing-mono" "$VERSION" \
+    "https://updates.example/releases/stable/release.json" \
+    >"$TMP/missing-mono.log" 2>&1; then
+    echo "release packaging accepted a runner without Wine Mono" >&2
+    exit 1
+fi
+grep -F "Runner is missing bundled Wine Mono:" "$TMP/missing-mono.log" >/dev/null
+
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$RELEASE" "$VERSION" \
+    "https://updates.example/releases/stable/release.json" "downloads" stable >/dev/null
+REPEAT_RELEASE="$TMP/release-repeat"
+"$HERE/packaging/build-release-artifacts.sh" \
+    "$RUNNER" "$MANAGER" "$REPEAT_RELEASE" "$VERSION" \
     "https://updates.example/releases/stable/release.json" "downloads" stable >/dev/null
 
 MANAGER_NAME="Wine4OfficeManager-${VERSION}-x86_64"
 WINE_NAME="${ROOT}.tar.zst"
+cmp "$RELEASE/$WINE_NAME" "$REPEAT_RELEASE/$WINE_NAME"
 expected_artifacts=(
     "$MANAGER_NAME"
     "$MANAGER_NAME.sha256"
@@ -71,8 +94,15 @@ mapfile -t roots < <(tar --zstd -tf "$RELEASE/$WINE_NAME" | sed 's|/.*||' | sort
 ! tar --zstd -tf "$RELEASE/$WINE_NAME" | grep -Fx "$ROOT/bin/wine64" >/dev/null
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86.msi" >/dev/null
+tar --zstd --quoting-style=literal -tvf "$RELEASE/$WINE_NAME" >"$TMP/archive-listing"
+! grep -F "link to ./" "$TMP/archive-listing" >/dev/null
+[[ $(grep -F -c "link to $ROOT/share/wine4office/shared target" "$TMP/archive-listing") -eq 2 ]]
+grep -F "$ROOT/bin/shared symlink -> ../share/wine4office/shared target" \
+    "$TMP/archive-listing" >/dev/null
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi" >/dev/null
+tar --zstd -tf "$RELEASE/$WINE_NAME" \
+    | grep -Fx "$ROOT/share/wine/mono/wine-mono-11.2.0-x86.msi" >/dev/null
 EXTRACTED="$TMP/extracted"
 mkdir -p "$EXTRACTED"
 tar --zstd -xf "$RELEASE/$WINE_NAME" -C "$EXTRACTED"
@@ -108,6 +138,17 @@ def inventory(root: Path):
 
 assert inventory(runner) == inventory(original), "packaging modified the staged runner"
 assert inventory(extracted) == inventory(original), "archive changed the staged runner"
+hardlink_names = (
+    "share/wine4office/shared target",
+    "bin/forward hardlink",
+    "lib/wine/x86_64-windows/backward hardlink",
+)
+for root in (runner, original, extracted):
+    inodes = {os.stat(root / name).st_ino for name in hardlink_names}
+    assert len(inodes) == 1, f"hard-link inode relationship lost under {root}"
+    assert os.stat(root / hardlink_names[0]).st_nlink == 3
+    assert (root / hardlink_names[0]).read_bytes() == b"shared hardlink payload\n"
+
 metadata = json.loads((release_dir / "release.json").read_text())
 assert set(metadata) == {"schema_version", "channel", "metadata_url", "manager", "wine"}
 assert metadata["schema_version"] == 1

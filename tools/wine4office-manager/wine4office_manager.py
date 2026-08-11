@@ -7,10 +7,12 @@ import argparse
 import os
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -49,6 +51,159 @@ def manager_restart_command() -> list[str]:
 
 
 MANAGER_RESTART_COMMAND = manager_restart_command()
+PREFIX_MARKER_NAME = backend.PREFIX_MARKER_NAME
+PREFIX_MARKER_CONTENT = backend.PREFIX_MARKER_CONTENT
+_PREFIX_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+class WineShutdownUnavailable(FileNotFoundError):
+    """Wine could not be stopped because a required executable is missing."""
+
+
+class WineShutdownFailed(RuntimeError):
+    """Wine shutdown was attempted but was not confirmed."""
+
+
+def _lexical_prefix(value: str | os.PathLike[str]) -> Path:
+    """Validate a prefix without resolving away a symlink supplied by a caller."""
+    try:
+        raw = os.fspath(value)
+    except TypeError as error:
+        raise ValueError("The Wine environment path is invalid.") from error
+    if isinstance(raw, bytes):
+        raise ValueError("The Wine environment path must be text.")
+    expanded = os.path.expandvars(os.path.expanduser(raw.strip()))
+    if not expanded:
+        raise ValueError("The Wine environment path is empty.")
+    lexical = Path(os.path.abspath(expanded))
+    validated = backend.validate_prefix(raw)
+    if validated != lexical:
+        raise ValueError(
+            f"Refusing a Wine environment path containing a symlink: {lexical}"
+        )
+    return lexical
+
+
+def _validate_prefix_layout_fd(prefix_fd: int, prefix: Path) -> None:
+    """Validate the prefix layout without following any prefix-child symlinks."""
+    required = (
+        ("system.reg", False),
+        ("user.reg", False),
+        ("drive_c", True),
+        ("dosdevices", True),
+    )
+    for name, directory in required:
+        try:
+            entry = os.stat(name, dir_fd=prefix_fd, follow_symlinks=False)
+        except OSError as error:
+            raise ValueError(f"Wine prefix layout is incomplete: {prefix}") from error
+        if directory:
+            valid = stat.S_ISDIR(entry.st_mode)
+        else:
+            valid = stat.S_ISREG(entry.st_mode)
+        if not valid:
+            raise ValueError(f"Wine prefix layout is invalid: {prefix}")
+
+
+def _validate_marker_fd(prefix_fd: int, prefix: Path) -> None:
+    """Require the manager-owned marker using the canonical backend validator."""
+    backend.validate_prefix_ownership_fd(prefix_fd, prefix)
+
+
+def _validate_prefix_directory_fd(prefix_fd: int, prefix: Path) -> None:
+    prefix_stat = os.fstat(prefix_fd)
+    if (not stat.S_ISDIR(prefix_stat.st_mode) or prefix_stat.st_uid != os.getuid()):
+        raise ValueError(f"Wine prefix directory is unsafe: {prefix}")
+    _validate_prefix_layout_fd(prefix_fd, prefix)
+
+
+@contextmanager
+def _open_prefix_fds(value: str | os.PathLike[str], *, owned: bool):
+    """Open a prefix and its parent without following path components."""
+    prefix = _lexical_prefix(value)
+    parent_fd = os.open(str(prefix.parent), _PREFIX_OPEN_FLAGS)
+    try:
+        prefix_fd = os.open(prefix.name, _PREFIX_OPEN_FLAGS, dir_fd=parent_fd)
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    try:
+        _validate_prefix_directory_fd(prefix_fd, prefix)
+        if owned:
+            _validate_marker_fd(prefix_fd, prefix)
+        yield prefix, parent_fd, prefix_fd
+    finally:
+        os.close(prefix_fd)
+        os.close(parent_fd)
+
+
+def mark_prefix_owned(value: str | os.PathLike[str]) -> Path:
+    """Mark a successfully initialized prefix using the backend hook."""
+    return backend.mark_prefix_owned(value)
+
+
+def validate_owned_prefix(value: str | os.PathLike[str]) -> Path:
+    """Validate ownership and Wine layout while preserving the caller's path."""
+    with _open_prefix_fds(value, owned=True) as (prefix, _parent_fd, _prefix_fd):
+        return prefix
+
+
+def _ensure_prefix_owned(value: str | os.PathLike[str]) -> Path:
+    """Require the marker, creating it only for this completed initialization."""
+    try:
+        return validate_owned_prefix(value)
+    except (OSError, ValueError):
+        return backend.mark_prefix_owned(value)
+
+
+def remove_owned_prefix(value: str | os.PathLike[str]) -> Path:
+    """Delete one owned prefix through an anchored, no-follow directory handle."""
+    with _open_prefix_fds(value, owned=True) as (prefix, parent_fd, prefix_fd):
+        expected = os.fstat(prefix_fd)
+        current = os.stat(prefix.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not os.path.samestat(expected, current):
+            raise RuntimeError(f"Wine prefix changed during validation: {prefix}")
+        # Re-open the marker and layout immediately before recursive deletion.
+        _validate_prefix_directory_fd(prefix_fd, prefix)
+        _validate_marker_fd(prefix_fd, prefix)
+        shutil.rmtree(prefix.name, dir_fd=parent_fd)
+    return prefix
+
+def _discard_initialized_prefix(value: str | os.PathLike[str]) -> Path:
+    """Remove only a just-created transition target through no-follow handles."""
+    with _open_prefix_fds(value, owned=False) as (prefix, parent_fd, prefix_fd):
+        expected = os.fstat(prefix_fd)
+        current = os.stat(prefix.name, dir_fd=parent_fd, follow_symlinks=False)
+        if not os.path.samestat(expected, current):
+            raise RuntimeError(f"Wine prefix changed during initialization cleanup: {prefix}")
+        _validate_prefix_directory_fd(prefix_fd, prefix)
+        shutil.rmtree(prefix.name, dir_fd=parent_fd)
+    return prefix
+
+
+def stop_wine_confirmed(prefix: str | os.PathLike[str], wine: str,
+                        *, use_x11: bool = True) -> None:
+    """Stop Wine and convert every non-success into an explicit refusal."""
+    try:
+        backend.stop_wine(str(prefix), wine, use_x11=use_x11)
+    except FileNotFoundError as error:
+        raise WineShutdownUnavailable(
+            f"Wine shutdown could not be confirmed because an executable is missing: {error}"
+        ) from error
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise WineShutdownFailed(
+            f"Wine shutdown failed; refusing the destructive operation: {error}"
+        ) from error
+
+
+def stop_and_remove_owned_prefix(value: str | os.PathLike[str], wine: str,
+                                 *, use_x11: bool = True) -> Path:
+    """Confirm shutdown, then revalidate and remove an owned prefix."""
+    prefix = validate_owned_prefix(value)
+    stop_wine_confirmed(prefix, wine, use_x11=use_x11)
+    return remove_owned_prefix(prefix)
 
 
 class ManagerState:
@@ -131,56 +286,68 @@ class ManagerState:
 
     def update_config(self, payload: dict) -> dict:
         with self.lock:
+            previous = dict(self.config)
             candidate = self._candidate_config(payload)
-            if not backend.paths_equivalent(self.config["prefix"], candidate["prefix"]):
+            if not backend.paths_equivalent(previous["prefix"], candidate["prefix"]):
                 raise ValueError(
                     "The Wine environment path must be switched through a validated transition."
                 )
             policy_was_disabled = backend.office_telemetry_disabled(
-                self.config, candidate["prefix"]
+                previous, candidate["prefix"]
             )
             policy_disabled = backend.office_telemetry_disabled(candidate)
             compatibility_before = backend.office_compatibility_settings(
-                self.config, candidate["prefix"]
+                previous, candidate["prefix"]
             )
             compatibility_after = backend.office_compatibility_settings(candidate)
             valid_prefix = backend.classify_prefix(candidate["prefix"]) == "valid"
-            policy_applied = False
-            compatibility_changed: list[str] = []
-            try:
-                if (policy_disabled or policy_was_disabled) and valid_prefix:
-                    policy_applied = backend.apply_office_telemetry_policy(
-                        candidate["prefix"], candidate["wine"], policy_disabled,
-                        remove_managed=policy_was_disabled,
-                        use_x11=candidate.get("use_x11", True),
-                    )
-                if compatibility_after != compatibility_before and valid_prefix:
-                    compatibility_changed = backend.apply_office_compatibility_policies(
+            policy_callbacks = (
+                {"cancel_event": self.cancel_event, "process_callback": self.set_process}
+                if self.task["running"] else {}
+            )
+        policy_applied = False
+        compatibility_changed: list[str] = []
+        try:
+            if (policy_disabled or policy_was_disabled) and valid_prefix:
+                policy_applied = backend.apply_office_telemetry_policy(
+                    candidate["prefix"], candidate["wine"], policy_disabled,
+                    remove_managed=policy_was_disabled,
+                    use_x11=candidate.get("use_x11", True),
+                    **policy_callbacks,
+                )
+            if compatibility_after != compatibility_before and valid_prefix:
+                compatibility_changed = backend.apply_office_compatibility_policies(
+                    candidate["prefix"], candidate["wine"],
+                    compatibility_after, compatibility_before,
+                    use_x11=candidate.get("use_x11", True),
+                    **policy_callbacks,
+                )
+            backend.save_config(candidate)
+        except Exception:
+            if compatibility_changed:
+                try:
+                    rollback_settings = dict(compatibility_after)
+                    for policy_id in compatibility_changed:
+                        rollback_settings[policy_id] = compatibility_before[policy_id]
+                    backend.apply_office_compatibility_policies(
                         candidate["prefix"], candidate["wine"],
-                        compatibility_after, compatibility_before,
+                        rollback_settings, compatibility_after,
                         use_x11=candidate.get("use_x11", True),
+                        **policy_callbacks,
                     )
-                backend.save_config(candidate)
-            except Exception:
-                if compatibility_changed:
-                    try:
-                        rollback_settings = dict(compatibility_after)
-                        for policy_id in compatibility_changed:
-                            rollback_settings[policy_id] = compatibility_before[policy_id]
-                        backend.apply_office_compatibility_policies(
-                            candidate["prefix"], candidate["wine"],
-                            rollback_settings, compatibility_after,
-                            use_x11=candidate.get("use_x11", True),
-                        )
-                    except Exception:
-                        pass
-                if policy_applied and policy_disabled != policy_was_disabled:
-                    backend.apply_office_telemetry_policy(
-                        candidate["prefix"], candidate["wine"], policy_was_disabled,
-                        remove_managed=policy_disabled,
-                        use_x11=candidate.get("use_x11", True),
-                    )
-                raise
+                except Exception:
+                    pass
+            if policy_applied and policy_disabled != policy_was_disabled:
+                backend.apply_office_telemetry_policy(
+                    candidate["prefix"], candidate["wine"], policy_was_disabled,
+                    remove_managed=policy_disabled,
+                    use_x11=candidate.get("use_x11", True),
+                    **policy_callbacks,
+                )
+            raise
+        with self.lock:
+            if self.config != previous:
+                raise RuntimeError("The Manager configuration changed during the update.")
             self.config = candidate
             return dict(self.config)
 
@@ -259,6 +426,8 @@ class ManagerState:
             candidate = self._candidate_config(payload)
             old_prefix = str(original["prefix"])
             new_prefix = str(candidate["prefix"])
+            if initialize:
+                _lexical_prefix(new_prefix)
             if backend.paths_equivalent(old_prefix, new_prefix):
                 raise ValueError("The Wine environment path has not changed.")
             target_kind = backend.classify_prefix(new_prefix)
@@ -272,6 +441,7 @@ class ManagerState:
             if target_kind == "valid" and initialize:
                 raise ValueError("An existing valid Wine prefix must not be initialized again.")
             if delete_old:
+                validate_owned_prefix(old_prefix)
                 backend.validate_environment_deletion(old_prefix, new_prefix)
             policy_was_disabled = backend.office_telemetry_disabled(original, new_prefix)
             policy_disabled = backend.office_telemetry_disabled(candidate, new_prefix)
@@ -285,6 +455,7 @@ class ManagerState:
 
         def transition() -> str:
             initialized = False
+            marker_created = False
             staged: Path | None = None
             committed = False
             policy_applied = False
@@ -296,6 +467,8 @@ class ManagerState:
                         self.cancel_event, self.set_process,
                     )
                     initialized = True
+                    _ensure_prefix_owned(new_prefix)
+                    marker_created = True
                 if backend.classify_prefix(new_prefix) != "valid":
                     raise ValueError(
                         f"The replacement is not a valid Wine prefix: {new_prefix}"
@@ -377,15 +550,21 @@ class ManagerState:
                         )
                 if initialized and not committed:
                     try:
-                        backend.discard_initialized_environment(new_prefix, self.output)
-                    except (OSError, ValueError) as cleanup_error:
-                        self.output(f"WARNING: Could not discard uncommitted environment: {cleanup_error}")
+                        if marker_created:
+                            remove_owned_prefix(new_prefix)
+                        else:
+                            _discard_initialized_prefix(new_prefix)
+                    except (OSError, ValueError, RuntimeError) as cleanup_error:
+                        self.output(
+                            "WARNING: Could not discard uncommitted environment: "
+                            f"{cleanup_error}"
+                        )
                 raise
 
             if staged and staged.exists():
                 try:
-                    backend.finish_staged_environment_deletion(staged, self.output)
-                except OSError as error:
+                    remove_owned_prefix(staged)
+                except (OSError, ValueError, RuntimeError) as error:
                     self.output(f"WARNING: Could not remove staged old environment: {error}")
             return f"Wine environment switched to {new_prefix}"
 
@@ -490,14 +669,11 @@ class ManagerState:
                     preload_update = backend.prepare_preload_runner_update(
                         config["prefix"], config.get("use_x11", True)
                     )
-                    try:
-                        backend.stop_wine(
-                            config["prefix"], config["wine"],
-                            use_x11=config.get("use_x11", True),
-                        )
-                        self.output("Stopped the selected Wine environment before updating.")
-                    except (FileNotFoundError, OSError):
-                        pass
+                    stop_wine_confirmed(
+                        config["prefix"], config["wine"],
+                        use_x11=config.get("use_x11", True),
+                    )
+                    self.output("Stopped the selected Wine environment before updating.")
                 result = backend.install_release_updates(
                     metadata, selected, self.output, self.cancel_event,
                     progress=self.set_progress,
@@ -807,7 +983,13 @@ class ManagerState:
         with self.lock:
             self.task["foreground_ready"] = True
 
-    def start_task(self, kind: str, operation) -> None:
+    def start_task(self, kind: str, operation, completion=None) -> None:
+        """Run a blocking operation away from Qt and report its result.
+
+        ``completion`` is deliberately invoked by the worker.  Qt callers must
+        queue that callback onto their QObject thread; the worker never owns or
+        touches a widget.
+        """
         with self.lock:
             if self.task["running"]:
                 raise RuntimeError("Another operation is already running.")
@@ -819,33 +1001,88 @@ class ManagerState:
             }
             self.cancel_event.clear()
 
+        result = None
+        error = None
+
         def worker() -> None:
+            nonlocal result, error
             try:
                 result = operation()
                 with self.lock:
-                    self.task["status"] = "completed"
-                    if result:
-                        self.output(str(result))
-            except Exception as error:  # surfaced verbatim in the native operation log
+                    if self.cancel_event.is_set():
+                        self.task["status"] = "cancelled"
+                    else:
+                        self.task["status"] = "completed"
+                        if result:
+                            self.output(str(result))
+            except Exception as caught:  # surfaced verbatim in the native operation log
+                error = caught
                 with self.lock:
                     self.task["status"] = "cancelled" if self.cancel_event.is_set() else "failed"
-                    self.output(f"ERROR: {error}")
+                    self.output(f"ERROR: {caught}")
             finally:
                 with self.lock:
                     self.task["running"] = False
                     self.process = None
+                if completion is not None:
+                    completion(result, error)
 
         threading.Thread(target=worker, name=f"wine4office-{kind}", daemon=True).start()
+
+    def start_config_update(self, payload: dict, completion=None) -> None:
+        """Persist policy/config changes in a task worker."""
+        self.start_task("config", lambda: self.update_config(payload), completion)
+
+    def start_reliability_update(self, reporting_mode: str,
+                                 automatic_update_checks: bool,
+                                 completion=None) -> None:
+        """Persist reliability choices without blocking the event loop."""
+        self.start_task(
+            "reliability",
+            lambda: self.set_reliability_preferences(
+                reporting_mode, automatic_update_checks
+            ),
+            completion,
+        )
+
+    def start_automatic_update_update(self, enabled: bool, *, prompted: bool = True,
+                                      completion=None) -> None:
+        """Persist update scheduling choices in a task worker."""
+        self.start_task(
+            "automatic-updates",
+            lambda: self.set_automatic_update_checks(enabled, prompted=prompted),
+            completion,
+        )
+
+    def _terminate_process(self, process: subprocess.Popen) -> None:
+        """Terminate and reap a helper without making the Qt caller wait."""
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
 
     def cancel(self) -> None:
         self.cancel_event.set()
         with self.lock:
             process = self.process
         if process and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            threading.Thread(
+                target=self._terminate_process,
+                args=(process,),
+                name="wine4office-cancel",
+                daemon=True,
+            ).start()
+
 
 
 def main() -> int:
@@ -901,27 +1138,18 @@ def main() -> int:
         try:
             remove_prefix = None
             if args.remove_prefix:
-                remove_prefix = backend.validate_prefix(args.remove_prefix)
-                if backend.classify_prefix(str(remove_prefix)) != "valid":
-                    raise ValueError(
-                        f"Refusing to remove a path that is not a Wine prefix: {remove_prefix}"
-                    )
+                remove_prefix = validate_owned_prefix(args.remove_prefix)
             backend.uninstall_preload_service()
             backend.uninstall_automatic_update_schedule()
             if remove_prefix is not None:
                 config = backend.load_config()
-                try:
-                    backend.stop_wine(
-                        str(remove_prefix), config["wine"],
-                        use_x11=config.get("use_x11", True),
-                    )
-                except (FileNotFoundError, OSError):
-                    pass
+                remove_prefix = stop_and_remove_owned_prefix(
+                    remove_prefix, config["wine"],
+                    use_x11=config.get("use_x11", True),
+                )
+                print(f"Removed Wine environment: {remove_prefix}")
             backend.remove_app_shortcuts(backend.APP_META)
             backend.remove_manager_shortcut()
-            if remove_prefix is not None:
-                shutil.rmtree(remove_prefix)
-                print(f"Removed Wine environment: {remove_prefix}")
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"wine4office uninstall: {error}", file=sys.stderr)
             return 1

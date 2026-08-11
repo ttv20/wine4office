@@ -38,8 +38,12 @@ OFFICE_TELEMETRY_POLICY_KEY = (
 )
 OFFICE_TELEMETRY_POLICY_VALUE = "SendTelemetry"
 OFFICE_TELEMETRY_DISABLED = "3"
-WINE_X11_DRIVER_KEY = r"HKCU\Software\Wine\X11 Driver"
+WINE_DECORATED_VALUE = "Decorated"
 WINE_XVIDMODE_VALUE = "UseXVidMode"
+OFFICE_X11_EXECUTABLES = (
+    "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE",
+    "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
+)
 OFFICE_COMPATIBILITY_POLICIES = {
     "disable_animations": {
         "label": "Disable Office animations",
@@ -241,6 +245,7 @@ MAX_TEAMS_MSIX_SIZE = 512 * 1024 * 1024
 MAX_WEBVIEW2_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 WINE_GECKO_VERSION = "2.47.4"
 WINE_GECKO_ARCHITECTURES = ("x86", "x86_64")
+WINE_MONO_VERSION = "11.2.0"
 
 TOOL_META = {
     "winecfg": ("winecfg", []),
@@ -265,6 +270,8 @@ MAX_WINE_FILE_SIZE = 4 * 1024**3
 MAX_WINE_EXTRACTED_SIZE = 16 * 1024**3
 DEFAULT_UPDATE_CHANNEL = "stable"
 VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+PREFIX_MARKER_NAME = ".wine4office-managed-prefix"
+PREFIX_MARKER_CONTENT = b"Wine4OfficeManager prefix v1\n"
 _STANDALONE_VERSION_CACHE = None
 
 
@@ -588,6 +595,110 @@ def has_wine_prefix_layout(prefix: Path) -> bool:
         )
     except OSError:
         return False
+def validate_prefix_ownership_fd(prefix_fd: int, prefix: Path) -> None:
+    """Validate the manager marker through an already-open prefix directory."""
+    prefix_stat = os.fstat(prefix_fd)
+    if not stat.S_ISDIR(prefix_stat.st_mode) or prefix_stat.st_uid != os.getuid():
+        raise ValueError(f"Wine prefix directory is unsafe: {prefix}")
+    try:
+        marker_fd = os.open(
+            PREFIX_MARKER_NAME,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=prefix_fd,
+        )
+    except OSError as error:
+        raise ValueError(f"Wine prefix is not owned by Wine4Office Manager: {prefix}") from error
+    try:
+        marker_stat = os.fstat(marker_fd)
+        if (not stat.S_ISREG(marker_stat.st_mode)
+                or marker_stat.st_uid != os.getuid()
+                or stat.S_IMODE(marker_stat.st_mode) != 0o600):
+            raise ValueError(
+                f"Wine prefix ownership marker is unsafe: {prefix / PREFIX_MARKER_NAME}"
+            )
+        content = os.read(marker_fd, len(PREFIX_MARKER_CONTENT) + 1)
+        if content != PREFIX_MARKER_CONTENT:
+            raise ValueError(
+                f"Wine prefix ownership marker is invalid: {prefix / PREFIX_MARKER_NAME}"
+            )
+    finally:
+        os.close(marker_fd)
+
+
+def is_prefix_owned(prefix_value: PathValue) -> bool:
+    """Return whether prefix and its ownership marker pass all invariants."""
+    try:
+        raw = prefix_value.strip() if isinstance(prefix_value, str) else os.fspath(prefix_value)
+        expanded = os.path.expandvars(os.path.expanduser(raw))
+        lexical = Path(os.path.abspath(expanded))
+        if Path(expanded).is_symlink():
+            return False
+        prefix = validate_prefix(prefix_value)
+        if prefix != lexical:
+            return False
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW \
+            | getattr(os, "O_CLOEXEC", 0)
+        parent_fd = os.open(str(prefix.parent), flags)
+        try:
+            prefix_fd = os.open(prefix.name, flags, dir_fd=parent_fd)
+        except BaseException:
+            os.close(parent_fd)
+            raise
+        try:
+            validate_prefix_ownership_fd(prefix_fd, prefix)
+            return True
+        finally:
+            os.close(prefix_fd)
+            os.close(parent_fd)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def mark_prefix_owned(prefix_value: PathValue) -> Path:
+    """Atomically mark a successfully initialized Wine prefix as manager-owned."""
+    prefix = validate_prefix(prefix_value)
+    if not prefix.is_dir() or prefix.is_symlink() or not has_wine_prefix_layout(prefix):
+        raise ValueError(f"Cannot mark an invalid Wine prefix as manager-owned: {prefix}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    parent_fd = os.open(str(prefix.parent), flags)
+    try:
+        prefix_fd = os.open(prefix.name, flags, dir_fd=parent_fd)
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    try:
+        prefix_stat = os.fstat(prefix_fd)
+        if prefix_stat.st_uid != os.getuid():
+            raise ValueError(f"Wine prefix directory is not user-owned: {prefix}")
+        marker_fd = os.open(
+            PREFIX_MARKER_NAME,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=prefix_fd,
+        )
+        try:
+            os.fchmod(marker_fd, 0o600)
+            remaining = memoryview(PREFIX_MARKER_CONTENT)
+            while remaining:
+                written = os.write(marker_fd, remaining)
+                if not written:
+                    raise OSError("short write creating the Wine prefix ownership marker")
+                remaining = remaining[written:]
+            os.fsync(marker_fd)
+            os.fsync(prefix_fd)
+        except BaseException:
+            try:
+                os.unlink(PREFIX_MARKER_NAME, dir_fd=prefix_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(marker_fd)
+    finally:
+        os.close(prefix_fd)
+        os.close(parent_fd)
+    return prefix
 
 
 def classify_prefix(value: str) -> str:
@@ -662,69 +773,164 @@ def require_wine(value: str) -> Path:
     return wine
 
 
+def office_winappsdk_runtime_environment(prefix: str | Path) -> str | None:
+    """Return the Windows path used by Office's WinAppSDK manifest."""
+    prefix_path = Path(prefix)
+    candidates = (
+        ("Program Files/Microsoft Office/root/Office16/WinAppSDK",
+         "C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\"),
+        ("Program Files (x86)/Microsoft Office/root/Office16/WinAppSDK",
+         "C:\\Program Files (x86)\\Microsoft Office\\root\\Office16\\WinAppSDK\\"),
+        ("Program Files/Microsoft Office/Office16/WinAppSDK",
+         "C:\\Program Files\\Microsoft Office\\Office16\\WinAppSDK\\"),
+        ("Program Files (x86)/Microsoft Office/Office16/WinAppSDK",
+         "C:\\Program Files (x86)\\Microsoft Office\\Office16\\WinAppSDK\\"),
+    )
+    for relative, windows_path in candidates:
+        if (prefix_path / "drive_c" / relative).is_dir():
+            return windows_path
+    return None
+
+
 def wine_environment(prefix: str | Path, wine: str | Path,
-                     use_x11: bool = True) -> dict[str, str]:
+                     use_x11: bool = True, *, _manager_create: bool = False) -> dict[str, str]:
     env = os.environ.copy()
-    env.update({
-        "WINEPREFIX": str(prefix),
-        "WINEARCH": "win64",
-        "WINEDLLOVERRIDES": env.get("WINEDLLOVERRIDES", "riched20=n;mscoree=;mshtml=b"),
-    })
+    managed = _manager_create or is_prefix_owned(prefix)
+    env["WINEPREFIX"] = str(prefix)
+    if managed:
+        env.update({
+            "WINEARCH": "win64",
+            "WINEDLLOVERRIDES": env.get(
+                "WINEDLLOVERRIDES", "riched20=n;mshtml=b"
+            ),
+        })
+        winappsdk_runtime = office_winappsdk_runtime_environment(prefix)
+        if winappsdk_runtime:
+            env["OFFICE_WINAPPSDK_RUNTIME_DIR"] = winappsdk_runtime
     wine_bin = str(Path(wine).parent)
     env["PATH"] = wine_bin + os.pathsep + env.get("PATH", "")
-    if use_x11:
-        env.pop("WAYLAND_DISPLAY", None)
-    elif env.get("WAYLAND_DISPLAY"):
-        env.pop("DISPLAY", None)
+    if managed:
+        if use_x11:
+            env.pop("WAYLAND_DISPLAY", None)
+        elif env.get("WAYLAND_DISPLAY"):
+            env.pop("DISPLAY", None)
     return env
 
 
+
+
+def _owned_office_pids(prefix: PathValue, wine: PathValue,
+                       use_x11: bool = True) -> list[int]:
+    """Return Office PIDs authenticated to this prefix, runner, and display.
+
+    The close helper must never discover windows on its own.  Read-only procfs
+    identity checks bind each supplied PID to the selected Wine prefix and
+    runner, while the display variables bind it to this manager session.
+    """
+    selected_prefix = normalize_path(prefix)
+    runner_dir = Path(wine).resolve().parent
+    selected_environment = wine_environment(selected_prefix, wine, use_x11)
+    expected_prefix = os.fsencode(str(selected_prefix))
+    expected_arch = os.fsencode(selected_environment["WINEARCH"])
+    office_names = (
+        b"excel.exe", b"msaccess.exe", b"mspub.exe", b"onenote.exe",
+        b"outlook.exe", b"powerpnt.exe", b"visio.exe", b"winproj.exe",
+        b"winword.exe",
+    )
+    display_names = ("DISPLAY", "WAYLAND_DISPLAY")
+    pids: list[int] = []
+
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+            environment = {}
+            for item in (entry / "environ").read_bytes().split(b"\0"):
+                if b"=" in item:
+                    key, value = item.split(b"=", 1)
+                    environment[key] = value
+            if (environment.get(b"WINEPREFIX") != expected_prefix
+                    or environment.get(b"WINEARCH") != expected_arch):
+                continue
+            for name in display_names:
+                expected = selected_environment.get(name)
+                if (expected is not None
+                        and environment.get(name.encode()) != os.fsencode(expected)):
+                    break
+            else:
+                executable = Path(os.readlink(entry / "exe")).resolve()
+                if executable.parent != runner_dir:
+                    continue
+                command_line = (entry / "cmdline").read_bytes().lower().replace(b"\0", b" ")
+                if any(re.search(rb"(?:^|[\\/\s\"'])" + re.escape(name)
+                                + rb"(?:$|[\s\"'])", command_line)
+                           for name in office_names):
+                    pids.append(int(entry.name))
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            continue
+    return sorted(set(pids))
+
+
 def ensure_safe_x11_defaults(prefix_value: str, wine_value: str,
-                             use_x11: bool = True) -> bool:
-    """Disable XVidMode for an existing X11 prefix unless the user chose a value."""
+                             use_x11: bool = True, *,
+                             _manager_create: bool = False) -> bool:
+    """Set manager X11 defaults only for owned prefixes."""
     if not use_x11:
         return False
     prefix = validate_prefix(prefix_value)
+    if not _manager_create and not is_prefix_owned(prefix):
+        return False
     if classify_prefix(str(prefix)) != "valid":
         return False
     wine = require_wine(wine_value)
-    env = wine_environment(prefix, wine, True)
-    query = subprocess.run(
-        [str(wine), "reg", "query", WINE_X11_DRIVER_KEY,
-         "/v", WINE_XVIDMODE_VALUE],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        timeout=30, check=False,
-    )
-    if query.returncode == 0:
-        return False
-    subprocess.run(
-        [str(wine), "reg", "add", WINE_X11_DRIVER_KEY,
-         "/v", WINE_XVIDMODE_VALUE, "/t", "REG_SZ", "/d", "N", "/f"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        timeout=30, check=True,
-    )
-    return True
+    env = wine_environment(prefix, wine, True, _manager_create=_manager_create)
+    changed = False
+    for executable in OFFICE_X11_EXECUTABLES:
+        key = fr"HKCU\Software\Wine\AppDefaults\{executable}\X11 Driver"
+        for value in (WINE_DECORATED_VALUE, WINE_XVIDMODE_VALUE):
+            query = subprocess.run(
+                [str(wine), "reg", "query", key, "/v", value],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=30, check=False,
+            )
+            if query.returncode == 0:
+                continue
+            subprocess.run(
+                [str(wine), "reg", "add", key, "/v", value,
+                 "/t", "REG_SZ", "/d", "N", "/f"],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=30, check=True,
+            )
+            changed = True
+    return changed
 
 
 def _apply_managed_office_dword(
         prefix_value: str, wine_value: str, key: str, value: str, data: int,
         enabled: bool, *, remove_managed: bool = False,
-        use_x11: bool = True) -> bool:
-    """Set a DWORD or remove it only when it still has our expected value."""
+        use_x11: bool = True, cancel_event=None, process_callback=None) -> bool:
+    """Set or remove an Office policy only in an owned prefix."""
     prefix = validate_prefix(prefix_value)
+    if not is_prefix_owned(prefix):
+        return False
     if classify_prefix(str(prefix)) != "valid":
         raise ValueError(f"Office policy requires a valid Wine prefix: {prefix}")
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
     if enabled:
-        subprocess.run(
+        _run_cancellable_command(
             [
                 str(wine), "reg", "add", key,
                 "/v", value, "/t", "REG_DWORD",
                 "/d", str(data), "/f",
             ],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            timeout=30, check=True,
+            env, cancel_event=cancel_event, process_callback=process_callback,
         )
         return True
     if not remove_managed:
@@ -733,46 +939,44 @@ def _apply_managed_office_dword(
     query_command = [
         str(wine), "reg", "query", key, "/v", value,
     ]
-    query = subprocess.run(
-        query_command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, timeout=30, check=False,
+    query = _run_cancellable_command(
+        query_command, env, cancel_event=cancel_event,
+        process_callback=process_callback, check=False,
     )
     if query.returncode == 1:
         return False
-    if query.returncode:
-        raise subprocess.CalledProcessError(
-            query.returncode, query_command, output=query.stdout, stderr=query.stderr
-        )
     match = re.search(
         r"\bREG_DWORD\s+(0x[0-9a-f]+|\d+)\b", query.stdout, re.IGNORECASE
     )
     if not match or int(match.group(1), 0) != data:
         return False
-    subprocess.run(
+    _run_cancellable_command(
         [
             str(wine), "reg", "delete", key, "/v", value, "/f",
         ],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        timeout=30, check=True,
+        env, cancel_event=cancel_event, process_callback=process_callback,
     )
     return True
 
 
 def apply_office_telemetry_policy(prefix_value: str, wine_value: str, disabled: bool,
                                   *, remove_managed: bool = False,
-                                  use_x11: bool = True) -> bool:
+                                  use_x11: bool = True, cancel_event=None,
+                                  process_callback=None) -> bool:
     """Set or remove only Office's official SendTelemetry user policy value."""
     return _apply_managed_office_dword(
         prefix_value, wine_value,
         OFFICE_TELEMETRY_POLICY_KEY, OFFICE_TELEMETRY_POLICY_VALUE,
         int(OFFICE_TELEMETRY_DISABLED), disabled,
         remove_managed=remove_managed, use_x11=use_x11,
+        cancel_event=cancel_event, process_callback=process_callback,
     )
 
 
 def apply_office_compatibility_policies(
         prefix_value: str, wine_value: str, desired: dict[str, bool],
-        previously_managed: dict[str, bool], use_x11: bool = True) -> list[str]:
+        previously_managed: dict[str, bool], use_x11: bool = True,
+        cancel_event=None, process_callback=None) -> list[str]:
     """Apply a compatibility-policy batch and roll back completed changes on failure."""
     unknown = (set(desired) | set(previously_managed)) \
         - set(OFFICE_COMPATIBILITY_POLICIES)
@@ -790,6 +994,7 @@ def apply_office_compatibility_policies(
             changed = _apply_managed_office_dword(
                 prefix_value, wine_value, spec["key"], spec["value"], spec["data"],
                 after, remove_managed=before, use_x11=use_x11,
+                cancel_event=cancel_event, process_callback=process_callback,
             )
             if changed:
                 completed.append((policy_id, before, after))
@@ -800,6 +1005,7 @@ def apply_office_compatibility_policies(
                 _apply_managed_office_dword(
                     prefix_value, wine_value, spec["key"], spec["value"], spec["data"],
                     before, remove_managed=after, use_x11=use_x11,
+                    cancel_event=cancel_event, process_callback=process_callback,
                 )
             except Exception:
                 pass
@@ -843,6 +1049,7 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
                     process.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
                 raise RuntimeError("Operation cancelled.")
     finally:
         if process.stdout:
@@ -851,6 +1058,57 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
             process_callback(None)
     if process.returncode:
         raise subprocess.CalledProcessError(process.returncode, command)
+
+
+def _run_cancellable_command(command: list[str], env: dict[str, str], *,
+                             cancel_event=None, process_callback=None,
+                             timeout: float = 30, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a policy helper while exposing and reaping its process."""
+    if cancel_event is None and process_callback is None:
+        return subprocess.run(
+            command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout, check=check,
+        )
+    process = subprocess.Popen(
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    if process_callback:
+        process_callback(process)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                raise RuntimeError("Operation cancelled.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process_callback:
+            process_callback(None)
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check and completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode, command, output=completed.stdout, stderr=completed.stderr
+        )
+    return completed
 
 
 def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
@@ -865,9 +1123,12 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
         )
 
     graceful_close = False
+    close_command = [str(wine), "wine4officeclose.exe"]
+    for pid in _owned_office_pids(prefix, wine, use_x11):
+        close_command.extend(("--pid", str(pid)))
     try:
         subprocess.run(
-            [str(wine), "wine4officeclose.exe"],
+            close_command,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -955,6 +1216,27 @@ def install_bundled_wine_gecko(prefix: Path, wine: Path, output: Output,
         )
     return True
 
+def bundled_wine_mono_package(wine: Path) -> Path | None:
+    """Return the Wine Mono MSI shipped with the selected runner, when present."""
+    package = (wine.parent.parent / "share/wine/mono" /
+               f"wine-mono-{WINE_MONO_VERSION}-x86.msi")
+    return package if package.is_file() else None
+
+
+def install_bundled_wine_mono(prefix: Path, wine: Path, output: Output,
+                              cancel_event=None, process_callback=None) -> bool:
+    """Silently install the Wine Mono package shipped with the selected runner."""
+    package = bundled_wine_mono_package(wine)
+    if package is None:
+        return False
+    output(f"Installing bundled Wine Mono: {package.name}")
+    _stream_command(
+        [str(wine), "msiexec", "/i", str(package), "/qn"],
+        wine_environment(prefix, wine), output,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
+    return True
+
 
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
                        cancel_event=None, process_callback=None) -> str:
@@ -984,20 +1266,28 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         wineboot = sibling_tool(wine, "wineboot")
         command = [str(wineboot), "-u"] if wineboot else [str(wine), "wineboot.exe", "-u"]
         _stream_command(
-            command, wine_environment(prefix, wine), output,
+            command, wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
         install_bundled_wine_gecko(
             prefix, wine, output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
+        install_bundled_wine_mono(
+            prefix, wine, output,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
         _stream_command([
             str(wine), "reg", "add", r"HKCU\Software\Wine\Drivers", "/v", "Graphics",
             "/d", "x11,wayland", "/f",
-        ], wine_environment(prefix, wine), output,
+        ], wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback)
         if classify_prefix(str(prefix)) != "valid":
             raise RuntimeError(f"Wine initialization did not create a valid prefix at: {prefix}")
+        ensure_safe_x11_defaults(
+            str(prefix), str(wine), True, _manager_create=True,
+        )
+        mark_prefix_owned(prefix)
     except Exception:
         if prefix.exists():
             shutil.rmtree(prefix, ignore_errors=True)
@@ -1021,6 +1311,7 @@ def office_candidates(prefix: Path, executable: str) -> Iterable[Path]:
     ]
     for root in roots:
         yield root / executable
+
 
 
 def teams_candidates(prefix: Path) -> Iterable[Path]:
@@ -1074,7 +1365,9 @@ def environment_status(prefix_value: str, wine_value: str) -> dict:
 
 
 def prepare_office_building_blocks(prefix: Path) -> int:
-    """Seed Word's per-user gallery when Wine does not expose the built-in template."""
+    """Seed Word's per-user gallery only in an owned prefix."""
+    if not is_prefix_owned(prefix):
+        return 0
     office_roots = [
         prefix / "drive_c/Program Files/Microsoft Office/root/Office16",
         prefix / "drive_c/Program Files (x86)/Microsoft Office/root/Office16",
@@ -1113,6 +1406,8 @@ def prepare_office_building_blocks(prefix: Path) -> int:
 
 def register_cloud_fonts(prefix: Path, wine: Path, helper: Path | None = None,
                          use_x11: bool = True) -> None:
+    if not is_prefix_owned(prefix):
+        return
     candidates = [prefix / "register-office-cloud-fonts.sh"]
     if helper:
         candidates.append(helper)
@@ -1134,6 +1429,8 @@ def _outlook_environment(env: dict[str, str]) -> dict[str, str]:
 
 
 def prepare_outlook_first_run(prefix: Path, wine: Path, env: dict[str, str]) -> None:
+    if not is_prefix_owned(prefix):
+        return
     outlook_key = r"HKCU\Software\Microsoft\Office\16.0\Outlook"
     query = subprocess.run(
         [str(wine), "reg", "query", outlook_key, "/v", "LastUILanguage"],
@@ -1188,13 +1485,14 @@ def launch_app_process(
     executable = find_office_app(str(prefix), app)
     if not executable:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    managed = is_prefix_owned(prefix)
     ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
     if app == "word":
         prepare_office_building_blocks(prefix)
     register_cloud_fonts(prefix, wine, helper, use_x11)
     env = wine_environment(prefix, wine, use_x11)
     arguments = [_windows_document_path(document, wine, env) for document in documents]
-    if app == "outlook":
+    if app == "outlook" and managed:
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)
     if capture_diagnostics:
@@ -1491,6 +1789,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
     wine_value = shlex.quote(str(wine))
     executable_value = shlex.quote(str(executable))
     helper_value = shlex.quote(str(font_helper)) if font_helper else "''"
+    winappsdk_runtime = office_winappsdk_runtime_environment(prefix)
     lines = [
         "#!/usr/bin/env bash",
         "# Generated by Wine4OfficeManager. Manual changes will be replaced.",
@@ -1508,10 +1807,20 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         '    printf \'Wine4Office launcher: Office application is unavailable: %s\\n\' "$executable" >&2',
         "    exit 1",
         "fi",
-        'export WINEPREFIX="$prefix"',
-        "export WINEARCH=win64",
         'export PATH="${wine%/*}${PATH:+:$PATH}"',
-        'export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-riched20=n;mscoree=;mshtml=b}"',
+        'marker="$prefix/.wine4office-managed-prefix"',
+        'prefix_info=$(stat -c "%F:%u" -- "$prefix" 2>/dev/null || true)',
+        'marker_info=$(stat -c "%F:%u:%a" -- "$marker" 2>/dev/null || true)',
+        'managed_prefix=false',
+        'if [[ $prefix_info == "directory:$(id -u)" && $marker_info == "regular file:$(id -u):600" ]] && cmp -s "$marker" <(printf "Wine4OfficeManager prefix v1\\n"); then',
+        '    managed_prefix=true',
+        '    export WINEARCH=win64',
+        '    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-riched20=n;mshtml=b}"',
+        *(
+            [f"    export OFFICE_WINAPPSDK_RUNTIME_DIR={shlex.quote(winappsdk_runtime)}"]
+            if winappsdk_runtime else []
+        ),
+        "fi",
         'config_file="${XDG_CONFIG_HOME:-"$HOME/.config"}/wine4office/config.json"',
         'host_display=${DISPLAY-}',
         'host_wayland_display=${WAYLAND_DISPLAY-}',
@@ -1524,15 +1833,16 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         "        fi",
         '    done < "$config_file"',
         "fi",
-        'if [[ $use_x11 == true ]]; then',
+        'if [[ $managed_prefix == true && $use_x11 == true ]]; then',
         "    unset WAYLAND_DISPLAY",
-        'elif [[ -n ${WAYLAND_DISPLAY:-} ]]; then',
+        'elif [[ $managed_prefix == true && -n ${WAYLAND_DISPLAY:-} ]]; then',
         "    unset DISPLAY",
         "fi",
     ]
     if app == "word":
         lines.extend([
-            'users_root="$prefix/drive_c/users"',
+            'if [[ $managed_prefix == true ]]; then',
+            '    users_root="$prefix/drive_c/users"',
             'if [[ -d "$users_root" ]]; then',
             '    for office_root in \\',
             '        "$prefix/drive_c/Program Files/Microsoft Office/root/Office16" \\',
@@ -1557,17 +1867,21 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
             '        done',
             '    done',
             'fi',
+            'fi',
         ])
     lines.extend([
-        'for candidate in "$prefix/register-office-cloud-fonts.sh" "$font_helper"; do',
-        '    if [[ -n "$candidate" && -x "$candidate" ]]; then',
-        '        "$candidate" >/dev/null 2>&1 || true',
-        "        break",
-        "    fi",
-        "done",
+        'if [[ $managed_prefix == true ]]; then',
+        '    for candidate in "$prefix/register-office-cloud-fonts.sh" "$font_helper"; do',
+        '        if [[ -n "$candidate" && -x "$candidate" ]]; then',
+        '            "$candidate" >/dev/null 2>&1 || true',
+        "            break",
+        "        fi",
+        "    done",
+        "fi",
     ])
     if app == "outlook":
         lines.extend([
+            'if [[ $managed_prefix == true ]]; then',
             r"outlook_key='HKCU\Software\Microsoft\Office\16.0\Outlook'",
             'outlook_query=$("$wine" reg query "$outlook_key" /v LastUILanguage 2>/dev/null || true)',
             'if [[ $outlook_query != *LastUILanguage* ]]; then',
@@ -1587,6 +1901,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
             "outlook_overrides+=('mshtml=')",
             "printf -v WINEDLLOVERRIDES '%s;' \"${outlook_overrides[@]}\"",
             "export WINEDLLOVERRIDES=${WINEDLLOVERRIDES%;}",
+            "fi",
         ])
     lines.extend([
         "documents=()",
@@ -3516,15 +3831,26 @@ AUTOMATIC_UPDATE_TIMER = "wine4office-update-check.timer"
 PRELOAD_COMPONENTS = ("ClickToRunSvc",)
 PRELOAD_APPV_COMPONENT = "AppV"
 PRELOAD_APPV_HELPER = "wine4office-appv-preload.exe"
+PRELOAD_VOIP_COMPONENT = "VoIPBroker"
+PRELOAD_VOIP_HELPER = "wine4office-voip-broker.exe"
+PRELOAD_STATUS_COMPONENTS = PRELOAD_COMPONENTS + (
+    PRELOAD_APPV_COMPONENT,
+    PRELOAD_VOIP_COMPONENT,
+)
+PRELOAD_REQUIRED_COMPONENTS = PRELOAD_COMPONENTS + (PRELOAD_VOIP_COMPONENT,)
 PRELOAD_WORKER_BINARY = "Wine4OfficePreloadWorker"
 _LEGACY_PRELOAD_COMPONENTS = ("ClickToRunSvc", "RpcSs")
 _PRELOAD_COMPONENT_IMAGES = {"ClickToRunSvc": "OfficeClickToRun.exe"}
 _PRELOAD_SCHEMA = 1
 _PRELOAD_HEARTBEAT_SCHEMA = 1
 _PRELOAD_SYSTEMCTL_TIMEOUT = 8
+_PRELOAD_UNIT_STOP_TIMEOUT = 90
+_PRELOAD_STOP_WAIT_TIMEOUT = 120
 _PRELOAD_WINE_TIMEOUT = 12
 _PRELOAD_APPV_TIMEOUT = 15
 _PRELOAD_APPV_STOP_TIMEOUT = 5
+_PRELOAD_VOIP_TIMEOUT = 15
+_PRELOAD_VOIP_STOP_TIMEOUT = 5
 _PRELOAD_HEARTBEAT_MAX_AGE = 20
 _PRELOAD_UNIT_MARKER = "# Managed by Wine4OfficeManager: preload-service-v1"
 _AUTOMATIC_UPDATE_UNIT_MARKER = (
@@ -3730,7 +4056,7 @@ def preload_service_memory_bytes() -> int | None:
     return memory if memory >= 0 else None
 
 
-def _stop_preload_unit_and_wait(timeout: float = 30.0) -> None:
+def _stop_preload_unit_and_wait(timeout: float = _PRELOAD_STOP_WAIT_TIMEOUT) -> None:
     """Stop the preload worker and verify systemd no longer considers it active."""
     deadline = time.monotonic() + timeout
     last_detail = ""
@@ -3831,7 +4157,7 @@ def preload_service_status(prefix_value: str | None = None, wine_value: str | No
     if heartbeat:
         result["components"] = {
             name: dict(value) for name, value in heartbeat["components"].items()
-            if name in PRELOAD_COMPONENTS and isinstance(value, dict)
+            if name in PRELOAD_STATUS_COMPONENTS and isinstance(value, dict)
         }
 
     if not result["selected_matches"]:
@@ -3847,7 +4173,7 @@ def preload_service_status(prefix_value: str | None = None, wine_value: str | No
         )
         healthy = fresh and all(
             result["components"].get(name, {}).get("state") == "running"
-            for name in PRELOAD_COMPONENTS
+            for name in PRELOAD_REQUIRED_COMPONENTS
         )
         result["state"] = "active" if healthy else "degraded"
         result["detail"] = (
@@ -4032,8 +4358,9 @@ def _preload_unit_text(binding_path: Path, status_path: Path) -> str:
         "Type=simple\n"
         f"ExecStart={arguments}\n"
         "Restart=on-failure\n"
-        "KillMode=process\n"
-        "TimeoutStopSec=20\n\n"
+        "KillMode=control-group\n"
+        "SendSIGKILL=yes\n"
+        f"TimeoutStopSec={_PRELOAD_UNIT_STOP_TIMEOUT}\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"
     )
@@ -4250,7 +4577,15 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
     supported, reason = _systemd_user_capability()
     if not supported:
         raise RuntimeError(reason)
-
+    unit_path = preload_unit_path()
+    if not unit_path.is_file():
+        if action == "disable":
+            return preload_service_status(prefix_value, wine_value, use_x11)
+        raise RuntimeError("The preload service is not installed.")
+    if not _owned_preload_unit():
+        raise RuntimeError(
+            "Refusing to control an unowned user service unit: " + str(unit_path)
+        )
     if action == "disable":
         enabled, _ = _systemctl_property("is-enabled")
         if enabled:
@@ -4258,8 +4593,6 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
         return preload_service_status(prefix_value, wine_value, use_x11)
 
     binding = _read_preload_binding()
-    if not preload_unit_path().is_file():
-        raise RuntimeError("The preload service is not installed.")
     if (
         action == "start"
         and not _preload_selected_matches(binding, prefix_value, wine_value, use_x11)
@@ -4285,7 +4618,11 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
 def _preload_active_for_environment(prefix_value: str, _wine_value: str,
                                     _use_x11: bool) -> bool:
     supported, _ = _systemd_user_capability()
-    if not supported or not preload_unit_path().is_file():
+    if (
+        not supported
+        or not preload_unit_path().is_file()
+        or not _owned_preload_unit()
+    ):
         return False
     try:
         binding = _read_preload_binding()
@@ -4298,6 +4635,85 @@ def _preload_active_for_environment(prefix_value: str, _wine_value: str,
         return False
 
 
+def _preload_process_record(
+    binding: dict, component: str, process: Path
+) -> tuple[dict | None, bool]:
+    """Read one component process identity.
+
+    The boolean reports an unreadable matching image.  A process that has a
+    different prefix or executable is known not to be owned; an unreadable
+    process is never treated as owned.
+    """
+    expected_image = _PRELOAD_COMPONENT_IMAGES.get(component)
+    if expected_image is None:
+        return None, True
+    try:
+        arguments = process.joinpath("cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None, True
+    if not arguments or not arguments[0]:
+        return None, False
+    image = re.split(r"[\\/]", os.fsdecode(arguments[0]))[-1]
+    if image.casefold() != expected_image.casefold():
+        return None, False
+    try:
+        environment = process.joinpath("environ").read_bytes().split(b"\0")
+    except OSError:
+        return None, True
+    prefix_entry = os.fsencode(f"WINEPREFIX={binding['prefix']}")
+    prefix_values = [
+        entry[len(b"WINEPREFIX="):]
+        for entry in environment
+        if entry.startswith(b"WINEPREFIX=")
+    ]
+    if len(prefix_values) != 1 or prefix_values[0] != prefix_entry[len(b"WINEPREFIX="):]:
+        return None, False
+    try:
+        runner = process.joinpath("exe").resolve(strict=True)
+        stat_text = process.joinpath("stat").read_text(encoding="ascii")
+        closing_paren = stat_text.rfind(")")
+        if closing_paren < 0:
+            raise ValueError("missing process stat command name")
+        fields = stat_text[closing_paren + 2:].split()
+        starttime = fields[19]
+        pid = int(process.name)
+    except (IndexError, OSError, UnicodeError, ValueError):
+        return None, True
+    if str(runner) != binding["wine"]:
+        return None, False
+    return {
+        "pid": pid,
+        "starttime": starttime,
+        "prefix": binding["prefix"],
+        "runner": str(runner),
+    }, False
+
+
+def _preload_component_process_records(
+    binding: dict, component: str, proc_root: Path = Path("/proc")
+) -> tuple[list[dict], bool]:
+    if component not in _PRELOAD_COMPONENT_IMAGES:
+        return [], True
+    try:
+        processes = tuple(proc_root.iterdir())
+    except OSError:
+        return [], True
+
+    records: list[dict] = []
+    matching_unknown = False
+    for process in processes:
+        try:
+            if not process.name.isdigit():
+                continue
+        except OSError:
+            continue
+        record, unknown = _preload_process_record(binding, component, process)
+        if record is not None:
+            records.append(record)
+        matching_unknown = matching_unknown or unknown
+    return records, matching_unknown
+
+
 def _preload_component_process_running(
     binding: dict, component: str, proc_root: Path = Path("/proc")
 ) -> bool | None:
@@ -4305,42 +4721,74 @@ def _preload_component_process_running(
 
     ``sc query`` starts Wine's service infrastructure and may auto-start
     ClickToRunSvc. Looking at the existing Linux process first lets the worker
-    retain ownership of a service that its first query caused to start.
-    ``None`` is conservative: a matching process existed but its environment
-    could not be inspected.
+    distinguish a pre-existing service from one it launches.  ``None`` is
+    conservative: the component image is unknown, or a matching process existed
+    but its environment or identity could not be inspected.
     """
-    expected_image = _PRELOAD_COMPONENT_IMAGES.get(component)
-    if expected_image is None:
-        return None
-    try:
-        processes = tuple(proc_root.iterdir())
-    except OSError:
-        return None
-
-    matching_unknown = False
-    for process in processes:
-        if not process.name.isdigit():
-            continue
-        try:
-            arguments = process.joinpath("cmdline").read_bytes().split(b"\0")
-        except OSError:
-            continue
-        if not arguments or not arguments[0]:
-            continue
-        image = re.split(r"[\\/]", os.fsdecode(arguments[0]))[-1]
-        if image.casefold() != expected_image.casefold():
-            continue
-        try:
-            environment = process.joinpath("environ").read_bytes().split(b"\0")
-        except OSError:
-            matching_unknown = True
-            continue
-        prefix_entry = f"WINEPREFIX={binding['prefix']}".encode(
-            sys.getfilesystemencoding(), "surrogateescape"
-        )
-        if prefix_entry in environment:
-            return True
+    records, matching_unknown = _preload_component_process_records(
+        binding, component, proc_root
+    )
+    if records:
+        return True
     return None if matching_unknown else False
+
+
+def _preload_component_process_identity(
+    binding: dict, component: str, pid: int,
+    proc_root: Path = Path("/proc"),
+) -> tuple[str, dict | None]:
+    process = proc_root / str(pid)
+    if not process.is_dir():
+        return "missing", None
+    record, unknown = _preload_process_record(binding, component, process)
+    if unknown:
+        return "unknown", None
+    return ("match", record) if record is not None else ("mismatch", None)
+
+
+def _preload_ownership_record_matches(binding: dict, ownership: object) -> bool:
+    if not isinstance(ownership, dict):
+        return False
+    return (
+        set(ownership) == {"pid", "starttime", "prefix", "runner"}
+        and isinstance(ownership["pid"], int)
+        and not isinstance(ownership["pid"], bool)
+        and ownership["pid"] > 0
+        and isinstance(ownership["starttime"], str)
+        and bool(ownership["starttime"])
+        and ownership["prefix"] == binding["prefix"]
+        and ownership["runner"] == binding["wine"]
+    )
+
+
+def _preload_ownership_is_current(
+    binding: dict, component: str, ownership: object,
+    proc_root: Path = Path("/proc"),
+) -> bool:
+    if not _preload_ownership_record_matches(binding, ownership):
+        return False
+    state, current = _preload_component_process_identity(
+        binding, component, ownership["pid"], proc_root
+    )
+    return state == "match" and current == ownership
+
+
+def _preload_saved_ownership(
+    binding: dict, component: str
+) -> dict | None:
+    heartbeat, _ = _read_preload_heartbeat()
+    if not heartbeat:
+        return None
+    components = heartbeat.get("components")
+    if not isinstance(components, dict):
+        return None
+    record = components.get(component)
+    if not isinstance(record, dict):
+        return None
+    ownership = record.get("ownership")
+    if not _preload_ownership_is_current(binding, component, ownership):
+        return None
+    return dict(ownership)
 
 
 def _preload_component_state(binding: dict, component: str) -> tuple[str, str]:
@@ -4391,7 +4839,9 @@ def _preload_component_action(binding: dict, action: str, component: str) -> tup
     return completed.returncode == 0, detail or f"exit {completed.returncode}"
 
 
-def _stop_preload_appv(process: subprocess.Popen[str]) -> tuple[bool, str]:
+def _stop_preload_helper(
+    process: subprocess.Popen[str], name: str, timeout: int
+) -> tuple[bool, str]:
     if process.poll() is not None:
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
@@ -4403,7 +4853,7 @@ def _stop_preload_appv(process: subprocess.Popen[str]) -> tuple[bool, str]:
             process.stdin.write("\n")
             process.stdin.flush()
             process.stdin.close()
-        process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+        process.wait(timeout=timeout)
         if process.stdout is not None and not process.stdout.closed:
             process.stdout.close()
         return True, "stopped"
@@ -4414,30 +4864,32 @@ def _stop_preload_appv(process: subprocess.Popen[str]) -> tuple[bool, str]:
 
     process.terminate()
     try:
-        process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+        process.wait(timeout=timeout)
         if process.stdout is not None and not process.stdout.closed:
             process.stdout.close()
         return True, "terminated"
     except subprocess.TimeoutExpired:
         process.kill()
         try:
-            process.wait(timeout=_PRELOAD_APPV_STOP_TIMEOUT)
+            process.wait(timeout=timeout)
             if process.stdout is not None and not process.stdout.closed:
                 process.stdout.close()
             return True, "killed"
         except subprocess.TimeoutExpired:
-            return False, "App-V preload helper did not exit."
+            return False, f"{name} helper did not exit."
 
 
-def _start_preload_appv(binding: dict) -> tuple[subprocess.Popen[str] | None, str]:
+def _start_preload_helper(
+    binding: dict, binary: str, name: str, timeout: int
+) -> tuple[subprocess.Popen[str] | None, str]:
     runner = Path(binding["wine"]).resolve().parent.parent
     helper_candidates = (
-        runner / "lib/wine/x86_64-windows" / PRELOAD_APPV_HELPER,
-        runner / "lib64/wine/x86_64-windows" / PRELOAD_APPV_HELPER,
+        runner / "lib/wine/x86_64-windows" / binary,
+        runner / "lib64/wine/x86_64-windows" / binary,
     )
     helper = next((path for path in helper_candidates if path.is_file()), None)
     if helper is None:
-        return None, f"The selected Wine runner does not contain {PRELOAD_APPV_HELPER}."
+        return None, f"The selected Wine runner does not contain {binary}."
 
     environment = wine_environment(
         binding["prefix"], binding["wine"], binding["use_x11"]
@@ -4457,7 +4909,7 @@ def _start_preload_appv(binding: dict) -> tuple[subprocess.Popen[str] | None, st
         return None, str(error)
 
     assert process.stdout is not None
-    deadline = time.monotonic() + _PRELOAD_APPV_TIMEOUT
+    deadline = time.monotonic() + timeout
     output: list[str] = []
     while process.poll() is None:
         remaining = deadline - time.monotonic()
@@ -4475,17 +4927,37 @@ def _start_preload_appv(binding: dict) -> tuple[subprocess.Popen[str] | None, st
             process.stdout.close()
             return process, line
 
-    if process.poll() is None:
-        reason = "App-V preload helper timed out."
-    else:
-        reason = f"App-V preload helper exited with status {process.returncode}."
-    stopped, stop_detail = _stop_preload_appv(process)
+    reason = (
+        f"{name} helper timed out." if process.poll() is None
+        else f"{name} helper exited with status {process.returncode}."
+    )
+    stopped, stop_detail = _stop_preload_helper(process, name, timeout)
     detail = " | ".join(output[-3:])
     if detail:
         reason += " " + detail
     if not stopped:
         reason += " " + stop_detail
     return None, reason
+
+
+def _stop_preload_appv(process: subprocess.Popen[str]) -> tuple[bool, str]:
+    return _stop_preload_helper(process, "App-V preload", _PRELOAD_APPV_STOP_TIMEOUT)
+
+
+def _start_preload_appv(binding: dict) -> tuple[subprocess.Popen[str] | None, str]:
+    return _start_preload_helper(
+        binding, PRELOAD_APPV_HELPER, "App-V preload", _PRELOAD_APPV_TIMEOUT
+    )
+
+
+def _stop_preload_voip(process: subprocess.Popen[str]) -> tuple[bool, str]:
+    return _stop_preload_helper(process, "VoIP broker", _PRELOAD_VOIP_STOP_TIMEOUT)
+
+
+def _start_preload_voip(binding: dict) -> tuple[subprocess.Popen[str] | None, str]:
+    return _start_preload_helper(
+        binding, PRELOAD_VOIP_HELPER, "VoIP broker", _PRELOAD_VOIP_TIMEOUT
+    )
 
 
 def _write_preload_heartbeat(path: Path, components: dict, state: str,
@@ -4526,21 +4998,61 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     restart_attempts = {name: 0 for name in PRELOAD_COMPONENTS}
     appv_process: subprocess.Popen[str] | None = None
     appv_restart_attempts = 0
+    voip_process: subprocess.Popen[str] | None = None
+    voip_restart_attempts = 0
     try:
         for component in PRELOAD_COMPONENTS:
+            saved_ownership = _preload_saved_ownership(binding, component)
             preexisting = _preload_component_process_running(binding, component)
             state, detail = _preload_component_state(binding, component)
-            owned = preexisting is False and state == "running"
+            ownership = saved_ownership
             if state == "stopped":
-                started, start_detail = _preload_component_action(binding, "start", component)
-                if started:
-                    owned = True
-                    state, detail = _preload_component_state(binding, component)
-                else:
-                    detail = start_detail
+                if ownership is None and preexisting is not False:
+                    detail = (
+                        "An unowned component was discovered; refusing to restart it."
+                    )
+                elif (
+                    ownership is None
+                    and _preload_component_process_running(binding, component) is not False
+                ):
+                    detail = (
+                        "A component appeared before launch; refusing to restart it."
+                    )
+                elif ownership is not None and not _preload_ownership_is_current(
+                    binding, component, ownership
+                ):
+                    ownership = None
+                    detail = "Component ownership was lost; refusing to restart it."
+                elif ownership is None or _preload_ownership_is_current(
+                    binding, component, ownership
+                ):
+                    started, start_detail = _preload_component_action(
+                        binding, "start", component
+                    )
+                    if started:
+                        state, detail = _preload_component_state(binding, component)
+                        records, _ = _preload_component_process_records(
+                            binding, component
+                        )
+                        ownership = records[0] if records else None
+                        if ownership is None:
+                            detail = (
+                                "Component identity was not readable after start; "
+                                "ownership was not claimed."
+                            )
+                    else:
+                        detail = start_detail
+            elif ownership is None and preexisting is False:
+                # The state query may have auto-started the component.  Only
+                # adopt it after observing a complete, matching identity.
+                records, _ = _preload_component_process_records(
+                    binding, component
+                )
+                ownership = records[0] if records else None
             components[component] = {
                 "state": state,
-                "owned": owned,
+                "owned": ownership is not None,
+                "ownership": ownership,
                 "detail": detail,
             }
             _write_preload_heartbeat(status, components, "starting")
@@ -4550,14 +5062,11 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             "owned": False,
             "detail": "Waiting for Click-to-Run.",
         }
-        if components["ClickToRunSvc"]["state"] == "running":
-            appv_restart_attempts += 1
-            appv_process, detail = _start_preload_appv(binding)
-            components[PRELOAD_APPV_COMPONENT] = {
-                "state": "running" if appv_process is not None else "stopped",
-                "owned": appv_process is not None,
-                "detail": detail,
-            }
+        components[PRELOAD_VOIP_COMPONENT] = {
+            "state": "stopped",
+            "owned": False,
+            "detail": "Waiting for the desktop session bus.",
+        }
         _write_preload_heartbeat(status, components, "starting")
 
         while not stopping:
@@ -4567,19 +5076,65 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 record = components[component]
                 if state == "running":
                     restart_attempts[component] = 0
-                if state != "running" and record["owned"] and restart_attempts[component] < 3:
-                    restart_attempts[component] += 1
-                    restarted, restart_detail = _preload_component_action(
-                        binding, "start", component
-                    )
-                    if restarted:
-                        state, detail = _preload_component_state(binding, component)
+                if (
+                    state != "running"
+                    and record["owned"]
+                    and restart_attempts[component] < 3
+                ):
+                    if not _preload_ownership_is_current(
+                        binding, component, record.get("ownership")
+                    ):
+                        record["owned"] = False
+                        record["ownership"] = None
+                        detail = "Component ownership was lost; refusing to restart it."
                     else:
-                        detail = restart_detail
+                        restart_attempts[component] += 1
+                        restarted, restart_detail = _preload_component_action(
+                            binding, "start", component
+                        )
+                        if restarted:
+                            state, detail = _preload_component_state(
+                                binding, component
+                            )
+                            records, _ = _preload_component_process_records(
+                                binding, component
+                            )
+                            ownership = records[0] if records else None
+                            record["ownership"] = ownership
+                            record["owned"] = ownership is not None
+                            if ownership is None:
+                                detail = (
+                                    "Component identity was not readable after "
+                                    "restart; ownership was dropped."
+                                )
+                        else:
+                            detail = restart_detail
                 if state != "running":
                     degraded.append(component)
                 record["state"] = state
                 record["detail"] = detail
+
+            voip_record = components[PRELOAD_VOIP_COMPONENT]
+            if voip_process is not None and voip_process.poll() is None:
+                voip_restart_attempts = 0
+            if voip_process is not None and voip_process.poll() is not None:
+                _stop_preload_voip(voip_process)
+                voip_record["state"] = "stopped"
+                voip_record["owned"] = False
+                voip_record["detail"] = (
+                    f"VoIP broker exited with status {voip_process.returncode}."
+                )
+                voip_process = None
+            if voip_process is None and voip_restart_attempts < 3:
+                voip_restart_attempts += 1
+                voip_process, detail = _start_preload_voip(binding)
+                voip_record["state"] = (
+                    "running" if voip_process is not None else "stopped"
+                )
+                voip_record["owned"] = voip_process is not None
+                voip_record["detail"] = detail
+            if voip_process is None:
+                degraded.append(PRELOAD_VOIP_COMPONENT)
 
             appv_record = components[PRELOAD_APPV_COMPONENT]
             if appv_process is not None and appv_process.poll() is None:
@@ -4617,6 +5172,16 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 time.sleep(0.5)
 
         cleanup_failed: list[str] = []
+        if voip_process is not None:
+            stopped, detail = _stop_preload_voip(voip_process)
+            voip_record = components[PRELOAD_VOIP_COMPONENT]
+            voip_record["state"] = "stopped" if stopped else "unknown"
+            voip_record["owned"] = not stopped
+            voip_record["detail"] = detail
+            if not stopped:
+                cleanup_failed.append(PRELOAD_VOIP_COMPONENT)
+            _write_preload_heartbeat(status, components, "stopping")
+
         if appv_process is not None:
             stopped, detail = _stop_preload_appv(appv_process)
             appv_record = components[PRELOAD_APPV_COMPONENT]
@@ -4646,6 +5211,19 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             return 1
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
+            if not record["owned"]:
+                continue
+            if not _preload_ownership_is_current(
+                binding, component, record.get("ownership")
+            ):
+                record["owned"] = False
+                record["ownership"] = None
+                record["state"] = "unknown"
+                record["detail"] = (
+                    "Component ownership was lost; leaving the component untouched."
+                )
+                _write_preload_heartbeat(status, components, "stopping")
+                continue
             stopped, detail = _preload_component_action(binding, "stop", component)
             record["state"] = "stopped" if stopped else "unknown"
             record["detail"] = detail

@@ -22,8 +22,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Remove the optional user service while its executable and backend still exist.
-# The backend is a no-op when the user never opted in.
+
+# Validate ownership, confirm Wine shutdown, and remove the selected prefix
+# through the manager's anchored no-follow deletion helper.
+if [[ -n $REMOVE_PREFIX ]]; then
+    [[ -f "$ROOT/lib/wine4office_backend.py" &&
+       -f "$ROOT/lib/wine4office_manager.py" ]] || {
+        echo "Cannot safely remove the prefix because the installed manager backend is missing." >&2
+        exit 1
+    }
+    python3 -I - "$ROOT/lib" "$REMOVE_PREFIX" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import wine4office_backend as backend
+import wine4office_manager as manager
+
+config = backend.load_config()
+removed = manager.stop_and_remove_owned_prefix(
+    sys.argv[2], config["wine"], use_x11=config.get("use_x11", True)
+)
+print(f"Removed Wine environment: {removed}")
+PY
+fi
+
 if [[ -f "$ROOT/lib/wine4office_backend.py" ]]; then
     python3 -I - "$ROOT/lib" <<'PY'
 import sys
@@ -39,31 +60,6 @@ elif [[ -e "$CONFIG_HOME/systemd/user/wine4office-preload.service" ||
         -e "$CONFIG_HOME/systemd/user/wine4office-update-check.timer" ]]; then
     echo "Cannot safely remove Wine4Office user services because the installed backend is missing." >&2
     exit 1
-fi
-
-# Validate and stop the selected prefix while the installed backend is available.
-if [[ -n $REMOVE_PREFIX ]]; then
-    [[ -f "$ROOT/lib/wine4office_backend.py" ]] || {
-        echo "Cannot safely validate the prefix because the installed backend is missing." >&2
-        exit 1
-    }
-    REMOVE_PREFIX=$(python3 -I - "$ROOT/lib" "$REMOVE_PREFIX" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-import wine4office_backend as backend
-print(backend.validate_prefix(sys.argv[2]))
-PY
-)
-    python3 -I - "$ROOT/lib" "$REMOVE_PREFIX" <<'PY' || true
-import sys
-sys.path.insert(0, sys.argv[1])
-import wine4office_backend as backend
-config = backend.load_config()
-try:
-    backend.stop_wine(sys.argv[2], config["wine"])
-except (FileNotFoundError, OSError):
-    pass
-PY
 fi
 
 if [[ -f "$ROOT/lib/wine4office_backend.py" ]]; then
@@ -82,10 +78,6 @@ for link in "$BIN_HOME/wine4office-manager" "$BIN_HOME/wine4office-launcher"; do
     if [[ -L "$link" ]] && [[ $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f "$link"; fi
 done
 
-if [[ -n $REMOVE_PREFIX ]]; then
-    rm -rf -- "$REMOVE_PREFIX"
-    printf 'Removed Wine environment: %s\n' "$REMOVE_PREFIX"
-fi
 rm -rf "$ROOT/lib" "$ROOT/icons"
 rm -f "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher"
 if $PURGE_RUNNER; then

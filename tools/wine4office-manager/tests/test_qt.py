@@ -129,6 +129,12 @@ class QtManagerTests(unittest.TestCase):
         with mock.patch.object(self.state, "snapshot", return_value=snapshot):
             self.window.refresh_state()
         return snapshot
+    def _wait_task(self, timeout: float = 2) -> None:
+        deadline = time.monotonic() + timeout
+        while self.state.snapshot()["task"]["running"] and time.monotonic() < deadline:
+            self.application.processEvents()
+            time.sleep(0.01)
+        self.application.processEvents()
 
     def test_background_preload_controls_are_explicit_and_accessible(self):
         self.assertEqual(self.window.preload_group.title(), "Background services")
@@ -583,15 +589,16 @@ class QtManagerTests(unittest.TestCase):
         self.window.reporting_available = True
         with mock.patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted), \
              mock.patch.object(
-                 self.window, "_reliability_dialog", return_value=(dialog, ask, updates)
-             ), mock.patch.object(
-                 self.state, "set_reliability_preferences", return_value=enabled
-             ) as save, mock.patch.object(
+                 self.state, "start_reliability_update"
+             ) as start, mock.patch.object(
                  self.window, "_set_config_fields"
              ), mock.patch.object(self.window, "_route_after_first_open") as route:
+            start.side_effect = lambda mode, automatic, completion: completion(enabled, None)
             self.window.prompt_reliability_on_first_launch()
+            self.application.processEvents()
 
-        save.assert_called_once_with("ask", True)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[:2], ("ask", True))
         route.assert_called_once_with()
 
     def test_startup_finishes_reliability_choice_before_other_prompts(self):
@@ -600,7 +607,7 @@ class QtManagerTests(unittest.TestCase):
         calls = []
         with mock.patch.object(
             self.window, "prompt_reliability_on_first_launch",
-            side_effect=lambda: calls.append("reliability"),
+            side_effect=lambda _callback=None: calls.append("reliability"),
         ), mock.patch.object(
             self.window, "start_background_update_check",
             side_effect=lambda: calls.append("updates"),
@@ -614,6 +621,40 @@ class QtManagerTests(unittest.TestCase):
             calls,
             ["reliability", "updates", ("incident", incident_path)],
         )
+    def test_incident_load_is_queued_before_review_dialog(self):
+        self.window.reporting_available = True
+        incident_path = self.home / "incident.json"
+        loaded = (
+            incident_path,
+            {
+                "summary": "Wine crashed",
+                "context": "",
+                "technical": {},
+                "incident_id": "incident",
+            },
+            "trace",
+        )
+        worker_thread = []
+
+        def load(_path):
+            worker_thread.append(threading.get_ident())
+            time.sleep(0.2)
+            return loaded
+
+        with mock.patch.object(
+            qt_module.incident, "load_incident", side_effect=load
+        ), mock.patch.object(
+            qt_module.incident, "report_preview", return_value={}
+        ), mock.patch.object(
+            QDialog, "exec", return_value=QDialog.DialogCode.Rejected
+        ):
+            started = time.monotonic()
+            self.window.review_incident(incident_path)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.15)
+            self._wait_task()
+
+        self.assertNotEqual(worker_thread[0], threading.get_ident())
 
     def test_build_without_openobserve_environment_hides_reporting_controls(self):
         self.assertFalse(self.window.reporting_available)
@@ -763,6 +804,7 @@ class QtManagerTests(unittest.TestCase):
             backend, "apply_office_telemetry_policy"
         ) as apply:
             self.window.configure_privacy_settings()
+            self._wait_task()
 
         self.assertTrue(
             backend.office_telemetry_disabled(self.state.snapshot()["config"])
@@ -805,6 +847,7 @@ class QtManagerTests(unittest.TestCase):
             backend, "apply_office_compatibility_policies"
         ) as apply:
             self.window.configure_compatibility_settings()
+            self._wait_task()
 
         saved = backend.office_compatibility_settings(
             self.state.snapshot()["config"]
@@ -830,12 +873,62 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertEqual(result, "environment ready")
         create.assert_called_once_with(
-            config["prefix"], config["wine"], True, self.state.output
+            config["prefix"], config["wine"], True, self.state.output,
+            cancel_event=self.state.cancel_event,
+            process_callback=self.state.set_process,
         )
         apply.assert_called_once_with(
-            config["prefix"], config["wine"], True, use_x11=True
+            config["prefix"], config["wine"], True, use_x11=True,
+            cancel_event=self.state.cancel_event,
+            process_callback=self.state.set_process,
         )
 
+    def test_environment_creation_queues_policy_work_and_keeps_qt_responsive(self):
+        with self.state.lock:
+            self.state.config = backend.set_office_telemetry_disabled(
+                self.state.config, self.config["prefix"], True
+            )
+        worker_thread = []
+        entered = threading.Event()
+
+        def apply_policy(*args, **kwargs):
+            worker_thread.append(threading.get_ident())
+            entered.set()
+            time.sleep(0.25)
+
+        with mock.patch.object(
+            backend, "create_environment", return_value="environment ready"
+        ), mock.patch.object(
+            backend, "apply_office_telemetry_policy", side_effect=apply_policy
+        ):
+            started = time.monotonic()
+            self.window.environment_action(False)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.15)
+            self.assertTrue(entered.wait(1))
+            self.assertNotEqual(worker_thread[0], threading.get_ident())
+
+            deadline = time.monotonic() + 2
+            while self.state.snapshot()["task"]["running"] and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(0.01)
+
+        self.assertEqual(self.state.snapshot()["task"]["status"], "completed")
+
+    def test_cancel_environment_reaps_active_helper(self):
+        helper = mock.Mock()
+        helper.pid = 4312
+        helper.poll.side_effect = [None, None, 0]
+        helper.wait.return_value = 0
+        with mock.patch.object(manager.os, "killpg") as killpg:
+            self.state.set_process(helper)
+            self.state.cancel()
+            deadline = time.monotonic() + 1
+            while not helper.wait.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        killpg.assert_called_once_with(helper.pid, manager.signal.SIGTERM)
+        helper.wait.assert_called_once()
     def test_telemetry_policy_failure_is_shown_and_not_saved(self):
         dialog, checkbox = self.window._privacy_settings_dialog(self.state.config)
         checkbox.setChecked(True)
@@ -849,6 +942,7 @@ class QtManagerTests(unittest.TestCase):
             return_value=(dialog, checkbox),
         ), mock.patch.object(self.window, "show_error") as show_error:
             self.window.configure_privacy_settings()
+            self._wait_task()
 
         self.assertFalse(backend.office_telemetry_disabled(self.state.config))
         show_error.assert_called_once()

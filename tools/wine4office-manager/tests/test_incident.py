@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,19 +46,38 @@ class FakeResponse:
 
 
 class FakeProcess:
-    def __init__(self, return_code, polls=1, trace=b""):
+    def __init__(self, return_code, polls=1, trace=b"", poll_error=None):
         self.pid = os.getpid()
         self.return_code = return_code
         self.remaining_polls = polls
         self.stdout = io.BytesIO(trace)
+        self.poll_error = poll_error
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_calls = 0
 
     def poll(self):
+        if self.poll_error:
+            raise self.poll_error
         if self.remaining_polls:
             self.remaining_polls -= 1
             return None
         return self.return_code
 
-    def wait(self):
+    def terminate(self):
+        self.terminate_calls += 1
+        self.remaining_polls = 0
+        self.return_code = -15
+
+    def kill(self):
+        self.kill_calls += 1
+        self.remaining_polls = 0
+        self.return_code = -9
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if timeout is not None and self.return_code == "timeout":
+            raise subprocess.TimeoutExpired("fake", timeout)
         return self.return_code
 
 
@@ -111,6 +131,59 @@ class IncidentTests(unittest.TestCase):
         unsafe = {**COMPLETE_ENV, "OPENOBSERVE_STREAM": "../../wrong"}
         self.assertFalse(incident.reporting_available(unsafe))
 
+    def test_reporting_environment_is_removed_before_children_launch(self):
+        with mock.patch.dict(os.environ, COMPLETE_ENV, clear=False):
+            self.assertTrue(incident.reporting_available())
+            self.assertNotIn("OPENOBSERVE_TOKEN", os.environ)
+            self.assertNotIn("OPENOBSERVE_ACCOUNT", os.environ)
+            self.assertTrue(incident.reporting_available())
+            clean = incident.clean_reporting_environment({
+                **COMPLETE_ENV, "OPENOBSERVE_API_KEY": "helper-secret",
+            })
+        self.assertNotIn("OPENOBSERVE_TOKEN", clean)
+        self.assertNotIn("OPENOBSERVE_ACCOUNT", clean)
+        self.assertNotIn("OPENOBSERVE_API_KEY", clean)
+
+    def test_notification_helpers_receive_no_reporting_credentials(self):
+        completed = mock.Mock(stdout="review")
+        with mock.patch.dict(os.environ, COMPLETE_ENV, clear=False), \
+             mock.patch.object(incident.shutil, "which", return_value="notify-send"), \
+             mock.patch.object(incident.subprocess, "run", return_value=completed) as run, \
+             mock.patch.object(incident.subprocess, "Popen") as popen:
+            incident._notify(Path("/tmp/report.json"), ["manager"], "crash")
+        for key in incident.REPORTING_ENVIRONMENT_KEYS:
+            self.assertNotIn(key, run.call_args.kwargs["env"])
+            self.assertNotIn(key, popen.call_args.kwargs["env"])
+
+    def test_redirect_handler_refuses_cross_origin_and_downgrade(self):
+        handler = incident._SafeRedirectHandler()
+        request = incident.urllib.request.Request(
+            "https://reports.example/api", headers={"Authorization": "Basic secret"},
+        )
+        for target in (
+            "https://attacker.example/collect",
+            "http://reports.example/collect",
+        ):
+            with self.subTest(target=target), self.assertRaises(incident.urllib.error.HTTPError):
+                handler.redirect_request(request, None, 302, "Found", {}, target)
+        redirected = handler.redirect_request(
+            request, None, 302, "Found", {}, "/next",
+        )
+        self.assertEqual(redirected.get_header("Authorization"), "Basic secret")
+
+    def test_redaction_removes_json_and_underscore_credentials(self):
+        redacted = incident.redact_text(
+            '{"token":"json-secret","nested":{"access_token":"access-secret",'
+            '"client_secret":"client-secret"}} OPENOBSERVE_TOKEN=env-secret '
+            'refresh_token: refresh-secret Authorization: Bearer auth-secret'
+        )
+        for secret in (
+            "json-secret", "access-secret", "client-secret", "env-secret",
+            "refresh-secret", "auth-secret",
+        ):
+            self.assertNotIn(secret, redacted)
+        self.assertGreaterEqual(redacted.count("<redacted>"), 6)
+
     def test_redaction_removes_home_email_and_secret_shapes(self):
         home = str(Path.home())
         redacted = incident.redact_text(
@@ -154,6 +227,51 @@ class IncidentTests(unittest.TestCase):
         self.assertEqual(record["kind"], "crash")
         self.assertNotIn("private", trace)
 
+    def test_malformed_supervisor_setting_reaps_detached_child(self):
+        process = FakeProcess(0, polls=20)
+        with mock.patch.dict(os.environ, {
+            "WINE4OFFICE_HANG_INTERVAL_SECONDS": "not-a-number",
+        }), self.assertRaises(ValueError):
+            incident.supervise_process(
+                process, app="powerpoint", prefix=Path("/tmp/prefix"),
+                use_x11=False, manager_version="test", runner_version="test",
+            )
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertGreaterEqual(process.wait_calls, 1)
+
+    def test_probe_failure_reaps_detached_child(self):
+        process = FakeProcess(0, polls=20)
+        probe = mock.Mock()
+        probe.ping.side_effect = RuntimeError("probe failed")
+        with mock.patch.dict(os.environ, {"DISPLAY": ":99"}), \
+             mock.patch.object(incident.time, "monotonic", return_value=float("inf")), \
+             self.assertRaises(RuntimeError):
+            incident.supervise_process(
+                process, app="powerpoint", prefix=Path("/tmp/prefix"),
+                use_x11=True, manager_version="test", runner_version="test",
+                probe_factory=lambda *_args: probe, hang_interval=0.01,
+            )
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertGreaterEqual(process.wait_calls, 1)
+        probe.close.assert_called_once()
+
+    def test_cancel_and_process_errors_reap_detached_child(self):
+        for error in (KeyboardInterrupt(), RuntimeError("poll failed")):
+            with self.subTest(error=type(error).__name__):
+                process = FakeProcess(0, polls=20, poll_error=error
+                                      if isinstance(error, RuntimeError) else None)
+                sleep = mock.patch.object(
+                    incident.time, "sleep", side_effect=error,
+                )
+                with sleep, self.assertRaises(type(error)):
+                    incident.supervise_process(
+                        process, app="powerpoint", prefix=Path("/tmp/prefix"),
+                        use_x11=False, manager_version="test", runner_version="test",
+                    )
+                self.assertEqual(process.terminate_calls, 1)
+                self.assertGreaterEqual(process.wait_calls, 1)
+
+
     def test_repeated_x11_ping_failures_create_one_hang_incident(self):
         process = FakeProcess(0, polls=5)
         probe = FakeProbe()
@@ -178,12 +296,17 @@ class IncidentTests(unittest.TestCase):
         attachment.write_bytes(b"synthetic office file")
         captured = {}
 
-        def urlopen(request, **_kwargs):
-            captured["request"] = request
-            documents = request.data.decode().splitlines()
-            return FakeResponse(items=len(documents) // 2)
+        def build_opener(*_handlers):
+            class FakeOpener:
+                def open(self, request, **_kwargs):
+                    captured["request"] = request
+                    documents = request.data.decode().splitlines()
+                    return FakeResponse(items=len(documents) // 2)
 
-        with mock.patch.object(incident.urllib.request, "urlopen", side_effect=urlopen):
+            return FakeOpener()
+
+        with mock.patch.object(incident.urllib.request, "build_opener",
+                               side_effect=build_opener):
             result = incident.submit_incident(
                 path, context="Opened Layout repeatedly", technical={"safe": True},
                 trace="bounded trace", attachment=attachment,

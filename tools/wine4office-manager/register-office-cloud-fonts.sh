@@ -4,6 +4,19 @@
 set -eu
 
 prefix=${WINEPREFIX:-$HOME/.wine}
+marker="$prefix/.wine4office-managed-prefix"
+marker_info=$(stat -c '%F:%u:%a' -- "$marker" 2>/dev/null || true)
+[ "$marker_info" = "regular file:$(id -u):600" ] || {
+    echo "wine4office: refusing cloud-font registration in an unowned prefix" >&2
+    exit 0
+}
+marker_text=$(cat "$marker" 2>/dev/null || true)
+marker_size=$(wc -c < "$marker" 2>/dev/null | tr -d ' ' || true)
+[ "$marker_size" = 29 ] &&
+    [ "$marker_text" = "Wine4OfficeManager prefix v1" ] || {
+    echo "wine4office: refusing cloud-font registration in an unowned prefix" >&2
+    exit 0
+}
 fonts_dir="$prefix/drive_c/windows/Fonts"
 tmp=${TMPDIR:-/tmp}
 font_list="$tmp/wine4office-office-cloud-fonts.$$"

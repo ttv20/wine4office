@@ -8,6 +8,7 @@ import ctypes
 import ctypes.util
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -17,6 +18,7 @@ import ssl
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -36,6 +38,19 @@ ATTACHMENT_SUFFIXES = frozenset({
     ".csv", ".txt",
 })
 STREAM_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+REPORTING_ENVIRONMENT_KEYS = frozenset({
+    "OPENOBSERVE_URL",
+    "OPENOBSERVE_ACCOUNT",
+    "OPENOBSERVE_TOKEN",
+    "OPENOBSERVE_ORG",
+    "OPENOBSERVE_STREAM",
+    "OPENOBSERVE_TRACE_STREAM",
+    "OPENOBSERVE_ARTIFACT_STREAM",
+})
+_CACHED_OPENOBSERVE_ENVIRONMENT: dict[str, str] | None = None
+SECRET_KEY_NAMES = frozenset({
+    "authorization", "credential", "password", "passwd", "secret", "token",
+})
 APP_EXECUTABLES = {
     "word": "winword.exe",
     "excel": "excel.exe",
@@ -61,12 +76,34 @@ def _https_url(value: str, label: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
 
 
+def _is_reporting_environment_key(key: str) -> bool:
+    return key in REPORTING_ENVIRONMENT_KEYS or key.startswith("OPENOBSERVE_")
+
+
+def clean_reporting_environment(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy an environment without reporting configuration or credentials."""
+    source = os.environ if environ is None else environ
+    return {
+        key: value for key, value in source.items()
+        if not _is_reporting_environment_key(key)
+    }
+
+
+def _remove_reporting_environment() -> None:
+    for key in list(os.environ):
+        if _is_reporting_environment_key(key):
+            os.environ.pop(key, None)
+
+
 def openobserve_environment(environ: dict[str, str] | None = None) -> dict[str, str] | None:
     """Return complete runtime OpenObserve configuration, or hide the feature.
 
     Secrets are read only from the process environment and are never persisted in
-    the Manager configuration or an incident file.
+    the Manager configuration or an incident file.  Once read, reporting
+    configuration is removed from the process environment so Wine, Office and
+    helper children cannot inherit it.
     """
+    global _CACHED_OPENOBSERVE_ENVIRONMENT
     source = os.environ if environ is None else environ
     names = {
         "url": "OPENOBSERVE_URL",
@@ -77,7 +114,15 @@ def openobserve_environment(environ: dict[str, str] | None = None) -> dict[str, 
         "trace_stream": "OPENOBSERVE_TRACE_STREAM",
         "artifact_stream": "OPENOBSERVE_ARTIFACT_STREAM",
     }
+    if (environ is None
+            and not any(_is_reporting_environment_key(name) for name in source)):
+        return (
+            dict(_CACHED_OPENOBSERVE_ENVIRONMENT)
+            if _CACHED_OPENOBSERVE_ENVIRONMENT is not None else None
+        )
     values = {key: str(source.get(name, "")).strip() for key, name in names.items()}
+    if environ is None:
+        _remove_reporting_environment()
     if not all(values.values()):
         return None
     values["url"] = _https_url(values["url"], "OPENOBSERVE_URL")
@@ -86,6 +131,8 @@ def openobserve_environment(environ: dict[str, str] | None = None) -> dict[str, 
     for key in ("org", "incident_stream", "trace_stream", "artifact_stream"):
         if not STREAM_PATTERN.fullmatch(values[key]):
             raise ValueError(f"{names[key]} is invalid.")
+    if environ is None:
+        _CACHED_OPENOBSERVE_ENVIRONMENT = dict(values)
     return values
 
 
@@ -103,8 +150,45 @@ def monitoring_enabled(config: dict, environ: dict[str, str] | None = None) -> b
     )
 
 
+def _initialize_reporting_environment() -> None:
+    if not any(_is_reporting_environment_key(name) for name in os.environ):
+        return
+    try:
+        openobserve_environment()
+    except ValueError:
+        _remove_reporting_environment()
+
+
+_initialize_reporting_environment()
+
+
+def _is_secret_key(name: object) -> bool:
+    normalized = re.sub(r"[-.]", "_", str(name).strip("\"'")).casefold()
+    if normalized in SECRET_KEY_NAMES:
+        return True
+    return normalized.endswith((
+        "token", "secret", "password", "passwd", "authorization", "credential",
+        "_api_key", "_access_key", "apikey", "accesskey",
+    ))
+
+
+def _redact_structure(value):
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if _is_secret_key(key) else _redact_structure(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_structure(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_structure(item) for item in value)
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
 def redact_text(value: str) -> str:
-    """Remove common identity, path and secret shapes from diagnostic text."""
+    """Remove common identity, path and structured credential shapes."""
     text = str(value)
     home = str(Path.home())
     if home and home != "/":
@@ -113,11 +197,37 @@ def redact_text(value: str) -> str:
     text = re.sub(
         r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "<redacted-email>", text,
     )
-    text = re.sub(
-        r"(?i)\b(token|password|passwd|secret|authorization)\s*[:=]\s*[^\s,;]+",
-        lambda match: f"{match.group(1)}=<redacted>", text,
+
+    def replace_quoted(match: re.Match[str]) -> str:
+        if not _is_secret_key(match.group("key")):
+            return match.group(0)
+        quote = match.group("quote")
+        return f"{match.group('key')}{match.group('separator')}{quote}<redacted>{quote}"
+
+    for quote in ('"', "'"):
+        quoted = re.compile(
+            rf'(?P<key>"?[A-Za-z][A-Za-z0-9_.-]*"?)'
+            rf'(?P<separator>\s*[:=]\s*)(?P<quote>{quote})'
+            rf'(?P<value>(?:\\.|[^{quote}\\])*){quote}'
+        )
+        text = quoted.sub(replace_quoted, text)
+
+    def replace_unquoted(match: re.Match[str]) -> str:
+        if not _is_secret_key(match.group("key")):
+            return match.group(0)
+        return f"{match.group('key')}{match.group('separator')}<redacted>"
+
+    authorization = re.compile(
+        r'(?P<key>"?[A-Za-z0-9_.-]*authorization"?)'
+        r'(?P<separator>\s*[:=]\s*)(?P<value>[^,\r\n;}\]]+)',
+        re.I,
     )
-    return text
+    text = authorization.sub(replace_unquoted, text)
+    unquoted = re.compile(
+        r'(?P<key>"?[A-Za-z][A-Za-z0-9_.-]*"?)'
+        r'(?P<separator>\s*[:=]\s*)(?P<value>[^,\s;}\]]+)'
+    )
+    return unquoted.sub(replace_unquoted, text)
 
 
 def _linux_release() -> str:
@@ -218,13 +328,13 @@ def create_incident(*, kind: str, app: str, summary: str, trace: str,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pending",
         "kind": kind,
-        "summary": str(summary)[:500],
+        "summary": redact_text(str(summary))[:500],
         "exit_code": exit_code,
         "context": "",
-        "technical": technical_report(
+        "technical": _redact_structure(technical_report(
             app=app, use_x11=use_x11, manager_version=manager_version,
             runner_version=runner_version,
-        ),
+        )),
         "trace_file": trace_path.name,
         "attachment": None,
     }
@@ -283,10 +393,10 @@ def report_preview(record: dict, *, context: str, technical: dict, trace: str,
         "incident_id": record["incident_id"],
         "created_at": record["created_at"],
         "kind": record["kind"],
-        "summary": record["summary"],
+        "summary": redact_text(str(record["summary"])),
         "exit_code": record.get("exit_code"),
-        "context": str(context),
-        "technical": technical,
+        "context": redact_text(str(context)),
+        "technical": _redact_structure(technical),
         "trace": {
             "included": bool(trace),
             "bytes": len(trace.encode("utf-8", errors="replace")),
@@ -324,6 +434,37 @@ def _tls_context() -> ssl.SSLContext:
             except (OSError, ssl.SSLError):
                 continue
     return context
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    @staticmethod
+    def _origin(value: str) -> tuple[str, str, int] | None:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return None
+        if not parsed.hostname or parsed.username or parsed.password:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        if port is None:
+            port = 443 if parsed.scheme.lower() == "https" else 80
+        return parsed.scheme.lower(), parsed.hostname.rstrip(".").casefold(), port
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl.replace(" ", "%20"))
+        source_origin = self._origin(req.full_url)
+        target_origin = self._origin(target)
+        source_scheme = urllib.parse.urlsplit(req.full_url).scheme.lower()
+        target_scheme = urllib.parse.urlsplit(target).scheme.lower()
+        if (source_origin is None or target_origin is None
+                or source_origin != target_origin
+                or (source_scheme == "https" and target_scheme == "http")):
+            raise urllib.error.HTTPError(
+                target, code, "Unsafe report redirect refused.", headers, fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
 
 
 def submit_incident(path_value: str | os.PathLike[str], *, context: str,
@@ -383,15 +524,20 @@ def submit_incident(path_value: str | os.PathLike[str], *, context: str,
             "User-Agent": "Wine4Office-Manager/incident-report",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout, context=_tls_context()) as response:
+    opener = urllib.request.build_opener(
+        _SafeRedirectHandler(),
+        urllib.request.HTTPSHandler(context=_tls_context()),
+    )
+    with opener.open(request, timeout=timeout) as response:
         response_data = json.loads(response.read().decode("utf-8"))
         status = response.status
     if status != 200 or response_data.get("errors") is not False:
         raise RuntimeError("OpenObserve rejected one or more report records.")
     record["status"] = "sent"
+    record["summary"] = preview["summary"]
     record["sent_at"] = datetime.now(timezone.utc).isoformat()
-    record["context"] = str(context)
-    record["technical"] = technical
+    record["context"] = redact_text(str(context))
+    record["technical"] = _redact_structure(technical)
     record["attachment"] = preview["attachment"]
     _write_private(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
     return {
@@ -674,6 +820,7 @@ def _notify(path: Path, review_command: Iterable[str] | None, kind: str) -> None
     notifier = shutil.which("notify-send")
     if not notifier:
         return
+    safe_env = clean_reporting_environment()
     command = [
         notifier, "--app-name=Wine4Office", "--urgency=normal",
         "--action=review=Review report",
@@ -682,13 +829,13 @@ def _notify(path: Path, review_command: Iterable[str] | None, kind: str) -> None
     ]
     try:
         completed = subprocess.run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            command, env=safe_env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, timeout=300, check=False,
         )
         if completed.stdout.strip() == "review" and review_command:
             subprocess.Popen(
                 [*review_command, "--review-incident", str(path)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                env=safe_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, start_new_session=True,
             )
     except (OSError, subprocess.SubprocessError):
@@ -696,11 +843,38 @@ def _notify(path: Path, review_command: Iterable[str] | None, kind: str) -> None
             subprocess.run(
                 [notifier, "Wine4Office issue detected",
                  "A local diagnostic report is ready in Wine4Office Manager."],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=safe_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=10, check=False,
             )
         except (OSError, subprocess.SubprocessError):
             pass
+
+
+def _terminate_and_wait(process: subprocess.Popen) -> None:
+    """Stop a detached child and reap it without masking the original failure."""
+    try:
+        process.terminate()
+    except BaseException:
+        pass
+    try:
+        process.wait(timeout=5)
+        return
+    except TypeError:
+        try:
+            process.wait()
+        except BaseException:
+            pass
+        return
+    except BaseException:
+        pass
+    try:
+        process.kill()
+    except BaseException:
+        pass
+    try:
+        process.wait()
+    except BaseException:
+        pass
 
 
 def supervise_process(process: subprocess.Popen, *, app: str, prefix: Path,
@@ -710,32 +884,38 @@ def supervise_process(process: subprocess.Popen, *, app: str, prefix: Path,
                       hang_interval: float | None = None,
                       hang_timeout: float | None = None,
                       hang_failures: int | None = None) -> int:
-    ring = RollingTrace()
-    reader = threading.Thread(
-        target=_read_trace, args=(process.stdout, ring),
-        name=f"wine4office-{app}-trace", daemon=True,
-    )
-    reader.start()
-    interval = hang_interval if hang_interval is not None else float(
-        os.environ.get("WINE4OFFICE_HANG_INTERVAL_SECONDS", "5")
-    )
-    timeout = hang_timeout if hang_timeout is not None else float(
-        os.environ.get("WINE4OFFICE_HANG_TIMEOUT_SECONDS", "3")
-    )
-    threshold = hang_failures if hang_failures is not None else int(
-        os.environ.get("WINE4OFFICE_HANG_FAILURES", "3")
-    )
+    ring = None
+    reader = None
+    reader_started = False
     probe = None
-    if use_x11 and os.environ.get("DISPLAY"):
-        try:
-            factory = probe_factory or X11WindowProbe
-            probe = factory(process.pid, prefix, app)
-        except (OSError, RuntimeError, ValueError):
-            probe = None
-    next_probe = time.monotonic() + max(0.05, interval)
-    failures = 0
     incident_path = None
     try:
+        ring = RollingTrace()
+        reader = threading.Thread(
+            target=_read_trace, args=(process.stdout, ring),
+            name=f"wine4office-{app}-trace", daemon=True,
+        )
+        reader.start()
+        reader_started = True
+        interval = hang_interval if hang_interval is not None else float(
+            os.environ.get("WINE4OFFICE_HANG_INTERVAL_SECONDS", "5")
+        )
+        timeout = hang_timeout if hang_timeout is not None else float(
+            os.environ.get("WINE4OFFICE_HANG_TIMEOUT_SECONDS", "3")
+        )
+        threshold = hang_failures if hang_failures is not None else int(
+            os.environ.get("WINE4OFFICE_HANG_FAILURES", "3")
+        )
+        if not math.isfinite(interval) or not math.isfinite(timeout):
+            raise ValueError("Hang monitoring settings must be finite numbers.")
+        if use_x11 and os.environ.get("DISPLAY"):
+            try:
+                factory = probe_factory or X11WindowProbe
+                probe = factory(process.pid, prefix, app)
+            except (OSError, RuntimeError, ValueError):
+                probe = None
+        next_probe = time.monotonic() + max(0.05, interval)
+        failures = 0
         while process.poll() is None:
             now = time.monotonic()
             if probe is not None and now >= next_probe and incident_path is None:
@@ -762,13 +942,17 @@ def supervise_process(process: subprocess.Popen, *, app: str, prefix: Path,
                 next_probe = now + max(0.05, interval)
             time.sleep(0.05)
         return_code = int(process.wait())
+    except BaseException:
+        _terminate_and_wait(process)
+        raise
     finally:
         if probe is not None:
             try:
                 probe.close()
-            except Exception:
+            except BaseException:
                 pass
-        reader.join(timeout=2)
+        if reader_started and reader is not None:
+            reader.join(timeout=2)
     trace = ring.text()
     crash_markers = re.search(r"(?i)(unhandled exception|wine:.*fault|segmentation fault)", trace)
     if incident_path is None and (return_code != 0 or crash_markers):

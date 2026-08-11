@@ -40,6 +40,10 @@ class ManagerTests(unittest.TestCase):
         (path / "dosdevices").mkdir(exist_ok=True)
         return path
 
+    def _mark_prefix(self, path):
+        manager.mark_prefix_owned(path)
+        return path
+
 
     def test_manager_uses_native_qt_without_web_server(self):
         entrypoint = (MANAGER_DIR / "wine4office_manager.py").read_text()
@@ -263,6 +267,7 @@ class ManagerTests(unittest.TestCase):
 
         def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
             self._make_prefix(Path(prefix))
+            self._mark_prefix(Path(prefix))
             return "ready"
 
         with mock.patch.object(
@@ -295,6 +300,7 @@ class ManagerTests(unittest.TestCase):
 
         def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
             self._make_prefix(Path(prefix))
+            self._mark_prefix(Path(prefix))
             return "ready"
 
         with mock.patch.object(
@@ -337,6 +343,7 @@ class ManagerTests(unittest.TestCase):
         config = backend.default_config()
         config["use_x11"] = False
         with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(manager.incident, "monitoring_enabled", return_value=False), \
              mock.patch.object(backend, "launch_app") as launch, \
              mock.patch.object(sys, "argv", ["Wine4OfficeManager", "word"]):
             result = manager.main()
@@ -410,6 +417,7 @@ class ManagerTests(unittest.TestCase):
         def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
             self.assertEqual(state.config["prefix"], str(old))
             self._make_prefix(Path(prefix), "new")
+            self._mark_prefix(Path(prefix))
             return "ready"
 
         with mock.patch.object(backend, "create_environment", side_effect=initialize):
@@ -418,6 +426,9 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(state.config["prefix"], str(new))
         self.assertTrue((old / "system.reg").is_file())
+        marker = new / manager.PREFIX_MARKER_NAME
+        self.assertEqual(marker.read_bytes(), manager.PREFIX_MARKER_CONTENT)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
         self.assertEqual(state.snapshot()["task"]["status"], "completed")
 
     def test_existing_valid_target_switches_without_initialization(self):
@@ -472,6 +483,7 @@ class ManagerTests(unittest.TestCase):
 
         def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
             self._make_prefix(Path(prefix), "new")
+            self._mark_prefix(Path(prefix))
             cancel_event.set()
             return "ready"
 
@@ -488,8 +500,8 @@ class ManagerTests(unittest.TestCase):
         state = manager.ManagerState()
         old = Path(state.config["prefix"])
         new = self.home / "new-prefix"
-        for prefix in (old, new):
-            self._make_prefix(prefix)
+        self._mark_prefix(self._make_prefix(old))
+        self._make_prefix(new)
         staged = old.with_name(".old-staged")
 
         def stage(old_value, new_value, wine_value, output):
@@ -510,8 +522,8 @@ class ManagerTests(unittest.TestCase):
         state = manager.ManagerState()
         old = Path(state.config["prefix"])
         new = self.home / "new-prefix"
-        for prefix in (old, new):
-            self._make_prefix(prefix)
+        self._mark_prefix(self._make_prefix(old))
+        self._make_prefix(new)
         staged = old.with_name(".old-staged")
         events = []
 
@@ -522,12 +534,12 @@ class ManagerTests(unittest.TestCase):
             old.rename(staged)
             return staged
 
-        def finish(staged_value, output):
+        def finish(staged_value):
             self.assertEqual(state.config["prefix"], str(new))
             events.append(("delete", staged_value))
 
         with mock.patch.object(backend, "stage_environment_deletion", side_effect=stage), \
-             mock.patch.object(backend, "finish_staged_environment_deletion", side_effect=finish):
+             mock.patch.object(manager, "remove_owned_prefix", side_effect=finish):
             state.start_environment_transition({"prefix": str(new)}, False, True)
             self._wait(state)
 
@@ -539,8 +551,8 @@ class ManagerTests(unittest.TestCase):
         state = manager.ManagerState()
         old = Path(state.config["prefix"])
         new = self.home / "new-prefix"
-        for prefix in (old, new):
-            self._make_prefix(prefix)
+        self._mark_prefix(self._make_prefix(old))
+        self._make_prefix(new)
         staged = old.with_name(".old-staged")
 
         def stage(old_value, new_value, wine_value, output):
@@ -560,7 +572,7 @@ class ManagerTests(unittest.TestCase):
     def test_overlapping_deletion_is_rejected_before_work_starts(self):
         state = manager.ManagerState()
         old = Path(state.config["prefix"])
-        self._make_prefix(old)
+        self._mark_prefix(self._make_prefix(old))
         nested = old / "nested"
 
         with self.assertRaisesRegex(ValueError, "overlapping"):
@@ -568,6 +580,51 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(state.config["prefix"], str(old))
         self.assertFalse(state.task["running"])
+
+    def test_owned_prefix_removal_requires_marker_and_layout(self):
+        ordinary = self.home / "user-data"
+        ordinary.mkdir()
+        (ordinary / "important").write_text("keep")
+        with self.assertRaisesRegex(ValueError, "Wine prefix"):
+            manager.remove_owned_prefix(ordinary)
+        self.assertEqual((ordinary / "important").read_text(), "keep")
+
+    def test_owned_prefix_removal_refuses_symlink_swap(self):
+        prefix = self._mark_prefix(self._make_prefix(self.home / "selected-prefix"))
+        victim = self.home / "user-data"
+        victim.mkdir()
+        (victim / "important").write_text("keep")
+        moved = self.home / "selected-prefix-original"
+        prefix.rename(moved)
+        prefix.symlink_to(victim, target_is_directory=True)
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            manager.remove_owned_prefix(prefix)
+        self.assertTrue(moved.exists())
+        self.assertEqual((victim / "important").read_text(), "keep")
+
+    def test_owned_prefix_removal_deletes_only_valid_owned_prefix(self):
+        prefix = self._mark_prefix(self._make_prefix(self.home / "selected-prefix"))
+        removed = manager.remove_owned_prefix(prefix)
+        self.assertEqual(removed, prefix)
+        self.assertFalse(prefix.exists())
+
+    def test_prefix_removal_refuses_when_wine_shutdown_fails(self):
+        prefix = self._mark_prefix(self._make_prefix(self.home / "selected-prefix"))
+        with mock.patch.object(
+            backend, "stop_wine", side_effect=RuntimeError("wineserver still active")
+        ):
+            with self.assertRaisesRegex(manager.WineShutdownFailed, "shutdown failed"):
+                manager.stop_and_remove_owned_prefix(prefix, "/runner/bin/wine")
+        self.assertTrue(prefix.exists())
+
+    def test_prefix_removal_reports_missing_wine_executable_separately(self):
+        with mock.patch.object(
+            backend, "stop_wine", side_effect=FileNotFoundError("wine missing")
+        ):
+            with self.assertRaisesRegex(
+                    manager.WineShutdownUnavailable, "executable is missing"):
+                manager.stop_wine_confirmed(self.home / "prefix", "/runner/bin/wine")
 
     def test_preload_status_cache_refreshes_off_main_thread(self):
         entered = __import__("threading").Event()

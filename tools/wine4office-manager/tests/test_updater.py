@@ -415,6 +415,36 @@ class UpdaterTests(unittest.TestCase):
         restore.assert_called_once_with(transition)
         self.assertEqual(state.snapshot()["task"]["status"], "failed")
 
+    def test_wine_update_aborts_when_shutdown_is_not_confirmed(self):
+        config = {
+            "prefix": str(self.home / ".wine4office"),
+            "wine": str(self.home / "old-runner/bin/wine"),
+            "desktop_copy": False,
+            "use_x11": True,
+            "update_url": "https://updates.example/release.json",
+            "skipped_updates": {},
+        }
+        with mock.patch.object(backend, "load_config", return_value=config), \
+             mock.patch.object(
+                 backend, "prepare_preload_runner_update", return_value=None
+             ), mock.patch.object(
+                 backend, "stop_wine", side_effect=RuntimeError("wineserver still active")
+             ), mock.patch.object(
+                 backend, "install_release_updates"
+             ) as install:
+            state = manager.ManagerState()
+            state.updater["offer"] = {
+                "id": "wine:11.2.0",
+                "metadata": self.metadata(),
+                "updates": {"wine": self.metadata()["wine"]},
+            }
+            state.start_offered_update(["wine"])
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        install.assert_not_called()
+        self.assertEqual(state.snapshot()["task"]["status"], "failed")
+        self.assertIn("Wine shutdown failed", state.snapshot()["task"]["log"])
+
     def test_failed_prefix_self_update_does_not_switch_runner(self):
         parsed = backend.parse_release_metadata(
             self.metadata(), "https://updates.example/release.json"
@@ -837,6 +867,7 @@ class UpdaterTests(unittest.TestCase):
             "word", str(self.home / "document.docx"),
         ]
         with mock.patch.object(manager.sys, "argv", arguments), \
+             mock.patch.object(manager.incident, "monitoring_enabled", return_value=False), \
              mock.patch.object(backend, "launch_app", return_value=1234) as launch:
             self.assertEqual(manager.main(), 0)
         launch.assert_called_once_with(

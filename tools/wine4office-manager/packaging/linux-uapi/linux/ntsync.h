@@ -8,6 +8,7 @@
 #ifndef __LINUX_NTSYNC_H
 #define __LINUX_NTSYNC_H
 
+#include <linux/ioctl.h>
 #include <linux/types.h>
 
 struct ntsync_sem_args {

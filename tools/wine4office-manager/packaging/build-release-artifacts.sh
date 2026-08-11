@@ -23,6 +23,9 @@ for gecko_arch in x86 x86_64; do
     gecko="$RUNNER/share/wine/gecko/wine-gecko-${GECKO_VERSION}-${gecko_arch}.msi"
     [[ -f "$gecko" ]] || { echo "Runner is missing bundled Wine Gecko: $gecko" >&2; exit 1; }
 done
+MONO_VERSION=11.2.0
+mono="$RUNNER/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi"
+[[ -f "$mono" ]] || { echo "Runner is missing bundled Wine Mono: $mono" >&2; exit 1; }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
 command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
@@ -41,10 +44,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 install -m 0755 "$MANAGER" "$TMP/$MANAGER_NAME"
 
-# Transform archive member names only. Symlink targets and every staged runner
-# file remain byte-for-byte and metadata-for-metadata as installed by Wine.
+# Transform archive member and hard-link names. Keep symlink targets and every staged
+# runner file byte-for-byte and metadata-for-metadata as installed by Wine.
 tar -C "$RUNNER" \
-    --transform="flags=r;s|^\\.$|$WINE_ROOT|;s|^\\./|$WINE_ROOT/|" \
+    --transform="flags=rhS;s|^\\.$|$WINE_ROOT|;s|^\\./|$WINE_ROOT/|" \
     -cf - . | zstd -T0 -19 --long=27 --no-progress -o "$TMP/$WINE_NAME"
 
 mapfile -t roots < <(tar --zstd -tf "$TMP/$WINE_NAME" | sed 's|/.*||' | sort -u)
@@ -63,6 +66,11 @@ for gecko_arch in x86 x86_64; do
         exit 1
     }
 done
+tar --zstd -tf "$TMP/$WINE_NAME" \
+    | grep -Fx "$WINE_ROOT/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi" >/dev/null || {
+    echo "Wine archive is missing Wine Mono" >&2
+    exit 1
+}
 
 (
     cd "$TMP"

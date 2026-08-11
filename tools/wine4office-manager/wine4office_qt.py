@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, Qt, QUrl
+from PySide6.QtCore import QObject, QSize, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -65,6 +65,53 @@ import wine4office_desktop as desktop
 import wine4office_i18n as i18n
 
 
+def _create_environment_worker(state, config: dict, recreate: bool) -> str:
+    """Create a prefix and apply its policies without a Qt object reference."""
+    result = backend.create_environment(
+        config["prefix"], config["wine"], recreate, state.output,
+        cancel_event=state.cancel_event,
+        process_callback=state.set_process,
+    )
+    if state.cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
+    if backend.office_telemetry_disabled(config):
+        backend.apply_office_telemetry_policy(
+            config["prefix"], config["wine"], True,
+            use_x11=config.get("use_x11", True),
+            cancel_event=state.cancel_event,
+            process_callback=state.set_process,
+        )
+    if state.cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
+    compatibility = backend.office_compatibility_settings(config)
+    if any(compatibility.values()):
+        backend.apply_office_compatibility_policies(
+            config["prefix"], config["wine"], compatibility,
+            {policy_id: False for policy_id in compatibility},
+            use_x11=config.get("use_x11", True),
+            cancel_event=state.cancel_event,
+            process_callback=state.set_process,
+        )
+    if state.cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
+    return result
+
+
+class _UiDispatcher(QObject):
+    """Queue worker completions onto the QObject/main thread."""
+
+    invoke = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoke.connect(self._invoke, Qt.ConnectionType.QueuedConnection)
+
+    @Slot(object)
+    def _invoke(self, callback) -> None:
+        callback()
+
+
+
 class ManagerWindow(QMainWindow):
     ENVIRONMENT_PAGE = 0
     INSTALL_PAGE = 1
@@ -72,11 +119,11 @@ class ManagerWindow(QMainWindow):
     OFFICE_SETTINGS_PAGE = 3
     TOOLS_PAGE = 4
     MAINTENANCE_PAGE = 5
-
     def __init__(self, state, launcher: Path, icons: Path, font_helper: Path,
                  restart_command: list[str] | None = None,
                  review_incident: Path | None = None) -> None:
         super().__init__()
+        self._ui_dispatcher = _UiDispatcher()
         self.state = state
         self.launcher = launcher
         self.icons = icons
@@ -126,8 +173,19 @@ class ManagerWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_state)
         self.timer.start(1200)
+
         self.refresh_state()
         self._translate_ui()
+    def _queue_ui(self, callback) -> None:
+        """Queue a state/widget update for the Qt object thread."""
+        self._ui_dispatcher.invoke.emit(callback)
+
+    def _task_completion(self, callback):
+        """Adapt a worker completion to a queued UI callback."""
+        def complete(result, error) -> None:
+            self._queue_ui(lambda: callback(result, error))
+        return complete
+
 
     def _standard_icon(self, icon: QStyle.StandardPixmap) -> QIcon:
         return self.style().standardIcon(icon)
@@ -1032,17 +1090,17 @@ class ManagerWindow(QMainWindow):
             policy_id: checkbox.isChecked()
             for policy_id, checkbox in checkboxes.items()
         }
-        try:
-            self.state.update_config({
+        self._start_config_update(
+            {
                 "prefix": config["prefix"],
                 "office_compatibility_settings": desired,
-            })
-        except Exception as error:
-            self.show_error(error)
-            self._sync_office_settings_summary(config["prefix"])
-            return
-        self._sync_office_settings_summary(config["prefix"])
-        self.notify("Office compatibility settings applied.")
+            },
+            on_success=lambda _saved: (
+                self._sync_office_settings_summary(config["prefix"]),
+                self.notify("Office compatibility settings applied."),
+            ),
+            error_prefix="Could not apply Office compatibility settings",
+        )
 
     def _privacy_settings_dialog(
             self, config: dict) -> tuple[QDialog, QCheckBox]:
@@ -1085,17 +1143,17 @@ class ManagerWindow(QMainWindow):
         self._translate_ui(dialog)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        try:
-            self.state.update_config({
+        self._start_config_update(
+            {
                 "prefix": config["prefix"],
                 "disable_office_telemetry": telemetry.isChecked(),
-            })
-        except Exception as error:
-            self.show_error(error)
-            self._sync_office_settings_summary(config["prefix"])
-            return
-        self._sync_office_settings_summary(config["prefix"])
-        self.notify("Office privacy settings applied.")
+            },
+            on_success=lambda _saved: (
+                self._sync_office_settings_summary(config["prefix"]),
+                self.notify("Office privacy settings applied."),
+            ),
+            error_prefix="Could not apply Office privacy settings",
+        )
 
     def show_security_settings(self) -> None:
         QMessageBox.information(
@@ -1424,6 +1482,24 @@ class ManagerWindow(QMainWindow):
             return False
         return True
 
+    def _start_config_update(self, payload: dict, on_success=None,
+                             error_prefix: str = "Could not save settings") -> None:
+        """Apply config and policy changes in a worker, then update widgets queued."""
+        def finished(saved, error) -> None:
+            if error is not None:
+                self._restore_config_fields()
+                self.show_error(f"{error_prefix}: {error}")
+                return
+            self._set_config_fields(saved)
+            if on_success is not None:
+                on_success(saved)
+
+        try:
+            self.state.start_config_update(payload, self._task_completion(finished))
+            self.refresh_state()
+        except Exception as error:
+            self.show_error(f"{error_prefix}: {error}")
+
     def require_selected_apps(self, exactly_one: bool = False) -> list[str] | None:
         apps = self.selected_apps()
         if (exactly_one and len(apps) != 1) or (not exactly_one and not apps):
@@ -1433,33 +1509,25 @@ class ManagerWindow(QMainWindow):
         return apps
 
     def _create_environment(self, config: dict, recreate: bool) -> str:
-        result = backend.create_environment(
-            config["prefix"], config["wine"], recreate, self.state.output
-        )
-        if backend.office_telemetry_disabled(config):
-            backend.apply_office_telemetry_policy(
-                config["prefix"], config["wine"], True,
-                use_x11=config.get("use_x11", True),
-            )
-        compatibility = backend.office_compatibility_settings(config)
-        if any(compatibility.values()):
-            backend.apply_office_compatibility_policies(
-                config["prefix"], config["wine"], compatibility,
-                {policy_id: False for policy_id in compatibility},
-                use_x11=config.get("use_x11", True),
-            )
-        return result
+        """Compatibility wrapper for tests and non-Qt callers."""
+        return _create_environment_worker(self.state, config, recreate)
 
 
     def environment_action(self, recreate: bool) -> None:
-        config = self.save_config()
-        if not config:
+        if not self.ensure_idle():
             return
+        values = self.config_values()
+        old_prefix = self.state.configured_prefix()
+        if not backend.paths_equivalent(old_prefix, values["prefix"]):
+            config = self.save_config()
+            if not config:
+                return
+            values = config
         if recreate:
             result = QMessageBox.warning(
                 self,
                 "Recreate Wine environment",
-                f"Permanently replace {config['prefix']}?\n\n"
+                f"Permanently replace {values['prefix']}?\n\n"
                 "Office, settings, accounts and files stored inside that environment will be removed. "
                 "The old environment is restored only if initialization fails.",
                 QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
@@ -1470,7 +1538,9 @@ class ManagerWindow(QMainWindow):
         try:
             self.state.start_task(
                 "environment",
-                lambda: self._create_environment(config, recreate),
+                lambda: _create_environment_worker(
+                    self.state, self.state.update_config(values), recreate
+                ),
             )
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
@@ -1625,10 +1695,14 @@ class ManagerWindow(QMainWindow):
 
     def finish_startup(self) -> None:
         """Finish first-open choices before showing update or incident prompts."""
-        self.prompt_reliability_on_first_launch()
-        self.start_background_update_check()
-        if self.initial_incident is not None:
-            self.review_incident(self.initial_incident)
+        def continue_startup() -> None:
+            self.start_background_update_check()
+            if self.initial_incident is not None:
+                self.review_incident(self.initial_incident)
+
+        if self.prompt_reliability_on_first_launch(continue_startup):
+            return
+        continue_startup()
 
     def _route_after_first_open(self) -> None:
         try:
@@ -1704,11 +1778,11 @@ class ManagerWindow(QMainWindow):
         layout.addWidget(buttons)
         return dialog, ask, updates
 
-    def prompt_reliability_on_first_launch(self) -> None:
+    def prompt_reliability_on_first_launch(self, on_complete=None) -> bool:
         with self.state.lock:
             config = dict(self.state.config)
         if config.get("reliability_prompted") is True:
-            return
+            return False
         if self.reporting_available:
             dialog, ask, updates = self._reliability_dialog()
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
@@ -1722,15 +1796,25 @@ class ManagerWindow(QMainWindow):
         else:
             reporting_mode = incident.REPORT_MODE_DISABLED
             automatic_checks = config.get("automatic_update_checks") is True
+
+        def completed(saved, error) -> None:
+            if error is not None:
+                self.show_error(f"Could not save reliability settings: {error}")
+                return
+            self._set_config_fields(saved)
+            self._route_after_first_open()
+            if on_complete is not None:
+                on_complete()
+
         try:
-            saved = self.state.set_reliability_preferences(
-                reporting_mode, automatic_checks
+            self.state.start_reliability_update(
+                reporting_mode, automatic_checks, self._task_completion(completed)
             )
+            self.refresh_state()
         except Exception as error:
             self.show_error(f"Could not save reliability settings: {error}")
-            return
-        self._set_config_fields(saved)
-        self._route_after_first_open()
+            return False
+        return True
 
     def set_incident_reporting_mode(self, ask_enabled: bool) -> None:
         if not self.initialized or not self.reporting_available:
@@ -1739,29 +1823,49 @@ class ManagerWindow(QMainWindow):
             automatic_checks = (
                 self.state.config.get("automatic_update_checks") is True
             )
-        try:
-            saved = self.state.set_reliability_preferences(
-                incident.REPORT_MODE_ASK if ask_enabled else incident.REPORT_MODE_DISABLED,
-                automatic_checks,
+
+        def completed(saved, error) -> None:
+            if error is not None:
+                self._restore_config_fields()
+                self.show_error(f"Could not save incident reporting mode: {error}")
+                return
+            self._set_config_fields(saved)
+            self.notify(
+                "Issue detection and review prompts enabled."
+                if ask_enabled else "Issue detection and reporting disabled."
             )
+
+        try:
+            self.state.start_reliability_update(
+                incident.REPORT_MODE_ASK if ask_enabled else incident.REPORT_MODE_DISABLED,
+                automatic_checks, self._task_completion(completed),
+            )
+            self.refresh_state()
         except Exception as error:
             self._restore_config_fields()
             self.show_error(f"Could not save incident reporting mode: {error}")
-            return
-        self._set_config_fields(saved)
-        self.notify(
-            "Issue detection and review prompts enabled."
-            if ask_enabled else "Issue detection and reporting disabled."
-        )
 
-    def review_incident(self, path: Path) -> None:
+    def review_incident(self, path: Path, loaded=None) -> None:
         if not self.reporting_available:
             return
-        try:
-            incident_path, record, stored_trace = incident.load_incident(path)
-        except Exception as error:
-            self.show_error(f"Could not open the local incident report: {error}")
+        if loaded is None:
+            def finished(result, error) -> None:
+                if error is not None:
+                    self.show_error(f"Could not open the local incident report: {error}")
+                    return
+                self.review_incident(path, result)
+
+            try:
+                self.state.start_task(
+                    "incident-load",
+                    lambda: incident.load_incident(path),
+                    self._task_completion(finished),
+                )
+                self.refresh_state()
+            except Exception as error:
+                self.show_error(f"Could not open the local incident report: {error}")
             return
+        incident_path, record, stored_trace = loaded
         dialog = QDialog(self)
         dialog.setWindowTitle("Review Wine4Office report")
         dialog.setMinimumSize(720, 460)
@@ -1894,36 +1998,91 @@ class ManagerWindow(QMainWindow):
         layout.addWidget(buttons)
 
         def delete_local() -> None:
-            try:
+            delete_button.setEnabled(False)
+
+            def delete_operation() -> None:
+                if self.state.cancel_event.is_set():
+                    raise RuntimeError("Operation cancelled.")
                 incident.delete_incident(incident_path)
+                if self.state.cancel_event.is_set():
+                    raise RuntimeError("Operation cancelled.")
+
+            try:
+                self.state.start_task(
+                    "incident-delete",
+                    delete_operation,
+                    self._task_completion(
+                        lambda _result, error: (
+                            self.show_error(f"Could not delete the local report: {error}")
+                            if error is not None else dialog.accept()
+                        )
+                    ),
+                )
+                self.refresh_state()
             except Exception as error:
+                delete_button.setEnabled(True)
                 self.show_error(f"Could not delete the local report: {error}")
-                return
-            dialog.accept()
 
         def send_report() -> None:
             if not refresh_exact():
                 details_toggle.setChecked(True)
                 return
-            report_button.setEnabled(False)
             try:
-                result = incident.submit_incident(
-                    incident_path, context=context.toPlainText(),
-                    technical=current_technical(), trace=trace.toPlainText(),
-                    attachment=attachment_edit.text() or None,
+                report_context = context.toPlainText()
+                report_technical = current_technical()
+                report_trace = trace.toPlainText()
+                report_attachment = attachment_edit.text() or None
+            except Exception as error:
+                details_toggle.setChecked(True)
+                self.show_error(f"The report was not sent: {error}")
+                return
+            report_button.setEnabled(False)
+
+            def finished(result, error) -> None:
+                if error is not None:
+                    report_button.setEnabled(True)
+                    self.show_error(f"The report was not sent: {error}")
+                    return
+                QMessageBox.information(
+                    dialog, "Report sent",
+                    f"Report {result['incident_id']} was sent successfully.",
                 )
+                dialog.accept()
+
+            def submit_operation():
+                if self.state.cancel_event.is_set():
+                    raise RuntimeError("Operation cancelled.")
+                result = incident.submit_incident(
+                    incident_path, context=report_context,
+                    technical=report_technical, trace=report_trace,
+                    attachment=report_attachment,
+                )
+                if self.state.cancel_event.is_set():
+                    raise RuntimeError("Operation cancelled.")
+                return result
+
+            try:
+                self.state.start_task(
+                    "incident-submit", submit_operation,
+                    self._task_completion(finished),
+                )
+                self.refresh_state()
             except Exception as error:
                 report_button.setEnabled(True)
                 self.show_error(f"The report was not sent: {error}")
+
+        def cancel_report() -> None:
+            with self.state.lock:
+                task = dict(self.state.task)
+            if task["running"] and task["kind"] in {
+                    "incident-delete", "incident-submit"}:
+                self.state.cancel()
+                cancel_button.setEnabled(False)
                 return
-            QMessageBox.information(
-                dialog, "Report sent",
-                f"Report {result['incident_id']} was sent successfully.",
-            )
-            dialog.accept()
+            dialog.reject()
 
         delete_button.clicked.connect(delete_local)
-        cancel_button.clicked.connect(dialog.reject)
+        cancel_button.clicked.connect(cancel_report)
         report_button.clicked.connect(send_report)
         dialog.exec()
 
@@ -1934,31 +2093,37 @@ class ManagerWindow(QMainWindow):
 
     def _apply_automatic_update_checks(self, enabled: bool,
                                        *, prompted: bool) -> None:
-        try:
-            config = self.state.set_automatic_update_checks(
-                enabled, prompted=prompted
-            )
-        except Exception as error:
+        def completed(config, error) -> None:
+            if error is not None:
+                self.automatic_update_checks.blockSignals(True)
+                with self.state.lock:
+                    current = self.state.config.get("automatic_update_checks") is True
+                self.automatic_update_checks.setChecked(current)
+                self.automatic_update_checks.blockSignals(False)
+                self.show_error(
+                    f"Could not {'enable' if enabled else 'disable'} automatic "
+                    f"update checks: {error}"
+                )
+                return
             self.automatic_update_checks.blockSignals(True)
-            with self.state.lock:
-                current = self.state.config.get("automatic_update_checks") is True
-            self.automatic_update_checks.setChecked(current)
-            self.automatic_update_checks.blockSignals(False)
-            self.show_error(
-                f"Could not {'enable' if enabled else 'disable'} automatic "
-                f"update checks: {error}"
+            self.automatic_update_checks.setChecked(
+                config.get("automatic_update_checks") is True
             )
-            return
-        self.automatic_update_checks.blockSignals(True)
-        self.automatic_update_checks.setChecked(
-            config.get("automatic_update_checks") is True
-        )
-        self.automatic_update_checks.blockSignals(False)
-        self.notify(
-            "Background update checks enabled."
-            if enabled else
-            "Background update checks disabled; checks on Manager open remain enabled."
-        )
+            self.automatic_update_checks.blockSignals(False)
+            self.notify(
+                "Background update checks enabled."
+                if enabled else
+                "Background update checks disabled; checks on Manager open remain enabled."
+            )
+
+        try:
+            self.state.start_automatic_update_update(
+                enabled, prompted=prompted,
+                completion=self._task_completion(completed),
+            )
+            self.refresh_state()
+        except Exception as error:
+            completed(None, error)
 
     def start_update(self) -> None:
         config = self.save_config()

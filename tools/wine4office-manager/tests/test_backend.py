@@ -54,12 +54,16 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
-    def _make_prefix(self, path, registry="registry"):
+    def _make_prefix(self, path, registry="registry", managed=True):
         path.mkdir(parents=True, exist_ok=True)
         (path / "system.reg").write_text(registry)
         (path / "user.reg").write_text(registry)
         (path / "drive_c").mkdir(exist_ok=True)
         (path / "dosdevices").mkdir(exist_ok=True)
+        if managed:
+            marker = path / backend.PREFIX_MARKER_NAME
+            marker.write_bytes(backend.PREFIX_MARKER_CONTENT)
+            marker.chmod(0o600)
         return path
 
     def test_default_prefix_is_home_wine4office(self):
@@ -231,6 +235,22 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertEqual(run.call_args.kwargs["env"]["WINEPREFIX"], str(prefix.resolve()))
         self.assertTrue(run.call_args.kwargs["check"])
+    def test_unmarked_prefix_does_not_receive_office_registry_defaults(self):
+        prefix = self._make_prefix(self.home / "ordinary-prefix", managed=False)
+        with mock.patch.object(backend.subprocess, "run") as run:
+            self.assertFalse(backend.apply_office_telemetry_policy(
+                str(prefix), str(self.wine), True, use_x11=False,
+            ))
+            self.assertEqual(
+                backend.apply_office_compatibility_policies(
+                    str(prefix), str(self.wine),
+                    {"disable_animations": True},
+                    {"disable_animations": False},
+                    use_x11=False,
+                ),
+                [],
+            )
+        run.assert_not_called()
 
     def test_unchecking_removes_only_managed_value_and_tolerates_absence(self):
         prefix = self._make_prefix(self.home / "selected-prefix")
@@ -370,24 +390,65 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertFalse(rollback.args[5])
         self.assertTrue(rollback.kwargs["remove_managed"])
 
-    def test_wine_environment_applies_display_precedence_for_both_modes(self):
+    def test_wine_environment_gates_display_and_dll_defaults_on_prefix_marker(self):
+        marked = self._make_prefix(self.home / "marked-prefix")
+        unmarked = self._make_prefix(self.home / "unmarked-prefix", managed=False)
         with mock.patch.dict(
-            os.environ, {"DISPLAY": ":7", "WAYLAND_DISPLAY": "wayland-7"}
+            os.environ, {
+                "DISPLAY": ":7",
+                "WAYLAND_DISPLAY": "wayland-7",
+                "WINEDLLOVERRIDES": "user32=b",
+            }
         ):
-            x11 = backend.wine_environment("/tmp/prefix", self.wine, True)
-            wayland = backend.wine_environment("/tmp/prefix", self.wine, False)
+            marked_x11 = backend.wine_environment(marked, self.wine, True)
+            unmarked_x11 = backend.wine_environment(unmarked, self.wine, True)
+            marked_wayland = backend.wine_environment(marked, self.wine, False)
+            unmarked_wayland = backend.wine_environment(unmarked, self.wine, False)
 
-        self.assertEqual(x11["DISPLAY"], ":7")
-        self.assertNotIn("WAYLAND_DISPLAY", x11)
-        self.assertEqual(wayland["WAYLAND_DISPLAY"], "wayland-7")
-        self.assertNotIn("DISPLAY", wayland)
+        self.assertEqual(marked_x11["DISPLAY"], ":7")
+        self.assertNotIn("WAYLAND_DISPLAY", marked_x11)
+        self.assertEqual(marked_x11["WINEARCH"], "win64")
+        self.assertEqual(marked_x11["WINEDLLOVERRIDES"], "user32=b")
+        self.assertEqual(marked_wayland["WAYLAND_DISPLAY"], "wayland-7")
+        self.assertNotIn("DISPLAY", marked_wayland)
+        self.assertNotIn("WINEARCH", unmarked_x11)
+        self.assertEqual(unmarked_x11["WINEDLLOVERRIDES"], "user32=b")
+        self.assertIn("WAYLAND_DISPLAY", unmarked_wayland)
+        self.assertIn("DISPLAY", unmarked_wayland)
 
-    def test_existing_x11_prefix_gets_safe_xvidmode_default(self):
+    def test_managed_environment_keeps_builtin_mscoree_enabled(self):
+        marked = self._make_prefix(self.home / "marked-prefix")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            environment = backend.wine_environment(marked, self.wine, True)
+
+        overrides = environment["WINEDLLOVERRIDES"].split(";")
+        self.assertIn("riched20=n", overrides)
+        self.assertIn("mshtml=b", overrides)
+        self.assertFalse(any(item.lower().startswith("mscoree=") for item in overrides))
+
+    def test_managed_environment_exposes_office_winappsdk_runtime(self):
+        marked = self._make_prefix(self.home / "marked-prefix")
+        (marked / "drive_c/Program Files/Microsoft Office/root/Office16/WinAppSDK").mkdir(
+            parents=True
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            environment = backend.wine_environment(marked, self.wine, True)
+
+        self.assertEqual(
+            environment["OFFICE_WINAPPSDK_RUNTIME_DIR"],
+            "C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\",
+        )
+
+
+    def test_existing_marked_prefix_gets_safe_office_x11_defaults(self):
         prefix = self._make_prefix(self.home / "selected-prefix")
         missing = mock.Mock(returncode=1, stdout="", stderr="not found")
         added = mock.Mock(returncode=0, stdout="", stderr="")
+        present = mock.Mock(returncode=0, stdout="", stderr="")
         with mock.patch.object(
-            backend.subprocess, "run", side_effect=[missing, added]
+            backend, "OFFICE_X11_EXECUTABLES", ("WINWORD.EXE",)
+        ), mock.patch.object(
+            backend.subprocess, "run", side_effect=[missing, added, present]
         ) as run:
             changed = backend.ensure_safe_x11_defaults(
                 str(prefix), str(self.wine), True
@@ -395,14 +456,27 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertTrue(changed)
         self.assertEqual(run.call_args_list[1].args[0], [
-            str(self.wine), "reg", "add", backend.WINE_X11_DRIVER_KEY,
-            "/v", backend.WINE_XVIDMODE_VALUE, "/t", "REG_SZ", "/d", "N", "/f",
+            str(self.wine), "reg", "add",
+            r"HKCU\Software\Wine\AppDefaults\WINWORD.EXE\X11 Driver",
+            "/v", backend.WINE_DECORATED_VALUE, "/t", "REG_SZ", "/d", "N", "/f",
         ])
 
-    def test_existing_x11_prefix_preserves_explicit_xvidmode_choice(self):
+    def test_unmarked_prefix_keeps_upstream_x11_defaults(self):
+        prefix = self._make_prefix(self.home / "selected-prefix", managed=False)
+        with mock.patch.object(backend.subprocess, "run") as run:
+            changed = backend.ensure_safe_x11_defaults(
+                str(prefix), str(self.wine), True
+            )
+
+        self.assertFalse(changed)
+        run.assert_not_called()
+
+    def test_existing_x11_prefix_preserves_explicit_choices(self):
         prefix = self._make_prefix(self.home / "selected-prefix")
-        present = mock.Mock(returncode=0, stdout="UseXVidMode REG_SZ Y\n", stderr="")
+        present = mock.Mock(returncode=0, stdout="present\n", stderr="")
         with mock.patch.object(
+            backend, "OFFICE_X11_EXECUTABLES", ("WINWORD.EXE",)
+        ), mock.patch.object(
             backend.subprocess, "run", return_value=present
         ) as run:
             changed = backend.ensure_safe_x11_defaults(
@@ -410,7 +484,28 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             )
 
         self.assertFalse(changed)
-        run.assert_called_once()
+        self.assertEqual(run.call_count, 2)
+    def test_prefix_marker_requires_exact_safe_file_invariant(self):
+        valid = self._make_prefix(self.home / "valid-prefix")
+        self.assertTrue(backend.is_prefix_owned(valid))
+
+        wrong_mode = self._make_prefix(self.home / "wrong-mode")
+        (wrong_mode / backend.PREFIX_MARKER_NAME).chmod(0o644)
+        self.assertFalse(backend.is_prefix_owned(wrong_mode))
+
+        wrong_content = self._make_prefix(self.home / "wrong-content")
+        (wrong_content / backend.PREFIX_MARKER_NAME).write_bytes(b"unsafe\n")
+        self.assertFalse(backend.is_prefix_owned(wrong_content))
+
+        symlinked = self._make_prefix(self.home / "symlinked")
+        target = self.home / "marker-target"
+        target.write_bytes(backend.PREFIX_MARKER_CONTENT)
+        target.chmod(0o600)
+        marker = symlinked / backend.PREFIX_MARKER_NAME
+        marker.unlink()
+        marker.symlink_to(target)
+        self.assertFalse(backend.is_prefix_owned(symlinked))
+
 
     def test_native_wayland_does_not_change_xvidmode(self):
         prefix = self._make_prefix(self.home / "selected-prefix")
@@ -429,7 +524,6 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertEqual(environment["DISPLAY"], ":7")
 
-
     def test_rejects_dangerous_prefixes(self):
         for value in ("/", "/usr", "/var", str(self.home), ""):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -439,6 +533,15 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         prefix = self.home / ".wine4office"
         message = backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
         self.assertTrue(backend.has_wine_prefix_layout(prefix))
+        self.assertTrue(backend.is_prefix_owned(prefix))
+        self.assertEqual(
+            (prefix / backend.PREFIX_MARKER_NAME).read_bytes(),
+            backend.PREFIX_MARKER_CONTENT,
+        )
+        self.assertEqual(
+            stat.S_IMODE((prefix / backend.PREFIX_MARKER_NAME).stat().st_mode),
+            0o600,
+        )
         self.assertIn(str(prefix), message)
 
     def test_create_environment_installs_both_bundled_gecko_architectures(self):
@@ -477,6 +580,27 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertFalse(prefix.exists())
 
+    def test_create_environment_installs_bundled_mono(self):
+        prefix = self.home / ".wine4office"
+        mono = self.runner.parent / "share/wine/mono"
+        mono.mkdir(parents=True)
+        package = mono / f"wine-mono-{backend.WINE_MONO_VERSION}-x86.msi"
+        package.write_bytes(b"msi")
+        commands = []
+        stream_command = backend._stream_command
+
+        def capture(command, *args, **kwargs):
+            commands.append(command)
+            return stream_command(command, *args, **kwargs)
+
+        with mock.patch.object(backend, "_stream_command", side_effect=capture):
+            backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
+
+        self.assertEqual(
+            commands[1],
+            [str(self.wine), "msiexec", "/i", str(package), "/qn"],
+        )
+
 
     def test_stop_wine_gracefully_closes_windows_before_server(self):
         prefix = self._make_prefix(self.home / ".wine4office")
@@ -492,6 +616,22 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertTrue(run.call_args_list[0].kwargs["check"])
         self.assertEqual(run.call_args_list[0].kwargs["timeout"], 20)
+
+
+    def test_stop_wine_passes_only_authenticated_office_pids_to_close_helper(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_office_pids", return_value=[4132, 4137]
+        ), mock.patch.object(backend.subprocess, "run") as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                str(self.wine), "wine4officeclose.exe",
+                "--pid", "4132", "--pid", "4137",
+            ],
+        )
 
     def test_stop_wine_hard_kills_when_graceful_close_fails(self):
         prefix = self._make_prefix(self.home / ".wine4office")
@@ -812,9 +952,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 self.assertEqual(backend.APP_META[app]["compatibility"], "Not tested")
 
     def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
+        (office / "WinAppSDK").mkdir()
         word = office / "WINWORD.EXE"
         word.write_bytes(b"exe")
         log = self.root / "launch.log"
@@ -823,6 +964,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             "#!/bin/bash\n"
             "printf 'DISPLAY=%s\\n' \"${DISPLAY-unset}\" > \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'WAYLAND_DISPLAY=%s\\n' \"${WAYLAND_DISPLAY-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'WINAPPSDK=%s\\n' \"${OFFICE_WINAPPSDK_RUNTIME_DIR-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n",
         )
         self._script("winepath", "#!/bin/bash\nprintf 'Z:\\\\converted\\\\%s\\n' \"${2##*/}\"\n")
@@ -847,11 +989,16 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         output = log.read_text()
         self.assertIn("DISPLAY=unset", output)
         self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
+        self.assertIn(
+            "WINAPPSDK=C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\",
+            output,
+        )
         self.assertIn(f"ARG={word}", output)
         self.assertIn("ARG=Z:\\converted\\מסמך with spaces.docx", output)
 
+
     def test_generated_launcher_materializes_kio_url_before_winepath(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         word = office / "WINWORD.EXE"
@@ -900,7 +1047,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn("ARG=Z:\\converted\\inside.docx", log.read_text())
 
     def test_generated_launcher_decodes_local_file_url_without_copy(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         word = office / "WINWORD.EXE"
@@ -930,7 +1077,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn("ARG=Z:\\converted\\My Document.docx", log.read_text())
 
     def test_generated_outlook_launcher_initializes_language_and_overrides_mshtml(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         outlook = office / "OUTLOOK.EXE"
@@ -1158,7 +1305,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
 
     def test_cloud_font_registration_skips_unchanged_registry_import(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         cloud_font = (
             prefix / "drive_c/users/tester/AppData/Local/Microsoft/FontCache/4"
             / "CloudFonts/Aptos/aptos.ttf"
@@ -1234,7 +1381,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
 
     def test_outlook_first_run_sets_language_and_safe_launch_options(self):
-        prefix = self.home / ".wine4office"
+        prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
         outlook = office / "OUTLOOK.EXE"
@@ -1964,6 +2111,30 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         prefix = self._make_prefix(self.home / "preload prefix")
         return backend._preload_snapshot(str(prefix), str(self.wine), True)
 
+    def _component_process(
+        self, binding, proc_root, pid=123, prefix=None, runner=None,
+        unreadable_environment=False, starttime="42",
+    ):
+        process = proc_root / str(pid)
+        process.mkdir(parents=True)
+        (process / "cmdline").write_bytes(
+            b"C:\\Program Files\\Common Files\\Microsoft Shared\\ClickToRun\\"
+            b"OfficeClickToRun.exe\0/service\0"
+        )
+        environment = process / "environ"
+        if unreadable_environment:
+            environment.mkdir()
+        else:
+            environment.write_bytes(
+                os.fsencode(f"WINEPREFIX={prefix or binding['prefix']}") + b"\0"
+            )
+        stat_fields = ["S"] + ["0"] * 18 + [starttime]
+        (process / "stat").write_text(
+            f"{pid} (OfficeClickToRun.exe) " + " ".join(stat_fields)
+        )
+        (process / "exe").symlink_to(runner or binding["wine"])
+        return process
+
     def test_preload_xdg_paths_and_atomic_modes(self):
         runtime = self.root / "runtime"
         with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
@@ -2036,22 +2207,49 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             "Type=simple\n"
             f"ExecStart={exec_start}\n"
             "Restart=on-failure\n"
-            "KillMode=process\n"
-            "TimeoutStopSec=20\n\n"
+            "KillMode=control-group\n"
+            "SendSIGKILL=yes\n"
+            f"TimeoutStopSec={backend._PRELOAD_UNIT_STOP_TIMEOUT}\n\n"
             "[Install]\n"
             "WantedBy=default.target\n"
         )
         self.assertEqual(backend.preload_unit_path().read_text(), expected)
-        self.assertIn("Type=simple\n", expected)
         self.assertIn("Restart=on-failure\n", expected)
-        self.assertIn("KillMode=process\n", expected)
-        self.assertIn("TimeoutStopSec=20\n", expected)
+        self.assertIn("KillMode=control-group\n", expected)
+        self.assertIn("SendSIGKILL=yes\n", expected)
+        self.assertNotIn("KillMode=process\n", expected)
+        self.assertNotIn("TimeoutStopSec=20\n", expected)
+        self.assertIn(
+            f"TimeoutStopSec={backend._PRELOAD_UNIT_STOP_TIMEOUT}\n", expected
+        )
+        self.assertGreaterEqual(backend._PRELOAD_UNIT_STOP_TIMEOUT, 90)
+        self.assertGreater(backend._PRELOAD_STOP_WAIT_TIMEOUT,
+                           backend._PRELOAD_UNIT_STOP_TIMEOUT)
         self.assertIn("WantedBy=default.target\n", expected)
         self.assertNotIn("/bin/sh", expected)
         self.assertNotIn("wineserver", expected)
         self.assertNotIn("wine4office_manager.py", expected)
         self.assertIn("wine4office_preload.py", expected)
         self.assertEqual(commands, [["daemon-reload"], ["enable", backend.PRELOAD_UNIT]])
+
+    def test_stop_waits_for_cgroup_deactivation(self):
+        states = iter([
+            (True, "deactivating"),
+            (True, "deactivating"),
+            (False, "inactive"),
+        ])
+        with mock.patch.object(
+            backend, "_systemctl_user",
+            return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+        ) as systemctl, mock.patch.object(
+            backend, "_systemctl_property", side_effect=lambda command: next(states)
+        ) as property_state, mock.patch.object(
+            backend.time, "monotonic", side_effect=(0, 1, 2, 3)
+        ), mock.patch.object(backend.time, "sleep"):
+            backend._stop_preload_unit_and_wait()
+        systemctl.assert_called_once_with(["stop", "--no-block", backend.PRELOAD_UNIT])
+        self.assertEqual(property_state.call_count, 3)
+
 
     def test_preload_unit_rejects_newline_in_argv(self):
         with self.assertRaisesRegex(ValueError, "unsafe control"):
@@ -2268,7 +2466,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         components = {
             name: {"state": "running", "owned": True, "detail": ""}
-            for name in backend.PRELOAD_COMPONENTS
+            for name in backend.PRELOAD_REQUIRED_COMPONENTS
         }
 
         def property_state(command):
@@ -2377,18 +2575,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 )
         systemctl.assert_not_called()
 
-    def test_clicktorun_process_detection_is_prefix_scoped(self):
+    def test_clicktorun_process_detection_requires_prefix_and_runner(self):
         binding = self._preload_binding()
         proc_root = self.root / "proc"
-        process = proc_root / "123"
-        process.mkdir(parents=True)
-        (process / "cmdline").write_bytes(
-            b"C:\\Program Files\\Common Files\\Microsoft Shared\\ClickToRun\\"
-            b"OfficeClickToRun.exe\0/service\0"
-        )
-        (process / "environ").write_bytes(
-            os.fsencode(f"WINEPREFIX={binding['prefix']}") + b"\0"
-        )
+        self._component_process(binding, proc_root)
 
         self.assertIs(
             backend._preload_component_process_running(
@@ -2396,6 +2586,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ),
             True,
         )
+        process = proc_root / "123"
         (process / "environ").write_bytes(b"WINEPREFIX=/other/prefix\0")
         self.assertIs(
             backend._preload_component_process_running(
@@ -2403,8 +2594,54 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ),
             False,
         )
+        (process / "environ").write_bytes(
+            os.fsencode(f"WINEPREFIX={binding['prefix']}") + b"\0"
+        )
+        foreign_runner = self.root / "foreign-runner/bin/wine"
+        foreign_runner.parent.mkdir(parents=True)
+        foreign_runner.write_text("foreign\n")
+        (process / "exe").unlink()
+        (process / "exe").symlink_to(foreign_runner)
+        self.assertIs(
+            backend._preload_component_process_running(
+                binding, "ClickToRunSvc", proc_root
+            ),
+            False,
+        )
+        (process / "environ").unlink()
+        (process / "environ").mkdir()
+        self.assertIsNone(
+            backend._preload_component_process_running(
+                binding, "ClickToRunSvc", proc_root
+            )
+        )
         self.assertIsNone(
             backend._preload_component_process_running(binding, "unknown", proc_root)
+        )
+
+    def test_component_ownership_record_rejects_pid_reuse(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        self._component_process(binding, proc_root)
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+        self.assertFalse(unknown)
+        ownership = records[0]
+        self.assertTrue(
+            backend._preload_ownership_is_current(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+        )
+        process = proc_root / str(ownership["pid"])
+        stat_fields = ["S"] + ["0"] * 18 + ["99"]
+        (process / "stat").write_text(
+            f"{ownership['pid']} (OfficeClickToRun.exe) " + " ".join(stat_fields)
+        )
+        self.assertFalse(
+            backend._preload_ownership_is_current(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
         )
 
     def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
@@ -2437,6 +2674,37 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
         self.assertTrue(process.stdout.closed)
 
+    def test_voip_broker_waits_for_name_ownership_and_uses_managed_prefix(self):
+        binding = self._preload_binding()
+        helper = (
+            Path(binding["wine"]).resolve().parent.parent
+            / "lib/wine/x86_64-windows"
+            / backend.PRELOAD_VOIP_HELPER
+        )
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_bytes(b"helper")
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.stdout = io.StringIO(
+            "READY service=org.wine.VoipCallBroker1 "
+            "path=/org/wine/VoipCallBroker1\n"
+        )
+        process.stdin = mock.Mock()
+
+        with mock.patch.object(
+            backend.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            backend.select, "select", return_value=([process.stdout], [], [])
+        ):
+            started, detail = backend._start_preload_voip(binding)
+
+        self.assertIs(started, process)
+        self.assertIn("org.wine.VoipCallBroker1", detail)
+        self.assertEqual(popen.call_args.args[0], [binding["wine"], str(helper)])
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEPREFIX"], binding["prefix"])
+        self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
+        self.assertTrue(process.stdout.closed)
+
     def test_appv_helper_stops_by_closing_its_input(self):
         process = mock.Mock()
         process.poll.return_value = None
@@ -2461,8 +2729,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         states = {"ClickToRunSvc": "stopped"}
         actions = []
         handlers = {}
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
         appv_process = mock.Mock()
-        appv_process.poll.return_value = None
+        voip_process = mock.Mock()
 
         def component_state(_binding, component):
             return states[component], states[component]
@@ -2483,6 +2757,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         with mock.patch.object(
             backend, "_preload_component_process_running", return_value=False
         ), mock.patch.object(
+            backend, "_preload_component_process_records",
+            return_value=([ownership], False),
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
+        ), mock.patch.object(
             backend, "_preload_component_state", side_effect=component_state
         ), mock.patch.object(
             backend, "_preload_component_action", side_effect=component_action
@@ -2494,6 +2773,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ) as appv_start, mock.patch.object(
             backend, "_stop_preload_appv", return_value=(True, "stopped")
         ) as appv_stop, mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ) as voip_start, mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ) as voip_stop, mock.patch.object(
             backend.signal, "signal", side_effect=install_signal
         ), mock.patch.object(
             backend.time, "sleep", side_effect=stop_sleep
@@ -2512,16 +2796,29 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         office.assert_called_once()
         appv_start.assert_called_once_with(binding)
         appv_stop.assert_called_once_with(appv_process)
+        voip_start.assert_called_once_with(binding)
+        voip_stop.assert_called_once_with(voip_process)
         broad_kill.assert_not_called()
         heartbeat = __import__("json").loads(status_path.read_text())
         self.assertEqual(heartbeat["state"], "stopped")
         self.assertTrue(heartbeat["components"]["ClickToRunSvc"]["owned"])
         self.assertEqual(heartbeat["components"]["AppV"]["state"], "stopped")
+        self.assertEqual(heartbeat["components"]["VoIPBroker"]["state"], "stopped")
+        self.assertEqual(stat.S_IMODE(status_path.stat().st_mode), 0o600)
+        self.assertEqual(
+            heartbeat["components"]["ClickToRunSvc"]["ownership"], ownership
+        )
 
     def test_worker_owns_clicktorun_auto_started_by_first_query(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
         handlers = {}
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
 
         def install_signal(signum, handler):
             old = handlers.get(signum, signal.SIG_DFL)
@@ -2530,9 +2827,13 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         def stop_sleep(_seconds):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
-
         with mock.patch.object(
             backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_component_process_records",
+            return_value=([ownership], False),
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
         ), mock.patch.object(
             backend, "_preload_component_state", return_value=("running", "running")
         ), mock.patch.object(
@@ -2584,10 +2885,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 backend.preload_binding_path(), backend.preload_runtime_status_path()
             )
 
-        self.assertEqual(result, 0)
         self.assertEqual(
             [call.args[1:] for call in action.call_args_list],
-            [("stop", "ClickToRunSvc")],
+            [],
         )
         heartbeat = __import__("json").loads(
             backend.preload_runtime_status_path().read_text()
@@ -2676,6 +2976,113 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             )["components"]["ClickToRunSvc"]["owned"]
         )
 
+
+    def test_worker_drops_ownership_before_restart_when_process_identity_changes(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handlers = {}
+        states = iter([
+            ("stopped", "stopped"),
+            ("running", "running"),
+            ("stopped", "reused PID"),
+        ])
+        actions = []
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_component_process_records",
+            return_value=([ownership], False),
+        ), mock.patch.object(
+            backend, "_preload_component_state", side_effect=states
+        ), mock.patch.object(
+            backend, "_preload_component_action",
+            side_effect=lambda _binding, action, component: (
+                actions.append((action, component)) or (True, action)
+            ),
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=False
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(actions, [("start", "ClickToRunSvc")])
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertFalse(heartbeat["components"]["ClickToRunSvc"]["owned"])
+
+    def test_worker_does_not_stop_component_after_ownership_loss(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handlers = {}
+        states = iter([
+            ("stopped", "stopped"),
+            ("running", "running"),
+            ("running", "running"),
+        ])
+        actions = []
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_component_process_records",
+            return_value=([ownership], False),
+        ), mock.patch.object(
+            backend, "_preload_component_state", side_effect=states
+        ), mock.patch.object(
+            backend, "_preload_component_action",
+            side_effect=lambda _binding, action, component: (
+                actions.append((action, component)) or (True, action)
+            ),
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=False
+        ), mock.patch.object(
+            backend, "preload_office_processes", return_value=[]
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(actions, [("start", "ClickToRunSvc")])
+
     def test_uninstall_stops_then_disables_owned_service_before_removal(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
@@ -2719,6 +3126,29 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend.uninstall_preload_service()
         systemctl.assert_not_called()
         self.assertTrue(backend.preload_unit_path().exists())
+
+    def test_manage_never_controls_foreign_unit(self):
+        foreign = "[Service]\nExecStart=/foreign\n"
+        backend.preload_unit_path().parent.mkdir(parents=True)
+        backend.preload_unit_path().write_text(foreign)
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(backend, "_systemctl_user") as systemctl:
+            for action in ("disable", "start", "stop"):
+                with self.assertRaisesRegex(RuntimeError, "unowned"):
+                    backend.manage_preload_service(action)
+        systemctl.assert_not_called()
+        self.assertEqual(backend.preload_unit_path().read_text(), foreign)
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(backend, "_systemctl_property") as property_state:
+            self.assertFalse(
+                backend._preload_active_for_environment(
+                    str(self.home / "prefix"), str(self.wine), True
+                )
+            )
+        property_state.assert_not_called()
+
 
     def test_inactive_disabled_binding_can_be_explicitly_replaced(self):
         old = self._preload_binding()
