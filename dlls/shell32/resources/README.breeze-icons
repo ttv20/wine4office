@@ -11,4 +11,5 @@ License text and artwork clarification: COPYING.breeze-icons
 
 The SVG files are the preferred source. The matching ICO files contain
 16, 20, 24, 32, and 48 pixel renderings generated from those SVG files for
-Wine resources.
+Wine resources. Wine's `tools/buildimage` supports these standard single-image
+SVG sources directly; they do not require custom crop directives.

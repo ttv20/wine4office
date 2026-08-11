@@ -95,6 +95,7 @@ struct incl_file
 #define FLAG_RC_PO          0x00100000  /* rc file contains translations */
 #define FLAG_RC_HEADER      0x00200000  /* rc file is a header */
 #define FLAG_SFD_FONTS      0x00400000  /* sfd file generated bitmap fonts */
+#define FLAG_SFD_EXTERNAL_TTF 0x00800000 /* ttf maintained separately from sfd */
 #define FLAG_C_IMPLIB       0x01000000  /* file is part of an import library */
 #define FLAG_C_UNIX         0x02000000  /* file is part of a Unix library */
 #define FLAG_C_CXX          0x04000000  /* file uses C++ */
@@ -1023,7 +1024,8 @@ static void parse_pragma_directive( struct file *source, char *str )
         }
         else if (strendswith( source->name, ".sfd" ))
         {
-            if (!strcmp( flag, "font" ))
+            if (!strcmp( flag, "external-ttf" )) source->flags |= FLAG_SFD_EXTERNAL_TTF;
+            else if (!strcmp( flag, "font" ))
             {
                 struct strarray *array = source->args;
 
@@ -1631,7 +1633,7 @@ static struct file *open_include_file( const struct makefile *make, struct incl_
     if ((file = open_local_generated_file( make, source, ".tab.h", ".y" ))) return file;
     if ((file = open_local_generated_file( make, source, ".h", ".idl" ))) return file;
     if (fontforge && (file = open_local_generated_file( make, source, ".ttf", ".sfd" ))) return file;
-    if (convert && rsvg && icotool)
+    if (rsvg && icotool)
     {
         if ((file = open_local_maintainer_file( make, source, ".bmp", ".svg" ))) return file;
         if ((file = open_local_maintainer_file( make, source, ".cur", ".svg" ))) return file;
@@ -3366,7 +3368,7 @@ static void output_source_sfd( struct makefile *make, struct incl_file *source, 
     char *ttf_obj = strmake( "%s.ttf", obj );
     char *ttf_file = src_dir_path( make, ttf_obj );
 
-    if (fontforge && !make->src_dir)
+    if (fontforge && !make->src_dir && !(source->file->flags & FLAG_SFD_EXTERNAL_TTF))
     {
         output( "%s: %s\n", ttf_file, source->filename );
         output( "\t%s%s -script %s %s $@\n", cmd_prefix( "GEN" ),
@@ -3405,7 +3407,7 @@ static void output_source_svg( struct makefile *make, struct incl_file *source, 
     static const char * const images[] = { "bmp", "cur", "ico", NULL };
     unsigned int i;
 
-    if (convert && rsvg && icotool)
+    if (rsvg && icotool)
     {
         for (i = 0; images[i]; i++)
             if (find_include_file( make, strmake( "%s.%s", obj, images[i] ))) break;

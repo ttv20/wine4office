@@ -46,8 +46,23 @@ python3 fonts/generate_tahoma_hebrew.py \
 
 Expected output SHA-256:
 
-- `tahoma.ttf`: `e4cde13dcd36174b57c71dde9c31125273b010f712022702d234e3804d7ef2d2`
-- `tahomabd.ttf`: `ec0ea57fabe1a3da01ab66ab3163d51e378544c09103f40337ab6817e5635a7f`
+- `tahoma.ttf`: `55250260837de53e58e97a7592c13760c7612b9761abeff1e6468c907efca366`
+- `tahomabd.ttf`: `e3a09d985ed5abf7593bf921046c60afbbd8de6770729e2f6ce64017e3abcc8f`
+
+## Validation
+
+Run the focused regression from the source root:
+
+```sh
+python3 -m unittest fonts/test_tahoma_hebrew.py
+```
+
+The test checks representative Hebrew cmap entries, every OS/2 and hhea
+compatibility metric, the two generated files' byte-for-byte reproducibility,
+and the `external-ttf` maintainer directive. To compare a regeneration with
+the original base and donor files, set `TAHOMA_BASE_REGULAR`,
+`TAHOMA_BASE_BOLD`, `TAHOMA_DONOR_REGULAR`, and `TAHOMA_DONOR_BOLD` before
+running the test.
 
 The generator restores Tahoma's original BDF, FFTM, and VDMX tables after
 fontTools merges the outline and layout tables, but deliberately omits the
@@ -55,6 +70,13 @@ EBDT and EBLC embedded-bitmap tables. Office paints some mixed-script UI runs
 into monochrome masks; using legacy bitmap strikes for Latin while Hebrew is
 outline-only makes the scripts visibly inconsistent. Omitting the strikes
 keeps both scripts on the same outline rasterizer.
+
+It also restores Tahoma's original global OS/2 and hhea compatibility metrics.
+The merge retains Hebrew Unicode/code-page coverage and actual appended-glyph
+bounds, but must not change line spacing or average width for existing Latin
+Tahoma users. The SFD files are marked `external-ttf` because this documented
+merge pipeline, rather than plain FontForge SFD generation, owns the checked-in
+TTF files.
 
 The `gasp` ranges request smoothing at every size (`GASP_DOGRAY`) and retain
 grid fitting above 8 ppem. The format controls have no outlines and zero

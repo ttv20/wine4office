@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve Hebrew fonts, regenerate shell icons, and scope Office desktop policy.
 - Correct Click-to-Run discovery, XML comparison, TOM2, and shared counter contracts.
 - Isolate Delivery Optimization jobs and enforce startup, range, and integrity contracts.
 - Report sensor monitoring as unsupported unless an active backend is available.

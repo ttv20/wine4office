@@ -45,6 +45,7 @@ $ENV{"SOURCE_DATE_EPOCH"} ||= "0";  # for reproducible builds
 # Get the programs from the environment variables
 my $convert = $ENV{"CONVERT"} || "convert";
 my $rsvg = $ENV{"RSVG"} || "rsvg-convert";
+my $is_rsvg_convert = $rsvg =~ m{(?:^|[/\\])rsvg-convert(?:\.exe)?$}i;
 my @icotool_args = ($ENV{"ICOTOOL"} || "icotool", "--create",
                     $ext eq "cur" ? "--cursor" : "--icon", "-o", $outFileName);
 
@@ -84,22 +85,40 @@ sub add_image($$$)
         my @coords = @{$hotspot[$size]};
         push @icotool_args, "--hotspot-x=$coords[0]", "--hotspot-y=$coords[1]";
     }
-    push @icotool_args, ($size >= 128 && $depth >= 24) ? "--raw=$file" : $file;
+    push @icotool_args, "--bit-depth=$depth",
+            ($size >= 128 && $depth >= 24) ? "--raw=$file" : $file;
     push @pngFiles, $file;
 }
 
-# Render the SVG image
-my @rsvgCmd;
-push(@rsvgCmd, $rsvg);
-push(@rsvgCmd, $svgFileName);
-push(@rsvgCmd, "-o") if ($rsvg eq "rsvg-convert");
-push(@rsvgCmd, $renderedSVGFileName);
-shell @rsvgCmd;
-
-# Render the images in the SVG
+# Parse the source before rendering it.  Standard single-image ICO sources
+# can be rendered directly by rsvg-convert and do not need ImageMagick.
 my $xml = XML::LibXML->load_xml( location => $svgFileName );
 my $xc = XML::LibXML::XPathContext->new($xml);
 $xc->registerNs('x', 'http://www.w3.org/2000/svg');
+my @images = grep { $_->{id} =~ /$label{$ext}/ } $xc->findnodes("/x:svg/*[\@id]");
+
+sub render_svg()
+{
+    my @rsvgCmd = ($rsvg, $svgFileName);
+    push(@rsvgCmd, "-o") if $is_rsvg_convert;
+    push(@rsvgCmd, $renderedSVGFileName);
+    shell @rsvgCmd;
+}
+
+sub render_scaled_svg($)
+{
+    my ($size) = @_;
+    my $file = "$outName-$size-32.png";
+    my @rsvgCmd = ($rsvg, "--width=$size", "--height=$size", $svgFileName);
+    push(@rsvgCmd, "-o") if $is_rsvg_convert;
+    push(@rsvgCmd, $file);
+    shell @rsvgCmd;
+    return $file;
+}
+
+# Directive-based images retain their existing crop/depth behavior.  The
+# standard ICO path below is deliberately independent of ImageMagick.
+render_svg() if $ext eq "bmp" || @images;
 
 if ($ext eq "bmp")
 {
@@ -131,11 +150,9 @@ if ($ext eq "cur")
 
 # extract rectangles from the rendered svg
 
-foreach my $element ($xc->findnodes("/x:svg/*[\@id]"))
+foreach my $element (@images)
 {
-    next unless $element->{id} =~ /$label{$ext}/;
-    my $size = $1;
-    my $depth = $2;
+    my ($size, $depth) = ($element->{id} =~ /$label{$ext}/);
     warn "Unexpected depth" unless
         $depth == 1 or $depth == 4 or $depth == 8 or $depth == 24 or $depth == 32;
     my $file = "$outName-$size-$depth.png";
@@ -157,6 +174,17 @@ foreach my $element ($xc->findnodes("/x:svg/*[\@id]"))
         shell $convert, $renderedSVGFileName, "-crop", "${width}x${height}+$x+$y", "-depth", $depth, $file;
     }
     add_image( $file, $size, $depth );
+}
+
+# Standard single-image SVGs do not need Wine's historical crop directives.
+# Render those directly at the common shell icon sizes.  Directive-based SVGs
+# keep their existing per-image sizes, depths, and cursor-hotspot behavior.
+if (!@pngFiles && $ext eq "ico")
+{
+    foreach my $size (16, 20, 24, 32, 48)
+    {
+        add_image( render_scaled_svg($size), $size, 32 );
+    }
 }
 
 die "no render directive found in $svgFileName" unless @pngFiles;

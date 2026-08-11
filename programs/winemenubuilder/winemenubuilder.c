@@ -2977,12 +2977,118 @@ static BOOL write_package_desktop_entry( const WCHAR *root, const WCHAR *executa
     return ret;
 }
 
+static void sanitize_package_desktop_id( WCHAR *id )
+{
+    WCHAR *p;
+
+    for (p = id; *p; ++p)
+    {
+        if (*p >= 'A' && *p <= 'Z') *p += 'a' - 'A';
+        else if ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
+                 *p == '.' || *p == '-' || *p == '_') continue;
+        else *p = '-';
+    }
+}
+
+static BOOL package_desktop_name_is_active( WCHAR **active, UINT count, const WCHAR *filename,
+                                            const WCHAR *extension )
+{
+    SIZE_T filename_len = wcslen( filename ), extension_len = wcslen( extension );
+    UINT i;
+
+    if (filename_len <= extension_len || _wcsicmp( filename + filename_len - extension_len, extension ))
+        return FALSE;
+    for (i = 0; i < count; ++i)
+        if (wcslen( active[i] ) == filename_len - extension_len &&
+            !_wcsnicmp( active[i], filename, filename_len - extension_len )) return TRUE;
+    return FALSE;
+}
+
+static BOOL remove_stale_package_files( const WCHAR *directory, const WCHAR *prefix,
+                                        const WCHAR *extension, WCHAR **active, UINT count )
+{
+    WIN32_FIND_DATAW data;
+    WCHAR *pattern, *path;
+    HANDLE find;
+    BOOL removed = FALSE;
+
+    pattern = heap_wprintf( L"%s\\%s*%s", directory, prefix, extension );
+    if ((find = FindFirstFileW( pattern, &data )) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (package_desktop_name_is_active( active, count, data.cFileName, extension )) continue;
+            path = heap_wprintf( L"%s\\%s", directory, data.cFileName );
+            if (DeleteFileW( path )) removed = TRUE;
+            else WINE_WARN( "failed to remove stale package integration file %s, error %lu.\n",
+                            wine_dbgstr_w(path), GetLastError() );
+            free( path );
+        } while (FindNextFileW( find, &data ));
+        FindClose( find );
+    }
+    free( pattern );
+    return removed;
+}
+
+static void cleanup_stale_package_integration( const WCHAR *prefix, WCHAR **active, UINT count )
+{
+    WIN32_FIND_DATAW data;
+    WCHAR *applications, *hicolor, *pattern, *apps;
+    HANDLE find;
+    BOOL icons_removed = FALSE;
+
+    applications = heap_wprintf( L"%s\\applications", xdg_data_dir );
+    remove_stale_package_files( applications, prefix, L".desktop", active, count );
+    free( applications );
+
+    hicolor = heap_wprintf( L"%s\\icons\\hicolor", xdg_data_dir );
+    pattern = heap_wprintf( L"%s\\*", hicolor );
+    if ((find = FindFirstFileW( pattern, &data )) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !wcscmp( data.cFileName, L"." ) ||
+                !wcscmp( data.cFileName, L".." )) continue;
+            apps = heap_wprintf( L"%s\\%s\\apps", hicolor, data.cFileName );
+            icons_removed |= remove_stale_package_files( apps, prefix, L".png", active, count );
+            free( apps );
+        } while (FindNextFileW( find, &data ));
+        FindClose( find );
+    }
+    free( pattern );
+    if (icons_removed) refresh_icon_cache( hicolor );
+    free( hicolor );
+}
+
+static WCHAR *get_package_desktop_prefix( const WCHAR *root, const WCHAR *manifest )
+{
+    WCHAR *identity, *identity_end, *name = NULL, *prefix = NULL;
+    const WCHAR *root_name, *publisher = NULL, *p;
+
+    if (!(identity = wcsstr( manifest, L"<Identity " )) || !(identity_end = wcschr( identity, '>' )) ||
+        !(name = xml_attribute( identity, identity_end, L"Name" ))) return NULL;
+    root_name = PathFindFileNameW( root );
+    for (p = root_name; (p = wcsstr( p, L"__" )); p += 2) publisher = p + 2;
+    if (publisher && *publisher)
+    {
+        /* Length fields keep one family prefix from being a prefix of
+         * another (for example, package A/B versus A-B/C). */
+        prefix = heap_wprintf( L"wine-package-%u-%s-%u-%s-", (unsigned)wcslen( name ), name,
+                               (unsigned)wcslen( publisher ), publisher );
+        sanitize_package_desktop_id( prefix );
+    }
+    free( name );
+    return prefix;
+}
+
 static BOOL process_package( const WCHAR *root )
 {
     WCHAR *manifest_path, *manifest, *application, *application_end, *next_application;
-    WCHAR *visual, *visual_end, *executable, *logo, *display_name, *app_list, *icon_name;
-    const WCHAR *basename;
-    BOOL ret = FALSE;
+    WCHAR *visual, *visual_end, *executable, *logo, *display_name, *app_list, *application_id;
+    WCHAR *icon_name, *prefix, **active = NULL, **new_active;
+    BOOL ret = FALSE, complete = TRUE;
+    UINT active_count = 0;
 
     manifest_path = heap_wprintf( L"%s\\AppxManifest.xml", root );
     manifest = read_utf8_text_file( manifest_path );
@@ -2990,6 +3096,12 @@ static BOOL process_package( const WCHAR *root )
     if (!manifest)
     {
         WINE_WARN( "could not read package manifest from %s\n", wine_dbgstr_w(root) );
+        return FALSE;
+    }
+    if (!(prefix = get_package_desktop_prefix( root, manifest )))
+    {
+        WINE_WARN( "could not derive stable package identity for %s\n", wine_dbgstr_w(root) );
+        free( manifest );
         return FALSE;
     }
 
@@ -3003,30 +3115,54 @@ static BOOL process_package( const WCHAR *root )
         if (!(application_end = wcschr( application, '>' )) || application_end > visual) continue;
 
         executable = xml_attribute( application, application_end, L"Executable" );
+        application_id = xml_attribute( application, application_end, L"Id" );
         logo = xml_attribute( visual, visual_end, L"Square44x44Logo" );
         display_name = xml_attribute( visual, visual_end, L"DisplayName" );
         app_list = xml_attribute( visual, visual_end, L"AppListEntry" );
-        if (!executable || !logo || (app_list && !_wcsicmp( app_list, L"none" ))) goto next;
+        if (app_list && !_wcsicmp( app_list, L"none" )) goto next;
+        if (!executable || !application_id || !*application_id || !logo)
+        {
+            complete = FALSE;
+            goto next;
+        }
 
-        basename = PathFindFileNameW( executable );
-        if (!(icon_name = wcsdup( basename ))) goto next;
-        CharLowerW( icon_name );
+        icon_name = heap_wprintf( L"%s%s", prefix, application_id );
+        sanitize_package_desktop_id( icon_name );
         if (!display_name || !*display_name || !_wcsnicmp( display_name, L"ms-resource:", 12 ))
         {
             free( display_name );
-            display_name = wcsdup( icon_name );
+            display_name = wcsdup( application_id );
         }
         if (export_package_icons( root, logo, icon_name ) &&
             write_package_desktop_entry( root, executable, display_name, icon_name ))
-            ret = TRUE;
+        {
+            if (!(new_active = realloc( active, (active_count + 1) * sizeof(*active) ))) complete = FALSE;
+            else
+            {
+                active = new_active;
+                active[active_count++] = wcsdup( icon_name );
+                if (!active[active_count - 1])
+                {
+                    --active_count;
+                    complete = FALSE;
+                }
+                else ret = TRUE;
+            }
+        }
+        else complete = FALSE;
         free( icon_name );
 
 next:
         free( executable );
+        free( application_id );
         free( logo );
         free( display_name );
         free( app_list );
     }
+    if (complete) cleanup_stale_package_integration( prefix, active, active_count );
+    while (active_count) free( active[--active_count] );
+    free( active );
+    free( prefix );
     free( manifest );
     return ret;
 }
@@ -3118,8 +3254,18 @@ int PASCAL wWinMain (HINSTANCE hInstance, HINSTANCE prev, LPWSTR cmdline, int sh
         }
         if( !wcscmp( token, L"-p" ) )
         {
+            HANDLE semaphore;
             WCHAR *package = next_token( &p );
-            if (!package || !process_package( package )) ret = 1;
+
+            semaphore = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_package_semaphore" );
+            if (!semaphore || WaitForSingleObject( semaphore, INFINITE ) != WAIT_OBJECT_0)
+                ret = 1;
+            else
+            {
+                if (!package || !process_package( package )) ret = 1;
+                ReleaseSemaphore( semaphore, 1, NULL );
+            }
+            if (semaphore) CloseHandle( semaphore );
             continue;
         }
         if( !wcscmp( token, L"-r" ) )

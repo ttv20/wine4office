@@ -16,7 +16,29 @@ from fontTools.ttLib import TTFont
 from fontTools.ttLib.tables._g_l_y_f import Glyph
 
 HEBREW_RANGES = "U+0590-05FF,U+FB1D-FB4F"
+HEBREW_REPRESENTATIVE_CODEPOINTS = (0x05B0, 0x05B4, 0x05D0, 0x05EA, 0x05F3, 0xFB2A)
 PRESERVED_TABLES = ("BDF ", "FFTM", "VDMX")
+OS2_COMPATIBILITY_METRICS = (
+    "xAvgCharWidth",
+    "ySubscriptXSize",
+    "ySubscriptYSize",
+    "ySubscriptXOffset",
+    "ySubscriptYOffset",
+    "ySuperscriptXSize",
+    "ySuperscriptYSize",
+    "ySuperscriptXOffset",
+    "ySuperscriptYOffset",
+    "yStrikeoutSize",
+    "yStrikeoutPosition",
+    "sTypoAscender",
+    "sTypoDescender",
+    "sTypoLineGap",
+    "usWinAscent",
+    "usWinDescent",
+    "sxHeight",
+    "sCapHeight",
+)
+HHEA_COMPATIBILITY_METRICS = ("ascent", "descent", "lineGap")
 SMOOTH_GASP_RANGES = {8: 2, 16: 3, 65535: 3}
 EMBEDDED_BITMAP_TABLES = ("EBDT", "EBLC")
 FORMAT_CONTROLS = (
@@ -61,6 +83,65 @@ def add_format_controls(font):
     font["maxp"].numGlyphs = len(glyph_order)
 
 
+def unicode_cmap(font):
+    """Return the union of all Unicode cmap subtables."""
+    cmap = {}
+    for table in font["cmap"].tables:
+        if not table.isUnicode():
+            continue
+        for codepoint, glyph_name in table.cmap.items():
+            if glyph_name != ".notdef" or codepoint not in cmap:
+                cmap[codepoint] = glyph_name
+    return cmap
+
+
+def validate_merged_font(base, donor, merged):
+    """Reject a successful-looking merge that lost coverage or metrics."""
+    base_order = base.getGlyphOrder()
+    if merged.getGlyphOrder()[: len(base_order)] != base_order:
+        raise RuntimeError("fontTools changed the base glyph order")
+
+    donor_cmap = unicode_cmap(donor)
+    merged_cmap = unicode_cmap(merged)
+    merged_glyphs = set(merged.getGlyphOrder())
+
+    def has_glyph(codepoint):
+        glyph_name = merged_cmap.get(codepoint)
+        return glyph_name and glyph_name != ".notdef" and glyph_name in merged_glyphs
+
+    expected = {
+        codepoint
+        for codepoint, glyph_name in donor_cmap.items()
+        if glyph_name != ".notdef"
+        and (0x0590 <= codepoint <= 0x05FF or 0xFB1D <= codepoint <= 0xFB4F)
+    }
+    missing = sorted(codepoint for codepoint in expected if not has_glyph(codepoint))
+    if missing:
+        formatted = ", ".join(f"U+{codepoint:04X}" for codepoint in missing)
+        raise RuntimeError(f"merged font lost Hebrew cmap entries: {formatted}")
+
+    missing = [codepoint for codepoint in HEBREW_REPRESENTATIVE_CODEPOINTS if not has_glyph(codepoint)]
+    if missing:
+        formatted = ", ".join(f"U+{codepoint:04X}" for codepoint in missing)
+        raise RuntimeError(f"merged font lacks representative Hebrew glyphs: {formatted}")
+
+    for field in OS2_COMPATIBILITY_METRICS:
+        if hasattr(base["OS/2"], field) and getattr(base["OS/2"], field) != getattr(merged["OS/2"], field):
+            raise RuntimeError(f"merge changed OS/2 {field}")
+    for field in HHEA_COMPATIBILITY_METRICS:
+        if getattr(base["hhea"], field) != getattr(merged["hhea"], field):
+            raise RuntimeError(f"merge changed hhea {field}")
+
+
+def restore_compatibility_metrics(base, merged):
+    """Keep Tahoma's global layout metrics while retaining donor coverage."""
+    for field in OS2_COMPATIBILITY_METRICS:
+        if hasattr(base["OS/2"], field):
+            setattr(merged["OS/2"], field, getattr(base["OS/2"], field))
+    for field in HHEA_COMPATIBILITY_METRICS:
+        setattr(merged["hhea"], field, getattr(base["hhea"], field))
+
+
 def build(base_path, donor_path, output_path, workdir):
     subset_path = workdir / (donor_path.stem + "-hebrew-subset.ttf")
     merged_path = workdir / (output_path.stem + "-merged.ttf")
@@ -82,10 +163,8 @@ def build(base_path, donor_path, output_path, workdir):
     )
 
     base = TTFont(base_path, recalcTimestamp=False)
+    donor = TTFont(donor_path, recalcTimestamp=False)
     merged = TTFont(merged_path, recalcTimestamp=False)
-    base_order = base.getGlyphOrder()
-    if merged.getGlyphOrder()[: len(base_order)] != base_order:
-        raise RuntimeError("fontTools changed the base glyph order")
 
     # fontTools.merge intentionally drops these first-font-only tables.  The
     # appended glyphs do not participate in Tahoma's embedded bitmap strikes,
@@ -93,6 +172,12 @@ def build(base_path, donor_path, output_path, workdir):
     for tag in PRESERVED_TABLES:
         if tag in base:
             merged[tag] = copy.deepcopy(base[tag])
+
+    # The merge takes global line and average-width metrics from the donor.
+    # That changes layout for every Latin Tahoma user. Preserve the original
+    # compatibility metrics, while leaving merged Unicode/code-page coverage
+    # and real horizontal glyph bounds intact for the appended Hebrew glyphs.
+    restore_compatibility_metrics(base, merged)
 
     # Office paints some mixed-script Latin runs into monochrome masks.
     # Outline rasterization keeps those runs consistent with the appended
@@ -109,6 +194,7 @@ def build(base_path, donor_path, output_path, workdir):
     # Office UI strings include invisible bidi controls around mixed-script
     # text. Missing glyphs render as boxes when Segoe UI is substituted.
     add_format_controls(merged)
+    validate_merged_font(base, donor, merged)
     merged["head"].created = base["head"].created
     merged["head"].modified = base["head"].modified
     merged.recalcTimestamp = False
