@@ -2636,6 +2636,25 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         return STATUS_SUCCESS;
     }
 
+    case ThreadWineYieldExecutionState:
+    {
+        const LONG *delta = data;
+
+        if (handle != GetCurrentThread()) return STATUS_NOT_SUPPORTED;
+        if (length != sizeof(*delta)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!delta) return STATUS_ACCESS_VIOLATION;
+        if (*delta == 1)
+        {
+            if (yield_execution_throttle_count != UINT_MAX) ++yield_execution_throttle_count;
+        }
+        else if (*delta == -1)
+        {
+            if (yield_execution_throttle_count) --yield_execution_throttle_count;
+        }
+        else return STATUS_INVALID_PARAMETER;
+        return STATUS_SUCCESS;
+    }
+
     case ThreadWow64Context:
         return set_thread_wow64_context( handle, data, length );
 

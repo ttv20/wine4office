@@ -1895,19 +1895,70 @@ NTSTATUS WINAPI NtOpenProcess( HANDLE *handle, ACCESS_MASK access,
 }
 
 
+static NTSTATUS notify_appcore_lifecycle( HANDLE process, BOOL quiesced, BOOL *notified )
+{
+    obj_handle_t completion_handle = 0;
+    NTSTATUS status;
+    HANDLE completion;
+
+    *notified = FALSE;
+    SERVER_START_REQ( prepare_appcore_lifecycle )
+    {
+        req->process = wine_server_obj_handle( process );
+        req->quiesced = quiesced;
+        status = wine_server_call( req );
+        if (!status) completion_handle = reply->completion;
+    }
+    SERVER_END_REQ;
+    if (status == STATUS_NOT_SUPPORTED) return STATUS_SUCCESS;
+    if (status) return status;
+
+    *notified = TRUE;
+    completion = wine_server_ptr_handle( completion_handle );
+    status = NtWaitForSingleObject( completion, FALSE, NULL );
+    NtClose( completion );
+    return status;
+}
+
+static NTSTATUS finish_appcore_lifecycle( HANDLE process, BOOL quiesced, BOOL success )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( finish_appcore_lifecycle )
+    {
+        req->process = wine_server_obj_handle( process );
+        req->quiesced = quiesced;
+        req->success = success;
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 /**********************************************************************
  *           NtSuspendProcess  (NTDLL.@)
  */
 NTSTATUS WINAPI NtSuspendProcess( HANDLE handle )
 {
+    BOOL notified, transitioned = FALSE;
+    NTSTATUS finish_status;
     unsigned int ret;
 
+    if ((ret = notify_appcore_lifecycle( handle, TRUE, &notified )))
+    {
+        if (notified) finish_appcore_lifecycle( handle, TRUE, FALSE );
+        return ret;
+    }
     SERVER_START_REQ( suspend_process )
     {
         req->handle = wine_server_obj_handle( handle );
         ret = wine_server_call( req );
+        if (!ret) transitioned = reply->transitioned;
     }
     SERVER_END_REQ;
+    if (notified && (finish_status = finish_appcore_lifecycle( handle, TRUE,
+            !ret && transitioned )) && !ret)
+        return finish_status;
     return ret;
 }
 
@@ -1917,14 +1968,25 @@ NTSTATUS WINAPI NtSuspendProcess( HANDLE handle )
  */
 NTSTATUS WINAPI NtResumeProcess( HANDLE handle )
 {
+    BOOL notified = FALSE, transitioned = FALSE;
+    NTSTATUS notify_status, finish_status;
     unsigned int ret;
 
     SERVER_START_REQ( resume_process )
     {
         req->handle = wine_server_obj_handle( handle );
         ret = wine_server_call( req );
+        if (!ret) transitioned = reply->transitioned;
     }
     SERVER_END_REQ;
+    if (!ret && transitioned &&
+        (notify_status = notify_appcore_lifecycle( handle, FALSE, &notified )))
+    {
+        if (notified) finish_appcore_lifecycle( handle, FALSE, TRUE );
+        return notify_status;
+    }
+    if (!ret && notified && (finish_status = finish_appcore_lifecycle( handle, FALSE, TRUE )))
+        return finish_status;
     return ret;
 }
 

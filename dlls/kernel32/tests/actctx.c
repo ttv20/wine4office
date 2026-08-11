@@ -365,6 +365,14 @@ static const char testdep_manifest3[] =
 "</file>"
 "</assembly>";
 
+static const char loadfrom_environment_manifest[] =
+"<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">"
+"<assemblyIdentity type=\"win32\" name=\"Wine.LoadFrom.Test\" version=\"1.0.0.0\" "
+"processorArchitecture=\"" ARCH "\"/>"
+"<file name=\"loadfrom.dll\" loadFrom=\"%WINE_ACTCTX_LOADFROM%\\\"/>"
+"</assembly>";
+
+
 static const char wrong_manifest1[] =
 "<assembly manifestVersion=\"1.0\">"
 "<assemblyIdentity version=\"1.0.0.0\"  name=\"Wine.Test\" type=\"win32\"></assemblyIdentity>"
@@ -3157,6 +3165,60 @@ todo_wine {
     }
 }
 
+static void test_loadfrom_environment(void)
+{
+    char temp[MAX_PATH], directory[MAX_PATH], manifest[MAX_PATH], dll[MAX_PATH], loaded[MAX_PATH];
+    ACTCTXA context = {sizeof(context)};
+    HMODULE module = NULL;
+    ULONG_PTR cookie = 0;
+    HANDLE handle;
+    DWORD length;
+    BOOL ret;
+
+    length = GetTempPathA( ARRAY_SIZE(temp), temp );
+    ok( length && length < ARRAY_SIZE(temp), "GetTempPathA failed, error %lu\n", GetLastError() );
+    ok( GetTempFileNameA( temp, "acf", 0, directory ), "GetTempFileNameA failed, error %lu\n",
+        GetLastError() );
+    DeleteFileA( directory );
+    ok( CreateDirectoryA( directory, NULL ), "CreateDirectoryA failed, error %lu\n", GetLastError() );
+    snprintf( manifest, ARRAY_SIZE(manifest), "%s\\loadfrom.manifest", directory );
+    snprintf( dll, ARRAY_SIZE(dll), "%s\\loadfrom.dll", directory );
+    extract_resource( "dummy.dll", "TESTDLL", dll );
+
+    ok( SetEnvironmentVariableA( "WINE_ACTCTX_LOADFROM", directory ),
+        "SetEnvironmentVariableA failed, error %lu\n", GetLastError() );
+    create_manifest_file( manifest, loadfrom_environment_manifest, -1, NULL, NULL );
+    context.lpSource = manifest;
+    handle = CreateActCtxA( &context );
+    ok( handle != INVALID_HANDLE_VALUE, "CreateActCtxA failed, error %lu\n", GetLastError() );
+    SetEnvironmentVariableA( "WINE_ACTCTX_LOADFROM", NULL );
+    DeleteFileA( manifest );
+
+    if (handle != INVALID_HANDLE_VALUE)
+    {
+        ret = ActivateActCtx( handle, &cookie );
+        ok( ret, "ActivateActCtx failed, error %lu\n", GetLastError() );
+        if (ret)
+        {
+            module = LoadLibraryA( "loadfrom.dll" );
+            ok( module != NULL, "LoadLibraryA failed, error %lu\n", GetLastError() );
+            if (module)
+            {
+                length = GetModuleFileNameA( module, loaded, ARRAY_SIZE(loaded) );
+                ok( length && length < ARRAY_SIZE(loaded), "GetModuleFileNameA failed, error %lu\n",
+                    GetLastError() );
+                ok( !_stricmp( loaded, dll ), "loaded %s, expected %s\n", loaded, dll );
+                FreeLibrary( module );
+            }
+            DeactivateActCtx( 0, cookie );
+        }
+        ReleaseActCtx( handle );
+    }
+    DeleteFileA( dll );
+    RemoveDirectoryA( directory );
+}
+
+
 static void test_CreateActCtx_share_mode(void)
 {
     WCHAR tmp_manifest_pathname[MAX_PATH];
@@ -4800,6 +4862,7 @@ START_TEST(actctx)
     test_actctx();
     test_create_fail();
     test_CreateActCtx();
+    test_loadfrom_environment();
     test_CreateActCtx_share_mode();
     test_findsectionstring();
     test_ZombifyActCtx();

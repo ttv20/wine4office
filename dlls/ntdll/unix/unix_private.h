@@ -188,6 +188,7 @@ extern void *pKiUserEmulationDispatcher;
 extern void *pLdrInitializeThunk;
 extern void *pRtlUserThreadStart;
 extern void *p__wine_ctrl_routine;
+extern __thread unsigned int yield_execution_throttle_count;
 extern SYSTEM_DLL_INIT_BLOCK *pLdrSystemDllInitBlock;
 
 struct _FILE_FS_DEVICE_INFORMATION;

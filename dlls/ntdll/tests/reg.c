@@ -960,6 +960,63 @@ static void test_NtQueryMultipleValueKey(void)
     pNtClose(key);
 }
 
+static void test_NtQueryMultipleValueKey_retention_limit(void)
+{
+    static const unsigned char value = 0x11;
+    const ULONG count = 512, name_length = USHRT_MAX - 1;
+    KEY_MULTIPLE_VALUE_INFORMATION *entries;
+    UNICODE_STRING long_name, short_name;
+    OBJECT_ATTRIBUTES attr;
+    unsigned char buffer[4];
+    WCHAR *name_data;
+    ULONG length;
+    NTSTATUS status;
+    HANDLE key;
+    ULONG i;
+
+    entries = HeapAlloc( GetProcessHeap(), 0, count * sizeof(*entries) );
+    name_data = HeapAlloc( GetProcessHeap(), 0, name_length );
+    if (!entries || !name_data)
+    {
+        HeapFree( GetProcessHeap(), 0, entries );
+        HeapFree( GetProcessHeap(), 0, name_data );
+        win_skip( "Could not allocate the registry retention test buffers.\n" );
+        return;
+    }
+    memset( name_data, 'a', name_length );
+    long_name.Buffer = name_data;
+    long_name.Length = name_length;
+    long_name.MaximumLength = name_length;
+    for (i = 0; i < count; i++) entries[i].ValueName = &long_name;
+
+    /* The staged query must reject excessive retained names and release its budget. */
+    InitializeObjectAttributes(&attr, &winetestpath, 0, 0, 0);
+    status = pNtOpenKey(&key, KEY_QUERY_VALUE | KEY_SET_VALUE, &attr);
+    ok(status == STATUS_SUCCESS, "NtOpenKey failed: %#lx\n", status);
+    if (status) goto done;
+
+    length = 0xdeadbeef;
+    status = pNtQueryMultipleValueKey(key, entries, count, NULL, &length, NULL);
+    ok(status == STATUS_INSUFFICIENT_RESOURCES, "got status %#lx\n", status);
+    ok(length == 0xdeadbeef, "length was modified: %#lx\n", length);
+
+    pRtlInitUnicodeString(&short_name, L"retention_recovery");
+    status = pNtSetValueKey(key, &short_name, 0, REG_BINARY, &value, sizeof(value));
+    ok(status == STATUS_SUCCESS, "NtSetValueKey failed: %#lx\n", status);
+    entries[0].ValueName = &short_name;
+    memset(buffer, 0xcc, sizeof(buffer));
+    length = sizeof(buffer);
+    status = pNtQueryMultipleValueKey(key, entries, 1, buffer, &length, NULL);
+    ok(status == STATUS_SUCCESS, "recovery query failed: %#lx\n", status);
+    ok(length == sizeof(value) && buffer[0] == value, "recovery query returned %lu/%#x\n",
+       length, buffer[0]);
+    pNtClose(key);
+
+done:
+    HeapFree( GetProcessHeap(), 0, entries );
+    HeapFree( GetProcessHeap(), 0, name_data );
+}
+
 static void test_NtDeleteKey(void)
 {
     UNICODE_STRING string;
@@ -3337,6 +3394,7 @@ START_TEST(reg)
     test_NtQueryValueKey();
     test_NtQueryMultipleValueKey();
     test_long_value_name();
+    test_NtQueryMultipleValueKey_retention_limit();
     test_notify();
     test_RtlCreateRegistryKey();
     test_NtDeleteKey();

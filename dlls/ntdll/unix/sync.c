@@ -2389,6 +2389,8 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
 }
 
 
+__thread unsigned int yield_execution_throttle_count;
+
 static void throttle_office_net_ui_yield(void)
 {
     static __thread struct timespec active_since, previous;
@@ -2398,7 +2400,7 @@ static void throttle_office_net_ui_yield(void)
     struct timespec current, delay;
     long milliseconds;
 
-    if (!getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    if (!yield_execution_throttle_count)
     {
         rapid_yields = 0;
         active_since.tv_sec = active_since.tv_nsec = 0;
@@ -2455,7 +2457,7 @@ NTSTATUS WINAPI NtYieldExecution(void)
     /* The visible Office gallery loop expects the native no-yield status.
      * Avoid two getrusage() calls and sched_yield() for every thumbnail-loop
      * iteration when this UI-thread-only path is active. */
-    if (getenv( "WINE_NETUI_YIELD_ACTIVE" ))
+    if (yield_execution_throttle_count)
     {
         throttle_office_net_ui_yield();
         return STATUS_NO_YIELD_PERFORMED;

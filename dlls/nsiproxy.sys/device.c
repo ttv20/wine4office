@@ -78,11 +78,21 @@ static NTSTATUS nsiproxy_enumerate_all( IRP *irp )
     void *out = irp->AssociatedIrp.SystemBuffer;
     DWORD out_len = irpsp->Parameters.DeviceIoControl.OutputBufferLength;
     struct nsi_enumerate_all_ex enum_all;
+    DWORD row_size, required;
     NTSTATUS status;
 
     if (in_len != sizeof(*in)) return STATUS_INVALID_PARAMETER;
 
-    if (out_len < sizeof(UINT) + (in->key_size + in->rw_size + in->dynamic_size + in->static_size) * in->count)
+    if (in->rw_size > MAXDWORD - in->key_size ||
+        in->dynamic_size > MAXDWORD - in->key_size - in->rw_size ||
+        in->static_size > MAXDWORD - in->key_size - in->rw_size - in->dynamic_size)
+        return STATUS_INVALID_PARAMETER;
+    row_size = in->key_size + in->rw_size + in->dynamic_size + in->static_size;
+    if (row_size > MAXDWORD - sizeof(UINT) ||
+        (row_size && in->count > (MAXDWORD - sizeof(UINT)) / row_size))
+        return STATUS_INVALID_PARAMETER;
+    required = sizeof(UINT) + row_size * in->count;
+    if (out_len < required)
         return STATUS_INVALID_PARAMETER;
 
     enum_all.unknown[0] = 0;

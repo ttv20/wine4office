@@ -2373,6 +2373,7 @@ typedef enum _THREADINFOCLASS {
     MaxThreadInfoClass,
 #ifdef __WINESRC__
     ThreadWineNativeThreadName = 1000,
+    ThreadWineYieldExecutionState = 1001,
 #endif
 } THREADINFOCLASS;
 

@@ -4385,58 +4385,66 @@ static const WCHAR *find_ascii_substring_i( const UNICODE_STRING *name, const ch
     return NULL;
 }
 
-/* Click-to-Run presents its VFS files as an overlay on the Office package.
- * App-V normally supplies that merged view.  For native Office processes,
- * retry missing Office16 files against the architecture-specific package VFS
- * while preserving the requested NT object name. */
-static NTSTATUS get_c2r_vfs_unix_name( const OBJECT_ATTRIBUTES *attr, const UNICODE_STRING *name,
-                                       char **unix_name, BOOL open_reparse )
+/* App-V packages contain files for virtual well-known folders below root/vfs.
+ * Click-to-Run normally supplies a merged view.  Retry a missing package-root
+ * file against the common-files virtual roots while preserving the requested
+ * NT object name. */
+static NTSTATUS get_appv_vfs_unix_name( const OBJECT_ATTRIBUTES *attr, const UNICODE_STRING *name,
+                                        char **unix_name, BOOL open_reparse )
 {
-    static const char marker[] = "\\Microsoft Office\\root\\Office16\\";
+    static const char marker[] = "\\root\\";
     static const char *replacements[] =
     {
-        "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Office16\\",
-        "\\Microsoft Office\\root\\vfs\\ProgramFilesCommonX86\\Microsoft Shared\\Office16\\"
+        "\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\",
+        "\\root\\vfs\\ProgramFilesCommonX86\\Microsoft Shared\\"
     };
-    const WCHAR *match, *suffix;
+    const WCHAR *match, *search = name->Buffer;
     SIZE_T prefix_len, suffix_len, replacement_len, len;
-    UNICODE_STRING alternate, true_name;
+    UNICODE_STRING alternate, true_name, remainder;
     OBJECT_ATTRIBUTES alternate_attr;
     NTSTATUS status = STATUS_OBJECT_NAME_NOT_FOUND;
     unsigned int i, j;
 
-    if (attr->RootDirectory || !(match = find_ascii_substring_i( name, marker ))) return status;
-
-    prefix_len = match - name->Buffer;
-    suffix = match + strlen(marker);
-    suffix_len = name->Length / sizeof(WCHAR) - (suffix - name->Buffer);
-
-    for (i = 0; i < ARRAY_SIZE(replacements); i++)
+    if (attr->RootDirectory) return status;
+    while (search < name->Buffer + name->Length / sizeof(WCHAR))
     {
-        replacement_len = strlen( replacements[i] );
-        len = prefix_len + replacement_len + suffix_len;
-        if (len >= 0x7fff / sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
-        if (!(alternate.Buffer = malloc( (len + 1) * sizeof(WCHAR) ))) return STATUS_NO_MEMORY;
+        remainder.Buffer = (WCHAR *)search;
+        remainder.Length = (name->Buffer + name->Length / sizeof(WCHAR) - search) * sizeof(WCHAR);
+        remainder.MaximumLength = remainder.Length;
+        if (!(match = find_ascii_substring_i( &remainder, marker ))) break;
 
-        memcpy( alternate.Buffer, name->Buffer, prefix_len * sizeof(WCHAR) );
-        for (j = 0; j < replacement_len; j++)
-            alternate.Buffer[prefix_len + j] = replacements[i][j];
-        memcpy( alternate.Buffer + prefix_len + replacement_len, suffix, suffix_len * sizeof(WCHAR) );
-        alternate.Buffer[len] = 0;
-        alternate.Length = len * sizeof(WCHAR);
-        alternate.MaximumLength = (len + 1) * sizeof(WCHAR);
+        prefix_len = match - name->Buffer;
+        search = match + 1;
+        suffix_len = name->Length / sizeof(WCHAR) - prefix_len - strlen(marker);
 
-        alternate_attr = *attr;
-        alternate_attr.ObjectName = &alternate;
-        alternate_attr.RootDirectory = 0;
-        true_name.Buffer = NULL;
-        status = nt_to_unix_file_name_no_root( &alternate_attr, &true_name, unix_name,
-                                               FILE_OPEN, open_reparse, 0 );
-        if (!status)
-            TRACE( "Click-to-Run VFS redirected %s to %s\n", debugstr_us(name), debugstr_us(&alternate) );
-        free( true_name.Buffer );
-        free( alternate.Buffer );
-        if (!status || status == STATUS_NO_MEMORY) return status;
+        for (i = 0; i < ARRAY_SIZE(replacements); i++)
+        {
+            replacement_len = strlen( replacements[i] );
+            len = prefix_len + replacement_len + suffix_len;
+            if (len >= 0x7fff / sizeof(WCHAR)) return STATUS_NAME_TOO_LONG;
+            if (!(alternate.Buffer = malloc( (len + 1) * sizeof(WCHAR) ))) return STATUS_NO_MEMORY;
+
+            memcpy( alternate.Buffer, name->Buffer, prefix_len * sizeof(WCHAR) );
+            for (j = 0; j < replacement_len; j++)
+                alternate.Buffer[prefix_len + j] = replacements[i][j];
+            memcpy( alternate.Buffer + prefix_len + replacement_len, match + strlen(marker),
+                    suffix_len * sizeof(WCHAR) );
+            alternate.Buffer[len] = 0;
+            alternate.Length = len * sizeof(WCHAR);
+            alternate.MaximumLength = (len + 1) * sizeof(WCHAR);
+
+            alternate_attr = *attr;
+            alternate_attr.ObjectName = &alternate;
+            alternate_attr.RootDirectory = 0;
+            true_name.Buffer = NULL;
+            status = nt_to_unix_file_name_no_root( &alternate_attr, &true_name, unix_name,
+                                                   FILE_OPEN, open_reparse, 0 );
+            if (!status)
+                TRACE( "App-V VFS redirected %s to %s\n", debugstr_us(name), debugstr_us(&alternate) );
+            free( true_name.Buffer );
+            free( alternate.Buffer );
+            if (!status || status == STATUS_NO_MEMORY) return status;
+        }
     }
     return status;
 }
@@ -4767,8 +4775,8 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
             !(access & (GENERIC_WRITE | GENERIC_ALL | DELETE | WRITE_DAC | WRITE_OWNER |
                         FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES)))
         {
-            NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name,
-                                                         options & FILE_OPEN_REPARSE_POINT );
+            NTSTATUS vfs_status = get_appv_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name,
+                                                          options & FILE_OPEN_REPARSE_POINT );
 
             if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
         }
@@ -4983,7 +4991,7 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
     status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE );
     if (status)
     {
-        NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
+        NTSTATUS vfs_status = get_appv_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
 
         if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
     }
@@ -5019,7 +5027,7 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
     status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE );
     if (status)
     {
-        NTSTATUS vfs_status = get_c2r_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
+        NTSTATUS vfs_status = get_appv_vfs_unix_name( &new_attr, attr->ObjectName, &unix_name, TRUE );
 
         if (!vfs_status || vfs_status == STATUS_NO_MEMORY) status = vfs_status;
     }

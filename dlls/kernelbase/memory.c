@@ -136,18 +136,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH FlushInstructionCache( HANDLE process, LPCVOID add
 {
     CROSS_PROCESS_WORK_LIST *list;
 
-#ifdef __x86_64__
-    if (process == GetCurrentProcess() && addr && size == 5 && *(const BYTE *)addr == 0xe9)
-    {
-        const BYTE *code = addr;
-        INT32 displacement;
-
-        memcpy( &displacement, code + 1, sizeof(displacement) );
-        WARN_(virtual)("5-byte detour at %p -> %p, bytes %02x %02x %02x %02x %02x\n", addr,
-                code + 5 + displacement, code[0], code[1], code[2], code[3], code[4]);
-    }
-#endif
-
     if ((list = open_cross_process_connection( process )))
     {
         send_cross_process_notification( list, CrossProcessFlushCache, addr, size, 0 );

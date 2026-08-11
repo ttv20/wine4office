@@ -1,5 +1,6 @@
 TESTDLL = vulkan-1.dll
 IMPORTS = vulkan-1 user32
+EXTRAINCL = $(VKD3D_PE_CFLAGS)
 
 SOURCES = \
 	vulkan.c

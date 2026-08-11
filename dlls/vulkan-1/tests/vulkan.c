@@ -16,8 +16,11 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#define COBJMACROS
 #include "windows.h"
+#include "objbase.h"
 #include "wine/vulkan.h"
+#include "../../wined3d/wined3d_vk.h"
 #include "wine/test.h"
 
 static VkResult create_instance(uint32_t extension_count,
@@ -64,6 +67,101 @@ static VkResult create_instance_skip_(unsigned int line, uint32_t extension_coun
     }
 
     return vr;
+}
+
+struct synthetic_image_format_loader
+{
+    BOOL core_available;
+    BOOL khr_available;
+    unsigned int core_queries;
+    unsigned int khr_queries;
+};
+
+static VkResult VKAPI_PTR synthetic_core_image_format_properties2(VkPhysicalDevice physical_device,
+        const VkPhysicalDeviceImageFormatInfo2 *format_info, VkImageFormatProperties2 *format_properties)
+{
+    (void)physical_device;
+    (void)format_info;
+    (void)format_properties;
+    return VK_SUCCESS;
+}
+
+static VkResult VKAPI_PTR synthetic_khr_image_format_properties2(VkPhysicalDevice physical_device,
+        const VkPhysicalDeviceImageFormatInfo2 *format_info, VkImageFormatProperties2 *format_properties)
+{
+    (void)physical_device;
+    (void)format_info;
+    (void)format_properties;
+    return VK_SUCCESS;
+}
+
+static PFN_vkVoidFunction VKAPI_PTR synthetic_get_instance_proc_addr(VkInstance instance, const char *name)
+{
+    struct synthetic_image_format_loader *loader = (void *)instance;
+
+    if (!strcmp(name, "vkGetPhysicalDeviceImageFormatProperties2"))
+    {
+        ++loader->core_queries;
+        return loader->core_available ? (void *)synthetic_core_image_format_properties2 : NULL;
+    }
+    if (!strcmp(name, "vkGetPhysicalDeviceImageFormatProperties2KHR"))
+    {
+        ++loader->khr_queries;
+        return loader->khr_available ? (void *)synthetic_khr_image_format_properties2 : NULL;
+    }
+    return NULL;
+}
+
+static void test_image_format_properties2_loader(void)
+{
+    static const struct
+    {
+        const char *name;
+        uint32_t api_version;
+        BOOL khr_advertised;
+        BOOL core_available;
+        BOOL khr_available;
+        PFN_vkGetPhysicalDeviceImageFormatProperties2 expected;
+        unsigned int expected_core_queries;
+        unsigned int expected_khr_queries;
+    }
+    tests[] =
+    {
+        {"core", VK_API_VERSION_1_1, FALSE, TRUE, TRUE,
+            synthetic_core_image_format_properties2, 1, 0},
+        {"KHR-only", VK_API_VERSION_1_0, TRUE, TRUE, TRUE,
+            synthetic_khr_image_format_properties2, 0, 1},
+        {"neither", VK_API_VERSION_1_0, FALSE, TRUE, TRUE,
+            NULL, 0, 0},
+        {"core advertised but missing", VK_API_VERSION_1_1, FALSE, FALSE, TRUE,
+            NULL, 1, 0},
+        {"KHR advertised but missing", VK_API_VERSION_1_0, TRUE, TRUE, FALSE,
+            NULL, 0, 1},
+        {"core advertised, KHR alias only", VK_API_VERSION_1_1, TRUE, FALSE, TRUE,
+            NULL, 1, 0},
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        struct synthetic_image_format_loader loader =
+        {
+            tests[i].core_available, tests[i].khr_available, 0, 0,
+        };
+        PFN_vkGetPhysicalDeviceImageFormatProperties2 function;
+
+        function = wined3d_vk_resolve_image_format_properties2(
+                synthetic_get_instance_proc_addr, (VkInstance)&loader,
+                tests[i].api_version, tests[i].khr_advertised);
+        ok(function == tests[i].expected, "%s: selected an unexpected function.\n",
+                tests[i].name);
+        ok(loader.core_queries == tests[i].expected_core_queries,
+                "%s: queried core %u times, expected %u.\n",
+                tests[i].name, loader.core_queries, tests[i].expected_core_queries);
+        ok(loader.khr_queries == tests[i].expected_khr_queries,
+                "%s: queried KHR %u times, expected %u.\n",
+                tests[i].name, loader.khr_queries, tests[i].expected_khr_queries);
+    }
 }
 
 static VkBool32 find_queue_family(VkPhysicalDevice vk_physical_device,
@@ -1835,6 +1933,7 @@ START_TEST(vulkan)
     int argc;
 
     argc = winetest_get_mainargs(&argv);
+    test_image_format_properties2_loader();
 
     if (argc > 3 && !strcmp(argv[2], "resource"))
     {

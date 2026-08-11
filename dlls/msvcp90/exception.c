@@ -655,6 +655,14 @@ typedef struct {
 typedef system_error _System_error;
 typedef system_error failure;
 
+/* The error_code member is part of the system_error ABI from MSVCP 100
+ * onwards.  Keep the older failure layout free of later-version state. */
+#if _MSVCP_VER > 90
+C_ASSERT(FIELD_OFFSET(system_error, code) == sizeof(runtime_error));
+#else
+C_ASSERT(sizeof(system_error) == sizeof(runtime_error));
+#endif
+
 static failure* MSVCP_failure_ctor( failure *this, exception_name name )
 {
     TRACE("%p %s\n", this, EXCEPTION_STR(name));
@@ -1204,6 +1212,12 @@ void __cdecl _Rethrow_future_exception(const exception_ptr ep)
     exception_ptr_rethrow(&ep);
 }
 
+#endif /* _MSVCP_VER >= 110 */
+
+#if _MSVCP_VER >= 110
+/* These helpers are exported by MSVCP 110 and later and require the
+ * post-90 system_error layout above. */
+
 /* ?_Throw_C_error@std@@YAXH@Z */
 void __cdecl _Throw_C_error(int code)
 {
@@ -1283,6 +1297,10 @@ void __cdecl DECLSPEC_NORETURN _Throw_Cpp_error(int code)
 
     _CxxThrowException(&se, &system_error_exception_type);
 }
+
+#endif /* _MSVCP_VER >= 110 */
+
+#if _MSVCP_VER >= 110
 
 /* compute the this pointer for a base class of a given type */
 static inline void *get_this_pointer( const this_ptr_offsets *off, void *object )

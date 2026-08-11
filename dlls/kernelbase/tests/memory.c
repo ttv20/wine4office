@@ -50,6 +50,36 @@ static void test_enum_system_firmware_tables(void)
     ok(err == ERROR_INVALID_FUNCTION, "Unexpected error for invalid provider: %ld\n", err);
 }
 
+static void test_flush_instruction_cache(void)
+{
+    SYSTEM_INFO system_info;
+    void *page, *committed;
+    BOOL ret;
+
+    /* The API must not inspect caller memory while flushing the range. */
+    GetSystemInfo(&system_info);
+    page = VirtualAlloc(NULL, 2 * system_info.dwPageSize, MEM_RESERVE, PAGE_NOACCESS);
+    ok(page != NULL, "VirtualAlloc reservation failed: %lu\n", GetLastError());
+    if (!page) return;
+    committed = VirtualAlloc(page, system_info.dwPageSize, MEM_COMMIT, PAGE_READWRITE);
+    ok(committed == page, "VirtualAlloc commit failed: %lu\n", GetLastError());
+    if (!committed)
+    {
+        VirtualFree(page, 0, MEM_RELEASE);
+        return;
+    }
+
+    ret = FlushInstructionCache(GetCurrentProcess(), (void *)(ULONG_PTR)0xdeadbeef, 1);
+    ok(ret, "FlushInstructionCache on an unmapped address failed: %lu\n", GetLastError());
+    ret = FlushInstructionCache(GetCurrentProcess(), (char *)page + system_info.dwPageSize, 1);
+    ok(ret, "FlushInstructionCache on a page edge failed: %lu\n", GetLastError());
+    ret = FlushInstructionCache(GetCurrentProcess(),
+                                (char *)page + system_info.dwPageSize - 1, 2);
+    ok(ret, "FlushInstructionCache across a page edge failed: %lu\n", GetLastError());
+
+    ok(VirtualFree(page, 0, MEM_RELEASE), "VirtualFree failed: %lu\n", GetLastError());
+}
+
 START_TEST(memory)
 {
     HMODULE hmod;
@@ -58,4 +88,5 @@ START_TEST(memory)
     pEnumSystemFirmwareTables = (void *)GetProcAddress(hmod, "EnumSystemFirmwareTables");
 
     test_enum_system_firmware_tables();
+    test_flush_instruction_cache();
 }

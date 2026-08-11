@@ -43,6 +43,37 @@ static int unstable( int val )
     return !winetest_interactive || val;
 }
 
+static void test_enumerate_size_overflow(void)
+{
+    /* Keep the arithmetic checks independent of the backing device. */
+    struct nsi_enumerate_all_ex params = {0};
+    void *key_data = NULL, *rw_data = NULL;
+    DWORD count = 1, err;
+
+    params.module = &NPI_MS_NDIS_MODULEID;
+    params.count = 1;
+    params.key_size = MAXDWORD;
+    params.rw_size = 1;
+    err = NsiEnumerateObjectsAllParametersEx( &params );
+    ok( err == ERROR_OUTOFMEMORY, "got %lu\n", err );
+
+    params.rw_size = 0;
+    params.count = 2;
+    err = NsiEnumerateObjectsAllParametersEx( &params );
+    ok( err == ERROR_OUTOFMEMORY, "got %lu\n", err );
+
+    params.key_size = 1;
+    params.key_data = NULL;
+    params.count = 1;
+    err = NsiEnumerateObjectsAllParametersEx( &params );
+    ok( err == ERROR_INVALID_PARAMETER, "got %lu\n", err );
+
+    err = NsiAllocateAndGetTable( 1, &NPI_MS_NDIS_MODULEID, NSI_NDIS_IFINFO_TABLE,
+                                  &key_data, MAXDWORD, &rw_data, 1, NULL, 0, NULL, 0, &count, 0 );
+    ok( err == ERROR_OUTOFMEMORY, "got %lu\n", err );
+    ok( !key_data && !rw_data && !count, "outputs were modified on failure\n" );
+}
+
 static void test_nsi_api( void )
 {
     DWORD rw_sizes[] = { FIELD_OFFSET(struct nsi_ndis_ifinfo_rw, name2), FIELD_OFFSET(struct nsi_ndis_ifinfo_rw, unk),
@@ -1174,6 +1205,7 @@ void test_change_notifications(void)
 
 START_TEST( nsi )
 {
+    test_enumerate_size_overflow();
     test_nsi_api();
 
     test_ndis_ifinfo();

@@ -2321,7 +2321,27 @@ static void parse_file_elem( xmlbuf_t* xmlbuf, struct assembly* assembly,
         }
         else if (xml_attr_cmp(&attr, L"loadFrom"))
         {
-            if (!(dll->load_from = xmlstrdupW(&attr.value))) set_error( xmlbuf );
+            WCHAR *expanded;
+            SIZE_T size;
+
+            if (!(dll->load_from = xmlstrdupW(&attr.value)))
+                set_error( xmlbuf );
+            else if (wcschr(dll->load_from, '%'))
+            {
+                RtlExpandEnvironmentStrings(NULL, dll->load_from, wcslen(dll->load_from), NULL, 0, &size);
+                if ((expanded = RtlAllocateHeap(GetProcessHeap(), 0, size * sizeof(*expanded))))
+                {
+                    if (!RtlExpandEnvironmentStrings(NULL, dll->load_from, wcslen(dll->load_from),
+                                                     expanded, size, NULL) &&
+                        wcscmp(expanded, dll->load_from))
+                    {
+                        RtlFreeHeap(GetProcessHeap(), 0, dll->load_from);
+                        dll->load_from = expanded;
+                    }
+                    else
+                        RtlFreeHeap(GetProcessHeap(), 0, expanded);
+                }
+            }
         }
         else if (xml_attr_cmp(&attr, L"hash"))
         {

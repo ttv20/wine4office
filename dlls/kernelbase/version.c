@@ -1727,41 +1727,242 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32
     return APPMODEL_ERROR_NO_PACKAGE;
 }
 
+struct staged_package_entry
+{
+    WCHAR *full_name;
+};
+
+static void free_staged_package_entries( struct staged_package_entry *entries, UINT32 count )
+{
+    UINT32 i;
+    for (i = 0; i < count; ++i) HeapFree( GetProcessHeap(), 0, entries[i].full_name );
+    HeapFree( GetProcessHeap(), 0, entries );
+}
+
+static BOOL staged_package_matches_filters( UINT32 filters )
+{
+    const UINT32 type_filters = 0x002200f0;
+
+    /* The staged index contains static head packages, never dynamic,
+     * resource, bundle, optional, or host-runtime graph entries. */
+    if ((filters & 0x00100000) && !(filters & 0x00080000)) return FALSE;
+    if ((filters & type_filters) && !(filters & 0x00000010)) return FALSE;
+    return TRUE;
+}
+
+static LONG enumerate_staged_packages( const WCHAR *family_name, UINT32 package_filters,
+        struct staged_package_entry **entries, UINT32 *count )
+{
+    static const WCHAR key_name[] = L"Software\\Wine\\Appx\\StagedPackages";
+    const UINT32 known_filters = 0x003f00f0;
+    WCHAR value_name[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1], *data, *basename;
+    DWORD index = 0, value_name_len, data_size, type;
+    SIZE_T family_length;
+    HKEY key;
+    LONG status;
+
+    *entries = NULL;
+    *count = 0;
+    if (!family_name || !*family_name) return ERROR_INVALID_PARAMETER;
+    if (package_filters & ~known_filters) return ERROR_INVALID_PARAMETER;
+    family_length = wcslen( family_name );
+    if (family_length > PACKAGE_FAMILY_NAME_MAX_LENGTH) return ERROR_INVALID_PARAMETER;
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, key_name, 0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
+    if (status) return status == ERROR_FILE_NOT_FOUND ? ERROR_NOT_FOUND : status;
+
+    for (;; ++index)
+    {
+        struct staged_package_entry *new_entries;
+        UINT32 new_count;
+        SIZE_T full_name_size;
+
+        value_name_len = ARRAY_SIZE(value_name);
+        data_size = 0;
+        status = RegEnumValueW( key, index, value_name, &value_name_len, NULL, &type, NULL, &data_size );
+        if (status == ERROR_NO_MORE_ITEMS) break;
+        if (status || type != REG_SZ || value_name_len != family_length ||
+            _wcsnicmp( value_name, family_name, family_length )) continue;
+        if (!data_size || data_size > 32768 * sizeof(WCHAR) ||
+            !(data = HeapAlloc( GetProcessHeap(), 0, data_size ))) continue;
+        status = RegQueryValueExW( key, value_name, NULL, &type, (BYTE *)data, &data_size );
+        if (status || type != REG_SZ || data_size < sizeof(WCHAR) || data_size % sizeof(WCHAR) ||
+            data[(data_size / sizeof(WCHAR)) - 1])
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            continue;
+        }
+        if (!staged_package_matches_filters( package_filters ))
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            continue;
+        }
+        if (!(basename = wcsrchr( data, '\\' )) || !basename[1])
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            continue;
+        }
+        ++basename;
+        if (wcslen( basename ) > PACKAGE_FULL_NAME_MAX_LENGTH)
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            continue;
+        }
+        new_count = *count + 1;
+        if (new_count < *count || new_count > UINT_MAX / sizeof(**entries))
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            RegCloseKey( key );
+            free_staged_package_entries( *entries, *count );
+            *entries = NULL;
+            *count = 0;
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        if (*entries)
+            new_entries = HeapReAlloc( GetProcessHeap(), 0, *entries, new_count * sizeof(**entries) );
+        else
+            new_entries = HeapAlloc( GetProcessHeap(), 0, new_count * sizeof(**entries) );
+        if (!new_entries)
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            RegCloseKey( key );
+            free_staged_package_entries( *entries, *count );
+            *entries = NULL;
+            *count = 0;
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        *entries = new_entries;
+        full_name_size = (wcslen( basename ) + 1) * sizeof(WCHAR);
+        if (!((*entries)[*count].full_name = HeapAlloc( GetProcessHeap(), 0, full_name_size )))
+        {
+            HeapFree( GetProcessHeap(), 0, data );
+            RegCloseKey( key );
+            free_staged_package_entries( *entries, *count );
+            *entries = NULL;
+            *count = 0;
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        wcscpy( (*entries)[*count].full_name, basename );
+        *count = new_count;
+        HeapFree( GetProcessHeap(), 0, data );
+    }
+    RegCloseKey( key );
+    return ERROR_SUCCESS;
+}
+
+static LONG package_name_buffer_requirements( struct staged_package_entry *entries, UINT32 count,
+        UINT32 *length )
+{
+    UINT32 i, required = 0, size;
+
+    for (i = 0; i < count; ++i)
+    {
+        size = wcslen( entries[i].full_name ) + 1;
+        if (required > UINT_MAX - size) return ERROR_NOT_ENOUGH_MEMORY;
+        required += size;
+    }
+    *length = required;
+    return ERROR_SUCCESS;
+}
+
 /***********************************************************************
  *         GetPackagesByPackageFamily   (kernelbase.@)
  */
-LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_name, UINT32 *count,
-                                                         WCHAR *full_names, UINT32 *buffer_len, WCHAR *buffer)
+LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily( const WCHAR *family_name, UINT32 *count,
+        WCHAR **full_names, UINT32 *buffer_len, WCHAR *buffer )
 {
-    FIXME( "(%s %p %p %p %p): stub\n", debugstr_w(family_name), count, full_names, buffer_len, buffer );
+    struct staged_package_entry *entries;
+    UINT32 capacity, buffer_capacity, required, i;
+    WCHAR *cursor;
+    LONG status;
 
-    if (!count || !buffer_len)
-        return ERROR_INVALID_PARAMETER;
-
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w(family_name), count, full_names, buffer_len, buffer );
+    if (!count || !buffer_len) return ERROR_INVALID_PARAMETER;
+    capacity = *count;
+    buffer_capacity = *buffer_len;
     *count = 0;
     *buffer_len = 0;
+    if (!family_name) return ERROR_INVALID_PARAMETER;
+    if ((status = enumerate_staged_packages( family_name, 0, &entries, count ))) return status;
+    if (!*count)
+    {
+        HeapFree( GetProcessHeap(), 0, entries );
+        return ERROR_NOT_FOUND;
+    }
+    if ((status = package_name_buffer_requirements( entries, *count, &required )))
+    {
+        free_staged_package_entries( entries, *count );
+        *count = 0;
+        return status;
+    }
+    *buffer_len = required;
+    if (capacity < *count || buffer_capacity < required || !full_names || !buffer)
+    {
+        status = ERROR_INSUFFICIENT_BUFFER;
+        free_staged_package_entries( entries, *count );
+        return status;
+    }
+    cursor = buffer;
+    for (i = 0; i < *count; ++i)
+    {
+        UINT32 size = wcslen( entries[i].full_name ) + 1;
+        full_names[i] = cursor;
+        memcpy( cursor, entries[i].full_name, size * sizeof(WCHAR) );
+        cursor += size;
+    }
+    free_staged_package_entries( entries, *count );
     return ERROR_SUCCESS;
 }
 
 /***********************************************************************
  *         FindPackagesByPackageFamily   (kernelbase.@)
- *
- * Office mso.dll imports this.  Return "no packages" so callers treat
- * the process as non-Store / unpackaged.
  */
 LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family_name, UINT32 package_filters, UINT32 *count,
-                                         WCHAR **full_names, UINT32 *buffer_len, WCHAR *buffer,
-                                         UINT32 *package_properties )
+        WCHAR **full_names, UINT32 *buffer_len, WCHAR *buffer, UINT32 *package_properties )
 {
-    FIXME( "(%s %#x %p %p %p %p %p): stub\n", debugstr_w(family_name), package_filters, count,
+    struct staged_package_entry *entries;
+    UINT32 capacity, buffer_capacity, required, i;
+    WCHAR *cursor;
+    LONG status;
+
+    TRACE( "(%s %#x %p %p %p %p %p)\n", debugstr_w(family_name), package_filters, count,
             full_names, buffer_len, buffer, package_properties );
-
-    if (!count || !buffer_len)
-        return ERROR_INVALID_PARAMETER;
-
+    if (!count || !buffer_len) return ERROR_INVALID_PARAMETER;
+    capacity = *count;
+    buffer_capacity = *buffer_len;
     *count = 0;
     *buffer_len = 0;
     if (package_properties) *package_properties = 0;
+    if (!family_name) return ERROR_INVALID_PARAMETER;
+    if ((status = enumerate_staged_packages( family_name, package_filters, &entries, count ))) return status;
+    if (!*count)
+    {
+        HeapFree( GetProcessHeap(), 0, entries );
+        return ERROR_NOT_FOUND;
+    }
+    if ((status = package_name_buffer_requirements( entries, *count, &required )))
+    {
+        free_staged_package_entries( entries, *count );
+        *count = 0;
+        return status;
+    }
+    *buffer_len = required;
+    if (capacity < *count || buffer_capacity < required || !full_names || !buffer)
+    {
+        status = ERROR_INSUFFICIENT_BUFFER;
+        free_staged_package_entries( entries, *count );
+        return status;
+    }
+    cursor = buffer;
+    for (i = 0; i < *count; ++i)
+    {
+        UINT32 size = wcslen( entries[i].full_name ) + 1;
+        full_names[i] = cursor;
+        memcpy( cursor, entries[i].full_name, size * sizeof(WCHAR) );
+        cursor += size;
+        if (package_properties) package_properties[i] = 0x00080000;
+    }
+    free_staged_package_entries( entries, *count );
     return ERROR_SUCCESS;
 }
 
