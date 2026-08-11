@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0-alpha — 2026-08-11
+
 - Add a new Wine4Office website with installation guidance.
 - Make updates, removal, background services, and recovery safer.
 - Improve Office installation and Click-to-Run reliability.
@@ -22,6 +24,8 @@
 - Improve compatibility with Office documents, XML features, and rich text.
 - Prevent Wine4Office from closing unrelated applications.
 - Improve stability when Office processes stop, restart, or crash.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/wine4office-v0.1.11-rc.2...0.2.0-alpha)
 
 ## 0.1.11-rc.2 — 2026-08-07 (prerelease)
 
