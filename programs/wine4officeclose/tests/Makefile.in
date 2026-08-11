@@ -1,0 +1,5 @@
+TESTDLL   = wine4officeclose_test.exe
+IMPORTS   = user32
+
+SOURCES = \
+	wine4officeclose.c

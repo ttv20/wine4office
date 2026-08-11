@@ -1,6 +1,7 @@
 MODULE = wine4office-appv-preload.exe
+IMPORTS = advapi32
 
-EXTRADLLFLAGS = -mconsole
+EXTRADLLFLAGS = -mconsole -municode
 
 SOURCES = \
 	main.c

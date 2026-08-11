@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restrict Office shutdown targets and discover the correct App-V subsystem architecture.
 - Preserve Hebrew fonts, regenerate shell icons, and scope Office desktop policy.
 - Correct Click-to-Run discovery, XML comparison, TOM2, and shared counter contracts.
 - Isolate Delivery Optimization jobs and enforce startup, range, and integrity contracts.

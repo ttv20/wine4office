@@ -21,30 +21,80 @@
 #include <windows.h>
 #include <stdio.h>
 
-int main(void)
+static WCHAR *get_c2r_client_folder(void)
 {
-    static const WCHAR office_dir[] =
-        L"C:\\Program Files\\Microsoft Office\\root\\Office16";
-    static const WCHAR appv_dll[] =
-        L"C:\\Program Files\\Microsoft Office\\root\\Office16\\"
-        L"AppVIsvSubsystems64.dll";
+    static const WCHAR key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    DWORD size = 0;
+    WCHAR *value;
+
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"ClientFolder", RRF_RT_REG_SZ, NULL, NULL, &size))
+        return NULL;
+    if (!(value = malloc(size))) return NULL;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"ClientFolder", RRF_RT_REG_SZ, NULL, value, &size))
+    {
+        free(value);
+        return NULL;
+    }
+    return value;
+}
+
+static WCHAR *get_full_path(const WCHAR *path)
+{
+    DWORD length = GetFullPathNameW(path, 0, NULL, NULL);
+    WCHAR *full_path;
+
+    if (!length || !(full_path = malloc(length * sizeof(*full_path)))) return NULL;
+    if (!GetFullPathNameW(path, length, full_path, NULL))
+    {
+        free(full_path);
+        return NULL;
+    }
+    return full_path;
+}
+
+int wmain(int argc, WCHAR **argv)
+{
+#ifdef _WIN64
+    static const WCHAR dll_name[] = L"AppvIsvSubsystems64.dll";
+#else
+    static const WCHAR dll_name[] = L"AppvIsvSubsystems32.dll";
+#endif
     ULONGLONG started = GetTickCount64();
+    WCHAR *client_folder = NULL, *dll_path = NULL;
+    SIZE_T length;
     HANDLE input;
     HMODULE module;
     char buffer;
     DWORD read;
 
-    if (!SetDllDirectoryW(office_dir))
+    if (argc > 2)
     {
-        fprintf(stderr, "ERROR appv_directory error=%lu\n", GetLastError());
+        fprintf(stderr, "ERROR usage: wine4office-appv-preload.exe [appv-subsystems-dll]\n");
+        return 1;
+    }
+    if (argc == 2)
+        dll_path = get_full_path(argv[1]);
+    else if ((client_folder = get_c2r_client_folder()))
+    {
+        length = wcslen(client_folder) + 1 + ARRAY_SIZE(dll_name);
+        if ((dll_path = malloc(length * sizeof(*dll_path))))
+            swprintf(dll_path, length, L"%s\\%s", client_folder, dll_name);
+    }
+    free(client_folder);
+    if (!dll_path)
+    {
+        fprintf(stderr, "ERROR appv_path error=%lu\n", GetLastError());
         return 1;
     }
 
-    if (!(module = LoadLibraryW(appv_dll)))
+    if (!(module = LoadLibraryExW(dll_path, NULL,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)))
     {
         fprintf(stderr, "ERROR appv_load error=%lu\n", GetLastError());
+        free(dll_path);
         return 2;
     }
+    free(dll_path);
 
     printf("READY appv_ms=%llu\n", GetTickCount64() - started);
     fflush(stdout);
