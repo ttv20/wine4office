@@ -2,33 +2,26 @@
 
 ## Unreleased
 
-- Add the public Wine4Office project website and installation overview.
-- Make manager updates, removal, supervision, incidents, and release packaging fail safely.
-- Restrict Office shutdown targets and discover the correct App-V subsystem architecture.
-- Preserve Hebrew fonts, regenerate shell icons, and scope Office desktop policy.
-- Correct Click-to-Run discovery, XML comparison, TOM2, and shared counter contracts.
-- Isolate Delivery Optimization jobs and enforce startup, range, and integrity contracts.
-- Report sensor monitoring as unsupported unless an active backend is available.
-- Validate runtime buffers, mappings, activation contexts, and thread cleanup paths.
-- Identify helper windows early and synchronize Wayland popup and systray lifetimes.
-- Fail unsupported GPU transfers safely and stabilize OpenGL/Vulkan presentation.
-- Make DXGI duplication output-aware, deadline-bound, and safe across clients.
-- Retain shared D3D resources in wineserver and validate cross-process metadata.
-- Connect Windows.UI composition objects to transactional DirectComposition rendering.
-- Make Direct2D render-target pooling and flush behavior device-safe.
-- Scope WAM credentials transactionally and reject unsupported licensing policy claims.
-- Implement packaged-app lifecycle, identity, enterprise policy, and honest VoIP contracts.
-- Make Windows.Web HTTP, JSON, cookies, and async objects thread-safe and honest.
-- Harden toast XML parsing, event lifetimes, and desktop notification delivery.
-- Validate MSIX identities, contents, and staging transactions before publication.
-- Audit the custom Wine delta and document the remaining memory-safety work.
-- Fix Teams installation and show its progress without leaving the Install page.
-- Install WebView2 and refresh 32-bit AppModel registration before installing Teams.
-- Fix DirectComposition tree updates, transforms, ordering, cleanup, and input state for Teams.
-- Support cross-device DirectComposition visual trees and device-scoped commits.
+- Add a new Wine4Office website with installation guidance.
+- Make updates, removal, background services, and recovery safer.
+- Improve Office installation and Click-to-Run reliability.
+- Improve Teams installation and keep progress visible.
+- Install the components required by Teams automatically.
+- Improve Microsoft 365 sign-in and account security.
+- Improve Teams calls, notifications, and background activity.
+- Improve modern Office and Teams application support.
+- Prevent damaged or unsafe application packages from being installed.
+- Improve downloads used by Office installation and updates.
+- Improve Office graphics across OpenGL, Vulkan, and Direct3D.
+- Improve Teams window rendering, resizing, ordering, and input.
+- Improve screen sharing and capture across multiple displays.
+- Fix more popup, notification-area, and window-management problems on Wayland.
+- Prevent PowerPoint ribbon galleries and transition previews from freezing.
 - Fix white Microsoft 365 sign-in windows in Word.
-- Prevent PowerPoint ribbon galleries from stalling after they close on Wayland.
-- Prevent PowerPoint transition previews from freezing on Wayland.
+- Improve Hebrew fonts, application icons, and desktop shortcuts.
+- Improve compatibility with Office documents, XML features, and rich text.
+- Prevent Wine4Office from closing unrelated applications.
+- Improve stability when Office processes stop, restart, or crash.
 
 ## 0.1.11-rc.2 — 2026-08-07 (prerelease)
 
