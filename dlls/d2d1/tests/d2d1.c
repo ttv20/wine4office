@@ -18481,6 +18481,204 @@ static void test_glyph_run_world_bounds(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static void test_wic_flush_internal_sync(BOOL d3d11)
+{
+    D2D1_RENDER_TARGET_PROPERTIES desc;
+    ID2D1SolidColorBrush *red_brush = NULL, *blue_brush = NULL, *green_brush = NULL;
+    IWICImagingFactory *wic_factory = NULL;
+    ID2D1PathGeometry *geometry = NULL;
+    struct d2d1_test_context ctx;
+    ID2D1GeometrySink *sink = NULL;
+    IWICBitmap *wic_bitmap = NULL;
+    ID2D1DeviceContext *context = NULL;
+    ID2D1RenderTarget *rt = NULL;
+    IWICBitmapLock *lock = NULL;
+    D2D1_POINT_2F point;
+    D2D1_COLOR_F colour;
+    D2D1_RECT_F rect;
+    BYTE *data = NULL;
+    UINT buffer_size, pitch, width, height;
+    HRESULT hr;
+    BOOL changed;
+    unsigned int i;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+            &IID_IWICImagingFactory, (void **)&wic_factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = IWICImagingFactory_CreateBitmap(wic_factory, 512, 512,
+            &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnDemand, &wic_bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* Keep the pre-present check independent of WIC's initial bitmap contents. */
+    hr = IWICBitmap_Lock(wic_bitmap, NULL, WICBitmapLockWrite, &lock);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = IWICBitmapLock_GetDataPointer(lock, &buffer_size, &data);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IWICBitmapLock_GetStride(lock, &pitch);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IWICBitmapLock_GetSize(lock, &width, &height);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            for (i = 0; i < height; ++i)
+                memset(data + (size_t)i * pitch, 0, (size_t)width * 4);
+        IWICBitmapLock_Release(lock);
+        lock = NULL;
+    }
+
+    desc.type = D2D1_RENDER_TARGET_TYPE_DEFAULT;
+    desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    desc.dpiX = 96.0f;
+    desc.dpiY = 96.0f;
+    desc.usage = D2D1_RENDER_TARGET_USAGE_NONE;
+    desc.minLevel = D2D1_FEATURE_LEVEL_DEFAULT;
+    hr = ID2D1Factory1_CreateWicBitmapRenderTarget(ctx.factory1, wic_bitmap, &desc, &rt);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = ID2D1RenderTarget_QueryInterface(rt, &IID_ID2D1DeviceContext, (void **)&context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    set_color(&colour, 1.0f, 0.0f, 0.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &colour, NULL, &red_brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_color(&colour, 0.0f, 0.0f, 1.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &colour, NULL, &blue_brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_color(&colour, 0.0f, 1.0f, 0.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &colour, NULL, &green_brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (!red_brush || !blue_brush || !green_brush)
+        goto done;
+
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = ID2D1PathGeometry_Open(geometry, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* 18 polygon vertices produce 16 faces. Add eight quadratic segments
+     * (24 curve vertices) to take the per-primitive AA path. */
+    set_point(&point, 352.0f, 128.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_FILLED);
+    for (i = 1; i < 18; ++i)
+    {
+        point.x = 256.0f + cosf(i * 2.0f * M_PI / 18.0f) * 96.0f;
+        point.y = 128.0f + sinf(i * 2.0f * M_PI / 18.0f) * 96.0f;
+        ID2D1GeometrySink_AddLine(sink, point);
+    }
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+
+    set_point(&point, 128.0f, 384.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_FILLED);
+    quadratic_to(sink, 176.0f, 336.0f, 224.0f, 384.0f);
+    quadratic_to(sink, 272.0f, 432.0f, 320.0f, 384.0f);
+    quadratic_to(sink, 368.0f, 336.0f, 416.0f, 384.0f);
+    quadratic_to(sink, 464.0f, 432.0f, 416.0f, 432.0f);
+    quadratic_to(sink, 416.0f, 480.0f, 368.0f, 480.0f);
+    quadratic_to(sink, 320.0f, 480.0f, 272.0f, 480.0f);
+    quadratic_to(sink, 224.0f, 480.0f, 176.0f, 432.0f);
+    quadratic_to(sink, 128.0f, 384.0f, 128.0f, 384.0f);
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+    sink = NULL;
+
+    ID2D1DeviceContext_SetAntialiasMode(context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_BeginDraw(context);
+    set_color(&colour, 0.0f, 0.0f, 0.0f, 1.0f);
+    ID2D1DeviceContext_Clear(context, &colour);
+    set_rect(&rect, 8.0f, 8.0f, 32.0f, 32.0f);
+    ID2D1DeviceContext_FillRectangle(context, &rect, (ID2D1Brush *)red_brush);
+    ID2D1DeviceContext_FillGeometry(context, (ID2D1Geometry *)geometry,
+            (ID2D1Brush *)blue_brush, NULL);
+
+    /* The internal AA readback must synchronize the GPU without presenting
+     * the WIC target. The bitmap remains the cleared image until Flush(). */
+    hr = IWICBitmap_Lock(wic_bitmap, NULL, WICBitmapLockRead, &lock);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    changed = FALSE;
+    if (SUCCEEDED(hr))
+    {
+        hr = IWICBitmapLock_GetDataPointer(lock, &buffer_size, &data);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IWICBitmapLock_GetStride(lock, &pitch);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IWICBitmapLock_GetSize(lock, &width, &height);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            for (i = 0; i < height; ++i)
+            {
+                unsigned int j;
+                for (j = 0; j < width * 4; ++j)
+                    changed |= data[(size_t)i * pitch + j] != 0;
+            }
+        IWICBitmapLock_Release(lock);
+        lock = NULL;
+    }
+    ok(!changed, "Internal GPU synchronization presented the WIC target early.\n");
+
+    set_rect(&rect, 480.0f, 480.0f, 504.0f, 504.0f);
+    ID2D1DeviceContext_FillRectangle(context, &rect, (ID2D1Brush *)green_brush);
+    hr = ID2D1DeviceContext_Flush(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IWICBitmap_Lock(wic_bitmap, NULL, WICBitmapLockRead, &lock);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = IWICBitmapLock_GetDataPointer(lock, &buffer_size, &data);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IWICBitmapLock_GetStride(lock, &pitch);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(data[128 * pitch + 256 * 4 + 0] > 200, "Final WIC pixels lost the internal blue draw.\n");
+        ok(data[8 * pitch + 8 * 4 + 2] > 200, "Final WIC pixels lost the GPU red draw.\n");
+        ok(data[480 * pitch + 480 * 4 + 1] > 200, "Final WIC pixels lost the post-sync green draw.\n");
+        IWICBitmapLock_Release(lock);
+        lock = NULL;
+    }
+
+done:
+    if (lock) IWICBitmapLock_Release(lock);
+    if (sink) ID2D1GeometrySink_Release(sink);
+    if (geometry) ID2D1PathGeometry_Release(geometry);
+    if (green_brush) ID2D1SolidColorBrush_Release(green_brush);
+    if (blue_brush) ID2D1SolidColorBrush_Release(blue_brush);
+    if (red_brush) ID2D1SolidColorBrush_Release(red_brush);
+    if (context) ID2D1DeviceContext_Release(context);
+    if (rt) ID2D1RenderTarget_Release(rt);
+    if (wic_bitmap) IWICBitmap_Release(wic_bitmap);
+    if (wic_factory) IWICImagingFactory_Release(wic_factory);
+    release_test_context(&ctx);
+    CoUninitialize();
+}
+
+
 START_TEST(d2d1)
 {
     HMODULE d2d1_dll = GetModuleHandleA("d2d1.dll");
@@ -18598,6 +18796,7 @@ START_TEST(d2d1)
     queue_test(test_effect_vertex_buffer);
     queue_d3d10_test(test_compute_geometry_area);
     queue_test(test_wic_target_format);
+    queue_test(test_wic_flush_internal_sync);
     queue_d3d10_test(test_effect_blob_property);
     queue_test(test_get_dxgi_device);
     queue_test(test_no_target);

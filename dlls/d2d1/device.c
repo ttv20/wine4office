@@ -298,37 +298,22 @@ static void d2d_device_context_end_batch(struct d2d_device_context *context)
         LeaveCriticalSection(context->cs);
 }
 
-BOOL d2d_device_context_prepare_reuse_target(ID2D1RenderTarget *iface)
+static void d2d_device_context_flush_gpu(struct d2d_device_context *context)
 {
-    struct d2d_device_context *context = impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
-    BOOL clean = !context->batched_draw && !context->draw_depth && !context->invalid_draw_sequence
-            && !context->clip_stack.count && !context->target.hdc;
+    ID3D11DeviceContext1 *d3d_context;
 
-    d2d_device_context_end_batch(context);
-    return clean;
-}
-
-void d2d_device_context_reset_reused_target(ID2D1RenderTarget *iface, float dpi_x, float dpi_y)
-{
-    struct d2d_device_context *context = impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
-
-    if (context->text_rendering_params)
+    if (context->batched_draw)
     {
-        IDWriteRenderingParams_Release(context->text_rendering_params);
-        context->text_rendering_params = NULL;
+        d3d_context = context->batched_context;
+        ID3D11DeviceContext1_AddRef(d3d_context);
+    }
+    else
+    {
+        ID3D11Device1_GetImmediateContext1(context->d3d_device, &d3d_context);
     }
 
-    memset(&context->drawing_state, 0, sizeof(context->drawing_state));
-    context->drawing_state.transform = identity;
-    memset(&context->error, 0, sizeof(context->error));
-    context->draw_depth = 0;
-    context->invalid_draw_sequence = FALSE;
-    context->clip_stack.count = 0;
-
-    if (dpi_x == 0.0f && dpi_y == 0.0f)
-        dpi_x = dpi_y = 96.0f;
-    context->desc.dpiX = dpi_x;
-    context->desc.dpiY = dpi_y;
+    ID3D11DeviceContext1_Flush(d3d_context);
+    ID3D11DeviceContext1_Release(d3d_context);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -1319,7 +1304,8 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
         context->drawing_state.transform = shifted_transform;
     }
-    hr = ID2D1DeviceContext6_Flush(&context->ID2D1DeviceContext6_iface, NULL, NULL);
+    d2d_device_context_flush_gpu(context);
+    hr = context->error.code;
     for (i = 0; i < context->clip_stack.count; ++i)
     {
         context->clip_stack.stack[i].left = context->clip_stack.stack[i].left / aa_scale + origin_x;
@@ -3733,7 +3719,9 @@ static BOOL d2d_device_context_rasterize_image(struct d2d_device_context *contex
         hr = E_NOINTERFACE;
     }
 
-    ID2D1DeviceContext6_Flush(&context->ID2D1DeviceContext6_iface, NULL, NULL);
+    d2d_device_context_flush_gpu(context);
+    if (SUCCEEDED(hr) && FAILED(context->error.code))
+        hr = context->error.code;
     if (FAILED(hr))
         goto done;
 

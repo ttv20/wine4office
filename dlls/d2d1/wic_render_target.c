@@ -22,113 +22,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
-#define D2D_WIC_POOL_LIMIT 32
-
-static SRWLOCK d2d_wic_pool_lock = SRWLOCK_INIT;
-static struct d2d_wic_render_target *d2d_wic_pool;
-static unsigned int d2d_wic_pool_count;
-
-static BOOL d2d_wic_pool_enabled(void)
-{
-    static int enabled = -1;
-    WCHAR path[MAX_PATH], *name;
-    char value[2];
-
-    if (enabled != -1)
-        return enabled;
-
-    if (GetEnvironmentVariableA("WINE_D2D_SMALL_WIC_POOL", value, ARRAY_SIZE(value)))
-        return enabled = value[0] != '0';
-
-    if (!GetModuleFileNameW(NULL, path, ARRAY_SIZE(path)))
-        return enabled = FALSE;
-    name = wcsrchr(path, '\\');
-    name = name ? name + 1 : path;
-    enabled = !wcsicmp(name, L"WINWORD.EXE") || !wcsicmp(name, L"EXCEL.EXE")
-            || !wcsicmp(name, L"POWERPNT.EXE") || !wcsicmp(name, L"OUTLOOK.EXE");
-    return enabled;
-}
-
 static inline struct d2d_wic_render_target *impl_from_IUnknown(IUnknown *iface)
 {
     return CONTAINING_RECORD(iface, struct d2d_wic_render_target, IUnknown_iface);
-}
-
-static void d2d_wic_render_target_discard_cpu_glyphs(struct d2d_wic_render_target *render_target)
-{
-    struct d2d_wic_cpu_glyph *glyph, *next;
-
-    for (glyph = render_target->cpu_glyphs; glyph; glyph = next)
-    {
-        next = glyph->next;
-        free(glyph);
-    }
-    render_target->cpu_glyphs = NULL;
-    render_target->cpu_glyph_tail = &render_target->cpu_glyphs;
-}
-
-static BOOL d2d_wic_render_target_queue_cpu_glyph(IUnknown *outer_unknown, const RECT *bounds,
-        const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour)
-{
-    struct d2d_wic_render_target *render_target = impl_from_IUnknown(outer_unknown);
-    struct d2d_wic_cpu_glyph *glyph;
-    unsigned int height = bounds->bottom - bounds->top;
-    size_t size = (size_t)pitch * height;
-
-    if (!d2d_wic_pool_enabled() || render_target->width > 32 || render_target->height > 32
-            || !(glyph = malloc(sizeof(*glyph) + size)))
-        return FALSE;
-
-    glyph->next = NULL;
-    glyph->bounds = *bounds;
-    glyph->colour = *colour;
-    glyph->pitch = pitch;
-    memcpy(glyph->values, values, size);
-    if (!render_target->cpu_glyph_tail)
-        render_target->cpu_glyph_tail = &render_target->cpu_glyphs;
-    *render_target->cpu_glyph_tail = glyph;
-    render_target->cpu_glyph_tail = &glyph->next;
-    return TRUE;
-}
-
-static void d2d_wic_render_target_apply_cpu_glyphs(struct d2d_wic_render_target *render_target,
-        BYTE *dst, unsigned int dst_pitch)
-{
-    struct d2d_wic_cpu_glyph *glyph;
-    BOOL bgra = render_target->desc.pixelFormat.format == DXGI_FORMAT_B8G8R8A8_UNORM;
-    unsigned int x, y;
-
-    for (glyph = render_target->cpu_glyphs; glyph; glyph = glyph->next)
-    {
-        int left = max(glyph->bounds.left, 0), top = max(glyph->bounds.top, 0);
-        int right = min(glyph->bounds.right, (int)render_target->width);
-        int bottom = min(glyph->bounds.bottom, (int)render_target->height);
-
-        for (y = top; y < bottom; ++y)
-        {
-            const BYTE *mask = glyph->values + (y - glyph->bounds.top) * glyph->pitch;
-            BYTE *pixel = dst + y * dst_pitch + left * 4;
-
-            for (x = left; x < right; ++x, pixel += 4)
-            {
-                unsigned int a = mask[x - glyph->bounds.left] * glyph->colour.a + 0.5f;
-                unsigned int inv = 255 - a;
-                unsigned int r = glyph->colour.r * a + 0.5f;
-                unsigned int g = glyph->colour.g * a + 0.5f;
-                unsigned int b = glyph->colour.b * a + 0.5f;
-                unsigned int ri = bgra ? 2 : 0, bi = bgra ? 0 : 2;
-
-                pixel[ri] = min(255, r + (pixel[ri] * inv + 127) / 255);
-                pixel[1] = min(255, g + (pixel[1] * inv + 127) / 255);
-                pixel[bi] = min(255, b + (pixel[bi] * inv + 127) / 255);
-                if (render_target->desc.pixelFormat.alphaMode == D2D1_ALPHA_MODE_IGNORE)
-                    pixel[3] = 255;
-                else
-                    pixel[3] = min(255, a + (pixel[3] * inv + 127) / 255);
-            }
-        }
-    }
-    d2d_wic_render_target_discard_cpu_glyphs(render_target);
 }
 
 static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
@@ -140,7 +36,7 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
     UINT dst_size, dst_pitch;
     ID3D10Device *device;
     WICRect dst_rect;
-    BYTE *src, *dst, *dst_base;
+    BYTE *src, *dst;
     unsigned int i;
     HRESULT hr;
 
@@ -173,8 +69,6 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
         goto end;
     }
 
-    dst_base = dst;
-
     if (FAILED(hr = IWICBitmapLock_GetStride(bitmap_lock, &dst_pitch)))
     {
         ERR("Failed to get stride, hr %#lx.\n", hr);
@@ -198,13 +92,10 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
         dst += dst_pitch;
     }
 
-    d2d_wic_render_target_apply_cpu_glyphs(render_target, dst_base, dst_pitch);
-
     ID3D10Texture2D_Unmap(render_target->readback_texture, 0);
     IWICBitmapLock_Release(bitmap_lock);
 
 end:
-    d2d_wic_render_target_discard_cpu_glyphs(render_target);
     return S_OK;
 }
 
@@ -227,17 +118,6 @@ static ULONG STDMETHODCALLTYPE d2d_wic_render_target_AddRef(IUnknown *iface)
     return refcount;
 }
 
-static void d2d_wic_render_target_destroy(struct d2d_wic_render_target *render_target)
-{
-    d2d_wic_render_target_discard_cpu_glyphs(render_target);
-    if (render_target->bitmap)
-        IWICBitmap_Release(render_target->bitmap);
-    ID3D10Texture2D_Release(render_target->readback_texture);
-    IUnknown_Release(render_target->dxgi_inner);
-    IDXGISurface_Release(render_target->dxgi_surface);
-    free(render_target);
-}
-
 static ULONG STDMETHODCALLTYPE d2d_wic_render_target_Release(IUnknown *iface)
 {
     struct d2d_wic_render_target *render_target = impl_from_IUnknown(iface);
@@ -247,33 +127,11 @@ static ULONG STDMETHODCALLTYPE d2d_wic_render_target_Release(IUnknown *iface)
 
     if (!refcount)
     {
-        BOOL clean = d2d_device_context_prepare_reuse_target(render_target->dxgi_target);
-
-        if (clean && d2d_wic_pool_enabled()
-                && render_target->width <= 32 && render_target->height <= 32)
-        {
-            struct d2d_wic_render_target *evicted = NULL;
-
-            d2d_wic_render_target_discard_cpu_glyphs(render_target);
-            IWICBitmap_Release(render_target->bitmap);
-            render_target->bitmap = NULL;
-            AcquireSRWLockExclusive(&d2d_wic_pool_lock);
-            if (d2d_wic_pool_count == D2D_WIC_POOL_LIMIT)
-            {
-                evicted = d2d_wic_pool;
-                d2d_wic_pool = evicted->pool_next;
-                --d2d_wic_pool_count;
-            }
-            render_target->pool_next = d2d_wic_pool;
-            d2d_wic_pool = render_target;
-            ++d2d_wic_pool_count;
-            ReleaseSRWLockExclusive(&d2d_wic_pool_lock);
-            if (evicted)
-                d2d_wic_render_target_destroy(evicted);
-            return 0;
-        }
-
-        d2d_wic_render_target_destroy(render_target);
+        IWICBitmap_Release(render_target->bitmap);
+        ID3D10Texture2D_Release(render_target->readback_texture);
+        IUnknown_Release(render_target->dxgi_inner);
+        IDXGISurface_Release(render_target->dxgi_surface);
+        free(render_target);
     }
 
     return refcount;
@@ -289,8 +147,6 @@ static const struct IUnknownVtbl d2d_wic_render_target_vtbl =
 static const struct d2d_device_context_ops d2d_wic_render_target_ops =
 {
     d2d_wic_render_target_present,
-    d2d_wic_render_target_queue_cpu_glyph,
-    TRUE,
 };
 
 static HRESULT d2d_wic_resolve_pixel_format(D2D1_PIXEL_FORMAT *pixel_format,
@@ -325,48 +181,6 @@ static HRESULT d2d_wic_resolve_pixel_format(D2D1_PIXEL_FORMAT *pixel_format,
     }
 
     return D2DERR_UNSUPPORTED_PIXEL_FORMAT;
-}
-
-BOOL d2d_wic_render_target_reuse(ID2D1Factory1 *factory, ID3D10Device1 *device,
-        IWICBitmap *bitmap, const D2D1_RENDER_TARGET_PROPERTIES *desc, ID2D1RenderTarget **target)
-{
-    struct d2d_wic_render_target **entry, *render_target;
-    D2D1_RENDER_TARGET_PROPERTIES resolved = *desc;
-    WICPixelFormatGUID bitmap_format;
-    unsigned int width, height;
-
-    if (!d2d_wic_pool_enabled() || FAILED(IWICBitmap_GetSize(bitmap, &width, &height))
-            || width > 32 || height > 32
-            || FAILED(IWICBitmap_GetPixelFormat(bitmap, &bitmap_format))
-            || FAILED(d2d_wic_resolve_pixel_format(&resolved.pixelFormat, &bitmap_format)))
-        return FALSE;
-
-    AcquireSRWLockExclusive(&d2d_wic_pool_lock);
-    for (entry = &d2d_wic_pool; (render_target = *entry); entry = &render_target->pool_next)
-    {
-        if (render_target->factory != factory || render_target->device != device
-                || render_target->width != width || render_target->height != height
-                || render_target->desc.type != resolved.type
-                || render_target->desc.pixelFormat.format != resolved.pixelFormat.format
-                || render_target->desc.pixelFormat.alphaMode != resolved.pixelFormat.alphaMode
-                || render_target->desc.dpiX != resolved.dpiX || render_target->desc.dpiY != resolved.dpiY
-                || render_target->desc.usage != resolved.usage || render_target->desc.minLevel != resolved.minLevel)
-            continue;
-
-        *entry = render_target->pool_next;
-        render_target->pool_next = NULL;
-        --d2d_wic_pool_count;
-        render_target->bitmap = bitmap;
-        IWICBitmap_AddRef(bitmap);
-        render_target->refcount = 1;
-        *target = render_target->dxgi_target;
-        ReleaseSRWLockExclusive(&d2d_wic_pool_lock);
-
-        d2d_device_context_reset_reused_target(*target, resolved.dpiX, resolved.dpiY);
-        return TRUE;
-    }
-    ReleaseSRWLockExclusive(&d2d_wic_pool_lock);
-    return FALSE;
 }
 
 HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, ID2D1Factory1 *factory,
@@ -491,9 +305,6 @@ HRESULT d2d_wic_render_target_init(struct d2d_wic_render_target *render_target, 
         return hr;
     }
 
-    render_target->factory = factory;
-    render_target->device = d3d_device;
-    render_target->desc = rt_desc;
     render_target->bitmap = bitmap;
     IWICBitmap_AddRef(bitmap);
 

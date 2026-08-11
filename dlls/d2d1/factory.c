@@ -386,18 +386,21 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDrawingStateBlock(ID2D1Factor
 
 static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1 **device)
 {
-    char thread_id[16];
+    IWineDXGIDevice *wine_device;
     HRESULT hr = S_OK;
 
     if (!factory->device)
     {
-        snprintf(thread_id, sizeof(thread_id), "%lu", GetCurrentThreadId());
-        SetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD", thread_id);
         hr = D3D10CreateDevice1(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, D3D10_CREATE_DEVICE_BGRA_SUPPORT,
                 D3D10_FEATURE_LEVEL_10_0, D3D10_1_SDK_VERSION, &factory->device);
-        SetEnvironmentVariableA("WINE_D2D_SYNC_DEVICE_THREAD", NULL);
         if (FAILED(hr))
             WARN("Failed to create device, hr %#lx.\n", hr);
+        else if (SUCCEEDED(ID3D10Device1_QueryInterface(factory->device,
+                &d2d_IID_IWineDXGIDevice, (void **)&wine_device)))
+        {
+            IWineDXGIDevice_use_sync_command_stream(wine_device);
+            IWineDXGIDevice_Release(wine_device);
+        }
     }
 
     *device = factory->device;
@@ -414,14 +417,14 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateWicBitmapRenderTarget(ID2D1Fa
 
     TRACE("iface %p, target %p, desc %p, render_target %p.\n", iface, target, desc, render_target);
 
-    if (FAILED(hr = d2d_factory_get_device(factory, &device)))
-        return hr;
-
-    if (d2d_wic_render_target_reuse((ID2D1Factory1 *)iface, device, target, desc, render_target))
-        return S_OK;
-
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
+
+    if (FAILED(hr = d2d_factory_get_device(factory, &device)))
+    {
+        free(object);
+        return hr;
+    }
 
     if (FAILED(hr = d2d_wic_render_target_init(object, (ID2D1Factory1 *)iface, device, target, desc)))
     {
