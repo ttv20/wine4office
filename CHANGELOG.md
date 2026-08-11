@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Harden toast XML parsing, event lifetimes, and desktop notification delivery.
 - Validate MSIX identities, contents, and staging transactions before publication.
 - Audit the custom Wine delta and document the remaining memory-safety work.
 - Fix Teams installation and show its progress without leaving the Install page.

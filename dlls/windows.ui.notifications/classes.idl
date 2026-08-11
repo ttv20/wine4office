@@ -2,11 +2,6 @@
 #pragma winrt ns_prefix
 
 import "windows.ui.notifications.idl";
-import "windows.data.xml.dom.idl";
-
-namespace Windows.Data.Xml.Dom {
-    runtimeclass XmlDocument;
-}
 
 namespace Windows.UI.Notifications {
     runtimeclass BadgeUpdateManager;

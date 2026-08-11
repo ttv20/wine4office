@@ -1,0 +1,8 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "windows.data.xml.dom.idl";
+
+namespace Windows.Data.Xml.Dom {
+    runtimeclass XmlDocument;
+}

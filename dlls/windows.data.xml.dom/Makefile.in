@@ -1,0 +1,8 @@
+MODULE  = windows.data.xml.dom.dll
+IMPORTLIB = windows_data_xml_dom
+IMPORTS = $(XML2_PE_LIBS) combase uuid
+EXTRAINCL = $(XML2_PE_CFLAGS)
+
+SOURCES = \
+	classes.idl \
+	dom.c

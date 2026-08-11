@@ -17,6 +17,7 @@ struct notify_event_params
 {
     unsigned int id;
     unsigned int closed;
+    BOOL received;
     char action_key[128];
 };
 

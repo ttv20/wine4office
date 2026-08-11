@@ -6,8 +6,12 @@
 
 #include "config.h"
 
+#ifdef SONAME_LIBDBUS_1
 #include <dbus/dbus.h>
+#endif
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ntstatus.h"
@@ -20,8 +24,36 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(notification);
 
+#ifdef SONAME_LIBDBUS_1
+
 static DBusConnection *notification_connection;
 static pthread_mutex_t connection_mutex = PTHREAD_MUTEX_INITIALIZER;
+static const char notification_service[] = "org.freedesktop.Notifications";
+static const char notification_path[] = "/org/freedesktop/Notifications";
+static BOOL notification_event_has_signature(DBusMessage *message, const char *expected);
+
+static char *get_bus_name_owner(DBusConnection *connection, const char *name, DBusError *error)
+{
+    DBusMessage *message, *reply;
+    const char *owner;
+    char *ret = NULL;
+
+    if (!(message = dbus_message_new_method_call(DBUS_SERVICE_DBUS, DBUS_PATH_DBUS,
+            DBUS_INTERFACE_DBUS, "GetNameOwner")))
+        return NULL;
+    if (!dbus_message_append_args(message, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID))
+    {
+        dbus_message_unref(message);
+        return NULL;
+    }
+    reply = dbus_connection_send_with_reply_and_block(connection, message, 5000, error);
+    dbus_message_unref(message);
+    if (!reply) return NULL;
+    if (dbus_message_get_args(reply, error, DBUS_TYPE_STRING, &owner, DBUS_TYPE_INVALID))
+        ret = strdup(owner);
+    dbus_message_unref(reply);
+    return ret;
+}
 
 static DBusConnection *get_notification_connection(DBusError *error)
 {
@@ -32,8 +64,6 @@ static DBusConnection *get_notification_connection(DBusError *error)
         if (notification_connection)
         {
             dbus_connection_set_exit_on_disconnect(notification_connection, FALSE);
-            dbus_bus_add_match(notification_connection,
-                    "type='signal',interface='org.freedesktop.Notifications'", error);
         }
     }
     return notification_connection;
@@ -42,7 +72,7 @@ static DBusConnection *get_notification_connection(DBusError *error)
 static NTSTATUS send_notification(void *args)
 {
     struct notify_params *params = args;
-    DBusMessageIter iter, array, hints, reply_iter;
+    DBusMessageIter iter, array, hints;
     DBusMessage *message, *reply = NULL;
     DBusConnection *connection;
     DBusError error;
@@ -53,6 +83,7 @@ static NTSTATUS send_notification(void *args)
     dbus_uint32_t replaces_id = 0;
     dbus_int32_t timeout = params->timeout;
 
+    params->id = 0;
     dbus_error_init(&error);
     pthread_mutex_lock(&connection_mutex);
     if (!(connection = get_notification_connection(&error)))
@@ -62,8 +93,8 @@ static NTSTATUS send_notification(void *args)
         pthread_mutex_unlock(&connection_mutex);
         return STATUS_UNSUCCESSFUL;
     }
-    if (!(message = dbus_message_new_method_call("org.freedesktop.Notifications",
-            "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify")))
+    if (!(message = dbus_message_new_method_call(notification_service,
+            notification_path, notification_service, "Notify")))
     {
         pthread_mutex_unlock(&connection_mutex);
         return STATUS_NO_MEMORY;
@@ -96,53 +127,110 @@ static NTSTATUS send_notification(void *args)
         pthread_mutex_unlock(&connection_mutex);
         return STATUS_UNSUCCESSFUL;
     }
-    if (dbus_message_iter_init(reply, &reply_iter) &&
-        dbus_message_iter_get_arg_type(&reply_iter) == DBUS_TYPE_UINT32)
-        dbus_message_iter_get_basic(&reply_iter, &params->id);
+    dbus_error_free(&error);
+    dbus_error_init(&error);
+    if (!notification_event_has_signature(reply, DBUS_TYPE_UINT32_AS_STRING) ||
+            !dbus_message_get_args(reply, &error, DBUS_TYPE_UINT32, &params->id, DBUS_TYPE_INVALID))
+    {
+        ERR("desktop notification returned an invalid reply: %s\n",
+                error.message ? error.message : "invalid signature");
+        dbus_error_free(&error);
+        dbus_message_unref(reply);
+        pthread_mutex_unlock(&connection_mutex);
+        return STATUS_UNSUCCESSFUL;
+    }
+    dbus_error_free(&error);
     dbus_message_unref(reply);
     pthread_mutex_unlock(&connection_mutex);
     TRACE("sent desktop notification id=%u app=%s title=%s\n", params->id, params->app_name, params->title);
     return STATUS_SUCCESS;
 }
 
-static DBusHandlerResult notification_event_filter(DBusConnection *connection, DBusMessage *message,
-        void *user_data)
+struct notification_event_context
 {
-    struct notify_event_params *params = user_data;
+    struct notify_event_params *params;
+    const char *service_owner;
+};
+
+static BOOL notification_event_has_signature(DBusMessage *message, const char *expected)
+{
+    char *signature = dbus_message_get_signature(message);
+    BOOL ret = signature && !strcmp(signature, expected);
+
+    if (signature) dbus_free(signature);
+    return ret;
+}
+
+static DBusHandlerResult notification_event_filter(DBusConnection *connection, DBusMessage *message, void *user_data)
+{
+    struct notification_event_context *context = user_data;
+    struct notify_event_params *params = context->params;
     DBusError error;
     const char *member, *key = NULL;
     dbus_uint32_t id = 0, reason = 0;
+
+    if (!dbus_message_has_sender(message, context->service_owner) ||
+        !dbus_message_has_path(message, notification_path) ||
+        !dbus_message_has_interface(message, notification_service))
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 
     dbus_error_init(&error);
     member = dbus_message_get_member(message);
     TRACE("desktop notification signal member=%s expected_id=%u\n",
             member ? member : "(null)", params->id);
-    if (member && !strcmp(member, "ActionInvoked") &&
+    if (dbus_message_is_signal(message, notification_service, "ActionInvoked") &&
+        notification_event_has_signature(message,
+                DBUS_TYPE_UINT32_AS_STRING DBUS_TYPE_STRING_AS_STRING) &&
         dbus_message_get_args(message, &error, DBUS_TYPE_UINT32, &id,
                 DBUS_TYPE_STRING, &key, DBUS_TYPE_INVALID) && id == params->id)
     {
         lstrcpynA(params->action_key, key, ARRAY_SIZE(params->action_key));
+        params->received = TRUE;
+        dbus_error_free(&error);
         return DBUS_HANDLER_RESULT_HANDLED;
     }
     dbus_error_free(&error);
     dbus_error_init(&error);
-    if (member && !strcmp(member, "NotificationClosed") &&
+    if (dbus_message_is_signal(message, notification_service, "NotificationClosed") &&
+        notification_event_has_signature(message, DBUS_TYPE_UINT32_AS_STRING DBUS_TYPE_UINT32_AS_STRING) &&
         dbus_message_get_args(message, &error, DBUS_TYPE_UINT32, &id,
                 DBUS_TYPE_UINT32, &reason, DBUS_TYPE_INVALID) && id == params->id)
     {
         params->closed = reason;
+        params->received = TRUE;
+        dbus_error_free(&error);
         return DBUS_HANDLER_RESULT_HANDLED;
     }
     dbus_error_free(&error);
     return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 }
 
+static char *notification_match_rule(const char *service_owner)
+{
+    static const char format[] = "type='signal',sender='%s',path='%s',interface='%s'";
+    size_t size = strlen(format) + strlen(service_owner) + strlen(notification_path)
+            + strlen(notification_service) + 1;
+    char *rule;
+
+    if (!(rule = malloc(size))) return NULL;
+    snprintf(rule, size, format, service_owner, notification_path, notification_service);
+    return rule;
+}
+
 static NTSTATUS wait_notification_event(void *args)
 {
     struct notify_event_params *params = args;
+    struct notification_event_context context = {.params = params};
     DBusConnection *connection;
     DBusError error;
+    char *service_owner = NULL, *match_rule = NULL;
+    BOOL match_added = FALSE, filter_added = FALSE;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    params->closed = 0;
+    params->received = FALSE;
+    params->action_key[0] = 0;
 
+    dbus_threads_init_default();
     dbus_error_init(&error);
     TRACE("waiting for desktop notification event id=%u\n", params->id);
     if (!(connection = dbus_bus_get_private(DBUS_BUS_SESSION, &error)))
@@ -153,17 +241,73 @@ static NTSTATUS wait_notification_event(void *args)
         return STATUS_UNSUCCESSFUL;
     }
     dbus_connection_set_exit_on_disconnect(connection, FALSE);
-    dbus_bus_add_match(connection, "type='signal',interface='org.freedesktop.Notifications'", &error);
-    dbus_connection_add_filter(connection, notification_event_filter, params, NULL);
+    if (!(service_owner = get_bus_name_owner(connection, notification_service, &error)) ||
+            service_owner[0] != ':')
+    {
+        ERR("failed to resolve unique notification service owner: %s\n",
+                error.message ? error.message : "invalid owner");
+        goto done;
+    }
+    context.service_owner = service_owner;
+    dbus_error_free(&error);
+    dbus_error_init(&error);
+    if (!(match_rule = notification_match_rule(service_owner)))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    dbus_bus_add_match(connection, match_rule, &error);
+    if (dbus_error_is_set(&error))
+    {
+        ERR("failed to subscribe to notification events: %s\n",
+                error.message ? error.message : "unknown error");
+        goto done;
+    }
+    match_added = TRUE;
+    if (!dbus_connection_add_filter(connection, notification_event_filter, &context, NULL))
+    {
+        ERR("failed to install notification event filter\n");
+        goto done;
+    }
+    filter_added = TRUE;
     dbus_connection_flush(connection);
 
-    while (!params->action_key[0] && !params->closed)
+    while (!params->received)
         if (!dbus_connection_read_write_dispatch(connection, -1)) break;
-    dbus_connection_remove_filter(connection, notification_event_filter, params);
+    status = params->received ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+
+done:
+    if (filter_added)
+        dbus_connection_remove_filter(connection, notification_event_filter, &context);
+    if (match_added)
+    {
+        dbus_error_free(&error);
+        dbus_error_init(&error);
+        dbus_bus_remove_match(connection, match_rule, &error);
+        if (dbus_error_is_set(&error))
+            ERR("failed to remove notification event match: %s\n", error.message);
+    }
+    free(match_rule);
+    dbus_error_free(&error);
+    free(service_owner);
     dbus_connection_close(connection);
     dbus_connection_unref(connection);
-    return params->action_key[0] || params->closed ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    return status;
 }
+
+#else
+
+static NTSTATUS send_notification(void *args)
+{
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS wait_notification_event(void *args)
+{
+    return STATUS_NOT_SUPPORTED;
+}
+
+#endif
 
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
