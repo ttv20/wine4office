@@ -4,6 +4,7 @@
 
 ## 0.2.0-alpha — 2026-08-11
 
+- Make release archives reproducible across different Linux filesystems.
 - Add a new Wine4Office website with installation guidance.
 - Make updates, removal, background services, and recovery safer.
 - Improve Office installation and Click-to-Run reliability.

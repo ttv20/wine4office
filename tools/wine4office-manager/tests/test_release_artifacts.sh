@@ -64,6 +64,9 @@ grep -F "Runner is missing bundled Wine Mono:" "$TMP/missing-mono.log" >/dev/nul
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$RELEASE" "$VERSION" \
     "https://updates.example/releases/stable/release.json" "downloads" stable >/dev/null
+# Reading source files may update access times on strict-atime filesystems. Archive
+# reproducibility must not depend on that filesystem policy.
+touch -a -d '@123456789' "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
 REPEAT_RELEASE="$TMP/release-repeat"
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$REPEAT_RELEASE" "$VERSION" \

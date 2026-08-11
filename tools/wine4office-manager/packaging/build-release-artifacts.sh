@@ -47,6 +47,7 @@ install -m 0755 "$MANAGER" "$TMP/$MANAGER_NAME"
 # Transform archive member and hard-link names. Keep symlink targets and every staged
 # runner file byte-for-byte and metadata-for-metadata as installed by Wine.
 tar -C "$RUNNER" \
+    --format=gnu --sort=name \
     --transform="flags=rhS;s|^\\.$|$WINE_ROOT|;s|^\\./|$WINE_ROOT/|" \
     -cf - . | zstd -T0 -19 --long=27 --no-progress -o "$TMP/$WINE_NAME"
 
