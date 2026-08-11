@@ -29,6 +29,7 @@ HANDLE stop_event = NULL;
 
 static SERVICE_STATUS_HANDLE status_handle;
 static SERVICE_STATUS status;
+static DWORD bits_registration, do_registration;
 
 static VOID
 UpdateStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode, DWORD dwWaitHint)
@@ -49,6 +50,40 @@ UpdateStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode, DWORD dwWaitHint)
     if (!SetServiceStatus(status_handle, &status)) {
         ERR("failed to set service status\n");
         SetEvent(stop_event);
+    }
+}
+
+static void revoke_class_objects(void)
+{
+    if (do_registration)
+    {
+        CoRevokeClassObject(do_registration);
+        do_registration = 0;
+    }
+    if (bits_registration)
+    {
+        CoRevokeClassObject(bits_registration);
+        bits_registration = 0;
+    }
+}
+
+static void stop_worker(HANDLE fileTxThread)
+{
+    if (fileTxThread)
+    {
+        if (stop_event) SetEvent(stop_event);
+        WaitForSingleObject(fileTxThread, INFINITE);
+        CloseHandle(fileTxThread);
+    }
+    if (globalMgr.jobEvent)
+    {
+        CloseHandle(globalMgr.jobEvent);
+        globalMgr.jobEvent = NULL;
+    }
+    if (stop_event)
+    {
+        CloseHandle(stop_event);
+        stop_event = NULL;
     }
 }
 
@@ -77,9 +112,8 @@ static BOOL
 StartCount(void)
 {
     HRESULT hr;
-    DWORD bits_reg, do_reg;
-
     TRACE("\n");
+    bits_registration = do_registration = 0;
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr))
@@ -89,19 +123,28 @@ StartCount(void)
                               RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE,
                               NULL);
     if (FAILED(hr))
+    {
+        CoUninitialize();
         return FALSE;
+    }
 
     hr = CoRegisterClassObject(&CLSID_BackgroundCopyManager,
                                (IUnknown *)&BITS_ClassFactory.IClassFactory_iface,
-                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &bits_reg);
-    if (FAILED(hr)) return FALSE;
+                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &bits_registration);
+    if (FAILED(hr))
+    {
+        revoke_class_objects();
+        CoUninitialize();
+        return FALSE;
+    }
 
     hr = CoRegisterClassObject(&CLSID_DeliveryOptimization,
                                (IUnknown *)&DO_ClassFactory.IClassFactory_iface,
-                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &do_reg);
+                               CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &do_registration);
     if (FAILED(hr))
     {
-        CoRevokeClassObject(bits_reg);
+        revoke_class_objects();
+        CoUninitialize();
         return FALSE;
     }
 
@@ -112,33 +155,34 @@ StartCount(void)
 VOID WINAPI
 ServiceMain(DWORD dwArgc, LPWSTR *lpszArgv)
 {
-    HANDLE fileTxThread;
+    HANDLE fileTxThread = NULL;
     DWORD threadId;
+    BOOL com_initialized = FALSE;
+
     TRACE("\n");
 
     stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!stop_event) {
+    if (!stop_event)
+    {
         ERR("failed to create stop_event\n");
         return;
     }
 
     status_handle = RegisterServiceCtrlHandlerExW(L"BITS", ServiceHandler, NULL);
-    if (!status_handle) {
+    if (!status_handle)
+    {
         ERR("failed to register handler: %lu\n", GetLastError());
+        stop_worker(NULL);
         return;
     }
 
     UpdateStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
-    if (!StartCount()) {
-        ERR("failed starting service thread\n");
-        UpdateStatus(SERVICE_STOPPED, NO_ERROR, 0);
-        return;
-    }
-
     globalMgr.jobEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (!globalMgr.jobEvent) {
+    if (!globalMgr.jobEvent)
+    {
         ERR("Couldn't create event: error %ld\n", GetLastError());
         UpdateStatus(SERVICE_STOPPED, NO_ERROR, 0);
+        stop_worker(NULL);
         return;
     }
 
@@ -147,15 +191,28 @@ ServiceMain(DWORD dwArgc, LPWSTR *lpszArgv)
     {
         ERR("Failed starting file transfer thread\n");
         UpdateStatus(SERVICE_STOPPED, NO_ERROR, 0);
+        stop_worker(NULL);
         return;
     }
 
-    UpdateStatus(SERVICE_RUNNING, NO_ERROR, 0);
+    /* Do not publish either class until both the event and worker are ready.
+       This makes an immediate Resume() safe during service startup. */
+    if (!StartCount())
+    {
+        ERR("failed registering service classes\n");
+        revoke_class_objects();
+        UpdateStatus(SERVICE_STOPPED, NO_ERROR, 0);
+        stop_worker(fileTxThread);
+        return;
+    }
+    com_initialized = TRUE;
 
+    UpdateStatus(SERVICE_RUNNING, NO_ERROR, 0);
     WaitForSingleObject(fileTxThread, INFINITE);
+    revoke_class_objects();
     UpdateStatus(SERVICE_STOPPED, NO_ERROR, 0);
-    CloseHandle(stop_event);
+    stop_worker(fileTxThread);
     TRACE("service stopped\n");
 
-    CoUninitialize();
+    if (com_initialized) CoUninitialize();
 }

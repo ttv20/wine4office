@@ -380,9 +380,9 @@ static HRESULT WINAPI BackgroundCopyJob_Resume(IBackgroundCopyJob4 *iface)
                 sink_hr = DO_E_FILE_DOWNLOADSINK_UNSPECIFIED;
                 break;
             }
-            if (file->integrity_check_mandatory && !file->integrity_check_info)
+            if (file->integrity_check_mandatory)
             {
-                sink_hr = DO_E_INTEGRITYCHECKINFO_UNSPECIFIED;
+                sink_hr = E_NOTIMPL;
                 break;
             }
         }
@@ -402,15 +402,26 @@ static HRESULT WINAPI BackgroundCopyJob_Resume(IBackgroundCopyJob4 *iface)
     else if (job->state != BG_JOB_STATE_CONNECTING
              && job->state != BG_JOB_STATE_TRANSFERRING)
     {
-        job->state = BG_JOB_STATE_QUEUED;
-        job->error.context = 0;
-        job->error.code = S_OK;
-        if (job->error.file)
+        if (!globalMgr.jobEvent)
         {
-            IBackgroundCopyFile2_Release(job->error.file);
-            job->error.file = NULL;
+            hr = HRESULT_FROM_WIN32(ERROR_SERVICE_NOT_ACTIVE);
         }
-        SetEvent(globalMgr.jobEvent);
+        else if (!SetEvent(globalMgr.jobEvent))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            if (SUCCEEDED(hr)) hr = E_FAIL;
+        }
+        else
+        {
+            job->state = BG_JOB_STATE_QUEUED;
+            job->error.context = 0;
+            job->error.code = S_OK;
+            if (job->error.file)
+            {
+                IBackgroundCopyFile2_Release(job->error.file);
+                job->error.file = NULL;
+            }
+        }
     }
     LeaveCriticalSection(&globalMgr.cs);
 
@@ -451,7 +462,8 @@ static HRESULT WINAPI BackgroundCopyJob_Cancel(IBackgroundCopyJob4 *iface)
                 WARN("Couldn't delete %s (%lu)\n", debugstr_w(file->tempFileName), GetLastError());
                 hr = BG_S_UNABLE_TO_DELETE_FILES;
             }
-            if (file->info.LocalName && file->info.LocalName[0] && !DeleteFileW(file->info.LocalName))
+            if (!job->delivery_optimization && file->info.LocalName && file->info.LocalName[0] &&
+                !DeleteFileW(file->info.LocalName))
             {
                 WARN("Couldn't delete %s (%lu)\n", debugstr_w(file->info.LocalName), GetLastError());
                 hr = BG_S_UNABLE_TO_DELETE_FILES;
@@ -463,6 +475,76 @@ static HRESULT WINAPI BackgroundCopyJob_Cancel(IBackgroundCopyJob4 *iface)
     LeaveCriticalSection(&job->cs);
     return hr;
 }
+
+static void set_completion_error_locked(BackgroundCopyJobImpl *job,
+                                        BackgroundCopyFileImpl *file, HRESULT hr)
+{
+    job->error.context = BG_ERROR_CONTEXT_LOCAL_FILE;
+    job->error.code = hr;
+    if (job->error.file) IBackgroundCopyFile2_Release(job->error.file);
+    job->error.file = &file->IBackgroundCopyFile2_iface;
+    IBackgroundCopyFile2_AddRef(job->error.file);
+}
+
+static void clear_job_error_locked(BackgroundCopyJobImpl *job)
+{
+    job->error.context = 0;
+    job->error.code = S_OK;
+    if (job->error.file)
+    {
+        IBackgroundCopyFile2_Release(job->error.file);
+        job->error.file = NULL;
+    }
+}
+
+static HRESULT complete_stream_sink(BackgroundCopyFileImpl *file)
+{
+    HANDLE input;
+    LARGE_INTEGER zero;
+    ULARGE_INTEGER size;
+    HRESULT hr;
+
+    input = CreateFileW(file->tempFileName, GENERIC_READ, FILE_SHARE_READ, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (input == INVALID_HANDLE_VALUE)
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    zero.QuadPart = 0;
+    hr = IStream_Seek(file->download_sink, zero, STREAM_SEEK_SET, NULL);
+    if (SUCCEEDED(hr))
+    {
+        size.QuadPart = 0;
+        hr = IStream_SetSize(file->download_sink, size);
+    }
+    if (SUCCEEDED(hr))
+        hr = IStream_Seek(file->download_sink, zero, STREAM_SEEK_SET, NULL);
+
+    while (SUCCEEDED(hr))
+    {
+        char buffer[64 * 1024];
+        DWORD read, written;
+
+        if (!ReadFile(input, buffer, sizeof(buffer), &read, NULL))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            break;
+        }
+        if (!read) break;
+        hr = IStream_Write(file->download_sink, buffer, read, &written);
+        if (SUCCEEDED(hr) && written != read)
+            hr = HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+    }
+
+    if (SUCCEEDED(hr))
+        hr = IStream_Commit(file->download_sink, STGC_DEFAULT);
+
+    CloseHandle(input);
+    if (SUCCEEDED(hr) && !DeleteFileW(file->tempFileName))
+        hr = HRESULT_FROM_WIN32(GetLastError());
+    if (SUCCEEDED(hr)) file->tempFileName[0] = 0;
+    return hr;
+}
+
 
 static HRESULT WINAPI BackgroundCopyJob_Complete(IBackgroundCopyJob4 *iface)
 {
@@ -480,32 +562,50 @@ static HRESULT WINAPI BackgroundCopyJob_Complete(IBackgroundCopyJob4 *iface)
     else
     {
         BackgroundCopyFileImpl *file;
+        BOOL all_committed = TRUE;
+
         LIST_FOR_EACH_ENTRY(file, &job->files, BackgroundCopyFileImpl, entryFromJob)
         {
+            HRESULT commit_hr = S_OK;
+
             if (!file->fileProgress.Completed)
             {
-                hr = BG_S_PARTIAL_COMPLETE;
+                all_committed = FALSE;
+                if (SUCCEEDED(hr)) hr = BG_S_PARTIAL_COMPLETE;
+                continue;
             }
-            else if (file->download_sink)
-            {
-                HRESULT commit_hr = IStream_Commit(file->download_sink, STGC_DEFAULT);
-                if (FAILED(commit_hr) && commit_hr != E_NOTIMPL) hr = BG_S_PARTIAL_COMPLETE;
-            }
-            else if (!file->info.LocalName || !file->info.LocalName[0] ||
-                     !MoveFileExW(file->tempFileName, file->info.LocalName,
+            if (file->completion_committed) continue;
+
+            if (file->download_sink)
+                commit_hr = complete_stream_sink(file);
+            else if (!file->info.LocalName || !file->info.LocalName[0])
+                commit_hr = E_INVALIDARG;
+            else if (!MoveFileExW(file->tempFileName, file->info.LocalName,
                                   MOVEFILE_COPY_ALLOWED | MOVEFILE_REPLACE_EXISTING |
                                   MOVEFILE_WRITE_THROUGH))
+                commit_hr = HRESULT_FROM_WIN32(GetLastError());
+
+            if (FAILED(commit_hr))
             {
-                ERR("Couldn't rename file %s -> %s\n", debugstr_w(file->tempFileName),
-                    debugstr_w(file->info.LocalName));
-                hr = BG_S_PARTIAL_COMPLETE;
+                all_committed = FALSE;
+                if (SUCCEEDED(hr) || hr == BG_S_PARTIAL_COMPLETE) hr = commit_hr;
+                set_completion_error_locked(job, file, commit_hr);
+                continue;
             }
+
+            file->completion_committed = TRUE;
+            if (!file->download_sink) file->tempFileName[0] = 0;
+        }
+
+        if (all_committed)
+        {
+            job->state = BG_JOB_STATE_ACKNOWLEDGED;
+            clear_job_error_locked(job);
+            hr = S_OK;
         }
     }
 
-    job->state = BG_JOB_STATE_ACKNOWLEDGED;
     LeaveCriticalSection(&job->cs);
-
     return hr;
 }
 
@@ -906,61 +1006,26 @@ static HRESULT WINAPI BackgroundCopyJob_AddFileWithRanges(
 {
     BackgroundCopyJobImpl *job = impl_from_IBackgroundCopyJob4(iface);
     BackgroundCopyFileImpl *file;
-    BG_FILE_RANGE *ranges;
-    UINT64 bytes_total = 0;
     HRESULT hr;
-    DWORD i, j;
 
     TRACE("%p, %s, %s, %lu, %p.\n", iface, debugstr_w(RemoteUrl), debugstr_w(LocalName), RangeCount, Ranges);
 
     if (!RemoteUrl || !LocalName || !RangeCount || !Ranges) return E_INVALIDARG;
     if (job->type != BG_JOB_TYPE_DOWNLOAD) return BG_E_INVALID_STATE;
 
-    for (i = 0; i < RangeCount; ++i)
-    {
-        UINT64 end;
-
-        if (!Ranges[i].Length) return BG_E_INVALID_RANGE;
-        if (Ranges[i].Length != BG_LENGTH_TO_EOF &&
-            Ranges[i].InitialOffset > ~(UINT64)0 - (Ranges[i].Length - 1))
-            return BG_E_INVALID_RANGE;
-
-        end = Ranges[i].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
-              Ranges[i].InitialOffset + Ranges[i].Length - 1;
-        for (j = 0; j < i; ++j)
-        {
-            UINT64 other_end = Ranges[j].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
-                               Ranges[j].InitialOffset + Ranges[j].Length - 1;
-
-            if (Ranges[i].InitialOffset <= other_end && Ranges[j].InitialOffset <= end)
-                return BG_E_OVERLAPPING_RANGES;
-        }
-
-        if (Ranges[i].Length == BG_LENGTH_TO_EOF ||
-            (bytes_total != BG_SIZE_UNKNOWN && bytes_total > ~(UINT64)0 - Ranges[i].Length))
-            bytes_total = BG_SIZE_UNKNOWN;
-        else if (bytes_total != BG_SIZE_UNKNOWN)
-            bytes_total += Ranges[i].Length;
-    }
-
-    if (!(ranges = malloc(RangeCount * sizeof(*ranges)))) return E_OUTOFMEMORY;
-    memcpy(ranges, Ranges, RangeCount * sizeof(*ranges));
-
     hr = BackgroundCopyFileConstructor(job, RemoteUrl, LocalName, &file);
+    if (FAILED(hr)) return hr;
+    hr = BackgroundCopyFileSetRanges(file, RangeCount, Ranges, BG_SIZE_UNKNOWN);
     if (FAILED(hr))
     {
-        free(ranges);
+        IBackgroundCopyFile2_Release(&file->IBackgroundCopyFile2_iface);
         return hr;
     }
 
-    file->ranges = ranges;
-    file->range_count = RangeCount;
-    file->fileProgress.BytesTotal = bytes_total;
-
     EnterCriticalSection(&job->cs);
     list_add_head(&job->files, &file->entryFromJob);
-    if (job->jobProgress.BytesTotal != BG_SIZE_UNKNOWN && bytes_total != BG_SIZE_UNKNOWN)
-        job->jobProgress.BytesTotal += bytes_total;
+    if (job->jobProgress.BytesTotal != BG_SIZE_UNKNOWN && file->fileProgress.BytesTotal != BG_SIZE_UNKNOWN)
+        job->jobProgress.BytesTotal += file->fileProgress.BytesTotal;
     else
         job->jobProgress.BytesTotal = BG_SIZE_UNKNOWN;
     ++job->jobProgress.FilesTotal;
@@ -1095,6 +1160,7 @@ static HRESULT add_delivery_optimization_file(BackgroundCopyJobImpl *job, const 
     UINT64 bytes_total;
     HRESULT hr;
 
+    if (range_count > MAX_FILE_RANGES) return E_INVALIDARG;
     if (!file_id || !file_id[0] || !remote_url || !remote_url[0] ||
         (range_count && !ranges) || (!range_count && ranges))
         return E_INVALIDARG;
@@ -1426,6 +1492,8 @@ HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL
 
     TRACE("(%s, %d, delivery optimization %u, %p)\n", debugstr_w(displayName), type,
           delivery_optimization, job);
+    if (!displayName || !job_id || !job) return E_INVALIDARG;
+    *job = NULL;
 
     This = malloc(sizeof(*This));
     if (!This)
@@ -1460,8 +1528,6 @@ HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL
         free(This);
         return hr;
     }
-    *job_id = This->jobId;
-
     list_init(&This->files);
     This->jobProgress.BytesTotal = 0;
     This->jobProgress.BytesTransferred = 0;
@@ -1479,11 +1545,26 @@ HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL
     This->error.file = NULL;
 
     memset(&This->http_options, 0, sizeof(This->http_options));
+    This->wait = NULL;
+    This->cancel = NULL;
+    This->done = NULL;
+    if (!(This->wait = CreateEventW(NULL, FALSE, FALSE, NULL)) ||
+        !(This->cancel = CreateEventW(NULL, FALSE, FALSE, NULL)) ||
+        !(This->done = CreateEventW(NULL, FALSE, FALSE, NULL)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        if (SUCCEEDED(hr)) hr = E_FAIL;
+        if (This->done) CloseHandle(This->done);
+        if (This->cancel) CloseHandle(This->cancel);
+        if (This->wait) CloseHandle(This->wait);
+        This->cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection(&This->cs);
+        free(This->displayName);
+        free(This);
+        return hr;
+    }
 
-    This->wait   = CreateEventW(NULL, FALSE, FALSE, NULL);
-    This->cancel = CreateEventW(NULL, FALSE, FALSE, NULL);
-    This->done   = CreateEventW(NULL, FALSE, FALSE, NULL);
-
+    *job_id = This->jobId;
     *job = This;
 
     TRACE("created job %s:%p\n", debugstr_guid(&This->jobId), This);

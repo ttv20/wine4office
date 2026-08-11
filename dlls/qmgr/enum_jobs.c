@@ -174,13 +174,16 @@ static const IEnumBackgroundCopyJobsVtbl EnumBackgroundCopyJobsVtbl =
     EnumBackgroundCopyJobs_GetCount
 };
 
-HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr, IEnumBackgroundCopyJobs **enumjob)
+HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr, BOOL delivery_optimization,
+                             IEnumBackgroundCopyJobs **enumjob)
 {
     EnumBackgroundCopyJobsImpl *This;
     BackgroundCopyJobImpl *job;
     ULONG i;
 
     TRACE("%p, %p)\n", qmgr, enumjob);
+    if (!qmgr || !enumjob) return E_INVALIDARG;
+    *enumjob = NULL;
 
     This = malloc(sizeof(*This));
     if (!This)
@@ -192,10 +195,18 @@ HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr, IEnumBackgroundCop
     This->indexJobs = 0;
 
     EnterCriticalSection(&qmgr->cs);
-    This->numJobs = list_count(&qmgr->jobs);
+    This->numJobs = 0;
+    LIST_FOR_EACH_ENTRY(job, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
+        if (job->delivery_optimization == delivery_optimization) ++This->numJobs;
 
     if (0 < This->numJobs)
     {
+        if ((SIZE_T)This->numJobs > ~(SIZE_T)0 / sizeof *This->jobs)
+        {
+            LeaveCriticalSection(&qmgr->cs);
+            free(This);
+            return E_OUTOFMEMORY;
+        }
         This->jobs = malloc(This->numJobs * sizeof *This->jobs);
         if (!This->jobs)
         {
@@ -210,6 +221,7 @@ HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr, IEnumBackgroundCop
     i = 0;
     LIST_FOR_EACH_ENTRY(job, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
     {
+        if (job->delivery_optimization != delivery_optimization) continue;
         IBackgroundCopyJob4_AddRef(&job->IBackgroundCopyJob4_iface);
         This->jobs[i++] = &job->IBackgroundCopyJob4_iface;
     }

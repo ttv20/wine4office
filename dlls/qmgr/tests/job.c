@@ -362,6 +362,19 @@ static void test_AddFile(void)
     ok(hres == S_OK, "Second call to AddFile failed: 0x%08lx\n", hres);
 }
 
+/* Test that a job can be resumed as soon as its first file is queued. */
+static void test_ResumeWithFile(void)
+{
+    HRESULT hres;
+
+    hres = IBackgroundCopyJob_AddFile(test_job, test_remotePathA, test_localPathA);
+    ok(hres == S_OK, "AddFile failed: 0x%08lx\n", hres);
+    if (FAILED(hres)) return;
+
+    hres = IBackgroundCopyJob_Resume(test_job);
+    ok(hres == S_OK, "Resume failed during startup: 0x%08lx\n", hres);
+}
+
 /* Test adding a ranged file and retrieving the ranges from the file object. */
 static void test_AddFileWithRanges(void)
 {
@@ -387,6 +400,16 @@ static void test_AddFileWithRanges(void)
 
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA, 0, ranges);
     ok(hr == E_INVALIDARG, "got 0x%08lx\n", hr);
+    if ((ret_ranges = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                0x10001 * sizeof(*ret_ranges))))
+    {
+        hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA,
+                                                    0x10001, ret_ranges);
+        ok(hr == E_INVALIDARG, "oversized range count returned %#lx\n", hr);
+        HeapFree(GetProcessHeap(), 0, ret_ranges);
+    }
+    else
+        skip("could not allocate oversized range fixture\n");
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA, 1, &invalid);
     ok(hr == BG_E_INVALID_RANGE, "got 0x%08lx\n", hr);
     hr = IBackgroundCopyJob3_AddFileWithRanges(job3, remote, test_localPathA,
@@ -1072,6 +1095,7 @@ START_TEST(job)
     };
     static const test_t tests_bits20[] = {
         test_AddFile,
+        test_ResumeWithFile,
         test_AddFileWithRanges,
         test_AddFileSet,
         test_EnumFiles,

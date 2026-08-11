@@ -66,6 +66,9 @@ static HRESULT WINAPI BackgroundCopyManager_CreateJob(IBackgroundCopyManager *if
     HRESULT hres;
 
     TRACE("(%s %d %p %p)\n", debugstr_w(DisplayName), Type, pJobId, ppJob);
+    if (!DisplayName || !pJobId || !ppJob)
+        return E_INVALIDARG;
+    *ppJob = NULL;
 
     hres = BackgroundCopyJobConstructor(DisplayName, Type, is_delivery_optimization_manager(iface), pJobId, &job);
     if (FAILED(hres))
@@ -116,7 +119,9 @@ static HRESULT WINAPI BackgroundCopyManager_EnumJobs(IBackgroundCopyManager *ifa
         DWORD flags, IEnumBackgroundCopyJobs **ppEnum)
 {
     TRACE("(0x%lx %p)\n", flags, ppEnum);
-    return enum_copy_job_create(&globalMgr, ppEnum);
+    if (!ppEnum) return E_INVALIDARG;
+    *ppEnum = NULL;
+    return enum_copy_job_create(&globalMgr, is_delivery_optimization_manager(iface), ppEnum);
 }
 
 static HRESULT WINAPI BackgroundCopyManager_GetErrorDescription(IBackgroundCopyManager *iface,
@@ -158,24 +163,35 @@ DWORD WINAPI fileTransfer(void *param)
 {
     BackgroundCopyManagerImpl *qmgr = &globalMgr;
     HANDLE events[2];
+    HRESULT com_hr;
+    BOOL com_uninitialize;
+
+    com_hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(com_hr) && com_hr != RPC_E_CHANGED_MODE)
+    {
+        ERR("CoInitializeEx failed, hr %#lx\n", com_hr);
+        return 0;
+    }
+    com_uninitialize = SUCCEEDED(com_hr);
 
     events[0] = stop_event;
     events[1] = qmgr->jobEvent;
-
     for (;;)
     {
         BackgroundCopyJobImpl *job, *jobCur;
         BOOL haveJob = FALSE;
 
-        /* Check if it's the stop_event */
+        /* Check if it's the stop_event. */
         if (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0)
         {
+            EnterCriticalSection(&qmgr->cs);
             LIST_FOR_EACH_ENTRY_SAFE(job, jobCur, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
             {
                 list_remove(&job->entryFromQmgr);
                 IBackgroundCopyJob4_Release(&job->IBackgroundCopyJob4_iface);
             }
-            return 0;
+            LeaveCriticalSection(&qmgr->cs);
+            break;
         }
 
         /* Note that other threads may add files to the job list, but only
@@ -210,4 +226,6 @@ DWORD WINAPI fileTransfer(void *param)
         if (haveJob)
             processJob(job);
     }
+    if (com_uninitialize) CoUninitialize();
+    return 0;
 }

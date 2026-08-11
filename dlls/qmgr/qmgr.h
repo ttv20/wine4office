@@ -33,6 +33,8 @@
 #include <string.h>
 #include "wine/list.h"
 
+#define MAX_FILE_RANGES 0x10000
+
 /* Background copy job vtbl and related data */
 typedef struct
 {
@@ -92,6 +94,7 @@ typedef struct
     ULONGLONG transfer_end;
     BG_FILE_PROGRESS fileProgress;
     WCHAR tempFileName[MAX_PATH];
+    BOOL completion_committed;
     struct list entryFromJob;
     BackgroundCopyJobImpl *owner;
     BG_FILE_RANGE *ranges;
@@ -124,7 +127,7 @@ HRESULT BackgroundCopyManagerConstructor(BOOL delivery_optimization, LPVOID *obj
 HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type, BOOL delivery_optimization,
                                      GUID *job_id, BackgroundCopyJobImpl **job);
 HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr,
-        IEnumBackgroundCopyJobs **enumjob);
+        BOOL delivery_optimization, IEnumBackgroundCopyJobs **enumjob);
 HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
                                       LPCWSTR remoteName, LPCWSTR localName,
                                       BackgroundCopyFileImpl **file);

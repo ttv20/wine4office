@@ -389,6 +389,8 @@ static HRESULT WINAPI delivery_file2_SetProperty(IDeliveryOptimizationFile2 *ifa
     case DOFilePropertyId_IntegrityCheckMandatory:
         if (V_VT(value) != VT_BOOL)
             hr = DISP_E_TYPEMISMATCH;
+        else if (V_BOOL(value) != VARIANT_FALSE)
+            hr = E_NOTIMPL;
         else
         {
             file->integrity_check_mandatory = V_BOOL(value) != VARIANT_FALSE;
@@ -481,14 +483,26 @@ HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
     return S_OK;
 }
 
+static int __cdecl compare_file_ranges(const void *left, const void *right)
+{
+    const BG_FILE_RANGE *a = left, *b = right;
+
+    if (a->InitialOffset < b->InitialOffset) return -1;
+    return a->InitialOffset > b->InitialOffset;
+}
+
 HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count,
                                     const BG_FILE_RANGE *ranges, UINT64 file_size)
 {
     BG_FILE_RANGE *copy;
+    SIZE_T alloc_size;
     UINT64 bytes_total = 0;
-    DWORD i, j;
+    DWORD i;
 
     if (!count || !ranges) return E_INVALIDARG;
+    if (count > MAX_FILE_RANGES) return E_INVALIDARG;
+    /* Keep both allocation size and overlap validation bounded. */
+    if ((SIZE_T)count > ~(SIZE_T)0 / sizeof *copy) return E_INVALIDARG;
     for (i = 0; i < count; ++i)
     {
         UINT64 end;
@@ -506,14 +520,6 @@ HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count,
              (ranges[i].Length != BG_LENGTH_TO_EOF && end >= file_size)))
             return BG_E_INVALID_RANGE;
 
-        for (j = 0; j < i; ++j)
-        {
-            UINT64 other_end = ranges[j].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
-                               ranges[j].InitialOffset + ranges[j].Length - 1;
-            if (ranges[i].InitialOffset <= other_end && ranges[j].InitialOffset <= end)
-                return BG_E_OVERLAPPING_RANGES;
-        }
-
         if (ranges[i].Length == BG_LENGTH_TO_EOF ||
             (bytes_total != BG_SIZE_UNKNOWN && bytes_total > ~(UINT64)0 - ranges[i].Length))
             bytes_total = BG_SIZE_UNKNOWN;
@@ -521,8 +527,22 @@ HRESULT BackgroundCopyFileSetRanges(BackgroundCopyFileImpl *file, DWORD count,
             bytes_total += ranges[i].Length;
     }
 
-    if (!(copy = malloc(count * sizeof(*copy)))) return E_OUTOFMEMORY;
-    memcpy(copy, ranges, count * sizeof(*copy));
+    alloc_size = count * sizeof(*copy);
+    if (!(copy = malloc(alloc_size))) return E_OUTOFMEMORY;
+    memcpy(copy, ranges, alloc_size);
+    qsort(copy, count, sizeof(*copy), compare_file_ranges);
+    for (i = 1; i < count; ++i)
+    {
+        UINT64 previous_end = copy[i - 1].Length == BG_LENGTH_TO_EOF ? ~(UINT64)0 :
+                              copy[i - 1].InitialOffset + copy[i - 1].Length - 1;
+        if (copy[i].InitialOffset <= previous_end)
+        {
+            free(copy);
+            return BG_E_OVERLAPPING_RANGES;
+        }
+    }
+    /* Keep the caller's order in GetFileRanges; the sorted copy was for validation. */
+    memcpy(copy, ranges, alloc_size);
     free(file->ranges);
     file->ranges = copy;
     file->range_count = count;
@@ -709,13 +729,10 @@ static void set_file_error(BackgroundCopyFileImpl *file, HRESULT hr, BG_ERROR_CO
     LeaveCriticalSection(&job->cs);
 }
 
-static BOOL write_download_data(BackgroundCopyFileImpl *file, HANDLE output, const void *buffer,
-                                ULONG size)
+static BOOL write_download_data(HANDLE output, const void *buffer, ULONG size)
 {
     ULONG written;
 
-    if (file->download_sink)
-        return SUCCEEDED(IStream_Write(file->download_sink, buffer, size, &written)) && written == size;
     return WriteFile(output, buffer, size, &written, NULL) && written == size;
 }
 
@@ -1167,7 +1184,7 @@ static BOOL transfer_http_request(BackgroundCopyFileImpl *file, HINTERNET con, D
         if (!WinHttpReadData(req, buf, HTTP_READ_BUFFER_SIZE, NULL)) goto done;
         if (wait_for_completion(job) || FAILED(job->error.code)) goto done;
         if (!file->read_size) break;
-        if (!write_download_data(file, output, buf, file->read_size)) goto done;
+        if (!write_download_data(output, buf, file->read_size)) goto done;
 
         received += file->read_size;
         EnterCriticalSection(&job->cs);
@@ -1213,17 +1230,8 @@ static BOOL transfer_file_http(BackgroundCopyFileImpl *file, URL_COMPONENTSW *uc
     file->http_connection_count = 0;
     LeaveCriticalSection(&job->cs);
 
-    if (file->download_sink)
-    {
-        LARGE_INTEGER zero;
-        zero.QuadPart = 0;
-        if (FAILED(IStream_Seek(file->download_sink, zero, STREAM_SEEK_SET, NULL))) goto done;
-    }
-    else
-    {
-        output = CreateFileW(tmpfile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (output == INVALID_HANDLE_VALUE) goto done;
-    }
+    output = CreateFileW(tmpfile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (output == INVALID_HANDLE_VALUE) goto done;
 
     if (can_transfer_ranges_in_parallel(file))
     {
@@ -1327,17 +1335,8 @@ static BOOL transfer_file_local(BackgroundCopyFileImpl *file, const WCHAR *tmpna
 
     source = CreateFileW(ptr, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (source == INVALID_HANDLE_VALUE || !GetFileSizeEx(source, &source_size)) goto done;
-    if (file->download_sink)
-    {
-        LARGE_INTEGER zero;
-        zero.QuadPart = 0;
-        if (FAILED(IStream_Seek(file->download_sink, zero, STREAM_SEEK_SET, NULL))) goto done;
-    }
-    else
-    {
-        output = CreateFileW(tmpname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (output == INVALID_HANDLE_VALUE) goto done;
-    }
+    output = CreateFileW(tmpname, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (output == INVALID_HANDLE_VALUE) goto done;
 
     count = file->range_count ? file->range_count : 1;
     for (i = 0; i < count; ++i)
@@ -1368,7 +1367,7 @@ static BOOL transfer_file_local(BackgroundCopyFileImpl *file, const WCHAR *tmpna
             DWORD requested = remaining > sizeof(buf) ? sizeof(buf) : remaining, read;
 
             if (!ReadFile(source, buf, requested, &read, NULL) || !read ||
-                !write_download_data(file, output, buf, read))
+                !write_download_data(output, buf, read))
                 goto done;
 
             remaining -= read;
@@ -1435,6 +1434,7 @@ BOOL processFile(BackgroundCopyFileImpl *file, BackgroundCopyJobImpl *job)
     if (!file->range_count) file->fileProgress.BytesTotal = file->source_size;
     file->fileProgress.BytesTransferred = 0;
     file->fileProgress.Completed = FALSE;
+    file->completion_committed = FALSE;
     LeaveCriticalSection(&job->cs);
 
     TRACE("Transferring: %s -> %s -> %s\n",
