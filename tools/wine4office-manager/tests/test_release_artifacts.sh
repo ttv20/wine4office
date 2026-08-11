@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Focused smoke test for separate Wine4OfficeManager release artifacts.
 set -euo pipefail
+trap 'status=$?; echo "release artifact test failed at line $LINENO: $BASH_COMMAND" >&2; exit $status' ERR
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
