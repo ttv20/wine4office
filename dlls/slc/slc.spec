@@ -7,27 +7,27 @@
 @ stub SLpGetMachineUGUID
 @ stub SLpVLActivateProduct
 @ stdcall SLClose(ptr) sppc.SLClose
-@ stub SLConsumeRight
+@ stdcall SLConsumeRight(ptr ptr ptr wstr ptr) sppc.SLConsumeRight
 @ stub SLConsumeWindowsRight
 @ stub SLDepositOfflineConfirmationId
 @ stub SLFireEvent
 @ stub SLGenerateOfflineInstallationId
 @ stub SLGetInstalledSAMLicenseApplications
-@ stub SLGetLicense
-@ stub SLGetLicenseFileId
-@ stub SLGetLicenseInformation
+@ stdcall SLGetLicense(ptr ptr ptr ptr) sppc.SLGetLicense
+@ stdcall SLGetLicenseFileId(ptr long ptr ptr) sppc.SLGetLicenseFileId
+@ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetLicenseInformation
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr) sppc.SLGetLicensingStatusInformation
 @ stub SLGetPKeyId
-@ stub SLGetPKeyInformation
-@ stub SLGetPolicyInformation
+@ stdcall SLGetPKeyInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetPKeyInformation
+@ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr) sppc.SLGetPolicyInformation
 @ stub SLGetPolicyInformationDWORD
-@ stub SLGetProductSkuInformation
+@ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetProductSkuInformation
 @ stub SLGetSAMLicense
-@ stub SLGetSLIDList
-@ stub SLGetServiceInformation
+@ stdcall SLGetSLIDList(ptr long ptr long ptr ptr) sppc.SLGetSLIDList
+@ stdcall SLGetServiceInformation(ptr wstr ptr ptr ptr) sppc.SLGetServiceInformation
 @ stdcall SLGetWindowsInformation(wstr ptr ptr ptr)
 @ stdcall SLGetWindowsInformationDWORD(wstr ptr)
-@ stub SLInstallLicense
+@ stdcall SLInstallLicense(ptr long ptr ptr) sppc.SLInstallLicense
 @ stub SLInstallProofOfPurchase
 @ stub SLInstallSAMLicense
 @ stdcall SLOpen(ptr) sppc.SLOpen

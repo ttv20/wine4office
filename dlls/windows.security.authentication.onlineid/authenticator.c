@@ -45,6 +45,50 @@ static const GUID IID_IWebTokenRequest3 =
     {0x5a755b51, 0x3bb1, 0x41a5, {0xa6, 0x3d, 0x90, 0xbc, 0x32, 0xc7, 0xdb, 0x9a}};
 static const GUID IID_IWebTokenRequestFactory =
     {0x6cf2141c, 0x0ff0, 0x4c67, {0xb8, 0x4f, 0x99, 0xdd, 0xbe, 0x4a, 0x72, 0xc9}};
+static const GUID IID_IAsyncOperation_WebTokenRequestResult =
+    {0x0a815852, 0x7c44, 0x5674, {0xb3, 0xd2, 0xfa, 0x2e, 0x4c, 0x1e, 0x46, 0xc9}};
+static const GUID IID_IAsyncOperation_WebAccount =
+    {0xacd76b54, 0x297f, 0x5a18, {0x91, 0x43, 0x20, 0xa3, 0x09, 0xe2, 0xdf, 0xd3}};
+static const GUID IID_IAsyncOperation_WebAccountProvider =
+    {0x88c66009, 0x12f7, 0x58e2, {0x8d, 0xbe, 0x6e, 0xfc, 0x62, 0x0c, 0x85, 0xba}};
+static const GUID IID_IAsyncOperation_FindAllAccountsResult =
+    {0x9affb572, 0x58c3, 0x5c6c, {0x93, 0x97, 0x2b, 0x77, 0x04, 0xaa, 0x35, 0xc3}};
+static const GUID IID_IVectorView_WebAccount =
+    {0xe0798d3d, 0x2b4a, 0x589a, {0xab, 0x12, 0x02, 0xdc, 0xcc, 0x15, 0x8a, 0xfc}};
+static const GUID IID_IVectorView_WebTokenResponse =
+    {0x199e065c, 0x8195, 0x55da, {0x9c, 0x10, 0x8a, 0xea, 0xf9, 0xac, 0x10, 0x62}};
+
+struct async_operation_type
+{
+    const GUID *iid;
+    const WCHAR *class_name;
+};
+
+static const struct async_operation_type async_web_token_request_result =
+{
+    &IID_IAsyncOperation_WebTokenRequestResult,
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Authentication.Web.Core.WebTokenRequestResult>",
+};
+static const struct async_operation_type async_web_account =
+{
+    &IID_IAsyncOperation_WebAccount,
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Credentials.WebAccount>",
+};
+static const struct async_operation_type async_web_account_provider =
+{
+    &IID_IAsyncOperation_WebAccountProvider,
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Credentials.WebAccountProvider>",
+};
+static const struct async_operation_type async_find_all_accounts_result =
+{
+    &IID_IAsyncOperation_FindAllAccountsResult,
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Authentication.Web.Core.FindAllAccountsResult>",
+};
+static const struct async_operation_type async_onlineid_ticket_result =
+{
+    &IID_IAsyncOperation_OnlineIdSystemTicketResult,
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Authentication.OnlineId.OnlineIdSystemTicketResult>",
+};
 
 struct web_token_request_factory;
 struct web_token_request_factory_vtbl
@@ -1319,6 +1363,7 @@ struct completed_provider_operation
     AsyncStatus status;
     HRESULT error;
     BOOL closed;
+    const struct async_operation_type *type;
 };
 
 static inline struct completed_provider_operation *impl_from_async_operation( IAsyncOperation_IInspectable *iface )
@@ -1335,16 +1380,16 @@ static HRESULT WINAPI completed_async_QueryInterface( IAsyncOperation_IInspectab
 {
     struct completed_provider_operation *impl = impl_from_async_operation( iface );
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IAsyncInfo )) *out = &impl->IAsyncInfo_iface;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+        *out = &impl->IAsyncInfo_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+             IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, impl->type->iid ))
+        *out = iface;
     else
     {
-        /* The parameterized IAsyncOperation<WebAccountProvider> IID is not in
-         * Wine's current credentials IDL.  This object has the single async
-         * operation ABI, so accept the generated operation IID here as well. */
-        if (!IsEqualGUID( iid, &IID_IUnknown ) && !IsEqualGUID( iid, &IID_IInspectable ) &&
-            !IsEqualGUID( iid, &IID_IAgileObject ))
-            TRACE( "accepting parameterized async IID %s.\n", debugstr_guid( iid ) );
-        *out = iface;
+        TRACE( "async interface %s not supported.\n", debugstr_guid( iid ) );
+        return E_NOINTERFACE;
     }
     TRACE( "async iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), *out );
     InterlockedIncrement( &impl->ref );
@@ -1373,17 +1418,18 @@ static ULONG WINAPI completed_async_Release( IAsyncOperation_IInspectable *iface
 static HRESULT WINAPI completed_async_GetIids( IAsyncOperation_IInspectable *iface, ULONG *count, IID **iids )
 {
     if (!count || !iids) return E_POINTER;
-    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
-    (*iids)[0] = IID_IAsyncInfo;
-    *count = 1;
+    if (!(*iids = CoTaskMemAlloc( 2 * sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = *impl_from_async_operation( iface )->type->iid;
+    (*iids)[1] = IID_IAsyncInfo;
+    *count = 2;
     return S_OK;
 }
 
 static HRESULT WINAPI completed_async_GetRuntimeClassName( IAsyncOperation_IInspectable *iface, HSTRING *name )
 {
-    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Credentials.WebAccountProvider>";
+    struct completed_provider_operation *impl = impl_from_async_operation( iface );
     if (!name) return E_POINTER;
-    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+    return WindowsCreateString( impl->type->class_name, wcslen( impl->type->class_name ), name );
 }
 
 static HRESULT WINAPI completed_async_GetTrustLevel( IAsyncOperation_IInspectable *iface, TrustLevel *level )
@@ -1491,16 +1537,23 @@ static HRESULT WINAPI completed_info_GetTrustLevel( IAsyncInfo *iface, TrustLeve
 
 static HRESULT WINAPI completed_info_get_Id( IAsyncInfo *iface, UINT32 *id )
 {
+    struct completed_provider_operation *impl = impl_from_async_info( iface );
+    HRESULT hr = S_OK;
+
     if (!id) return E_POINTER;
-    if (impl_from_async_info( iface )->closed) return E_ILLEGAL_METHOD_CALL;
-    *id = 1;
-    return S_OK;
+    *id = 0;
+    EnterCriticalSection( &impl->cs );
+    if (impl->closed) hr = E_ILLEGAL_METHOD_CALL;
+    else *id = 1;
+    LeaveCriticalSection( &impl->cs );
+    return hr;
 }
 
 static HRESULT WINAPI completed_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
 {
     struct completed_provider_operation *impl = impl_from_async_info( iface );
     if (!status) return E_POINTER;
+    *status = Started;
     EnterCriticalSection( &impl->cs );
     if (impl->closed)
     {
@@ -1516,6 +1569,7 @@ static HRESULT WINAPI completed_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *
 {
     struct completed_provider_operation *impl = impl_from_async_info( iface );
     if (!error) return E_POINTER;
+    *error = S_OK;
     EnterCriticalSection( &impl->cs );
     if (impl->closed)
     {
@@ -1544,9 +1598,23 @@ static HRESULT WINAPI completed_info_Cancel( IAsyncInfo *iface )
 static HRESULT WINAPI completed_info_Close( IAsyncInfo *iface )
 {
     struct completed_provider_operation *impl = impl_from_async_info( iface );
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    IInspectable *result;
+
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return S_OK;
+    }
     impl->closed = TRUE;
+    handler = impl->handler;
+    result = impl->result;
+    impl->handler = NULL;
+    impl->result = NULL;
     LeaveCriticalSection( &impl->cs );
+    if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+    if (result) IInspectable_Release( result );
     return S_OK;
 }
 
@@ -1558,7 +1626,8 @@ static const IAsyncInfoVtbl completed_info_vtbl =
     completed_info_Cancel, completed_info_Close,
 };
 
-static HRESULT provider_operation_create( AsyncStatus status, IInspectable *result,
+static HRESULT provider_operation_create( const struct async_operation_type *type, AsyncStatus status,
+                                          IInspectable *result,
                                           struct completed_provider_operation **impl_out,
                                           IInspectable **out )
 {
@@ -1569,6 +1638,7 @@ static HRESULT provider_operation_create( AsyncStatus status, IInspectable *resu
     impl->IAsyncOperation_IInspectable_iface.lpVtbl = &completed_async_vtbl;
     impl->IAsyncInfo_iface.lpVtbl = &completed_info_vtbl;
     impl->ref = 1;
+    impl->type = type;
     impl->status = status;
     impl->error = S_OK;
     InitializeCriticalSection( &impl->cs );
@@ -1578,9 +1648,10 @@ static HRESULT provider_operation_create( AsyncStatus status, IInspectable *resu
     return S_OK;
 }
 
-static HRESULT completed_provider_operation_create( IInspectable *result, IInspectable **out )
+static HRESULT completed_provider_operation_create( const struct async_operation_type *type,
+                                                     IInspectable *result, IInspectable **out )
 {
-    return provider_operation_create( Completed, result, NULL, out );
+    return provider_operation_create( type, Completed, result, NULL, out );
 }
 
 static void provider_operation_complete( struct completed_provider_operation *impl,
@@ -1592,11 +1663,13 @@ static void provider_operation_complete( struct completed_provider_operation *im
     EnterCriticalSection( &impl->cs );
     if (impl->status == Started)
     {
-        if ((impl->result = result)) IInspectable_AddRef( result );
         impl->status = status;
         impl->error = error;
-        if (!impl->closed && (handler = impl->handler))
-            IAsyncOperationCompletedHandler_IInspectable_AddRef( handler );
+        if (!impl->closed)
+        {
+            if ((impl->result = result)) IInspectable_AddRef( result );
+            if ((handler = impl->handler)) IAsyncOperationCompletedHandler_IInspectable_AddRef( handler );
+        }
     }
     LeaveCriticalSection( &impl->cs );
     if (handler)
@@ -1627,11 +1700,10 @@ static HRESULT WINAPI account_vector_QueryInterface( IVectorView_IInspectable *i
 {
     struct empty_account_vector *impl = impl_from_account_vector( iface );
     if (!out) return E_POINTER;
-    /* The parameterized IVectorView<WebAccount> IID is absent from Wine's
-     * credentials IDL.  This empty object has no element-specific behavior. */
+    *out = NULL;
     if (!IsEqualGUID( iid, &IID_IUnknown ) && !IsEqualGUID( iid, &IID_IInspectable ) &&
-        !IsEqualGUID( iid, &IID_IAgileObject ))
-        TRACE( "accepting parameterized vector IID %s.\n", debugstr_guid( iid ) );
+        !IsEqualGUID( iid, &IID_IAgileObject ) && !IsEqualGUID( iid, &IID_IVectorView_WebAccount ))
+        return E_NOINTERFACE;
     *out = iface;
     TRACE( "vector iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), *out );
     InterlockedIncrement( &impl->ref );
@@ -1658,8 +1730,9 @@ static ULONG WINAPI account_vector_Release( IVectorView_IInspectable *iface )
 static HRESULT WINAPI account_vector_GetIids( IVectorView_IInspectable *iface, ULONG *count, IID **iids )
 {
     if (!count || !iids) return E_POINTER;
-    *count = 0;
-    *iids = NULL;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IVectorView_WebAccount;
+    *count = 1;
     return S_OK;
 }
 
@@ -2073,8 +2146,12 @@ static ULONG WINAPI web_account_Release( struct web_account *iface )
 }
 static HRESULT WINAPI web_account_GetIids( struct web_account *iface, ULONG *count, IID **iids )
 {
-    if (!count || !iids) return E_POINTER; if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
-    (*iids)[0] = IID_IWebAccount; *count = 1; return S_OK;
+    if (!count || !iids) return E_POINTER;
+    if (!(*iids = CoTaskMemAlloc( 2 * sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IWebAccount;
+    (*iids)[1] = IID_IWebAccount2;
+    *count = 2;
+    return S_OK;
 }
 static HRESULT WINAPI web_account_GetRuntimeClassName( struct web_account *iface, HSTRING *name )
 {
@@ -2328,6 +2405,10 @@ static inline struct single_response_vector *impl_from_response_vector( IVectorV
 static HRESULT WINAPI response_vector_QueryInterface( IVectorView_IInspectable *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
+    *out = NULL;
+    if (!IsEqualGUID( iid, &IID_IUnknown ) && !IsEqualGUID( iid, &IID_IInspectable ) &&
+        !IsEqualGUID( iid, &IID_IAgileObject ) && !IsEqualGUID( iid, &IID_IVectorView_WebTokenResponse ))
+        return E_NOINTERFACE;
     *out = iface;
     InterlockedIncrement( &impl_from_response_vector( iface )->ref );
     return S_OK;
@@ -2346,7 +2427,10 @@ static ULONG WINAPI response_vector_Release( IVectorView_IInspectable *iface )
 static HRESULT WINAPI response_vector_GetIids( IVectorView_IInspectable *iface, ULONG *count, IID **iids )
 {
     if (!count || !iids) return E_POINTER;
-    *count = 0; *iids = NULL; return S_OK;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    (*iids)[0] = IID_IVectorView_WebTokenResponse;
+    *count = 1;
+    return S_OK;
 }
 static HRESULT WINAPI response_vector_GetRuntimeClassName( IVectorView_IInspectable *iface, HSTRING *name )
 {
@@ -2542,6 +2626,16 @@ done:
     return token;
 }
 
+static BOOL wam_cache_transaction_pending(void)
+{
+    WCHAR local_appdata[MAX_PATH], path[MAX_PATH];
+
+    if (!GetEnvironmentVariableW( L"LOCALAPPDATA", local_appdata, ARRAY_SIZE(local_appdata) )) return TRUE;
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Wine4Office\\WAM\\wam-transaction.pending",
+                  local_appdata ) < 0) return TRUE;
+    return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
+}
+
 static WCHAR *load_wam_token_file( const WCHAR *path )
 {
     HANDLE file;
@@ -2550,6 +2644,7 @@ static WCHAR *load_wam_token_file( const WCHAR *path )
     char *bytes;
     WCHAR *token;
 
+    if (wam_cache_transaction_pending()) return NULL;
     if ((token = load_encrypted_wam_token( path ))) return token;
 
     /* Retain the diagnostic plaintext input as a compatibility fallback for
@@ -2908,7 +3003,8 @@ static HRESULT create_pending_interactive_token_operation( HWND owner, struct we
     if (!out) return E_POINTER;
     *out = NULL;
     if (!(context = calloc( 1, sizeof(*context) ))) return E_OUTOFMEMORY;
-    if (FAILED(hr = provider_operation_create( Started, NULL, &impl, &operation )))
+    if (FAILED(hr = provider_operation_create( &async_web_token_request_result,
+                                               Started, NULL, &impl, &operation )))
     {
         free( context );
         return hr;
@@ -3390,7 +3486,7 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         WindowsDeleteString( nested_client_id );
         if (FAILED(hr)) return hr;
     }
-    hr = completed_provider_operation_create( result, operation );
+    hr = completed_provider_operation_create( &async_web_token_request_result, result, operation );
     IInspectable_Release( result );
     return hr;
 }
@@ -3425,7 +3521,7 @@ static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
     }
     WindowsDeleteString( nested_client_id );
     if (FAILED(hr)) return hr;
-    hr = completed_provider_operation_create( result, operation );
+    hr = completed_provider_operation_create( &async_web_token_request_result, result, operation );
     IInspectable_Release( result );
     return hr;
 }
@@ -3481,7 +3577,7 @@ static HRESULT WINAPI web_manager_FindAccountAsync(
         WindowsDeleteString( account_id );
     }
 
-    hr = completed_provider_operation_create( result, operation );
+    hr = completed_provider_operation_create( &async_web_account, result, operation );
     if (result) IInspectable_Release( result );
     return hr;
 }
@@ -3498,7 +3594,7 @@ static HRESULT WINAPI web_manager_FindAccountProviderAsync(
     if (FAILED(hr = WindowsCreateString( NULL, 0, &authority ))) return hr;
     if (SUCCEEDED(hr = web_account_provider_create( id, authority, &provider )))
     {
-        hr = completed_provider_operation_create( provider, operation );
+        hr = completed_provider_operation_create( &async_web_account_provider, provider, operation );
         IInspectable_Release( provider );
     }
     WindowsDeleteString( authority );
@@ -3516,7 +3612,7 @@ static HRESULT WINAPI web_manager_FindAccountProviderWithAuthorityAsync(
     if (!operation) return E_POINTER;
     *operation = NULL;
     if (FAILED(hr = web_account_provider_create( id, authority, &provider ))) return hr;
-    hr = completed_provider_operation_create( provider, operation );
+    hr = completed_provider_operation_create( &async_web_account_provider, provider, operation );
     IInspectable_Release( provider );
     return hr;
 }
@@ -3692,7 +3788,7 @@ static HRESULT WINAPI web_manager_FindAllAccountsWithClientIdAsync(
                        L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
             wcsstr( WindowsGetStringRawBuffer( ((struct web_account_provider *)provider)->authority, NULL ),
                     L"organizations" ) != NULL, &result ))) return hr;
-    hr = completed_provider_operation_create( result, operation );
+    hr = completed_provider_operation_create( &async_find_all_accounts_result, result, operation );
     IInspectable_Release( result );
     return hr;
 }
@@ -4065,7 +4161,8 @@ static HRESULT WINAPI authenticator_GetTicketAsync( IOnlineIdSystemAuthenticator
         hr = onlineid_ticket_result_create( OnlineIdSystemTicketStatus_ServiceConnectionError, hr, NULL, &result );
     if (identity) IOnlineIdSystemIdentity_Release( identity );
     if (FAILED(hr)) return hr;
-    hr = completed_provider_operation_create( result, (IInspectable **)operation );
+    hr = completed_provider_operation_create( &async_onlineid_ticket_result,
+                                              result, (IInspectable **)operation );
     IInspectable_Release( result );
     return hr;
 }

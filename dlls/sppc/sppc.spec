@@ -39,7 +39,7 @@
 @ stub SLGetInstalledProductKeyIds
 @ stdcall SLGetLicense(ptr ptr ptr ptr)
 @ stdcall SLGetLicenseFileId(ptr long ptr ptr)
-@ stub SLGetLicenseInformation
+@ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
 @ stub SLGetPKeyId
 @ stdcall SLGetPKeyInformation(ptr ptr wstr ptr ptr ptr)

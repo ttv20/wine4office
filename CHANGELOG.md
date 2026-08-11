@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Scope WAM credentials transactionally and reject unsupported licensing policy claims.
 - Implement packaged-app lifecycle, identity, enterprise policy, and honest VoIP contracts.
 - Make Windows.Web HTTP, JSON, cookies, and async objects thread-safe and honest.
 - Harden toast XML parsing, event lifetimes, and desktop notification delivery.

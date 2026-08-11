@@ -1,7 +1,8 @@
 EXTRADEFS = -D_SLC_
 MODULE    = sppc.dll
 IMPORTLIB = sppc
-IMPORTS   = advapi32
+IMPORTS   = $(XML2_PE_LIBS) crypt32 advapi32
+EXTRAINCL = $(XML2_PE_CFLAGS)
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 

@@ -2,8 +2,9 @@
  * Wine4Office organizational OAuth helper.
  *
  * Hosts Microsoft authentication in an owner-window MSHTML control inside the
- * Wine prefix, exchanges the public-client PKCE code, and stores the resulting
- * WAM state with DPAPI.  It never opens the host browser and never logs tokens.
+ * Wine prefix, exchanges the public-client PKCE code, and stores each account's
+ * versioned WAM bundle with DPAPI.  It never opens the host browser and never
+ * logs tokens.
  */
 #include <windows.h>
 #include <bcrypt.h>
@@ -327,6 +328,122 @@ static std::wstring cache_file(const WCHAR *name)
     return path;
 }
 
+static bool cache_transaction_pending(void)
+{
+    std::wstring path = cache_file(L"wam-transaction.pending");
+    return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+class cache_lock
+{
+    HANDLE mutex = NULL;
+    bool locked = false;
+
+public:
+    cache_lock()
+    {
+        DWORD wait;
+        mutex = CreateMutexW(NULL, FALSE, L"Local\\Wine4OfficeWamCache");
+        if (!mutex) return;
+        wait = WaitForSingleObject(mutex, INFINITE);
+        locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    }
+
+    ~cache_lock()
+    {
+        if (mutex)
+        {
+            if (locked) ReleaseMutex(mutex);
+            CloseHandle(mutex);
+        }
+    }
+
+    bool valid() const { return locked; }
+};
+
+class cache_transaction
+{
+    cache_lock lock;
+    std::wstring marker, target, backup, temporary;
+    bool active = false, replaced = false;
+    bool write_marker(const char *state = "prepared")
+    {
+        HANDLE file;
+        DWORD written;
+        std::string name;
+        std::wstring marker_temporary;
+
+        if (target.empty()) return false;
+        const WCHAR *filename = wcsrchr(target.c_str(), L'\\');
+        name = wide_to_utf8(filename ? filename + 1 : target.c_str());
+        marker = cache_file(L"wam-transaction.pending");
+        if (marker.empty()) return false;
+        marker_temporary = marker + L".new";
+        file = CreateFileW(marker_temporary.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        std::string content = "Wine4OfficeWamBundle=1\n" + name + "\n" + state + "\n";
+        bool success = WriteFile(file, content.data(), content.size(), &written, NULL) &&
+                       written == content.size() && FlushFileBuffers(file);
+        CloseHandle(file);
+        if (success) success = MoveFileExW(marker_temporary.c_str(), marker.c_str(),
+                                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!success) DeleteFileW(marker_temporary.c_str());
+        return success;
+    }
+
+public:
+    bool valid() const { return lock.valid() && active; }
+
+    bool begin(const std::wstring &bundle)
+    {
+        if (!lock.valid() || cache_transaction_pending()) return false;
+        target = bundle;
+        backup = target + L".bak";
+        temporary = target + L".new";
+        DeleteFileW(backup.c_str());
+        DeleteFileW(temporary.c_str());
+        active = write_marker();
+        return active;
+    }
+
+    bool commit()
+    {
+        if (!valid() || !DeleteFileW(marker.c_str())) return false;
+        DeleteFileW(backup.c_str());
+        DeleteFileW(temporary.c_str());
+        active = false;
+        return true;
+    }
+
+    bool rollback()
+    {
+        bool success = true;
+        if (!active) return false;
+        DeleteFileW(temporary.c_str());
+        if (replaced)
+        {
+            if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                success = DeleteFileW(target.c_str()) &&
+                          MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+            }
+            else success = DeleteFileW(target.c_str()) ||
+                           GetLastError() == ERROR_FILE_NOT_FOUND;
+        }
+        if (success && !DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
+            success = false;
+        if (success)
+        {
+            DeleteFileW(backup.c_str());
+            active = false;
+        }
+        return success;
+    }
+
+    bool replace_bundle(const std::string &value);
+};
+
 static bool protected_write(const WCHAR *name, const std::string &value)
 {
     DATA_BLOB input, output = {};
@@ -355,16 +472,24 @@ static bool protected_write(const WCHAR *name, const std::string &value)
     return success;
 }
 
-static bool protected_read(const WCHAR *name, std::string &value)
+static bool delete_cache_file(const WCHAR *name)
+{
+    std::wstring path = cache_file(name);
+    if (path.empty()) return false;
+    return DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+}
+
+static bool protected_read_path(const std::wstring &path, std::string &value, bool check_pending)
 {
     DATA_BLOB input = {}, output = {};
-    std::wstring path = cache_file(name);
     LARGE_INTEGER size;
     HANDLE file;
     DWORD read;
     std::vector<BYTE> bytes;
     bool success = false;
+
     value.clear();
+    if (path.empty() || (check_pending && cache_transaction_pending())) return false;
     file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return false;
@@ -387,6 +512,47 @@ static bool protected_read(const WCHAR *name, std::string &value)
     SecureZeroMemory(bytes.data(), bytes.size());
     return success;
 }
+
+static bool protected_read(const WCHAR *name, std::string &value)
+{
+    return protected_read_path(cache_file(name), value, true);
+}
+
+bool cache_transaction::replace_bundle(const std::string &value)
+{
+    DATA_BLOB input, output = {};
+    HANDLE file;
+    DWORD written;
+    bool success = false;
+
+    if (!valid()) return false;
+    input.cbData = value.size();
+    input.pbData = (BYTE *)value.data();
+    if (!CryptProtectData(&input, L"Wine4Office WAM bundle", NULL, NULL, NULL,
+                          CRYPTPROTECT_UI_FORBIDDEN, &output)) return false;
+    file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        success = WriteFile(file, output.pbData, output.cbData, &written, NULL) &&
+                  written == output.cbData && FlushFileBuffers(file);
+        CloseHandle(file);
+        if (success)
+        {
+            if (GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES)
+                success = ReplaceFileW(target.c_str(), temporary.c_str(), backup.c_str(),
+                                       REPLACEFILE_WRITE_THROUGH, NULL, NULL);
+            else success = MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+        }
+        if (!success) DeleteFileW(temporary.c_str());
+    }
+    replaced = success;
+    if (success && !write_marker("replaced")) success = false;
+    return success;
+}
+
+
+static bool cached_account_matches(const std::string &login_hint);
 
 static bool http_post(const WCHAR *host, const WCHAR *path, const std::string &body,
                       std::string &response)
@@ -615,44 +781,409 @@ static bool refresh_scope(const std::string &refresh_token, const char *scope,
     return success;
 }
 
-static bool save_tokens(const token_set &office, const token_set &licensing)
+struct cache_record
 {
-    std::string payload, oid, tid, username, first_name, last_name, display_name, exp;
-    std::string account_id, authority, client_info_json, client_info;
-    ULONGLONG expires;
-    if (!jwt_payload(office.id_token, payload) ||
-        !json_string(payload, "oid", oid) || !json_string(payload, "tid", tid) ||
-        (!json_string(payload, "preferred_username", username) &&
-         !json_string(payload, "upn", username))) return false;
-    json_string(payload, "given_name", first_name);
-    json_string(payload, "family_name", last_name);
-    json_string(payload, "name", display_name);
-    if (!json_number(payload, "exp", expires)) expires = unix_time() + office.expires_in;
-    exp = std::to_string(expires);
-    account_id = oid + "." + tid;
-    authority = "https://login.microsoftonline.com/" + tid + "/";
-    client_info_json = "{\"uid\":\"" + oid + "\",\"utid\":\"" + tid + "\"}";
-    client_info = base64url_encode((const BYTE *)client_info_json.data(), client_info_json.size());
+    token_set office, licensing;
+    std::string username, oid, tid, first_name, last_name, display_name;
+    std::string account_id, authority, client_info;
+    ULONGLONG expires = 0;
+};
 
-    bool success =
-        protected_write(L"wam-access-token.dat", office.access_token) &&
-        protected_write(L"wam-id-token.dat", office.id_token) &&
-        protected_write(L"wam-refresh-token.dat", office.refresh_token) &&
-        protected_write(L"wam-licensing-token.dat", licensing.access_token) &&
-        protected_write(L"wam-token-expires-on.dat", exp) &&
-        protected_write(L"wam-account-username.dat", username) &&
-        protected_write(L"wam-account-id.dat", account_id) &&
-        protected_write(L"wam-account-oid.dat", oid) &&
-        protected_write(L"wam-account-tenant-id.dat", tid) &&
-        protected_write(L"wam-account-authority.dat", authority) &&
-        protected_write(L"wam-client-info.dat", client_info);
-    if (success && !first_name.empty()) success = protected_write(L"wam-account-first-name.dat", first_name);
-    if (success && !last_name.empty()) success = protected_write(L"wam-account-last-name.dat", last_name);
-    if (success && !display_name.empty()) success = protected_write(L"wam-account-display-name.dat", display_name);
+static void secure_clear(cache_record &record)
+{
+    secure_clear(record.office);
+    secure_clear(record.licensing);
+    secure_clear(record.username);
+    secure_clear(record.oid);
+    secure_clear(record.tid);
+    secure_clear(record.first_name);
+    secure_clear(record.last_name);
+    secure_clear(record.display_name);
+    secure_clear(record.account_id);
+    secure_clear(record.authority);
+    secure_clear(record.client_info);
+    record.expires = 0;
+}
+static bool publish_projection(const cache_record &record);
+static bool clear_projection(void);
+
+static bool same_account_string(const std::string &left, const std::string &right)
+{
+    std::wstring left_w = utf8_to_wide(left), right_w = utf8_to_wide(right);
+    return !left_w.empty() && !right_w.empty() &&
+           CompareStringOrdinal(left_w.c_str(), left_w.size(), right_w.c_str(), right_w.size(),
+                                TRUE) == CSTR_EQUAL;
+}
+
+static std::wstring cache_bundle_name(const std::string &username)
+{
+    static const WCHAR hex[] = L"0123456789abcdef";
+    BYTE hash[32];
+    WCHAR suffix[33];
+    std::string normalized = username;
+
+    if (normalized.empty()) return {};
+    for (char &ch : normalized)
+        if ((unsigned char)ch < 128) ch = (char)std::tolower((unsigned char)ch);
+    if (!sha256(normalized, hash)) return {};
+    for (unsigned int i = 0; i < 16; ++i)
+    {
+        suffix[2 * i] = hex[hash[i] >> 4];
+        suffix[2 * i + 1] = hex[hash[i] & 0xf];
+    }
+    suffix[32] = 0;
+    SecureZeroMemory(hash, sizeof(hash));
+    return L"wam-bundle-" + std::wstring(suffix) + L".dat";
+}
+
+static std::string json_escape(const std::string &value)
+{
+    std::string result;
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned char ch : value)
+    {
+        switch (ch)
+        {
+        case '"': result += "\\\""; break;
+        case '\\': result += "\\\\"; break;
+        case '\b': result += "\\b"; break;
+        case '\f': result += "\\f"; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        case '\t': result += "\\t"; break;
+        default:
+            if (ch < 0x20)
+            {
+                result += "\\u00";
+                result += hex[ch >> 4];
+                result += hex[ch & 15];
+            }
+            else result += ch;
+        }
+    }
+    return result;
+}
+
+static std::string cache_record_json(const cache_record &record)
+{
+    std::string json = "{\"version\":1";
+    auto add_string = [&](const char *name, const std::string &value)
+    {
+        json += ",\""; json += name; json += "\":\""; json += json_escape(value); json += '"';
+    };
+    auto add_number = [&](const char *name, ULONGLONG value)
+    {
+        json += ",\""; json += name; json += "\":"; json += std::to_string(value);
+    };
+
+    add_string("username", record.username);
+    add_string("oid", record.oid);
+    add_string("tid", record.tid);
+    add_string("account_id", record.account_id);
+    add_string("authority", record.authority);
+    add_string("client_info", record.client_info);
+    add_string("first_name", record.first_name);
+    add_string("last_name", record.last_name);
+    add_string("display_name", record.display_name);
+    add_string("access_token", record.office.access_token);
+    add_string("refresh_token", record.office.refresh_token);
+    add_string("id_token", record.office.id_token);
+    add_number("expires", record.expires);
+    add_string("licensing_access_token", record.licensing.access_token);
+    add_string("licensing_refresh_token", record.licensing.refresh_token);
+    add_string("licensing_id_token", record.licensing.id_token);
+    add_number("licensing_expires_in", record.licensing.expires_in);
+    json += '}';
+    return json;
+}
+
+static bool cache_record_from_json(const std::string &json, cache_record &record)
+{
+    ULONGLONG version;
+    record = {};
+    if (json.empty() || json.back() != '}' ||
+        !json_number(json, "version", version) || version != 1 ||
+        !json_string(json, "username", record.username) ||
+        !json_string(json, "oid", record.oid) || !json_string(json, "tid", record.tid) ||
+        !json_string(json, "account_id", record.account_id) ||
+        !json_string(json, "authority", record.authority) ||
+        !json_string(json, "client_info", record.client_info) ||
+        !json_string(json, "access_token", record.office.access_token) ||
+        !json_string(json, "refresh_token", record.office.refresh_token) ||
+        !json_string(json, "id_token", record.office.id_token) ||
+        !json_number(json, "expires", record.expires) ||
+        !json_string(json, "licensing_access_token", record.licensing.access_token) ||
+        !json_string(json, "licensing_refresh_token", record.licensing.refresh_token) ||
+        !json_string(json, "licensing_id_token", record.licensing.id_token) ||
+        !json_number(json, "licensing_expires_in", record.licensing.expires_in))
+        return false;
+    json_string(json, "first_name", record.first_name);
+    json_string(json, "last_name", record.last_name);
+    json_string(json, "display_name", record.display_name);
+    return !record.username.empty() && !record.oid.empty() && !record.tid.empty();
+}
+static bool cache_record_identity_valid(const cache_record &record, const std::string &login_hint)
+{
+    std::string payload, oid, tid, username, client_info_json, expected_client_info;
+    bool success = jwt_payload(record.office.id_token, payload) &&
+                   json_string(payload, "oid", oid) && json_string(payload, "tid", tid) &&
+                   (json_string(payload, "preferred_username", username) ||
+                    json_string(payload, "upn", username));
+    client_info_json = "{\"uid\":\"" + record.oid + "\",\"utid\":\"" + record.tid + "\"}";
+    expected_client_info = base64url_encode((const BYTE *)client_info_json.data(),
+                                            client_info_json.size());
+    if (success)
+        success = same_account_string(record.oid, oid) && same_account_string(record.tid, tid) &&
+                  same_account_string(record.username, username) &&
+                  record.account_id == record.oid + "." + record.tid &&
+                  record.authority == "https://login.microsoftonline.com/" + record.tid + "/" &&
+                  record.client_info == expected_client_info &&
+                  (login_hint.empty() || same_account_string(record.username, login_hint));
+    secure_clear(payload);
+    secure_clear(oid);
+    secure_clear(tid);
+    secure_clear(username);
+    secure_clear(client_info_json);
+    secure_clear(expected_client_info);
     return success;
 }
 
-static bool exchange_and_save(const std::string &code, const std::string &verifier)
+static bool recover_cache_transaction_locked(void)
+{
+    std::wstring marker = cache_file(L"wam-transaction.pending");
+    LARGE_INTEGER size;
+    HANDLE file;
+    DWORD read;
+    std::string content, name;
+    std::wstring target, backup, temporary;
+    bool success = true, transaction_replaced = false;
+
+    if (marker.empty() || GetFileAttributesW(marker.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    file = CreateFileW(marker.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE && GetFileSizeEx(file, &size) &&
+        size.QuadPart > 0 && size.QuadPart <= 512)
+    {
+        content.resize((size_t)size.QuadPart);
+        if (!ReadFile(file, &content[0], content.size(), &read, NULL) || read != content.size())
+            content.clear();
+    }
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (content.compare(0, strlen("Wine4OfficeWamBundle=1\n"), "Wine4OfficeWamBundle=1\n"))
+    {
+        DeleteFileW(marker.c_str());
+        return true;
+    }
+    {
+        size_t prefix_len = strlen("Wine4OfficeWamBundle=1\n"), name_end;
+        name_end = content.find('\n', prefix_len);
+        if (name_end == std::string::npos) return false;
+        name = content.substr(prefix_len, name_end - prefix_len);
+        transaction_replaced = content.compare(name_end + 1, strlen("replaced"), "replaced") == 0;
+        if (name.compare(0, 11, "wam-bundle-") || name.size() != 11 + 32 + 4 ||
+            name.compare(name.size() - 4, 4, ".dat"))
+            return false;
+        for (size_t i = 11; i < 11 + 32; ++i)
+            if (!std::isxdigit((unsigned char)name[i])) return false;
+        target = cache_file(utf8_to_wide(name).c_str());
+        backup = target + L".bak";
+        temporary = target + L".new";
+        if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            DeleteFileW(target.c_str());
+            success = MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+        }
+        else if (transaction_replaced) DeleteFileW(target.c_str());
+        DeleteFileW(temporary.c_str());
+    }
+    DeleteFileW(temporary.c_str());
+    if (success)
+    {
+        std::string json;
+        cache_record record;
+        if (protected_read_path(target, json, false) &&
+            cache_record_from_json(json, record) &&
+            cache_record_identity_valid(record, {}))
+            success = publish_projection(record);
+        else success = clear_projection();
+        secure_clear(json);
+        secure_clear(record);
+    }
+    if (success) success = DeleteFileW(marker.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+    return success;
+}
+
+static bool recover_cache_transaction(void)
+{
+    cache_lock lock;
+    return lock.valid() && recover_cache_transaction_locked();
+}
+
+static bool cache_record_load_locked(const std::string &login_hint, cache_record &record)
+{
+    std::string username = login_hint, active_username, json;
+    std::wstring bundle;
+    record = {};
+    if (username.empty())
+    {
+        if (!protected_read_path(cache_file(L"wam-active-account.dat"), active_username, false))
+            return false;
+        username = active_username;
+    }
+    bundle = cache_file(cache_bundle_name(username).c_str());
+    if (bundle.empty() || !protected_read_path(bundle, json, false) ||
+        !cache_record_from_json(json, record) ||
+        !cache_record_identity_valid(record, login_hint))
+    {
+        secure_clear(json);
+        secure_clear(record);
+        return false;
+    }
+    secure_clear(json);
+    secure_clear(username);
+    return true;
+}
+
+static bool cache_record_load(const std::string &login_hint, cache_record &record)
+{
+    cache_lock lock;
+    if (!lock.valid() || !recover_cache_transaction_locked()) return false;
+    return cache_record_load_locked(login_hint, record);
+}
+
+static bool publish_projection(const cache_record &record)
+{
+    std::string expires = std::to_string(record.expires);
+    bool success =
+        protected_write(L"wam-access-token.dat", record.office.access_token) &&
+        protected_write(L"wam-id-token.dat", record.office.id_token) &&
+        protected_write(L"wam-refresh-token.dat", record.office.refresh_token) &&
+        protected_write(L"wam-licensing-token.dat", record.licensing.access_token) &&
+        protected_write(L"wam-token-expires-on.dat", expires) &&
+        protected_write(L"wam-account-username.dat", record.username) &&
+        protected_write(L"wam-account-id.dat", record.account_id) &&
+        protected_write(L"wam-account-oid.dat", record.oid) &&
+        protected_write(L"wam-account-tenant-id.dat", record.tid) &&
+        protected_write(L"wam-account-authority.dat", record.authority) &&
+        protected_write(L"wam-client-info.dat", record.client_info);
+    if (success) success = record.first_name.empty() ? delete_cache_file(L"wam-account-first-name.dat") :
+                                                       protected_write(L"wam-account-first-name.dat", record.first_name);
+    if (success) success = record.last_name.empty() ? delete_cache_file(L"wam-account-last-name.dat") :
+                                                      protected_write(L"wam-account-last-name.dat", record.last_name);
+    if (success) success = record.display_name.empty() ? delete_cache_file(L"wam-account-display-name.dat") :
+                                                         protected_write(L"wam-account-display-name.dat", record.display_name);
+    return success && protected_write(L"wam-active-account.dat", record.username);
+}
+
+static bool clear_projection(void)
+{
+    bool success = true;
+    static const WCHAR *const names[] =
+    {
+        L"wam-access-token.dat", L"wam-id-token.dat", L"wam-refresh-token.dat",
+        L"wam-licensing-token.dat", L"wam-token-expires-on.dat",
+        L"wam-account-username.dat", L"wam-account-id.dat", L"wam-account-oid.dat",
+        L"wam-account-tenant-id.dat", L"wam-account-authority.dat", L"wam-client-info.dat",
+        L"wam-account-first-name.dat", L"wam-account-last-name.dat",
+        L"wam-account-display-name.dat", L"wam-active-account.dat"
+    };
+    for (const WCHAR *name : names)
+        if (!delete_cache_file(name)) success = false;
+    return success;
+}
+
+static bool cache_record_save(const cache_record &record)
+{
+    std::wstring bundle_name = cache_bundle_name(record.username);
+    std::wstring bundle = cache_file(bundle_name.c_str());
+    cache_transaction transaction;
+    std::string bundle_json;
+    bool success;
+
+    if (bundle_name.empty() || bundle.empty() ||
+        !cache_record_identity_valid(record, {}) || !transaction.begin(bundle))
+        return false;
+    bundle_json = cache_record_json(record);
+    success = transaction.replace_bundle(bundle_json);
+    secure_clear(bundle_json);
+    if (!success)
+    {
+        transaction.rollback();
+        return false;
+    }
+    if (!publish_projection(record)) return false;
+    if (!transaction.commit())
+    {
+        transaction.rollback();
+        return false;
+    }
+    return true;
+}
+
+static bool cached_account_matches(const std::string &login_hint)
+{
+    cache_record record;
+    bool success = login_hint.empty() || cache_record_load(login_hint, record);
+    secure_clear(record);
+    return success;
+}
+
+static bool save_tokens(const token_set &office, const token_set &licensing,
+                        const std::string &login_hint = {})
+{
+    cache_record record;
+    std::string payload, oid, tid, username, client_info_json;
+    ULONGLONG expires;
+    bool success;
+
+    if (!jwt_payload(office.id_token, payload) ||
+        !json_string(payload, "oid", oid) || !json_string(payload, "tid", tid) ||
+        (!json_string(payload, "preferred_username", username) &&
+         !json_string(payload, "upn", username)) ||
+        (!login_hint.empty() && !same_account_string(login_hint, username)))
+    {
+        secure_clear(payload);
+        secure_clear(oid);
+        secure_clear(tid);
+        secure_clear(username);
+        return false;
+    }
+    json_string(payload, "given_name", record.first_name);
+    json_string(payload, "family_name", record.last_name);
+    json_string(payload, "name", record.display_name);
+    if (!json_number(payload, "exp", expires)) expires = unix_time() + office.expires_in;
+    record.office = office;
+    record.licensing = licensing;
+    record.username = username;
+    record.oid = oid;
+    record.tid = tid;
+    record.expires = expires;
+    record.account_id = oid + "." + tid;
+    record.authority = "https://login.microsoftonline.com/" + tid + "/";
+    client_info_json = "{\"uid\":\"" + oid + "\",\"utid\":\"" + tid + "\"}";
+    record.client_info = base64url_encode((const BYTE *)client_info_json.data(), client_info_json.size());
+    success = cache_record_save(record);
+    secure_clear(payload);
+    secure_clear(oid);
+    secure_clear(tid);
+    secure_clear(username);
+    secure_clear(client_info_json);
+    secure_clear(record.office);
+    secure_clear(record.licensing);
+    secure_clear(record.username);
+    secure_clear(record.oid);
+    secure_clear(record.tid);
+    secure_clear(record.account_id);
+    secure_clear(record.authority);
+    secure_clear(record.client_info);
+    secure_clear(record.first_name);
+    secure_clear(record.last_name);
+    secure_clear(record.display_name);
+    return success;
+}
+
+static bool exchange_and_save(const std::string &code, const std::string &verifier,
+                              const std::string &login_hint)
 {
     token_set office, licensing;
     std::string response;
@@ -664,7 +1195,7 @@ static bool exchange_and_save(const std::string &code, const std::string &verifi
     bool success = token_request(body, response, oauth_tenant) && parse_token_set(response, office);
     if (success) success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
     if (success && !licensing.refresh_token.empty()) office.refresh_token = licensing.refresh_token;
-    if (success) success = save_tokens(office, licensing);
+    if (success) success = save_tokens(office, licensing, login_hint);
     secure_clear(body);
     secure_clear(response);
     secure_clear(office);
@@ -672,16 +1203,23 @@ static bool exchange_and_save(const std::string &code, const std::string &verifi
     return success;
 }
 
-static bool refresh_and_save(void)
+static bool refresh_and_save(const std::string &login_hint)
 {
-    token_set previous, office, licensing;
-    bool success = protected_read(L"wam-refresh-token.dat", previous.refresh_token) &&
-                   protected_read(L"wam-id-token.dat", previous.id_token);
-    if (success) success = refresh_scope(previous.refresh_token, office_scope, office, &previous);
+    cache_record previous_record;
+    token_set office, licensing;
+    bool success = cache_record_load(login_hint, previous_record);
+
+    if (success)
+    {
+        office.refresh_token = previous_record.office.refresh_token;
+        office.id_token = previous_record.office.id_token;
+        success = refresh_scope(office.refresh_token, office_scope, office, &office);
+    }
     if (success) success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
     if (success && !licensing.refresh_token.empty()) office.refresh_token = licensing.refresh_token;
-    if (success) success = save_tokens(office, licensing);
-    secure_clear(previous);
+    if (success) success = save_tokens(office, licensing, login_hint.empty() ?
+                                       previous_record.username : login_hint);
+    secure_clear(previous_record);
     secure_clear(office);
     secure_clear(licensing);
     return success;
@@ -710,67 +1248,22 @@ static std::string normalize_resource_scope(const std::string &scope)
     return scope;
 }
 
-static bool resource_cache_names(const std::string &scope, const std::string &requested_client_id,
-                                 std::wstring &token_name,
-                                 std::wstring &id_token_name, std::wstring &expires_name)
-{
-    static const WCHAR hex[] = L"0123456789abcdef";
-    BYTE hash[32];
-    WCHAR suffix[17];
-
-    if (!sha256(scope + "\n" + requested_client_id, hash)) return false;
-    for (unsigned int i = 0; i < 8; ++i)
-    {
-        suffix[2 * i] = hex[hash[i] >> 4];
-        suffix[2 * i + 1] = hex[hash[i] & 0xf];
-    }
-    suffix[16] = 0;
-    token_name = L"wam-resource-" + std::wstring(suffix) + L"-token.dat";
-    id_token_name = L"wam-resource-" + std::wstring(suffix) + L"-id-token.dat";
-    expires_name = L"wam-resource-" + std::wstring(suffix) + L"-expires-on.dat";
-    SecureZeroMemory(hash, sizeof(hash));
-    return true;
-}
-
 static bool refresh_resource_and_save(const std::string &requested_scope,
-                                      const std::string &requested_client_id)
+                                      const std::string &requested_client_id,
+                                      const std::string &login_hint)
 {
-    token_set previous, resource;
+    cache_record account;
+    token_set resource;
     std::string scope = normalize_resource_scope(requested_scope);
-    std::string cached_token, cached_id_token, cached_expires;
-    std::wstring token_name, id_token_name, expires_name;
-    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name,
-                                                 id_token_name, expires_name);
-    ULONGLONG expiry = 0;
-
-    if (have_cache_names && protected_read(token_name.c_str(), cached_token) &&
-        protected_read(id_token_name.c_str(), cached_id_token) &&
-        protected_read(expires_name.c_str(), cached_expires))
-        expiry = _strtoui64(cached_expires.c_str(), NULL, 10);
-    if (!cached_token.empty() && !cached_id_token.empty() && expiry > unix_time() + 300)
-    {
-        bool success = protected_write(L"wam-access-token.dat", cached_token) &&
-                       protected_write(L"wam-id-token.dat", cached_id_token) &&
-                       protected_write(L"wam-token-expires-on.dat", cached_expires);
-        secure_clear(cached_token);
-        secure_clear(cached_id_token);
-        secure_clear(cached_expires);
-        secure_clear(scope);
-        return success;
-    }
-    secure_clear(cached_token);
-    secure_clear(cached_id_token);
-    secure_clear(cached_expires);
-
     bool success = !scope.empty() &&
         (requested_client_id == client_id || requested_client_id == teams_client_id ||
          requested_client_id == teams_nested_client_id) &&
-        protected_read(L"wam-refresh-token.dat", previous.refresh_token) &&
-        protected_read(L"wam-id-token.dat", previous.id_token);
+        cache_record_load(login_hint, account);
+
     if (success)
     {
         std::string oidc_scope = scope + " offline_access openid profile";
-        success = refresh_scope(previous.refresh_token, oidc_scope.c_str(), resource, NULL,
+        success = refresh_scope(account.office.refresh_token, oidc_scope.c_str(), resource, NULL,
                                 requested_client_id.c_str());
         secure_clear(oidc_scope);
     }
@@ -778,24 +1271,21 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     {
         std::string payload, audience;
         success = jwt_payload(resource.id_token, payload) &&
-                  json_string(payload, "aud", audience) && audience == requested_client_id;
+                  json_string(payload, "aud", audience) && audience == requested_client_id &&
+                  cache_record_identity_valid(account, login_hint);
         secure_clear(payload);
         secure_clear(audience);
     }
     if (success)
     {
-        std::string expires = std::to_string(unix_time() + resource.expires_in);
-        success = protected_write(L"wam-access-token.dat", resource.access_token) &&
-                  protected_write(L"wam-id-token.dat", resource.id_token) &&
-                  protected_write(L"wam-refresh-token.dat", resource.refresh_token) &&
-                  protected_write(L"wam-token-expires-on.dat", expires) &&
-                  (!have_cache_names ||
-                   (protected_write(token_name.c_str(), resource.access_token) &&
-                    protected_write(id_token_name.c_str(), resource.id_token) &&
-                    protected_write(expires_name.c_str(), expires)));
+        account.office.access_token = resource.access_token;
+        account.office.id_token = resource.id_token;
+        if (!resource.refresh_token.empty()) account.office.refresh_token = resource.refresh_token;
+        account.expires = unix_time() + resource.expires_in;
+        success = cache_record_save(account);
     }
     secure_clear(scope);
-    secure_clear(previous);
+    secure_clear(account);
     secure_clear(resource);
     return success;
 }
@@ -803,7 +1293,8 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
 static bool exchange_resource_and_save(const std::string &code, const std::string &verifier,
                                        const std::string &requested_scope,
                                        const std::string &requested_client_id,
-                                       const std::string &requested_redirect_uri)
+                                       const std::string &requested_redirect_uri,
+                                       const std::string &login_hint)
 {
     token_set resource;
     std::string scope = normalize_resource_scope(requested_scope);
@@ -813,9 +1304,6 @@ static bool exchange_resource_and_save(const std::string &code, const std::strin
         "&grant_type=authorization_code&code=" + url_encode(code) +
         "&redirect_uri=" + url_encode(requested_redirect_uri) +
         "&code_verifier=" + url_encode(verifier) + "&scope=" + url_encode(oidc_scope);
-    std::wstring token_name, id_token_name, expires_name;
-    bool have_cache_names = resource_cache_names(scope, requested_client_id, token_name,
-                                                 id_token_name, expires_name);
     bool success = !scope.empty() && requested_client_id == teams_nested_client_id &&
                    token_request(body, response, oauth_tenant) && parse_token_set(response, resource);
 
@@ -827,19 +1315,7 @@ static bool exchange_resource_and_save(const std::string &code, const std::strin
         secure_clear(payload);
         secure_clear(audience);
     }
-
-    if (success)
-    {
-        std::string expires = std::to_string(unix_time() + resource.expires_in);
-        success = protected_write(L"wam-access-token.dat", resource.access_token) &&
-                  protected_write(L"wam-id-token.dat", resource.id_token) &&
-                  protected_write(L"wam-refresh-token.dat", resource.refresh_token) &&
-                  protected_write(L"wam-token-expires-on.dat", expires) &&
-                  (!have_cache_names ||
-                   (protected_write(token_name.c_str(), resource.access_token) &&
-                    protected_write(id_token_name.c_str(), resource.id_token) &&
-                    protected_write(expires_name.c_str(), expires)));
-    }
+    if (success) success = save_tokens(resource, resource, login_hint);
     secure_clear(scope);
     secure_clear(oidc_scope);
     secure_clear(body);
@@ -1189,11 +1665,40 @@ static void center_window(HWND window, HWND owner)
     }
 }
 
+static void restore_owner_window(HWND owner)
+{
+    if (!owner) return;
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+}
+
+class owner_window_restore
+{
+    HWND owner;
+    bool armed = false;
+
+public:
+    explicit owner_window_restore(HWND window) : owner(window) {}
+    void disable()
+    {
+        if (owner)
+        {
+            EnableWindow(owner, FALSE);
+            armed = true;
+        }
+    }
+    ~owner_window_restore()
+    {
+        if (armed) restore_owner_window(owner);
+    }
+};
+
 static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &login_hint,
                             const std::string &requested_client_id,
                             const std::string &requested_scope,
                             const std::string &requested_redirect_uri, std::string &verifier)
 {
+    owner_window_restore owner_state(owner);
     static const WCHAR class_name[] = L"Wine4OfficeOAuthBroker";
     BrowserSite *site;
     WNDCLASSW window_class = {};
@@ -1234,7 +1739,6 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
         url_encode(requested_redirect_uri) + "&scope=" + url_encode(requested_scope) +
         "&code_challenge=" + challenge + "&code_challenge_method=S256&state=" + oauth_state;
     if (!login_hint.empty()) authorize_url += "&login_hint=" + url_encode(login_hint);
-    authorize_url_w = utf8_to_wide(authorize_url);
 
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = instance;
@@ -1248,37 +1752,53 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
                                   owner, NULL, instance, NULL);
     if (!host_window) return false;
     center_window(host_window, owner);
-    if (owner) EnableWindow(owner, FALSE);
+    owner_state.disable();
 
     site = new BrowserSite(host_window);
     hr = CoCreateInstance(CLSID_WebBrowser, NULL, CLSCTX_INPROC_SERVER,
                           IID_IOleObject, (void **)&ole_object);
-    if (FAILED(hr)) { site->Release(); DestroyWindow(host_window); return false; }
-    ole_object->SetClientSite(site);
-    OleSetContainedObject(ole_object, TRUE);
-    GetClientRect(host_window, &rect);
+    if (FAILED(hr)) { site->Release(); DestroyWindow(host_window); restore_owner_window(owner); return false; }
+    hr = ole_object->SetClientSite(site);
+    if (FAILED(hr)) { site->Release(); DestroyWindow(host_window); restore_owner_window(owner); return false; }
+    hr = OleSetContainedObject(ole_object, TRUE);
+    if (FAILED(hr)) { site->Release(); DestroyWindow(host_window); restore_owner_window(owner); return false; }
+    if (!GetClientRect(host_window, &rect))
+    { site->Release(); DestroyWindow(host_window); restore_owner_window(owner); return false; }
     hr = ole_object->DoVerb(OLEIVERB_SHOW, NULL, site, 0, host_window, &rect);
     site->Release();
-    if (FAILED(hr)) { DestroyWindow(host_window); return false; }
+    if (FAILED(hr)) { DestroyWindow(host_window); restore_owner_window(owner); return false; }
     if (FAILED(ole_object->QueryInterface(IID_IOleInPlaceObject, (void **)&inplace_object)) ||
         FAILED(ole_object->QueryInterface(IID_IWebBrowser2, (void **)&browser)))
-    { DestroyWindow(host_window); return false; }
+    { DestroyWindow(host_window); restore_owner_window(owner); return false; }
     resize_browser(host_window);
     {
         IConnectionPointContainer *container = NULL;
         BrowserEvents *events = new BrowserEvents();
-        if (SUCCEEDED(browser->QueryInterface(IID_IConnectionPointContainer, (void **)&container)) &&
-            SUCCEEDED(container->FindConnectionPoint(DIID_DWebBrowserEvents2, &browser_connection)) &&
-            FAILED(browser_connection->Advise(events, &browser_connection_cookie)))
-        {
-            browser_connection->Release();
-            browser_connection = NULL;
-        }
+        hr = browser->QueryInterface(IID_IConnectionPointContainer, (void **)&container);
+        if (SUCCEEDED(hr)) hr = container->FindConnectionPoint(DIID_DWebBrowserEvents2,
+                                                                 &browser_connection);
+        if (SUCCEEDED(hr)) hr = browser_connection->Advise(events, &browser_connection_cookie);
         if (container) container->Release();
         events->Release();
+        if (FAILED(hr))
+        {
+            if (browser_connection)
+            {
+                browser_connection->Release();
+                browser_connection = NULL;
+            }
+            DestroyWindow(host_window);
+            restore_owner_window(owner);
+            return false;
+        }
     }
-
     protocol_factory = new CallbackProtocolFactory();
+    if (!protocol_factory)
+    {
+        DestroyWindow(host_window);
+        restore_owner_window(owner);
+        return false;
+    }
     hr = CoInternetGetSession(0, &internet_session, 0);
     if (SUCCEEDED(hr))
         hr = internet_session->RegisterNameSpace(protocol_factory, CLSID_NULL,
@@ -1288,6 +1808,7 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
         if (internet_session) internet_session->Release();
         protocol_factory->Release();
         DestroyWindow(host_window);
+        restore_owner_window(owner);
         return false;
     }
 
@@ -1299,6 +1820,15 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
     }
     VariantInit(&empty);
     url = SysAllocString(authorize_url_w.c_str());
+    if (!url)
+    {
+        internet_session->UnregisterNameSpace(protocol_factory, L"ms-appx-web");
+        internet_session->Release();
+        protocol_factory->Release();
+        DestroyWindow(host_window);
+        restore_owner_window(owner);
+        return false;
+    }
     hr = browser->Navigate(url, &empty, &empty, &empty, &empty);
     SysFreeString(url);
     if (FAILED(hr))
@@ -1307,12 +1837,21 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
         internet_session->Release();
         protocol_factory->Release();
         DestroyWindow(host_window);
+        restore_owner_window(owner);
         return false;
     }
     ShowWindow(host_window, SW_SHOW);
     UpdateWindow(host_window);
     SetForegroundWindow(host_window);
-    SetTimer(host_window, 1, 250, NULL);
+    if (!SetTimer(host_window, 1, 250, NULL))
+    {
+        internet_session->UnregisterNameSpace(protocol_factory, L"ms-appx-web");
+        internet_session->Release();
+        protocol_factory->Release();
+        DestroyWindow(host_window);
+        restore_owner_window(owner);
+        return false;
+    }
     while (GetMessageW(&message, NULL, 0, 0) > 0)
     {
         TranslateMessage(&message);
@@ -1321,11 +1860,7 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
     internet_session->UnregisterNameSpace(protocol_factory, L"ms-appx-web");
     internet_session->Release();
     protocol_factory->Release();
-    if (owner)
-    {
-        EnableWindow(owner, TRUE);
-        SetForegroundWindow(owner);
-    }
+    restore_owner_window(owner);
     return !oauth_cancelled && !oauth_error && !oauth_code.empty();
 }
 
@@ -1351,31 +1886,139 @@ static std::string read_login_hint_file(const WCHAR *path)
     return value;
 }
 
+static std::string self_test_id_token(const std::string &username, const std::string &oid,
+                                      const std::string &tid)
+{
+    std::string header = "{}", payload = "{\"oid\":\"" + oid + "\",\"tid\":\"" + tid +
+                         "\",\"preferred_username\":\"" + username + "\"}";
+    return base64url_encode((const BYTE *)header.data(), header.size()) + "." +
+           base64url_encode((const BYTE *)payload.data(), payload.size()) + ".test";
+}
+
+static void self_test_record(cache_record &record, const char *username, const char *oid,
+                             const char *tid, const char *suffix)
+{
+    std::string client_info_json;
+    record = {};
+    record.username = username;
+    record.oid = oid;
+    record.tid = tid;
+    record.account_id = record.oid + "." + record.tid;
+    record.authority = "https://login.microsoftonline.com/" + record.tid + "/";
+    client_info_json = "{\"uid\":\"" + record.oid + "\",\"utid\":\"" + record.tid + "\"}";
+    record.client_info = base64url_encode((const BYTE *)client_info_json.data(),
+                                          client_info_json.size());
+    secure_clear(client_info_json);
+    record.office.access_token = std::string("access-") + suffix;
+    record.office.refresh_token = std::string("refresh-") + suffix;
+    record.office.id_token = self_test_id_token(record.username, record.oid, record.tid);
+    record.licensing.access_token = std::string("license-") + suffix;
+    record.licensing.refresh_token = record.office.refresh_token;
+    record.licensing.id_token = record.office.id_token;
+    record.expires = unix_time() + 3600;
+}
+
+struct cache_lock_probe
+{
+    HANDLE started;
+    bool blocked;
+};
+
+static DWORD WINAPI cache_lock_probe_thread(void *param)
+{
+    cache_lock_probe *probe = (cache_lock_probe *)param;
+    HANDLE mutex = CreateMutexW(NULL, FALSE, L"Local\\Wine4OfficeWamCache");
+    DWORD wait;
+
+    if (!mutex)
+    {
+        probe->blocked = false;
+        SetEvent(probe->started);
+        return 0;
+    }
+    SetEvent(probe->started);
+    wait = WaitForSingleObject(mutex, 0);
+    probe->blocked = wait == WAIT_TIMEOUT;
+    if (wait == WAIT_OBJECT_0) ReleaseMutex(mutex);
+    CloseHandle(mutex);
+    return 0;
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line, int show)
 {
     int argc;
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::string verifier, login_hint, cached_refresh;
-    std::string resource_scope, resource_client_id, resource_redirect_uri;
+    std::string verifier, login_hint, resource_scope, resource_client_id, resource_redirect_uri;
     bool success;
     (void)previous; (void)command_line; (void)show;
     if (!argv) return 3;
     if (argc >= 2 && !wcscmp(argv[1], L"--self-test-cache"))
     {
-        BYTE bytes[32];
-        std::string expected, actual;
-        success = random_bytes(bytes, sizeof(bytes));
-        if (success) expected = base64url_encode(bytes, sizeof(bytes));
-        if (success) success = protected_write(L"self-test.dat", expected) &&
-                               protected_read(L"self-test.dat", actual) && actual == expected;
-        DeleteFileW(cache_file(L"self-test.dat").c_str());
-        SecureZeroMemory(bytes, sizeof(bytes));
+        bool recovered = recover_cache_transaction();
+        cache_record first, second, loaded;
+        std::wstring first_bundle, second_bundle;
+        std::string mismatch;
+
+        self_test_record(first, "first@example.invalid", "11111111-1111-1111-1111-111111111111",
+                         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "first");
+        self_test_record(second, "second@example.invalid", "22222222-2222-2222-2222-222222222222",
+                         "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "second");
+        first_bundle = cache_bundle_name(first.username);
+        second_bundle = cache_bundle_name(second.username);
+        DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+        DeleteFileW(cache_file(second_bundle.c_str()).c_str());
+        success = recovered && cache_record_save(first) && cache_record_save(second);
+        if (success) success = cache_record_load(first.username, loaded) &&
+                               loaded.office.refresh_token == first.office.refresh_token;
+        if (success) success = cache_record_load(second.username, loaded) &&
+                               loaded.office.refresh_token == second.office.refresh_token;
+        mismatch = "third@example.invalid";
+        if (success) success = !cache_record_load(mismatch, loaded);
+        if (success)
+        {
+            cache_lock held;
+            cache_lock_probe probe = {};
+            HANDLE thread, started = CreateEventW(NULL, TRUE, FALSE, NULL);
+            probe.started = started;
+            thread = started ? CreateThread(NULL, 0, cache_lock_probe_thread, &probe, 0, NULL) : NULL;
+            if (thread)
+            {
+                WaitForSingleObject(started, INFINITE);
+                WaitForSingleObject(thread, INFINITE);
+                CloseHandle(thread);
+            }
+            if (started) CloseHandle(started);
+            success = held.valid() && thread != NULL && probe.blocked;
+        }
+        if (success)
+        {
+            protected_write(first_bundle.c_str(), "corrupt bundle");
+            success = !cache_record_load(first.username, loaded) && cache_record_save(first);
+        }
+        if (success)
+        {
+            {
+                cache_transaction interrupted;
+                success = interrupted.begin(cache_file(first_bundle.c_str())) &&
+                          interrupted.replace_bundle("partial bundle");
+            }
+            if (success) success = cache_record_load(first.username, loaded) &&
+                                   loaded.office.refresh_token == first.office.refresh_token;
+        }
+        DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+        DeleteFileW(cache_file(second_bundle.c_str()).c_str());
+        success = clear_projection() && success;
+        DeleteFileW(cache_file(L"wam-transaction.pending").c_str());
+        SecureZeroMemory((void *)mismatch.data(), mismatch.size());
+        secure_clear(first);
+        secure_clear(second);
+        secure_clear(loaded);
         LocalFree(argv);
         return success ? 0 : 3;
     }
     if (argc >= 2 && !wcscmp(argv[1], L"--refresh"))
     {
-        success = refresh_and_save();
+        success = refresh_and_save({});
         LocalFree(argv);
         return success ? 0 : 3;
     }
@@ -1383,7 +2026,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     {
         std::string scope = wide_to_utf8(argv[2]);
         std::string requested_client_id = wide_to_utf8(argv[3]);
-        success = refresh_resource_and_save(scope, requested_client_id);
+        success = refresh_resource_and_save(scope, requested_client_id, {});
         secure_clear(scope);
         secure_clear(requested_client_id);
         LocalFree(argv);
@@ -1407,11 +2050,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     OleInitialize(NULL);
     bool resource_mode = !resource_scope.empty() && !resource_client_id.empty() &&
                          !resource_redirect_uri.empty();
-    if (protected_read(L"wam-refresh-token.dat", cached_refresh) && !cached_refresh.empty())
+    if (cached_account_matches(login_hint))
     {
-        success = resource_mode ? refresh_resource_and_save(resource_scope, resource_client_id) :
-                                  refresh_and_save();
-        SecureZeroMemory((void *)cached_refresh.data(), cached_refresh.size());
+        success = resource_mode ? refresh_resource_and_save(resource_scope, resource_client_id, login_hint) :
+                                  refresh_and_save(login_hint);
         if (success)
         {
             OleUninitialize();
@@ -1425,8 +2067,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
                               resource_mode ? resource_redirect_uri : redirect_uri, verifier);
     if (success)
         success = resource_mode ? exchange_resource_and_save(oauth_code, verifier, resource_scope,
-                                                              resource_client_id, resource_redirect_uri) :
-                                  exchange_and_save(oauth_code, verifier);
+                                                              resource_client_id, resource_redirect_uri,
+                                                              login_hint) :
+                                  exchange_and_save(oauth_code, verifier, login_hint);
     SecureZeroMemory((void *)oauth_code.data(), oauth_code.size());
     SecureZeroMemory((void *)verifier.data(), verifier.size());
     secure_clear(resource_scope);

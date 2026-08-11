@@ -33,184 +33,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(combase);
 
-static const GUID IID_IProtectionPolicyManagerStatics2 =
-    {0xb68f9a8c,0x39e0,0x4649,{0xb2,0xe4,0x07,0x0a,0xb8,0xa5,0x79,0xb3}};
-static const WCHAR protection_policy_manager_name[] =
-    L"Windows.Security.EnterpriseData.ProtectionPolicyManager";
 
-struct protection_policy_manager_statics2
-{
-    const struct protection_policy_manager_statics2_vtbl *lpVtbl;
-};
 
-struct protection_policy_manager_statics2_vtbl
-{
-    HRESULT (WINAPI *QueryInterface)(struct protection_policy_manager_statics2 *, REFIID, void **);
-    ULONG (WINAPI *AddRef)(struct protection_policy_manager_statics2 *);
-    ULONG (WINAPI *Release)(struct protection_policy_manager_statics2 *);
-    HRESULT (WINAPI *GetIids)(struct protection_policy_manager_statics2 *, ULONG *, IID **);
-    HRESULT (WINAPI *GetRuntimeClassName)(struct protection_policy_manager_statics2 *, HSTRING *);
-    HRESULT (WINAPI *GetTrustLevel)(struct protection_policy_manager_statics2 *, TrustLevel *);
-    HRESULT (WINAPI *HasContentBeenRevokedSince)(struct protection_policy_manager_statics2 *, HSTRING,
-                                                  INT64, boolean *);
-    HRESULT (WINAPI *CheckAccessForApp)(struct protection_policy_manager_statics2 *, HSTRING, HSTRING, INT32 *);
-    HRESULT (WINAPI *RequestAccessForAppAsync)(struct protection_policy_manager_statics2 *, HSTRING, HSTRING,
-                                                IInspectable **);
-    HRESULT (WINAPI *GetEnforcementLevel)(struct protection_policy_manager_statics2 *, HSTRING, INT32 *);
-    HRESULT (WINAPI *IsUserDecryptionAllowed)(struct protection_policy_manager_statics2 *, HSTRING, boolean *);
-    HRESULT (WINAPI *IsProtectionUnderLockRequired)(struct protection_policy_manager_statics2 *, HSTRING,
-                                                     boolean *);
-    HRESULT (WINAPI *PolicyChanged)(struct protection_policy_manager_statics2 *, IInspectable *, INT64 *);
-    HRESULT (WINAPI *RemovePolicyChanged)(struct protection_policy_manager_statics2 *, INT64);
-    HRESULT (WINAPI *IsProtectionEnabled)(struct protection_policy_manager_statics2 *, boolean *);
-};
-
-static HRESULT WINAPI protection_policy_QueryInterface(struct protection_policy_manager_statics2 *iface,
-                                                         REFIID iid, void **out)
-{
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
-        IsEqualGUID(iid, &IID_IAgileObject) || IsEqualGUID(iid, &IID_IProtectionPolicyManagerStatics2))
-    {
-        *out = iface;
-        return S_OK;
-    }
-    FIXME("ProtectionPolicyManager interface %s not implemented\n", debugstr_guid(iid));
-    return E_NOINTERFACE;
-}
-
-static ULONG WINAPI protection_policy_AddRef(struct protection_policy_manager_statics2 *iface)
-{
-    return 2;
-}
-
-static ULONG WINAPI protection_policy_Release(struct protection_policy_manager_statics2 *iface)
-{
-    return 1;
-}
-
-static HRESULT WINAPI protection_policy_GetIids(struct protection_policy_manager_statics2 *iface,
-                                                  ULONG *count, IID **iids)
-{
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI protection_policy_GetRuntimeClassName(struct protection_policy_manager_statics2 *iface,
-                                                              HSTRING *name)
-{
-    return WindowsCreateString(protection_policy_manager_name,
-                               ARRAY_SIZE(protection_policy_manager_name) - 1, name);
-}
-
-static HRESULT WINAPI protection_policy_GetTrustLevel(struct protection_policy_manager_statics2 *iface,
-                                                        TrustLevel *level)
-{
-    if (!level) return E_POINTER;
-    *level = BaseTrust;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_HasContentBeenRevokedSince(struct protection_policy_manager_statics2 *iface,
-                                                                    HSTRING identity, INT64 since,
-                                                                    boolean *revoked)
-{
-    FIXME("ProtectionPolicyManager HasContentBeenRevokedSince stub\n");
-    if (!revoked) return E_POINTER;
-    *revoked = FALSE;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_CheckAccessForApp(struct protection_policy_manager_statics2 *iface,
-                                                            HSTRING source, HSTRING app, INT32 *result)
-{
-    FIXME("ProtectionPolicyManager CheckAccessForApp stub\n");
-    if (!result) return E_POINTER;
-    *result = 0;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_RequestAccessForAppAsync(struct protection_policy_manager_statics2 *iface,
-                                                                  HSTRING source, HSTRING app,
-                                                                  IInspectable **operation)
-{
-    FIXME("ProtectionPolicyManager RequestAccessForAppAsync stub\n");
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI protection_policy_GetEnforcementLevel(struct protection_policy_manager_statics2 *iface,
-                                                              HSTRING identity, INT32 *level)
-{
-    FIXME("ProtectionPolicyManager GetEnforcementLevel stub\n");
-    if (!level) return E_POINTER;
-    *level = 0;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_IsUserDecryptionAllowed(struct protection_policy_manager_statics2 *iface,
-                                                                 HSTRING identity, boolean *allowed)
-{
-    FIXME("ProtectionPolicyManager IsUserDecryptionAllowed stub\n");
-    if (!allowed) return E_POINTER;
-    *allowed = TRUE;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_IsProtectionUnderLockRequired(
-        struct protection_policy_manager_statics2 *iface, HSTRING identity, boolean *required)
-{
-    FIXME("ProtectionPolicyManager IsProtectionUnderLockRequired stub\n");
-    if (!required) return E_POINTER;
-    *required = FALSE;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_PolicyChanged(struct protection_policy_manager_statics2 *iface,
-                                                        IInspectable *handler, INT64 *token)
-{
-    FIXME("ProtectionPolicyManager PolicyChanged stub\n");
-    if (!token) return E_POINTER;
-    *token = 1;
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_RemovePolicyChanged(struct protection_policy_manager_statics2 *iface,
-                                                              INT64 token)
-{
-    FIXME("ProtectionPolicyManager RemovePolicyChanged stub\n");
-    return S_OK;
-}
-
-static HRESULT WINAPI protection_policy_IsProtectionEnabled(struct protection_policy_manager_statics2 *iface,
-                                                              boolean *enabled)
-{
-    FIXME("ProtectionPolicyManager IsProtectionEnabled stub\n");
-    if (!enabled) return E_POINTER;
-    *enabled = FALSE;
-    return S_OK;
-}
-
-static const struct protection_policy_manager_statics2_vtbl protection_policy_vtbl =
-{
-    protection_policy_QueryInterface,
-    protection_policy_AddRef,
-    protection_policy_Release,
-    protection_policy_GetIids,
-    protection_policy_GetRuntimeClassName,
-    protection_policy_GetTrustLevel,
-    protection_policy_HasContentBeenRevokedSince,
-    protection_policy_CheckAccessForApp,
-    protection_policy_RequestAccessForAppAsync,
-    protection_policy_GetEnforcementLevel,
-    protection_policy_IsUserDecryptionAllowed,
-    protection_policy_IsProtectionUnderLockRequired,
-    protection_policy_PolicyChanged,
-    protection_policy_RemovePolicyChanged,
-    protection_policy_IsProtectionEnabled,
-};
-
-static struct protection_policy_manager_statics2 protection_policy = {&protection_policy_vtbl};
 
 struct activatable_class_data
 {
@@ -337,12 +161,13 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
 
     if (!iid || !class_factory)
         return E_INVALIDARG;
+    *class_factory = NULL;
+    if (!classid)
+        return E_INVALIDARG;
 
     if (FAILED(hr = ensure_mta()))
         return hr;
 
-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), protection_policy_manager_name))
-        return protection_policy_QueryInterface(&protection_policy, iid, class_factory);
 
     hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
     if (FAILED(hr))

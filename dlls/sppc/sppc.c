@@ -21,9 +21,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 
 #include "windef.h"
 #include "winbase.h"
+#include "winnls.h"
 #include "winreg.h"
 #include "winternl.h"
 #include "wincrypt.h"
@@ -52,23 +55,11 @@ static const SLID word2024_grace_binding_license_id =
     {0xcd522689, 0x03e1, 0x4adc, {0x9b, 0x57, 0x33, 0x22, 0xea, 0x6a, 0x15, 0x26}};
 static const SLID word2024_grace_ul_license_id =
     {0xf2faf831, 0xa981, 0x40e0, {0xac, 0x9b, 0x7a, 0x37, 0x2e, 0xb4, 0xb1, 0x92}};
-static const SLID word2024_grace_ppd_license_id =
-    {0x4cab570e, 0xf33e, 0x5e1a, {0x61, 0xeb, 0x35, 0xb1, 0x42, 0x15, 0x7c, 0xf7}};
-static const WCHAR word2024_grace_license[] =
-    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\Word2024R_Grace-ul-oob.xrm-ms";
-static const WCHAR word2024_grace_ppd_license[] =
-    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\Word2024R_Grace-ppd.xrm-ms";
-/* IDs and paths published by the Microsoft 365 ProPlus grace license group. */
+/* IDs published by the Microsoft 365 ProPlus grace license group. */
 static const SLID o365_proplus_grace_binding_license_id =
     {0x8b085e63, 0x33b5, 0x47dc, {0x80, 0xed, 0x79, 0x67, 0x4f, 0x09, 0x1a, 0x36}};
 static const SLID o365_proplus_grace_ul_license_id =
     {0x3c42d53b, 0x20c5, 0x42c6, {0x92, 0x79, 0x76, 0x8c, 0xd3, 0x5a, 0xa2, 0x52}};
-static const SLID o365_proplus_grace_ppd_license_id =
-    {0x32757964, 0x6b92, 0xd375, {0x42, 0xe1, 0xfb, 0xbd, 0x7d, 0xa1, 0x64, 0x54}};
-static const WCHAR o365_proplus_grace_license[] =
-    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ul-oob.xrm-ms";
-static const WCHAR o365_proplus_grace_ppd_license[] =
-    L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\O365ProPlusR_Grace-ppd.xrm-ms";
 
 struct o365_product_sku
 {
@@ -175,7 +166,8 @@ static struct slc_context *get_slc_context(HSLC handle)
     return context;
 }
 
-static BOOL grace_license_present(void); /* defined below with license paths */
+static BOOL license_installed(const SLID *id);
+static BOOL grace_license_present(void);
 static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
 static const WCHAR *installed_profile_product_info(const WCHAR *name);
@@ -614,9 +606,6 @@ static const struct grace_policy_string o365_grace_string_policies[] =
     { L"office-ApplicationBitmap", L"0x0001F1BB" },
 };
 
-#define OFFICE_LICENSE_ROOT L"C:\\Program Files\\Microsoft Office\\root\\Licenses16\\"
-#define OFFICE_X86_LICENSE_ROOT L"C:\\Program Files (x86)\\Microsoft Office\\root\\Licenses16\\"
-#define MAX_LICENSE_METADATA_SIZE (16 * 1024 * 1024)
 
 struct installed_grace_profile
 {
@@ -625,8 +614,6 @@ struct installed_grace_profile
     SLID binding_license_id;
     SLID ul_license_id;
     SLID ppd_license_id;
-    WCHAR ul_path[MAX_PATH];
-    WCHAR ppd_path[MAX_PATH];
     WCHAR name[160];
     WCHAR description[160];
     WCHAR author[80];
@@ -638,311 +625,11 @@ struct installed_grace_profile
 static INIT_ONCE installed_profile_once = INIT_ONCE_STATIC_INIT;
 static struct installed_grace_profile installed_profile;
 
-static unsigned int hex_digit(char ch)
-{
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return ~0u;
-}
-
-static BOOL parse_hex(const char **ptr, unsigned int digits, unsigned int *value)
-{
-    unsigned int digit, result = 0, i;
-
-    for (i = 0; i < digits; i++)
-    {
-        if ((digit = hex_digit((*ptr)[i])) > 15) return FALSE;
-        result = (result << 4) | digit;
-    }
-    *ptr += digits;
-    *value = result;
-    return TRUE;
-}
-
-static BOOL parse_slid(const char *text, SLID *id)
-{
-    unsigned int value, i;
-    const char *p = text;
-
-    if (*p == '{') p++;
-    if (!parse_hex(&p, 8, &value)) return FALSE;
-    id->Data1 = value;
-    if (*p++ != '-' || !parse_hex(&p, 4, &value)) return FALSE;
-    id->Data2 = value;
-    if (*p++ != '-' || !parse_hex(&p, 4, &value)) return FALSE;
-    id->Data3 = value;
-    if (*p++ != '-') return FALSE;
-    for (i = 0; i < 2; i++)
-    {
-        if (!parse_hex(&p, 2, &value)) return FALSE;
-        id->Data4[i] = value;
-    }
-    if (*p++ != '-') return FALSE;
-    for (i = 2; i < 8; i++)
-    {
-        if (!parse_hex(&p, 2, &value)) return FALSE;
-        id->Data4[i] = value;
-    }
-    return *p == '}' || !*p || *p == '<' || *p == '"';
-}
-
-/* License metadata is ASCII even when the XRM container is UTF-16.  Preserve
- * the signed source bytes and only make a read-only ASCII view for lookup. */
-static char *read_ascii_xml(const WCHAR *path, DWORD *size)
-{
-    DWORD file_size, read, i, chars;
-    char *raw, *ascii;
-    HANDLE file;
-
-    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return NULL;
-    file_size = GetFileSize(file, NULL);
-    if (file_size == INVALID_FILE_SIZE || !file_size || file_size > MAX_LICENSE_METADATA_SIZE ||
-        !(raw = LocalAlloc(LMEM_FIXED, file_size + 1)))
-    {
-        CloseHandle(file);
-        return NULL;
-    }
-    if (!ReadFile(file, raw, file_size, &read, NULL) || read != file_size)
-    {
-        LocalFree(raw);
-        CloseHandle(file);
-        return NULL;
-    }
-    CloseHandle(file);
-    raw[file_size] = 0;
-
-    if (file_size >= 2 && (((BYTE)raw[0] == 0xff && (BYTE)raw[1] == 0xfe) ||
-                            ((BYTE)raw[0] == 0xfe && (BYTE)raw[1] == 0xff)))
-    {
-        BOOL big_endian = (BYTE)raw[0] == 0xfe;
-
-        chars = (file_size - 2) / 2;
-        if (!(ascii = LocalAlloc(LMEM_FIXED, chars + 1)))
-        {
-            LocalFree(raw);
-            return NULL;
-        }
-        for (i = 0; i < chars; i++)
-        {
-            BYTE low = raw[2 + i * 2 + big_endian];
-            BYTE high = raw[2 + i * 2 + !big_endian];
-            ascii[i] = high ? '?' : low;
-        }
-        ascii[chars] = 0;
-        LocalFree(raw);
-        *size = chars;
-        return ascii;
-    }
-
-    *size = file_size;
-    return raw;
-}
-
-static BOOL span_contains(const char *start, const char *end, const char *needle)
-{
-    const char *found = strstr(start, needle);
-    return found && found + strlen(needle) <= end;
-}
-
-static BOOL copy_ascii_span(const char *start, const char *end, WCHAR *dest, UINT count)
-{
-    UINT length, i;
-
-    if (!start || !end || end < start || (length = end - start) >= count) return FALSE;
-    for (i = 0; i < length; i++) dest[i] = (BYTE)start[i];
-    dest[length] = 0;
-    return TRUE;
-}
-
-static BOOL copy_xml_value(const char *xml, const char *prefix, WCHAR *dest, UINT count)
-{
-    const char *start, *end;
-
-    if (!(start = strstr(xml, prefix))) return FALSE;
-    start += strlen(prefix);
-    if (!(end = strchr(start, '<'))) return FALSE;
-    return copy_ascii_span(start, end, dest, count);
-}
-
-static BOOL append_path(WCHAR *path, UINT count, const WCHAR *suffix)
-{
-    UINT length = lstrlenW(path), suffix_length = lstrlenW(suffix);
-
-    if (length + suffix_length >= count) return FALSE;
-    memcpy(path + length, suffix, (suffix_length + 1) * sizeof(*path));
-    return TRUE;
-}
-
-static BOOL license_map_present(const WCHAR *root)
-{
-    WCHAR path[MAX_PATH];
-
-    lstrcpynW(path, root, ARRAY_SIZE(path));
-    return append_path(path, ARRAY_SIZE(path), L"c2rpridslicensefiles_auto.xml") &&
-           GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
-}
-
-static BOOL get_office_license_root(WCHAR *root, UINT count)
-{
-    static const WCHAR config_key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
-    static const WCHAR * const values[] = { L"InstallationPath", L"InstallPath" };
-    static const WCHAR * const fallbacks[] = { OFFICE_LICENSE_ROOT, OFFICE_X86_LICENSE_ROOT };
-    WCHAR installation[MAX_PATH];
-    DWORD size;
-    UINT i, length;
-
-    for (i = 0; i < ARRAY_SIZE(values); i++)
-    {
-        size = sizeof(installation);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, values[i], RRF_RT_REG_SZ,
-                NULL, installation, &size)) continue;
-        length = lstrlenW(installation);
-        while (length && (installation[length - 1] == '\\' || installation[length - 1] == '/'))
-            installation[--length] = 0;
-
-        lstrcpynW(root, installation, count);
-        if (append_path(root, count, L"\\root\\Licenses16\\") && license_map_present(root))
-            return TRUE;
-        lstrcpynW(root, installation, count);
-        if (append_path(root, count, L"\\Licenses16\\") && license_map_present(root))
-            return TRUE;
-    }
-
-    for (i = 0; i < ARRAY_SIZE(fallbacks); i++)
-    {
-        lstrcpynW(root, fallbacks[i], count);
-        if (license_map_present(root)) return TRUE;
-    }
-    return FALSE;
-}
-
-static BOOL find_grace_mapping(const char *xml, const char *product_id,
-        SLID *sku_id, WCHAR *ul_name, WCHAR *ppd_name)
-{
-    char product_tag[256];
-    const char *product, *product_end, *license, *license_end;
-    const char *sku, *sku_end, *acid, *file, *file_end, *name, *name_end;
-
-    snprintf(product_tag, sizeof(product_tag), "<ProductReleaseId id=\"%s\">", product_id);
-    if (!(product = strstr(xml, product_tag)) ||
-        !(product_end = strstr(product, "</ProductReleaseId>"))) return FALSE;
-
-    license = product;
-    while ((license = strstr(license, "<License Sku=\"")) && license < product_end)
-    {
-        sku = license + strlen("<License Sku=\"");
-        if (!(sku_end = strchr(sku, '"')) || sku_end >= product_end) return FALSE;
-        if (!(license_end = strstr(sku_end, "</License>")) || license_end > product_end) return FALSE;
-        if (!span_contains(sku, sku_end, "Grace"))
-        {
-            license = license_end + 1;
-            continue;
-        }
-        if (!(acid = strstr(sku_end, " Acid=\"")) || acid >= license_end ||
-            !parse_slid(acid + strlen(" Acid=\""), sku_id))
-        {
-            license = license_end + 1;
-            continue;
-        }
-
-        ul_name[0] = ppd_name[0] = 0;
-        file = sku_end;
-        while ((file = strstr(file, "<File name=\"")) && file < license_end)
-        {
-            name = file + strlen("<File name=\"");
-            if (!(name_end = strchr(name, '"')) || name_end > license_end) return FALSE;
-            file_end = name_end;
-            if (span_contains(name, file_end, "-ul-oob.xrm-ms"))
-                copy_ascii_span(name, file_end, ul_name, MAX_PATH);
-            else if (span_contains(name, file_end, "-ppd.xrm-ms"))
-                copy_ascii_span(name, file_end, ppd_name, MAX_PATH);
-            file = name_end + 1;
-        }
-        if (ul_name[0] && ppd_name[0]) return TRUE;
-        license = license_end + 1;
-    }
-    return FALSE;
-}
 
 static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void **context)
 {
-    static const WCHAR config_key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
-    WCHAR product_ids[512], license_root[MAX_PATH], map_path[MAX_PATH];
-    WCHAR ul_name[MAX_PATH], ppd_name[MAX_PATH];
-    char product_id[256], *map_xml = NULL, *ul_xml = NULL, *ppd_xml = NULL;
-    const char *token, *private_id;
-    DWORD size = sizeof(product_ids), xml_size;
-    UINT i, length;
-
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, L"ProductReleaseIds", RRF_RT_REG_SZ,
-            NULL, product_ids, &size) || !get_office_license_root(license_root,
-            ARRAY_SIZE(license_root))) goto done;
-    lstrcpynW(map_path, license_root, ARRAY_SIZE(map_path));
-    if (!append_path(map_path, ARRAY_SIZE(map_path), L"c2rpridslicensefiles_auto.xml") ||
-        !(map_xml = read_ascii_xml(map_path, &xml_size))) goto done;
-
-    for (i = 0; product_ids[i]; )
-    {
-        while (product_ids[i] == ',' || product_ids[i] == ';' || product_ids[i] == ' ') i++;
-        length = 0;
-        while (product_ids[i + length] && product_ids[i + length] != ',' &&
-               product_ids[i + length] != ';' && product_ids[i + length] != ' ') length++;
-        if (!length) break;
-        if (length >= ARRAY_SIZE(product_id)) goto next;
-        for (size = 0; size < length; size++) product_id[size] = product_ids[i + size];
-        product_id[length] = 0;
-
-        if (!find_grace_mapping(map_xml, product_id, &installed_profile.sku_id,
-                ul_name, ppd_name)) goto next;
-        lstrcpynW(installed_profile.ul_path, license_root,
-                ARRAY_SIZE(installed_profile.ul_path));
-        lstrcpynW(installed_profile.ppd_path, license_root,
-                ARRAY_SIZE(installed_profile.ppd_path));
-        if (!append_path(installed_profile.ul_path, ARRAY_SIZE(installed_profile.ul_path), ul_name) ||
-            !append_path(installed_profile.ppd_path, ARRAY_SIZE(installed_profile.ppd_path), ppd_name))
-            goto next;
-        if (!(ul_xml = read_ascii_xml(installed_profile.ul_path, &xml_size)) ||
-            !(ppd_xml = read_ascii_xml(installed_profile.ppd_path, &xml_size))) goto next;
-
-        if (!(token = strstr(ul_xml, "licenseId=\"")) ||
-            !parse_slid(token + strlen("licenseId=\""), &installed_profile.ul_license_id) ||
-            !(private_id = strstr(ul_xml, "privateCertificateId\">")) ||
-            !parse_slid(private_id + strlen("privateCertificateId\">"),
-                    &installed_profile.binding_license_id) ||
-            !(token = strstr(ppd_xml, "licenseId=\"")) ||
-            !parse_slid(token + strlen("licenseId=\""), &installed_profile.ppd_license_id))
-            goto next;
-
-        copy_xml_value(ul_xml, "<tm:infoStr name=\"productName\">",
-                installed_profile.name, ARRAY_SIZE(installed_profile.name));
-        copy_xml_value(ul_xml, "<tm:infoStr name=\"productAuthor\">",
-                installed_profile.author, ARRAY_SIZE(installed_profile.author));
-        copy_xml_value(ul_xml, "<tm:infoStr name=\"ApplicationBitmap\">",
-                installed_profile.application_bitmap,
-                ARRAY_SIZE(installed_profile.application_bitmap));
-        copy_xml_value(ul_xml, "<tm:infoStr name=\"UXDifferentiator\">",
-                installed_profile.ux_differentiator,
-                ARRAY_SIZE(installed_profile.ux_differentiator));
-        lstrcpynW(installed_profile.description, installed_profile.name,
-                ARRAY_SIZE(installed_profile.description));
-        installed_profile.ppd_xml = ppd_xml;
-        ppd_xml = NULL;
-        installed_profile.valid = TRUE;
-        break;
-
-next:
-        LocalFree(ul_xml); ul_xml = NULL;
-        LocalFree(ppd_xml); ppd_xml = NULL;
-        i += length;
-    }
-
-done:
-    LocalFree(map_xml);
-    LocalFree(ul_xml);
-    LocalFree(ppd_xml);
+    /* Wine has no public SPP license-record format or Microsoft trust
+     * material. Do not infer a trusted profile from XRM file metadata. */
     return TRUE;
 }
 
@@ -1039,13 +726,12 @@ static const SLID *selected_grace_id(void)
 
 static BOOL grace_license_present(void)
 {
-    const struct installed_grace_profile *profile = get_installed_profile();
-    const WCHAR *path;
+    if (o365_proplus_configured())
+        return license_installed(&o365_proplus_grace_binding_license_id) &&
+               license_installed(&o365_proplus_grace_ul_license_id);
 
-    if (profile) path = profile->ul_path;
-    else path = o365_proplus_configured() ?
-            o365_proplus_grace_license : word2024_grace_license;
-    return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+    return license_installed(&word2024_grace_binding_license_id) &&
+           license_installed(&word2024_grace_ul_license_id);
 }
 
 static const struct grace_policy_dword *selected_dword_policies(UINT *count)
@@ -1304,6 +990,955 @@ HRESULT WINAPI SLGetServiceInformation(HSLC handle, LPCWSTR name, SLDATATYPE *ty
     return SL_E_VALUE_NOT_FOUND;
 }
 
+#define XRM_MAX_SIZE (16 * 1024 * 1024)
+#define RSA1_MAGIC 0x31415352
+
+static const xmlChar rel_namespace[] = "urn:mpeg:mpeg21:2003:01-REL-R-NS";
+static const xmlChar dsig_namespace[] = "http://www.w3.org/2000/09/xmldsig#";
+static const xmlChar tm_namespace[] = "http://www.microsoft.com/DRM/XrML2/TM/v2";
+static const WCHAR sppc_issuers_key[] = L"Software\\Wine\\SPPC\\TrustedIssuers";
+static const WCHAR sppc_licenses_key[] = L"Software\\Wine\\SPPC\\InstalledLicenses";
+
+/* SHA-256 fingerprints of the RSA moduli for Microsoft's Office pkeyconfig,
+ * legacy issuance-bridge, and production client-issuance roots. The XML
+ * signature and digest are still verified; these pins only establish roots
+ * shipped in the Office licensing chain. */
+static const BYTE office_root_fingerprints[][32] =
+{
+    {0x4e,0x3e,0xb9,0xc9,0x00,0x54,0xf0,0x24,0x37,0x8f,0x10,0x59,0x6a,0xbc,0x67,0xd3,
+     0x0e,0x75,0x62,0x22,0xb7,0xcc,0x4e,0x3a,0xfb,0x48,0xa7,0xd9,0xe8,0x52,0xdc,0x04},
+    {0x84,0x1a,0x61,0x8e,0x2c,0xb0,0xc1,0xe2,0x9d,0x1a,0x39,0xfc,0xad,0xe8,0xf1,0x72,
+     0xb5,0xbb,0xae,0xed,0x5d,0x66,0x11,0xfb,0x54,0x08,0x9f,0xd2,0xa6,0xb0,0x34,0x08},
+    {0x90,0xb5,0x90,0x32,0x1e,0x12,0x79,0xc2,0xf4,0x45,0x75,0x7a,0x5d,0x3a,0xd4,0xc8,
+     0x9b,0x60,0x44,0x57,0x9d,0x13,0x19,0x0e,0x03,0x0b,0x8b,0x37,0x00,0xc2,0xbb,0xbb},
+};
+
+struct xrm_document
+{
+    xmlDocPtr doc;
+    SLID file_id;
+};
+
+static BOOL guid_from_xml(const xmlChar *string, SLID *id)
+{
+    unsigned int data1, data2, data3, data4[8], consumed = 0;
+
+    if (!string || sscanf((const char *)string,
+            "{%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x}%n",
+            &data1, &data2, &data3, &data4[0], &data4[1], &data4[2], &data4[3],
+            &data4[4], &data4[5], &data4[6], &data4[7], &consumed) != 11 ||
+            string[consumed])
+        return FALSE;
+
+    id->Data1 = data1;
+    id->Data2 = data2;
+    id->Data3 = data3;
+    id->Data4[0] = data4[0];
+    id->Data4[1] = data4[1];
+    id->Data4[2] = data4[2];
+    id->Data4[3] = data4[3];
+    id->Data4[4] = data4[4];
+    id->Data4[5] = data4[5];
+    id->Data4[6] = data4[6];
+    id->Data4[7] = data4[7];
+    return TRUE;
+}
+
+static BOOL guid_from_string(const WCHAR *string, SLID *id)
+{
+    unsigned int data1, data2, data3, data4[8], consumed = 0;
+
+    if (!string || swscanf(string,
+            L"{%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x}%n",
+            &data1, &data2, &data3, &data4[0], &data4[1], &data4[2], &data4[3],
+            &data4[4], &data4[5], &data4[6], &data4[7], &consumed) != 11 ||
+            string[consumed])
+        return FALSE;
+
+    id->Data1 = data1;
+    id->Data2 = data2;
+    id->Data3 = data3;
+    id->Data4[0] = data4[0];
+    id->Data4[1] = data4[1];
+    id->Data4[2] = data4[2];
+    id->Data4[3] = data4[3];
+    id->Data4[4] = data4[4];
+    id->Data4[5] = data4[5];
+    id->Data4[6] = data4[6];
+    id->Data4[7] = data4[7];
+    return TRUE;
+}
+
+static void guid_to_string(const SLID *id, WCHAR string[39])
+{
+    swprintf(string, 39, L"{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+            id->Data1, id->Data2, id->Data3, id->Data4[0], id->Data4[1],
+            id->Data4[2], id->Data4[3], id->Data4[4], id->Data4[5],
+            id->Data4[6], id->Data4[7]);
+}
+
+static BOOL hash_bytes(ALG_ID algorithm, const BYTE *data, DWORD data_size,
+        BYTE *hash, DWORD hash_size)
+{
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH handle = 0;
+    DWORD size = hash_size;
+    BOOL ret = FALSE;
+
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+        return FALSE;
+    if (!CryptCreateHash(provider, algorithm, 0, 0, &handle))
+        goto done;
+    if (!CryptHashData(handle, data, data_size, 0))
+        goto done;
+    if (!CryptGetHashParam(handle, HP_HASHVAL, hash, &size, 0) || size != hash_size)
+        goto done;
+    ret = TRUE;
+
+done:
+    if (handle) CryptDestroyHash(handle);
+    CryptReleaseContext(provider, 0);
+    return ret;
+}
+
+static xmlNodePtr xml_child(xmlNodePtr parent, const char *name, const xmlChar *namespace)
+{
+    xmlNodePtr child;
+
+    if (!parent) return NULL;
+    for (child = parent->children; child; child = child->next)
+    {
+        if (child->type != XML_ELEMENT_NODE || xmlStrcmp(child->name, (const xmlChar *)name))
+            continue;
+        if (!namespace || (child->ns && !xmlStrcmp(child->ns->href, namespace)))
+            return child;
+    }
+    return NULL;
+}
+
+static xmlNodePtr xml_next_sibling(xmlNodePtr node, const char *name, const xmlChar *namespace)
+{
+    if (!node) return NULL;
+    for (node = node->next; node; node = node->next)
+    {
+        if (node->type != XML_ELEMENT_NODE || xmlStrcmp(node->name, (const xmlChar *)name))
+            continue;
+        if (!namespace || (node->ns && !xmlStrcmp(node->ns->href, namespace)))
+            return node;
+    }
+    return NULL;
+}
+
+static xmlNodePtr xml_descendant(xmlNodePtr node, const char *name, const xmlChar *namespace)
+{
+    xmlNodePtr child, result;
+
+    if (!node) return NULL;
+    for (child = node->children; child; child = child->next)
+    {
+        if (child->type != XML_ELEMENT_NODE) continue;
+        if (!xmlStrcmp(child->name, (const xmlChar *)name) &&
+                (!namespace || (child->ns && !xmlStrcmp(child->ns->href, namespace))))
+            return child;
+        if ((result = xml_descendant(child, name, namespace)))
+            return result;
+    }
+    return NULL;
+}
+
+static BOOL xml_algorithm_is(xmlNodePtr node, const char *algorithm)
+{
+    xmlChar *value;
+    BOOL ret;
+
+    if (!node || !(value = xmlGetProp(node, (const xmlChar *)"Algorithm")))
+        return FALSE;
+    ret = !xmlStrcmp(value, (const xmlChar *)algorithm);
+    xmlFree(value);
+    return ret;
+}
+
+static BOOL decode_base64_node(xmlNodePtr node, BYTE **data, DWORD *size)
+{
+    xmlChar *text;
+    DWORD required = 0;
+    BYTE *buffer;
+    BOOL ret = FALSE;
+
+    *data = NULL;
+    *size = 0;
+    if (!node || !(text = xmlNodeGetContent(node)))
+        return FALSE;
+    if (!CryptStringToBinaryA((const char *)text, 0, CRYPT_STRING_BASE64,
+            NULL, &required, NULL, NULL) || !required)
+        goto done;
+    if (!(buffer = LocalAlloc(LMEM_FIXED, required)))
+        goto done;
+    if (!CryptStringToBinaryA((const char *)text, 0, CRYPT_STRING_BASE64,
+            buffer, &required, NULL, NULL))
+    {
+        LocalFree(buffer);
+        goto done;
+    }
+    *data = buffer;
+    *size = required;
+    ret = TRUE;
+
+done:
+    xmlFree(text);
+    return ret;
+}
+
+static BOOL c14n_add(xmlBufferPtr buffer, const char *string)
+{
+    return xmlBufferCat(buffer, (const xmlChar *)string) == 0;
+}
+
+static BOOL c14n_add_name(xmlBufferPtr buffer, const xmlNode *node)
+{
+    if (node->ns && node->ns->prefix)
+    {
+        if (xmlBufferCat(buffer, node->ns->prefix) || !c14n_add(buffer, ":"))
+            return FALSE;
+    }
+    return xmlBufferCat(buffer, node->name) == 0;
+}
+
+static BOOL c14n_escape(xmlBufferPtr buffer, const xmlChar *string, BOOL attribute)
+{
+    const xmlChar *cursor, *start = string;
+    const char *replacement;
+
+    for (cursor = string; ; ++cursor)
+    {
+        replacement = NULL;
+        switch (*cursor)
+        {
+        case '&': replacement = "&amp;"; break;
+        case '<': replacement = "&lt;"; break;
+        case '>': if (!attribute) replacement = "&gt;"; break;
+        case '"': if (attribute) replacement = "&quot;"; break;
+        case '\t': if (attribute) replacement = "&#x9;"; break;
+        case '\n': if (attribute) replacement = "&#xA;"; break;
+        case '\r': replacement = "&#xD;"; break;
+        }
+        if (!*cursor || replacement)
+        {
+            if (cursor > start && xmlBufferAdd(buffer, start, cursor - start))
+                return FALSE;
+            if (!*cursor)
+                return TRUE;
+            if (!c14n_add(buffer, replacement))
+                return FALSE;
+            start = cursor + 1;
+        }
+    }
+}
+
+static int compare_namespaces(const void *left, const void *right)
+{
+    const xmlNsPtr a = *(const xmlNsPtr *)left;
+    const xmlNsPtr b = *(const xmlNsPtr *)right;
+    const xmlChar *a_prefix = a->prefix ? a->prefix : (const xmlChar *)"";
+    const xmlChar *b_prefix = b->prefix ? b->prefix : (const xmlChar *)"";
+
+    return xmlStrcmp(a_prefix, b_prefix);
+}
+
+static int compare_attributes(const void *left, const void *right)
+{
+    const xmlAttrPtr a = *(const xmlAttrPtr *)left;
+    const xmlAttrPtr b = *(const xmlAttrPtr *)right;
+    const xmlChar *a_href = a->ns ? a->ns->href : (const xmlChar *)"";
+    const xmlChar *b_href = b->ns ? b->ns->href : (const xmlChar *)"";
+    int result = xmlStrcmp(a_href, b_href);
+
+    return result ? result : xmlStrcmp(a->name, b->name);
+}
+
+static BOOL namespace_matches(xmlNsPtr needle, xmlNsPtr *list)
+{
+    const xmlChar *prefix = needle->prefix ? needle->prefix : (const xmlChar *)"";
+    unsigned int i;
+
+    if (!list) return FALSE;
+    for (i = 0; list[i]; ++i)
+    {
+        const xmlChar *candidate = list[i]->prefix ? list[i]->prefix : (const xmlChar *)"";
+        if (!xmlStrcmp(prefix, candidate))
+            return !xmlStrcmp(needle->href, list[i]->href);
+    }
+    return FALSE;
+}
+
+static BOOL c14n_node(xmlDocPtr doc, xmlNodePtr node, xmlBufferPtr buffer)
+{
+    xmlNsPtr *namespaces = NULL, *parent_namespaces = NULL, *render = NULL;
+    xmlAttrPtr attribute, *attributes = NULL;
+    xmlChar *value;
+    xmlNodePtr child;
+    unsigned int namespace_count = 0, render_count = 0, attribute_count = 0, i;
+    BOOL ret = FALSE;
+
+    if (!c14n_add(buffer, "<") || !c14n_add_name(buffer, node))
+        goto done;
+    namespaces = xmlGetNsList(doc, node);
+    if (node->parent && node->parent->type == XML_ELEMENT_NODE)
+        parent_namespaces = xmlGetNsList(doc, node->parent);
+    if (namespaces)
+        while (namespaces[namespace_count]) namespace_count++;
+    if (namespace_count &&
+            !(render = malloc(namespace_count * sizeof(*render))))
+        goto done;
+    for (i = 0; i < namespace_count; ++i)
+        if (!namespace_matches(namespaces[i], parent_namespaces))
+            render[render_count++] = namespaces[i];
+    qsort(render, render_count, sizeof(*render), compare_namespaces);
+    for (i = 0; i < render_count; ++i)
+    {
+        if (!c14n_add(buffer, " xmlns"))
+            goto done;
+        if (render[i]->prefix &&
+                (!c14n_add(buffer, ":") || xmlBufferCat(buffer, render[i]->prefix)))
+            goto done;
+        if (!c14n_add(buffer, "=\"") || !c14n_escape(buffer, render[i]->href, TRUE) ||
+                !c14n_add(buffer, "\""))
+            goto done;
+    }
+
+    for (attribute = node->properties; attribute; attribute = attribute->next)
+        attribute_count++;
+    if (attribute_count &&
+            !(attributes = malloc(attribute_count * sizeof(*attributes))))
+        goto done;
+    for (attribute = node->properties, i = 0; attribute; attribute = attribute->next)
+        attributes[i++] = attribute;
+    qsort(attributes, attribute_count, sizeof(*attributes), compare_attributes);
+    for (i = 0; i < attribute_count; ++i)
+    {
+        attribute = attributes[i];
+        if (!c14n_add(buffer, " "))
+            goto done;
+        if (attribute->ns && attribute->ns->prefix &&
+                (xmlBufferCat(buffer, attribute->ns->prefix) || !c14n_add(buffer, ":")))
+            goto done;
+        if (xmlBufferCat(buffer, attribute->name) || !c14n_add(buffer, "=\""))
+            goto done;
+        if (!(value = xmlNodeListGetString(doc, attribute->children, 1)))
+            value = xmlStrdup((const xmlChar *)"");
+        if (!value || !c14n_escape(buffer, value, TRUE))
+        {
+            xmlFree(value);
+            goto done;
+        }
+        xmlFree(value);
+        if (!c14n_add(buffer, "\""))
+            goto done;
+    }
+    if (!c14n_add(buffer, ">"))
+        goto done;
+
+    for (child = node->children; child; child = child->next)
+    {
+        if (child->type == XML_ELEMENT_NODE)
+        {
+            if (!c14n_node(doc, child, buffer))
+                goto done;
+        }
+        else if (child->type == XML_TEXT_NODE || child->type == XML_CDATA_SECTION_NODE)
+        {
+            if (!c14n_escape(buffer, child->content, FALSE))
+                goto done;
+        }
+        else if (child->type != XML_COMMENT_NODE)
+            goto done;
+    }
+    if (!c14n_add(buffer, "</") || !c14n_add_name(buffer, node) || !c14n_add(buffer, ">"))
+        goto done;
+    ret = TRUE;
+
+done:
+    free(attributes);
+    free(render);
+    if (parent_namespaces) xmlFree(parent_namespaces);
+    if (namespaces) xmlFree(namespaces);
+    return ret;
+}
+
+static BOOL canonicalize_copy(xmlNodePtr node, BOOL remove_signature,
+        BYTE **data, DWORD *size)
+{
+    xmlDocPtr doc;
+    xmlNodePtr copy, issuer, signature;
+    xmlBufferPtr buffer;
+    unsigned int length;
+    BOOL ret = FALSE;
+
+    *data = NULL;
+    *size = 0;
+    if (!(doc = xmlNewDoc((const xmlChar *)"1.0")))
+        return FALSE;
+    if (!(copy = xmlDocCopyNode(node, doc, 1)))
+    {
+        xmlFreeDoc(doc);
+        return FALSE;
+    }
+    xmlDocSetRootElement(doc, copy);
+    if (remove_signature)
+    {
+        issuer = xml_child(copy, "issuer", rel_namespace);
+        signature = xml_child(issuer, "Signature", dsig_namespace);
+        if (!signature)
+            goto done;
+        xmlUnlinkNode(signature);
+        xmlFreeNode(signature);
+    }
+    if (!(buffer = xmlBufferCreate()))
+        goto done;
+    if (!c14n_node(doc, copy, buffer) || !(length = xmlBufferLength(buffer)) ||
+            !(*data = LocalAlloc(LMEM_FIXED, length)))
+    {
+        xmlBufferFree(buffer);
+        goto done;
+    }
+    memcpy(*data, xmlBufferContent(buffer), length);
+    *size = length;
+    xmlBufferFree(buffer);
+    ret = TRUE;
+
+done:
+    xmlFreeDoc(doc);
+    return ret;
+}
+
+static BOOL extract_rsa_key(xmlNodePtr rsa, BYTE **modulus, DWORD *modulus_size,
+        DWORD *exponent)
+{
+    xmlNodePtr modulus_node, exponent_node;
+    BYTE *exponent_bytes = NULL;
+    DWORD exponent_size = 0;
+    unsigned int i;
+    BOOL ret = FALSE;
+
+    *modulus = NULL;
+    *modulus_size = 0;
+    *exponent = 0;
+    modulus_node = xml_child(rsa, "Modulus", dsig_namespace);
+    exponent_node = xml_child(rsa, "Exponent", dsig_namespace);
+    if (!decode_base64_node(modulus_node, modulus, modulus_size) ||
+            !decode_base64_node(exponent_node, &exponent_bytes, &exponent_size))
+        goto done;
+    if (*modulus_size < 128 || *modulus_size > 512 || !exponent_size || exponent_size > 4)
+        goto done;
+    for (i = 0; i < exponent_size; ++i)
+        *exponent = (*exponent << 8) | exponent_bytes[i];
+    if (*exponent != 65537)
+        goto done;
+    ret = TRUE;
+
+done:
+    LocalFree(exponent_bytes);
+    if (!ret)
+    {
+        LocalFree(*modulus);
+        *modulus = NULL;
+        *modulus_size = 0;
+        *exponent = 0;
+    }
+    return ret;
+}
+
+static BOOL extract_signature_key(xmlNodePtr signature, BYTE **modulus,
+        DWORD *modulus_size, DWORD *exponent)
+{
+    xmlNodePtr key_info, key_value, rsa;
+
+    key_info = xml_child(signature, "KeyInfo", dsig_namespace);
+    key_value = xml_child(key_info, "KeyValue", dsig_namespace);
+    rsa = xml_child(key_value, "RSAKeyValue", dsig_namespace);
+    return extract_rsa_key(rsa, modulus, modulus_size, exponent);
+}
+
+static void fingerprint_name(const BYTE fingerprint[32], WCHAR name[65])
+{
+    static const WCHAR digits[] = L"0123456789abcdef";
+    unsigned int i;
+
+    for (i = 0; i < 32; ++i)
+    {
+        name[i * 2] = digits[fingerprint[i] >> 4];
+        name[i * 2 + 1] = digits[fingerprint[i] & 0xf];
+    }
+    name[64] = 0;
+}
+
+static BOOL signer_is_trusted(const BYTE *modulus, DWORD modulus_size)
+{
+    BYTE fingerprint[32];
+    WCHAR name[65];
+    DWORD value, size = sizeof(value);
+    unsigned int i;
+
+    if (!hash_bytes(CALG_SHA_256, modulus, modulus_size, fingerprint, sizeof(fingerprint)))
+        return FALSE;
+    for (i = 0; i < ARRAY_SIZE(office_root_fingerprints); ++i)
+        if (!memcmp(fingerprint, office_root_fingerprints[i], sizeof(fingerprint)))
+            return TRUE;
+
+    fingerprint_name(fingerprint, name);
+    return !RegGetValueW(HKEY_LOCAL_MACHINE, sppc_issuers_key, name, RRF_RT_REG_DWORD,
+            NULL, &value, &size) && value == 1;
+}
+
+static BOOL trust_signer(const BYTE *modulus, DWORD modulus_size)
+{
+    BYTE fingerprint[32];
+    WCHAR name[65];
+    HKEY key;
+    DWORD value = 1;
+    LSTATUS status;
+
+    if (!hash_bytes(CALG_SHA_256, modulus, modulus_size, fingerprint, sizeof(fingerprint)))
+        return FALSE;
+    fingerprint_name(fingerprint, name);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, sppc_issuers_key, 0, NULL, 0,
+            KEY_SET_VALUE, NULL, &key, NULL))
+        return FALSE;
+    status = RegSetValueExW(key, name, 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
+    RegCloseKey(key);
+    return !status;
+}
+
+static BOOL verify_rsa_sha1(const BYTE *modulus, DWORD modulus_size, DWORD exponent,
+        const BYTE *data, DWORD data_size, const BYTE *signature, DWORD signature_size)
+{
+    struct
+    {
+        BLOBHEADER header;
+        RSAPUBKEY rsa;
+    } prefix;
+    HCRYPTPROV provider = 0;
+    HCRYPTKEY key = 0;
+    HCRYPTHASH hash = 0;
+    BYTE *blob = NULL, *reversed = NULL;
+    DWORD i;
+    BOOL ret = FALSE;
+
+    if (signature_size != modulus_size || modulus_size > 512)
+        return FALSE;
+    if (!(blob = LocalAlloc(LMEM_FIXED, sizeof(prefix) + modulus_size)) ||
+            !(reversed = LocalAlloc(LMEM_FIXED, signature_size)))
+        goto done;
+
+    memset(&prefix, 0, sizeof(prefix));
+    prefix.header.bType = PUBLICKEYBLOB;
+    prefix.header.bVersion = CUR_BLOB_VERSION;
+    prefix.header.aiKeyAlg = CALG_RSA_SIGN;
+    prefix.rsa.magic = RSA1_MAGIC;
+    prefix.rsa.bitlen = modulus_size * 8;
+    prefix.rsa.pubexp = exponent;
+    memcpy(blob, &prefix, sizeof(prefix));
+    for (i = 0; i < modulus_size; ++i)
+        blob[sizeof(prefix) + i] = modulus[modulus_size - i - 1];
+    for (i = 0; i < signature_size; ++i)
+        reversed[i] = signature[signature_size - i - 1];
+
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) ||
+            !CryptImportKey(provider, blob, sizeof(prefix) + modulus_size, 0, 0, &key) ||
+            !CryptCreateHash(provider, CALG_SHA1, 0, 0, &hash) ||
+            !CryptHashData(hash, data, data_size, 0))
+        goto done;
+    ret = CryptVerifySignatureA(hash, reversed, signature_size, key, NULL, 0);
+
+done:
+    if (hash) CryptDestroyHash(hash);
+    if (key) CryptDestroyKey(key);
+    if (provider) CryptReleaseContext(provider, 0);
+    LocalFree(reversed);
+    LocalFree(blob);
+    return ret;
+}
+
+static BOOL verify_xrm_license(xmlNodePtr license, SLID *id)
+{
+    static const char c14n_algorithm[] = "http://www.microsoft.com/xrml/lwc14n";
+    static const char rsa_sha1_algorithm[] = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+    static const char sha1_algorithm[] = "http://www.w3.org/2000/09/xmldsig#sha1";
+    static const char license_transform[] = "urn:mpeg:mpeg21:2003:01-REL-R-NS:licenseTransform";
+    xmlNodePtr issuer, signature, signed_info, c14n, method, reference, transforms;
+    xmlNodePtr transform, digest_method, digest_value, signature_value;
+    xmlChar *license_id = NULL;
+    BYTE *canonical_license = NULL, *canonical_info = NULL;
+    BYTE *expected_digest = NULL, *signature_bytes = NULL, *modulus = NULL;
+    DWORD canonical_license_size = 0, canonical_info_size = 0;
+    DWORD digest_size = 0, signature_size = 0, modulus_size = 0, exponent = 0;
+    BYTE actual_digest[20];
+    BOOL ret = FALSE;
+
+    issuer = xml_child(license, "issuer", rel_namespace);
+    signature = xml_child(issuer, "Signature", dsig_namespace);
+    signed_info = xml_child(signature, "SignedInfo", dsig_namespace);
+    c14n = xml_child(signed_info, "CanonicalizationMethod", dsig_namespace);
+    method = xml_child(signed_info, "SignatureMethod", dsig_namespace);
+    reference = xml_child(signed_info, "Reference", dsig_namespace);
+    transforms = xml_child(reference, "Transforms", dsig_namespace);
+    transform = xml_child(transforms, "Transform", dsig_namespace);
+    digest_method = xml_child(reference, "DigestMethod", dsig_namespace);
+    digest_value = xml_child(reference, "DigestValue", dsig_namespace);
+    signature_value = xml_child(signature, "SignatureValue", dsig_namespace);
+    if (!signature || !signed_info || !xml_algorithm_is(c14n, c14n_algorithm) ||
+            !xml_algorithm_is(method, rsa_sha1_algorithm) ||
+            !xml_algorithm_is(transform, license_transform) ||
+            !(transform = xml_next_sibling(transform, "Transform", dsig_namespace)) ||
+            !xml_algorithm_is(transform, c14n_algorithm) ||
+            !xml_algorithm_is(digest_method, sha1_algorithm))
+        goto done;
+
+    if (!decode_base64_node(digest_value, &expected_digest, &digest_size) ||
+            digest_size != sizeof(actual_digest) ||
+            !canonicalize_copy(license, TRUE, &canonical_license, &canonical_license_size) ||
+            !hash_bytes(CALG_SHA1, canonical_license, canonical_license_size,
+                    actual_digest, sizeof(actual_digest)) ||
+            memcmp(expected_digest, actual_digest, sizeof(actual_digest)))
+        goto done;
+
+    if (!extract_signature_key(signature, &modulus, &modulus_size, &exponent) ||
+            !signer_is_trusted(modulus, modulus_size) ||
+            !decode_base64_node(signature_value, &signature_bytes, &signature_size) ||
+            !canonicalize_copy(signed_info, FALSE, &canonical_info, &canonical_info_size) ||
+            !verify_rsa_sha1(modulus, modulus_size, exponent, canonical_info,
+                    canonical_info_size, signature_bytes, signature_size))
+        goto done;
+
+    if (!(license_id = xmlGetProp(license, (const xmlChar *)"licenseId")) ||
+            !guid_from_xml(license_id, id))
+        goto done;
+    ret = TRUE;
+
+done:
+    xmlFree(license_id);
+    LocalFree(modulus);
+    LocalFree(signature_bytes);
+    LocalFree(expected_digest);
+    LocalFree(canonical_info);
+    LocalFree(canonical_license);
+    return ret;
+}
+
+static HRESULT validate_xrm(const BYTE *license, UINT size, struct xrm_document *record)
+{
+    xmlNodePtr root, node;
+    unsigned int count = 0;
+    SLID id;
+
+    memset(record, 0, sizeof(*record));
+    if (!size || size > XRM_MAX_SIZE)
+        return SL_E_VALUE_NOT_FOUND;
+    record->doc = xmlReadMemory((const char *)license, size, "license.xrm-ms", NULL,
+            XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+    if (!record->doc || record->doc->intSubset || record->doc->extSubset)
+        goto invalid;
+    root = xmlDocGetRootElement(record->doc);
+    if (!root)
+        goto invalid;
+
+    if (!xmlStrcmp(root->name, (const xmlChar *)"license") &&
+            root->ns && !xmlStrcmp(root->ns->href, rel_namespace))
+    {
+        if (!verify_xrm_license(root, &record->file_id))
+            goto invalid;
+        return S_OK;
+    }
+    if (xmlStrcmp(root->name, (const xmlChar *)"licenseGroup") ||
+            !root->ns || xmlStrcmp(root->ns->href, rel_namespace))
+        goto invalid;
+
+    for (node = root->children; node; node = node->next)
+    {
+        if (node->type != XML_ELEMENT_NODE)
+            continue;
+        if (xmlStrcmp(node->name, (const xmlChar *)"license") ||
+                !node->ns || xmlStrcmp(node->ns->href, rel_namespace) ||
+                !verify_xrm_license(node, &id))
+            goto invalid;
+        if (!count) record->file_id = id;
+        count++;
+    }
+    if (count)
+        return S_OK;
+
+invalid:
+    if (record->doc) xmlFreeDoc(record->doc);
+    record->doc = NULL;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+static BOOL grant_authorizes_key(xmlNodePtr license, const xmlChar *part_id)
+{
+    xmlNodePtr grant, node;
+    xmlChar *reference;
+
+    for (grant = license->children; grant; grant = grant->next)
+    {
+        if (grant->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(grant->name, (const xmlChar *)"grant") ||
+                !grant->ns || xmlStrcmp(grant->ns->href, rel_namespace) ||
+                !xml_descendant(grant, "issue", rel_namespace))
+            continue;
+        for (node = grant->children; node; node = node->next)
+        {
+            if (node->type != XML_ELEMENT_NODE)
+                continue;
+            if (!(node = xml_descendant(grant, "keyHolder", rel_namespace)))
+                break;
+            reference = xmlGetProp(node, (const xmlChar *)"licensePartIdRef");
+            if (reference && !xmlStrcmp(reference, part_id))
+            {
+                xmlFree(reference);
+                return TRUE;
+            }
+            xmlFree(reference);
+            break;
+        }
+    }
+    return FALSE;
+}
+
+static void trust_issuance_keys(xmlDocPtr doc)
+{
+    xmlNodePtr root = xmlDocGetRootElement(doc), license, inventory, holder, info, value, rsa;
+    xmlChar *part_id;
+    BYTE *modulus;
+    DWORD modulus_size, exponent;
+
+    if (!root) return;
+    license = (!xmlStrcmp(root->name, (const xmlChar *)"license")) ? root : root->children;
+    for (; license; license = license->next)
+    {
+        if (license->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(license->name, (const xmlChar *)"license") ||
+                !license->ns || xmlStrcmp(license->ns->href, rel_namespace))
+            continue;
+        inventory = xml_child(license, "inventory", rel_namespace);
+        for (holder = inventory ? inventory->children : NULL; holder; holder = holder->next)
+        {
+            if (holder->type != XML_ELEMENT_NODE ||
+                    xmlStrcmp(holder->name, (const xmlChar *)"keyHolder") ||
+                    !holder->ns || xmlStrcmp(holder->ns->href, rel_namespace) ||
+                    !(part_id = xmlGetProp(holder, (const xmlChar *)"licensePartId")))
+                continue;
+            if (!grant_authorizes_key(license, part_id))
+            {
+                xmlFree(part_id);
+                continue;
+            }
+            info = xml_child(holder, "info", rel_namespace);
+            value = xml_child(info, "KeyValue", dsig_namespace);
+            rsa = xml_child(value, "RSAKeyValue", dsig_namespace);
+            if (extract_rsa_key(rsa, &modulus, &modulus_size, &exponent))
+            {
+                trust_signer(modulus, modulus_size);
+                LocalFree(modulus);
+            }
+            xmlFree(part_id);
+        }
+    }
+}
+
+static BOOL license_store_directory(WCHAR directory[MAX_PATH])
+{
+    WCHAR program_data[MAX_PATH];
+
+    if (!GetEnvironmentVariableW(L"ProgramData", program_data, ARRAY_SIZE(program_data)))
+        wcscpy(program_data, L"C:\\ProgramData");
+    if (swprintf(directory, MAX_PATH, L"%s\\Wine", program_data) < 0)
+        return FALSE;
+    if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+    if (wcslen(directory) + 6 >= MAX_PATH)
+        return FALSE;
+    wcscat(directory, L"\\SPPC");
+    if (!CreateDirectoryW(directory, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+    if (wcslen(directory) + 10 >= MAX_PATH)
+        return FALSE;
+    wcscat(directory, L"\\Licenses");
+    return CreateDirectoryW(directory, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static BOOL save_license_file(const SLID *file_id, const BYTE *data, UINT size)
+{
+    WCHAR directory[MAX_PATH], id[39], path[MAX_PATH], temporary[MAX_PATH];
+    HANDLE file = INVALID_HANDLE_VALUE;
+    DWORD written;
+    BOOL ret = FALSE;
+
+    if (!license_store_directory(directory))
+        return FALSE;
+    guid_to_string(file_id, id);
+    if (swprintf(path, ARRAY_SIZE(path), L"%s\\%s.xrm-ms", directory, id) < 0 ||
+            swprintf(temporary, ARRAY_SIZE(temporary), L"%s\\.%s.%lu.tmp",
+                    directory, id, GetCurrentProcessId()) < 0)
+        return FALSE;
+    file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (!WriteFile(file, data, size, &written, NULL) || written != size ||
+            !FlushFileBuffers(file))
+        goto done;
+    CloseHandle(file);
+    file = INVALID_HANDLE_VALUE;
+    ret = MoveFileExW(temporary, path,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    if (!ret) DeleteFileW(temporary);
+    return ret;
+}
+
+static BOOL record_installed_licenses(xmlDocPtr doc, const SLID *file_id)
+{
+    xmlNodePtr root = xmlDocGetRootElement(doc), license;
+    xmlChar *license_id;
+    WCHAR file_name[39], name[39];
+    HKEY key;
+    SLID id;
+    BOOL ret = TRUE;
+
+    guid_to_string(file_id, file_name);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, sppc_licenses_key, 0, NULL, 0,
+            KEY_SET_VALUE, NULL, &key, NULL))
+        return FALSE;
+    license = (!xmlStrcmp(root->name, (const xmlChar *)"license")) ? root : root->children;
+    for (; license; license = license->next)
+    {
+        if (license->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(license->name, (const xmlChar *)"license") ||
+                !(license_id = xmlGetProp(license, (const xmlChar *)"licenseId")))
+            continue;
+        if (guid_from_xml(license_id, &id))
+        {
+            guid_to_string(&id, name);
+            if (RegSetValueExW(key, name, 0, REG_SZ, (const BYTE *)file_name,
+                    (wcslen(file_name) + 1) * sizeof(WCHAR)))
+                ret = FALSE;
+        }
+        xmlFree(license_id);
+    }
+    RegCloseKey(key);
+    return ret;
+}
+
+static BOOL license_installed(const SLID *id)
+{
+    WCHAR name[39];
+    DWORD size = 0;
+
+    guid_to_string(id, name);
+    return !RegGetValueW(HKEY_LOCAL_MACHINE, sppc_licenses_key, name,
+            RRF_RT_REG_SZ, NULL, NULL, &size) && size >= sizeof(WCHAR);
+}
+
+static BOOL load_license_file(const SLID *id, UINT *size, BYTE **license)
+{
+    WCHAR name[39], file_id[39], directory[MAX_PATH], path[MAX_PATH];
+    DWORD value_size = sizeof(file_id);
+    LARGE_INTEGER file_size;
+    HANDLE file;
+    BYTE *buffer;
+    DWORD read_size;
+    BOOL ret = FALSE;
+
+    guid_to_string(id, name);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, sppc_licenses_key, name, RRF_RT_REG_SZ,
+            NULL, file_id, &value_size) || !license_store_directory(directory) ||
+            swprintf(path, ARRAY_SIZE(path), L"%s\\%s.xrm-ms", directory, file_id) < 0)
+        return FALSE;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart <= 0 ||
+            file_size.QuadPart > XRM_MAX_SIZE ||
+            !(buffer = LocalAlloc(LMEM_FIXED, file_size.LowPart)))
+        goto done;
+    if (!ReadFile(file, buffer, file_size.LowPart, &read_size, NULL) ||
+            read_size != file_size.LowPart)
+    {
+        LocalFree(buffer);
+        goto done;
+    }
+    *size = file_size.LowPart;
+    *license = buffer;
+    ret = TRUE;
+
+done:
+    CloseHandle(file);
+    return ret;
+}
+
+static UINT enumerate_file_licenses(HKEY key, const WCHAR *file_id, SLID *ids, UINT capacity)
+{
+    WCHAR name[39], value[39];
+    DWORD index, name_size, value_size, type;
+    UINT count = 0;
+    LSTATUS status;
+    SLID id;
+
+    for (index = 0; ; ++index)
+    {
+        name_size = ARRAY_SIZE(name);
+        value_size = sizeof(value);
+        status = RegEnumValueW(key, index, name, &name_size, NULL, &type,
+                (BYTE *)value, &value_size);
+        if (status == ERROR_NO_MORE_ITEMS)
+            break;
+        if (status || type != REG_SZ || value_size < sizeof(WCHAR))
+            continue;
+        value[ARRAY_SIZE(value) - 1] = 0;
+        if (wcsicmp(value, file_id) || !guid_from_string(name, &id))
+            continue;
+        if (ids && count < capacity)
+            ids[count] = id;
+        ++count;
+    }
+    return count;
+}
+
+static HRESULT get_file_license_ids(const SLID *file_id, UINT *count, SLID **ids)
+{
+    WCHAR file_name[39];
+    HKEY key;
+    UINT found;
+
+    *count = 0;
+    *ids = NULL;
+    if (!file_id)
+        return E_INVALIDARG;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, sppc_licenses_key, 0, KEY_QUERY_VALUE, &key))
+        return S_OK;
+
+    guid_to_string(file_id, file_name);
+    found = enumerate_file_licenses(key, file_name, NULL, 0);
+    if (found && !(*ids = LocalAlloc(LMEM_FIXED, found * sizeof(**ids))))
+    {
+        RegCloseKey(key);
+        return E_OUTOFMEMORY;
+    }
+    if (found != enumerate_file_licenses(key, file_name, *ids, found))
+    {
+        LocalFree(*ids);
+        *ids = NULL;
+        RegCloseKey(key);
+        return E_FAIL;
+    }
+    RegCloseKey(key);
+    *count = found;
+    return S_OK;
+}
+
 HRESULT WINAPI SLOpen(HSLC *handle)
 {
     struct slc_context *context;
@@ -1342,17 +1977,26 @@ HRESULT WINAPI SLClose(HSLC handle)
 
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *license, SLID *file_id)
 {
-    static const SLID null_id;
+    struct xrm_document record;
+    HRESULT hr;
 
-    FIXME("(%p, %u, %p, %p) semi-stub\n", handle, size, license, file_id);
+    TRACE("(%p, %u, %p, %p)\n", handle, size, license, file_id);
 
-    if (!handle || !size || !license || !file_id)
+    if (file_id) memset(file_id, 0, sizeof(*file_id));
+    if (!get_slc_context(handle) || !size || !license || !file_id)
         return E_INVALIDARG;
+    if (FAILED(hr = validate_xrm(license, size, &record)))
+        return hr;
 
-    /* Wine does not have a Software Protection Platform license store yet.
-     * Accepting the license lets applications which keep their own licensing
-     * state complete installation. */
-    *file_id = null_id;
+    if (!save_license_file(&record.file_id, license, size) ||
+            !record_installed_licenses(record.doc, &record.file_id))
+    {
+        xmlFreeDoc(record.doc);
+        return E_FAIL;
+    }
+    trust_issuance_keys(record.doc);
+    *file_id = record.file_id;
+    xmlFreeDoc(record.doc);
     return S_OK;
 }
 
@@ -1368,152 +2012,152 @@ enum
     SL_ID_ALL_LICENSE_FILES = 6,
 };
 
-static HRESULT read_license_file(const WCHAR *path, UINT *size, BYTE **license)
-{
-    HANDLE file;
-    DWORD file_size, read;
-    BYTE *buf;
-
-    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE)
-        return HRESULT_FROM_WIN32(GetLastError());
-
-    file_size = GetFileSize(file, NULL);
-    if (file_size == INVALID_FILE_SIZE || !file_size)
-    {
-        CloseHandle(file);
-        return E_FAIL;
-    }
-
-    if (!(buf = LocalAlloc(LMEM_FIXED, file_size)))
-    {
-        CloseHandle(file);
-        return E_OUTOFMEMORY;
-    }
-
-    if (!ReadFile(file, buf, file_size, &read, NULL) || read != file_size)
-    {
-        LocalFree(buf);
-        CloseHandle(file);
-        return E_FAIL;
-    }
-    CloseHandle(file);
-
-    *size = file_size;
-    *license = buf;
-    return S_OK;
-}
-
-static const BYTE *buffer_find_ascii(const BYTE *buf, UINT size, const char *needle)
-{
-    UINT nlen, i;
-
-    if (!buf || !needle) return NULL;
-    nlen = (UINT)strlen(needle);
-    if (!nlen || size < nlen) return NULL;
-    for (i = 0; i + nlen <= size; i++)
-    {
-        if (!memcmp(buf + i, needle, nlen)) return buf + i + nlen;
-    }
-    return NULL;
-}
-
-static BOOL buffer_contains_ascii(const BYTE *buf, UINT size, const char *needle)
-{
-    return !!buffer_find_ascii(buf, size, needle);
-}
 
 HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, SLID *file_id)
 {
-    const struct installed_grace_profile *profile = get_installed_profile();
-    const BYTE *id_text;
-    SLID parsed_id;
+    struct xrm_document record;
+    HRESULT hr;
 
-    FIXME("(%p, %u, %p, %p) semi-stub\n", handle, size, license, file_id);
+    TRACE("(%p, %u, %p, %p)\n", handle, size, license, file_id);
 
+    if (file_id) memset(file_id, 0, sizeof(*file_id));
     if (!get_slc_context(handle) || !size || !license || !file_id)
         return E_INVALIDARG;
-
-    if (profile && (id_text = buffer_find_ascii(license, size, "licenseId=\"")) &&
-        id_text + 38 <= license + size && parse_slid((const char *)id_text, &parsed_id) &&
-        (IsEqualGUID(&parsed_id, &profile->ul_license_id) ||
-         IsEqualGUID(&parsed_id, &profile->ppd_license_id) ||
-         IsEqualGUID(&parsed_id, &profile->binding_license_id)))
-    {
-        *file_id = parsed_id;
-        return S_OK;
-    }
-
-    /* Prefer matching by scanning for known licenseId attributes. */
-    if (buffer_contains_ascii(license, size, "{f2faf831-a981-40e0-ac9b-7a372eb4b192}") ||
-        buffer_contains_ascii(license, size, "{F2FAF831-A981-40E0-AC9B-7A372EB4B192}"))
-    {
-        *file_id = word2024_grace_ul_license_id;
-        return S_OK;
-    }
-    if (buffer_contains_ascii(license, size, "{4cab570e-f33e-5e1a-61eb-35b142157cf7}") ||
-        buffer_contains_ascii(license, size, "{4CAB570E-F33E-5E1A-61EB-35B142157CF7}"))
-    {
-        *file_id = word2024_grace_ppd_license_id;
-        return S_OK;
-    }
-    if (buffer_contains_ascii(license, size, "{3c42d53b-20c5-42c6-9279-768cd35aa252}") ||
-        buffer_contains_ascii(license, size, "{3C42D53B-20C5-42C6-9279-768CD35AA252}"))
-    {
-        *file_id = o365_proplus_grace_ul_license_id;
-        return S_OK;
-    }
-    if (buffer_contains_ascii(license, size, "{32757964-6b92-d375-42e1-fbbd7da16454}") ||
-        buffer_contains_ascii(license, size, "{32757964-6B92-D375-42E1-FBBD7DA16454}"))
-    {
-        *file_id = o365_proplus_grace_ppd_license_id;
-        return S_OK;
-    }
-
-    if (grace_license_present())
-    {
-        if (profile) *file_id = profile->ul_license_id;
-        else *file_id = o365_proplus_configured() ? o365_proplus_grace_ul_license_id :
-                word2024_grace_ul_license_id;
-        return S_OK;
-    }
-    return SL_E_VALUE_NOT_FOUND;
+    if (FAILED(hr = validate_xrm(license, size, &record)))
+        return hr;
+    *file_id = record.file_id;
+    xmlFreeDoc(record.doc);
+    return S_OK;
 }
 
 HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE **license)
 {
-    const struct installed_grace_profile *profile = get_installed_profile();
+    TRACE("(%p, %s, %p, %p)\n", handle, wine_dbgstr_guid(file_id), size, license);
 
-    FIXME("(%p, %s, %p, %p) semi-stub\n", handle, wine_dbgstr_guid(file_id), size, license);
-
+    if (size) *size = 0;
+    if (license) *license = NULL;
     if (!get_slc_context(handle) || !file_id || !size || !license)
         return E_INVALIDARG;
+    if (!load_license_file(file_id, size, license))
+        return SL_E_VALUE_NOT_FOUND;
+    return S_OK;
+}
 
-    if (profile && IsEqualGUID(file_id, &profile->ul_license_id))
-        return read_license_file(profile->ul_path, size, license);
-    if (profile && IsEqualGUID(file_id, &profile->ppd_license_id))
-        return read_license_file(profile->ppd_path, size, license);
+static xmlNodePtr find_license_node(xmlDocPtr doc, const SLID *id)
+{
+    xmlNodePtr root = xmlDocGetRootElement(doc), node;
+    xmlChar *license_id;
+    SLID candidate;
 
-    if (IsEqualGUID(file_id, &word2024_grace_ul_license_id) &&
-        GetFileAttributesW(word2024_grace_license) != INVALID_FILE_ATTRIBUTES)
-        return read_license_file(word2024_grace_license, size, license);
+    if (!root) return NULL;
+    node = !xmlStrcmp(root->name, (const xmlChar *)"license") ? root : root->children;
+    for (; node; node = node->next)
+    {
+        if (node->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(node->name, (const xmlChar *)"license") ||
+                !node->ns || xmlStrcmp(node->ns->href, rel_namespace) ||
+                !(license_id = xmlGetProp(node, (const xmlChar *)"licenseId")))
+            continue;
+        if (guid_from_xml(license_id, &candidate) && IsEqualGUID(&candidate, id))
+        {
+            xmlFree(license_id);
+            return node;
+        }
+        xmlFree(license_id);
+    }
+    return NULL;
+}
 
-    if (IsEqualGUID(file_id, &word2024_grace_ppd_license_id) &&
-        GetFileAttributesW(word2024_grace_ppd_license) != INVALID_FILE_ATTRIBUTES)
-        return read_license_file(word2024_grace_ppd_license, size, license);
+static xmlNodePtr find_license_info_string(xmlNodePtr node, const char *name)
+{
+    xmlNodePtr child, result;
+    xmlChar *key;
 
-    if (IsEqualGUID(file_id, &o365_proplus_grace_ul_license_id) &&
-        GetFileAttributesW(o365_proplus_grace_license) != INVALID_FILE_ATTRIBUTES)
-        return read_license_file(o365_proplus_grace_license, size, license);
+    for (child = node ? node->children : NULL; child; child = child->next)
+    {
+        if (child->type != XML_ELEMENT_NODE)
+            continue;
+        if (!xmlStrcmp(child->name, (const xmlChar *)"infoStr") &&
+                child->ns && !xmlStrcmp(child->ns->href, tm_namespace) &&
+                (key = xmlGetProp(child, (const xmlChar *)"name")))
+        {
+            BOOL matches = !xmlStrcasecmp(key, (const xmlChar *)name);
+            xmlFree(key);
+            if (matches) return child;
+        }
+        if ((result = find_license_info_string(child, name)))
+            return result;
+    }
+    return NULL;
+}
 
-    if (IsEqualGUID(file_id, &o365_proplus_grace_ppd_license_id) &&
-        GetFileAttributesW(o365_proplus_grace_ppd_license) != INVALID_FILE_ATTRIBUTES)
-        return read_license_file(o365_proplus_grace_ppd_license, size, license);
+static HRESULT copy_license_string(xmlNodePtr node, SLDATATYPE *type, UINT *size, BYTE **value)
+{
+    xmlChar *utf8 = NULL;
+    WCHAR *buffer;
+    int chars;
 
-    *size = 0;
-    *license = NULL;
-    return SL_E_VALUE_NOT_FOUND;
+    if (!node || !(utf8 = xmlNodeGetContent(node)) || !utf8[0])
+    {
+        xmlFree(utf8);
+        return SL_E_VALUE_NOT_FOUND;
+    }
+    chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)utf8, -1, NULL, 0);
+    if (!chars || !(buffer = LocalAlloc(LMEM_FIXED, chars * sizeof(*buffer))))
+    {
+        xmlFree(utf8);
+        return chars ? E_OUTOFMEMORY : E_FAIL;
+    }
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)utf8, -1, buffer, chars);
+    xmlFree(utf8);
+
+    if (type) *type = SL_DATA_SZ;
+    *size = chars * sizeof(*buffer);
+    *value = (BYTE *)buffer;
+    return S_OK;
+}
+
+HRESULT WINAPI SLGetLicenseInformation(HSLC handle, const SLID *license_id, LPCWSTR name,
+        SLDATATYPE *type, UINT *size, BYTE **value)
+{
+    xmlDocPtr doc = NULL;
+    xmlNodePtr license, field = NULL;
+    BYTE *data = NULL;
+    UINT data_size = 0;
+    HRESULT hr = SL_E_VALUE_NOT_FOUND;
+
+    TRACE("(%p, %s, %s, %p, %p, %p)\n", handle, wine_dbgstr_guid(license_id),
+            debugstr_w(name), type, size, value);
+
+    if (type) *type = SL_DATA_NONE;
+    if (size) *size = 0;
+    if (value) *value = NULL;
+    if (!get_slc_context(handle) || !license_id || !name || !size || !value)
+        return E_INVALIDARG;
+    if (!load_license_file(license_id, &data_size, &data))
+        return SL_E_VALUE_NOT_FOUND;
+
+    doc = xmlReadMemory((const char *)data, data_size, "license.xrm-ms", NULL,
+            XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+    if (!doc || doc->intSubset || doc->extSubset ||
+            !(license = find_license_node(doc, license_id)))
+        goto done;
+
+    if (!wcsicmp(name, L"Description"))
+        field = xml_child(license, "title", rel_namespace);
+    else if (!wcsicmp(name, L"LicenseType"))
+        field = find_license_info_string(license, "licenseType");
+    else if (!wcsicmp(name, L"Version"))
+        field = find_license_info_string(license, "licenseVersion");
+    else
+        goto done;
+
+    hr = copy_license_string(field, type, size, value);
+
+done:
+    if (doc) xmlFreeDoc(doc);
+    LocalFree(data);
+    return hr;
 }
 
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
@@ -1533,6 +2177,9 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
     if (!handle || !count || !ids)
         return E_INVALIDARG;
 
+
+    if (return_type == SL_ID_LICENSE && query_type == SL_ID_LICENSE_FILE)
+        return get_file_license_ids(query_id, count, ids);
     if (!grace_license_present())
     {
         *count = 0;

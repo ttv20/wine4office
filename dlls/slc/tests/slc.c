@@ -17,6 +17,7 @@
  */
 
 #include <stdarg.h>
+#include <string.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -26,6 +27,9 @@
 #include "slerror.h"
 
 #include <wine/test.h>
+
+HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
+HRESULT WINAPI SLClose(HSLC handle);
 
 static void test_SLGetWindowsInformationDWORD(void)
 {
@@ -60,8 +64,55 @@ static void test_SLGetWindowsInformationDWORD(void)
     ok(value != 0xdeadbeef, "expected value != 0xdeadbeef\n");
 }
 
+static void test_SLInstallLicense(void)
+{
+    static const BYTE invalid_license[] = {0xde, 0xad, 0xbe, 0xef};
+    HSLC handle = NULL;
+    SLID file_id;
+    HRESULT res;
+
+    res = SLOpen(&handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+    if (FAILED(res))
+        return;
+
+    memset(&file_id, 0xcc, sizeof(file_id));
+    res = SLInstallLicense(handle, sizeof(invalid_license), invalid_license, &file_id);
+    ok(res == SL_E_VALUE_NOT_FOUND, "expected SL_E_VALUE_NOT_FOUND, got %08lx\n", res);
+
+    res = SLClose(handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+}
+
+static void test_SLGetLicenseInformation(void)
+{
+    static const SLID missing_id =
+            {0x6f82ad40, 0xd4e2, 0x46cc, {0xa7, 0xc4, 0x42, 0xb9, 0x37, 0xf4, 0x21, 0x70}};
+    BYTE *value = (BYTE *)0xdeadbeef;
+    SLDATATYPE type = 0xdeadbeef;
+    UINT size = 0xdeadbeef;
+    HSLC handle = NULL;
+    HRESULT res;
+
+    res = SLOpen(&handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+    if (FAILED(res))
+        return;
+
+    res = SLGetLicenseInformation(handle, &missing_id, L"Version", &type, &size, &value);
+    ok(res == SL_E_VALUE_NOT_FOUND, "expected SL_E_VALUE_NOT_FOUND, got %08lx\n", res);
+    ok(type == SL_DATA_NONE, "expected SL_DATA_NONE, got %u\n", type);
+    ok(!size, "expected zero size, got %u\n", size);
+    ok(!value, "expected a NULL value, got %p\n", value);
+
+    res = SLClose(handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+}
+
 
 START_TEST(slc)
 {
     test_SLGetWindowsInformationDWORD();
+    test_SLInstallLicense();
+    test_SLGetLicenseInformation();
 }
