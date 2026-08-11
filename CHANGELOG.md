@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restore Office proofing and language-pack discovery.
+
 ## 0.2.0-alpha — 2026-08-11
 
 - Make release archives reproducible without breaking linked files.

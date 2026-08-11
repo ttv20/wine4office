@@ -1499,10 +1499,10 @@ static UINT enum_office_c2r_ui_qualifiers( const WCHAR *component, DWORD index, 
 }
 
 /* C2R manifests use the MSI Package, Component and PublishComponent table
- * relationships.  Keep the parser schema-aware: a PublishComponent is a
- * record only when it is a direct child of the package's
- * PublishComponentList, and its ComponentId resolves through ComponentList.
- * In particular, do not infer identity or key paths from filenames or tag
+ * relationships.  In generated Office manifests PublishComponent records are
+ * children of their owning Component row; some older manifests also carry a
+ * top-level PublishComponentList with an explicit ComponentId.  Keep the
+ * parser schema-aware and never infer identity from filenames or tag
  * proximity. */
 #define OFFICE_C2R_MANIFEST_MAX_SIZE (16 * 1024 * 1024)
 #define OFFICE_C2R_MAX_XML_DEPTH 128
@@ -1791,7 +1791,8 @@ static BOOL office_c2r_manifest_add_component( struct office_c2r_manifest *manif
 }
 
 static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifest *manifest,
-                                                       const struct office_c2r_xml_tag *tag )
+                                                       const struct office_c2r_xml_tag *tag,
+                                                       const WCHAR *parent_component_id )
 {
     WCHAR publish_component_id[GUID_SIZE], qualifier[256], component_id[GUID_SIZE];
     WCHAR appdata[512], feature[256], keyfile[1024];
@@ -1807,9 +1808,20 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
         !office_c2r_xml_attribute( tag, L"ComponentId", component_id, ARRAY_SIZE(component_id),
                                    &component_id_present ) ||
         !office_c2r_xml_attribute( tag, L"Feature", feature, ARRAY_SIZE(feature), &feature_present ) ||
-        !publish_id_present || !qualifier_present || !component_id_present || !feature_present ||
-        !office_c2r_valid_guid( publish_component_id ) || !office_c2r_valid_guid( component_id ))
+        !publish_id_present || !qualifier_present || !feature_present ||
+        !office_c2r_valid_guid( publish_component_id ))
         return TRUE;
+    if (component_id_present)
+    {
+        if (!office_c2r_valid_guid( component_id ) ||
+            (parent_component_id && wcsicmp( component_id, parent_component_id )))
+            return TRUE;
+    }
+    else
+    {
+        if (!parent_component_id) return TRUE;
+        lstrcpyW( component_id, parent_component_id );
+    }
     if (!office_c2r_xml_attribute( tag, L"AppData", appdata, ARRAY_SIZE(appdata), &appdata_present ) ||
         !office_c2r_xml_attribute( tag, L"KeyFile", keyfile, ARRAY_SIZE(keyfile), &keyfile_present ))
         return TRUE;
@@ -1850,12 +1862,13 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
 static BOOL office_c2r_parse_manifest( const WCHAR *filename, struct office_c2r_manifest *manifest )
 {
     WCHAR stack[OFFICE_C2R_MAX_XML_DEPTH][64];
+    WCHAR parent_component_id[GUID_SIZE];
     WCHAR *buffer;
     LARGE_INTEGER size;
     const WCHAR *cursor, *limit;
     struct office_c2r_xml_tag tag;
     DWORD read, stack_count = 0;
-    BOOL product_present, root_seen = FALSE, root_done = FALSE;
+    BOOL product_present, component_id_present, root_seen = FALSE, root_done = FALSE;
     enum office_c2r_xml_result result;
     HANDLE file;
 
@@ -1875,6 +1888,7 @@ static BOOL office_c2r_parse_manifest( const WCHAR *filename, struct office_c2r_
     buffer[read / sizeof(WCHAR)] = 0;
     cursor = buffer + (buffer[0] == 0xfeff);
     limit = buffer + read / sizeof(WCHAR);
+    parent_component_id[0] = 0;
     if (cursor >= limit || cursor[0] == 0xfffe) goto failed;
 
     while ((result = office_c2r_xml_next( &cursor, limit, &tag )) != OFFICE_C2R_XML_EOF)
@@ -1895,7 +1909,15 @@ static BOOL office_c2r_parse_manifest( const WCHAR *filename, struct office_c2r_
                 goto failed;
             else if (stack_count == 2 && !wcscmp( stack[1], L"PublishComponentList" ) &&
                      !wcscmp( tag.name, L"PublishComponent" ) &&
-                     !office_c2r_manifest_add_publish_component( manifest, &tag ))
+                     !office_c2r_manifest_add_publish_component( manifest, &tag, NULL ))
+                goto failed;
+            else if (!wcscmp( tag.name, L"PublishComponent" ) &&
+                     !wcscmp( stack[stack_count - 1], L"Component" ) &&
+                     ((stack_count == 3 && !wcscmp( stack[1], L"ComponentList" )) ||
+                      (stack_count == 4 && !wcscmp( stack[1], L"SequencedData" ) &&
+                       !wcscmp( stack[2], L"ComponentList" ))) &&
+                     !office_c2r_manifest_add_publish_component( manifest, &tag,
+                                                                  parent_component_id ))
                 goto failed;
             else if (((stack_count == 2 && !wcscmp( stack[1], L"ComponentList" )) ||
                       (stack_count >= 3 && !wcscmp( stack[1], L"SequencedData" ) &&
@@ -1903,6 +1925,19 @@ static BOOL office_c2r_parse_manifest( const WCHAR *filename, struct office_c2r_
                      !wcscmp( tag.name, L"Component" ) &&
                      !office_c2r_manifest_add_component( manifest, &tag ))
                 goto failed;
+
+            if (!wcscmp( tag.name, L"Component" ) &&
+                ((stack_count == 2 && !wcscmp( stack[1], L"ComponentList" )) ||
+                 (stack_count == 3 && !wcscmp( stack[1], L"SequencedData" ) &&
+                  !wcscmp( stack[2], L"ComponentList" ))))
+            {
+                parent_component_id[0] = 0;
+                if (!office_c2r_xml_attribute( &tag, L"ComponentId", parent_component_id,
+                                                ARRAY_SIZE(parent_component_id), &component_id_present ))
+                    goto failed;
+                if (!component_id_present || !office_c2r_valid_guid( parent_component_id ))
+                    parent_component_id[0] = 0;
+            }
 
             if (!tag.self_closing)
             {

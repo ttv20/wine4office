@@ -13593,6 +13593,8 @@ static void test_office_c2r_manifest(void)
     static const WCHAR product_code[] = L"{F4AC0B32-6E6F-4C70-9E61-1B8A9F7D4C22}";
     static const WCHAR other_product[] = L"{A42C2A7A-BA5E-4F1B-8C1D-6D7B9D0E2F33}";
     static const WCHAR publish_component[] = L"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}";
+    static const WCHAR proof_component[] = L"{EF8E9806-D488-4BE1-8D06-01B401C9DE98}";
+    static const WCHAR setlang_component[] = L"{5D99B316-7DFC-4BCF-97B3-050068BB1431}";
     static const WCHAR fixture_name[] = L"C2RManifest.c2r-msi.msi.16.x-none.xml";
     static const WCHAR proof_name[] = L"C2RManifest.Proof.Culture.msi.16.c2r-msi.xml";
     static const WCHAR fixture[] =
@@ -13621,9 +13623,19 @@ static void test_office_c2r_manifest(void)
         L"AppData=\"outside\" Feature=\"Main\" KeyFile=\"outside.ttf\"></PublishComponent></Feature></FeatureList>\r\n"
         L"  <SequencedData><ComponentList>\r\n"
         L"    <Component ComponentId=\"{1F5D7A1C-1DE3-4D50-8E7A-4A4B2F60C8D1}\" "
-        L"KeyPath=\"%CSIDL_FONTS%\\private\\component-table.ttf\"></Component>\r\n"
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\component-table.ttf\">\r\n"
+        L"      <PublishComponent PublishComponentId=\"{EF8E9806-D488-4BE1-8D06-01B401C9DE98}\" "
+        L"Qualifier=\"1037\\Normal\" AppData=\"\" Feature=\"SpellingAndGrammarFilesExp2_1037\"></PublishComponent>\r\n"
+        L"      <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"mismatched-parent\" ComponentId=\"{4A7D8E91-2B3C-4D5E-8F60-7A8B9C0D1E2F}\" "
+        L"AppData=\"bad\" Feature=\"Main\"></PublishComponent>\r\n"
+        L"    </Component>\r\n"
         L"    <Component ComponentId=\"{4A7D8E91-2B3C-4D5E-8F60-7A8B9C0D1E2F}\" "
-        L"KeyPath=\"%CSIDL_FONTS%\\private\\component.ttf\"></Component>\r\n"
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\component.ttf\">\r\n"
+        L"      <PublishComponent PublishComponentId=\"{5D99B316-7DFC-4BCF-97B3-050068BB1431}\" "
+        L"Qualifier=\"{EF8E9806-D488-4BE1-8D06-01B401C9DE98},1037\\Normal\" "
+        L"AppData=\"SpellingAndGrammarFilesExp2_1037\" Feature=\"Gimme_OnDemandData\"></PublishComponent>\r\n"
+        L"    </Component>\r\n"
         L"  </ComponentList></SequencedData>\r\n"
         L"</Package>\r\n";
     static const WCHAR proof_fixture[] =
@@ -13690,6 +13702,23 @@ static void test_office_c2r_manifest(void)
                                           appdata, &appdata_size );
     ok(result == ERROR_NO_MORE_ITEMS, "duplicate/nested records returned %lu\n", result);
 
+    qualifier_size = ARRAY_SIZE(qualifier);
+    appdata_size = ARRAY_SIZE(appdata);
+    result = MsiEnumComponentQualifiersW( proof_component, 0, qualifier, &qualifier_size,
+                                          appdata, &appdata_size );
+    ok(result == ERROR_SUCCESS, "proofing qualifier returned %lu\n", result);
+    ok(!wcscmp( qualifier, L"1037\\Normal" ), "got proofing qualifier %s\n",
+       wine_dbgstr_w(qualifier));
+    qualifier_size = ARRAY_SIZE(qualifier);
+    appdata_size = ARRAY_SIZE(appdata);
+    result = MsiEnumComponentQualifiersW( setlang_component, 0, qualifier, &qualifier_size,
+                                          appdata, &appdata_size );
+    ok(result == ERROR_SUCCESS, "SETLANG qualifier returned %lu\n", result);
+    ok(!wcscmp( qualifier, L"{EF8E9806-D488-4BE1-8D06-01B401C9DE98},1037\\Normal" ),
+       "got SETLANG qualifier %s\n", wine_dbgstr_w(qualifier));
+    ok(!wcscmp( appdata, L"SpellingAndGrammarFilesExp2_1037" ),
+       "got SETLANG appdata %s\n", wine_dbgstr_w(appdata));
+
     path_size = ARRAY_SIZE(component_path);
     result = MsiProvideQualifiedComponentExW( publish_component, L"direct", INSTALLMODE_EXISTING,
                                               product_code, 0, 0, component_path, &path_size );
@@ -13706,6 +13735,14 @@ static void test_office_c2r_manifest(void)
     ok(result == ERROR_SUCCESS, "component-list fallback returned %lu\n", result);
     swprintf( expected, ARRAY_SIZE(expected), L"%s\\Fonts\\private\\component.ttf", windows );
     ok(!wcsicmp( component_path, expected ), "component path %s expected %s\n",
+       wine_dbgstr_w(component_path), wine_dbgstr_w(expected));
+
+    path_size = ARRAY_SIZE(component_path);
+    result = MsiProvideQualifiedComponentExW( proof_component, L"1037\\Normal", INSTALLMODE_EXISTING,
+                                              product_code, 0, 0, component_path, &path_size );
+    ok(result == ERROR_SUCCESS, "proofing component path returned %lu\n", result);
+    swprintf( expected, ARRAY_SIZE(expected), L"%s\\Fonts\\private\\component-table.ttf", windows );
+    ok(!wcsicmp( component_path, expected ), "proofing path %s expected %s\n",
        wine_dbgstr_w(component_path), wine_dbgstr_w(expected));
 
     path_size = ARRAY_SIZE(component_path);
