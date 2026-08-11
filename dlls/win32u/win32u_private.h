@@ -272,6 +272,8 @@ extern BOOL is_virtual_desktop(void);
 extern BOOL is_service_process(void);
 
 /* window.c */
+extern const WCHAR dcomp_synthetic_window_prop[];
+#define NTUSER_CREATE_WINDOW_BROADCAST_OWNER 0x00000001
 struct tagWND;
 extern BOOL client_to_screen( HWND hwnd, POINT *pt );
 extern void destroy_thread_windows(void);
@@ -309,6 +311,8 @@ extern BOOL get_client_rect_rel( HWND hwnd, enum coords_relative rel, RECT *rect
 extern BOOL get_window_rects( HWND hwnd, enum coords_relative relative,
                               struct window_rects *rects, struct ratio dpi );
 extern HWND *list_window_children( HWND hwnd );
+extern BOOL update_window_broadcast_exclusion( HWND hwnd, HWND target, BOOL add );
+extern BOOL get_window_broadcast_exclusion( HWND hwnd, HWND *target, UINT *refcount, BOOL *excluded );
 extern int map_window_points( HWND hwnd_from, HWND hwnd_to, POINT *points, UINT count,
                               struct ratio dpi );
 extern void map_window_region( HWND from, HWND to, HRGN hrgn );

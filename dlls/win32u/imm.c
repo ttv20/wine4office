@@ -286,15 +286,25 @@ static BOOL needs_ime_window( HWND hwnd )
 BOOL register_imm_window( HWND hwnd )
 {
     struct imm_thread_data *thread_data;
+    HWND target;
+    UINT refcount;
+    BOOL excluded, synthetic;
 
     TRACE( "(%p)\n", hwnd );
+    synthetic = !!NtUserGetProp( hwnd, dcomp_synthetic_window_prop );
 
     if (disable_ime || !needs_ime_window( hwnd ))
+    {
+        if (synthetic) update_window_broadcast_exclusion( hwnd, 0, TRUE );
         return FALSE;
+    }
 
     thread_data = get_imm_thread_data();
     if (!thread_data || thread_data->disable_ime)
+    {
+        if (synthetic) update_window_broadcast_exclusion( hwnd, 0, TRUE );
         return FALSE;
+    }
 
     TRACE( "window_cnt=%u, default_hwnd=%p\n", thread_data->window_cnt + 1, thread_data->default_hwnd );
 
@@ -308,7 +318,21 @@ BOOL register_imm_window( HWND hwnd )
 
         thread_data->default_hwnd = NtUserCreateWindowEx( 0, &class_name, NULL, &name,
                                                           WS_POPUP | WS_DISABLED | WS_CLIPSIBLINGS,
-                                                          0, 0, 1, 1, 0, 0, 0, 0, 0, 0, NULL, FALSE );
+                                                          0, 0, 1, 1, 0, 0, 0,
+                                                          synthetic ? (void *)hwnd : NULL,
+                                                          synthetic ? NTUSER_CREATE_WINDOW_BROADCAST_OWNER : 0,
+                                                          0, NULL, FALSE );
+    }
+
+    if (synthetic)
+    {
+        target = 0;
+        refcount = 0;
+        excluded = FALSE;
+        if (!thread_data->default_hwnd ||
+            !get_window_broadcast_exclusion( hwnd, &target, &refcount, &excluded ) ||
+            target != thread_data->default_hwnd)
+            update_window_broadcast_exclusion( hwnd, thread_data->default_hwnd, TRUE );
     }
 
     return TRUE;

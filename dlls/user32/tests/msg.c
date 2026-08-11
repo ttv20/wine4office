@@ -19039,6 +19039,170 @@ static void test_broadcast(void)
 
     DestroyWindow(hwnd);
 }
+static const WCHAR synthetic_broadcast_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
+static const WCHAR synthetic_broadcast_class[] = {'W','i','n','e','S','y','n','t','h','e','t','i','c','B','r','o','a','d','c','a','s','t',0};
+static UINT synthetic_broadcast_msg;
+static LONG synthetic_broadcast_hits, synthetic_concurrent_hits, synthetic_receiver_hits, synthetic_ime_hits;
+static WNDPROC synthetic_ime_oldproc;
+
+static LRESULT WINAPI synthetic_broadcast_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCCREATE)
+        ok(SetPropW(hwnd, synthetic_broadcast_prop, (HANDLE)1), "SetPropW failed, error %lu\n", GetLastError());
+    if (message == synthetic_broadcast_msg)
+        InterlockedIncrement(wParam ? &synthetic_concurrent_hits : &synthetic_broadcast_hits);
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+
+static LRESULT WINAPI synthetic_receiver_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == synthetic_broadcast_msg)
+        InterlockedIncrement(&synthetic_receiver_hits);
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static LRESULT WINAPI synthetic_ime_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == synthetic_broadcast_msg && !wParam)
+        InterlockedIncrement(&synthetic_ime_hits);
+    return CallWindowProcW(synthetic_ime_oldproc, hwnd, message, wParam, lParam);
+}
+
+static DWORD WINAPI synthetic_broadcast_thread(void *arg)
+{
+    unsigned int i;
+
+    (void)arg;
+    for (i = 0; i < 1000; i++)
+        SendMessageTimeoutW(HWND_BROADCAST, synthetic_broadcast_msg, 1, 0,
+                            SMTO_ABORTIFHUNG, 100, NULL);
+    return 0;
+}
+
+static void test_synthetic_broadcast_lifetime(void)
+{
+    WNDCLASSW wc = {0};
+    HWND receiver, ime, helper1, helper2;
+    WNDPROC oldproc;
+    HANDLE thread;
+    BOOL ret;
+    unsigned int i;
+
+    if (strcmp(winetest_platform, "wine"))
+    {
+        win_skip("synthetic broadcast windows are Wine-specific\n");
+        return;
+    }
+
+    synthetic_broadcast_msg = RegisterWindowMessageW(L"WineSyntheticBroadcastLifetime");
+    ok(synthetic_broadcast_msg, "RegisterWindowMessageW failed, error %lu\n", GetLastError());
+    if (!synthetic_broadcast_msg) return;
+
+    wc.lpfnWndProc = synthetic_broadcast_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = synthetic_broadcast_class;
+    ret = RegisterClassW(&wc);
+    ok(ret || GetLastError() == ERROR_CLASS_ALREADY_EXISTS, "RegisterClassW failed, error %lu\n", GetLastError());
+
+    wc.lpfnWndProc = synthetic_receiver_proc;
+    wc.lpszClassName = L"WineSyntheticBroadcastReceiver";
+    ret = RegisterClassW(&wc);
+    ok(ret || GetLastError() == ERROR_CLASS_ALREADY_EXISTS, "RegisterClassW failed, error %lu\n", GetLastError());
+
+    receiver = CreateWindowExW(0, L"WineSyntheticBroadcastReceiver", NULL, WS_OVERLAPPED,
+                               0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+    ok(receiver != NULL, "CreateWindowExW failed, error %lu\n", GetLastError());
+    if (!receiver) return;
+
+    ime = ImmGetDefaultIMEWnd(receiver);
+    ok(ime != NULL, "ImmGetDefaultIMEWnd returned NULL\n");
+    if (!ime)
+    {
+        DestroyWindow(receiver);
+        return;
+    }
+
+    SetLastError(0xdeadbeef);
+    oldproc = (WNDPROC)SetWindowLongPtrW(ime, GWLP_WNDPROC, (LONG_PTR)synthetic_ime_proc);
+    ok(oldproc != NULL, "SetWindowLongPtrW failed, error %lu\n", GetLastError());
+    if (!oldproc)
+    {
+        DestroyWindow(receiver);
+        return;
+    }
+    synthetic_ime_oldproc = oldproc;
+
+    thread = CreateThread(NULL, 0, synthetic_broadcast_thread, NULL, 0, NULL);
+    ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
+
+    for (i = 0; i < 4; i++)
+    {
+        helper1 = CreateWindowExW(0, synthetic_broadcast_class, NULL, WS_POPUP,
+                                  0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+        helper2 = CreateWindowExW(0, synthetic_broadcast_class, NULL, WS_POPUP,
+                                  0, 0, 0, 0, NULL, NULL, wc.hInstance, NULL);
+        ok(helper1 != NULL && helper2 != NULL, "failed to create helper windows %p, %p\n", helper1, helper2);
+        if (!helper1 || !helper2)
+        {
+            if (helper1) DestroyWindow(helper1);
+            if (helper2) DestroyWindow(helper2);
+            break;
+        }
+
+        ok(ImmGetDefaultIMEWnd(helper1) == ime && ImmGetDefaultIMEWnd(helper2) == ime,
+           "helper windows did not share the default IME\n");
+
+        InterlockedExchange(&synthetic_broadcast_hits, 0);
+        InterlockedExchange(&synthetic_receiver_hits, 0);
+        InterlockedExchange(&synthetic_ime_hits, 0);
+        ret = SendMessageTimeoutW(HWND_BROADCAST, synthetic_broadcast_msg, 0, 0,
+                                  SMTO_NORMAL, 2000, NULL);
+        if (!ret && GetLastError() == ERROR_TIMEOUT)
+            win_skip("broadcast timed out with two helper windows\n");
+        else
+        {
+            ok(synthetic_receiver_hits > 0, "receiver did not receive broadcast\n");
+            ok(!synthetic_broadcast_hits, "synthetic helper received broadcast with two owners\n");
+            ok(!synthetic_ime_hits, "shared IME received broadcast with two owners\n");
+        }
+
+        DestroyWindow(helper1);
+        InterlockedExchange(&synthetic_broadcast_hits, 0);
+        InterlockedExchange(&synthetic_ime_hits, 0);
+        ret = SendMessageTimeoutW(HWND_BROADCAST, synthetic_broadcast_msg, 0, 0,
+                                  SMTO_NORMAL, 2000, NULL);
+        if (!ret && GetLastError() == ERROR_TIMEOUT)
+            win_skip("broadcast timed out with one helper window\n");
+        else
+        {
+            ok(!synthetic_broadcast_hits, "remaining synthetic helper received broadcast\n");
+            ok(!synthetic_ime_hits, "shared IME received broadcast with one owner\n");
+        }
+
+        DestroyWindow(helper2);
+        InterlockedExchange(&synthetic_ime_hits, 0);
+        ret = SendMessageTimeoutW(HWND_BROADCAST, synthetic_broadcast_msg, 0, 0,
+                                  SMTO_NORMAL, 2000, NULL);
+        if (!ret && GetLastError() == ERROR_TIMEOUT)
+            win_skip("broadcast timed out after helper teardown\n");
+        else
+            ok(synthetic_ime_hits > 0, "shared IME was not restored to broadcast eligibility\n");
+    }
+
+    if (thread)
+    {
+        ok(WaitForSingleObject(thread, 10000) == WAIT_OBJECT_0, "broadcast thread did not finish\n");
+        ok(!synthetic_concurrent_hits, "synthetic helper received a concurrent broadcast\n");
+        CloseHandle(thread);
+    }
+
+    SetWindowLongPtrW(ime, GWLP_WNDPROC, (LONG_PTR)synthetic_ime_oldproc);
+    DestroyWindow(receiver);
+    UnregisterClassW(synthetic_broadcast_class, wc.hInstance);
+    UnregisterClassW(L"WineSyntheticBroadcastReceiver", wc.hInstance);
+}
 
 static const struct
 {
@@ -21523,6 +21687,7 @@ START_TEST(msg)
     test_SetParent();
     test_PostMessage();
     test_broadcast();
+    test_synthetic_broadcast_lifetime();
     test_ShowWindow();
     test_PeekMessage();
     test_PeekMessage2();

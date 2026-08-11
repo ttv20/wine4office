@@ -160,8 +160,8 @@ static HWND *build_hwnd_list(HWND hwnd, BOOL children);
 
 /* The caller holds win_data_mutex. Rebuild the GPU client hierarchy in
  * Win32 child Z-order. Client surfaces are Wayland siblings regardless of
- * their HWND ancestry, so creation or presentation order cannot be used for
- * stacking when Office switches between workbook and full-page startup UI. */
+ * their HWND ancestry, so creation or presentation order cannot determine
+ * stacking. */
 static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
                                                             const HWND *list)
 {
@@ -220,8 +220,7 @@ static void wayland_win_data_restack_client_surfaces(HWND toplevel)
 /* Keep all visible owner-relative popups
  * above every GPU client surface attached to the owner. Rebuild the two
  * groups relative to the owner surface instead of repeatedly positioning a
- * client relative to different popups; the latter can move it back above an
- * earlier popup when Office has separate border-effect windows.
+ * client relative to different popups.
  *
  * As above, collect the Win32 child order before taking win_data_mutex. Popup
  * classification is cached by WindowPosChanged from state queried before the
@@ -380,13 +379,11 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         (state->layered_flags & LWA_ALPHA) && !state->layered_alpha)
         visible = FALSE;
 
-    /* A newly visible unmanaged toplevel without a class background brush has
-     * no application-defined contents yet. Keep it role-less until the first
+    /* A newly visible surface without a class background brush has no
+     * application-defined contents yet. Keep it role-less until the first
      * software flush or GPU presentation instead of exposing the driver's
-     * generic initialization buffer. Managed application windows need their
-     * initial xdg configure before they can produce the first presentation. */
-    if (visible && !data->managed && !owner_surface &&
-        !data->contents_presented && !state->has_background)
+     * generic initialization buffer. */
+    if (visible && !data->contents_presented && !state->has_background)
         visible = FALSE;
 
     /* A DirectComposition-only notification host is a logical Win32 target,
@@ -656,29 +653,16 @@ static HWND find_adjacent_window(HWND hwnd, const RECT *rect)
  */
 static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
 {
-    static const WCHAR nui_dialog_class[] = {'N','U','I','D','i','a','l','o','g',0};
-    WCHAR class_buffer[64];
-    UNICODE_STRING class_name = {.Buffer = class_buffer, .MaximumLength = sizeof(class_buffer)};
     DWORD style, ex_style;
-    BOOL office_nui_dialog = FALSE;
+    BOOL owned_popup;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
-    if (NtUserGetClassName(hwnd, FALSE, &class_name))
-        office_nui_dialog = !wcscmp(class_buffer, nui_dialog_class);
-    /* Owned popups without a thick frame must remain owner-relative, even when
-     * active. Office NUIDialog also uses WS_CAPTION but ships companion
-     * MSO_BORDEREFFECT surfaces that are not owned by the dialog; if the dialog
-     * becomes a free-floating xdg_toplevel while those strips are Word-relative
-     * subsurfaces, the border/shadow chrome drifts. Captionless menus/galleries
-     * take the same path. Other captioned owned popups, such as embedded-browser
-     * authentication dialogs, must remain managed to avoid being clipped below
-     * the owner's GPU client surface. */
-    if ((style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
-        !(style & WS_THICKFRAME) && !(ex_style & WS_EX_APPWINDOW) &&
-        (!(style & WS_CAPTION) || office_nui_dialog))
+    owned_popup = (style & WS_POPUP) && NtUserGetWindowRelative(hwnd, GW_OWNER) &&
+                  !(style & (WS_CAPTION | WS_THICKFRAME)) && !(ex_style & WS_EX_APPWINDOW);
+    if (owned_popup)
     {
         TRACE("keeping owned popup hwnd=%p owner-relative\n", hwnd);
         return FALSE;
@@ -794,7 +778,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     /* Get the managed state with win_data unlocked, as is_window_managed
      * may need to query win_data information about other HWNDs and thus
      * acquire the lock itself internally. */
-    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)) && surface)
+    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)))
     {
         DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
         LONG width = new_rects->window.right - new_rects->window.left;

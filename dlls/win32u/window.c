@@ -34,6 +34,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 
+const WCHAR dcomp_synthetic_window_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
+
 #define USER_HANDLE_TO_INDEX(hwnd) ((LOWORD(hwnd) - FIRST_USER_HANDLE) >> 1)
 #define USER_HANDLE_FROM_INDEX(index, generation) UlongToHandle( (index << 1) + FIRST_USER_HANDLE + (generation << 16) )
 
@@ -1721,6 +1724,42 @@ HANDLE WINAPI NtUserGetProp( HWND hwnd, const WCHAR *str )
     SERVER_END_REQ;
     return (HANDLE)ret;
 }
+BOOL update_window_broadcast_exclusion( HWND hwnd, HWND target, BOOL add )
+{
+    BOOL ret;
+
+    SERVER_START_REQ( update_window_broadcast_exclusion )
+    {
+        req->window = wine_server_user_handle( hwnd );
+        req->target = wine_server_user_handle( target );
+        req->flags = add ? 1 : 2;
+        ret = !wine_server_call_err( req );
+    }
+    SERVER_END_REQ;
+    return ret;
+}
+
+BOOL get_window_broadcast_exclusion( HWND hwnd, HWND *target, UINT *refcount, BOOL *excluded )
+{
+    BOOL ret;
+
+    *target = 0;
+    *refcount = 0;
+    *excluded = FALSE;
+    SERVER_START_REQ( get_window_broadcast_exclusion )
+    {
+        req->window = wine_server_user_handle( hwnd );
+        ret = !wine_server_call_err( req );
+        if (ret)
+        {
+            *target = wine_server_ptr_handle( reply->target );
+            *refcount = reply->refcount;
+            *excluded = reply->excluded;
+        }
+    }
+    SERVER_END_REQ;
+    return ret;
+}
 
 /*****************************************************************************
  *           NtUserSetProp    (win32u.@)
@@ -2178,33 +2217,30 @@ static void constrain_office_net_ui_width( WINDOWPOS *winpos )
     if (available > 0 && winpos->cx > available) winpos->cx = available;
 }
 
-static HWND office_net_ui_yield_window;
-
 static void update_office_net_ui_yield_throttle( HWND hwnd, BOOL visible )
 {
+    LONG delta = 0;
+    WND *win;
     RECT rect;
     BOOL gallery;
 
     if (!is_office_net_ui_tool_window( hwnd )) return;
-
-    if (visible)
+    gallery = visible && get_window_rect( hwnd, &rect, get_thread_dpi() ) &&
+              rect.right - rect.left >= 80 && rect.bottom - rect.top >= 80 &&
+              rect.right - rect.left <= 900 && rect.bottom - rect.top <= 1000;
+    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return;
+    if (gallery && !(win->flags & WIN_YIELD_THROTTLE_ACTIVE))
     {
-        /* Cover Shapes/Table galleries and smaller color/Shape Fill flyouts
-         * (Office "Net UI Tool Window"), but skip tiny tooltips. */
-        gallery = get_window_rect( hwnd, &rect, get_thread_dpi() ) &&
-                  rect.right - rect.left >= 80 && rect.bottom - rect.top >= 80 &&
-                  rect.right - rect.left <= 900 && rect.bottom - rect.top <= 1000;
-        if (gallery)
-        {
-            office_net_ui_yield_window = hwnd;
-            setenv( "WINE_NETUI_YIELD_ACTIVE", "1", TRUE );
-        }
+        win->flags |= WIN_YIELD_THROTTLE_ACTIVE;
+        delta = 1;
     }
-    else if (hwnd == office_net_ui_yield_window)
+    else if (!gallery && (win->flags & WIN_YIELD_THROTTLE_ACTIVE))
     {
-        office_net_ui_yield_window = 0;
-        unsetenv( "WINE_NETUI_YIELD_ACTIVE" );
+        win->flags &= ~WIN_YIELD_THROTTLE_ACTIVE;
+        delta = -1;
     }
+    release_win_ptr( win );
+    if (delta) NtSetInformationThread( GetCurrentThread(), ThreadWineYieldExecutionState, &delta, sizeof(delta) );
 }
 
 /***********************************************************************
@@ -5665,6 +5701,8 @@ LRESULT destroy_window( HWND hwnd )
         wine_server_call( req );
     }
     SERVER_END_REQ;
+    update_window_broadcast_exclusion( hwnd, 0, FALSE );
+    NtUserRemoveProp( hwnd, dcomp_synthetic_window_prop );
 
     send_message( hwnd, WM_NCDESTROY, 0, 0 );
 
@@ -5882,8 +5920,8 @@ void destroy_thread_windows(void)
  *
  * Create a window handle with the server.
  */
-static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name, HINSTANCE class_instance,
-                                  HINSTANCE instance, BOOL ansi, DWORD style, DWORD ex_style )
+static WND *create_window_handle( HWND parent, HWND owner, HWND broadcast_owner, UNICODE_STRING *name,
+                                  HINSTANCE class_instance, HINSTANCE instance, BOOL ansi, DWORD style, DWORD ex_style )
 {
     UINT dpi_context = get_thread_dpi_awareness_context();
     HWND handle = 0, full_parent = 0, full_owner = 0;
@@ -5894,6 +5932,7 @@ static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name,
     {
         req->parent          = wine_server_user_handle( parent );
         req->owner           = wine_server_user_handle( owner );
+        req->broadcast_owner = wine_server_user_handle( broadcast_owner );
         req->class_instance  = wine_server_client_ptr( class_instance );
         req->instance        = wine_server_client_ptr( instance );
         req->dpi_context     = dpi_context;
@@ -5919,6 +5958,7 @@ static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name,
 
     if (!(win = calloc( 1, sizeof(*win) )))
     {
+        if (broadcast_owner) update_window_broadcast_exclusion( broadcast_owner, 0, FALSE );
         SERVER_START_REQ( destroy_window )
         {
             req->handle = wine_server_user_handle( handle );
@@ -6036,10 +6076,10 @@ static void map_dpi_create_struct( CREATESTRUCTW *cs, struct ratio dpi_to )
     cs->y = rect.top;
     cs->cx = rect.right - rect.left;
     cs->cy = rect.bottom - rect.top;
-}
 
+}
 /***********************************************************************
- *           NtUserCreateWindowEx (win32u.@)
+ *           NtUserCreateWindowEx  (win32u.@)
  */
 HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
                                   UNICODE_STRING *version, UNICODE_STRING *window_name,
@@ -6052,7 +6092,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     struct window_surface *surface;
     struct window_rects new_rects;
     CBT_CREATEWNDW cbtc;
-    HWND hwnd, toplevel, owner = 0;
+    HWND hwnd, toplevel, owner = 0, broadcast_owner = 0;
     CREATESTRUCTW cs;
     INT sw = SW_SHOW;
     RECT surface_rect;
@@ -6064,6 +6104,11 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
            ex_style, debugstr_us(class_name), debugstr_us(version), debugstr_us(window_name), style, x, y, cx, cy,
            parent, menu, class_instance, params, flags, instance, debugstr_w(class), ansi );
 
+    if (flags & NTUSER_CREATE_WINDOW_BROADCAST_OWNER)
+    {
+        broadcast_owner = (HWND)params;
+        params = NULL;
+    }
     cs.lpCreateParams = params;
     cs.hInstance  = instance ? instance : class_instance;
     cs.hMenu      = menu;
@@ -6119,7 +6164,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
 
     style = cs.style & ~WS_VISIBLE;
     ex_style = cs.dwExStyle & ~WS_EX_LAYERED;
-    if (!(win = create_window_handle( parent, owner, class_name, class_instance,
+    if (!(win = create_window_handle( parent, owner, broadcast_owner, class_name, class_instance,
                                       cs.hInstance, ansi, style, ex_style )))
         return 0;
     hwnd = win->handle;

@@ -21,7 +21,7 @@ SOURCES = \
 	monitor.c \
 	msg.c \
 	resource.c \
-	resource.rc \
+	popup.c \
 	scroll.c \
 	static.c \
 	sysparams.c \

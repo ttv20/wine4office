@@ -565,8 +565,8 @@ err:
  *          wayland_surface_set_toplevel_parent
  *
  * Mirrors Win32 owned-window relationships for managed dialogs. This keeps
- * transient Office windows above their owning document without forcing them
- * into the subsurface positioning path used by captionless popups.
+ * transient windows above their owning document without forcing them into
+ * the subsurface positioning path used by captionless popups.
  */
 void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
                                          struct wayland_surface *parent)
@@ -616,11 +616,11 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
     if (surface->wl_subsurface && surface->owner_hwnd == owner->hwnd &&
         surface->parent_surface == owner->wl_surface) return;
 
-    /* Win32 popup ownership can change transiently while nested Office UI is
-     * being rearranged. Never mirror a relationship that would make this
-     * surface a child of one of its own Wayland descendants: compositors treat
-     * that wl_subcompositor request as a fatal protocol error. Keep an existing
-     * valid parent until a later WindowPosChanged supplies an acyclic owner. */
+    /* Win32 popup ownership can change while nested UI is being rearranged.
+     * Never mirror a relationship that would make this surface a child of
+     * one of its own Wayland descendants: compositors treat that request as
+     * a fatal protocol error. Keep an existing valid parent until a later
+     * WindowPosChanged supplies an acyclic owner. */
     if (wayland_surface_is_ancestor(surface, owner))
     {
         WARN("ignoring cyclic subsurface reparent hwnd=%p owner=%p\n",
@@ -1556,6 +1556,12 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
+
+    /* A first presentation can arrive before the client surface has been
+     * attached to a roleful parent. Use the Win32 root as the presentation
+     * target so the callback can create that surface from the owner signal. */
+    if (!toplevel) toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
+    if (!toplevel) toplevel = hwnd;
 
     TRACE("client %p hwnd %p tracked toplevel %p attached toplevel %p subsurface %p\n",
             surface, hwnd, toplevel, surface->toplevel, surface->wl_subsurface);

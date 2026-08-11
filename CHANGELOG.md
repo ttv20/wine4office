@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Identify helper windows early and synchronize Wayland popup and systray lifetimes.
 - Fail unsupported GPU transfers safely and stabilize OpenGL/Vulkan presentation.
 - Make DXGI duplication output-aware, deadline-bound, and safe across clients.
 - Retain shared D3D resources in wineserver and validate cross-process metadata.

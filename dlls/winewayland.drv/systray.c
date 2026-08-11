@@ -8,6 +8,7 @@
 
 #include <dbus/dbus.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,20 @@ struct tray_icon
     int width, height;
     DBusConnection *connection;
     HANDLE thread;
+    BOOL deleting;
+    pthread_mutex_t mutex;
+};
+
+struct tray_icon_snapshot
+{
+    HWND owner;
+    UINT id;
+    UINT callback_message;
+    UINT version;
+    DWORD state;
+    char *tip;
+    BYTE *pixels;
+    int width, height;
 };
 
 static struct list icon_list = LIST_INIT(icon_list);
@@ -157,33 +172,74 @@ static struct tray_icon *get_icon(HWND owner, UINT id)
     return NULL;
 }
 
-static BOOL notify_owner(struct tray_icon *icon, UINT msg, int x, int y)
+static void free_snapshot(struct tray_icon_snapshot *snapshot)
 {
-    WPARAM wp = icon->id;
+    free(snapshot->tip);
+    free(snapshot->pixels);
+}
+
+static BOOL snapshot_icon(struct tray_icon *icon, struct tray_icon_snapshot *snapshot)
+{
+    size_t pixel_count;
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    pthread_mutex_lock(&icon->mutex);
+    if (icon->deleting)
+    {
+        pthread_mutex_unlock(&icon->mutex);
+        return FALSE;
+    }
+
+    snapshot->owner = icon->owner;
+    snapshot->id = icon->id;
+    snapshot->callback_message = icon->callback_message;
+    snapshot->version = icon->version;
+    snapshot->state = icon->state;
+    snapshot->width = icon->width;
+    snapshot->height = icon->height;
+    if (icon->tip) snapshot->tip = strdup(icon->tip);
+    if (icon->pixels && icon->width > 0 && icon->height > 0 &&
+        (size_t)icon->width <= SIZE_MAX / (size_t)icon->height)
+    {
+        pixel_count = (size_t)icon->width * (size_t)icon->height;
+        if (pixel_count <= SIZE_MAX / 4)
+        {
+            snapshot->pixels = malloc(pixel_count * 4);
+            if (snapshot->pixels) memcpy(snapshot->pixels, icon->pixels, pixel_count * 4);
+        }
+    }
+    pthread_mutex_unlock(&icon->mutex);
+    return TRUE;
+}
+
+static BOOL notify_owner(const struct tray_icon_snapshot *snapshot, UINT msg, int x, int y)
+{
+    WPARAM wp = snapshot->id;
     LPARAM lp = msg;
 
-    if (!icon->callback_message) return TRUE;
-    if (icon->version >= NOTIFYICON_VERSION_4)
+    if (!snapshot->callback_message) return TRUE;
+    if (snapshot->version >= NOTIFYICON_VERSION_4)
     {
         wp = MAKEWPARAM(x, y);
-        lp = MAKELPARAM(msg, icon->id);
+        lp = MAKELPARAM(msg, snapshot->id);
     }
-    TRACE("posting msg %#x to hwnd %p id %#x\n", msg, icon->owner, icon->id);
-    return NtUserMessageCall(icon->owner, icon->callback_message, wp, lp, 0,
+    TRACE("posting msg %#x to hwnd %p id %#x\n", msg, snapshot->owner, snapshot->id);
+    return NtUserMessageCall(snapshot->owner, snapshot->callback_message, wp, lp, 0,
                              NtUserSendNotifyMessage, FALSE);
 }
 
-static void activate_icon(struct tray_icon *icon, UINT down, UINT up, UINT select, int x, int y)
+static void activate_icon(const struct tray_icon_snapshot *snapshot, UINT down, UINT up,
+                          UINT select, int x, int y)
 {
-    notify_owner(icon, down, x, y);
+    notify_owner(snapshot, down, x, y);
     /* StatusNotifier has one semantic Activate method and no click count.  A
      * number of Windows tray applications only activate on a double click. */
-    if (down == WM_LBUTTONDOWN) notify_owner(icon, WM_LBUTTONDBLCLK, x, y);
-    notify_owner(icon, up, x, y);
-    if (icon->version && select) notify_owner(icon, select, x, y);
+    if (down == WM_LBUTTONDOWN) notify_owner(snapshot, WM_LBUTTONDBLCLK, x, y);
+    notify_owner(snapshot, up, x, y);
+    if (snapshot->version && select) notify_owner(snapshot, select, x, y);
 }
 
-static void append_pixmap(DBusMessageIter *variant, const struct tray_icon *icon)
+static void append_pixmap(DBusMessageIter *variant, const struct tray_icon_snapshot *icon)
 {
     DBusMessageIter array, item, bytes;
     dbus_int32_t width = icon->width, height = icon->height;
@@ -205,7 +261,7 @@ static void append_pixmap(DBusMessageIter *variant, const struct tray_icon *icon
 }
 
 static BOOL append_property_value(DBusMessageIter *iter, const char *name,
-                                  const struct tray_icon *icon)
+                                  const struct tray_icon_snapshot *icon)
 {
     DBusMessageIter variant, tooltip, pixmaps;
     const char *value = "";
@@ -224,7 +280,7 @@ static BOOL append_property_value(DBusMessageIter *iter, const char *name,
              !strcmp(name, "AttentionIconPixmap"))
     {
         dbus_message_iter_open_container(iter, DBUS_TYPE_VARIANT, "a(iiay)", &variant);
-        append_pixmap(&variant, !strcmp(name, "IconPixmap") ? icon : &(struct tray_icon){0});
+        append_pixmap(&variant, !strcmp(name, "IconPixmap") ? icon : &(struct tray_icon_snapshot){0});
         dbus_message_iter_close_container(iter, &variant);
         return TRUE;
     }
@@ -269,7 +325,8 @@ static BOOL append_property_value(DBusMessageIter *iter, const char *name,
     return TRUE;
 }
 
-static void append_dict_property(DBusMessageIter *array, const char *name, const struct tray_icon *icon)
+static void append_dict_property(DBusMessageIter *array, const char *name,
+                                  const struct tray_icon_snapshot *icon)
 {
     DBusMessageIter entry;
     dbus_message_iter_open_container(array, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
@@ -281,11 +338,15 @@ static void append_dict_property(DBusMessageIter *array, const char *name, const
 static DBusHandlerResult icon_message(DBusConnection *connection, DBusMessage *message, void *user_data)
 {
     struct tray_icon *icon = user_data;
+    struct tray_icon_snapshot snapshot;
+    DBusHandlerResult result = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     DBusMessage *reply = NULL;
     DBusMessageIter iter, array;
     DBusError error;
     const char *iface, *property;
     dbus_int32_t x = 0, y = 0;
+
+    if (!snapshot_icon(icon, &snapshot)) return result;
 
     dbus_error_init(&error);
     if (dbus_message_is_method_call(message, "org.freedesktop.DBus.Introspectable", "Introspect"))
@@ -300,7 +361,7 @@ static DBusHandlerResult icon_message(DBusConnection *connection, DBusMessage *m
     {
         reply = dbus_message_new_method_return(message);
         dbus_message_iter_init_append(reply, &iter);
-        if (strcmp(iface, SNI_IFACE) || !append_property_value(&iter, property, icon))
+        if (strcmp(iface, SNI_IFACE) || !append_property_value(&iter, property, &snapshot))
         {
             dbus_message_unref(reply);
             reply = dbus_message_new_error(message, DBUS_ERROR_UNKNOWN_PROPERTY, property);
@@ -317,7 +378,7 @@ static DBusHandlerResult icon_message(DBusConnection *connection, DBusMessage *m
         dbus_message_iter_init_append(reply, &iter);
         dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &array);
         if (!strcmp(iface, SNI_IFACE))
-            for (i = 0; i < ARRAY_SIZE(properties); ++i) append_dict_property(&array, properties[i], icon);
+            for (i = 0; i < ARRAY_SIZE(properties); ++i) append_dict_property(&array, properties[i], &snapshot);
         dbus_message_iter_close_container(&iter, &array);
     }
     else if ((dbus_message_is_method_call(message, SNI_IFACE, "Activate") ||
@@ -327,21 +388,25 @@ static DBusHandlerResult icon_message(DBusConnection *connection, DBusMessage *m
                                    DBUS_TYPE_INT32, &y, DBUS_TYPE_INVALID))
     {
         if (dbus_message_is_method_call(message, SNI_IFACE, "Activate"))
-            activate_icon(icon, WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT, x, y);
+            activate_icon(&snapshot, WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT, x, y);
         else if (dbus_message_is_method_call(message, SNI_IFACE, "SecondaryActivate"))
-            activate_icon(icon, WM_MBUTTONDOWN, WM_MBUTTONUP, 0, x, y);
+            activate_icon(&snapshot, WM_MBUTTONDOWN, WM_MBUTTONUP, 0, x, y);
         else
-            activate_icon(icon, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU, x, y);
+            activate_icon(&snapshot, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_CONTEXTMENU, x, y);
         reply = dbus_message_new_method_return(message);
     }
     else if (dbus_message_is_method_call(message, SNI_IFACE, "Scroll"))
         reply = dbus_message_new_method_return(message);
 
     dbus_error_free(&error);
-    if (!reply) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-    dbus_connection_send(connection, reply, NULL);
-    dbus_message_unref(reply);
-    return DBUS_HANDLER_RESULT_HANDLED;
+    if (reply)
+    {
+        dbus_connection_send(connection, reply, NULL);
+        dbus_message_unref(reply);
+        result = DBUS_HANDLER_RESULT_HANDLED;
+    }
+    free_snapshot(&snapshot);
+    return result;
 }
 
 static DBusObjectPathVTable icon_vtable = { .message_function = icon_message };
@@ -413,6 +478,9 @@ static void emit_signal(struct tray_icon *icon, const char *member)
 
 static BOOL modify_icon(struct tray_icon *icon, NOTIFYICONDATAW *nid)
 {
+    BOOL title_changed = FALSE, icon_changed = FALSE;
+
+    pthread_mutex_lock(&icon->mutex);
     if (nid->uFlags & NIF_MESSAGE) icon->callback_message = nid->uCallbackMessage;
     if (nid->uFlags & NIF_STATE)
         icon->state = (icon->state & ~nid->dwStateMask) | (nid->dwState & nid->dwStateMask);
@@ -420,8 +488,7 @@ static BOOL modify_icon(struct tray_icon *icon, NOTIFYICONDATAW *nid)
     {
         char *tip = strdup_utf8(nid->szTip);
         if (tip) { free(icon->tip); icon->tip = tip; }
-        emit_signal(icon, "NewTitle");
-        emit_signal(icon, "NewToolTip");
+        title_changed = TRUE;
     }
     if (nid->uFlags & NIF_ICON)
     {
@@ -433,15 +500,28 @@ static BOOL modify_icon(struct tray_icon *icon, NOTIFYICONDATAW *nid)
             icon->pixels = pixels;
             icon->width = width;
             icon->height = height;
-            emit_signal(icon, "NewIcon");
+            icon_changed = TRUE;
         }
     }
+    pthread_mutex_unlock(&icon->mutex);
+
+    if (title_changed)
+    {
+        emit_signal(icon, "NewTitle");
+        emit_signal(icon, "NewToolTip");
+    }
+    if (icon_changed) emit_signal(icon, "NewIcon");
     return TRUE;
 }
 
 static BOOL delete_icon(struct tray_icon *icon)
 {
-    list_remove(&icon->entry);
+    pthread_mutex_lock(&icon->mutex);
+    icon->deleting = TRUE;
+    pthread_mutex_unlock(&icon->mutex);
+
+    /* Closing and joining the dispatch thread drains an in-flight D-Bus
+     * callback before the state and user_data storage are released. */
     if (icon->connection)
     {
         dbus_connection_unregister_object_path(icon->connection, SNI_PATH);
@@ -450,18 +530,21 @@ static BOOL delete_icon(struct tray_icon *icon)
         {
             NtWaitForSingleObject(icon->thread, FALSE, NULL);
             NtClose(icon->thread);
+            icon->thread = NULL;
         }
         dbus_connection_unref(icon->connection);
+        icon->connection = NULL;
     }
     free(icon->tip);
     free(icon->pixels);
+    pthread_mutex_destroy(&icon->mutex);
     free(icon);
     return TRUE;
 }
 
 LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data)
 {
-    struct tray_icon *icon;
+    struct tray_icon *icon, *delete = NULL;
     LRESULT ret = FALSE;
 
     pthread_mutex_lock(&icon_mutex);
@@ -471,11 +554,20 @@ LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data)
     case NIM_ADD:
         if (icon) break;
         if (!(icon = calloc(1, sizeof(*icon)))) break;
+        if (pthread_mutex_init(&icon->mutex, NULL)) { free(icon); break; }
         icon->owner = data->hWnd;
         icon->id = data->uID;
         icon->state = (data->uFlags & NIF_STATE) ? data->dwState : 0;
         modify_icon(icon, data);
-        if (!register_icon(icon)) { free(icon->tip); free(icon->pixels); free(icon); ret = -1; break; }
+        if (!register_icon(icon))
+        {
+            free(icon->tip);
+            free(icon->pixels);
+            pthread_mutex_destroy(&icon->mutex);
+            free(icon);
+            ret = -1;
+            break;
+        }
         list_add_tail(&icon_list, &icon->entry);
         ret = TRUE;
         break;
@@ -483,24 +575,55 @@ LRESULT WAYLAND_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data)
         if (icon) ret = modify_icon(icon, data);
         break;
     case NIM_DELETE:
-        if (icon) ret = delete_icon(icon);
+        if (icon)
+        {
+            pthread_mutex_lock(&icon->mutex);
+            icon->deleting = TRUE;
+            pthread_mutex_unlock(&icon->mutex);
+            list_remove(&icon->entry);
+            delete = icon;
+            ret = TRUE;
+        }
         break;
     case NIM_SETVERSION:
-        if (icon) { icon->version = data->uVersion; ret = TRUE; }
+        if (icon)
+        {
+            pthread_mutex_lock(&icon->mutex);
+            icon->version = data->uVersion;
+            pthread_mutex_unlock(&icon->mutex);
+            ret = TRUE;
+        }
         break;
     default:
         ret = -1;
         break;
     }
     pthread_mutex_unlock(&icon_mutex);
+
+    if (delete) ret = delete_icon(delete);
     return ret;
 }
 
 void WAYLAND_CleanupIcons(HWND hwnd)
 {
     struct tray_icon *icon, *next;
+    struct list delete_list = LIST_INIT(delete_list);
+
     pthread_mutex_lock(&icon_mutex);
     LIST_FOR_EACH_ENTRY_SAFE(icon, next, &icon_list, struct tray_icon, entry)
-        if (icon->owner == hwnd) delete_icon(icon);
+        if (icon->owner == hwnd)
+        {
+            pthread_mutex_lock(&icon->mutex);
+            icon->deleting = TRUE;
+            pthread_mutex_unlock(&icon->mutex);
+            list_remove(&icon->entry);
+            list_add_tail(&delete_list, &icon->entry);
+        }
     pthread_mutex_unlock(&icon_mutex);
+
+    LIST_FOR_EACH_ENTRY_SAFE(icon, next, &delete_list, struct tray_icon, entry)
+    {
+        list_remove(&icon->entry);
+        delete_icon(icon);
+    }
 }
