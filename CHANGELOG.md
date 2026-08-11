@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix Office color picker popups on Wayland.
+
 ## 0.2.0-alpha — 2026-08-11
 
 - Make release archives reproducible without breaking linked files.
