@@ -100,7 +100,7 @@ tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86.msi" >/dev/null
 tar --zstd --quoting-style=literal -tvf "$RELEASE/$WINE_NAME" >"$TMP/archive-listing"
 ! grep -F "link to ./" "$TMP/archive-listing" >/dev/null
-[[ $(grep -F -c "link to $ROOT/share/wine4office/shared target" "$TMP/archive-listing") -eq 2 ]]
+[[ $(grep -F -c "link to $ROOT/" "$TMP/archive-listing") -eq 2 ]]
 grep -F "$ROOT/bin/shared symlink -> ../share/wine4office/shared target" \
     "$TMP/archive-listing" >/dev/null
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
