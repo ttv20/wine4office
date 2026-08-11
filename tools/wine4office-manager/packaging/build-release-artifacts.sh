@@ -44,10 +44,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 install -m 0755 "$MANAGER" "$TMP/$MANAGER_NAME"
 
-# Transform archive member and hard-link names. Keep symlink targets and every staged
-# runner file byte-for-byte and metadata-for-metadata as installed by Wine.
+# Transform archive member and hard-link names. Keep symlink targets, modes, and
+# every staged runner file byte-for-byte while normalizing volatile archive metadata.
 tar -C "$RUNNER" \
-    --format=gnu --sort=name \
+    --format=gnu --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
     --transform="flags=rhS;s|^\\.$|$WINE_ROOT|;s|^\\./|$WINE_ROOT/|" \
     -cf - . | zstd -T0 -19 --long=27 --no-progress -o "$TMP/$WINE_NAME"
 
