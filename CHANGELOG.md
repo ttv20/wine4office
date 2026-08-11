@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Audit the custom Wine delta and document the remaining memory-safety work.
 - Fix Teams installation and show its progress without leaving the Install page.
 - Install WebView2 and refresh 32-bit AppModel registration before installing Teams.
 - Fix DirectComposition tree updates, transforms, ordering, cleanup, and input state for Teams.
