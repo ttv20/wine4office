@@ -30,16 +30,45 @@ struct dxgi_output_duplication
     LONG refcount;
     struct wined3d_private_store private_store;
     IDXGIOutput6 *output;
+    struct dxgi_output_duplication *next;
+    HMONITOR monitor;
+    BOOL registered;
     ID3D11Device *device;
     ID3D11Texture2D *texture;
     IDXGISurface1 *surface;
     DXGI_OUTDUPL_DESC desc;
     BYTE *capture_buffer;
     UINT capture_buffer_size;
+    UINT capture_serial;
     LONG source_x;
     LONG source_y;
+    POINT cursor_position;
+    BOOL cursor_visible;
+    BOOL cursor_valid;
+    BOOL capture_valid;
+    BOOL frame_image_changed;
+    BOOL frame_pointer_changed;
+    BOOL portal_capture;
     BOOL frame_acquired;
 };
+static SRWLOCK duplication_lock = SRWLOCK_INIT;
+static struct dxgi_output_duplication *duplication_list;
+
+static void dxgi_output_duplication_unregister(struct dxgi_output_duplication *duplication)
+{
+    struct dxgi_output_duplication **cursor;
+
+    if (!duplication->registered)
+        return;
+
+    AcquireSRWLockExclusive(&duplication_lock);
+    cursor = &duplication_list;
+    while (*cursor != duplication)
+        cursor = &(*cursor)->next;
+    *cursor = duplication->next;
+    duplication->registered = FALSE;
+    ReleaseSRWLockExclusive(&duplication_lock);
+}
 
 static inline struct dxgi_output_duplication *impl_from_IDXGIOutputDuplication(
         IDXGIOutputDuplication *iface)
@@ -77,7 +106,14 @@ static ULONG STDMETHODCALLTYPE dxgi_output_duplication_Release(IDXGIOutputDuplic
 
     if (!refcount)
     {
-        WINE_UNIX_CALL(unix_release_capture, NULL);
+        struct dxgi_capture_output output =
+        {
+            duplication->source_x, duplication->source_y,
+            duplication->desc.ModeDesc.Width, duplication->desc.ModeDesc.Height,
+        };
+
+        dxgi_output_duplication_unregister(duplication);
+        if (duplication->portal_capture) WINE_UNIX_CALL(unix_release_capture, &output);
         IDXGISurface1_Release(duplication->surface);
         ID3D11Texture2D_Release(duplication->texture);
         ID3D11Device_Release(duplication->device);
@@ -131,15 +167,109 @@ static void STDMETHODCALLTYPE dxgi_output_duplication_GetDesc(IDXGIOutputDuplica
         *desc = duplication->desc;
 }
 
+static NTSTATUS dxgi_output_duplication_capture_gdi(struct dxgi_output_duplication *duplication,
+        UINT timeout)
+{
+    UINT width = duplication->desc.ModeDesc.Width, height = duplication->desc.ModeDesc.Height;
+    BITMAPINFO bitmap_info = {0};
+    HGDIOBJ previous_bitmap = NULL;
+    HBITMAP bitmap = NULL;
+    HDC memory_dc = NULL, screen_dc;
+    ULONGLONG start = GetTickCount64(), elapsed;
+    CURSORINFO cursor = {sizeof(cursor)};
+    POINT cursor_position;
+    BOOL cursor_visible, image_changed, pointer_changed;
+    void *bits = NULL;
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+    UINT delay;
+
+    if (!(screen_dc = GetDC(NULL))) return STATUS_NOT_SUPPORTED;
+    bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
+    bitmap_info.bmiHeader.biWidth = width;
+    bitmap_info.bmiHeader.biHeight = -(LONG)height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+    if (!(memory_dc = CreateCompatibleDC(screen_dc)) ||
+        !(bitmap = CreateDIBSection(screen_dc, &bitmap_info, DIB_RGB_COLORS, &bits, NULL, 0)) ||
+        !(previous_bitmap = SelectObject(memory_dc, bitmap)))
+        goto done;
+
+    for (;;)
+    {
+        if (!BitBlt(memory_dc, 0, 0, width, height, screen_dc, duplication->source_x,
+                    duplication->source_y, SRCCOPY | CAPTUREBLT))
+            goto done;
+        image_changed = !duplication->capture_valid ||
+                memcmp(duplication->capture_buffer, bits, (SIZE_T)width * height * 4);
+        if (GetCursorInfo(&cursor))
+        {
+            cursor_position.x = cursor.ptScreenPos.x - duplication->source_x;
+            cursor_position.y = cursor.ptScreenPos.y - duplication->source_y;
+            cursor_visible = (cursor.flags & CURSOR_SHOWING) && cursor_position.x >= 0 &&
+                    cursor_position.y >= 0 && cursor_position.x < (LONG)width &&
+                    cursor_position.y < (LONG)height;
+        }
+        else
+        {
+            cursor_position.x = cursor_position.y = 0;
+            cursor_visible = FALSE;
+        }
+        pointer_changed = !duplication->cursor_valid || cursor_visible != duplication->cursor_visible ||
+                (cursor_visible && (cursor_position.x != duplication->cursor_position.x ||
+                                    cursor_position.y != duplication->cursor_position.y));
+        if (image_changed || pointer_changed)
+        {
+            if (image_changed)
+            {
+                memcpy(duplication->capture_buffer, bits, (SIZE_T)width * height * 4);
+                duplication->capture_valid = TRUE;
+            }
+            duplication->cursor_position = cursor_position;
+            duplication->cursor_visible = cursor_visible;
+            duplication->cursor_valid = TRUE;
+            duplication->frame_image_changed = image_changed;
+            duplication->frame_pointer_changed = pointer_changed;
+            status = STATUS_SUCCESS;
+            break;
+        }
+        if (!timeout)
+        {
+            status = STATUS_TIMEOUT;
+            break;
+        }
+        if (timeout != ~0u)
+        {
+            elapsed = GetTickCount64() - start;
+            if (elapsed >= timeout)
+            {
+                status = STATUS_TIMEOUT;
+                break;
+            }
+            delay = min(10u, timeout - (UINT)elapsed);
+        }
+        else delay = 10;
+        Sleep(delay);
+    }
+
+done:
+    if (previous_bitmap) SelectObject(memory_dc, previous_bitmap);
+    if (bitmap) DeleteObject(bitmap);
+    if (memory_dc) DeleteDC(memory_dc);
+    ReleaseDC(NULL, screen_dc);
+    return status;
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIOutputDuplication *iface,
         UINT timeout, DXGI_OUTDUPL_FRAME_INFO *frame_info, IDXGIResource **desktop_resource)
 {
     struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
     struct dxgi_capture_params capture = {0};
     BITMAPINFO bitmap_info = {0};
-    HDC surface_dc, screen_dc;
+    HDC surface_dc;
+    ULONGLONG start, elapsed;
+    UINT portal_timeout;
     BOOL captured = FALSE;
-    POINT cursor;
     NTSTATUS status;
     HRESULT hr;
 
@@ -149,25 +279,32 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
     *desktop_resource = NULL;
     memset(frame_info, 0, sizeof(*frame_info));
 
-    if (FAILED(hr = IDXGISurface1_GetDC(duplication->surface, TRUE, &surface_dc)))
+    start = GetTickCount64();
+    status = dxgi_output_duplication_capture_gdi(duplication, timeout);
+    if (status == STATUS_TIMEOUT) return DXGI_ERROR_WAIT_TIMEOUT;
+    if (!status) captured = TRUE;
+    else
     {
-        WARN("Failed to get duplication surface DC, hr %#lx.\n", hr);
-        return hr;
-    }
-
-    if ((screen_dc = GetDC(NULL)))
-    {
-        captured = BitBlt(surface_dc, 0, 0, duplication->desc.ModeDesc.Width,
-                duplication->desc.ModeDesc.Height, screen_dc, duplication->source_x,
-                duplication->source_y, SRCCOPY | CAPTUREBLT);
-        ReleaseDC(NULL, screen_dc);
-    }
-
-    if (!captured)
-    {
+        if (!duplication->portal_capture)
+        {
+            WARN("Portal capture backend is unavailable.\n");
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+        if (timeout == ~0u)
+            portal_timeout = ~0u;
+        else
+        {
+            elapsed = GetTickCount64() - start;
+            portal_timeout = elapsed >= timeout ? 0 : timeout - (UINT)elapsed;
+        }
         capture.buffer = duplication->capture_buffer;
+        capture.output.source_x = duplication->source_x;
+        capture.output.source_y = duplication->source_y;
+        capture.output.width = duplication->desc.ModeDesc.Width;
+        capture.output.height = duplication->desc.ModeDesc.Height;
         capture.buffer_size = duplication->capture_buffer_size;
-        capture.timeout = timeout;
+        capture.timeout = portal_timeout;
+        capture.serial = duplication->capture_serial;
         status = WINE_UNIX_CALL(unix_capture_workspace, &capture);
         if (status == STATUS_BUFFER_TOO_SMALL && capture.width && capture.height &&
                 capture.stride == capture.width * 4 &&
@@ -188,27 +325,43 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
                 capture.stride == capture.width * 4 &&
                 capture.format == DXGI_CAPTURE_FORMAT_BGRA)
         {
-            bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
-            bitmap_info.bmiHeader.biWidth = capture.width;
-            bitmap_info.bmiHeader.biHeight = -(LONG)capture.height;
-            bitmap_info.bmiHeader.biPlanes = 1;
-            bitmap_info.bmiHeader.biBitCount = 32;
-            bitmap_info.bmiHeader.biCompression = BI_RGB;
-            captured = StretchDIBits(surface_dc, 0, 0,
-                    duplication->desc.ModeDesc.Width, duplication->desc.ModeDesc.Height,
-                    0, 0, capture.width, capture.height, capture.buffer,
-                    &bitmap_info, DIB_RGB_COLORS, SRCCOPY) == duplication->desc.ModeDesc.Height;
+            captured = TRUE;
+            duplication->capture_serial = capture.serial;
+            duplication->frame_image_changed = TRUE;
+            duplication->frame_pointer_changed = FALSE;
         }
         else if (status == STATUS_TIMEOUT)
         {
-            IDXGISurface1_ReleaseDC(duplication->surface, NULL);
             return DXGI_ERROR_WAIT_TIMEOUT;
+        }
+        else if (status == STATUS_NOT_SUPPORTED || status == STATUS_ACCESS_DENIED)
+        {
+            return DXGI_ERROR_UNSUPPORTED;
         }
     }
 
     if (!captured)
     {
         WARN("Failed to copy the desktop into the duplication surface.\n");
+        return DXGI_ERROR_ACCESS_LOST;
+    }
+
+    if (FAILED(hr = IDXGISurface1_GetDC(duplication->surface, TRUE, &surface_dc)))
+    {
+        WARN("Failed to get duplication surface DC, hr %#lx.\n", hr);
+        return hr;
+    }
+    bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
+    bitmap_info.bmiHeader.biWidth = capture.width ? capture.width : duplication->desc.ModeDesc.Width;
+    bitmap_info.bmiHeader.biHeight = -(LONG)(capture.height ? capture.height : duplication->desc.ModeDesc.Height);
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+    if (StretchDIBits(surface_dc, 0, 0, duplication->desc.ModeDesc.Width,
+            duplication->desc.ModeDesc.Height, 0, 0, bitmap_info.bmiHeader.biWidth,
+            -bitmap_info.bmiHeader.biHeight, duplication->capture_buffer, &bitmap_info,
+            DIB_RGB_COLORS, SRCCOPY) != duplication->desc.ModeDesc.Height)
+    {
         IDXGISurface1_ReleaseDC(duplication->surface, NULL);
         return DXGI_ERROR_ACCESS_LOST;
     }
@@ -220,14 +373,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIO
             &IID_IDXGIResource, (void **)desktop_resource)))
         return hr;
 
-    QueryPerformanceCounter(&frame_info->LastPresentTime);
+    if (duplication->frame_image_changed) QueryPerformanceCounter(&frame_info->LastPresentTime);
     frame_info->AccumulatedFrames = 1;
-    frame_info->TotalMetadataBufferSize = sizeof(RECT);
-    if (GetCursorPos(&cursor))
+    frame_info->TotalMetadataBufferSize = duplication->frame_image_changed ? sizeof(RECT) : 0;
+    if (duplication->frame_pointer_changed)
     {
-        frame_info->PointerPosition.Position = cursor;
-        frame_info->PointerPosition.Visible = TRUE;
-        frame_info->LastMouseUpdateTime = frame_info->LastPresentTime;
+        frame_info->PointerPosition.Position = duplication->cursor_position;
+        frame_info->PointerPosition.Visible = duplication->cursor_visible;
+        QueryPerformanceCounter(&frame_info->LastMouseUpdateTime);
     }
     duplication->frame_acquired = TRUE;
     return S_OK;
@@ -240,7 +393,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetFrameDirtyRects(
 
     if (!required_size || !duplication->frame_acquired)
         return DXGI_ERROR_INVALID_CALL;
-    *required_size = sizeof(*buffer);
+    *required_size = duplication->frame_image_changed ? sizeof(*buffer) : 0;
+    if (!*required_size) return S_OK;
     if (buffer_size < sizeof(*buffer) || !buffer)
         return DXGI_ERROR_MORE_DATA;
     SetRect(buffer, 0, 0, duplication->desc.ModeDesc.Width, duplication->desc.ModeDesc.Height);
@@ -317,8 +471,10 @@ static HRESULT dxgi_output_duplication_create(IDXGIOutput6 *output, IUnknown *de
         IDXGIOutputDuplication **output_duplication)
 {
     struct dxgi_output_duplication *duplication;
+    struct dxgi_output_duplication *current;
     D3D11_TEXTURE2D_DESC texture_desc = {0};
     DXGI_OUTPUT_DESC output_desc;
+    NTSTATUS status;
     HRESULT hr;
 
     if (!output_duplication)
@@ -347,8 +503,27 @@ static HRESULT dxgi_output_duplication_create(IDXGIOutput6 *output, IUnknown *de
 
     duplication->output = output;
     IDXGIOutput6_AddRef(output);
+    AcquireSRWLockExclusive(&duplication_lock);
+    for (current = duplication_list; current; current = current->next)
+        if (current->monitor == output_desc.Monitor)
+            break;
+    if (current)
+    {
+        hr = E_INVALIDARG;
+    }
+    else
+    {
+        duplication->monitor = output_desc.Monitor;
+        duplication->next = duplication_list;
+        duplication_list = duplication;
+        duplication->registered = TRUE;
+    }
+    ReleaseSRWLockExclusive(&duplication_lock);
+    if (current)
+        goto fail;
     duplication->source_x = output_desc.DesktopCoordinates.left;
     duplication->source_y = output_desc.DesktopCoordinates.top;
+    duplication->portal_capture = TRUE;
     duplication->desc.ModeDesc.Width = output_desc.DesktopCoordinates.right
             - output_desc.DesktopCoordinates.left;
     duplication->desc.ModeDesc.Height = output_desc.DesktopCoordinates.bottom
@@ -382,6 +557,12 @@ static HRESULT dxgi_output_duplication_create(IDXGIOutput6 *output, IUnknown *de
             &IID_IDXGISurface1, (void **)&duplication->surface)))
         goto fail;
 
+    if (texture_desc.Width > UINT_MAX / 4 ||
+        texture_desc.Height > UINT_MAX / (texture_desc.Width * 4))
+    {
+        hr = E_OUTOFMEMORY;
+        goto fail;
+    }
     duplication->capture_buffer_size = texture_desc.Width * texture_desc.Height * 4;
     if (!(duplication->capture_buffer = malloc(duplication->capture_buffer_size)))
     {
@@ -389,12 +570,29 @@ static HRESULT dxgi_output_duplication_create(IDXGIOutput6 *output, IUnknown *de
         goto fail;
     }
 
+    {
+        struct dxgi_capture_output capture_output =
+        {
+            duplication->source_x, duplication->source_y,
+            duplication->desc.ModeDesc.Width, duplication->desc.ModeDesc.Height,
+        };
+
+        status = WINE_UNIX_CALL(unix_addref_capture, &capture_output);
+        if (status != STATUS_SUCCESS)
+        {
+            duplication->portal_capture = FALSE;
+            hr = DXGI_ERROR_UNSUPPORTED;
+            goto fail;
+        }
+    }
     *output_duplication = &duplication->IDXGIOutputDuplication_iface;
+
     TRACE("Created desktop duplication %p for %ux%u output.\n", duplication,
             texture_desc.Width, texture_desc.Height);
     return S_OK;
 
 fail:
+    dxgi_output_duplication_unregister(duplication);
     if (duplication->surface)
         IDXGISurface1_Release(duplication->surface);
     if (duplication->texture)

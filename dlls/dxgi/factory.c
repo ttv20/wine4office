@@ -19,7 +19,6 @@
 
 #include "dxgi_private.h"
 #include "dwmapi.h"
-#include "imm.h"
 #include "wine/dwmapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
@@ -30,6 +29,38 @@ WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
 static const WCHAR dcomp_synthetic_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
+
+static void dxgi_mark_synthetic_window(HWND window)
+{
+    SetPropW(window, dcomp_synthetic_window_prop, ULongToHandle(1));
+}
+
+static LRESULT CALLBACK dxgi_synthetic_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message == WM_NCCREATE) dxgi_mark_synthetic_window(window);
+    return DefWindowProcA(window, message, wparam, lparam);
+}
+
+static BOOL CALLBACK register_dxgi_synthetic_window_class(INIT_ONCE *once, void *param, void **context)
+{
+    static const char class_name[] = "Wine DXGI synthetic window";
+    WNDCLASSA class = {0};
+
+    class.lpfnWndProc = dxgi_synthetic_window_proc;
+    class.hInstance = GetModuleHandleA("dxgi.dll");
+    class.lpszClassName = class_name;
+    return RegisterClassA(&class) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+static HWND create_dxgi_synthetic_window(DWORD ex_style, const char *title, DWORD style,
+        int x, int y, int width, int height)
+{
+    static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
+
+    if (!InitOnceExecuteOnce(&init_once, register_dxgi_synthetic_window_class, NULL, NULL)) return NULL;
+    return CreateWindowExA(ex_style, "Wine DXGI synthetic window", title, style, x, y, width, height,
+            NULL, NULL, GetModuleHandleA("dxgi.dll"), NULL);
+}
 
 static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *iface)
 {
@@ -85,7 +116,9 @@ static ULONG STDMETHODCALLTYPE dxgi_factory_Release(IWineDXGIFactory *iface)
     if (!refcount)
     {
         if (factory->device_window)
+        {
             DestroyWindow(factory->device_window);
+        }
 
         wined3d_decref(factory->wined3d);
         wined3d_private_store_cleanup(&factory->private_store);
@@ -285,25 +318,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForHwnd(IWineDXGIFa
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC windowed_fullscreen_desc = {0};
     IWineDXGISwapChainFactory *swapchain_factory;
     ID3D12CommandQueue *command_queue;
-    WCHAR class_name[64] = {0};
-    RECT window_rect = {0};
     HRESULT hr;
 
     TRACE("iface %p, device %p, window %p, desc %p, fullscreen_desc %p, output %p, swapchain %p.\n",
             iface, device, window, desc, fullscreen_desc, output, swapchain);
 
-    if (desc && GetEnvironmentVariableA("WINE_DXGI_PRESENT_DIAG", NULL, 0))
-    {
-        GetClassNameW(window, class_name, ARRAY_SIZE(class_name));
-        GetWindowRect(window, &window_rect);
-        WARN("OFFICE_SWAPCHAIN_CREATE hwnd %p class %s rect %s size %ux%u format %#x "
-                "stereo %u samples %u/%u usage %#x buffers %u scaling %#x effect %#x "
-                "alpha %#x flags %#x.\n", window, debugstr_w(class_name),
-                wine_dbgstr_rect(&window_rect), desc->Width, desc->Height, desc->Format,
-                desc->Stereo, desc->SampleDesc.Count, desc->SampleDesc.Quality,
-                desc->BufferUsage, desc->BufferCount, desc->Scaling, desc->SwapEffect,
-                desc->AlphaMode, desc->Flags);
-    }
 
     if (!device || !window || !desc || !swapchain)
     {
@@ -416,7 +435,30 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
 {
     HWND root;
     LONG offset_x, offset_y, scale_x = 10000, scale_y = 10000;
-    LONG width, height;
+    LONGLONG base_width, base_height, scaled_width, scaled_height;
+    LONGLONG left, top, right, bottom;
+    if (GetPropW(window, L"__wine_dcomp_bounds_enabled"))
+    {
+        LONG bounds_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_x"));
+        LONG bounds_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_y"));
+        LONG bounds_width = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_width"));
+        LONG bounds_height = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_height"));
+
+        if ((root = GetAncestor(target, GA_ROOT))) target = root;
+        if (bounds_width <= 0 || bounds_height <= 0 || !GetClientRect(target, rect))
+            return FALSE;
+        MapWindowPoints(target, NULL, (POINT *)rect, 2);
+        left = (LONGLONG)rect->left + bounds_x;
+        top = (LONGLONG)rect->top + bounds_y;
+        right = left + bounds_width;
+        bottom = top + bounds_height;
+        if (left < INT_MIN || left > INT_MAX || top < INT_MIN || top > INT_MAX
+                || right < INT_MIN || right > INT_MAX || bottom < INT_MIN || bottom > INT_MAX)
+            return FALSE;
+        SetRect(rect, left, top, right, bottom);
+        return TRUE;
+    }
+
 
     if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
         !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
@@ -436,13 +478,29 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
     {
         scale_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_x"));
         scale_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_y"));
+        if (scale_x <= 0 || scale_y <= 0) return FALSE;
     }
-    width = MulDiv(rect->right - rect->left, scale_x, 10000);
-    height = MulDiv(rect->bottom - rect->top, scale_y, 10000);
-    rect->left += offset_x;
-    rect->top += offset_y;
-    rect->right = rect->left + width;
-    rect->bottom = rect->top + height;
+
+    base_width = (LONGLONG)rect->right - rect->left;
+    base_height = (LONGLONG)rect->bottom - rect->top;
+    if (base_width < 0 || base_height < 0) return FALSE;
+    scaled_width = base_width * scale_x;
+    scaled_height = base_height * scale_y;
+    scaled_width = scaled_width / 10000 + (scaled_width % 10000 >= 5000);
+    scaled_height = scaled_height / 10000 + (scaled_height % 10000 >= 5000);
+    if (scaled_width > INT_MAX || scaled_height > INT_MAX) return FALSE;
+
+    left = (LONGLONG)rect->left + offset_x;
+    top = (LONGLONG)rect->top + offset_y;
+    right = left + scaled_width;
+    bottom = top + scaled_height;
+    if (left < INT_MIN || left > INT_MAX || top < INT_MIN || top > INT_MAX ||
+        right < INT_MIN || right > INT_MAX || bottom < INT_MIN || bottom > INT_MAX)
+        return FALSE;
+    rect->left = (LONG)left;
+    rect->top = (LONG)top;
+    rect->right = (LONG)right;
+    rect->bottom = (LONG)bottom;
     return TRUE;
 }
 
@@ -831,6 +889,7 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
 
 static void dxgi_composition_window_update_backdrop(HWND window)
 {
+
     /* Base DComp surfaces are opaque desktop windows. Premultiplied alpha
      * therefore needs to be flattened against the active application theme. */
     SetPropW(window, L"__wine_dcomp_composite_alpha_background",
@@ -1106,7 +1165,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
 {
     BOOL own_window = TRUE;
     HRESULT hr;
-    HWND window, ime_window;
+    HWND window;
 
     TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
@@ -1116,22 +1175,21 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     /* A composition swapchain is windowless. Wine uses an initially hidden
      * helper only as a local presentation surface; dcomp binds it to an HWND
      * later, when SetContent connects the swapchain to a targeted visual. */
-    if (!(window = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
-            "static", "DXGI composition window", WS_POPUP,
-            0, 0, max(desc->Width, 1), max(desc->Height, 1), NULL, NULL, NULL, NULL)))
+    if (!(window = create_dxgi_synthetic_window(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            "DXGI composition window", WS_POPUP,
+            0, 0, max(desc->Width, 1), max(desc->Height, 1))))
         return E_FAIL;
 
     /* Composition swapchains are windowless on Windows. The HWND and default
      * IME window created here are Wine presentation details, often owned by a
      * render thread which has no Win32 message loop. Keep them out of
      * HWND_BROADCAST delivery. */
-    SetPropW(window, dcomp_synthetic_window_prop, ULongToHandle(1));
-    if ((ime_window = ImmGetDefaultIMEWnd(window)))
-        SetPropW(ime_window, dcomp_synthetic_window_prop, ULongToHandle(1));
-
     if (FAILED(hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window, desc, NULL, output, swapchain)))
     {
-        if (own_window) DestroyWindow(window);
+        if (own_window)
+        {
+            DestroyWindow(window);
+        }
         return hr;
     }
     if (own_window) d3d11_swapchain_set_composition_window(*swapchain, window);
@@ -1369,22 +1427,17 @@ HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended)
 
 HWND dxgi_factory_get_device_window(struct dxgi_factory *factory)
 {
-    HWND ime_window;
-
     wined3d_mutex_lock();
 
     if (!factory->device_window)
     {
-        if (!(factory->device_window = CreateWindowA("static", "DXGI device window",
-                WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL)))
+        if (!(factory->device_window = create_dxgi_synthetic_window(0, "DXGI device window",
+                WS_DISABLED, 0, 0, 0, 0)))
         {
             wined3d_mutex_unlock();
             ERR("Failed to create a window.\n");
             return NULL;
         }
-        SetPropW(factory->device_window, dcomp_synthetic_window_prop, ULongToHandle(1));
-        if ((ime_window = ImmGetDefaultIMEWnd(factory->device_window)))
-            SetPropW(ime_window, dcomp_synthetic_window_prop, ULongToHandle(1));
         SetWindowPos(factory->device_window, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         TRACE("Created device window %p for factory %p.\n", factory->device_window, factory);
     }

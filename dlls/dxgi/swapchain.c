@@ -18,6 +18,7 @@
  */
 
 #include "dxgi_private.h"
+#include "wine/dcomp.h"
 
 #define VKD3D_NO_VULKAN_H
 #define VKD3D_NO_WIN32_TYPES
@@ -203,6 +204,8 @@ static HWND d3d11_swapchain_get_hwnd(struct d3d11_swapchain *swapchain)
 
     return wined3d_desc.device_window;
 }
+static const struct IDXGISwapChain4Vtbl d3d11_swapchain_vtbl;
+
 
 static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
 {
@@ -214,6 +217,32 @@ void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
     swapchain->composition_window = window;
 }
+HRESULT WINAPI __wine_dxgi_set_composition_description(IDXGISwapChain1 *iface,
+        const struct wine_dcomp_visual_desc *desc)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *swapchain4;
+    HRESULT hr;
+
+    if (!iface || (desc && (desc->version != WINE_DCOMP_VISUAL_DESC_VERSION
+            || !(desc->flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE))))
+        return E_INVALIDARG;
+    if (FAILED(hr = IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4,
+            (void **)&swapchain4)))
+        return hr;
+    if (swapchain4->lpVtbl != &d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(swapchain4);
+        return E_NOINTERFACE;
+    }
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+    wined3d_mutex_lock();
+    wined3d_swapchain_set_composition_desc(swapchain->wined3d_swapchain, desc);
+    wined3d_mutex_unlock();
+    IDXGISwapChain4_Release(swapchain4);
+    return S_OK;
+}
+
 
 /* IUnknown methods */
 
@@ -278,7 +307,9 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
         if (composition_window)
+        {
             DestroyWindow(composition_window);
+        }
     }
 
     return refcount;
@@ -344,6 +375,26 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
 static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 {
     HWND root;
+    if (GetPropW(window, L"__wine_dcomp_bounds_enabled"))
+    {
+        LONG x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_x"));
+        LONG y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_y"));
+        LONG width = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_width"));
+        LONG height = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_height"));
+
+        if ((root = GetAncestor(target, GA_ROOT))) target = root;
+        if (width <= 0 || height <= 0 || !GetClientRect(target, rect)) return FALSE;
+        MapWindowPoints(target, NULL, (POINT *)rect, 2);
+        if ((LONGLONG)rect->left + x < INT_MIN || (LONGLONG)rect->left + x > INT_MAX
+                || (LONGLONG)rect->top + y < INT_MIN || (LONGLONG)rect->top + y > INT_MAX
+                || (LONGLONG)rect->left + x + width > INT_MAX
+                || (LONGLONG)rect->top + y + height > INT_MAX)
+            return FALSE;
+        SetRect(rect, rect->left + x, rect->top + y,
+                rect->left + x + width, rect->top + y + height);
+        return TRUE;
+    }
+
 
     if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
         !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
@@ -447,7 +498,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     }
 
     window = d3d11_swapchain_get_hwnd(swapchain);
-    if (GetPropW(window, L"__wine_dcomp_clip_enabled"))
+    if (GetPropW(window, L"__wine_dcomp_clip_enabled")
+            && !GetPropW(window, L"__wine_dcomp_bounds_enabled"))
     {
         source_rect.left = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_left"));
         source_rect.top = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_top"));
@@ -477,27 +529,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *ifac
 static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGISwapChain4 *iface, UINT sync_interval, UINT flags)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    HWND hwnd = d3d11_swapchain_get_hwnd(swapchain);
-    ID3D11Texture2D *back = NULL;
-    D3D11_TEXTURE2D_DESC desc = {0};
-    WCHAR class_name[64] = {0};
     HRESULT hr;
 
     TRACE("iface %p, sync_interval %u, flags %#x.\n", iface, sync_interval, flags);
-    if (GetEnvironmentVariableA("WINE_DXGI_PRESENT_DIAG", NULL, 0))
-    {
-        GetClassNameW(hwnd, class_name, ARRAY_SIZE(class_name));
-        if (SUCCEEDED(d3d11_swapchain_GetBuffer(iface, 0, &IID_ID3D11Texture2D, (void **)&back)))
-        {
-            ID3D11Texture2D_GetDesc(back, &desc);
-            ID3D11Texture2D_Release(back);
-        }
-        WARN("OFFICE_PRESENT iface %p hwnd %p class %s size %ux%u sync %u flags %#x.\n",
-                iface, hwnd, debugstr_w(class_name), desc.Width, desc.Height, sync_interval, flags);
-    }
-    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, NULL)))
-        WARN("Failed to update presentation shadow, hr %#lx.\n", hr);
-    return d3d11_swapchain_present(swapchain, sync_interval, flags);
+    hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+        swapchain->present1_shadow_valid = FALSE;
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
@@ -955,7 +993,7 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
     if (parameters && parameters->DirtyRectsCount && !parameters->pDirtyRects)
         return E_INVALIDARG;
     if (parameters && (!!parameters->pScrollRect != !!parameters->pScrollOffset))
-        WARN("Present1 scroll rectangle and offset should be specified together.\n");
+        return E_INVALIDARG;
     if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
             0, &IID_ID3D11Texture2D, (void **)&back)))
         return hr;
@@ -1043,43 +1081,27 @@ done:
     return hr;
 }
 
+
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface,
         UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS *present_parameters)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    const RECT *dirty = present_parameters && present_parameters->DirtyRectsCount
-            ? present_parameters->pDirtyRects : NULL;
-    HWND hwnd = d3d11_swapchain_get_hwnd(swapchain);
-    ID3D11Texture2D *back = NULL;
-    D3D11_TEXTURE2D_DESC desc = {0};
-    WCHAR class_name[64] = {0};
     HRESULT hr;
 
     TRACE("iface %p, sync_interval %u, flags %#x, present_parameters %p.\n",
             iface, sync_interval, flags, present_parameters);
-    if (GetEnvironmentVariableA("WINE_DXGI_PRESENT_DIAG", NULL, 0))
-    {
-        GetClassNameW(hwnd, class_name, ARRAY_SIZE(class_name));
-        if (SUCCEEDED(d3d11_swapchain_GetBuffer(iface, 0, &IID_ID3D11Texture2D, (void **)&back)))
-        {
-            ID3D11Texture2D_GetDesc(back, &desc);
-            ID3D11Texture2D_Release(back);
-        }
-        WARN("OFFICE_PRESENT1 iface %p hwnd %p class %s size %ux%u dirty_count %u "
-                "dirty0 %s scroll %s offset %s.\n", iface, hwnd, debugstr_w(class_name),
-                desc.Width, desc.Height,
-                present_parameters ? present_parameters->DirtyRectsCount : 0,
-                dirty ? wine_dbgstr_rect(dirty) : "(null)",
-                present_parameters && present_parameters->pScrollRect
-                    ? wine_dbgstr_rect(present_parameters->pScrollRect) : "(null)",
-                present_parameters && present_parameters->pScrollOffset
-                    ? wine_dbg_sprintf("(%ld,%ld)", present_parameters->pScrollOffset->x,
-                            present_parameters->pScrollOffset->y) : "(null)");
-    }
+    if (present_parameters && ((present_parameters->DirtyRectsCount
+            && !present_parameters->pDirtyRects)
+            || !!present_parameters->pScrollRect != !!present_parameters->pScrollOffset))
+        return E_INVALIDARG;
+    if (sync_interval > 4 || (flags & DXGI_PRESENT_TEST))
+        return d3d11_swapchain_present(swapchain, sync_interval, flags);
     if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, present_parameters)))
-        WARN("Failed to preserve Present1 contents, hr %#lx.\n", hr);
-
-    return d3d11_swapchain_present(swapchain, sync_interval, flags);
+        return hr;
+    hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
+    if (FAILED(hr))
+        swapchain->present1_shadow_valid = FALSE;
+    return hr;
 }
 
 static BOOL STDMETHODCALLTYPE d3d11_swapchain_IsTemporaryMonoSupported(IDXGISwapChain4 *iface)

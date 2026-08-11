@@ -1,7 +1,7 @@
 MODULE    = dxgi.dll
 UNIXLIB   = dxgi.so
 IMPORTLIB = dxgi
-IMPORTS   = advapi32 gdi32 dxguid imm32 uuid wined3d user32 win32u
+IMPORTS   = advapi32 gdi32 dxguid uuid wined3d user32 win32u
 EXTRAINCL = $(VKD3D_PE_CFLAGS)
 UNIX_CFLAGS = $(DBUS_CFLAGS) $(PIPEWIRE_CFLAGS)
 UNIX_LIBS = $(DBUS_LIBS) $(PIPEWIRE_LIBS) $(PTHREAD_LIBS)

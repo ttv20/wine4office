@@ -5390,10 +5390,14 @@ static void test_swapchain_parameters(void)
 static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
 {
     static const DWORD flags[] = {0, DXGI_PRESENT_TEST};
+    DXGI_PRESENT_PARAMETERS present_parameters = {0};
     DXGI_SWAP_CHAIN_DESC swapchain_desc;
     IDXGISwapChain *swapchain;
+    IDXGISwapChain1 *swapchain1;
     IDXGIFactory *factory;
     IDXGIOutput *output;
+    RECT scroll_rect = {0};
+    POINT scroll_offset = {0};
     BOOL fullscreen;
     unsigned int i;
     ULONG refcount;
@@ -5425,6 +5429,29 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
     hr = IDXGISwapChain_Present(swapchain, 0, 0);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(IsWindowVisible(swapchain_desc.OutputWindow), "Present hid the output window.\n");
+    if (!is_d3d12)
+    {
+        hr = IDXGISwapChain_QueryInterface(swapchain, &IID_IDXGISwapChain1, (void **)&swapchain1);
+        if (SUCCEEDED(hr))
+        {
+            present_parameters.DirtyRectsCount = 1;
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == E_INVALIDARG, "Present1 with a NULL dirty rectangle array returned %#lx.\n", hr);
+            present_parameters.DirtyRectsCount = 0;
+            present_parameters.pScrollRect = &scroll_rect;
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == E_INVALIDARG, "Present1 with a missing scroll offset returned %#lx.\n", hr);
+            present_parameters.pScrollRect = NULL;
+            present_parameters.pScrollOffset = &scroll_offset;
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == E_INVALIDARG, "Present1 with a missing scroll rectangle returned %#lx.\n", hr);
+            IDXGISwapChain1_Release(swapchain1);
+        }
+        else
+        {
+            win_skip("IDXGISwapChain1 is unavailable.\n");
+        }
+    }
 
     for (i = 0; i < 10; ++i)
     {
@@ -9034,6 +9061,174 @@ static void test_subresource_surface(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_output_duplication(void)
+{
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *d3d_device;
+    IDXGIAdapter *adapter;
+    IDXGIOutput *output, *duplicate_output, *secondary_output;
+    IDXGIOutput1 *output1, *duplicate_output1, *secondary_output1;
+    IDXGIOutputDuplication *duplication, *survivor, *secondary_duplication, *duplicate;
+    IDXGIResource *resource;
+    DXGI_OUTPUT_DESC output_desc, secondary_desc;
+    DXGI_OUTDUPL_DESC duplication_desc;
+    DXGI_OUTDUPL_FRAME_INFO frame_info;
+    HRESULT hr;
+    ULONGLONG start;
+
+    if (!(dxgi_device = create_d3d11_device()))
+    {
+        skip("D3D11 device is not available.\n");
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&d3d_device);
+    ok(hr == S_OK, "Failed to query ID3D11Device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        IDXGIDevice_Release(dxgi_device);
+        return;
+    }
+    hr = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
+    ok(hr == S_OK, "Failed to get adapter, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_device;
+    hr = IDXGIAdapter_EnumOutputs(adapter, 0, &output);
+    ok(hr == S_OK, "Failed to get primary output, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_adapter;
+    hr = IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1);
+    if (FAILED(hr))
+    {
+        skip("IDXGIOutput1 is not available, hr %#lx.\n", hr);
+        goto done_output;
+    }
+    hr = IDXGIOutput1_GetDesc(output1, &output_desc);
+    ok(hr == S_OK, "Failed to get output description, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_output1;
+
+    duplication = NULL;
+    hr = IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)d3d_device, &duplication);
+    if (hr == E_ACCESSDENIED || hr == DXGI_ERROR_UNSUPPORTED
+            || hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+            || hr == DXGI_ERROR_SESSION_DISCONNECTED || hr == E_NOTIMPL)
+    {
+        skip("Desktop duplication is unavailable, hr %#lx.\n", hr);
+        goto done_output1;
+    }
+    ok(hr == S_OK, "Failed to duplicate primary output, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_output1;
+
+    hr = IDXGIAdapter_EnumOutputs(adapter, 0, &duplicate_output);
+    ok(hr == S_OK, "Failed to get a second primary output wrapper, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = IDXGIOutput_QueryInterface(duplicate_output, &IID_IDXGIOutput1,
+                (void **)&duplicate_output1);
+        ok(hr == S_OK, "Failed to query the second IDXGIOutput1, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            duplicate = NULL;
+            hr = IDXGIOutput1_DuplicateOutput(duplicate_output1, (IUnknown *)d3d_device,
+                    &duplicate);
+            ok(hr == E_INVALIDARG, "Unexpected duplicate session result %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+                IDXGIOutputDuplication_Release(duplicate);
+            IDXGIOutput1_Release(duplicate_output1);
+        }
+        IDXGIOutput_Release(duplicate_output);
+    }
+
+    IDXGIOutputDuplication_GetDesc(duplication, &duplication_desc);
+    ok(duplication_desc.ModeDesc.Width == (UINT)(output_desc.DesktopCoordinates.right
+            - output_desc.DesktopCoordinates.left), "Unexpected duplication width %u.\n",
+            duplication_desc.ModeDesc.Width);
+    ok(duplication_desc.ModeDesc.Height == (UINT)(output_desc.DesktopCoordinates.bottom
+            - output_desc.DesktopCoordinates.top), "Unexpected duplication height %u.\n",
+            duplication_desc.ModeDesc.Height);
+
+    resource = NULL;
+    start = GetTickCount64();
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 0, &frame_info, &resource);
+    ok(hr == S_OK || hr == DXGI_ERROR_WAIT_TIMEOUT || hr == DXGI_ERROR_ACCESS_LOST
+            || hr == DXGI_ERROR_UNSUPPORTED, "Unexpected zero-timeout result %#lx.\n", hr);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+        ok(GetTickCount64() - start < 1000, "Zero-timeout capture took too long.\n");
+    if (hr == S_OK)
+    {
+        IDXGIResource_Release(resource);
+        IDXGIOutputDuplication_ReleaseFrame(duplication);
+    }
+
+    survivor = duplication;
+    IDXGIOutputDuplication_AddRef(survivor);
+    IDXGIOutputDuplication_Release(duplication);
+
+    resource = NULL;
+    hr = IDXGIOutputDuplication_AcquireNextFrame(survivor, 0, &frame_info, &resource);
+    ok(hr == S_OK || hr == DXGI_ERROR_WAIT_TIMEOUT || hr == DXGI_ERROR_UNSUPPORTED,
+            "Releasing one COM reference damaged the surviving session, hr %#lx.\n", hr);
+    if (hr == S_OK)
+    {
+        IDXGIResource_Release(resource);
+        IDXGIOutputDuplication_ReleaseFrame(survivor);
+    }
+
+    resource = NULL;
+    hr = IDXGIOutputDuplication_AcquireNextFrame(survivor, 0, &frame_info, &resource);
+    ok(hr == S_OK || hr == DXGI_ERROR_WAIT_TIMEOUT,
+            "Unexpected unchanged-frame result %#lx.\n", hr);
+    if (hr == S_OK)
+    {
+        IDXGIResource_Release(resource);
+        IDXGIOutputDuplication_ReleaseFrame(survivor);
+    }
+    IDXGIOutputDuplication_Release(survivor);
+
+    if (SUCCEEDED(IDXGIAdapter_EnumOutputs(adapter, 1, &secondary_output)))
+    {
+        hr = IDXGIOutput_QueryInterface(secondary_output, &IID_IDXGIOutput1,
+                (void **)&secondary_output1);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDXGIOutput1_GetDesc(secondary_output1, &secondary_desc);
+            ok(hr == S_OK, "Failed to get secondary output description, hr %#lx.\n", hr);
+            secondary_duplication = NULL;
+            if (SUCCEEDED(hr))
+                hr = IDXGIOutput1_DuplicateOutput(secondary_output1, (IUnknown *)d3d_device,
+                        &secondary_duplication);
+            ok(hr == S_OK || hr == E_ACCESSDENIED || hr == DXGI_ERROR_UNSUPPORTED
+                    || hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+                    || hr == DXGI_ERROR_SESSION_DISCONNECTED || hr == E_NOTIMPL,
+                    "Unexpected secondary duplication result %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                IDXGIOutputDuplication_GetDesc(secondary_duplication, &duplication_desc);
+                ok(duplication_desc.ModeDesc.Width == (UINT)(secondary_desc.DesktopCoordinates.right
+                        - secondary_desc.DesktopCoordinates.left),
+                        "Secondary duplication width does not match its output.\n");
+                ok(duplication_desc.ModeDesc.Height == (UINT)(secondary_desc.DesktopCoordinates.bottom
+                        - secondary_desc.DesktopCoordinates.top),
+                        "Secondary duplication height does not match its output.\n");
+                IDXGIOutputDuplication_Release(secondary_duplication);
+            }
+            IDXGIOutput1_Release(secondary_output1);
+        }
+        IDXGIOutput_Release(secondary_output);
+    }
+
+done_output1:
+    IDXGIOutput1_Release(output1);
+done_output:
+    IDXGIOutput_Release(output);
+done_adapter:
+    IDXGIAdapter_Release(adapter);
+done_device:
+    ID3D11Device_Release(d3d_device);
+    IDXGIDevice_Release(dxgi_device);
+}
+
 START_TEST(dxgi)
 {
     HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module;
@@ -9091,6 +9286,7 @@ START_TEST(dxgi)
     queue_test(test_private_data);
     queue_test(test_maximum_frame_latency);
     queue_test(test_output_desc);
+    queue_test(test_output_duplication);
     queue_test(test_object_wrapping);
     queue_test(test_factory_check_feature_support);
     queue_test(test_video_memory_budget_notification);

@@ -5,3 +5,4 @@
 @ stdcall DXGID3D10RegisterLayers(ptr long)
 @ stdcall DXGIGetDebugInterface1(long ptr ptr)
 @ stdcall __wine_dxgi_bind_composition_window(long long)
+@ stdcall __wine_dxgi_set_composition_description(ptr ptr)
