@@ -1102,15 +1102,16 @@ static BOOL grace_period_remaining(DWORD *minutes)
     if (minutes) *minutes = 0;
     if (!grace_profile_present()) return FALSE;
     guid_to_string(selected_grace_id(), name);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, sppc_grace_key, name, RRF_RT_REG_QWORD,
-            NULL, &start, &size))
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, sppc_grace_key, name,
+            RRF_RT_REG_QWORD | RRF_SUBKEY_WOW6464KEY, NULL, &start, &size))
         return FALSE;
     GetSystemTimeAsFileTime(&time);
     now = ((ULONGLONG)time.dwHighDateTime << 32) | time.dwLowDateTime;
     duration = (ULONGLONG)GRACE_PERIOD_DAYS * 24 * 60 * FILETIME_TICKS_PER_MINUTE;
     if (start > now || now - start >= duration) return FALSE;
     remaining = duration - (now - start);
-    if (minutes) *minutes = remaining / FILETIME_TICKS_PER_MINUTE;
+    if (minutes) *minutes = (remaining + FILETIME_TICKS_PER_MINUTE - 1) /
+            FILETIME_TICKS_PER_MINUTE;
     return TRUE;
 }
 
@@ -1129,7 +1130,7 @@ static BOOL start_grace_period(void)
     wait = WaitForSingleObject(mutex, INFINITE);
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) goto done;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, sppc_grace_key, 0, NULL, 0,
-            KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &key, NULL))
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL))
         goto release;
     guid_to_string(selected_grace_id(), name);
     if (!RegGetValueW(key, NULL, name, RRF_RT_REG_QWORD, NULL, &start, &size))
