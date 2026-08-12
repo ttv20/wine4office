@@ -1819,7 +1819,7 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
     }
     else
     {
-        if (!parent_component_id) return TRUE;
+        if (!parent_component_id || !parent_component_id[0]) return TRUE;
         lstrcpyW( component_id, parent_component_id );
     }
     if (!office_c2r_xml_attribute( tag, L"AppData", appdata, ARRAY_SIZE(appdata), &appdata_present ) ||

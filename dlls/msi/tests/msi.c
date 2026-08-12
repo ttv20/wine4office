@@ -13636,12 +13636,17 @@ static void test_office_c2r_manifest(void)
         L"Qualifier=\"{EF8E9806-D488-4BE1-8D06-01B401C9DE98},1037\\Normal\" "
         L"AppData=\"SpellingAndGrammarFilesExp2_1037\" Feature=\"Gimme_OnDemandData\"></PublishComponent>\r\n"
         L"    </Component>\r\n"
+        L"    <Component ComponentId=\"\" KeyPath=\"bad-empty-parent.ttf\">\r\n"
+        L"      <PublishComponent PublishComponentId=\"{9B41A3D7-AD21-4CC4-9FA8-6E6E6F4D0A11}\" "
+        L"Qualifier=\"empty-parent\" AppData=\"bad\" Feature=\"Main\"></PublishComponent>\r\n"
+        L"    </Component>\r\n"
         L"  </ComponentList></SequencedData>\r\n"
         L"</Package>\r\n";
     static const WCHAR proof_fixture[] =
         L"<Package Platform=\"x64\" ProductCode=\"{F4AC0B32-6E6F-4C70-9E61-1B8A9F7D4C22}\"></Package>\r\n";
     WCHAR program_data[MAX_PATH], directory[MAX_PATH], path[MAX_PATH], proof_path[MAX_PATH];
     WCHAR windows[MAX_PATH], font_dir[MAX_PATH], direct_file[MAX_PATH], component_file[MAX_PATH];
+    WCHAR component_table_file[MAX_PATH];
     WCHAR expected[MAX_PATH], saved_package_guid[GUID_SIZE];
     WCHAR qualifier[256], appdata[512], component_path[MAX_PATH];
     BOOL had_package_guid = FALSE;
@@ -13649,7 +13654,7 @@ static void test_office_c2r_manifest(void)
     HKEY key;
 
     size = GetEnvironmentVariableW( L"ProgramData", program_data, ARRAY_SIZE(program_data) );
-    path[0] = proof_path[0] = direct_file[0] = component_file[0] = 0;
+    path[0] = proof_path[0] = direct_file[0] = component_file[0] = component_table_file[0] = 0;
     ok(size && size < ARRAY_SIZE(program_data), "ProgramData unavailable\n");
     if (!size || size >= ARRAY_SIZE(program_data)) return;
     swprintf( directory, ARRAY_SIZE(directory), L"%s\\Microsoft", program_data );
@@ -13682,8 +13687,12 @@ static void test_office_c2r_manifest(void)
     CreateDirectoryW( font_dir, NULL );
     swprintf( direct_file, ARRAY_SIZE(direct_file), L"%s\\direct.ttf", font_dir );
     swprintf( component_file, ARRAY_SIZE(component_file), L"%s\\component.ttf", font_dir );
+    swprintf( component_table_file, ARRAY_SIZE(component_table_file),
+              L"%s\\component-table.ttf", font_dir );
     ok(write_c2r_fixture( direct_file, L"direct fixture" ), "failed to create direct path fixture\n");
     ok(write_c2r_fixture( component_file, L"component fixture" ), "failed to create component path fixture\n");
+    ok(write_c2r_fixture( component_table_file, L"component table fixture" ),
+       "failed to create component table path fixture\n");
     appdata_size = ARRAY_SIZE(appdata);
     result = MsiEnumComponentQualifiersW( publish_component, 0, qualifier, &qualifier_size,
                                           appdata, &appdata_size );
@@ -13774,6 +13783,7 @@ cleanup_files:
     DeleteFileW( proof_path );
     DeleteFileW( direct_file );
     DeleteFileW( component_file );
+    DeleteFileW( component_table_file );
 }
 
 START_TEST(msi)

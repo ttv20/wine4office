@@ -24,12 +24,13 @@ static BOOL write_fixture( const WCHAR *path, const WCHAR *contents )
     HANDLE file;
     BOOL ret;
 
-    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE) return FALSE;
     ret = WriteFile( file, &bom, sizeof(bom), &written, NULL ) && written == sizeof(bom) &&
           WriteFile( file, contents, lstrlenW(contents) * sizeof(WCHAR), &written, NULL ) &&
           written == lstrlenW(contents) * sizeof(WCHAR);
     CloseHandle( file );
+    if (!ret) DeleteFileW( path );
     return ret;
 }
 
@@ -44,12 +45,12 @@ START_TEST(proofing)
         L"<Package ProductCode=\"{90160000-001F-040D-1000-0000000FF1CE}\" Platform=\"x64\">\r\n"
         L"  <SequencedData><ComponentList>\r\n"
         L"    <Component ComponentId=\"{9636F9D1-3369-4CB1-834E-70CF1E02DFAD}\" "
-        L"KeyPath=\"%CSIDL_FONTS%\\private\\proof.lex\">\r\n"
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\wine-msi-proofing-test.lex\">\r\n"
         L"      <PublishComponent PublishComponentId=\"{EF8E9806-D488-4BE1-8D06-01B401C9DE98}\" "
         L"Qualifier=\"1037\\Normal\" AppData=\"\" Feature=\"SpellingAndGrammarFilesExp2_1037\"/>\r\n"
         L"    </Component>\r\n"
         L"    <Component ComponentId=\"{90160000-001F-040D-1000-0E32E9F6E558}\" "
-        L"KeyPath=\"%CSIDL_FONTS%\\private\\ondemand.dat\">\r\n"
+        L"KeyPath=\"%CSIDL_FONTS%\\private\\wine-msi-setlang-test.dat\">\r\n"
         L"      <PublishComponent PublishComponentId=\"{5D99B316-7DFC-4BCF-97B3-050068BB1431}\" "
         L"Qualifier=\"{EF8E9806-D488-4BE1-8D06-01B401C9DE98},1037\\Normal\" "
         L"AppData=\"SpellingAndGrammarFilesExp2_1037\" Feature=\"Gimme_OnDemandData\"/>\r\n"
@@ -59,7 +60,7 @@ START_TEST(proofing)
     WCHAR program_data[MAX_PATH], directory[MAX_PATH], manifest[MAX_PATH];
     WCHAR windows[MAX_PATH], font_dir[MAX_PATH], proof_file[MAX_PATH], ondemand_file[MAX_PATH];
     WCHAR saved_package_guid[GUID_SIZE], qualifier[256], appdata[512], path[MAX_PATH];
-    BOOL had_package_guid = FALSE;
+    BOOL had_package_guid = FALSE, proof_file_created = FALSE, ondemand_file_created = FALSE;
     DWORD size, type, qualifier_size, appdata_size, path_size;
     HKEY key;
     UINT result;
@@ -77,7 +78,11 @@ START_TEST(proofing)
     CreateDirectoryW( directory, NULL );
     swprintf( manifest, ARRAY_SIZE(manifest),
               L"%s\\C2RManifest.Proof.Culture.msi.16.he-il.xml", directory );
-    ok(write_fixture( manifest, fixture ), "failed to create C2R manifest fixture\n");
+    if (!write_fixture( manifest, fixture ))
+    {
+        win_skip("C2R manifest fixture already exists or cannot be created, error %lu\n", GetLastError());
+        return;
+    }
 
     result = RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Office\\ClickToRun", 0,
                               NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL,
@@ -92,13 +97,27 @@ START_TEST(proofing)
                     sizeof(package_guid) );
     RegCloseKey( key );
 
-    GetWindowsDirectoryW( windows, ARRAY_SIZE(windows) );
+    proof_file[0] = ondemand_file[0] = 0;
+    size = GetWindowsDirectoryW( windows, ARRAY_SIZE(windows) );
+    if (!size || size >= ARRAY_SIZE(windows))
+    {
+        win_skip("Windows directory unavailable\n");
+        goto cleanup_registry;
+    }
     swprintf( font_dir, ARRAY_SIZE(font_dir), L"%s\\Fonts\\private", windows );
     CreateDirectoryW( font_dir, NULL );
-    swprintf( proof_file, ARRAY_SIZE(proof_file), L"%s\\proof.lex", font_dir );
-    swprintf( ondemand_file, ARRAY_SIZE(ondemand_file), L"%s\\ondemand.dat", font_dir );
-    ok(write_fixture( proof_file, L"proof" ), "failed to create proof fixture\n");
-    ok(write_fixture( ondemand_file, L"ondemand" ), "failed to create SETLANG fixture\n");
+    swprintf( proof_file, ARRAY_SIZE(proof_file), L"%s\\wine-msi-proofing-test.lex", font_dir );
+    swprintf( ondemand_file, ARRAY_SIZE(ondemand_file), L"%s\\wine-msi-setlang-test.dat", font_dir );
+    if (!(proof_file_created = write_fixture( proof_file, L"proof" )))
+    {
+        win_skip("proofing fixture already exists or cannot be created, error %lu\n", GetLastError());
+        goto cleanup_registry;
+    }
+    if (!(ondemand_file_created = write_fixture( ondemand_file, L"ondemand" )))
+    {
+        win_skip("SETLANG fixture already exists or cannot be created, error %lu\n", GetLastError());
+        goto cleanup_registry;
+    }
 
     qualifier[0] = appdata[0] = 0;
     qualifier_size = ARRAY_SIZE(qualifier);
@@ -128,6 +147,7 @@ START_TEST(proofing)
     ok(MsiQueryFeatureStateW( product_code, L"OfficeMSProof6" ) == INSTALLSTATE_LOCAL,
        "SETLANG proofing feature was not reported installed\n");
 
+cleanup_registry:
     result = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Office\\ClickToRun", 0,
                             KEY_SET_VALUE | KEY_WOW64_64KEY, &key );
     if (!result)
@@ -139,8 +159,8 @@ START_TEST(proofing)
             RegDeleteValueW( key, L"PackageGUID" );
         RegCloseKey( key );
     }
-    DeleteFileW( proof_file );
-    DeleteFileW( ondemand_file );
+    if (proof_file_created) DeleteFileW( proof_file );
+    if (ondemand_file_created) DeleteFileW( ondemand_file );
 cleanup_manifest:
     DeleteFileW( manifest );
 }
