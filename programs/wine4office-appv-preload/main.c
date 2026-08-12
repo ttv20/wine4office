@@ -20,22 +20,124 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
 
-static WCHAR *get_c2r_client_folder(void)
+static WCHAR *get_registry_string(const WCHAR *name, LSTATUS *status)
 {
     static const WCHAR key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
     DWORD size = 0;
     WCHAR *value;
 
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"ClientFolder", RRF_RT_REG_SZ, NULL, NULL, &size))
+    if ((*status = RegGetValueW(HKEY_LOCAL_MACHINE, key, name, RRF_RT_REG_SZ, NULL, NULL, &size)))
         return NULL;
-    if (!(value = malloc(size))) return NULL;
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, L"ClientFolder", RRF_RT_REG_SZ, NULL, value, &size))
+    if (!(value = malloc(size)))
+    {
+        *status = ERROR_NOT_ENOUGH_MEMORY;
+        return NULL;
+    }
+    if ((*status = RegGetValueW(HKEY_LOCAL_MACHINE, key, name, RRF_RT_REG_SZ, NULL, value, &size)))
     {
         free(value);
         return NULL;
     }
     return value;
+}
+
+static WCHAR *join_path(const WCHAR *directory, const WCHAR *name)
+{
+    SIZE_T directory_length = wcslen(directory), name_length = wcslen(name), length;
+    BOOL separator = directory_length && directory[directory_length - 1] != L'\\'
+            && directory[directory_length - 1] != L'/';
+    WCHAR *path;
+
+    if (directory_length > 32767 || name_length > 32767
+            || directory_length + separator + name_length + 1 > 32767)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return NULL;
+    }
+    length = directory_length + separator + name_length + 1;
+    if (!(path = malloc(length * sizeof(*path))))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+    memcpy(path, directory, directory_length * sizeof(*path));
+    if (separator) path[directory_length++] = L'\\';
+    memcpy(path + directory_length, name, (name_length + 1) * sizeof(*path));
+    return path;
+}
+
+static WCHAR *get_existing_module_path(const WCHAR *directory, const WCHAR *dll_name)
+{
+    WCHAR *candidate;
+    DWORD attributes;
+
+    if (!(candidate = join_path(directory, dll_name))) return NULL;
+    attributes = GetFileAttributesW(candidate);
+    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY))
+        return candidate;
+    free(candidate);
+    return NULL;
+}
+
+static BOOL get_office_major_version(unsigned int *major, LSTATUS *status)
+{
+    WCHAR *end, *version;
+    unsigned long value;
+
+    version = get_registry_string(L"ClientVersionToReport", status);
+    if (!version) version = get_registry_string(L"VersionToReport", status);
+    if (!version) return FALSE;
+    value = wcstoul(version, &end, 10);
+    if (end == version || (*end && *end != L'.') || !value || value > 999)
+    {
+        free(version);
+        *status = ERROR_INVALID_DATA;
+        return FALSE;
+    }
+    free(version);
+    *major = value;
+    return TRUE;
+}
+
+static WCHAR *get_default_dll_path(const WCHAR *dll_name, LSTATUS *status)
+{
+    WCHAR office_name[16], *installation, *root = NULL, *office = NULL, *path = NULL;
+    unsigned int major;
+
+    if (!(installation = get_registry_string(L"InstallationPath", status))) return NULL;
+    if (!get_office_major_version(&major, status)) goto done;
+    swprintf(office_name, ARRAY_SIZE(office_name), L"Office%u", major);
+
+    /* Click-to-Run exposes package identity only through its logical Office tree.
+     * ClientFolder is the physical servicing tree and must not be used here. */
+    if (!(root = join_path(installation, L"root"))
+            || !(office = join_path(root, office_name)))
+    {
+        *status = GetLastError();
+        goto done;
+    }
+    path = get_existing_module_path(office, dll_name);
+    free(office);
+    office = NULL;
+    if (!path)
+    {
+        if (!(office = join_path(installation, office_name)))
+        {
+            *status = GetLastError();
+            goto done;
+        }
+        path = get_existing_module_path(office, dll_name);
+    }
+    free(office);
+done:
+    free(root);
+    free(installation);
+    if (!path && *status == ERROR_SUCCESS) *status = ERROR_MOD_NOT_FOUND;
+    return path;
 }
 
 static WCHAR *get_full_path(const WCHAR *path)
@@ -60,8 +162,8 @@ int wmain(int argc, WCHAR **argv)
     static const WCHAR dll_name[] = L"AppvIsvSubsystems32.dll";
 #endif
     ULONGLONG started = GetTickCount64();
-    WCHAR *client_folder = NULL, *dll_path = NULL;
-    SIZE_T length;
+    WCHAR *dll_path = NULL;
+    LSTATUS status = ERROR_SUCCESS;
     HANDLE input;
     HMODULE module;
     char buffer;
@@ -74,23 +176,21 @@ int wmain(int argc, WCHAR **argv)
     }
     if (argc == 2)
         dll_path = get_full_path(argv[1]);
-    else if ((client_folder = get_c2r_client_folder()))
-    {
-        length = wcslen(client_folder) + 1 + ARRAY_SIZE(dll_name);
-        if ((dll_path = malloc(length * sizeof(*dll_path))))
-            swprintf(dll_path, length, L"%s\\%s", client_folder, dll_name);
-    }
-    free(client_folder);
+    else
+        dll_path = get_default_dll_path(dll_name, &status);
     if (!dll_path)
     {
-        fprintf(stderr, "ERROR appv_path error=%lu\n", GetLastError());
+        if (argc == 2) status = GetLastError();
+        fprintf(stderr, "ERROR appv_path error=%ld\n", status);
         return 1;
     }
 
+    fwprintf(stderr, L"LOADING appv_path=%s\n", dll_path);
+    fflush(stderr);
     if (!(module = LoadLibraryExW(dll_path, NULL,
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)))
     {
-        fprintf(stderr, "ERROR appv_load error=%lu\n", GetLastError());
+        fwprintf(stderr, L"ERROR appv_load error=%lu path=%s\n", GetLastError(), dll_path);
         free(dll_path);
         return 2;
     }
