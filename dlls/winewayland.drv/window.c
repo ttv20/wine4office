@@ -964,9 +964,11 @@ static void wayland_configure_window(HWND hwnd)
         needs_exit_size_move = TRUE;
     }
 
-    if (surface->resize_target && NtUserIsWindow(surface->resize_target))
+    if (surface->resize_target &&
+        ((state & WAYLAND_SURFACE_CONFIG_STATE_RESIZING) || needs_exit_size_move) &&
+        NtUserIsWindow(surface->resize_target))
         resize_target = surface->resize_target;
-    if (needs_exit_size_move) surface->resize_target = NULL;
+    if (!(state & WAYLAND_SURFACE_CONFIG_STATE_RESIZING)) surface->resize_target = NULL;
 
     /* Transitions between normal/max/fullscreen may entail a frame change. */
     if ((state ^ surface->current.state) &
