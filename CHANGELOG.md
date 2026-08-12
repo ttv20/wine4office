@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Make Office grace periods start, persist, count down, and expire like Windows.
 - Fix Office color picker popups on Wayland.
 
 ## 0.2.0-alpha — 2026-08-11
