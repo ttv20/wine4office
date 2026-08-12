@@ -615,7 +615,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ],
         )
         self.assertTrue(run.call_args_list[0].kwargs["check"])
-        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 20)
+        self.assertLessEqual(run.call_args_list[0].kwargs["timeout"], 10)
+        self.assertGreater(run.call_args_list[0].kwargs["timeout"], 0)
 
 
     def test_stop_wine_passes_only_authenticated_office_pids_to_close_helper(self):
@@ -654,7 +655,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ],
         )
 
-    def test_stop_wine_retries_sigkill_when_server_wait_times_out(self):
+    def test_stop_wine_force_kills_only_revalidated_owned_processes(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         timeout = subprocess.TimeoutExpired("wineserver -w", 15)
         with mock.patch.object(
@@ -663,16 +664,41 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 mock.DEFAULT, timeout, mock.DEFAULT, timeout,
                 mock.DEFAULT, mock.DEFAULT,
             ],
-        ) as run:
+        ) as run, mock.patch.object(
+            backend, "_kill_owned_wine_processes"
+        ) as kill_owned, mock.patch.object(
+            backend, "_owned_wine_processes", return_value=[]
+        ):
             backend.stop_wine(str(prefix), str(self.wine))
 
-        self.assertEqual(
-            [call.args[0] for call in run.call_args_list][-2:],
-            [
-                [str(self.runner / "wineserver"), "-k9"],
-                [str(self.runner / "wineserver"), "-w"],
-            ],
+        kill_owned.assert_called_once_with(prefix.resolve(), self.wine.resolve())
+        self.assertNotIn(
+            [str(self.runner / "wineserver"), "-k9"],
+            [call.args[0] for call in run.call_args_list],
         )
+
+    def test_force_kill_skips_pid_when_identity_changes(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_wine_processes", return_value=[(1234, "42")]
+        ), mock.patch.object(
+            backend, "_wine_process_identity", return_value=(1234, "43")
+        ), mock.patch.object(backend.os, "kill") as kill:
+            backend._kill_owned_wine_processes(prefix, self.wine)
+        kill.assert_not_called()
+
+    def test_force_kill_never_uses_process_groups_or_wineserver_k9(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_wine_processes", return_value=[(1234, "42")]
+        ), mock.patch.object(
+            backend, "_wine_process_identity", return_value=(1234, "42")
+        ), mock.patch.object(backend.os, "kill") as kill, mock.patch.object(
+            backend.os, "killpg", create=True
+        ) as killpg:
+            backend._kill_owned_wine_processes(prefix, self.wine)
+        kill.assert_called_once_with(1234, signal.SIGKILL)
+        killpg.assert_not_called()
 
     def test_stop_wine_reports_missing_wineserver(self):
         prefix = self._make_prefix(self.home / ".wine4office")
@@ -2222,9 +2248,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertIn(
             f"TimeoutStopSec={backend._PRELOAD_UNIT_STOP_TIMEOUT}\n", expected
         )
-        self.assertGreaterEqual(backend._PRELOAD_UNIT_STOP_TIMEOUT, 90)
-        self.assertGreater(backend._PRELOAD_STOP_WAIT_TIMEOUT,
-                           backend._PRELOAD_UNIT_STOP_TIMEOUT)
+        self.assertEqual(backend._PRELOAD_UNIT_STOP_TIMEOUT, 10)
         self.assertIn("WantedBy=default.target\n", expected)
         self.assertNotIn("/bin/sh", expected)
         self.assertNotIn("wineserver", expected)
@@ -2249,6 +2273,44 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend._stop_preload_unit_and_wait()
         systemctl.assert_called_once_with(["stop", "--no-block", backend.PRELOAD_UNIT])
         self.assertEqual(property_state.call_count, 3)
+
+    def test_stop_service_escalates_at_single_deadline_after_identity_check(self):
+        binding = self._preload_binding()
+        states = iter([(True, "deactivating"), (False, "inactive")])
+        with mock.patch.object(
+            backend, "_systemctl_user",
+            return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+        ) as systemctl, mock.patch.object(
+            backend, "_systemctl_property", side_effect=lambda command: next(states)
+        ), mock.patch.object(
+            backend, "_preload_stop_identity_matches", return_value=True
+        ) as identity, mock.patch.object(
+            backend.time, "monotonic", side_effect=(9.9, 10.0)
+        ), mock.patch.object(backend.time, "sleep"):
+            backend._stop_preload_unit_and_wait(binding=binding, _deadline=10.0)
+        identity.assert_called_once_with(binding)
+        self.assertEqual(systemctl.call_args_list, [
+            mock.call(["stop", "--no-block", backend.PRELOAD_UNIT]),
+            mock.call(["kill", "--kill-who=all", "--signal=SIGKILL", backend.PRELOAD_UNIT]),
+        ])
+
+    def test_stop_service_refuses_escalation_after_identity_mismatch(self):
+        binding = self._preload_binding()
+        with mock.patch.object(
+            backend, "_systemctl_user",
+            return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+        ) as systemctl, mock.patch.object(
+            backend, "_systemctl_property", return_value=(True, "deactivating")
+        ), mock.patch.object(
+            backend, "_preload_stop_identity_matches", return_value=False
+        ), mock.patch.object(
+            backend.time, "monotonic", side_effect=(10.0,)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                backend._stop_preload_unit_and_wait(binding=binding, _deadline=10.0)
+        self.assertEqual(systemctl.call_args_list, [
+            mock.call(["stop", "--no-block", backend.PRELOAD_UNIT])
+        ])
 
 
     def test_preload_unit_rejects_newline_in_argv(self):
@@ -2398,7 +2460,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [["disable", backend.PRELOAD_UNIT], ["start", backend.PRELOAD_UNIT]],
         )
 
-    def test_stop_uses_bound_environment_during_runner_mismatch(self):
+    def test_stop_refuses_selected_runner_mismatch(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
         backend._preload_atomic_write(
@@ -2416,16 +2478,13 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ) as systemctl, mock.patch.object(
             backend, "preload_service_status", return_value={"state": "mismatch"}
         ):
-            backend.manage_preload_service(
-                "stop", binding["prefix"], different_wine, True
-            )
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                backend.manage_preload_service(
+                    "stop", binding["prefix"], different_wine, True
+                )
 
-        office.assert_called_once_with(
-            binding["prefix"], binding["wine"], binding["use_x11"]
-        )
-        systemctl.assert_called_once_with(
-            ["stop", "--no-block", backend.PRELOAD_UNIT]
-        )
+        office.assert_not_called()
+        systemctl.assert_not_called()
 
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
@@ -2442,8 +2501,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertIsNone(result)
         active.assert_called_once_with(str(prefix), str(self.wine), False)
-        stop_service.assert_called_once_with()
-        stop.assert_called_once_with(str(prefix), str(self.wine), False)
+        self.assertEqual(stop_service.call_count, 1)
+        deadline = stop_service.call_args.kwargs["_deadline"]
+        stop.assert_called_once_with(
+            str(prefix), str(self.wine), False, _deadline=deadline
+        )
         systemctl.assert_called_once_with(["start", backend.PRELOAD_UNIT])
 
     def test_stop_wine_tool_does_not_start_an_inactive_background_service(self):
@@ -2457,6 +2519,30 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ) as systemctl:
             backend.launch_tool(str(prefix), str(self.wine), "stop")
         systemctl.assert_not_called()
+
+    def test_stop_wine_tool_does_not_control_different_runner_service(self):
+        prefix = self._make_prefix(self.home / "runner-mismatch-stop")
+        binding = backend._preload_snapshot(str(prefix), str(self.wine), True)
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        different_runner = self.home / "different-runner/bin"
+        different_runner.mkdir(parents=True)
+        different_wine = different_runner / "wine"
+        different_wine.write_text("#!/bin/sh\nexit 0\n")
+        different_wine.chmod(0o755)
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property", return_value=(True, "active")
+        ) as property_state:
+            self.assertFalse(
+                backend._preload_active_for_environment(
+                    str(prefix), str(different_wine), True
+                )
+            )
+        property_state.assert_not_called()
 
     def test_preload_status_merges_fresh_and_stale_heartbeat(self):
         binding = self._preload_binding()

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix Office color picker popups on Wayland.
+- Keep Wine and background-service shutdowns bounded and environment-specific.
 
 ## 0.2.0-alpha — 2026-08-11
 

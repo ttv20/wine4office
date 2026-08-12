@@ -44,6 +44,7 @@ OFFICE_X11_EXECUTABLES = (
     "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE",
     "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
 )
+STOP_GRACE_SECONDS = 10.0
 OFFICE_COMPATIBILITY_POLICIES = {
     "disable_animations": {
         "label": "Disable Office animations",
@@ -877,6 +878,61 @@ def _owned_office_pids(prefix: PathValue, wine: PathValue,
     return sorted(set(pids))
 
 
+def _wine_process_identity(
+    process: Path, prefix: Path, runner_dir: Path
+) -> tuple[int, str] | None:
+    """Return a stable identity only for a current-user process in this Wine environment."""
+    try:
+        if process.stat().st_uid != os.getuid():
+            return None
+        environment = dict(
+            item.split(b"=", 1) for item in process.joinpath("environ").read_bytes().split(b"\0")
+            if b"=" in item
+        )
+        if environment.get(b"WINEPREFIX") != os.fsencode(str(prefix)):
+            return None
+        executable = Path(os.readlink(process / "exe")).resolve()
+        if executable.parent != runner_dir:
+            return None
+        stat_text = process.joinpath("stat").read_text(encoding="ascii")
+        closing_paren = stat_text.rfind(")")
+        fields = stat_text[closing_paren + 2:].split()
+        return int(process.name), fields[19]
+    except (IndexError, OSError, UnicodeError, ValueError):
+        return None
+
+
+def _owned_wine_processes(prefix: PathValue, wine: PathValue,
+                          proc_root: Path = Path("/proc")) -> list[tuple[int, str]]:
+    """Snapshot processes authenticated to the selected prefix and runner."""
+    selected_prefix = normalize_path(prefix)
+    runner_dir = Path(wine).resolve().parent
+    try:
+        processes = tuple(proc_root.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        identity for process in processes
+        if process.name.isdigit()
+        if (identity := _wine_process_identity(process, selected_prefix, runner_dir)) is not None
+    )
+
+
+def _kill_owned_wine_processes(prefix: PathValue, wine: PathValue,
+                               proc_root: Path = Path("/proc")) -> None:
+    """SIGKILL only processes whose PID and start time still match an owned snapshot."""
+    selected_prefix = normalize_path(prefix)
+    runner_dir = Path(wine).resolve().parent
+    for pid, starttime in _owned_wine_processes(selected_prefix, wine, proc_root):
+        current = _wine_process_identity(proc_root / str(pid), selected_prefix, runner_dir)
+        if current != (pid, starttime):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def ensure_safe_x11_defaults(prefix_value: str, wine_value: str,
                              use_x11: bool = True, *,
                              _manager_create: bool = False) -> bool:
@@ -1111,7 +1167,8 @@ def _run_cancellable_command(command: list[str], env: dict[str, str], *,
     return completed
 
 
-def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
+def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
+              *, _deadline: float | None = None) -> None:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
@@ -1122,6 +1179,11 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
             f"Cannot stop Wine because wineserver is missing beside {wine}"
         )
 
+    deadline = (
+        _deadline
+        if _deadline is not None
+        else time.monotonic() + STOP_GRACE_SECONDS
+    )
     graceful_close = False
     close_command = [str(wine), "wine4officeclose.exe"]
     for pid in _owned_office_pids(prefix, wine, use_x11):
@@ -1132,7 +1194,7 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=20,
+            timeout=max(0.001, deadline - time.monotonic()),
             check=True,
         )
         graceful_close = True
@@ -1146,7 +1208,8 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
             # asking wineserver to terminate the remaining prefix processes.
             subprocess.run(
                 [str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=8, check=True,
+                stderr=subprocess.DEVNULL,
+                timeout=max(0.001, deadline - time.monotonic()), check=True,
             )
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -1154,15 +1217,16 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True) -> None:
 
     try:
         subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, check=True)
+                       stderr=subprocess.DEVNULL,
+                       timeout=max(0.001, deadline - time.monotonic()), check=True)
         subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=20, check=True)
+                       stderr=subprocess.DEVNULL,
+                       timeout=max(0.001, deadline - time.monotonic()), check=True)
+        return
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        # Retry with an explicit SIGKILL, then verify that this prefix stopped.
-        subprocess.run([str(wineserver), "-k9"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=15, check=False)
-        subprocess.run([str(wineserver), "-w"], env=env, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=20, check=True)
+        _kill_owned_wine_processes(prefix, wine)
+    if _owned_wine_processes(prefix, wine):
+        raise RuntimeError("Wine processes remained after ownership-verified forced shutdown.")
 
 
 def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
@@ -1581,13 +1645,14 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
                 use_x11: bool = True) -> int | None:
     if tool == "stop":
+        deadline = time.monotonic() + STOP_GRACE_SECONDS
         restart_preload = _preload_active_for_environment(
             prefix_value, wine_value, use_x11
         )
         if restart_preload:
-            _stop_preload_unit_and_wait()
+            _stop_preload_unit_and_wait(_deadline=deadline)
         try:
-            stop_wine(prefix_value, wine_value, use_x11)
+            stop_wine(prefix_value, wine_value, use_x11, _deadline=deadline)
         finally:
             if restart_preload:
                 _systemctl_user(["start", PRELOAD_UNIT])
@@ -3844,8 +3909,7 @@ _PRELOAD_COMPONENT_IMAGES = {"ClickToRunSvc": "OfficeClickToRun.exe"}
 _PRELOAD_SCHEMA = 1
 _PRELOAD_HEARTBEAT_SCHEMA = 1
 _PRELOAD_SYSTEMCTL_TIMEOUT = 8
-_PRELOAD_UNIT_STOP_TIMEOUT = 90
-_PRELOAD_STOP_WAIT_TIMEOUT = 120
+_PRELOAD_UNIT_STOP_TIMEOUT = int(STOP_GRACE_SECONDS)
 _PRELOAD_WINE_TIMEOUT = 12
 _PRELOAD_APPV_TIMEOUT = 15
 _PRELOAD_APPV_STOP_TIMEOUT = 5
@@ -4056,9 +4120,27 @@ def preload_service_memory_bytes() -> int | None:
     return memory if memory >= 0 else None
 
 
-def _stop_preload_unit_and_wait(timeout: float = _PRELOAD_STOP_WAIT_TIMEOUT) -> None:
+def _preload_stop_identity_matches(binding: dict) -> bool:
+    """Revalidate manager ownership and the exact service binding before escalation."""
+    if not _owned_preload_unit():
+        return False
+    try:
+        current = _read_preload_binding()
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    return _preload_selected_matches(
+        current, binding["prefix"], binding["wine"], binding["use_x11"]
+    )
+
+
+def _stop_preload_unit_and_wait(*, binding: dict | None = None,
+                                _deadline: float | None = None) -> None:
     """Stop the preload worker and verify systemd no longer considers it active."""
-    deadline = time.monotonic() + timeout
+    deadline = (
+        _deadline
+        if _deadline is not None
+        else time.monotonic() + STOP_GRACE_SECONDS
+    )
     last_detail = ""
     # --no-block avoids the generic eight-second systemctl command timeout;
     # component cleanup is allowed to use the unit's full shutdown window.
@@ -4068,15 +4150,14 @@ def _stop_preload_unit_and_wait(timeout: float = _PRELOAD_STOP_WAIT_TIMEOUT) -> 
         if not active:
             return
         time.sleep(0.1)
-    # Re-submit once in case the first request was lost during a user-manager
-    # reload, then give systemd a short final verification window.
-    _systemctl_user(["stop", "--no-block", PRELOAD_UNIT], check=False)
-    retry_deadline = time.monotonic() + 5.0
-    while time.monotonic() < retry_deadline:
-        active, last_detail = _systemctl_property("is-active")
-        if not active:
-            return
-        time.sleep(0.1)
+    if binding is None:
+        binding = _read_preload_binding()
+    if not _preload_stop_identity_matches(binding):
+        raise RuntimeError("The background service identity changed; refusing forced shutdown.")
+    _systemctl_user(["kill", "--kill-who=all", "--signal=SIGKILL", PRELOAD_UNIT])
+    active, last_detail = _systemctl_property("is-active")
+    if not active:
+        return
     raise RuntimeError(
         "The background service did not stop cleanly"
         + (f": {last_detail}" if last_detail else ".")
@@ -4601,6 +4682,10 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
             "The selected Wine environment does not match the fixed preload binding."
         )
     if action == "stop":
+        if not _preload_selected_matches(binding, prefix_value, wine_value, use_x11):
+            raise RuntimeError(
+                "The selected Wine environment does not match the fixed preload binding."
+            )
         active_office = preload_office_processes(
             binding["prefix"], binding["wine"], binding["use_x11"]
         )
@@ -4609,13 +4694,13 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
                 "Office is active; refusing to stop preload: " + ", ".join(active_office)
             )
     if action == "stop":
-        _stop_preload_unit_and_wait()
+        _stop_preload_unit_and_wait(binding=binding)
     else:
         _systemctl_user([action, PRELOAD_UNIT])
     return preload_service_status(prefix_value, wine_value, use_x11)
 
 
-def _preload_active_for_environment(prefix_value: str, _wine_value: str,
+def _preload_active_for_environment(prefix_value: str, wine_value: str,
                                     _use_x11: bool) -> bool:
     supported, _ = _systemd_user_capability()
     if (
@@ -4626,8 +4711,9 @@ def _preload_active_for_environment(prefix_value: str, _wine_value: str,
         return False
     try:
         binding = _read_preload_binding()
-        prefix = validate_prefix(prefix_value)
-        if not paths_equivalent(binding["prefix"], str(prefix)):
+        if not _preload_selected_matches(
+            binding, prefix_value, wine_value, _use_x11
+        ):
             return False
         active, _ = _systemctl_property("is-active")
         return active
