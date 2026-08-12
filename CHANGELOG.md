@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix Office color picker popups on Wayland.
+- Fix resizing Office windows with DirectComposition content on Wayland.
 
 ## 0.2.0-alpha — 2026-08-11
 

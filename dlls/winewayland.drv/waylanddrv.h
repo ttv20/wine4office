@@ -330,6 +330,7 @@ struct wayland_surface
     BOOL dcomp_overlay;
     BOOL dcomp_notification;
     BOOL dcomp_base_presentation;
+    HWND resize_target;
     BOOL stacked;
     struct wayland_window_config window;
     int content_width, content_height;
@@ -361,6 +362,8 @@ void wayland_surface_destroy(struct wayland_surface *surface);
 void wayland_surface_make_toplevel(struct wayland_surface *surface, const WCHAR *title);
 void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
                                          struct wayland_surface *parent);
+BOOL wayland_surface_begin_move_resize(HWND surface_hwnd, HWND target_hwnd,
+                                       WPARAM command, UINT edge, uint32_t serial);
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *parent);
 void wayland_surface_clear_role(struct wayland_surface *surface);
