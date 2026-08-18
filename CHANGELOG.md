@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0-alpha.2 — 2026-08-18
+
 - Restore Office proofing and language-pack discovery.
 - Make Office grace periods start, persist, count down, and expire like Windows.
 - Restore App-V preload through Office's logical Click-to-Run package path.
@@ -9,6 +11,8 @@
 - Fix resizing Office windows with DirectComposition content on Wayland.
 - Keep Wine and background-service shutdowns bounded and environment-specific.
 - Fix Office dialogs that stayed blank until pointer movement.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/0.2.0-alpha...0.2.0-alpha.2)
 
 ## 0.2.0-alpha — 2026-08-11
 
