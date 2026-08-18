@@ -778,12 +778,16 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     /* Get the managed state with win_data unlocked, as is_window_managed
      * may need to query win_data information about other HWNDs and thus
      * acquire the lock itself internally. */
-    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)))
+    if (!(managed = is_window_managed(hwnd, swp_flags, fullscreen)) && surface)
     {
         DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
         LONG width = new_rects->window.right - new_rects->window.left;
         LONG height = new_rects->window.bottom - new_rects->window.top;
 
+        /* owner_hint is only meaningful for windows with a driver surface.
+         * Client-surface-only windows acquire their parent when presented;
+         * storing the hint early changes desktop-relative coordinates into
+         * parent-relative ones. */
         owner = owner_hint;
         if (!transient_owner && (style & WS_POPUP) && !(style & WS_THICKFRAME) &&
             (width <= 16 || height <= 16) &&
