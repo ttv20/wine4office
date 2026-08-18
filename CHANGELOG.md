@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restore Office proofing and language-pack discovery.
 - Make Office grace periods start, persist, count down, and expire like Windows.
 - Restore App-V preload through Office's logical Click-to-Run package path.
 - Fix Office color picker popups on Wayland.
