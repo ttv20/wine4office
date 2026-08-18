@@ -1,0 +1,6 @@
+TESTDLL = wine4office-appv-preload.exe
+IMPORTS = advapi32
+
+SOURCES = \
+	appv_testdll.c \
+	preload.c
