@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+- Restore App-V preload through Office's logical Click-to-Run package path.
 - Fix Office color picker popups on Wayland.
 - Fix resizing Office windows with DirectComposition content on Wayland.
+- Keep Wine and background-service shutdowns bounded and environment-specific.
+- Fix Office dialogs that stayed blank until pointer movement.
 
 ## 0.2.0-alpha — 2026-08-11
 
