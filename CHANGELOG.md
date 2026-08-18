@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Make Office grace periods start, persist, count down, and expire like Windows.
+- Match Office product metadata and license relationships more closely to Windows.
 - Restore App-V preload through Office's logical Click-to-Run package path.
 - Fix Office color picker popups on Wayland.
 - Fix resizing Office windows with DirectComposition content on Wayland.

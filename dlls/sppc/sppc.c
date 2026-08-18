@@ -65,6 +65,7 @@ struct o365_product_sku
 {
     SLID id;
     const WCHAR *name;
+    const WCHAR *family;
     const WCHAR *description;
     const WCHAR *ux_differentiator;
 };
@@ -80,22 +81,22 @@ static const WCHAR o365_grace_ux[] = L"RETAIL(Grace)";
  * installations. The Grace SKU is index 4; all other entries are unlicensed. */
 static const struct o365_product_sku o365_product_skus[] =
 {
-    {{0x149dbce7,0xa48e,0x44db,{0x83,0x64,0xa5,0x33,0x86,0xcd,0x45,0x80}}, L"Office 16, Office16O365ProPlusR_Subscription1 edition", o365_timebased_description, o365_timebased_ux},
-    {{0x24fc428e,0xa37e,0x4996,{0xac,0x66,0x8e,0xa0,0x30,0x4a,0x15,0x2d}}, L"Office 16, Office16O365ProPlusE5R_SubTrial edition", o365_timebased_description, o365_timebased_ux},
-    {{0x26b6a7ce,0xb174,0x40aa,{0xa1,0x14,0x31,0x6a,0xa5,0x6b,0xa9,0xfc}}, L"Office 16, Office16O365ProPlusR_SubTrial2 edition", o365_timebased_description, o365_timebased_ux},
-    {{0x35ec6e0e,0x2df4,0x4629,{0x9e,0xe3,0xd5,0x25,0xe8,0x06,0xb9,0x88}}, L"Office 16, Office16O365ProPlusDemoR_BypassTrial365 edition", o365_free_description, o365_free_ux},
-    {{0x3ad61e22,0xe4fe,0x497f,{0xbd,0xb1,0x3e,0x51,0xbd,0x87,0x21,0x73}}, L"Office 16, Office16O365ProPlusR_Grace edition", o365_grace_description, o365_grace_ux},
-    {{0x46d2c0bd,0xf912,0x4ddc,{0x8e,0x67,0xb9,0x0e,0xad,0xc3,0xf8,0x3c}}, L"Office 16, Office16O365ProPlusR_SubTrial1 edition", o365_timebased_description, o365_timebased_ux},
-    {{0x6e5db8a5,0x78e6,0x4953,{0xb7,0x93,0x74,0x22,0x35,0x1a,0xfe,0x88}}, L"Office 16, Office16O365ProPlusR_Subscription4 edition", o365_timebased_description, o365_timebased_ux},
-    {{0x7984d9ed,0x81f9,0x4d50,{0x91,0x3d,0x31,0x7e,0xcd,0x86,0x30,0x65}}, L"Office 16, Office16O365ProPlusE5R_Subscription edition", o365_timebased_description, o365_timebased_ux},
-    {{0xa8119e32,0xb17c,0x4bd3,{0x89,0x50,0x7d,0x18,0x53,0xf4,0xb4,0x12}}, L"Office 16, Office16O365ProPlusR_Subscription3 edition", o365_timebased_description, o365_timebased_ux},
-    {{0xb27b3d00,0x9a95,0x4fcd,{0xa0,0xc2,0x11,0x8c,0xbd,0x5e,0x69,0x9b}}, L"Office 16, Office16O365ProPlusEDUR_SubTrial edition", o365_timebased_description, o365_timebased_ux},
-    {{0xb6b47040,0xb38e,0x4be2,{0xbf,0x6a,0xda,0xbf,0x0c,0x41,0x54,0x0a}}, L"Office 16, Office16O365ProPlusR_SubTrial3 edition", o365_timebased_description, o365_timebased_ux},
-    {{0xcbecb6f5,0xda49,0x4029,{0xbe,0x25,0x59,0x45,0xac,0x97,0x50,0xb3}}, L"Office 16, Office16O365ProPlusEDUR_Subscription edition", o365_timebased_description, o365_timebased_ux},
-    {{0xdfc5a8b0,0xe9fd,0x43f7,{0xb4,0xca,0xd6,0x3f,0x1e,0x74,0x97,0x11}}, L"Office 16, Office16O365ProPlusR_SubTrial5 edition", o365_timebased_description, o365_timebased_ux},
-    {{0xe3dacc06,0x3bc2,0x4e13,{0x8e,0x59,0x8e,0x05,0xf3,0x23,0x23,0x25}}, L"Office 16, Office16O365ProPlusR_Subscription2 edition", o365_timebased_description, o365_timebased_ux},
-    {{0xe538d623,0xc066,0x433d,{0xa6,0xb7,0xe0,0x70,0x8b,0x1f,0xad,0xf7}}, L"Office 16, Office16O365ProPlusR_SubTrial4 edition", o365_timebased_description, o365_timebased_ux},
-    {{0xff02e86c,0xfef0,0x4063,{0xb3,0x9f,0x74,0x27,0x5c,0xdd,0xd7,0xc3}}, L"Office 16, Office16O365ProPlusR_Subscription5 edition", o365_timebased_description, o365_timebased_ux},
+    {{0x149dbce7,0xa48e,0x44db,{0x83,0x64,0xa5,0x33,0x86,0xcd,0x45,0x80}}, L"Office 16, Office16O365ProPlusR_Subscription1 edition", L"Office16O365ProPlusR_Subscription1", o365_timebased_description, o365_timebased_ux},
+    {{0x24fc428e,0xa37e,0x4996,{0xac,0x66,0x8e,0xa0,0x30,0x4a,0x15,0x2d}}, L"Office 16, Office16O365ProPlusE5R_SubTrial edition", L"Office16O365ProPlusE5R_SubTrial", o365_timebased_description, o365_timebased_ux},
+    {{0x26b6a7ce,0xb174,0x40aa,{0xa1,0x14,0x31,0x6a,0xa5,0x6b,0xa9,0xfc}}, L"Office 16, Office16O365ProPlusR_SubTrial2 edition", L"Office16O365ProPlusR_SubTrial2", o365_timebased_description, o365_timebased_ux},
+    {{0x35ec6e0e,0x2df4,0x4629,{0x9e,0xe3,0xd5,0x25,0xe8,0x06,0xb9,0x88}}, L"Office 16, Office16O365ProPlusDemoR_BypassTrial365 edition", L"Office16O365ProPlusDemoR_BypassTrial365", o365_free_description, o365_free_ux},
+    {{0x3ad61e22,0xe4fe,0x497f,{0xbd,0xb1,0x3e,0x51,0xbd,0x87,0x21,0x73}}, L"Office 16, Office16O365ProPlusR_Grace edition", L"Office16O365ProPlusR_Grace", o365_grace_description, o365_grace_ux},
+    {{0x46d2c0bd,0xf912,0x4ddc,{0x8e,0x67,0xb9,0x0e,0xad,0xc3,0xf8,0x3c}}, L"Office 16, Office16O365ProPlusR_SubTrial1 edition", L"Office16O365ProPlusR_SubTrial1", o365_timebased_description, o365_timebased_ux},
+    {{0x6e5db8a5,0x78e6,0x4953,{0xb7,0x93,0x74,0x22,0x35,0x1a,0xfe,0x88}}, L"Office 16, Office16O365ProPlusR_Subscription4 edition", L"Office16O365ProPlusR_Subscription4", o365_timebased_description, o365_timebased_ux},
+    {{0x7984d9ed,0x81f9,0x4d50,{0x91,0x3d,0x31,0x7e,0xcd,0x86,0x30,0x65}}, L"Office 16, Office16O365ProPlusE5R_Subscription edition", L"Office16O365ProPlusE5R_Subscription", o365_timebased_description, o365_timebased_ux},
+    {{0xa8119e32,0xb17c,0x4bd3,{0x89,0x50,0x7d,0x18,0x53,0xf4,0xb4,0x12}}, L"Office 16, Office16O365ProPlusR_Subscription3 edition", L"Office16O365ProPlusR_Subscription3", o365_timebased_description, o365_timebased_ux},
+    {{0xb27b3d00,0x9a95,0x4fcd,{0xa0,0xc2,0x11,0x8c,0xbd,0x5e,0x69,0x9b}}, L"Office 16, Office16O365ProPlusEDUR_SubTrial edition", L"Office16O365ProPlusEDUR_SubTrial", o365_timebased_description, o365_timebased_ux},
+    {{0xb6b47040,0xb38e,0x4be2,{0xbf,0x6a,0xda,0xbf,0x0c,0x41,0x54,0x0a}}, L"Office 16, Office16O365ProPlusR_SubTrial3 edition", L"Office16O365ProPlusR_SubTrial3", o365_timebased_description, o365_timebased_ux},
+    {{0xcbecb6f5,0xda49,0x4029,{0xbe,0x25,0x59,0x45,0xac,0x97,0x50,0xb3}}, L"Office 16, Office16O365ProPlusEDUR_Subscription edition", L"Office16O365ProPlusEDUR_Subscription", o365_timebased_description, o365_timebased_ux},
+    {{0xdfc5a8b0,0xe9fd,0x43f7,{0xb4,0xca,0xd6,0x3f,0x1e,0x74,0x97,0x11}}, L"Office 16, Office16O365ProPlusR_SubTrial5 edition", L"Office16O365ProPlusR_SubTrial5", o365_timebased_description, o365_timebased_ux},
+    {{0xe3dacc06,0x3bc2,0x4e13,{0x8e,0x59,0x8e,0x05,0xf3,0x23,0x23,0x25}}, L"Office 16, Office16O365ProPlusR_Subscription2 edition", L"Office16O365ProPlusR_Subscription2", o365_timebased_description, o365_timebased_ux},
+    {{0xe538d623,0xc066,0x433d,{0xa6,0xb7,0xe0,0x70,0x8b,0x1f,0xad,0xf7}}, L"Office 16, Office16O365ProPlusR_SubTrial4 edition", L"Office16O365ProPlusR_SubTrial4", o365_timebased_description, o365_timebased_ux},
+    {{0xff02e86c,0xfef0,0x4063,{0xb3,0x9f,0x74,0x27,0x5c,0xdd,0xd7,0xc3}}, L"Office 16, Office16O365ProPlusR_Subscription5 edition", L"Office16O365ProPlusR_Subscription5", o365_timebased_description, o365_timebased_ux},
 };
 
 #define SLC_CONTEXT_MAGIC 0x534c4343
@@ -103,7 +104,7 @@ static const struct o365_product_sku o365_product_skus[] =
 #define AUTH_RESULT_VER   2
 #define AUTH_HMAC_LEN     20
 #define AUTH_MAX_KEY_LEN  64
-#define GRACE_PERIOD_DAYS 5
+#define DEFAULT_GRACE_PERIOD_DAYS 5
 #define FILETIME_TICKS_PER_MINUTE 600000000ULL
 
 struct slc_context
@@ -173,6 +174,7 @@ static BOOL grace_license_present(void);
 static BOOL grace_profile_present(void);
 static BOOL grace_period_remaining(DWORD *minutes);
 static BOOL start_grace_period(void);
+static DWORD grace_period_days(void);
 static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
 static const WCHAR *installed_profile_product_info(const WCHAR *name);
@@ -413,7 +415,7 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
             {
                 entries[i].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
                 entries[i].dwGraceTime = grace_minutes;
-                entries[i].dwTotalGraceDays = GRACE_PERIOD_DAYS;
+                entries[i].dwTotalGraceDays = grace_period_days();
                 entries[i].hrReason = SL_I_OOB_GRACE_PERIOD;
             }
             else
@@ -430,7 +432,7 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
         {
             entries[0].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
             entries[0].dwGraceTime = grace_minutes;
-            entries[0].dwTotalGraceDays = GRACE_PERIOD_DAYS;
+            entries[0].dwTotalGraceDays = grace_period_days();
             entries[0].hrReason = SL_I_OOB_GRACE_PERIOD;
         }
         else
@@ -444,7 +446,7 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
         entries[0].SkuId = *grace_id;
         entries[0].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
         entries[0].dwGraceTime = grace_minutes;
-        entries[0].dwTotalGraceDays = GRACE_PERIOD_DAYS;
+        entries[0].dwTotalGraceDays = grace_period_days();
         entries[0].hrReason = SL_I_OOB_GRACE_PERIOD;
     }
     else
@@ -485,6 +487,7 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
         else if (!wcsicmp(name, L"Author")) string = author;
         else if (!wcsicmp(name, L"ApplicationBitmap")) string = o365_application_bitmap;
         else if (!wcsicmp(name, L"UXDifferentiator")) string = o365_sku->ux_differentiator;
+        else if (!wcsicmp(name, L"Family")) string = o365_sku->family;
     }
     else if (IsEqualGUID(product, selected_grace_id()) && grace_profile_present())
     {
@@ -497,6 +500,7 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
             else if (!wcsicmp(name, L"Author")) string = author;
             else if (!wcsicmp(name, L"ApplicationBitmap")) string = word_application_bitmap;
             else if (!wcsicmp(name, L"UXDifferentiator")) string = ux_differentiator;
+            else if (!wcsicmp(name, L"Family")) string = L"Office24Word2024R_Grace";
         }
         else string = installed_profile_product_info(name);
     }
@@ -633,7 +637,9 @@ struct installed_grace_profile
     WCHAR author[80];
     WCHAR application_bitmap[32];
     WCHAR ux_differentiator[64];
+    WCHAR family[128];
     char *ppd_xml;
+    DWORD grace_days;
 };
 
 static INIT_ONCE installed_profile_once = INIT_ONCE_STATIC_INIT;
@@ -901,6 +907,30 @@ static BOOL find_grace_mapping(const char *xml, const char *product_id,
     return FALSE;
 }
 
+static BOOL parse_grace_days(const char *xml, DWORD *days)
+{
+    static const char duration_prefix[] = "<sl:duration>P";
+    static const char grace_type[] = "<sl:type>msft:sl/grace-period</sl:type>";
+    const char *period, *period_end, *duration, *end;
+    ULONGLONG value = 0;
+
+    if (!(period = strstr(xml, "<sl:floatingPeriod")) ||
+            !(period_end = strstr(period, "</sl:floatingPeriod>")) ||
+            !(duration = strstr(period, duration_prefix)) || duration >= period_end ||
+            !span_contains(period, period_end, grace_type))
+        return FALSE;
+
+    duration += strlen(duration_prefix);
+    for (end = duration; end < period_end && *end >= '0' && *end <= '9'; ++end)
+    {
+        value = value * 10 + (*end - '0');
+        if (value > MAXDWORD) return FALSE;
+    }
+    if (end == duration || end >= period_end || *end != 'D' || end[1] != '<') return FALSE;
+    *days = value;
+    return TRUE;
+}
+
 static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void **context)
 {
     WCHAR product_ids[512], license_root[MAX_PATH], map_path[MAX_PATH];
@@ -949,8 +979,7 @@ static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void *
             !(token = strstr(ul_xml, "<tm:infoStr name=\"applicationId\">")) ||
             !parse_slid(token + strlen("<tm:infoStr name=\"applicationId\">"), &signed_app_id) ||
             !IsEqualGUID(&signed_app_id, &office_app_id) ||
-            !strstr(ul_xml, "<sl:type>msft:sl/grace-period</sl:type>") ||
-            !strstr(ul_xml, "<sl:duration>P5D</sl:duration>") ||
+            !parse_grace_days(ul_xml, &installed_profile.grace_days) ||
             !(token = strstr(ppd_xml, "licenseId=\"")) ||
             !parse_slid(token + strlen("licenseId=\""), &installed_profile.ppd_license_id) ||
             !validate_installed_profile_files(&installed_profile))
@@ -966,6 +995,8 @@ static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void *
                 installed_profile.application_bitmap, ARRAY_SIZE(installed_profile.application_bitmap));
         copy_xml_value(ul_xml, "<tm:infoStr name=\"UXDifferentiator\">",
                 installed_profile.ux_differentiator, ARRAY_SIZE(installed_profile.ux_differentiator));
+        copy_xml_value(ul_xml, "<tm:infoStr name=\"Family\">",
+                installed_profile.family, ARRAY_SIZE(installed_profile.family));
         if (!installed_profile.description[0])
             lstrcpynW(installed_profile.description, installed_profile.name,
                     ARRAY_SIZE(installed_profile.description));
@@ -1006,6 +1037,7 @@ static const WCHAR *installed_profile_product_info(const WCHAR *name)
         return profile->application_bitmap[0] ? profile->application_bitmap : NULL;
     if (!wcsicmp(name, L"UXDifferentiator"))
         return profile->ux_differentiator[0] ? profile->ux_differentiator : NULL;
+    if (!wcsicmp(name, L"Family")) return profile->family[0] ? profile->family : NULL;
     return NULL;
 }
 
@@ -1092,8 +1124,15 @@ static BOOL grace_profile_present(void)
            license_installed(&word2024_grace_ul_license_id);
 }
 
+static DWORD grace_period_days(void)
+{
+    const struct installed_grace_profile *profile = get_installed_profile();
+    return profile ? profile->grace_days : DEFAULT_GRACE_PERIOD_DAYS;
+}
+
 static BOOL grace_period_remaining(DWORD *minutes)
 {
+    DWORD grace_days = grace_period_days();
     ULONGLONG start, now, duration, remaining;
     WCHAR name[39];
     FILETIME time;
@@ -1107,7 +1146,7 @@ static BOOL grace_period_remaining(DWORD *minutes)
         return FALSE;
     GetSystemTimeAsFileTime(&time);
     now = ((ULONGLONG)time.dwHighDateTime << 32) | time.dwLowDateTime;
-    duration = (ULONGLONG)GRACE_PERIOD_DAYS * 24 * 60 * FILETIME_TICKS_PER_MINUTE;
+    duration = (ULONGLONG)grace_days * 24 * 60 * FILETIME_TICKS_PER_MINUTE;
     if (start > now || now - start >= duration) return FALSE;
     remaining = duration - (now - start);
     if (minutes) *minutes = (remaining + FILETIME_TICKS_PER_MINUTE - 1) /
@@ -2649,15 +2688,152 @@ done:
     return hr;
 }
 
+static int compare_slids(const void *left, const void *right)
+{
+    const SLID *a = left, *b = right;
+    int result;
+
+    if (a->Data1 != b->Data1) return a->Data1 < b->Data1 ? -1 : 1;
+    if (a->Data2 != b->Data2) return a->Data2 < b->Data2 ? -1 : 1;
+    if (a->Data3 != b->Data3) return a->Data3 < b->Data3 ? -1 : 1;
+    result = memcmp(a->Data4, b->Data4, sizeof(a->Data4));
+    return result < 0 ? -1 : result > 0;
+}
+
+static BOOL get_o365_sku_license_ids(const struct o365_product_sku *sku,
+        UINT *count, SLID ids[3])
+{
+    WCHAR root[MAX_PATH], path[MAX_PATH];
+    const WCHAR *stem;
+    char *xml = NULL;
+    const char *token;
+    DWORD size;
+    UINT found = 0;
+
+    if (!sku || !get_office_license_root(root, ARRAY_SIZE(root))) return FALSE;
+    stem = !wcsncmp(sku->family, L"Office16", 8) ? sku->family + 8 : sku->family;
+
+    lstrcpynW(path, root, ARRAY_SIZE(path));
+    if (!append_path(path, ARRAY_SIZE(path), stem) ||
+        !append_path(path, ARRAY_SIZE(path), L"-ul-oob.xrm-ms") ||
+        !(xml = read_ascii_xml(path, &size)) ||
+        !(token = strstr(xml, "licenseId=\"")) ||
+        !parse_slid(token + strlen("licenseId=\""), &ids[found]) ||
+        !validate_profile_file(path, &ids[found]))
+        goto failed;
+    found++;
+    if (!(token = strstr(xml, "privateCertificateId\">")) ||
+        !parse_slid(token + strlen("privateCertificateId\">"), &ids[found]))
+        goto failed;
+    found++;
+    LocalFree(xml);
+    xml = NULL;
+
+    lstrcpynW(path, root, ARRAY_SIZE(path));
+    if (append_path(path, ARRAY_SIZE(path), stem) &&
+        append_path(path, ARRAY_SIZE(path), L"-pl.xrm-ms") &&
+        (xml = read_ascii_xml(path, &size)))
+    {
+        if (!(token = strstr(xml, "licenseId=\"")) ||
+            !parse_slid(token + strlen("licenseId=\""), &ids[found]) ||
+            !validate_profile_file(path, &ids[found]))
+            goto failed;
+        found++;
+    }
+
+    LocalFree(xml);
+    qsort(ids, found, sizeof(*ids), compare_slids);
+    *count = found;
+    return TRUE;
+
+failed:
+    LocalFree(xml);
+    return FALSE;
+}
+
+static BOOL get_o365_sku_file_license_ids(const struct o365_product_sku *sku,
+        UINT *count, SLID ids[3])
+{
+    static const WCHAR * const suffixes[] =
+    {
+        L"-ul-oob.xrm-ms", L"-ppd.xrm-ms", L"-pl.xrm-ms"
+    };
+    WCHAR root[MAX_PATH], path[MAX_PATH];
+    const WCHAR *stem;
+    const char *token;
+    char *xml;
+    DWORD size;
+    UINT found = 0, i;
+
+    if (!sku || !get_office_license_root(root, ARRAY_SIZE(root))) return FALSE;
+    stem = !wcsncmp(sku->family, L"Office16", 8) ? sku->family + 8 : sku->family;
+
+    for (i = 0; i < ARRAY_SIZE(suffixes); ++i)
+    {
+        lstrcpynW(path, root, ARRAY_SIZE(path));
+        if (!append_path(path, ARRAY_SIZE(path), stem) ||
+            !append_path(path, ARRAY_SIZE(path), suffixes[i]))
+            return FALSE;
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
+        {
+            if (i < 2) return FALSE;
+            continue;
+        }
+        if (!(xml = read_ascii_xml(path, &size)) ||
+            !(token = strstr(xml, "licenseId=\"")) ||
+            !parse_slid(token + strlen("licenseId=\""), &ids[found]) ||
+            !validate_profile_file(path, &ids[found]))
+        {
+            LocalFree(xml);
+            return FALSE;
+        }
+        LocalFree(xml);
+        found++;
+    }
+    qsort(ids, found, sizeof(*ids), compare_slids);
+    *count = found;
+    return TRUE;
+}
+
+static HRESULT get_o365_application_license_ids(UINT *count, SLID **ids)
+{
+    SLID collected[ARRAY_SIZE(o365_product_skus) * 3], *list;
+    UINT sku_count, total = 0, unique, i, j;
+
+    for (i = 0; i < ARRAY_SIZE(o365_product_skus); ++i)
+    {
+        if (!get_o365_sku_file_license_ids(&o365_product_skus[i], &sku_count,
+                collected + total))
+            return SL_E_VALUE_NOT_FOUND;
+        total += sku_count;
+    }
+    qsort(collected, total, sizeof(*collected), compare_slids);
+    for (i = unique = 0; i < total; ++i)
+    {
+        for (j = 0; j < unique; ++j)
+            if (IsEqualGUID(&collected[i], &collected[j])) break;
+        if (j == unique) collected[unique++] = collected[i];
+    }
+    if (!(list = LocalAlloc(LMEM_FIXED, unique * sizeof(*list))))
+        return E_OUTOFMEMORY;
+    memcpy(list, collected, unique * sizeof(*list));
+    *count = unique;
+    *ids = list;
+    return S_OK;
+}
+
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         UINT return_type, UINT *count, SLID **ids)
 {
     const struct installed_grace_profile *profile = get_installed_profile();
+    const struct o365_product_sku *o365_sku;
     const SLID *grace_id = selected_grace_id();
     const SLID *binding_id, *ul_id;
     BOOL o365 = o365_proplus_configured();
     const SLID *pkey_id = NULL;
     unsigned int i;
+    UINT license_count;
+    SLID license_ids[3];
     SLID *list;
 
     FIXME("(%p, %u, %s, %u, %p, %p) semi-stub\n", handle, query_type,
@@ -2716,6 +2892,35 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         *count = 0;
         *ids = NULL;
         return 0xC004F016;
+    }
+
+    if (o365 && return_type == SL_ID_LICENSE && query_type == SL_ID_APPLICATION &&
+        query_id && IsEqualGUID(query_id, &office_app_id))
+        return get_o365_application_license_ids(count, ids);
+
+    if (return_type == SL_ID_APPLICATION && query_type == SL_ID_PRODUCT_SKU &&
+        query_id && (find_o365_product_sku(query_id) || IsEqualGUID(query_id, grace_id)))
+    {
+        if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
+            return E_OUTOFMEMORY;
+        *list = office_app_id;
+        *count = 1;
+        *ids = list;
+        return S_OK;
+    }
+
+    /* Derive SKU license relationships from signed installed UL/PL files.
+     * Native orders these IDs by GUID and omits PPD policy licenses. */
+    if (return_type == SL_ID_LICENSE && query_type == SL_ID_PRODUCT_SKU && query_id &&
+        (o365_sku = find_o365_product_sku(query_id)) &&
+        get_o365_sku_license_ids(o365_sku, &license_count, license_ids))
+    {
+        if (!(list = LocalAlloc(LMEM_FIXED, license_count * sizeof(*list))))
+            return E_OUTOFMEMORY;
+        memcpy(list, license_ids, license_count * sizeof(*list));
+        *count = license_count;
+        *ids = list;
+        return S_OK;
     }
 
     /* SKU → LICENSE: native returns binding + UL-OOB license IDs (not PPD). */
