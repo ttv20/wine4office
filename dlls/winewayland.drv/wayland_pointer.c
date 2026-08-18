@@ -396,7 +396,27 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
     pthread_mutex_unlock(&pointer->mutex);
 }
 
-static UINT pointer_get_resize_edge(HWND hwnd)
+static BOOL pointer_has_toplevel_surface(HWND hwnd)
+{
+    struct wayland_win_data *data;
+    BOOL toplevel = FALSE;
+
+    if (!(data = wayland_win_data_get(hwnd))) return FALSE;
+    if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface))
+        toplevel = TRUE;
+    wayland_win_data_release(data);
+    return toplevel;
+}
+
+static HWND pointer_get_resize_surface_hwnd(HWND focused_hwnd, HWND resize_hwnd)
+{
+    if (pointer_has_toplevel_surface(focused_hwnd)) return focused_hwnd;
+    if (resize_hwnd != focused_hwnd && pointer_has_toplevel_surface(resize_hwnd))
+        return resize_hwnd;
+    return NULL;
+}
+
+static UINT pointer_get_resize_edge(HWND hwnd, HWND hit_test_hwnd, HWND resize_surface_hwnd)
 {
     struct wayland_surface *surface;
     struct wayland_win_data *data;
@@ -407,16 +427,24 @@ static UINT pointer_get_resize_edge(HWND hwnd)
     UINT edge = 0;
 
     if (!NtUserGetCursorPos(&cursor)) return 0;
-    if (!(data = wayland_win_data_get(hwnd))) return 0;
+    if (!(data = wayland_win_data_get(hit_test_hwnd))) return 0;
 
     surface = data->wayland_surface;
-    if (!data->resizeable || !surface || !wayland_surface_is_toplevel(surface) ||
-        (surface->window.state & (WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED |
-                                  WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN)))
-        goto done;
+    if (!(NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_THICKFRAME) || !surface) goto done;
 
     rect = surface->window.rect;
     if (!PtInRect(&rect, cursor)) goto done;
+
+    if (resize_surface_hwnd != hit_test_hwnd)
+    {
+        wayland_win_data_release(data);
+        if (!(data = wayland_win_data_get(resize_surface_hwnd))) return 0;
+        surface = data->wayland_surface;
+    }
+    if (!surface || !wayland_surface_is_toplevel(surface) ||
+        (surface->window.state & (WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED |
+                                  WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN)))
+        goto done;
 
     frame_x = NtUserGetSystemMetrics(SM_CXFRAME);
     frame_y = NtUserGetSystemMetrics(SM_CYFRAME);
@@ -438,6 +466,16 @@ done:
     return edge;
 }
 
+static HWND pointer_get_resize_hwnd(HWND hwnd)
+{
+    HWND target;
+
+    if ((target = NtUserGetProp(hwnd, dcomp_caption_root_prop))) return target;
+    if ((target = NtUserGetProp(hwnd, dcomp_detached_window_prop))) hwnd = target;
+    if ((target = NtUserGetAncestor(hwnd, GA_ROOT))) return target;
+    return hwnd;
+}
+
 static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
                                   uint32_t serial, uint32_t time, uint32_t button,
                                   uint32_t state)
@@ -445,7 +483,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     struct wayland_pointer *pointer = &process_wayland.pointer;
     BOOL edge_resize;
     INPUT input = {0};
-    HWND hwnd, input_hwnd, root, command, caption;
+    HWND hwnd, input_hwnd, root, command, caption, resize_hwnd, resize_surface_hwnd;
     UINT resize_edge;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -467,7 +505,6 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     if (state == WL_POINTER_BUTTON_STATE_RELEASED && edge_resize) return;
     if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
-    if (!(root = NtUserGetAncestor(hwnd, GA_ROOT))) root = hwnd;
 
     caption = NtUserGetProp(hwnd, dcomp_caption_overlay_prop) ? hwnd :
             NtUserGetProp(hwnd, dcomp_caption_pointer_prop);
@@ -507,19 +544,23 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED)
     {
+        resize_hwnd = pointer_get_resize_hwnd(hwnd);
+        resize_surface_hwnd = pointer_get_resize_surface_hwnd(hwnd, resize_hwnd);
         pthread_mutex_lock(&pointer->mutex);
-        pointer->button_hwnd = root;
+        pointer->button_hwnd = hwnd;
         pthread_mutex_unlock(&pointer->mutex);
 
-        if (button == BTN_LEFT && (resize_edge = pointer_get_resize_edge(root)))
+        if (button == BTN_LEFT && resize_surface_hwnd &&
+            (resize_edge = pointer_get_resize_edge(resize_hwnd, hwnd, resize_surface_hwnd)) &&
+            wayland_surface_begin_move_resize(resize_surface_hwnd, resize_hwnd,
+                                              SC_SIZE, resize_edge, serial))
         {
             pthread_mutex_lock(&pointer->mutex);
             pointer->edge_resize = TRUE;
             pthread_mutex_unlock(&pointer->mutex);
 
             TRACE("edge resize hwnd=%p focused=%p edge=%u serial=%u\n",
-                  root, hwnd, resize_edge, serial);
-            NtUserPostMessage(root, WM_SYSCOMMAND, SC_SIZE | resize_edge, 0);
+                  resize_hwnd, hwnd, resize_edge, serial);
             return;
         }
     }
