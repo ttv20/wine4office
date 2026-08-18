@@ -532,8 +532,18 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
     HRESULT hr;
 
     TRACE("iface %p, sync_interval %u, flags %#x.\n", iface, sync_interval, flags);
+    if (flags & DXGI_PRESENT_TEST)
+        return d3d11_swapchain_present(swapchain, sync_interval, flags);
+
+    /* Applications may follow a complete Present() with sparse Present1()
+     * updates.  Keep the complete frame available for those dirty updates. */
+    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, NULL)))
+    {
+        swapchain->present1_shadow_valid = FALSE;
+        WARN("Failed to update presentation shadow, hr %#lx.\n", hr);
+    }
     hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
-    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+    if (FAILED(hr))
         swapchain->present1_shadow_valid = FALSE;
     return hr;
 }
