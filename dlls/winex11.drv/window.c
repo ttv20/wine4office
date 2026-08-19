@@ -619,7 +619,7 @@ static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD st
 
     /* The visible rect is produced from the decoration policy, so using it to choose that policy
      * creates a configure feedback loop when the window manager changes the frame extents. */
-    if (!decorated_mode || !data->managed) return 0;
+    if (!decorated_mode || !data->managed || data->shaped) return 0;
     policy = HandleToULong( NtUserGetProp( data->hwnd, dwm_nc_rendering_policy_prop ) );
     policy = policy ? policy - 1 : DWMNCRP_USEWINDOWSTYLE;
     if (policy == DWMNCRP_DISABLED) return 0;
