@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Prevent the first Word Design-tab load from stalling on queued Direct2D work.
 - Stop only the selected Wine environment, with a graceful ten-second deadline.
 
 ## 0.2.0-alpha.2 — 2026-08-18
