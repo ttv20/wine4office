@@ -1058,6 +1058,7 @@ SOURCES = \
 	windows.graphics.idl \
 	windows.graphics.imaging.idl \
 	windows.h \
+	windows.management.core.idl \
 	windows.management.deployment.idl \
 	windows.media.capture.idl \
 	windows.media.closedcaptioning.idl \
@@ -1267,10 +1268,12 @@ INSTALL_LIB = \
 	windows.applicationmodel.winmd \
 	windows.globalization.winmd \
 	windows.graphics.winmd \
+	windows.management.core.winmd \
 	windows.media.winmd \
 	windows.networking.winmd \
 	windows.perception.winmd \
 	windows.storage.winmd \
 	windows.system.winmd \
+	windows.system.profile.winmd \
 	windows.ui.winmd \
 	windows.ui.xaml.winmd

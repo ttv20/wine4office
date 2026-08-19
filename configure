@@ -23162,6 +23162,8 @@ wine_fn_config_makefile dlls/windows.storage.applicationdata enable_windows_stor
 wine_fn_config_makefile dlls/windows.storage.applicationdata/tests enable_tests
 wine_fn_config_makefile dlls/windows.storage enable_windows_storage
 wine_fn_config_makefile dlls/windows.storage/tests enable_tests
+wine_fn_config_makefile dlls/windows.system enable_windows_system
+wine_fn_config_makefile dlls/windows.system/tests enable_tests
 wine_fn_config_makefile dlls/windows.system.profile.systemid enable_windows_system_profile_systemid
 wine_fn_config_makefile dlls/windows.system.profile.systemid/tests enable_tests
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers enable_windows_system_profile_systemmanufacturers

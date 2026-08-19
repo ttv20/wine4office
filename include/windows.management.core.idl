@@ -1,0 +1,49 @@
+/* Windows.Management.Core declarations. */
+
+#ifdef __WIDL__
+#pragma makedep header install winmd
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.storage.idl";
+
+namespace Windows.Management.Core
+{
+    interface IApplicationDataManager;
+    interface IApplicationDataManagerStatics;
+    runtimeclass ApplicationDataManager;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Management.Core.ApplicationDataManager),
+        uuid(74d10432-2e99-4000-9a3a-64307e858129)
+    ]
+    interface IApplicationDataManager : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Management.Core.ApplicationDataManager),
+        uuid(1e1862e3-698e-49a1-9752-dee94925b9b3)
+    ]
+    interface IApplicationDataManagerStatics : IInspectable
+    {
+        HRESULT CreateForPackageFamily([in] HSTRING package_family_name,
+                [out, retval] Windows.Storage.ApplicationData **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Management.Core.IApplicationDataManagerStatics,
+                Windows.Foundation.UniversalApiContract, 1.0),
+        threading(mta)
+    ]
+    runtimeclass ApplicationDataManager
+    {
+        [default] interface Windows.Management.Core.IApplicationDataManager;
+    }
+}
