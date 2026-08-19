@@ -43,27 +43,37 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+static BOOL hstring_equals( HSTRING string, const WCHAR *value )
+{
+    UINT32 length = WindowsGetStringLen( string );
+    SIZE_T value_length = wcslen( value );
+
+    return length == value_length && !memcmp( WindowsGetStringRawBuffer( string, NULL ), value,
+            length * sizeof(*value) );
+}
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
-    const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
 
     TRACE( "class %s, factory %p.\n", debugstr_hstring(classid), factory );
 
     *factory = NULL;
 
-    if (!wcscmp( buffer, RuntimeClass_Windows_Security_ExchangeActiveSyncProvisioning_EasClientDeviceInformation ))
+    if (hstring_equals( classid, RuntimeClass_Windows_Security_ExchangeActiveSyncProvisioning_EasClientDeviceInformation ))
         IActivationFactory_QueryInterface( client_device_information_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Profile_AnalyticsInfo ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_System_Profile_AnalyticsInfo ))
         IActivationFactory_QueryInterface( analytics_info_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Profile_RetailInfo ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_System_Profile_EducationSettings ))
+        IActivationFactory_QueryInterface( education_settings_factory, &IID_IActivationFactory, (void **)factory );
+    else if (hstring_equals( classid, RuntimeClass_Windows_System_Profile_RetailInfo ))
         IActivationFactory_QueryInterface( retail_info_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_System_UserProfile_AdvertisingManager ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_System_UserProfile_AdvertisingManager ))
         IActivationFactory_QueryInterface( advertising_manager_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_ViewManagement_ApplicationView ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_UI_ViewManagement_ApplicationView ))
         IActivationFactory_QueryInterface( application_view_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Core_CoreApplication ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_ApplicationModel_Core_CoreApplication ))
         IActivationFactory_QueryInterface( core_application_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
+    else if (hstring_equals( classid, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
         IActivationFactory_QueryInterface( data_transfer_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

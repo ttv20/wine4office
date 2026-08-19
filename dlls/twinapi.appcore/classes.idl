@@ -39,6 +39,7 @@ namespace Windows.Security.ExchangeActiveSyncProvisioning {
 }
 namespace Windows.System.Profile {
     runtimeclass AnalyticsInfo;
+    runtimeclass EducationSettings;
     runtimeclass RetailInfo;
 }
 namespace Windows.System.UserProfile {

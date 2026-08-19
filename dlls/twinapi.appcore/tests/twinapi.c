@@ -368,6 +368,142 @@ static void test_AnalyticsVersionInfo(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_EducationSettings(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_System_Profile_EducationSettings;
+    static const GUID unsupported_iid =
+        {0xdeadbeef, 0xbeef, 0x4bad, {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}};
+    IEducationSettingsStatics *statics = NULL;
+    IActivationFactory *factory = NULL;
+    IUnknown *identity = NULL;
+    HSTRING str = NULL, returned_name = NULL;
+    TrustLevel trust_level = (TrustLevel)-1;
+    boolean value = TRUE;
+    void *unsupported;
+    INT32 compare;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, NULL );
+    ok( hr == E_INVALIDARG, "null output returned %#lx.\n", hr );
+    {
+        WCHAR invalid_name[ARRAY_SIZE(RuntimeClass_Windows_System_Profile_EducationSettings) + 5];
+        HSTRING invalid_class = NULL;
+        IActivationFactory *invalid_factory = (void *)(ULONG_PTR)0xdeadbeef;
+        UINT32 length = wcslen( class_name );
+
+        memcpy( invalid_name, class_name, length * sizeof(*invalid_name) );
+        invalid_name[length] = 0;
+        memcpy( invalid_name + length + 1, L"junk", 4 * sizeof(*invalid_name) );
+        hr = WindowsCreateString( invalid_name, length + 5, &invalid_class );
+        ok( hr == S_OK, "embedded-NUL class creation returned %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            hr = RoGetActivationFactory( invalid_class, &IID_IActivationFactory,
+                    (void **)&invalid_factory );
+            ok( hr == CLASS_E_CLASSNOTAVAILABLE && !invalid_factory,
+                    "embedded-NUL class activation returned %#lx, %p.\n", hr, invalid_factory );
+            WindowsDeleteString( invalid_class );
+        }
+    }
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        WindowsDeleteString( str );
+        return;
+    }
+    if (FAILED(hr) || !factory)
+    {
+        ok( !!factory, "got no activation factory for hr %#lx.\n", hr );
+        if (factory) IActivationFactory_Release( factory );
+        WindowsDeleteString( str );
+        return;
+    }
+
+    unsupported = (void *)(ULONG_PTR)0xdeadbeef;
+    hr = RoGetActivationFactory( str, &unsupported_iid, &unsupported );
+    ok( hr == E_NOINTERFACE && !unsupported, "unsupported RoGetActivationFactory returned %#lx, %p.\n",
+            hr, unsupported );
+
+    check_interface( factory, &IID_IUnknown, TRUE );
+    check_interface( factory, &IID_IInspectable, TRUE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
+    check_interface( factory, &IID_IActivationFactory, TRUE );
+    check_interface( factory, &IID_IEducationSettingsStatics, TRUE );
+
+    unsupported = (void *)(ULONG_PTR)0xdeadbeef;
+    hr = IActivationFactory_QueryInterface( factory, &unsupported_iid, &unsupported );
+    ok( hr == E_NOINTERFACE && !unsupported, "unsupported QI returned %#lx, %p.\n", hr, unsupported );
+
+    hr = IActivationFactory_GetRuntimeClassName( factory, &returned_name );
+    ok( hr == S_OK && !!returned_name, "GetRuntimeClassName returned %#lx, %p.\n", hr, returned_name );
+    if (returned_name)
+    {
+        hr = WindowsCompareStringOrdinal( returned_name, str, &compare );
+        ok( hr == S_OK && !compare, "got class name %s.\n", debugstr_hstring( returned_name ) );
+        WindowsDeleteString( returned_name );
+    }
+    hr = IActivationFactory_GetRuntimeClassName( factory, NULL );
+    ok( hr == E_POINTER, "null class name output returned %#lx.\n", hr );
+
+    hr = IActivationFactory_GetTrustLevel( factory, &trust_level );
+    ok( hr == S_OK && trust_level == BaseTrust, "GetTrustLevel returned %#lx, level %d.\n", hr, trust_level );
+    hr = IActivationFactory_GetTrustLevel( factory, NULL );
+    ok( hr == E_POINTER, "null trust level output returned %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IEducationSettingsStatics, (void **)&statics );
+    ok( hr == S_OK && !!statics, "statics activation returned %#lx, %p.\n", hr, statics );
+    if (FAILED(hr) || !statics)
+    {
+        IActivationFactory_Release( factory );
+        WindowsDeleteString( str );
+        return;
+    }
+
+    check_interface( statics, &IID_IUnknown, TRUE );
+    check_interface( statics, &IID_IInspectable, TRUE );
+    check_interface( statics, &IID_IAgileObject, TRUE );
+    check_interface( statics, &IID_IActivationFactory, TRUE );
+    check_interface( statics, &IID_IEducationSettingsStatics, TRUE );
+
+    unsupported = (void *)(ULONG_PTR)0xdeadbeef;
+    hr = IEducationSettingsStatics_QueryInterface( statics, &unsupported_iid, &unsupported );
+    ok( hr == E_NOINTERFACE && !unsupported, "unsupported statics QI returned %#lx, %p.\n", hr, unsupported );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IUnknown, (void **)&identity );
+    ok( hr == S_OK && identity == (IUnknown *)factory, "factory identity returned %#lx, %p.\n", hr, identity );
+    if (identity) IUnknown_Release( identity );
+    identity = NULL;
+    hr = IEducationSettingsStatics_QueryInterface( statics, &IID_IUnknown, (void **)&identity );
+    ok( hr == S_OK && identity == (IUnknown *)factory, "statics identity returned %#lx, %p.\n", hr, identity );
+    if (identity) IUnknown_Release( identity );
+
+    IActivationFactory_AddRef( factory );
+    IActivationFactory_Release( factory );
+
+    hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, &value );
+    ok( hr == S_OK, "get_IsEducationEnvironment returned %#lx.\n", hr );
+    if (!strcmp( winetest_platform, "wine" )) ok( !value, "expected a non-education Wine environment.\n" );
+    hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, NULL );
+    ok( hr == E_POINTER, "null value output returned %#lx.\n", hr );
+
+    IActivationFactory_Release( factory );
+    factory = NULL;
+    value = TRUE;
+    hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, &value );
+    ok( hr == S_OK, "statics did not survive factory release, hr %#lx.\n", hr );
+    if (!strcmp( winetest_platform, "wine" )) ok( !value, "statics returned TRUE after factory release.\n" );
+
+    IEducationSettingsStatics_Release( statics );
+    WindowsDeleteString( str );
+}
+
 static void test_AdvertisingManager(void)
 {
     static const WCHAR *class_name = RuntimeClass_Windows_System_UserProfile_AdvertisingManager;
@@ -897,6 +1033,7 @@ START_TEST(twinapi)
 
     test_EasClientDeviceInformation();
     test_AnalyticsVersionInfo();
+    test_EducationSettings();
     test_AdvertisingManager();
     test_ApplicationView();
     test_CoreApplication();
