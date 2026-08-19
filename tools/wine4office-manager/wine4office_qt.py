@@ -111,6 +111,18 @@ class _UiDispatcher(QObject):
         callback()
 
 
+class _OperationProgressDialog(QDialog):
+    """Keep destructive non-cancellable operations visible until completion."""
+
+    def __init__(self, cancellable: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.cancellable = cancellable
+
+    def reject(self) -> None:
+        if self.cancellable:
+            super().reject()
+
+
 
 class ManagerWindow(QMainWindow):
     ENVIRONMENT_PAGE = 0
@@ -2223,7 +2235,7 @@ class ManagerWindow(QMainWindow):
                             *, cancellable: bool = True) -> None:
         if self.update_progress_dialog is not None:
             self.update_progress_dialog.close()
-        dialog = QDialog(self)
+        dialog = _OperationProgressDialog(cancellable, self)
         dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)

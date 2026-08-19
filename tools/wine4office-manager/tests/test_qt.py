@@ -16,6 +16,7 @@ sys.path.insert(0, str(MANAGER_DIR))
 try:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QBrush, QCloseEvent
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -527,6 +528,12 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(self.window.update_progress_task_kind, "remove")
         self.assertEqual(self.window.update_progress_button.text(), "Please wait")
         self.assertFalse(self.window.update_progress_button.isEnabled())
+        dialog = self.window.update_progress_dialog
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
 
     def test_failed_removal_keeps_manager_open_without_success_confirmation(self):
         snapshot = self._preload_snapshot(task={
