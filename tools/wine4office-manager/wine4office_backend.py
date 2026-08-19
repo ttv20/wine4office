@@ -818,68 +818,86 @@ def wine_environment(prefix: str | Path, wine: str | Path,
     return env
 
 
+def _runner_executable_matches(executable: Path, wine: PathValue) -> bool:
+    """Return whether a host process executable belongs to the selected runner."""
+    selected_wine = normalize_path(wine)
+    executable = executable.resolve()
+    runner_bin = selected_wine.parent
+    if executable.parent == runner_bin:
+        return True
+    if runner_bin.name != "bin":
+        return False
+    try:
+        relative = executable.relative_to(runner_bin.parent)
+    except ValueError:
+        return False
+    return (
+        len(relative.parts) >= 4
+        and relative.parts[:2] == ("lib", "wine")
+        and relative.name in {"wine", "wine-preloader"}
+    )
+
+
+
+
+def _office_tasklist(prefix: Path, wine: Path, use_x11: bool,
+                     timeout: float) -> list[tuple[str, int]]:
+    """Query Windows PIDs from the exact selected prefix and runner."""
+    try:
+        completed = subprocess.run(
+            [str(wine), "tasklist.exe", "/FO", "CSV", "/NH"],
+            env=wine_environment(prefix, wine, use_x11),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Wine process detection timed out.") from error
+    except OSError as error:
+        raise RuntimeError(f"Wine process detection failed: {error}") from error
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"Wine process detection failed: {detail or completed.returncode}"
+        )
+
+    processes: list[tuple[str, int]] = []
+    try:
+        rows = csv.reader(io.StringIO(completed.stdout), strict=True)
+        for row in rows:
+            if not row:
+                continue
+            if len(row) < 2 or not row[1].strip().isdigit():
+                raise csv.Error("tasklist returned an invalid process row")
+            pid = int(row[1].strip())
+            if not pid or pid > 0xffffffff:
+                raise csv.Error("tasklist returned an invalid process id")
+            processes.append((row[0].strip(), pid))
+    except (csv.Error, ValueError) as error:
+        raise RuntimeError(f"Wine process output was invalid: {error}") from error
+    return processes
 
 
 def _owned_office_pids(prefix: PathValue, wine: PathValue,
-                       use_x11: bool = True) -> list[int]:
-    """Return Office PIDs authenticated to this prefix, runner, and display.
-
-    The close helper must never discover windows on its own.  Read-only procfs
-    identity checks bind each supplied PID to the selected Wine prefix and
-    runner, while the display variables bind it to this manager session.
-    """
-    selected_prefix = normalize_path(prefix)
-    runner_dir = Path(wine).resolve().parent
-    selected_environment = wine_environment(selected_prefix, wine, use_x11)
-    expected_prefix = os.fsencode(str(selected_prefix))
-    expected_arch = os.fsencode(selected_environment["WINEARCH"])
-    office_names = (
-        b"excel.exe", b"msaccess.exe", b"mspub.exe", b"onenote.exe",
-        b"outlook.exe", b"powerpnt.exe", b"visio.exe", b"winproj.exe",
-        b"winword.exe",
-    )
-    display_names = ("DISPLAY", "WAYLAND_DISPLAY")
-    pids: list[int] = []
-
-    try:
-        entries = list(Path("/proc").iterdir())
-    except OSError:
-        return pids
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            if entry.stat().st_uid != os.getuid():
-                continue
-            environment = {}
-            for item in (entry / "environ").read_bytes().split(b"\0"):
-                if b"=" in item:
-                    key, value = item.split(b"=", 1)
-                    environment[key] = value
-            if (environment.get(b"WINEPREFIX") != expected_prefix
-                    or environment.get(b"WINEARCH") != expected_arch):
-                continue
-            for name in display_names:
-                expected = selected_environment.get(name)
-                if (expected is not None
-                        and environment.get(name.encode()) != os.fsencode(expected)):
-                    break
-            else:
-                executable = Path(os.readlink(entry / "exe")).resolve()
-                if executable.parent != runner_dir:
-                    continue
-                command_line = (entry / "cmdline").read_bytes().lower().replace(b"\0", b" ")
-                if any(re.search(rb"(?:^|[\\/\s\"'])" + re.escape(name)
-                                + rb"(?:$|[\s\"'])", command_line)
-                           for name in office_names):
-                    pids.append(int(entry.name))
-        except (OSError, RuntimeError, UnicodeError, ValueError):
-            continue
-    return sorted(set(pids))
+                       use_x11: bool = True,
+                       timeout: float = STOP_GRACE_SECONDS) -> list[int]:
+    """Return Windows Office PIDs from the exact selected Wine environment."""
+    selected_prefix = validate_prefix(prefix)
+    selected_wine = require_wine(str(wine))
+    office_names = {name.casefold() for name in OFFICE_X11_EXECUTABLES}
+    return sorted({
+        pid for image, pid in _office_tasklist(
+            selected_prefix, selected_wine, use_x11, timeout
+        )
+        if image.casefold() in office_names
+    })
 
 
 def _wine_process_identity(
-    process: Path, prefix: Path, runner_dir: Path
+    process: Path, prefix: Path, wine: PathValue
 ) -> tuple[int, str] | None:
     """Return a stable identity only for a current-user process in this Wine environment."""
     try:
@@ -892,7 +910,7 @@ def _wine_process_identity(
         if environment.get(b"WINEPREFIX") != os.fsencode(str(prefix)):
             return None
         executable = Path(os.readlink(process / "exe")).resolve()
-        if executable.parent != runner_dir:
+        if not _runner_executable_matches(executable, wine):
             return None
         stat_text = process.joinpath("stat").read_text(encoding="ascii")
         closing_paren = stat_text.rfind(")")
@@ -906,7 +924,6 @@ def _owned_wine_processes(prefix: PathValue, wine: PathValue,
                           proc_root: Path = Path("/proc")) -> list[tuple[int, str]]:
     """Snapshot processes authenticated to the selected prefix and runner."""
     selected_prefix = normalize_path(prefix)
-    runner_dir = Path(wine).resolve().parent
     try:
         processes = tuple(proc_root.iterdir())
     except OSError:
@@ -914,7 +931,7 @@ def _owned_wine_processes(prefix: PathValue, wine: PathValue,
     return sorted(
         identity for process in processes
         if process.name.isdigit()
-        if (identity := _wine_process_identity(process, selected_prefix, runner_dir)) is not None
+        if (identity := _wine_process_identity(process, selected_prefix, wine)) is not None
     )
 
 
@@ -922,9 +939,8 @@ def _kill_owned_wine_processes(prefix: PathValue, wine: PathValue,
                                proc_root: Path = Path("/proc")) -> None:
     """SIGKILL only processes whose PID and start time still match an owned snapshot."""
     selected_prefix = normalize_path(prefix)
-    runner_dir = Path(wine).resolve().parent
     for pid, starttime in _owned_wine_processes(selected_prefix, wine, proc_root):
-        current = _wine_process_identity(proc_root / str(pid), selected_prefix, runner_dir)
+        current = _wine_process_identity(proc_root / str(pid), selected_prefix, wine)
         if current != (pid, starttime):
             continue
         try:
@@ -1185,19 +1201,27 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         else time.monotonic() + STOP_GRACE_SECONDS
     )
     graceful_close = False
+    try:
+        office_pids = _owned_office_pids(
+            prefix, wine, use_x11,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+    except RuntimeError:
+        office_pids = []
     close_command = [str(wine), "wine4officeclose.exe"]
-    for pid in _owned_office_pids(prefix, wine, use_x11):
+    for pid in office_pids:
         close_command.extend(("--pid", str(pid)))
     try:
-        subprocess.run(
-            close_command,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=max(0.001, deadline - time.monotonic()),
-            check=True,
-        )
-        graceful_close = True
+        if office_pids:
+            subprocess.run(
+                close_command,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=max(0.001, deadline - time.monotonic()),
+                check=True,
+            )
+            graceful_close = True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         # Continue with wineserver termination when a window cannot close cleanly.
         pass
@@ -4605,48 +4629,19 @@ def preload_office_processes(prefix_value: str, wine_value: str,
                              use_x11: bool = True) -> list[str]:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    try:
-        completed = subprocess.run(
-            [str(wine), "tasklist.exe", "/FO", "CSV", "/NH"],
-            env=wine_environment(prefix, wine, use_x11),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=_PRELOAD_WINE_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RuntimeError("Wine process detection timed out; refusing to stop preload.") from error
-    except OSError as error:
-        raise RuntimeError(f"Wine process detection failed; refusing to stop preload: {error}") from error
-    if completed.returncode:
-        detail = (completed.stderr or completed.stdout).strip()
-        raise RuntimeError(
-            f"Wine process detection failed; refusing to stop preload: {detail or completed.returncode}"
-        )
     office_names = {
         metadata["exe"].casefold()
         for metadata in APP_META.values()
         if metadata.get("preload_process", True)
     }
     found: list[str] = []
-    try:
-        rows = csv.reader(io.StringIO(completed.stdout), strict=True)
-        for row in rows:
-            if not row:
-                continue
-            if len(row) < 2:
-                raise csv.Error("tasklist returned a non-CSV status line")
-            image = row[0].strip()
-            if image.casefold() in office_names and image.casefold() not in {
-                value.casefold() for value in found
-            }:
-                found.append(image)
-    except csv.Error as error:
-        raise RuntimeError(
-            f"Wine process output was invalid; refusing to stop preload: {error}"
-        ) from error
+    for image, _pid in _office_tasklist(
+        prefix, wine, use_x11, _PRELOAD_WINE_TIMEOUT
+    ):
+        if image.casefold() in office_names and image.casefold() not in {
+            value.casefold() for value in found
+        }:
+            found.append(image)
     return found
 
 
@@ -4681,18 +4676,12 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
         raise RuntimeError(
             "The selected Wine environment does not match the fixed preload binding."
         )
-    if action == "stop":
-        if not _preload_selected_matches(binding, prefix_value, wine_value, use_x11):
-            raise RuntimeError(
-                "The selected Wine environment does not match the fixed preload binding."
-            )
-        active_office = preload_office_processes(
-            binding["prefix"], binding["wine"], binding["use_x11"]
+    if action == "stop" and not _preload_selected_matches(
+        binding, prefix_value, wine_value, use_x11
+    ):
+        raise RuntimeError(
+            "The selected Wine environment does not match the fixed preload binding."
         )
-        if active_office:
-            raise RuntimeError(
-                "Office is active; refusing to stop preload: " + ", ".join(active_office)
-            )
     if action == "stop":
         _stop_preload_unit_and_wait(binding=binding)
     else:
@@ -5278,23 +5267,6 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 cleanup_failed.append(PRELOAD_APPV_COMPONENT)
             _write_preload_heartbeat(status, components, "stopping")
 
-        try:
-            active_office = preload_office_processes(
-                binding["prefix"], binding["wine"], binding["use_x11"]
-            )
-        except RuntimeError as error:
-            _write_preload_heartbeat(
-                status, components, "stop-refused",
-                f"Process state unknown; owned services were preserved: {error}",
-            )
-            return 1
-        if active_office:
-            _write_preload_heartbeat(
-                status, components, "stop-refused",
-                "Office became active; owned components were preserved: "
-                + ", ".join(active_office),
-            )
-            return 1
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
             if not record["owned"]:

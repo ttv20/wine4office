@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop only the selected Wine environment, with a graceful ten-second deadline.
+
 ## 0.2.0-alpha.2 — 2026-08-18
 
 - Restore Office proofing and language-pack discovery.
