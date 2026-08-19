@@ -284,6 +284,27 @@ void wayland_restack_after_surface_flush(HWND owner)
     wayland_win_data_restack_owned_popups(owner);
 }
 
+/* Rebuild a client group after its Win32 Z-order changes, then restore any
+ * owner-relative popup group above it. Nested popup clients use the popup's
+ * own group internally and its owner for the outer stack. */
+static void wayland_win_data_restack_client_group(HWND toplevel)
+{
+    struct wayland_win_data *data;
+    struct wayland_surface *surface;
+    HWND owner = toplevel;
+
+    if ((data = wayland_win_data_get(toplevel)))
+    {
+        if ((surface = data->wayland_surface) &&
+            surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
+            owner = surface->owner_hwnd;
+        wayland_win_data_release(data);
+    }
+
+    wayland_win_data_restack_client_surfaces(toplevel);
+    wayland_win_data_restack_owned_popups(owner);
+}
+
 struct wayland_window_state
 {
     DWORD style;
@@ -893,7 +914,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     wayland_win_data_release(data);
     if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
     if (client_restack_toplevel)
-        wayland_win_data_restack_client_surfaces(client_restack_toplevel);
+        wayland_win_data_restack_client_group(client_restack_toplevel);
     if (popup_restack_owner)
         wayland_win_data_restack_owned_popups(popup_restack_owner);
     if (retry_client_surfaces)
@@ -1326,6 +1347,7 @@ void WAYLAND_UpdateLayeredWindow(HWND hwnd, BYTE alpha, UINT flags)
 void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 {
     HWND toplevel = new_client->client.toplevel;
+    HWND popup_restack_owner = 0;
     RECT rect = new_client->client.monitor_rect;
     struct wayland_client_surface *old_client;
     struct wayland_win_data *data, *toplevel_data;
@@ -1370,7 +1392,16 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
         wayland_client_surface_attach(new_client, NULL, NULL);
     }
 
+    /* A presentation can recommit or reattach an existing GPU client after
+     * an owner-relative popup has already been stacked. Rebuild the complete
+     * owner group after dropping win_data_mutex so that live previews cannot
+     * move the document client above the popup. */
+    if (visible && !offscreen && new_client->wl_subsurface)
+        popup_restack_owner = new_client->toplevel;
+
     wayland_win_data_release(data);
+    if (popup_restack_owner)
+        wayland_win_data_restack_owned_popups(popup_restack_owner);
 }
 
 BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
