@@ -302,13 +302,19 @@ static LONG WINTRUST_DefaultClose(HWND hwnd, GUID *actionID,
 {
     DWORD err = ERROR_SUCCESS;
     CRYPT_PROVIDER_DATA *provData = data->hWVTStateData;
+    BOOL opened_file;
 
     TRACE("(%p, %s, %p)\n", hwnd, debugstr_guid(actionID), data);
 
     if (provData)
     {
+        opened_file = provData->fOpenedFile;
         if (provData->psPfns->pfnCleanupPolicy)
             err = provData->psPfns->pfnCleanupPolicy(provData);
+
+        if (opened_file && provData->pWintrustData == data &&
+            data->dwUnionChoice == WTD_CHOICE_FILE && data->pFile)
+            data->pFile->hFile = INVALID_HANDLE_VALUE;
 
         free(provData->padwTrustStepErrors);
         free(provData->pPDSip);
