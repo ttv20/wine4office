@@ -39,7 +39,10 @@ fi
 
 write_metadata() {
     manager_digest=$1
-    RELEASE="$RELEASE" MANAGER_DIGEST="$manager_digest" python3 - <<'PY'
+    manager_version=${2:-0.1.0}
+    wine_version=${3:-0.1.0}
+    RELEASE="$RELEASE" MANAGER_DIGEST="$manager_digest" \
+        MANAGER_VERSION="$manager_version" WINE_VERSION="$wine_version" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -52,13 +55,13 @@ payload = {
     "channel": "stable",
     "metadata_url": "https://example.invalid/release.json",
     "manager": {
-        "version": "0.1.0",
+        "version": os.environ["MANAGER_VERSION"],
         "url": "Wine4OfficeManager",
         "sha256": os.environ["MANAGER_DIGEST"],
         "size": manager.stat().st_size,
     },
     "wine": {
-        "version": "0.1.0",
+        "version": os.environ["WINE_VERSION"],
         "url": "wine.tar.zst",
         "sha256": hashlib.sha256(wine.read_bytes()).hexdigest(),
         "size": wine.stat().st_size,
@@ -136,6 +139,18 @@ PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null &
 SECOND_INSTALL=$!
 wait "$FIRST_INSTALL"
 wait "$SECOND_INSTALL"
+
+printf '# updated manager\n' >> "$RELEASE/Wine4OfficeManager"
+printf 'runner payload v2\n' > "$RELEASE/runner/identity"
+tar -C "$RELEASE" -cf - runner | zstd -q -f -o "$RELEASE/wine.tar.zst"
+MANAGER_DIGEST=$(sha256sum "$RELEASE/Wine4OfficeManager")
+MANAGER_DIGEST=${MANAGER_DIGEST%% *}
+write_metadata "$MANAGER_DIGEST" 0.2.0 0.2.0
+PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+[[ $(cat "$WINE4OFFICE_HOME/VERSION") == 0.2.0 ]]
+[[ $(cat "$WINE4OFFICE_HOME/WINE_VERSION") == 0.2.0 ]]
+[[ $(cat "$WINE4OFFICE_HOME/runner/identity") == "runner payload v2" ]]
+
 BEFORE_MANAGER=$(sha256sum "$WINE4OFFICE_HOME/bin/Wine4OfficeManager")
 BEFORE_RUNNER=$(sha256sum "$WINE4OFFICE_HOME/runner/identity")
 
@@ -178,8 +193,17 @@ fi
 [[ $(sha256sum "$WINE4OFFICE_HOME/bin/Wine4OfficeManager") == "$BEFORE_MANAGER" ]]
 [[ $(sha256sum "$WINE4OFFICE_HOME/runner/identity") == "$BEFORE_RUNNER" ]]
 
+mkdir -p "$WINE4OFFICE_HOME/lib" "$WINE4OFFICE_HOME/icons"
+printf 'legacy\n' > "$WINE4OFFICE_HOME/lib/legacy-manager"
+printf 'legacy\n' > "$WINE4OFFICE_HOME/icons/legacy-icon"
+printf 'legacy\n' > "$WINE4OFFICE_HOME/bin/wine4office-preload-worker"
+ln -sfn "$WINE4OFFICE_HOME/bin/wine4office-preload-worker" \
+    "$WINE4OFFICE_BIN_HOME/wine4office-launcher"
 PATH="$FAKE_BIN:$PATH" "$WINE4OFFICE_HOME/bin/wine4office-uninstall" --purge-runner >/dev/null
 [[ ! -e $WINE4OFFICE_HOME ]]
-[[ ! -e $WINE4OFFICE_BIN_HOME/Wine4OfficeManager ]]
+[[ ! -e $WINE4OFFICE_BIN_HOME/Wine4OfficeManager &&
+   ! -L $WINE4OFFICE_BIN_HOME/Wine4OfficeManager ]]
+[[ ! -e $WINE4OFFICE_BIN_HOME/wine4office-launcher &&
+   ! -L $WINE4OFFICE_BIN_HOME/wine4office-launcher ]]
 
 echo "curl installer verified install, uninstall, locking, rollback, and archive safety: PASS"

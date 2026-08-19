@@ -16,6 +16,7 @@ sys.path.insert(0, str(MANAGER_DIR))
 try:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QBrush, QCloseEvent
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -504,6 +505,39 @@ class QtManagerTests(unittest.TestCase):
         close.assert_called_once()
         self.assertTrue(self.window._automatic_close)
 
+    def test_removal_shows_noncancellable_progress_and_wires_progress_updates(self):
+        with mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            qt_module.QMessageBox, "warning",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(
+            self.state, "start_task"
+        ) as start_task, mock.patch.object(
+            backend, "remove_wine4office", return_value="removed"
+        ) as remove:
+            self.window.remove_wine4office()
+            operation = start_task.call_args.args[1]
+            operation()
+
+        self.assertEqual(start_task.call_args.args[0], "remove")
+        remove.assert_called_once_with(
+            self.config["prefix"], False, self.state.output,
+            progress=self.state.set_progress,
+        )
+        self.assertEqual(self.window.update_progress_task_kind, "remove")
+        self.assertEqual(self.window.update_progress_button.text(), "Please wait")
+        self.assertFalse(self.window.update_progress_button.isEnabled())
+        dialog = self.window.update_progress_dialog
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
+        dialog.close()
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
+
     def test_failed_removal_keeps_manager_open_without_success_confirmation(self):
         snapshot = self._preload_snapshot(task={
             "running": False,
@@ -524,6 +558,55 @@ class QtManagerTests(unittest.TestCase):
         information.assert_not_called()
         close.assert_not_called()
         self.assertFalse(self.window._automatic_close)
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Wine4Office removal failed; see the log.",
+        )
+
+    def test_close_during_removal_waits_without_cancelling(self):
+        removal_started = threading.Event()
+        allow_removal = threading.Event()
+
+        def remove():
+            removal_started.set()
+            allow_removal.wait(1)
+            return "removed"
+
+        self.state.start_task("remove", remove)
+        self.assertTrue(removal_started.wait(1))
+        self.window.last_task_state = "True:running"
+        close_event = QCloseEvent()
+        with mock.patch.object(self.state, "cancel") as cancel:
+            self.window.closeEvent(close_event)
+
+        self.assertFalse(close_event.isAccepted())
+        cancel.assert_not_called()
+        self.assertTrue(self.window._close_when_idle)
+
+        with mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot:
+            allow_removal.set()
+            self._wait_task()
+            self.window.refresh_state()
+
+        callbacks = [call.args[1] for call in single_shot.call_args_list]
+        self.assertIn(self.window.finish_successful_removal, callbacks)
+
+    def test_interrupted_removal_does_not_claim_settings_were_restored(self):
+        snapshot = self._preload_snapshot(task={
+            "running": False,
+            "kind": "remove",
+            "status": "cancelled",
+        })
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(self.state, "snapshot", return_value=snapshot):
+            self.window.refresh_state()
+
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Wine4Office removal was interrupted.",
+        )
 
 
 

@@ -1659,6 +1659,29 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [str(uninstaller), "--purge-runner", "--remove-prefix", str(ordinary.resolve())],
         )
 
+    def test_uninstaller_reports_progress_around_verified_removal(self):
+        root = self.home / "installed"
+        uninstaller = root / "bin/wine4office-uninstall"
+        uninstaller.parent.mkdir(parents=True)
+        uninstaller.write_text("#!/bin/sh\n")
+        uninstaller.chmod(uninstaller.stat().st_mode | stat.S_IXUSR)
+        progress = []
+
+        with mock.patch.object(backend, "installed_root", return_value=root), \
+             mock.patch.object(backend, "_stream_command") as stream:
+            result = backend.remove_wine4office(
+                str(self.home / "preserved-prefix"), False, lambda line: None,
+                progress=lambda label, value: progress.append((label, value)),
+            )
+
+        stream.assert_called_once()
+        self.assertEqual(result, "Wine4Office removed.")
+        self.assertEqual(progress, [
+            ("Preparing Wine4Office removal", 0),
+            ("Removing Wine4Office files and shortcuts", None),
+            ("Wine4Office removed", 100),
+        ])
+
     def test_initialization_cancellation_removes_only_the_new_target(self):
         prefix = self.home / "cancelled-prefix"
         cancel = mock.Mock()

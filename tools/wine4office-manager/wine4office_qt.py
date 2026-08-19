@@ -111,6 +111,24 @@ class _UiDispatcher(QObject):
         callback()
 
 
+class _OperationProgressDialog(QDialog):
+    """Keep destructive non-cancellable operations visible until completion."""
+
+    def __init__(self, cancellable: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.cancellable = cancellable
+
+    def reject(self) -> None:
+        if self.cancellable:
+            super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.cancellable:
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
+
 
 class ManagerWindow(QMainWindow):
     ENVIRONMENT_PAGE = 0
@@ -2219,11 +2237,11 @@ class ManagerWindow(QMainWindow):
         )
 
     def _show_task_progress(self, task_kind: str, title: str, heading_text: str,
-                            preparing_text: str,
-                            messages: dict[str, str]) -> None:
+                            preparing_text: str, messages: dict[str, str],
+                            *, cancellable: bool = True) -> None:
         if self.update_progress_dialog is not None:
             self.update_progress_dialog.close()
-        dialog = QDialog(self)
+        dialog = _OperationProgressDialog(cancellable, self)
         dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
@@ -2246,8 +2264,13 @@ class ManagerWindow(QMainWindow):
         layout.addWidget(details)
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel = QPushButton("Cancel update" if task_kind == "update" else "Cancel")
-        cancel.clicked.connect(self.cancel_task)
+        cancel = QPushButton(
+            "Cancel update" if task_kind == "update" else
+            "Cancel" if cancellable else "Please wait"
+        )
+        cancel.setEnabled(cancellable)
+        if cancellable:
+            cancel.clicked.connect(self.cancel_task)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
         self.update_progress_dialog = dialog
@@ -2316,6 +2339,7 @@ class ManagerWindow(QMainWindow):
             except RuntimeError:
                 pass
             self.update_progress_button.setText("Close")
+            self.update_progress_button.setEnabled(True)
             self.update_progress_button.clicked.connect(dialog.accept)
         if task.get("kind") == "update" and task.get("restart_required"):
             QTimer.singleShot(500, dialog.accept)
@@ -2350,6 +2374,8 @@ class ManagerWindow(QMainWindow):
             self.show_error(f"Could not restart Wine4Office Manager: {error}")
 
     def finish_successful_removal(self) -> None:
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.accept()
         QMessageBox.information(
             self,
             "Wine4Office Uninstalled",
@@ -2374,7 +2400,23 @@ class ManagerWindow(QMainWindow):
         try:
             self.state.start_task(
                 "remove",
-                lambda: backend.remove_wine4office(config["prefix"], remove_prefix, self.state.output),
+                lambda: backend.remove_wine4office(
+                    config["prefix"], remove_prefix, self.state.output,
+                    progress=self.state.set_progress,
+                ),
+            )
+            self.last_task_state = "True:running"
+            self._show_task_progress(
+                "remove",
+                "Removing Wine4Office",
+                "Wine4Office Manager and runner",
+                "Preparing Wine4Office removal…",
+                {
+                    "completed": "Wine4Office removal completed.",
+                    "cancelled": "Wine4Office removal was interrupted.",
+                    "failed": "Wine4Office removal failed. Review the details below.",
+                },
+                cancellable=False,
             )
             self.notify("Removal started.")
             self.refresh_state()
@@ -2489,7 +2531,9 @@ class ManagerWindow(QMainWindow):
         self.task_label.setText(task_text)
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])
-        self.cancel_button.setEnabled(task["running"])
+        self.cancel_button.setEnabled(
+            task["running"] and task.get("kind") != "remove"
+        )
         self._update_preload_status(snapshot)
         if (self.pending_environment_transition
                 and task["kind"] == "environment-switch" and not task["running"]):
@@ -2508,9 +2552,17 @@ class ManagerWindow(QMainWindow):
                     self.timer.stop()
                     QTimer.singleShot(0, self.finish_successful_removal)
             elif task["status"] == "cancelled":
-                self.notify("Operation cancelled; settings restored.")
+                self.notify(
+                    "Wine4Office removal was interrupted."
+                    if task.get("kind") == "remove" else
+                    "Operation cancelled; settings restored."
+                )
             else:
-                self.notify("Operation failed; settings restored. See the log.")
+                self.notify(
+                    "Wine4Office removal failed; see the log."
+                    if task.get("kind") == "remove" else
+                    "Operation failed; settings restored. See the log."
+                )
                 task_kind = str(task.get("kind") or "")
                 if "preload" in task_kind:
                     failure = (str(task.get("log") or "").strip()
@@ -2539,12 +2591,18 @@ class ManagerWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         with self.state.lock:
             running = bool(self.state.task["running"])
+            task_kind = str(self.state.task.get("kind") or "")
         if running:
             self._close_when_idle = True
             self._automatic_close = False
-            self.state.cancel()
+            if task_kind != "remove":
+                self.state.cancel()
             self.timer.start(100)
-            self.notify("Cancellation requested; closing after the operation rolls back.")
+            self.notify(
+                "Removal is finishing; the Manager will close when it completes."
+                if task_kind == "remove" else
+                "Cancellation requested; closing after the operation rolls back."
+            )
             event.ignore()
             return
         self.timer.stop()

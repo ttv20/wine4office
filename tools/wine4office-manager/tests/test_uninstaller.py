@@ -205,6 +205,41 @@ def remove_app_shortcuts(_apps):
         self.assertTrue(unit.exists())
         self.assertTrue((self.root / "bin/wine4office-manager").exists())
 
+    def test_purge_removes_complete_updated_source_layout_from_custom_home(self):
+        self._backend("""
+APP_META = {}
+def uninstall_preload_service():
+    pass
+def uninstall_automatic_update_schedule():
+    pass
+def remove_app_shortcuts(_apps):
+    pass
+""")
+        (self.root / "bin/wine4office-preload-worker").write_text("worker")
+        (self.root / "icons").mkdir()
+        (self.root / "runner").mkdir()
+        for name in (
+                "VERSION", "WINE_VERSION", "UPDATE_URL", "UPDATE_CHANNEL",
+                "install.json", ".wine4office-update.lock"):
+            (self.root / name).write_text("updated")
+        bin_home = Path(self.env["WINE4OFFICE_BIN_HOME"])
+        bin_home.mkdir(parents=True)
+        manager_link = bin_home / "wine4office-manager"
+        worker_link = bin_home / "wine4office-launcher"
+        manager_link.symlink_to(self.root / "bin/wine4office-manager")
+        worker_link.symlink_to(self.root / "bin/wine4office-preload-worker")
+
+        result = subprocess.run(
+            [str(UNINSTALLER), "--purge-runner"], env=self.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.root.exists())
+        self.assertFalse(manager_link.exists() or manager_link.is_symlink())
+        self.assertFalse(worker_link.exists() or worker_link.is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()
