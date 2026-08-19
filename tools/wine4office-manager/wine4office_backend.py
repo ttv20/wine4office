@@ -4101,8 +4101,10 @@ def systemd_user_available() -> bool:
 def _preload_selected_matches(binding: dict, prefix_value: str | None,
                               wine_value: str | None, _use_x11: bool | None) -> bool:
     """Match the Wine environment; display mode is a foreground-app choice."""
-    if prefix_value is None or wine_value is None:
+    if prefix_value is None and wine_value is None:
         return True
+    if prefix_value is None or wine_value is None:
+        return False
     try:
         prefix = validate_prefix(prefix_value)
         wine = normalize_path(wine_value)

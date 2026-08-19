@@ -2591,6 +2591,33 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         property_state.assert_not_called()
         systemctl.assert_not_called()
 
+    def test_disable_refuses_partial_environment_selection(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        selections = (
+            (binding["prefix"], None),
+            (None, binding["wine"]),
+        )
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property"
+        ) as property_state, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            for prefix_value, wine_value in selections:
+                with self.subTest(prefix=prefix_value, wine=wine_value):
+                    with self.assertRaisesRegex(RuntimeError, "does not match"):
+                        backend.manage_preload_service(
+                            "disable", prefix_value, wine_value, True
+                        )
+
+        property_state.assert_not_called()
+        systemctl.assert_not_called()
+
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
         with mock.patch.object(
