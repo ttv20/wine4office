@@ -18,6 +18,7 @@
 #include "initguid.h"
 #include "roapi.h"
 #include "lmcons.h"
+#include "bcrypt.h"
 #include "sddl.h"
 #include "wincrypt.h"
 #include "winreg.h"
@@ -448,19 +449,20 @@ static HRESULT get_app_identity( WCHAR **value )
     }
 }
 
-static HRESULT hash_identity_component( HCRYPTHASH hash, const WCHAR *value )
+static HRESULT hash_identity_component( BCRYPT_HASH_HANDLE hash, const WCHAR *value )
 {
     BYTE encoded_length[4];
     SIZE_T length = value ? wcslen( value ) : 0;
+    NTSTATUS status;
 
     if (length > ~(DWORD)0 / sizeof(*value)) return E_OUTOFMEMORY;
     encoded_length[0] = length;
     encoded_length[1] = length >> 8;
     encoded_length[2] = length >> 16;
     encoded_length[3] = length >> 24;
-    if (!CryptHashData( hash, encoded_length, sizeof(encoded_length), 0 ) ||
-        (length && !CryptHashData( hash, (const BYTE *)value, length * sizeof(*value), 0 )))
-        return HRESULT_FROM_WIN32( GetLastError() );
+    if ((status = BCryptHashData( hash, encoded_length, sizeof(encoded_length), 0 )) ||
+        (length && (status = BCryptHashData( hash, (BYTE *)value, length * sizeof(*value), 0 ))))
+        return HRESULT_FROM_NT( status );
     return S_OK;
 }
 
@@ -469,29 +471,42 @@ static HRESULT create_non_roamable_id( const WCHAR *machine, const WCHAR *sid, c
 {
     static const WCHAR prefix[] = L"wine:";
     static const WCHAR hex[] = L"0123456789abcdef";
-    HCRYPTPROV provider = 0;
-    HCRYPTHASH hash = 0;
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    BYTE *object = NULL;
     BYTE digest[32];
     WCHAR output[ARRAY_SIZE(prefix) - 1 + ARRAY_SIZE(digest) * 2 + 1];
-    DWORD digest_size = sizeof(digest);
+    DWORD object_size, result_size;
+    NTSTATUS status;
     HRESULT hr;
     unsigned int i;
 
     *value = NULL;
-    if (!CryptAcquireContextW( &provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT ))
-        return HRESULT_FROM_WIN32( GetLastError() );
-    if (!CryptCreateHash( provider, CALG_SHA_256, 0, 0, &hash ))
+    if ((status = BCryptOpenAlgorithmProvider( &algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0 )))
+        return HRESULT_FROM_NT( status );
+    if ((status = BCryptGetProperty( algorithm, BCRYPT_OBJECT_LENGTH, (BYTE *)&object_size,
+            sizeof(object_size), &result_size, 0 )))
     {
-        hr = HRESULT_FROM_WIN32( GetLastError() );
+        hr = HRESULT_FROM_NT( status );
+        goto done;
+    }
+    if (!(object = malloc( object_size )))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+    if ((status = BCryptCreateHash( algorithm, &hash, object, object_size, NULL, 0, 0 )))
+    {
+        hr = HRESULT_FROM_NT( status );
         goto done;
     }
     if (FAILED(hr = hash_identity_component( hash, machine )) ||
         FAILED(hr = hash_identity_component( hash, sid )) ||
         FAILED(hr = hash_identity_component( hash, app )))
         goto done;
-    if (!CryptGetHashParam( hash, HP_HASHVAL, digest, &digest_size, 0 ) || digest_size != sizeof(digest))
+    if ((status = BCryptFinishHash( hash, digest, sizeof(digest), 0 )))
     {
-        hr = HRESULT_FROM_WIN32( GetLastError() );
+        hr = HRESULT_FROM_NT( status );
         goto done;
     }
 
@@ -505,8 +520,9 @@ static HRESULT create_non_roamable_id( const WCHAR *machine, const WCHAR *sid, c
     hr = WindowsCreateString( output, ARRAY_SIZE(output) - 1, value );
 
 done:
-    if (hash) CryptDestroyHash( hash );
-    CryptReleaseContext( provider, 0 );
+    if (hash) BCryptDestroyHash( hash );
+    if (algorithm) BCryptCloseAlgorithmProvider( algorithm, 0 );
+    free( object );
     return hr;
 }
 
