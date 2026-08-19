@@ -4670,12 +4670,6 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
         raise RuntimeError(
             "Refusing to control an unowned user service unit: " + str(unit_path)
         )
-    if action == "disable":
-        enabled, _ = _systemctl_property("is-enabled")
-        if enabled:
-            _systemctl_user(["disable", PRELOAD_UNIT])
-        return preload_service_status(prefix_value, wine_value, use_x11)
-
     binding = _read_preload_binding()
     if not _preload_selected_matches(
         binding, prefix_value, wine_value, use_x11
@@ -4683,6 +4677,11 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
         raise RuntimeError(
             "The selected Wine environment does not match the fixed preload binding."
         )
+    if action == "disable":
+        enabled, _ = _systemctl_property("is-enabled")
+        if enabled:
+            _systemctl_user(["disable", PRELOAD_UNIT])
+        return preload_service_status(prefix_value, wine_value, use_x11)
     if action == "stop":
         _stop_preload_unit_and_wait(binding=binding)
     else:

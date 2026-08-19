@@ -2568,6 +2568,29 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         office.assert_not_called()
         systemctl.assert_not_called()
 
+    def test_disable_refuses_selected_environment_mismatch(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        different_prefix = self._make_prefix(self.home / "different prefix")
+        different_wine = str(self.home / "different runner/bin/wine")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property"
+        ) as property_state, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                backend.manage_preload_service(
+                    "disable", str(different_prefix), different_wine, True
+                )
+
+        property_state.assert_not_called()
+        systemctl.assert_not_called()
+
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
         with mock.patch.object(
