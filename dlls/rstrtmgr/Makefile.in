@@ -1,4 +1,6 @@
 MODULE    = rstrtmgr.dll
+IMPORTLIB = rstrtmgr
+IMPORTS   = user32 psapi
 
 SOURCES = \
 	main.c

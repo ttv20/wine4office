@@ -1,0 +1,5 @@
+TESTDLL = rstrtmgr.dll
+IMPORTS = rstrtmgr
+
+SOURCES = \
+	rstrtmgr.c
