@@ -61,6 +61,10 @@ static const WCHAR dcomp_caption_hot_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','h','o','t',0};
 static const WCHAR dcomp_caption_rtl_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
+static const WCHAR dcomp_native_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','n','a','t','i','v','e','_','f','r','a','m','e',0};
+static const WCHAR dcomp_task_delegated_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
 
 enum dcomp_caption_part
 {
@@ -216,6 +220,18 @@ static HWND wayland_pointer_get_focused_hwnd(void)
     return hwnd;
 }
 
+static BOOL wayland_pointer_get_screen_point(POINT *screen)
+{
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    BOOL valid;
+
+    pthread_mutex_lock(&pointer->mutex);
+    valid = pointer->screen_valid;
+    if (valid) *screen = pointer->screen;
+    pthread_mutex_unlock(&pointer->mutex);
+    return valid;
+}
+
 static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
 {
     static const WCHAR target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
@@ -259,9 +275,60 @@ HWND wayland_get_input_hwnd(HWND hwnd)
     return wayland_get_input_hwnd_internal(hwnd, TRUE);
 }
 
+static HWND wayland_get_native_frame_root(HWND hwnd)
+{
+    HWND target, root;
+
+    if (!NtUserGetProp(hwnd, dcomp_native_frame_prop) ||
+        !(target = NtUserGetProp(hwnd, dcomp_detached_window_prop)) ||
+        NtUserGetProp(target, dcomp_base_presentation_prop) != hwnd ||
+        !(root = NtUserGetAncestor(target, GA_ROOT)) ||
+        NtUserGetProp(root, dcomp_task_delegated_prop) != hwnd)
+        return NULL;
+    return root;
+}
+
+static LRESULT wayland_native_frame_hit_test(HWND hwnd, POINT screen)
+{
+    return NtUserMessageCall(hwnd, WM_NCHITTEST, 0, MAKELPARAM(screen.x, screen.y),
+            NULL, NtUserDefWindowProc, FALSE);
+}
+
 static HWND wayland_get_pointer_input_hwnd(HWND hwnd)
 {
-    return wayland_get_input_hwnd_internal(hwnd, FALSE);
+    POINT cursor = {0}, client_points[2];
+    HWND target, base, input_hwnd, root;
+    HANDLE native_frame;
+    RECT client = {0};
+    BOOL cursor_valid = FALSE, client_valid = FALSE;
+    UINT dpi;
+
+    native_frame = NtUserGetProp(hwnd, dcomp_native_frame_prop);
+    target = NtUserGetProp(hwnd, dcomp_detached_window_prop);
+    base = target ? NtUserGetProp(target, dcomp_base_presentation_prop) : NULL;
+    root = wayland_get_native_frame_root(hwnd);
+    dpi = NtUserGetDpiForWindow(hwnd);
+    if (root &&
+        (cursor_valid = wayland_pointer_get_screen_point(&cursor)) &&
+        (client_valid = NtUserGetClientRect(hwnd, &client, dpi)))
+    {
+        client_points[0].x = client.left;
+        client_points[0].y = client.top;
+        client_points[1].x = client.right;
+        client_points[1].y = client.bottom;
+        NtUserMapWindowPoints(hwnd, NULL, client_points, 2, dpi);
+        SetRect(&client, client_points[0].x, client_points[0].y,
+                client_points[1].x, client_points[1].y);
+        if (!PtInRect(&client, cursor)) input_hwnd = hwnd;
+        else input_hwnd = wayland_get_input_hwnd_internal(hwnd, FALSE);
+    }
+    else input_hwnd = wayland_get_input_hwnd_internal(hwnd, FALSE);
+
+    TRACE("DComp pointer input hwnd %p frame %p target %p base %p cursor %d,%d valid %u "
+          "client (%d,%d)-(%d,%d) valid %u -> %p\n", hwnd, native_frame, target, base,
+          cursor.x, cursor.y, cursor_valid, client.left, client.top, client.right,
+          client.bottom, client_valid, input_hwnd);
+    return input_hwnd;
 }
 
 static struct wayland_pointer_button *wayland_pointer_find_button_locked(
@@ -373,6 +440,11 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
 
     wayland_win_data_release(data);
 
+    pthread_mutex_lock(&process_wayland.pointer.mutex);
+    process_wayland.pointer.screen = screen;
+    process_wayland.pointer.screen_valid = TRUE;
+    pthread_mutex_unlock(&process_wayland.pointer.mutex);
+
     caption = wayland_get_dcomp_caption(hwnd);
     if (caption && NtUserGetWindowRect(caption, &caption_rect, NtUserGetDpiForWindow(caption)) &&
         PtInRect(&caption_rect, screen))
@@ -432,6 +504,7 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
     pthread_mutex_lock(&pointer->mutex);
     pointer->focused_hwnd = hwnd;
     pointer->enter_serial = serial;
+    pointer->screen_valid = FALSE;
     pthread_mutex_unlock(&pointer->mutex);
 
     /* The cursor is undefined at every enter, so we set it again with
@@ -466,6 +539,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
     pthread_mutex_lock(&pointer->mutex);
     pointer->focused_hwnd = NULL;
     pointer->enter_serial = 0;
+    pointer->screen_valid = FALSE;
     pthread_mutex_unlock(&pointer->mutex);
 }
 
@@ -489,17 +563,16 @@ static HWND pointer_get_resize_surface_hwnd(HWND focused_hwnd, HWND resize_hwnd)
     return NULL;
 }
 
-static UINT pointer_get_resize_edge(HWND hwnd, HWND hit_test_hwnd, HWND resize_surface_hwnd)
+static UINT pointer_get_resize_edge(HWND hwnd, HWND hit_test_hwnd,
+                                    HWND resize_surface_hwnd, POINT cursor)
 {
     struct wayland_surface *surface;
     struct wayland_win_data *data;
     BOOL left, right, top, bottom;
     int frame_x, frame_y;
-    POINT cursor;
     RECT rect;
     UINT edge = 0;
 
-    if (!NtUserGetCursorPos(&cursor)) return 0;
     if (!(data = wayland_win_data_get(hit_test_hwnd))) return 0;
 
     surface = data->wayland_surface;
@@ -559,6 +632,9 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     struct wayland_pointer_button injected = {0};
     INPUT input = {0};
     HWND hwnd = NULL, input_hwnd, root = NULL, command, caption, resize_hwnd, resize_surface_hwnd;
+    BOOL cursor_valid, maximize, nonclient;
+    POINT cursor = {0};
+    LRESULT hit;
     NTSTATUS status;
     UINT resize_edge;
 
@@ -579,6 +655,32 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
         pthread_mutex_unlock(&pointer->mutex);
 
         if (released.edge_resize) return;
+        if (!released.injected && released.native_frame_hit &&
+            wayland_get_native_frame_root(released.hwnd) == released.root_hwnd)
+        {
+            hit = released.native_frame_hit;
+            if (button == BTN_LEFT && hit != HTCAPTION &&
+                wayland_pointer_get_screen_point(&cursor) &&
+                wayland_native_frame_hit_test(released.hwnd, cursor) == hit)
+            {
+                if (hit == HTCLOSE)
+                    NtUserPostMessage(released.root_hwnd, WM_CLOSE, 0, 0);
+                else if (hit == HTMAXBUTTON)
+                {
+                    maximize = !(NtUserGetWindowLongW(released.root_hwnd, GWL_STYLE) & WS_MAXIMIZE);
+                    NtUserPostMessage(released.root_hwnd, WM_SYSCOMMAND,
+                            maximize ? SC_MAXIMIZE : SC_RESTORE, 0);
+                }
+                else if (hit == HTMINBUTTON)
+                {
+                    NtUserPostMessage(released.root_hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+                    NtUserSetProp(released.hwnd, dcomp_task_minimized_prop, ULongToHandle(1));
+                    wayland_minimize_dcomp_base(released.hwnd);
+                    NtUserShowWindow(released.hwnd, SW_MINIMIZE);
+                }
+            }
+            return;
+        }
         if (released.injected)
         {
             wayland_pointer_send_button_up(&released);
@@ -646,11 +748,39 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     if (state == WL_POINTER_BUTTON_STATE_PRESSED)
     {
+        cursor_valid = wayland_pointer_get_screen_point(&cursor);
+        nonclient = FALSE;
+        if (button == BTN_LEFT && cursor_valid &&
+            (root = wayland_get_native_frame_root(hwnd)))
+        {
+            hit = wayland_native_frame_hit_test(hwnd, cursor);
+            if (hit == HTCAPTION)
+                nonclient = wayland_surface_begin_move_resize(hwnd, root, SC_MOVE, 0, serial);
+            else if (hit == HTMINBUTTON || hit == HTMAXBUTTON || hit == HTCLOSE)
+                nonclient = TRUE;
+            if (nonclient)
+            {
+                pthread_mutex_lock(&pointer->mutex);
+                owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+                if (owner)
+                {
+                    owner->root_hwnd = root;
+                    owner->native_frame_hit = hit;
+                    wayland_pointer_update_button_compat_locked(pointer);
+                }
+                pthread_mutex_unlock(&pointer->mutex);
+                TRACE("native frame button hwnd=%p root=%p hit=%ld screen=%d,%d serial=%u\n",
+                        hwnd, root, (long)hit, cursor.x, cursor.y, serial);
+                return;
+            }
+        }
+
         resize_hwnd = pointer_get_resize_hwnd(hwnd);
         resize_surface_hwnd = pointer_get_resize_surface_hwnd(hwnd, resize_hwnd);
 
-        if (button == BTN_LEFT && resize_surface_hwnd &&
-            (resize_edge = pointer_get_resize_edge(resize_hwnd, hwnd, resize_surface_hwnd)) &&
+        if (button == BTN_LEFT && cursor_valid && resize_surface_hwnd &&
+            (resize_edge = pointer_get_resize_edge(resize_hwnd, hwnd,
+                                                   resize_surface_hwnd, cursor)) &&
             wayland_surface_begin_move_resize(resize_surface_hwnd, resize_hwnd,
                                               SC_SIZE, resize_edge, serial))
         {
@@ -946,6 +1076,7 @@ void wayland_pointer_init(struct wl_pointer *wl_pointer)
     pointer->wl_pointer = wl_pointer;
     pointer->focused_hwnd = NULL;
     pointer->enter_serial = 0;
+    pointer->screen_valid = FALSE;
     memset(pointer->buttons, 0, sizeof(pointer->buttons));
     wayland_pointer_update_button_compat_locked(pointer);
     pthread_mutex_unlock(&pointer->mutex);
@@ -994,6 +1125,7 @@ void wayland_pointer_deinit(void)
     pointer->wl_pointer = NULL;
     pointer->focused_hwnd = NULL;
     pointer->enter_serial = 0;
+    pointer->screen_valid = FALSE;
     pthread_mutex_unlock(&pointer->mutex);
 }
 

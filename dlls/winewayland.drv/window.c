@@ -51,6 +51,8 @@ static const WCHAR dcomp_base_presentation_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
 static const WCHAR dcomp_task_delegate_timer_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','_','t','i','m','e','r',0};
+static const WCHAR dcomp_native_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','n','a','t','i','v','e','_','f','r','a','m','e',0};
 
 static BOOL wayland_dcomp_task_delegated(HWND root)
 {
@@ -394,17 +396,21 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
 
     conf->minimized = !!(style & WS_MINIMIZE);
 
-    /* The fullscreen state is implied by the window position and style. */
-    if (data->is_fullscreen)
+    /* DComp task presentations follow the logical root geometry. */
+    if (!data->dcomp_base_presentation)
     {
-        if ((style & WS_MAXIMIZE) && (style & WS_CAPTION) == WS_CAPTION)
+        /* The fullscreen state is implied by the window position and style. */
+        if (data->is_fullscreen)
+        {
+            if ((style & WS_MAXIMIZE) && (style & WS_CAPTION) == WS_CAPTION)
+                window_state |= WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED;
+            else if (!(style & WS_MINIMIZE))
+                window_state |= WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN;
+        }
+        else if (style & WS_MAXIMIZE)
+        {
             window_state |= WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED;
-        else if (!(style & WS_MINIMIZE))
-            window_state |= WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN;
-    }
-    else if (style & WS_MAXIMIZE)
-    {
-        window_state |= WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED;
+        }
     }
 
     conf->resizeable = data->resizeable;
@@ -462,7 +468,8 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     if (!visible || wayland_dcomp_task_delegated(data->hwnd) ||
         (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
         role = WAYLAND_SURFACE_ROLE_NONE;
-    else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+    else if (owner_surface && !data->dcomp_base_presentation)
+        role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
 
     /* we can temporarily clear the role of a surface but cannot assign a different one after it's set */
@@ -503,7 +510,8 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     switch (role)
     {
     case WAYLAND_SURFACE_ROLE_NONE:
-        wayland_surface_clear_role(surface);
+        if (surface->role != WAYLAND_SURFACE_ROLE_NONE)
+            wayland_surface_clear_role(surface);
         break;
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         wayland_surface_make_toplevel(surface, state->title);
@@ -828,6 +836,26 @@ BOOL WAYLAND_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const str
     return TRUE;
 }
 
+static HICON get_icon_info(HICON icon, ICONINFO *ii)
+{
+    return icon && NtUserGetIconInfo(icon, ii, NULL, NULL, NULL, 0) ? icon : NULL;
+}
+
+static HICON get_window_icon(HWND hwnd, UINT type, ICONINFO *ret)
+{
+    HICON icon;
+
+    if ((icon = get_icon_info((HICON)send_message(hwnd, WM_GETICON, type, 0), ret))) return icon;
+    if ((icon = get_icon_info((HICON)NtUserGetClassLongPtrW(hwnd, GCLP_HICON), ret))) return icon;
+    if (type == ICON_BIG)
+    {
+        icon = LoadImageW(0, (const WCHAR *)IDI_WINLOGO, IMAGE_ICON, 0, 0,
+                          LR_SHARED | LR_DEFAULTSIZE);
+        return get_icon_info(icon, ret);
+    }
+    return NULL;
+}
+
 /***********************************************************************
  *           WAYLAND_WindowPosChanged
  */
@@ -841,11 +869,11 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     struct wayland_surface *owner_surface, *transient_parent_surface;
     struct wayland_win_data *data, *owner_data, *transient_owner_data;
     BOOL managed, retry_client_surfaces = FALSE, surface_recreated = FALSE;
-    BOOL notification;
+    BOOL notification, needs_icon = FALSE;
     BOOL reapply_clip = FALSE;
     BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
     struct wayland_window_state state;
-    HWND client_restack_toplevel = 0, popup_restack_owner = 0;
+    HWND client_restack_toplevel = 0, popup_restack_owner = 0, dcomp_target;
 
     TRACE("hwnd %p new_rects %s after %p flags %08x\n", hwnd, debugstr_window_rects(new_rects), insert_after, swp_flags);
 
@@ -926,12 +954,13 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     notification = is_notification_window(hwnd, swp_flags, &new_rects->window);
     data->owner = !managed && owner && owner != hwnd ? owner : NULL;
     data->dcomp_only_host = notification;
-    data->plasma_positioned = notification || NtUserGetProp(hwnd, dcomp_detached_window_prop);
-    data->dcomp_overlay = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
-                          !NtUserGetProp(hwnd, dcomp_background_prop);
+    dcomp_target = NtUserGetProp(hwnd, dcomp_detached_window_prop);
+    data->plasma_positioned = notification || dcomp_target;
+    data->dcomp_overlay = dcomp_target && !NtUserGetProp(hwnd, dcomp_background_prop);
     data->dcomp_notification = data->dcomp_overlay && is_dcomp_notification_window(hwnd);
-    data->dcomp_base_presentation = NtUserGetProp(hwnd, dcomp_detached_window_prop) &&
-                                    NtUserGetProp(hwnd, dcomp_background_prop);
+    data->dcomp_base_presentation = dcomp_target && NtUserIsWindow(dcomp_target) &&
+                                    NtUserGetProp(hwnd, dcomp_background_prop) &&
+                                    NtUserGetProp(dcomp_target, dcomp_base_presentation_prop) == hwnd;
 
     if (!surface)
     {
@@ -961,8 +990,28 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
         data->wayland_surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE &&
         !data->wayland_surface->stacked)
         popup_restack_owner = data->wayland_surface->owner_hwnd;
+    needs_icon = process_wayland.xdg_toplevel_icon_manager_v1 && data->wayland_surface &&
+                 wayland_surface_is_toplevel(data->wayland_surface) &&
+                 !data->wayland_surface->big_icon_buffer;
 
     wayland_win_data_release(data);
+    if (needs_icon)
+    {
+        ICONINFO ii, ii_small;
+        HICON big = get_window_icon(hwnd, ICON_BIG, &ii);
+        HICON small = get_window_icon(hwnd, ICON_SMALL, &ii_small);
+
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface && wayland_surface_is_toplevel(data->wayland_surface))
+            {
+                if (big) wayland_surface_set_icon_buffer(data->wayland_surface, ICON_BIG, &ii);
+                if (small) wayland_surface_set_icon_buffer(data->wayland_surface, ICON_SMALL, &ii_small);
+                wayland_surface_assign_icon(data->wayland_surface);
+            }
+            wayland_win_data_release(data);
+        }
+    }
     if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
     if (client_restack_toplevel)
         wayland_win_data_restack_client_group(client_restack_toplevel);
@@ -975,7 +1024,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     }
 }
 
-static void wayland_configure_window(HWND hwnd)
+void wayland_configure_window(HWND hwnd)
 {
     struct wayland_surface *surface;
     INT width, height;
@@ -984,10 +1033,11 @@ static void wayland_configure_window(HWND hwnd)
     DWORD style;
     BOOL needs_enter_size_move = FALSE;
     BOOL needs_exit_size_move = FALSE;
-    BOOL restoring_from_minimize = FALSE;
+    BOOL restoring_from_minimize = FALSE, resize_presentation = FALSE;
+    BOOL dcomp_base_presentation = FALSE;
     struct wayland_win_data *data;
     RECT rect, surface_rect;
-    HWND resize_target = NULL;
+    HWND resize_target = NULL, surface_hwnd = hwnd, target, root;
 
     if (!(data = wayland_win_data_get(hwnd))) return;
     if (!(surface = data->wayland_surface))
@@ -1043,6 +1093,15 @@ static void wayland_configure_window(HWND hwnd)
         NtUserIsWindow(surface->resize_target))
         resize_target = surface->resize_target;
     if (!(state & WAYLAND_SURFACE_CONFIG_STATE_RESIZING)) surface->resize_target = NULL;
+
+    target = NtUserGetProp(surface_hwnd, dcomp_detached_window_prop);
+    root = target ? NtUserGetAncestor(target, GA_ROOT) : NULL;
+    dcomp_base_presentation = target &&
+                              NtUserGetProp(target, dcomp_base_presentation_prop) == surface_hwnd;
+    resize_presentation = resize_target && resize_target == root &&
+                          NtUserGetProp(surface_hwnd, dcomp_native_frame_prop) &&
+                          dcomp_base_presentation &&
+                          NtUserGetProp(root, dcomp_task_delegated_prop) == surface_hwnd;
 
     /* Transitions between normal/max/fullscreen may entail a frame change. */
     if ((state ^ surface->current.state) &
@@ -1112,8 +1171,9 @@ static void wayland_configure_window(HWND hwnd)
 
     hwnd = resize_target ? resize_target : hwnd;
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
-    if (!(state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED) != !(style & WS_MAXIMIZE)
-        && !(state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN))
+    if (!dcomp_base_presentation &&
+        !(state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED) != !(style & WS_MAXIMIZE) &&
+        !(state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN))
         NtUserSetWindowLong(hwnd, GWL_STYLE, style ^ WS_MAXIMIZE, FALSE);
 
     /* The Wayland maximized and fullscreen states are very strict about
@@ -1128,6 +1188,11 @@ static void wayland_configure_window(HWND hwnd)
     }
 
     NtUserSetRawWindowPos(hwnd, rect, flags, FALSE);
+    if (resize_presentation)
+    {
+        NtUserSetRawWindowPos(surface_hwnd, rect, flags, FALSE);
+        NtUserExposeWindowSurface(surface_hwnd, 0, NULL);
+    }
 }
 
 /**********************************************************************
@@ -1386,27 +1451,35 @@ static void wayland_move_resize_loop(HWND hwnd)
 LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT *pos)
 {
     BOOL move_resize_started = FALSE;
-    LRESULT ret = -1;
-    HWND button_hwnd;
+    HWND button_hwnd, surface_hwnd = hwnd, target_hwnd = hwnd;
     WPARAM command = wparam & 0xfff0;
     uint32_t button_serial;
+    HWND target, root;
+    LRESULT ret = -1;
 
     TRACE("cmd=%lx hwnd=%p, %lx, %lx\n",
           (long)command, hwnd, (long)wparam, lparam);
 
+    if (NtUserGetProp(hwnd, dcomp_native_frame_prop) &&
+        (target = NtUserGetProp(hwnd, dcomp_detached_window_prop)) &&
+        (root = NtUserGetAncestor(target, GA_ROOT)) &&
+        wayland_dcomp_task_delegated(root) &&
+        NtUserGetProp(root, dcomp_task_delegated_prop) == hwnd)
+        target_hwnd = root;
+
     pthread_mutex_lock(&process_wayland.pointer.mutex);
     button_hwnd = process_wayland.pointer.button_hwnd;
-    button_serial = button_hwnd == hwnd ? process_wayland.pointer.button_serial : 0;
+    button_serial = button_hwnd == surface_hwnd ? process_wayland.pointer.button_serial : 0;
     pthread_mutex_unlock(&process_wayland.pointer.mutex);
 
     if (command == SC_MOVE || command == SC_SIZE)
     {
-        move_resize_started = wayland_surface_begin_move_resize(hwnd, hwnd, command,
-                wparam & 0x0f, button_serial);
+        move_resize_started = wayland_surface_begin_move_resize(surface_hwnd, target_hwnd,
+                command, wparam & 0x0f, button_serial);
         ret = 0;
     }
 
-    if (move_resize_started) wayland_move_resize_loop(hwnd);
+    if (move_resize_started) wayland_move_resize_loop(surface_hwnd);
     return ret;
 }
 

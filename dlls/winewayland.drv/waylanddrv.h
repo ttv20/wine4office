@@ -127,6 +127,7 @@ struct wayland_pointer_button
     HWND input_hwnd;
     DWORD up_flags;
     DWORD mouse_data;
+    INT native_frame_hit;
     BOOL pressed;
     BOOL injected;
     BOOL edge_resize;
@@ -146,6 +147,8 @@ struct wayland_pointer
     BOOL pending_warp;
     uint32_t enter_serial;
     uint32_t button_serial;
+    POINT screen;
+    BOOL screen_valid;
     struct wayland_pointer_button buttons[WAYLAND_POINTER_BUTTON_COUNT];
     struct wayland_cursor cursor;
     double accum_x;
@@ -389,6 +392,7 @@ void wayland_surface_set_toplevel_parent(struct wayland_surface *surface,
                                          struct wayland_surface *parent);
 BOOL wayland_surface_begin_move_resize(HWND surface_hwnd, HWND target_hwnd,
                                        WPARAM command, UINT edge, uint32_t serial);
+void wayland_configure_window(HWND hwnd);
 void wayland_surface_make_subsurface(struct wayland_surface *surface,
                                      struct wayland_surface *parent);
 void wayland_surface_clear_role(struct wayland_surface *surface);

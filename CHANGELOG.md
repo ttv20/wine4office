@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add initial New Outlook support with WebView2 input, native window frames, and correct Outlook taskbar identity.
+
 ## 0.2.0-beta.1 — 2026-08-19
 
 - Let Office finish proofing-language updates without crashing Click-to-Run.
