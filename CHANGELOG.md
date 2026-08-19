@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevent the first Word Design-tab load from stalling on queued Direct2D work.
+
 ## 0.2.0-alpha.2 — 2026-08-18
 
 - Restore Office proofing and language-pack discovery.
