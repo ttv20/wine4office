@@ -698,6 +698,25 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             ],
         )
 
+    def test_stop_wine_discovers_office_in_prefix_when_tasklist_fails(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_office_pids",
+            side_effect=RuntimeError("tasklist unavailable"),
+        ) as detect, mock.patch.object(backend.subprocess, "run") as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertLessEqual(
+            detect.call_args.kwargs["timeout"], backend.STOP_DETECTION_SECONDS
+        )
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.wine), "wine4officeclose.exe", "--discover-office"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
     def test_office_detection_uses_windows_pid_from_selected_tasklist(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         completed = mock.Mock(

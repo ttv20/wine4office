@@ -2,9 +2,10 @@
  * Bounded graceful closer for manager-owned Microsoft Office applications.
  *
  * The manager authenticates the selected Wine prefix and runner before it
- * supplies process ids.  This program deliberately accepts no implicit
- * process discovery: a process id is revalidated (including its creation
- * time) immediately before each window operation.
+ * supplies process ids.  If manager-side process discovery fails, the manager
+ * can request discovery inside its selected Wine environment instead.  Every
+ * process is revalidated (including its creation time) immediately before
+ * each window operation.
  */
 
 #include <windows.h>
@@ -104,6 +105,7 @@ struct collect_context
     struct window_list *list;
     const struct process_identity *targets;
     unsigned int target_count;
+    BOOL discover_office;
 };
 
 static const struct process_identity *find_target(const struct collect_context *context, DWORD pid)
@@ -121,12 +123,16 @@ static BOOL CALLBACK collect_window(HWND hwnd, LPARAM param)
     struct collect_context *context = (struct collect_context *)param;
     struct window_list *list = context->list;
     const struct process_identity *target;
+    struct process_identity discovered;
     DWORD pid;
 
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == GetCurrentProcessId() || hwnd == GetDesktopWindow() || !IsWindowVisible(hwnd))
         return TRUE;
-    if (!(target = find_target(context, pid)) || !process_identity_matches(target))
+    target = find_target(context, pid);
+    if (!target && context->discover_office && read_process_identity(pid, &discovered))
+        target = &discovered;
+    if (!target || !process_identity_matches(target))
         return TRUE;
     if (list->count == MAX_WINDOWS)
     {
@@ -157,39 +163,44 @@ int __cdecl wmain(int argc, WCHAR **argv)
 {
     struct process_identity targets[MAX_TARGETS];
     struct window_list windows = {0};
-    struct collect_context context = {&windows, targets, 0};
+    struct collect_context context = {&windows, targets, 0, FALSE};
     ULONGLONG deadline;
     unsigned int i, target_index, remaining;
     DWORD pid;
 
-    for (i = 1; i < (unsigned int)argc; ++i)
+    if (argc == 2 && !wcsicmp(argv[1], L"--discover-office"))
+        context.discover_office = TRUE;
+    else
     {
-        if (wcsicmp(argv[i], L"--pid") || i + 1 >= (unsigned int)argc
-                || !parse_pid(argv[++i], &pid))
+        for (i = 1; i < (unsigned int)argc; ++i)
         {
-            fwprintf(stderr, L"usage: wine4officeclose.exe --pid <office-process-id> [...]\n");
-            return 2;
+            if (wcsicmp(argv[i], L"--pid") || i + 1 >= (unsigned int)argc
+                    || !parse_pid(argv[++i], &pid))
+            {
+                fwprintf(stderr, L"usage: wine4officeclose.exe (--pid <office-process-id> [...] | --discover-office)\n");
+                return 2;
+            }
+            for (target_index = 0; target_index < context.target_count; ++target_index)
+                if (targets[target_index].pid == pid)
+                    break;
+            if (target_index != context.target_count)
+                continue;
+            if (context.target_count == MAX_TARGETS)
+            {
+                fwprintf(stderr, L"wine4officeclose: too many process targets\n");
+                return 2;
+            }
+            if (!read_process_identity(pid, &targets[context.target_count]))
+            {
+                fwprintf(stderr, L"wine4officeclose: refusing unowned or non-Office process %lu\n", pid);
+                return 2;
+            }
+            ++context.target_count;
         }
-        for (target_index = 0; target_index < context.target_count; ++target_index)
-            if (targets[target_index].pid == pid)
-                break;
-        if (target_index != context.target_count)
-            continue;
-        if (context.target_count == MAX_TARGETS)
-        {
-            fwprintf(stderr, L"wine4officeclose: too many process targets\n");
-            return 2;
-        }
-        if (!read_process_identity(pid, &targets[context.target_count]))
-        {
-            fwprintf(stderr, L"wine4officeclose: refusing unowned or non-Office process %lu\n", pid);
-            return 2;
-        }
-        ++context.target_count;
     }
-    if (!context.target_count)
+    if (!context.target_count && !context.discover_office)
     {
-        fwprintf(stderr, L"usage: wine4officeclose.exe --pid <office-process-id> [...]\n");
+        fwprintf(stderr, L"usage: wine4officeclose.exe (--pid <office-process-id> [...] | --discover-office)\n");
         return 2;
     }
 

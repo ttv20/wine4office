@@ -1,4 +1,4 @@
-TESTDLL   = wine4officeclose_test.exe
+TESTDLL   = wine4officeclose.exe
 IMPORTS   = user32
 
 SOURCES = \

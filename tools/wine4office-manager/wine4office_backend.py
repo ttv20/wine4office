@@ -45,6 +45,7 @@ OFFICE_X11_EXECUTABLES = (
     "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
 )
 STOP_GRACE_SECONDS = 10.0
+STOP_DETECTION_SECONDS = 4.0
 OFFICE_COMPATIBILITY_POLICIES = {
     "disable_animations": {
         "label": "Disable Office animations",
@@ -1201,18 +1202,25 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         else time.monotonic() + STOP_GRACE_SECONDS
     )
     graceful_close = False
+    detection_failed = False
     try:
         office_pids = _owned_office_pids(
             prefix, wine, use_x11,
-            timeout=max(0.001, deadline - time.monotonic()),
+            timeout=max(
+                0.001,
+                min(STOP_DETECTION_SECONDS, deadline - time.monotonic()),
+            ),
         )
     except RuntimeError:
         office_pids = []
+        detection_failed = True
     close_command = [str(wine), "wine4officeclose.exe"]
     for pid in office_pids:
         close_command.extend(("--pid", str(pid)))
+    if detection_failed:
+        close_command.append("--discover-office")
     try:
-        if office_pids:
+        if office_pids or detection_failed:
             subprocess.run(
                 close_command,
                 env=env,
@@ -4669,14 +4677,7 @@ def manage_preload_service(action: str, prefix_value: str | None = None,
         return preload_service_status(prefix_value, wine_value, use_x11)
 
     binding = _read_preload_binding()
-    if (
-        action == "start"
-        and not _preload_selected_matches(binding, prefix_value, wine_value, use_x11)
-    ):
-        raise RuntimeError(
-            "The selected Wine environment does not match the fixed preload binding."
-        )
-    if action == "stop" and not _preload_selected_matches(
+    if not _preload_selected_matches(
         binding, prefix_value, wine_value, use_x11
     ):
         raise RuntimeError(
