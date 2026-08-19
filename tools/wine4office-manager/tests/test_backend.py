@@ -604,13 +604,15 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_stop_wine_gracefully_closes_windows_before_server(self):
         prefix = self._make_prefix(self.home / ".wine4office")
-        with mock.patch.object(backend.subprocess, "run") as run:
+        with mock.patch.object(
+            backend, "_owned_office_pids", return_value=[4132]
+        ), mock.patch.object(backend.subprocess, "run") as run:
             backend.stop_wine(str(prefix), str(self.wine))
 
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
-                [str(self.wine), "wine4officeclose.exe"],
+                [str(self.wine), "wine4officeclose.exe", "--pid", "4132"],
                 [str(self.runner / "wineserver"), "-w"],
             ],
         )
@@ -637,6 +639,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
     def test_stop_wine_hard_kills_when_graceful_close_fails(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         with mock.patch.object(
+            backend, "_owned_office_pids", return_value=[4132]
+        ), mock.patch.object(
             backend.subprocess, "run",
             side_effect=[
                 subprocess.CalledProcessError(2, "wine4officeclose.exe"),
@@ -649,7 +653,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
-                [str(self.wine), "wine4officeclose.exe"],
+                [str(self.wine), "wine4officeclose.exe", "--pid", "4132"],
                 [str(self.runner / "wineserver"), "-k"],
                 [str(self.runner / "wineserver"), "-w"],
             ],
@@ -659,6 +663,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         prefix = self._make_prefix(self.home / ".wine4office")
         timeout = subprocess.TimeoutExpired("wineserver -w", 15)
         with mock.patch.object(
+            backend, "_owned_office_pids", return_value=[4132]
+        ), mock.patch.object(
             backend.subprocess, "run",
             side_effect=[
                 mock.DEFAULT, timeout, mock.DEFAULT, timeout,
@@ -675,6 +681,106 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertNotIn(
             [str(self.runner / "wineserver"), "-k9"],
             [call.args[0] for call in run.call_args_list],
+        )
+
+    def test_stop_wine_without_office_skips_invalid_empty_close_request(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_office_pids", return_value=[]
+        ), mock.patch.object(backend.subprocess, "run") as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.runner / "wineserver"), "-k"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
+    def test_stop_wine_discovers_office_in_prefix_when_tasklist_fails(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_office_pids",
+            side_effect=RuntimeError("tasklist unavailable"),
+        ) as detect, mock.patch.object(backend.subprocess, "run") as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertLessEqual(
+            detect.call_args.kwargs["timeout"], backend.STOP_DETECTION_SECONDS
+        )
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.wine), "wine4officeclose.exe", "--discover-office"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
+    def test_stop_wine_force_stops_when_discovery_helper_fails(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with mock.patch.object(
+            backend, "_owned_office_pids",
+            side_effect=RuntimeError("tasklist unavailable"),
+        ), mock.patch.object(
+            backend.subprocess, "run",
+            side_effect=[
+                subprocess.CalledProcessError(2, "wine4officeclose.exe"),
+                mock.DEFAULT,
+                mock.DEFAULT,
+            ],
+        ) as run:
+            backend.stop_wine(str(prefix), str(self.wine))
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [str(self.wine), "wine4officeclose.exe", "--discover-office"],
+                [str(self.runner / "wineserver"), "-k"],
+                [str(self.runner / "wineserver"), "-w"],
+            ],
+        )
+
+    def test_office_detection_uses_windows_pid_from_selected_tasklist(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        completed = mock.Mock(
+            returncode=0,
+            stdout='"WINWORD.EXE","4242","Console","1","12 K"\n'
+                   '"services.exe","43","Services","0","8 K"\n',
+            stderr="",
+        )
+        with mock.patch.object(
+            backend.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(
+                backend._owned_office_pids(prefix, self.wine, False), [4242]
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(self.wine), "tasklist.exe", "/FO", "CSV", "/NH"],
+        )
+
+    def test_force_kill_accepts_selected_runner_wine_preloader(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        proc_root = self.root / "proc"
+        process = proc_root / "1234"
+        process.mkdir(parents=True)
+        preloader = self.runner.parent / "lib/wine/x86_64-unix/wine-preloader"
+        preloader.parent.mkdir(parents=True)
+        preloader.write_bytes(b"preloader")
+        (process / "exe").symlink_to(preloader)
+        (process / "environ").write_bytes(
+            os.fsencode(f"WINEPREFIX={prefix.resolve()}") + b"\0"
+        )
+        stat_fields = ["S"] + ["0"] * 18 + ["42"]
+        (process / "stat").write_text(
+            "1234 (wine-preloader) " + " ".join(stat_fields)
+        )
+
+        self.assertEqual(
+            backend._owned_wine_processes(prefix, self.wine, proc_root),
+            [(1234, "42")],
         )
 
     def test_force_kill_skips_pid_when_identity_changes(self):
@@ -2486,6 +2592,56 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         office.assert_not_called()
         systemctl.assert_not_called()
 
+    def test_disable_refuses_selected_environment_mismatch(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        different_prefix = self._make_prefix(self.home / "different prefix")
+        different_wine = str(self.home / "different runner/bin/wine")
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property"
+        ) as property_state, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                backend.manage_preload_service(
+                    "disable", str(different_prefix), different_wine, True
+                )
+
+        property_state.assert_not_called()
+        systemctl.assert_not_called()
+
+    def test_disable_refuses_partial_environment_selection(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(), backend._PRELOAD_UNIT_MARKER + "\n", 0o644
+        )
+        selections = (
+            (binding["prefix"], None),
+            (None, binding["wine"]),
+        )
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property"
+        ) as property_state, mock.patch.object(
+            backend, "_systemctl_user"
+        ) as systemctl:
+            for prefix_value, wine_value in selections:
+                with self.subTest(prefix=prefix_value, wine=wine_value):
+                    with self.assertRaisesRegex(RuntimeError, "does not match"):
+                        backend.manage_preload_service(
+                            "disable", prefix_value, wine_value, True
+                        )
+
+        property_state.assert_not_called()
+        systemctl.assert_not_called()
+
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
         with mock.patch.object(
@@ -2632,7 +2788,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertEqual(found, [])
 
-    def test_stop_refuses_active_or_unknown_office_without_systemctl_stop(self):
+    def test_stop_service_does_not_refuse_when_office_is_active(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
         backend._preload_atomic_write(
@@ -2642,24 +2798,18 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend, "_systemd_user_capability", return_value=(True, "")
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=["EXCEL.EXE"]
-        ), mock.patch.object(backend, "_systemctl_user") as systemctl:
-            with self.assertRaisesRegex(RuntimeError, "Office is active"):
-                backend.manage_preload_service(
-                    "stop", binding["prefix"], binding["wine"], True
-                )
-        systemctl.assert_not_called()
+        ) as office, mock.patch.object(
+            backend, "_stop_preload_unit_and_wait"
+        ) as stop, mock.patch.object(
+            backend, "preload_service_status", return_value={"state": "inactive"}
+        ):
+            result = backend.manage_preload_service(
+                "stop", binding["prefix"], binding["wine"], True
+            )
 
-        with mock.patch.object(
-            backend, "_systemd_user_capability", return_value=(True, "")
-        ), mock.patch.object(
-            backend, "preload_office_processes",
-            side_effect=RuntimeError("tasklist timeout"),
-        ), mock.patch.object(backend, "_systemctl_user") as systemctl:
-            with self.assertRaisesRegex(RuntimeError, "tasklist timeout"):
-                backend.manage_preload_service(
-                    "stop", binding["prefix"], binding["wine"], True
-                )
-        systemctl.assert_not_called()
+        self.assertEqual(result["state"], "inactive")
+        office.assert_not_called()
+        stop.assert_called_once_with(binding=binding)
 
     def test_clicktorun_process_detection_requires_prefix_and_runner(self):
         binding = self._preload_binding()
@@ -2879,7 +3029,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             actions,
             [("start", "ClickToRunSvc"), ("stop", "ClickToRunSvc")],
         )
-        office.assert_called_once()
+        office.assert_not_called()
         appv_start.assert_called_once_with(binding)
         appv_stop.assert_called_once_with(appv_process)
         voip_start.assert_called_once_with(binding)
@@ -2980,7 +3130,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertFalse(heartbeat["components"]["ClickToRunSvc"]["owned"])
 
-    def test_worker_refuses_signal_cleanup_when_activity_check_fails(self):
+    def test_worker_cleanup_does_not_depend_on_tasklist(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)
         handlers = {}
@@ -2998,22 +3148,22 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ), mock.patch.object(
             backend, "_preload_component_state", return_value=("running", "running")
         ), mock.patch.object(
-            backend, "_preload_component_action"
+            backend, "_preload_component_action", return_value=(True, "stopped")
         ) as action, mock.patch.object(
             backend, "preload_office_processes",
             side_effect=RuntimeError("unknown"),
-        ), mock.patch.object(
+        ) as office, mock.patch.object(
             backend.signal, "signal", side_effect=install_signal
         ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
             result = backend.run_preload_worker(
                 backend.preload_binding_path(), backend.preload_runtime_status_path()
             )
-        self.assertEqual(result, 1)
-        action.assert_not_called()
+        self.assertEqual(result, 0)
+        office.assert_not_called()
         heartbeat = __import__("json").loads(
             backend.preload_runtime_status_path().read_text()
         )
-        self.assertEqual(heartbeat["state"], "stop-refused")
+        self.assertEqual(heartbeat["state"], "stopped")
 
     def test_worker_reports_degraded_component_without_claiming_ownership(self):
         binding = self._preload_binding()

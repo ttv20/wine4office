@@ -89,6 +89,24 @@ static BOOL run_close_utility_without_targets(const WCHAR *utility, DWORD *exit_
     return TRUE;
 }
 
+static BOOL run_close_utility_discovery(const WCHAR *utility, DWORD *exit_code)
+{
+    PROCESS_INFORMATION process_info = {0};
+    STARTUPINFOW startup_info = {0};
+    WCHAR command[32768];
+
+    startup_info.cb = sizeof(startup_info);
+    swprintf(command, ARRAY_SIZE(command), L"\"%s\" --discover-office", utility);
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL,
+                        &startup_info, &process_info))
+        return FALSE;
+    WaitForSingleObject(process_info.hProcess, INFINITE);
+    GetExitCodeProcess(process_info.hProcess, exit_code);
+    CloseHandle(process_info.hThread);
+    CloseHandle(process_info.hProcess);
+    return TRUE;
+}
+
 static void test_owned_window_is_the_only_close_target(void)
 {
     WCHAR module[32768], utility[32768], full_utility[32768];
@@ -167,6 +185,32 @@ static void test_owned_window_is_the_only_close_target(void)
 
     TerminateProcess(child_info.hProcess, 0);
     CloseHandle(child_info.hProcess);
+    child_info.hProcess = NULL;
+
+    ResetEvent(ready);
+    ok(CreateProcessW(child_path, command, NULL, NULL, TRUE, 0, NULL, NULL,
+                      &startup_info, &child_info), "Could not restart owned child: %lu\n", GetLastError());
+    if (child_info.hProcess)
+    {
+        CloseHandle(child_info.hThread);
+        wait = WaitForSingleObject(ready, 5000);
+        ok(wait == WAIT_OBJECT_0, "Discovered window did not become ready: %lu\n", wait);
+        if (wait == WAIT_OBJECT_0)
+        {
+            ok(run_close_utility_discovery(utility, &exit_code),
+               "Could not launch close utility discovery\n");
+            ok(exit_code == 0, "Close utility discovery returned %lu\n", exit_code);
+            ok(WaitForSingleObject(child_info.hProcess, 5000) == WAIT_OBJECT_0,
+               "Discovered Office-like process remained open\n");
+            ok(IsWindow(unrelated), "Discovery closed an unrelated top-level window\n");
+        }
+    }
+
+    if (child_info.hProcess)
+    {
+        TerminateProcess(child_info.hProcess, 0);
+        CloseHandle(child_info.hProcess);
+    }
     DestroyWindow(unrelated);
     CloseHandle(ready);
     DeleteFileW(child_path);
