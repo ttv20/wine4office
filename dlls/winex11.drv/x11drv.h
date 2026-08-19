@@ -488,6 +488,7 @@ extern BOOL use_take_focus;
 extern BOOL use_primary_selection;
 extern BOOL use_system_cursors;
 extern BOOL grab_fullscreen;
+extern BOOL decorated_mode;
 extern BOOL usexcomposite;
 extern BOOL managed_mode;
 extern BOOL private_color_map;

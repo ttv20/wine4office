@@ -47,6 +47,7 @@
 #include "ntstatus.h"
 
 #include "x11drv.h"
+#include "dwmapi.h"
 #include "wingdi.h"
 #include "winuser.h"
 
@@ -104,6 +105,9 @@ static const WCHAR clip_window_prop[] =
     {'_','_','w','i','n','e','_','x','1','1','_','c','l','i','p','_','w','i','n','d','o','w',0};
 static const WCHAR focus_time_prop[] =
     {'_','_','w','i','n','e','_','x','1','1','_','f','o','c','u','s','_','t','i','m','e',0};
+static const WCHAR dwm_nc_rendering_policy_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','n','c','_','r','e','n','d','e','r','i','n','g','_',
+     'p','o','l','i','c','y',0};
 
 static const char *debugstr_mwm_hints( const MwmHints *hints )
 {
@@ -611,7 +615,14 @@ static unsigned long get_mwm_decorations_for_style( DWORD style, DWORD ex_style 
  */
 static unsigned long get_mwm_decorations( struct x11drv_win_data *data, DWORD style, DWORD ex_style )
 {
-    if (EqualRect( &data->rects.window, &data->rects.visible )) return 0;
+    enum DWMNCRENDERINGPOLICY policy;
+
+    /* The visible rect is produced from the decoration policy, so using it to choose that policy
+     * creates a configure feedback loop when the window manager changes the frame extents. */
+    if (!decorated_mode || !data->managed) return 0;
+    policy = HandleToULong( NtUserGetProp( data->hwnd, dwm_nc_rendering_policy_prop ) );
+    policy = policy ? policy - 1 : DWMNCRP_USEWINDOWSTYLE;
+    if (policy == DWMNCRP_DISABLED) return 0;
     return get_mwm_decorations_for_style( style, ex_style );
 }
 

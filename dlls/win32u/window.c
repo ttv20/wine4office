@@ -28,6 +28,7 @@
 #include "ntstatus.h"
 #include "ntgdi_private.h"
 #include "ntuser_private.h"
+#include "wine/dwmapi.h"
 #include "wine/opengl_driver.h"
 #include "wine/server.h"
 #include "wine/debug.h"
@@ -2302,9 +2303,13 @@ done:
 static RECT get_visible_rect( HWND hwnd, BOOL shaped, UINT style, UINT ex_style, const struct window_rects *rects )
 {
     struct ratio dpi = get_dpi_for_window( hwnd );
+    enum DWMNCRENDERINGPOLICY policy;
     UINT style_mask, ex_style_mask;
     RECT visible_rect, rect = {0};
 
+    policy = wine_dwm_decode_window_attribute(
+        NtUserGetProp( hwnd, wine_dwm_nc_rendering_policy_prop ), DWMNCRP_USEWINDOWSTYLE );
+    if (policy == DWMNCRP_DISABLED) return rects->window;
     if (get_present_rect( hwnd, &rect, get_thread_dpi() )) return rect;
     if (IsRectEmpty( &rects->window ) || EqualRect( &rects->window, &rects->client ) || shaped || !decorated_mode) return rects->window;
     if (!user_driver->pGetWindowStyleMasks( hwnd, style, ex_style, &style_mask, &ex_style_mask )) return rects->window;
