@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Let modern Office identify the current user without exposing machine, account,
+  or application identifiers.
+
 ## 0.2.0-beta.1 — 2026-08-19
 
 - Let Office finish proofing-language updates without crashing Click-to-Run.

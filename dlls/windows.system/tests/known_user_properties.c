@@ -93,6 +93,14 @@ START_TEST(known_user_properties)
             hr, object, factory );
     if (SUCCEEDED(hr)) IActivationFactory_Release( object );
 
+    count = 99;
+    iids = NULL;
+    hr = IKnownUserPropertiesStatics_GetIids( statics, &count, &iids );
+    ok( hr == S_OK && count == 1 && iids && IsEqualGUID( &iids[0], &IID_IKnownUserPropertiesStatics ),
+            "Statics GetIids returned %#lx, count %lu, iids %p.\n", hr, count, iids );
+    if (iids) CoTaskMemFree( iids );
+    iids = NULL;
+
     hr = IKnownUserPropertiesStatics_QueryInterface( statics, &IID_IUnknown, (void **)&other_unknown );
     ok( hr == S_OK && (void *)other_unknown == (void *)unknown,
             "Statics IUnknown query returned %#lx and %p, expected %p.\n", hr, other_unknown, unknown );

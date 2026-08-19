@@ -22,6 +22,17 @@ static const IID iid_unsupported =
 
 #define TEST_SENTINEL ((void *)(ULONG_PTR)0xdeadbeef)
 
+static BOOL is_opaque_non_roamable_id( HSTRING value )
+{
+    const WCHAR *string = WindowsGetStringRawBuffer( value, NULL );
+    UINT32 length = WindowsGetStringLen( value ), i;
+
+    if (length != 69 || wcsncmp( string, L"wine:", 5 )) return FALSE;
+    for (i = 5; i < length; ++i)
+        if (!wcschr( L"0123456789abcdef", string[i] )) return FALSE;
+    return TRUE;
+}
+
 struct test_completed_handler
 {
     IAsyncOperationCompletedHandler_IInspectable IAsyncOperationCompletedHandler_IInspectable_iface;
@@ -419,6 +430,7 @@ static void test_user_property_async( IUser *user )
                     "AccountName string returned %s, expected %s.\n",
                     wine_dbgstr_w( WindowsGetStringRawBuffer( value, NULL ) ), wine_dbgstr_w( account_name ) );
         if (value) WindowsDeleteString( value );
+        value = NULL;
     }
     if (property_value) IPropertyValue_Release( property_value );
     property_value = NULL;
@@ -449,6 +461,7 @@ static void test_user_property_async( IUser *user )
                     "DomainName string returned %s, expected %s.\n",
                     wine_dbgstr_w( WindowsGetStringRawBuffer( value, NULL ) ), wine_dbgstr_w( computer_name ) );
         if (value) WindowsDeleteString( value );
+        value = NULL;
     }
     if (property_value) IPropertyValue_Release( property_value );
     property_value = NULL;
@@ -557,6 +570,8 @@ static void test_user_property_async( IUser *user )
     handler = test_handler_create();
     ok( handler != NULL, "Failed to create completion handler.\n" );
     if (!handler) goto done;
+    hr = IAsyncOperation_IInspectable_put_Completed( operation, NULL );
+    ok( hr == E_POINTER, "Initial NULL put_Completed returned %#lx.\n", hr );
     hr = IAsyncOperation_IInspectable_put_Completed( operation,
             &handler->IAsyncOperationCompletedHandler_IInspectable_iface );
     ok( hr == S_OK && handler->invoked && handler->got_operation && handler->status == Completed,
@@ -573,6 +588,8 @@ static void test_user_property_async( IUser *user )
                 &second_handler->IAsyncOperationCompletedHandler_IInspectable_iface );
         second_handler = NULL;
     }
+    hr = IAsyncOperation_IInspectable_put_Completed( operation, NULL );
+    ok( hr == E_ILLEGAL_DELEGATE_ASSIGNMENT, "Second NULL put_Completed returned %#lx.\n", hr );
     completed = TEST_SENTINEL;
     hr = IAsyncOperation_IInspectable_get_Completed( operation, &completed );
     if (completed == TEST_SENTINEL) completed = NULL;
@@ -774,15 +791,24 @@ static void test_executable_scoped_non_roamable_id( HSTRING value )
     ok( file != INVALID_HANDLE_VALUE, "Opening child identity failed, error %lu.\n", GetLastError() );
     if (file == INVALID_HANDLE_VALUE) goto done;
     size = GetFileSize( file, NULL );
+    if (!size || size == INVALID_FILE_SIZE || size > 4096 || size % sizeof(*child_value))
+    {
+        ok( FALSE, "Invalid child identity file size %lu, error %lu.\n", size, GetLastError() );
+        CloseHandle( file );
+        goto done;
+    }
     child_value = malloc( size + sizeof(*child_value) );
     ok( child_value != NULL, "Failed to allocate child identity buffer.\n" );
     if (child_value)
     {
         ret = ReadFile( file, child_value, size, &read, NULL );
         ok( ret && read == size, "Reading child identity returned %d and %lu/%lu bytes.\n", ret, read, size );
-        child_value[size / sizeof(*child_value)] = 0;
-        ok( wcscmp( WindowsGetStringRawBuffer( value, NULL ), child_value ),
-                "Different executables returned the same NonRoamableId %s.\n", wine_dbgstr_w( child_value ) );
+        if (ret && read == size)
+        {
+            child_value[size / sizeof(*child_value)] = 0;
+            ok( wcscmp( WindowsGetStringRawBuffer( value, NULL ), child_value ),
+                    "Different executables returned the same NonRoamableId %s.\n", wine_dbgstr_w( child_value ) );
+        }
     }
     CloseHandle( file );
 
@@ -872,13 +898,28 @@ static void test_packaged_app_scoped_non_roamable_id(void)
                 NULL, OPEN_EXISTING, 0, NULL )) != INVALID_HANDLE_VALUE)
         {
             size = GetFileSize( file, NULL );
+            if (!size || size == INVALID_FILE_SIZE || size > 4096 || size % sizeof(*identities[i]))
+            {
+                ok( FALSE, "Invalid packaged identity %u file size %lu, error %lu.\n",
+                        i, size, GetLastError() );
+                CloseHandle( file );
+                file = INVALID_HANDLE_VALUE;
+                DeleteFileW( output );
+                continue;
+            }
             identities[i] = malloc( size + sizeof(*identities[i]) );
             if (identities[i])
             {
                 ret = ReadFile( file, identities[i], size, &read, NULL );
                 ok( ret && read == size, "Reading packaged identity %u returned %d and %lu/%lu bytes.\n",
                         i, ret, read, size );
-                identities[i][size / sizeof(*identities[i])] = 0;
+                if (ret && read == size)
+                    identities[i][size / sizeof(*identities[i])] = 0;
+                else
+                {
+                    free( identities[i] );
+                    identities[i] = NULL;
+                }
             }
             CloseHandle( file );
             file = INVALID_HANDLE_VALUE;
@@ -957,6 +998,7 @@ done:
 static void test_user_properties_async( IUser *user )
 {
     static const WCHAR *names[] = {L"AccountName", L"DomainName", L"FirstName"};
+    static const WCHAR *duplicate_names[] = {L"AccountName", L"AccountName", L"DomainName"};
     WCHAR account_name[UNLEN + 1], computer_name[MAX_COMPUTERNAME_LENGTH + 1];
     DWORD account_name_size = ARRAY_SIZE( account_name );
     DWORD computer_name_size = ARRAY_SIZE( computer_name );
@@ -1067,6 +1109,50 @@ static void test_user_properties_async( IUser *user )
     test_property_map_string( map, L"AccountName", have_account_name ? account_name : NULL, TRUE );
     test_property_map_string( map, L"DomainName", have_computer_name ? computer_name : NULL, TRUE );
     test_property_map_string( map, L"FirstName", NULL, FALSE );
+    {
+        struct test_hstring_vector *duplicate_vector;
+        IAsyncOperation_IPropertySet *duplicate_operation = NULL;
+        IPropertySet *duplicate_property_set = NULL;
+        IMap_HSTRING_IInspectable *duplicate_map = NULL;
+
+        duplicate_vector = test_hstring_vector_create( duplicate_names, ARRAY_SIZE( duplicate_names ) );
+        ok( duplicate_vector != NULL, "Failed to create duplicate HSTRING vector.\n" );
+        if (duplicate_vector)
+        {
+            hr = IUser_GetPropertiesAsync( user, &duplicate_vector->IVectorView_HSTRING_iface,
+                    &duplicate_operation );
+            ok( hr == S_OK && duplicate_operation != NULL,
+                    "Duplicate GetPropertiesAsync returned %#lx and %p.\n", hr, duplicate_operation );
+            IVectorView_HSTRING_Release( &duplicate_vector->IVectorView_HSTRING_iface );
+        }
+        if (duplicate_operation)
+        {
+            hr = IAsyncOperation_IPropertySet_GetResults( duplicate_operation, &duplicate_property_set );
+            ok( hr == S_OK && duplicate_property_set != NULL,
+                    "Duplicate PropertySet GetResults returned %#lx and %p.\n", hr, duplicate_property_set );
+        }
+        if (duplicate_property_set)
+        {
+            hr = IPropertySet_QueryInterface( duplicate_property_set, &IID_IMap_HSTRING_IInspectable,
+                    (void **)&duplicate_map );
+            ok( hr == S_OK && duplicate_map != NULL,
+                    "Duplicate PropertySet map query returned %#lx and %p.\n", hr, duplicate_map );
+        }
+        if (duplicate_map)
+        {
+            size = 0;
+            hr = IMap_HSTRING_IInspectable_get_Size( duplicate_map, &size );
+            ok( hr == S_OK && size == 2,
+                    "Duplicate PropertySet map size returned %#lx and %u.\n", hr, size );
+            test_property_map_string( duplicate_map, L"AccountName",
+                    have_account_name ? account_name : NULL, TRUE );
+            test_property_map_string( duplicate_map, L"DomainName",
+                    have_computer_name ? computer_name : NULL, TRUE );
+        }
+        if (duplicate_map) IMap_HSTRING_IInspectable_Release( duplicate_map );
+        if (duplicate_property_set) IPropertySet_Release( duplicate_property_set );
+        if (duplicate_operation) IAsyncOperation_IPropertySet_Release( duplicate_operation );
+    }
     second_property_set = NULL;
     hr = IAsyncOperation_IPropertySet_GetResults( operation, &second_property_set );
     ok( hr == S_OK && second_property_set != NULL, "Second PropertySet GetResults returned %#lx and %p.\n",
@@ -1077,6 +1163,8 @@ static void test_user_properties_async( IUser *user )
     handler = test_property_handler_create();
     ok( handler != NULL, "Failed to create PropertySet completion handler.\n" );
     if (!handler) goto done;
+    hr = IAsyncOperation_IPropertySet_put_Completed( operation, NULL );
+    ok( hr == E_POINTER, "Initial NULL PropertySet put_Completed returned %#lx.\n", hr );
     hr = IAsyncOperation_IPropertySet_put_Completed( operation,
             &handler->IAsyncOperationCompletedHandler_IPropertySet_iface );
     ok( hr == S_OK && handler->invoked && handler->got_operation && handler->status == Completed,
@@ -1093,6 +1181,9 @@ static void test_user_properties_async( IUser *user )
                 &second_handler->IAsyncOperationCompletedHandler_IPropertySet_iface );
         second_handler = NULL;
     }
+    hr = IAsyncOperation_IPropertySet_put_Completed( operation, NULL );
+    ok( hr == E_ILLEGAL_DELEGATE_ASSIGNMENT,
+            "Second NULL PropertySet put_Completed returned %#lx.\n", hr );
     completed = TEST_SENTINEL;
     hr = IAsyncOperation_IPropertySet_get_Completed( operation, &completed );
     if (completed == TEST_SENTINEL) completed = NULL;
@@ -1410,6 +1501,8 @@ START_TEST(user)
     value = NULL;
     hr = IUser_get_NonRoamableId( user, &value );
     ok( hr == S_OK && value && WindowsGetStringLen( value ), "NonRoamableId returned %#lx.\n", hr );
+    ok( value && is_opaque_non_roamable_id( value ), "NonRoamableId %s is not opaque.\n",
+            wine_dbgstr_w( value ? WindowsGetStringRawBuffer( value, NULL ) : NULL ) );
     hr = IUser_get_NonRoamableId( user, &other_value );
     ok( hr == S_OK && other_value && value &&
             !wcscmp( WindowsGetStringRawBuffer( value, NULL ), WindowsGetStringRawBuffer( other_value, NULL ) ),
