@@ -1,5 +1,5 @@
 MODULE    = wine4officeclose.exe
-IMPORTS   = user32
+IMPORTS   = user32 ntdll
 
 EXTRADLLFLAGS = -mconsole -municode
 
