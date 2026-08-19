@@ -10,7 +10,7 @@
 - Fix Office color picker popups on Wayland.
 - Fix resizing Office windows with DirectComposition content on Wayland.
 - Keep Wine and background-service shutdowns bounded and environment-specific.
-- Fix Office dialogs that stayed blank until pointer movement.
+- Fix Office dialogs turning white during pointer movement.
 
 [Full changes](https://github.com/ttv20/wine4office/compare/0.2.0-alpha...0.2.0-alpha.2)
 
