@@ -1094,15 +1094,127 @@ class QtManagerTests(unittest.TestCase):
         launch.assert_called_once()
         self.assertFalse(launch.call_args.kwargs["use_x11"])
 
-    def test_stop_wine_shows_persistent_status_bar_message(self):
+    def test_stop_wine_shows_persistent_progress_dialog(self):
+        dialog_visible_during_stop = []
+
+        def stop_with_phase_updates(*_args, **kwargs):
+            dialog_visible_during_stop.append(
+                self.window.update_progress_dialog.isVisible()
+            )
+            progress = kwargs["progress_callback"]
+            progress("Closing Office applications gracefully…", None)
+            progress("Force-killing remaining Wine processes…", None)
+
         with mock.patch.object(
             self.state, "start_task"
-        ), mock.patch.object(
+        ) as start, mock.patch.object(
+            self.state, "set_progress"
+        ) as set_progress, mock.patch.object(
+            backend, "launch_tool", side_effect=stop_with_phase_updates
+        ) as launch, mock.patch.object(
             self.window.statusBar(), "showMessage"
         ) as show_message:
             self.window.launch_tool("stop")
+            start.call_args.args[1]()
 
+        self.assertEqual(start.call_args.args[0], "wine-stop")
+        self.assertEqual(dialog_visible_during_stop, [True])
+        self.assertEqual(set_progress.call_args_list, [
+            mock.call("Closing Office applications gracefully…", None),
+            mock.call("Force-killing remaining Wine processes…", None),
+        ])
+        self.assertIs(launch.call_args.kwargs["progress_callback"], set_progress)
         show_message.assert_any_call("Stopping Wine environment…", 0)
+        self.assertTrue(self.window.update_progress_dialog.isVisible())
+        self.assertEqual(
+            self.window.update_progress_dialog.windowTitle(), "Stopping Wine"
+        )
+        self.assertEqual(self.window.update_progress_task_kind, "wine-stop")
+        self.assertFalse(self.window.update_progress_button.isEnabled())
+
+    def test_stop_wine_progress_tracks_delayed_success_timeout_and_failure(self):
+        self.window._show_task_progress(
+            "wine-stop", "Stopping Wine", "Selected Wine environment",
+            "Stopping Wine environment…",
+            {
+                "completed": "Wine environment stopped.",
+                "cancelled": "Wine shutdown was interrupted.",
+                "failed": "Wine shutdown failed. Review the details below.",
+            },
+            cancellable=False,
+        )
+        self.window._refresh_update_progress({
+            "kind": "wine-stop", "running": True, "status": "running",
+            "progress_label": "", "progress_value": None,
+            "log": "Waiting for Wine processes to exit.\n",
+        })
+        self.assertEqual(self.window.update_progress_bar.maximum(), 0)
+        self.assertIn(
+            "Waiting for Wine processes",
+            self.window.update_progress_log.toPlainText(),
+        )
+
+        self.window._refresh_update_progress({
+            "kind": "wine-stop", "running": False, "status": "completed",
+            "progress_label": "", "progress_value": None,
+            "log": "Wine processes stopped.\n",
+        })
+        self.assertEqual(
+            self.window.update_progress_status.text(), "Wine environment stopped."
+        )
+        self.assertEqual(self.window.update_progress_bar.value(), 100)
+        self.assertEqual(self.window.update_progress_button.text(), "Close")
+
+        for detail in ("Wine shutdown timed out.", "wineserver failed."):
+            with self.subTest(detail=detail):
+                self.window.update_progress_dialog.accept()
+                self.window._show_task_progress(
+                    "wine-stop", "Stopping Wine", "Selected Wine environment",
+                    "Stopping Wine environment…",
+                    {
+                        "completed": "Wine environment stopped.",
+                        "cancelled": "Wine shutdown was interrupted.",
+                        "failed": "Wine shutdown failed. Review the details below.",
+                    },
+                    cancellable=False,
+                )
+                self.window._refresh_update_progress({
+                    "kind": "wine-stop", "running": False, "status": "failed",
+                    "progress_label": "", "progress_value": None,
+                    "log": f"ERROR: {detail}\n",
+                })
+                self.assertEqual(
+                    self.window.update_progress_status.text(),
+                    "Wine shutdown failed. Review the details below.",
+                )
+                self.assertIn(detail, self.window.update_progress_log.toPlainText())
+
+    def test_stop_wine_progress_uses_manager_language(self):
+        self.window.language = "he"
+        self.window._show_task_progress(
+            "wine-stop", "Stopping Wine", "Selected Wine environment",
+            "Stopping Wine environment…",
+            {
+                "completed": "Wine environment stopped.",
+                "failed": "Wine shutdown failed. Review the details below.",
+            },
+            cancellable=False,
+        )
+
+        self.assertEqual(self.window.update_progress_dialog.windowTitle(), "עצירת Wine")
+        self.assertEqual(
+            self.window.update_progress_status.text(), "עוצר את סביבת Wine…"
+        )
+        self.assertEqual(self.window.update_progress_button.text(), "נא להמתין")
+        self.assertEqual(
+            self.window.update_progress_log.placeholderText(),
+            "פרטי הפעולה יופיעו כאן.",
+        )
+        self.window._refresh_update_progress({
+            "kind": "wine-stop", "running": False, "status": "completed",
+            "progress_label": "", "progress_value": None, "log": "",
+        })
+        self.assertEqual(self.window.update_progress_status.text(), "סביבת Wine נעצרה.")
 
     def test_equivalent_symlink_path_saves_without_prompts(self):
         alias = self.home / "prefix-alias"
@@ -1492,6 +1604,11 @@ class QtManagerTests(unittest.TestCase):
         self.assertTrue(self.window.office_startup_dialog.isVisible())
         self.assertEqual(self.window.office_startup_bar.minimum(), 0)
         self.assertEqual(self.window.office_startup_bar.maximum(), 0)
+        self.assertTrue(self.window.office_startup_timer.isActive())
+        self.assertEqual(
+            self.window.office_startup_timer.interval(),
+            qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_MS,
+        )
         self.window._refresh_office_startup_progress({
             "kind": "odt-install",
             "running": True,
@@ -1505,8 +1622,44 @@ class QtManagerTests(unittest.TestCase):
             "foreground_ready": True,
         })
         self.assertIsNone(self.window.office_startup_dialog)
+        self.assertFalse(self.window.office_startup_timer.isActive())
         self.assertEqual(
             self.window.statusBar().currentMessage(), "Office installer opened."
+        )
+
+    def test_office_startup_timeout_cancels_with_clear_error(self):
+        self.window._show_office_startup_progress()
+        with mock.patch.object(
+            self.state, "fail_pending_foreground_start", return_value=True
+        ) as fail:
+            self.window._office_startup_timed_out()
+
+        fail.assert_called_once_with(
+            "odt-install", qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR
+        )
+        self.assertEqual(
+            self.window.office_startup_status.text(),
+            qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR,
+        )
+
+    def test_office_startup_timeout_error_remains_visible_after_failure(self):
+        self.window.last_task_state = "True:running"
+        with self.state.lock:
+            self.state.task = {
+                "running": False,
+                "kind": "odt-install",
+                "status": "failed",
+                "log": f"ERROR: {qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR}\n",
+                "progress_label": "",
+                "progress_value": None,
+                "foreground_ready": False,
+            }
+
+        self.window.refresh_state()
+
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR,
         )
 
     def test_custom_office_install_waits_for_open_selection(self):

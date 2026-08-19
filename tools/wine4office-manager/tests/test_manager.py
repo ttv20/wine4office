@@ -867,6 +867,43 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(preload_helper.main(["/snapshot", "/status"]), 7)
         worker.assert_called_once_with(Path("/snapshot"), Path("/status"))
 
+    def test_pending_office_startup_timeout_fails_with_clear_error(self):
+        state = manager.ManagerState()
+        entered = __import__("threading").Event()
+
+        def wait_for_cancel():
+            entered.set()
+            state.cancel_event.wait(1)
+            raise RuntimeError("helper terminated")
+
+        state.start_task("odt-install", wait_for_cancel)
+        self.assertTrue(entered.wait(1))
+        self.assertTrue(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        self._wait(state)
+
+        task = state.snapshot()["task"]
+        self.assertEqual(task["status"], "failed")
+        self.assertIn(
+            "ERROR: Office installer did not open within 60 seconds.",
+            task["log"],
+        )
+
+    def test_office_start_before_deadline_cannot_be_failed_by_timeout(self):
+        state = manager.ManagerState()
+        release = __import__("threading").Event()
+        state.start_task("odt-install", lambda: release.wait(1) or "installed")
+        state.mark_foreground_ready()
+
+        self.assertFalse(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        self.assertFalse(state.cancel_event.is_set())
+        release.set()
+        self._wait(state)
+        self.assertEqual(state.snapshot()["task"]["status"], "completed")
+
     def _wait(self, state):
         deadline = time.monotonic() + 2
         while state.snapshot()["task"]["running"] and time.monotonic() < deadline:

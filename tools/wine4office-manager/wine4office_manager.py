@@ -219,6 +219,7 @@ class ManagerState:
         }
         self.cancel_event = threading.Event()
         self.process: subprocess.Popen | None = None
+        self._forced_failure = ""
         self.updater = {
             "checking": False,
             "checked": False,
@@ -981,7 +982,8 @@ class ManagerState:
     def mark_foreground_ready(self) -> None:
         """Signal that a task's external foreground window is starting."""
         with self.lock:
-            self.task["foreground_ready"] = True
+            if self.task["running"] and not self._forced_failure:
+                self.task["foreground_ready"] = True
 
     def start_task(self, kind: str, operation, completion=None) -> None:
         """Run a blocking operation away from Qt and report its result.
@@ -1000,6 +1002,7 @@ class ManagerState:
                 "foreground_ready": False,
             }
             self.cancel_event.clear()
+            self._forced_failure = ""
 
         result = None
         error = None
@@ -1009,7 +1012,10 @@ class ManagerState:
             try:
                 result = operation()
                 with self.lock:
-                    if self.cancel_event.is_set():
+                    if self._forced_failure:
+                        self.task["status"] = "failed"
+                        self.output(f"ERROR: {self._forced_failure}")
+                    elif self.cancel_event.is_set():
                         self.task["status"] = "cancelled"
                     else:
                         self.task["status"] = "completed"
@@ -1018,8 +1024,14 @@ class ManagerState:
             except Exception as caught:  # surfaced verbatim in the native operation log
                 error = caught
                 with self.lock:
-                    self.task["status"] = "cancelled" if self.cancel_event.is_set() else "failed"
-                    self.output(f"ERROR: {caught}")
+                    if self._forced_failure:
+                        self.task["status"] = "failed"
+                        self.output(f"ERROR: {self._forced_failure}")
+                    else:
+                        self.task["status"] = (
+                            "cancelled" if self.cancel_event.is_set() else "failed"
+                        )
+                        self.output(f"ERROR: {caught}")
             finally:
                 with self.lock:
                     self.task["running"] = False
@@ -1082,6 +1094,16 @@ class ManagerState:
                 name="wine4office-cancel",
                 daemon=True,
             ).start()
+
+    def fail_pending_foreground_start(self, kind: str, message: str) -> bool:
+        """Fail and cancel a task only while its foreground process is pending."""
+        with self.lock:
+            if (not self.task["running"] or self.task["kind"] != kind
+                    or self.task.get("foreground_ready")):
+                return False
+            self._forced_failure = str(message)
+        self.cancel()
+        return True
 
 
 

@@ -1185,7 +1185,8 @@ def _run_cancellable_command(command: list[str], env: dict[str, str], *,
 
 
 def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
-              *, _deadline: float | None = None) -> None:
+              *, _deadline: float | None = None,
+              progress_callback: Callable[[str, int | None], None] | None = None) -> None:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
@@ -1201,6 +1202,8 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         if _deadline is not None
         else time.monotonic() + STOP_GRACE_SECONDS
     )
+    if progress_callback is not None:
+        progress_callback("Closing Office applications gracefully…", None)
     graceful_close = False
     detection_failed = False
     try:
@@ -1247,6 +1250,8 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
 
+    if progress_callback is not None:
+        progress_callback("Force-killing remaining Wine processes…", None)
     try:
         subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL,
@@ -1675,7 +1680,8 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 
 
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
-                use_x11: bool = True) -> int | None:
+                use_x11: bool = True,
+                progress_callback: Callable[[str, int | None], None] | None = None) -> int | None:
     if tool == "stop":
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         restart_preload = _preload_active_for_environment(
@@ -1684,7 +1690,10 @@ def launch_tool(prefix_value: str, wine_value: str, tool: str,
         if restart_preload:
             _stop_preload_unit_and_wait(_deadline=deadline)
         try:
-            stop_wine(prefix_value, wine_value, use_x11, _deadline=deadline)
+            stop_wine(
+                prefix_value, wine_value, use_x11, _deadline=deadline,
+                progress_callback=progress_callback,
+            )
         finally:
             if restart_preload:
                 _systemctl_user(["start", PRELOAD_UNIT])

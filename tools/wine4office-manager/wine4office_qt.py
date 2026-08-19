@@ -64,6 +64,11 @@ import wine4office_incident as incident
 import wine4office_desktop as desktop
 import wine4office_i18n as i18n
 
+OFFICE_INSTALLER_STARTUP_TIMEOUT_MS = 60_000
+OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR = (
+    "Office installer did not open within 60 seconds. Installation was stopped."
+)
+
 
 def _create_environment_worker(state, config: dict, recreate: bool) -> str:
     """Create a prefix and apply its policies without a Qt object reference."""
@@ -177,6 +182,9 @@ class ManagerWindow(QMainWindow):
         self.office_startup_dialog: QDialog | None = None
         self.office_startup_status: QLabel | None = None
         self.office_startup_bar: QProgressBar | None = None
+        self.office_startup_timer = QTimer(self)
+        self.office_startup_timer.setSingleShot(True)
+        self.office_startup_timer.timeout.connect(self._office_startup_timed_out)
         self.reporting_available = incident.reporting_available()
         self.initial_incident = review_incident
         self._startup_scheduled = False
@@ -833,6 +841,7 @@ class ManagerWindow(QMainWindow):
         )
         self._translate_ui(dialog)
         dialog.show()
+        self.office_startup_timer.start(OFFICE_INSTALLER_STARTUP_TIMEOUT_MS)
 
     def _clear_office_startup_progress(self, dialog: QDialog) -> None:
         if self.office_startup_dialog is not dialog:
@@ -840,6 +849,16 @@ class ManagerWindow(QMainWindow):
         self.office_startup_dialog = None
         self.office_startup_status = None
         self.office_startup_bar = None
+        self.office_startup_timer.stop()
+
+    def _office_startup_timed_out(self) -> None:
+        if not self.state.fail_pending_foreground_start(
+                "odt-install", OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR):
+            return
+        if self.office_startup_status is not None:
+            self.office_startup_status.setText(
+                self._tr(OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR)
+            )
 
     def _refresh_office_startup_progress(self, task: dict) -> None:
         dialog = self.office_startup_dialog
@@ -1632,12 +1651,27 @@ class ManagerWindow(QMainWindow):
 
         def launch() -> str:
             pid = backend.launch_tool(
-                config["prefix"], config["wine"], tool, use_x11=config["use_x11"]
+                config["prefix"], config["wine"], tool, use_x11=config["use_x11"],
+                progress_callback=(self.state.set_progress if tool == "stop" else None),
             )
             return "Wine processes stopped." if pid is None else f"Tool started (PID {pid})."
 
         try:
-            self.state.start_task("tool", launch)
+            task_kind = "wine-stop" if tool == "stop" else "tool"
+            if tool == "stop":
+                self._show_task_progress(
+                    "wine-stop",
+                    "Stopping Wine",
+                    "Selected Wine environment",
+                    "Stopping Wine environment…",
+                    {
+                        "completed": "Wine environment stopped.",
+                        "cancelled": "Wine shutdown was interrupted.",
+                        "failed": "Wine shutdown failed. Review the details below.",
+                    },
+                    cancellable=False,
+                )
+            self.state.start_task(task_kind, launch)
             self.last_task_state = "True:running"
             self.notify(
                 "Stopping Wine environment…" if tool == "stop"
@@ -1646,6 +1680,8 @@ class ManagerWindow(QMainWindow):
             )
             self.refresh_state()
         except Exception as error:
+            if tool == "stop" and self.update_progress_dialog is not None:
+                self.update_progress_dialog.accept()
             self.show_error(error)
 
     def run_executable(self) -> None:
@@ -2260,7 +2296,7 @@ class ManagerWindow(QMainWindow):
         details = QPlainTextEdit()
         details.setReadOnly(True)
         details.setMaximumHeight(130)
-        details.setPlaceholderText("Operation details will appear here.")
+        details.setPlaceholderText(self._tr("Operation details will appear here."))
         layout.addWidget(details)
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -2285,6 +2321,7 @@ class ManagerWindow(QMainWindow):
         dialog.finished.connect(
             lambda _result, current=dialog: self._clear_update_progress(current)
         )
+        self._translate_ui(dialog)
         dialog.show()
 
     def _clear_update_progress(self, dialog: QDialog) -> None:
@@ -2304,7 +2341,9 @@ class ManagerWindow(QMainWindow):
         dialog = self.update_progress_dialog
         if dialog is None or task.get("kind") != self.update_progress_task_kind:
             return
-        label = str(task.get("progress_label") or self.update_progress_fallback)
+        label = self._tr(str(
+            task.get("progress_label") or self.update_progress_fallback
+        ))
         if self.update_progress_status is not None:
             self.update_progress_status.setText(label)
         value = task.get("progress_value")
@@ -2323,22 +2362,23 @@ class ManagerWindow(QMainWindow):
             return
         self.update_progress_finished = True
         if self.update_progress_status is not None:
-            self.update_progress_status.setText(
+            self.update_progress_status.setText(self._tr(
                 self.update_progress_messages.get(
                     str(task.get("status")), "Operation finished."
                 )
-            )
+            ))
         if self.update_progress_bar is not None:
             self.update_progress_bar.setRange(0, 100)
             self.update_progress_bar.setValue(
                 100 if task.get("status") == "completed" else 0
             )
         if self.update_progress_button is not None:
-            try:
-                self.update_progress_button.clicked.disconnect()
-            except RuntimeError:
-                pass
-            self.update_progress_button.setText("Close")
+            if self.update_progress_button.isEnabled():
+                try:
+                    self.update_progress_button.clicked.disconnect()
+                except RuntimeError:
+                    pass
+            self.update_progress_button.setText(self._tr("Close"))
             self.update_progress_button.setEnabled(True)
             self.update_progress_button.clicked.connect(dialog.accept)
         if task.get("kind") == "update" and task.get("restart_required"):
@@ -2532,7 +2572,7 @@ class ManagerWindow(QMainWindow):
         for button in self.task_sensitive_buttons:
             button.setDisabled(task["running"])
         self.cancel_button.setEnabled(
-            task["running"] and task.get("kind") != "remove"
+            task["running"] and task.get("kind") not in {"remove", "wine-stop"}
         )
         self._update_preload_status(snapshot)
         if (self.pending_environment_transition
@@ -2558,12 +2598,16 @@ class ManagerWindow(QMainWindow):
                     "Operation cancelled; settings restored."
                 )
             else:
-                self.notify(
-                    "Wine4Office removal failed; see the log."
-                    if task.get("kind") == "remove" else
-                    "Operation failed; settings restored. See the log."
-                )
                 task_kind = str(task.get("kind") or "")
+                if (task_kind == "odt-install"
+                        and OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR in task.get("log", "")):
+                    self.notify(OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR, 0)
+                else:
+                    self.notify(
+                        "Wine4Office removal failed; see the log."
+                        if task_kind == "remove" else
+                        "Operation failed; settings restored. See the log."
+                    )
                 if "preload" in task_kind:
                     failure = (str(task.get("log") or "").strip()
                                or "The background preload operation failed.")
@@ -2595,12 +2639,14 @@ class ManagerWindow(QMainWindow):
         if running:
             self._close_when_idle = True
             self._automatic_close = False
-            if task_kind != "remove":
+            if task_kind not in {"remove", "wine-stop"}:
                 self.state.cancel()
             self.timer.start(100)
             self.notify(
                 "Removal is finishing; the Manager will close when it completes."
                 if task_kind == "remove" else
+                "Wine shutdown is finishing; the Manager will close when it completes."
+                if task_kind == "wine-stop" else
                 "Cancellation requested; closing after the operation rolls back."
             )
             event.ignore()
