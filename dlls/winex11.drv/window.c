@@ -1249,7 +1249,9 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
      * only normal windows, and doesn't handle correctly TRANSIENT_FOR hint for
      * dialogs owned by fullscreen windows.
      */
-    if (is_transient_tool_popup( style, ex_style, data->is_fullscreen ))
+    if (data->office_net_ui_tool_window)
+        window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_DROPDOWN_MENU );
+    else if (is_transient_tool_popup( style, ex_style, data->is_fullscreen ))
         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_UTILITY );
     else if (data->is_fullscreen)
         window_set_net_wm_window_type( data, XATOM__NET_WM_WINDOW_TYPE_NORMAL );
@@ -3446,6 +3448,10 @@ static BOOL map_office_transition_target_locked( struct x11drv_win_data *data,
         pos = virtual_screen_to_root( data->rects.visible.left, data->rects.visible.top );
         data->office_suppress_config_until_serial = NextRequest( data->display );
         XMoveWindow( data->display, data->whole_window, pos.x, pos.y );
+        /* KWin/Xwayland does not necessarily restack an override-redirect
+         * surface when it moves from completely offscreen.  Raise the painted
+         * dropdown as part of the same reveal handoff. */
+        XRaiseWindow( data->display, data->whole_window );
         data->office_popup_offscreen = FALSE;
         sync_window_input_shape( data );
     }
@@ -3488,6 +3494,13 @@ static void map_office_transition_target( HWND hwnd )
         release_win_data( data );
         return;
     }
+
+    /* Office destroys AS_WindowTransition only after finishing the popup
+     * handoff.  Treat that paired transition completion as authoritative:
+     * incremental window-surface dirty rectangles can each be uniform even
+     * though their combined Net UI popup is fully painted. */
+    if (data->office_popup_offscreen && data->reveal_after_first_paint)
+        data->warmup_content_ready = TRUE;
     mapped = map_office_transition_target_locked( data, alpha, flags );
     release_win_data( data );
     if (mapped)
