@@ -4,6 +4,8 @@
 
 - Let Office finish proofing-language updates without crashing Click-to-Run.
 - Let Office updates detect and request closing running Office apps.
+- Keep Office color palettes visible while moving the pointer and reveal them
+  after their XWayland transition completes.
 - Prevent the first Word Design-tab load from stalling on queued Direct2D work.
 - Respect application frame preferences and prevent Office window borders from blinking.
 - Stop only the selected Wine environment, with a graceful ten-second deadline.
