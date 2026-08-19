@@ -534,6 +534,9 @@ class QtManagerTests(unittest.TestCase):
         QTest.keyClick(dialog, Qt.Key.Key_Escape)
         self.application.processEvents()
         self.assertTrue(dialog.isVisible())
+        dialog.close()
+        self.application.processEvents()
+        self.assertTrue(dialog.isVisible())
 
     def test_failed_removal_keeps_manager_open_without_success_confirmation(self):
         snapshot = self._preload_snapshot(task={
@@ -555,6 +558,55 @@ class QtManagerTests(unittest.TestCase):
         information.assert_not_called()
         close.assert_not_called()
         self.assertFalse(self.window._automatic_close)
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Wine4Office removal failed; see the log.",
+        )
+
+    def test_close_during_removal_waits_without_cancelling(self):
+        removal_started = threading.Event()
+        allow_removal = threading.Event()
+
+        def remove():
+            removal_started.set()
+            allow_removal.wait(1)
+            return "removed"
+
+        self.state.start_task("remove", remove)
+        self.assertTrue(removal_started.wait(1))
+        self.window.last_task_state = "True:running"
+        close_event = QCloseEvent()
+        with mock.patch.object(self.state, "cancel") as cancel:
+            self.window.closeEvent(close_event)
+
+        self.assertFalse(close_event.isAccepted())
+        cancel.assert_not_called()
+        self.assertTrue(self.window._close_when_idle)
+
+        allow_removal.set()
+        self._wait_task()
+        with mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot:
+            self.window.refresh_state()
+
+        callbacks = [call.args[1] for call in single_shot.call_args_list]
+        self.assertIn(self.window.finish_successful_removal, callbacks)
+
+    def test_interrupted_removal_does_not_claim_settings_were_restored(self):
+        snapshot = self._preload_snapshot(task={
+            "running": False,
+            "kind": "remove",
+            "status": "cancelled",
+        })
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(self.state, "snapshot", return_value=snapshot):
+            self.window.refresh_state()
+
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Wine4Office removal was interrupted.",
+        )
 
 
 

@@ -122,6 +122,12 @@ class _OperationProgressDialog(QDialog):
         if self.cancellable:
             super().reject()
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.cancellable:
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
 
 
 class ManagerWindow(QMainWindow):
@@ -2546,9 +2552,17 @@ class ManagerWindow(QMainWindow):
                     self.timer.stop()
                     QTimer.singleShot(0, self.finish_successful_removal)
             elif task["status"] == "cancelled":
-                self.notify("Operation cancelled; settings restored.")
+                self.notify(
+                    "Wine4Office removal was interrupted."
+                    if task.get("kind") == "remove" else
+                    "Operation cancelled; settings restored."
+                )
             else:
-                self.notify("Operation failed; settings restored. See the log.")
+                self.notify(
+                    "Wine4Office removal failed; see the log."
+                    if task.get("kind") == "remove" else
+                    "Operation failed; settings restored. See the log."
+                )
                 task_kind = str(task.get("kind") or "")
                 if "preload" in task_kind:
                     failure = (str(task.get("log") or "").strip()
