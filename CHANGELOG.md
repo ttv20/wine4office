@@ -4,6 +4,7 @@
 
 - Let Office finish proofing-language updates without crashing Click-to-Run.
 - Prevent the first Word Design-tab load from stalling on queued Direct2D work.
+- Respect application frame preferences and prevent Office window borders from blinking.
 - Stop only the selected Wine environment, with a graceful ten-second deadline.
 - Fully remove Manager files after installs and updates, with visible removal progress.
 
