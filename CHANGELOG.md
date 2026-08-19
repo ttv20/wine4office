@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0-beta.1 — 2026-08-19
+
 - Let Office finish proofing-language updates without crashing Click-to-Run.
 - Let Office updates detect and request closing running Office apps.
 - Keep Office color palettes visible while moving the pointer and reveal them
@@ -10,6 +12,8 @@
 - Respect application frame preferences and prevent Office window borders from blinking.
 - Stop only the selected Wine environment, with a graceful ten-second deadline.
 - Fully remove Manager files after installs and updates, with visible removal progress.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/0.2.0-alpha.2...0.2.0-beta.1)
 
 ## 0.2.0-alpha.2 — 2026-08-18
 
