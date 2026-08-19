@@ -1428,6 +1428,16 @@ HRESULT WINAPI SoftpubCleanup(CRYPT_PROVIDER_DATA *data)
 {
     DWORD i, j;
 
+    if (data->fOpenedFile)
+    {
+        if (data->pPDSip && data->pPDSip->psSipSubjectInfo)
+        {
+            CloseHandle(data->pPDSip->psSipSubjectInfo->hFile);
+            data->pPDSip->psSipSubjectInfo->hFile = INVALID_HANDLE_VALUE;
+        }
+        data->fOpenedFile = FALSE;
+    }
+
     for (i = 0; i < data->csSigners; i++)
     {
         for (j = 0; j < data->pasSigners[i].csCertChain; j++)
@@ -1459,15 +1469,6 @@ HRESULT WINAPI SoftpubCleanup(CRYPT_PROVIDER_DATA *data)
         data->psPfns->pfnFree(data->pSigState);
     }
     CryptMsgClose(data->hMsg);
-
-    if (data->fOpenedFile &&
-     data->pWintrustData->dwUnionChoice == WTD_CHOICE_FILE &&
-     data->pWintrustData->pFile)
-    {
-        CloseHandle(data->pWintrustData->pFile->hFile);
-        data->pWintrustData->pFile->hFile = INVALID_HANDLE_VALUE;
-        data->fOpenedFile = FALSE;
-    }
 
     return S_OK;
 }

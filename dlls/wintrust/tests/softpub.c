@@ -1815,6 +1815,7 @@ static void test_multiple_signatures(void)
     WINTRUST_SIGNATURE_SETTINGS settings = { sizeof(settings) };
     WINTRUST_FILE_INFO file_info = { sizeof(file_info) };
     WINTRUST_DATA data = { sizeof(data) };
+    WINTRUST_DATA close_data = { sizeof(close_data) };
     CRYPT_PROVIDER_DATA *prov;
     WCHAR pathW[MAX_PATH];
     CERT_INFO *cert_info;
@@ -1823,6 +1824,7 @@ static void test_multiple_signatures(void)
     DWORD written;
     LONG status;
     HANDLE file;
+    HANDLE state, trust_file;
     DWORD size;
     BOOL bret;
 
@@ -1882,9 +1884,24 @@ static void test_multiple_signatures(void)
         }
     }
 
-    data.dwStateAction = WTD_STATEACTION_CLOSE;
-    status = WinVerifyTrust(NULL, &WVTPolicyGUID, &data);
+    state = data.hWVTStateData;
+    trust_file = prov->pPDSip && prov->pPDSip->psSipSubjectInfo
+            ? prov->pPDSip->psSipSubjectInfo->hFile : INVALID_HANDLE_VALUE;
+    data.dwUnionChoice = 0;
+    close_data.dwStateAction = WTD_STATEACTION_CLOSE;
+    close_data.hWVTStateData = state;
+    status = WinVerifyTrust(NULL, &WVTPolicyGUID, &close_data);
     ok(status == S_OK, "Failed, ret %#lx\n", status);
+    data.hWVTStateData = NULL;
+    if (trust_file != INVALID_HANDLE_VALUE)
+    {
+        SetLastError(0xdeadbeef);
+        ok(GetFileType(trust_file) == FILE_TYPE_UNKNOWN
+                && GetLastError() == ERROR_INVALID_HANDLE,
+                "Trust provider file handle was not closed, error %lu.\n", GetLastError());
+    }
+    data.dwUnionChoice = WTD_CHOICE_FILE;
+    file_info.hFile = NULL;
 
     data.dwStateAction = WTD_STATEACTION_VERIFY;
     settings.dwFlags = WSS_GET_SECONDARY_SIG_COUNT;
