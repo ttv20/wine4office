@@ -337,7 +337,10 @@ static BOOL get_test_swapchain_rect(IDXGISwapChain1 *swapchain, RECT *rect)
 {
     HWND window;
 
-    return SUCCEEDED(IDXGISwapChain1_GetHwnd(swapchain, &window)) && GetWindowRect(window, rect);
+    if (FAILED(IDXGISwapChain1_GetHwnd(swapchain, &window)) || !GetClientRect(window, rect))
+        return FALSE;
+    MapWindowPoints(window, NULL, (POINT *)rect, 2);
+    return TRUE;
 }
 
 static void check_test_rect(const char *name, const RECT *base, const RECT *got,
@@ -370,7 +373,7 @@ static void test_visual_geometry(void)
     IDCompositionVisual *root = NULL, *child1 = NULL, *child2 = NULL;
     IDCompositionVisualPrivate *root_private = NULL;
     HMODULE d3d11 = NULL, dxgi = NULL;
-    HWND target_window = NULL, child1_window = NULL, child2_window = NULL;
+    HWND target_root = NULL, target_window = NULL, child1_window = NULL, child2_window = NULL;
     d3d11_create_device_proc pD3D11CreateDevice;
     create_dxgi_factory_proc pCreateDXGIFactory1;
     D2D_MATRIX_3X2_F root_transform = {0}, child_transform = {0};
@@ -422,15 +425,23 @@ static void test_visual_geometry(void)
         win_skip("DCompositionCreateDevice failed, hr %#lx.\n", hr);
         goto done;
     }
-    target_window = CreateWindowW(L"static", L"dcomp geometry test", WS_OVERLAPPEDWINDOW,
+    target_root = CreateWindowW(L"static", L"dcomp geometry test", WS_OVERLAPPEDWINDOW,
             100, 100, 320, 200, NULL, NULL, NULL, NULL);
-    if (!target_window)
+    if (!target_root)
     {
-        win_skip("Could not create geometry target window.\n");
+        win_skip("Could not create geometry root window.\n");
         goto done;
     }
-    ShowWindow(target_window, SW_SHOW);
-    UpdateWindow(target_window);
+    ShowWindow(target_root, SW_SHOW);
+    UpdateWindow(target_root);
+    if (!GetClientRect(target_root, &target_rect) ||
+        !(target_window = CreateWindowW(L"static", L"dcomp geometry target",
+                WS_CHILD | WS_VISIBLE, 0, 0, target_rect.right, target_rect.bottom,
+                target_root, NULL, NULL, NULL)))
+    {
+        win_skip("Could not create geometry child target window.\n");
+        goto done;
+    }
     if (FAILED(hr = IDCompositionDevice_CreateTargetForHwnd(device, target_window, FALSE, &target)))
     {
         win_skip("CreateTargetForHwnd failed, hr %#lx.\n", hr);
@@ -644,6 +655,7 @@ done:
     if (dxgi_device) IDXGIDevice_Release(dxgi_device);
     if (d3d_device) ID3D11Device_Release(d3d_device);
     if (target_window) DestroyWindow(target_window);
+    if (target_root) DestroyWindow(target_root);
     if (d3d11) FreeLibrary(d3d11);
 }
 

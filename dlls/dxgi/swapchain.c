@@ -441,37 +441,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
 
-static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+static BOOL d3d11_composition_window_needs_update(HWND window, const RECT *rect, UINT flags)
 {
-    HWND root;
-    if (GetPropW(window, L"__wine_dcomp_bounds_enabled"))
-    {
-        LONG x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_x"));
-        LONG y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_y"));
-        LONG width = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_width"));
-        LONG height = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_height"));
+    RECT current;
 
-        if ((root = GetAncestor(target, GA_ROOT))) target = root;
-        if (width <= 0 || height <= 0 || !GetClientRect(target, rect)) return FALSE;
-        MapWindowPoints(target, NULL, (POINT *)rect, 2);
-        if ((LONGLONG)rect->left + x < INT_MIN || (LONGLONG)rect->left + x > INT_MAX
-                || (LONGLONG)rect->top + y < INT_MIN || (LONGLONG)rect->top + y > INT_MAX
-                || (LONGLONG)rect->left + x + width > INT_MAX
-                || (LONGLONG)rect->top + y + height > INT_MAX)
-            return FALSE;
-        SetRect(rect, rect->left + x, rect->top + y,
-                rect->left + x + width, rect->top + y + height);
-        return TRUE;
-    }
-
-
-    if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
-        !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
-        return GetWindowRect(target, rect);
-    if ((root = GetAncestor(target, GA_ROOT))) target = root;
-    if (!GetClientRect(target, rect)) return FALSE;
-    MapWindowPoints(target, NULL, (POINT *)rect, 2);
-    return TRUE;
+    if ((flags & SWP_SHOWWINDOW) && !IsWindowVisible(window)) return TRUE;
+    if ((flags & SWP_FRAMECHANGED) || !(flags & SWP_NOZORDER)) return TRUE;
+    return !GetWindowRect(window, &current) || !EqualRect(&current, rect);
 }
 
 static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
@@ -519,7 +495,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
         return;
     }
 
-    if (!d3d11_composition_window_get_rect(window, target, &rect)) return;
+    if (!dxgi_composition_window_get_rect(window, target, &rect)) return;
     if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
             && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
     {
@@ -533,9 +509,10 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
                 || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
             RemovePropW(window, L"__wine_dcomp_raised_while_active");
     }
-    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
-            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
-            flags);
+    if (d3d11_composition_window_needs_update(window, &rect, flags))
+        SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+                max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+                flags);
 }
 
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,

@@ -2076,6 +2076,8 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
         if (!PtInRect( &rects.window, pt ))
         {
             BOOL min_or_max_box = (style & WS_SYSMENU) && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+            int button_width = get_system_metrics( ex_style & WS_EX_TOOLWINDOW ?
+                                                  SM_CYCAPTION : SM_CXSIZE );
             if (ex_style & WS_EX_LAYOUTRTL)
             {
                 /* Check system menu */
@@ -2089,18 +2091,18 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
                 /* Check close button */
                 if (style & WS_SYSMENU)
                 {
-                    rects.window.left += get_system_metrics( SM_CYCAPTION );
+                    rects.window.left += button_width;
                     if (pt.x < rects.window.left) return HTCLOSE;
                 }
 
                 if (min_or_max_box && !(ex_style & WS_EX_TOOLWINDOW))
                 {
                     /* Check maximize box */
-                    rects.window.left += get_system_metrics( SM_CXSIZE );
+                    rects.window.left += button_width;
                     if (pt.x < rects.window.left) return HTMAXBUTTON;
 
                     /* Check minimize box */
-                    rects.window.left += get_system_metrics( SM_CXSIZE );
+                    rects.window.left += button_width;
                     if (pt.x < rects.window.left) return HTMINBUTTON;
                 }
             }
@@ -2117,18 +2119,18 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
                 /* Check close button */
                 if (style & WS_SYSMENU)
                 {
-                    rects.window.right -= get_system_metrics( SM_CYCAPTION );
+                    rects.window.right -= button_width;
                     if (pt.x > rects.window.right) return HTCLOSE;
                 }
 
                 if (min_or_max_box && !(ex_style & WS_EX_TOOLWINDOW))
                 {
                     /* Check maximize box */
-                    rects.window.right -= get_system_metrics( SM_CXSIZE );
+                    rects.window.right -= button_width;
                     if (pt.x > rects.window.right) return HTMAXBUTTON;
 
                     /* Check minimize box */
-                    rects.window.right -= get_system_metrics( SM_CXSIZE );
+                    rects.window.right -= button_width;
                     if (pt.x > rects.window.right) return HTMINBUTTON;
                 }
             }
