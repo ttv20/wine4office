@@ -1477,6 +1477,34 @@ static HRESULT WINAPI WineJScript_CreateObject(IWineJScript *iface, IWineJSDispa
     return hres;
 }
 
+static HRESULT WINAPI WineJScript_CreateArray(IWineJScript *iface, DWORD length, IWineJSDispatch **ret)
+{
+    JScript *This = impl_from_IWineJScript(iface);
+    jsdisp_t *array;
+    HRESULT hres;
+
+    if (!ret) return E_POINTER;
+    *ret = NULL;
+    hres = create_array(This->ctx, length, &array);
+    if (SUCCEEDED(hres)) *ret = &array->IWineJSDispatch_iface;
+    return hres;
+}
+
+static HRESULT WINAPI WineJScript_IsCallable(IWineJScript *iface, IDispatch *dispatch, BOOL *ret)
+{
+    jsdisp_t *jsdisp;
+
+    if (!ret) return E_POINTER;
+    *ret = FALSE;
+    if (!dispatch) return E_INVALIDARG;
+    if ((jsdisp = iface_to_jsdisp(dispatch)))
+    {
+        *ret = is_class(jsdisp, JSCLASS_FUNCTION);
+        jsdisp_release(jsdisp);
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI WineJScript_CreateArrayBuffer(IWineJScript *iface, DWORD size, IWineJSDispatch **arraybuf, void **data)
 {
     JScript *This = impl_from_IWineJScript(iface);
@@ -1498,6 +1526,8 @@ static const IWineJScriptVtbl WineJScriptVtbl = {
     WineJScript_CreateObject,
     WineJScript_CreateArrayBuffer,
     WineJScript_FillGlobals,
+    WineJScript_CreateArray,
+    WineJScript_IsCallable,
 };
 
 HRESULT create_jscript_object(BOOL is_encode, REFIID riid, void **ppv)
