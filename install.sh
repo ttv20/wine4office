@@ -247,6 +247,7 @@ set -euo pipefail
 SELF=$(readlink -f "$0")
 ROOT=$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
 MANAGER=$ROOT/bin/Wine4OfficeManager
 PURGE_RUNNER=false
@@ -278,9 +279,13 @@ cleanup_args=(--prepare-uninstall)
 if [[ -n $REMOVE_PREFIX ]]; then cleanup_args+=(--remove-prefix "$REMOVE_PREFIX"); fi
 "$MANAGER" "${cleanup_args[@]}"
 
-for link in "$BIN_HOME/Wine4OfficeManager" "$BIN_HOME/wine4office-manager"; do
-    if [[ -L $link && $(readlink -f "$link") == "$MANAGER" ]]; then rm -f -- "$link"; fi
+for link in "$BIN_HOME/Wine4OfficeManager" "$BIN_HOME/wine4office-manager" \
+        "$BIN_HOME/wine4office-launcher"; do
+    if [[ -L $link && $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f -- "$link"; fi
 done
+rm -rf -- "$ROOT/lib" "$ROOT/icons"
+rm -f -- "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher" \
+    "$ROOT/bin/wine4office-preload-worker"
 if $PURGE_RUNNER; then
     rm -rf -- "$ROOT/runner"
     rm -f -- "$ROOT/VERSION" "$ROOT/WINE_VERSION" "$ROOT/UPDATE_URL" \
@@ -289,6 +294,7 @@ if $PURGE_RUNNER; then
     rm -rf -- "$CONFIG_HOME/wine4office"
 fi
 rm -f -- "$MANAGER" "$MANAGER.version" "$SELF"
+rmdir -- "$DATA_HOME/icons/wine4office" 2>/dev/null || true
 rmdir -- "$ROOT/bin" "$ROOT" 2>/dev/null || true
 
 if $PURGE_RUNNER; then

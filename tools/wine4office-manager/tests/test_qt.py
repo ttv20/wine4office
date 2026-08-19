@@ -504,6 +504,30 @@ class QtManagerTests(unittest.TestCase):
         close.assert_called_once()
         self.assertTrue(self.window._automatic_close)
 
+    def test_removal_shows_noncancellable_progress_and_wires_progress_updates(self):
+        with mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            qt_module.QMessageBox, "warning",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(
+            self.state, "start_task"
+        ) as start_task, mock.patch.object(
+            backend, "remove_wine4office", return_value="removed"
+        ) as remove:
+            self.window.remove_wine4office()
+            operation = start_task.call_args.args[1]
+            operation()
+
+        self.assertEqual(start_task.call_args.args[0], "remove")
+        remove.assert_called_once_with(
+            self.config["prefix"], False, self.state.output,
+            progress=self.state.set_progress,
+        )
+        self.assertEqual(self.window.update_progress_task_kind, "remove")
+        self.assertEqual(self.window.update_progress_button.text(), "Please wait")
+        self.assertFalse(self.window.update_progress_button.isEnabled())
+
     def test_failed_removal_keeps_manager_open_without_success_confirmation(self):
         snapshot = self._preload_snapshot(task={
             "running": False,

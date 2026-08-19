@@ -74,18 +74,24 @@ for file in "$DATA_HOME/applications/wine4office-manager.desktop" "${XDG_DESKTOP
     if [[ -f "$file" ]] && grep -q '^X-Wine4Office-Managed=true$' "$file"; then rm -f "$file"; fi
 done
 rm -f "$DATA_HOME/icons/wine4office"/wine4office-manager*.png
-for link in "$BIN_HOME/wine4office-manager" "$BIN_HOME/wine4office-launcher"; do
+for link in "$BIN_HOME/Wine4OfficeManager" "$BIN_HOME/wine4office-manager" \
+        "$BIN_HOME/wine4office-launcher"; do
     if [[ -L "$link" ]] && [[ $(readlink "$link") == "$ROOT"/bin/* ]]; then rm -f "$link"; fi
 done
 
 rm -rf "$ROOT/lib" "$ROOT/icons"
-rm -f "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher"
+rm -f "$ROOT/bin/Wine4OfficeManager" "$ROOT/bin/Wine4OfficeManager.version" \
+    "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher" \
+    "$ROOT/bin/wine4office-preload-worker"
 if $PURGE_RUNNER; then
     rm -rf "$ROOT/runner"
-    rm -f "$ROOT/VERSION" "$ROOT/UPDATE_URL" "$ROOT/UPDATE_CHANNEL" "$ROOT/install.json"
+    rm -f "$ROOT/VERSION" "$ROOT/WINE_VERSION" "$ROOT/UPDATE_URL" \
+        "$ROOT/UPDATE_CHANNEL" "$ROOT/STANDALONE" "$ROOT/install.json" \
+        "$ROOT/.wine4office-update.lock"
     rm -rf "$CONFIG_HOME/wine4office"
 fi
 rm -f "$ROOT/bin/wine4office-uninstall"
+rmdir "$DATA_HOME/icons/wine4office" 2>/dev/null || true
 rmdir "$ROOT/bin" "$ROOT" 2>/dev/null || true
 
 if $PURGE_RUNNER; then

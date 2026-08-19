@@ -3905,7 +3905,10 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
     return "Selected updates installed." + suffix
 
 
-def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -> str:
+def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output,
+                       progress: Callable[[str, int | None], None] | None = None) -> str:
+    if progress:
+        progress("Preparing Wine4Office removal", 0)
     root = installed_root()
     if root is None:
         raise RuntimeError("Removal is available only from an installed Wine4Office Manager.")
@@ -3918,8 +3921,12 @@ def remove_wine4office(prefix_value: str, remove_prefix: bool, output: Output) -
         if classify_prefix(str(prefix)) != "valid":
             raise ValueError(f"Refusing to remove a path that is not a Wine prefix: {prefix}")
         command.extend(["--remove-prefix", str(prefix)])
+    if progress:
+        progress("Removing Wine4Office files and shortcuts", None)
     _stream_command(command, os.environ.copy(), output)
-    return "Wine4Office removed. You may close this browser tab."
+    if progress:
+        progress("Wine4Office removed", 100)
+    return "Wine4Office removed."
 
 
 PRELOAD_UNIT = "wine4office-preload.service"
