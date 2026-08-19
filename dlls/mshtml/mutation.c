@@ -1327,7 +1327,7 @@ static nsresult NSAPI mutation_node_list_Item(nsIDOMNodeList *iface, UINT32 inde
         return NS_ERROR_FAILURE;
     *ret = NULL;
     if(index >= This->count)
-        return NS_ERROR_FAILURE;
+        return NS_OK;
 
     nsIDOMNode_AddRef(This->nodes[index]);
     *ret = This->nodes[index];
@@ -1447,7 +1447,8 @@ static void mutation_observer_restore_records(struct mutation_observer *This, st
     }
 }
 
-static HRESULT mutation_observer_create_array(struct mutation_observer *This, IWineJSDispatch **ret)
+static HRESULT mutation_observer_create_array(struct mutation_observer *This, DWORD length,
+        IWineJSDispatch **ret)
 {
     HTMLInnerWindow *window;
     HRESULT hres;
@@ -1460,7 +1461,7 @@ static HRESULT mutation_observer_create_array(struct mutation_observer *This, IW
         return E_UNEXPECTED;
     }
 
-    hres = IWineJScript_CreateArray(window->jscript, 0, ret);
+    hres = IWineJScript_CreateArray(window->jscript, length, ret);
     IHTMLWindow2_Release(&window->base.IHTMLWindow2_iface);
     return hres;
 }
@@ -1611,7 +1612,7 @@ static HRESULT mutation_observer_create_records(struct mutation_observer *This, 
     HRESULT hres;
 
     *ret = NULL;
-    hres = mutation_observer_create_array(This, &array);
+    hres = mutation_observer_create_array(This, list_count(&This->records), &array);
     if(FAILED(hres))
         return hres;
 
@@ -1857,7 +1858,8 @@ static nsresult mutation_observer_deliver(HTMLDocumentNode *doc, nsISupports *ar
     hres = mutation_observer_create_records(This, &records);
     if(FAILED(hres)) {
         WARN("Could not create MutationObserver records array: %08lx\n", hres);
-        mutation_observer_schedule(This);
+        if(hres == E_UNEXPECTED)
+            mutation_observer_clear_records(This);
         return NS_OK;
     }
 
@@ -2544,8 +2546,6 @@ static void mutation_observer_traverse(DispatchEx *dispex, nsCycleCollectionTrav
 
     if(This->callback)
         note_cc_edge((nsISupports*)This->callback, "callback", cb);
-    if(This->delivery_pending)
-        note_cc_edge((nsISupports*)&This->nsIMutationObserver_iface, "scheduled_runner", cb);
     LIST_FOR_EACH_ENTRY(target, &This->targets, struct mutation_observer_target, entry) {
         note_cc_edge((nsISupports*)&target->node->IHTMLDOMNode_iface, "target", cb);
         note_cc_edge((nsISupports*)target->native_node, "native_target", cb);
