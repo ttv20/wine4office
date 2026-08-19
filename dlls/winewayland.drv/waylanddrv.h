@@ -92,12 +92,19 @@ enum wayland_surface_role
     WAYLAND_SURFACE_ROLE_SUBSURFACE,
 };
 
+#define WAYLAND_KEY_COUNT 0x300
+
 struct wayland_keyboard
 {
     struct wl_keyboard *wl_keyboard;
     struct xkb_context *xkb_context;
     struct xkb_state *xkb_state;
     HWND focused_hwnd;
+    HWND focused_input_hwnd;
+    HWND key_hwnds[WAYLAND_KEY_COUNT];
+    HWND synthetic_right_control_hwnd;
+    HWND right_control_hwnd;
+    unsigned int focus_generation;
     pthread_mutex_t mutex;
 };
 
@@ -107,6 +114,22 @@ struct wayland_cursor
     struct wl_surface *wl_surface;
     struct wp_viewport *wp_viewport;
     int hotspot_x, hotspot_y;
+};
+
+#define WAYLAND_POINTER_BUTTON_COUNT 32
+
+struct wayland_pointer_button
+{
+    uint32_t button;
+    uint32_t serial;
+    HWND hwnd;
+    HWND root_hwnd;
+    HWND input_hwnd;
+    DWORD up_flags;
+    DWORD mouse_data;
+    BOOL pressed;
+    BOOL injected;
+    BOOL edge_resize;
 };
 
 struct wayland_pointer
@@ -121,9 +144,9 @@ struct wayland_pointer
     HWND constraint_hwnd;
     BOOL relative_mode;
     BOOL pending_warp;
-    BOOL edge_resize;
     uint32_t enter_serial;
     uint32_t button_serial;
+    struct wayland_pointer_button buttons[WAYLAND_POINTER_BUTTON_COUNT];
     struct wayland_cursor cursor;
     double accum_x;
     double accum_y;
@@ -144,6 +167,8 @@ struct wayland_text_input
     } preedit, current_preedit;
     WCHAR *commit_string;
     HWND focused_hwnd;
+    HWND focused_surface_hwnd;
+    HWND focused_root_hwnd;
     pthread_mutex_t mutex;
 };
 
@@ -460,6 +485,8 @@ UINT WAYLAND_GetKeyboardLayoutList(INT size, HKL *layouts);
 const KBDTABLES *WAYLAND_KbdLayerDescriptor(HKL hkl);
 void WAYLAND_ReleaseKbdTables(const KBDTABLES *);
 void activate_keyboard_hkl(HWND hwnd, BOOL ime);
+BOOL wayland_keyboard_clear_surface_focus(HWND hwnd);
+void wayland_keyboard_destroy_window(HWND hwnd);
 
 /**********************************************************************
  *          Wayland pointer
@@ -468,6 +495,7 @@ void activate_keyboard_hkl(HWND hwnd, BOOL ime);
 void wayland_pointer_init(struct wl_pointer *wl_pointer);
 HWND wayland_get_input_hwnd(HWND hwnd);
 void wayland_pointer_deinit(void);
+void wayland_pointer_clear_button_owners(HWND hwnd);
 void wayland_pointer_clear_constraint(void);
 
 /**********************************************************************
@@ -512,6 +540,7 @@ BOOL WAYLAND_ClipCursor(const RECT *clip, BOOL reset);
 LRESULT WAYLAND_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void WAYLAND_DestroyWindow(HWND hwnd);
 BOOL WAYLAND_SetIMECompositionRect(HWND hwnd, RECT rect);
+void wayland_text_input_clear_focus(HWND surface_hwnd);
 void WAYLAND_SetCursor(HWND hwnd, HCURSOR hcursor);
 BOOL WAYLAND_SetCursorPos(INT x, INT y);
 void WAYLAND_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha, DWORD flags);

@@ -28,6 +28,7 @@
 #undef SW_MAX /* Also defined in winuser.rh */
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define OEMRESOURCE
 
@@ -219,12 +220,8 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
 {
     static const WCHAR target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
             'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
-    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
-            'i','n','p','u','t','_','w','i','n','d','o','w',0};
     static const WCHAR keyboard_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
             'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
-    static const WCHAR direct_input_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
-            'h','a','r','d','w','a','r','e','_','i','n','p','u','t',0};
     static const WCHAR cursor_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
             'c','u','r','s','o','r','_','w','i','n','d','o','w',0};
     HWND target, parent, input_window, root;
@@ -234,6 +231,8 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
         if ((input_window = NtUserGetProp(hwnd, keyboard_prop))) return input_window;
         if ((input_window = NtUserGetProp(NtUserGetAncestor(hwnd, GA_ROOT), keyboard_prop)))
             return input_window;
+        if (NtUserGetProp(hwnd, dcomp_caption_overlay_prop)) return hwnd;
+        if (NtUserGetProp(hwnd, target_prop)) return NULL;
     }
 
     /* Cross-process DirectComposition swapchains use a detached presentation
@@ -247,11 +246,9 @@ static HWND wayland_get_input_hwnd_internal(HWND hwnd, BOOL keyboard)
     if (!(target = NtUserGetProp(hwnd, target_prop))) return hwnd;
     if (!(parent = NtUserGetAncestor(target, GA_PARENT))) return hwnd;
     input_window = parent;
-    NtUserSetProp(parent, input_prop, input_window);
-    NtUserSetProp(input_window, direct_input_prop, (HANDLE)(ULONG_PTR)0x57444952);
     NtUserSetProp(input_window, cursor_window_prop, hwnd);
     if ((root = NtUserGetAncestor(target, GA_ROOT)))
-        NtUserSetProp(root, keyboard_prop, input_window);
+        NtUserSetProp(root, cursor_window_prop, hwnd);
     TRACE("DComp input presentation hwnd %p -> target %p parent %p input %p root %p\n",
           hwnd, target, parent, input_window, root);
     return input_window;
@@ -265,6 +262,81 @@ HWND wayland_get_input_hwnd(HWND hwnd)
 static HWND wayland_get_pointer_input_hwnd(HWND hwnd)
 {
     return wayland_get_input_hwnd_internal(hwnd, FALSE);
+}
+
+static struct wayland_pointer_button *wayland_pointer_find_button_locked(
+        struct wayland_pointer *pointer, uint32_t button, BOOL create)
+{
+    struct wayland_pointer_button *free_slot = NULL;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(pointer->buttons); i++)
+    {
+        if (pointer->buttons[i].pressed && pointer->buttons[i].button == button)
+            return &pointer->buttons[i];
+        if (!pointer->buttons[i].pressed && !free_slot) free_slot = &pointer->buttons[i];
+    }
+
+    if (create && free_slot)
+    {
+        free_slot->button = button;
+        free_slot->pressed = TRUE;
+        return free_slot;
+    }
+    return NULL;
+}
+
+static void wayland_pointer_update_button_compat_locked(struct wayland_pointer *pointer)
+{
+    struct wayland_pointer_button *best = NULL;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(pointer->buttons); i++)
+    {
+        struct wayland_pointer_button *button = &pointer->buttons[i];
+
+        if (!button->pressed) continue;
+        if (!best || (button->edge_resize && !best->edge_resize) ||
+            (button->edge_resize == best->edge_resize && button->button == BTN_LEFT &&
+             best->button != BTN_LEFT))
+            best = button;
+    }
+
+    pointer->button_hwnd = best ? best->root_hwnd : NULL;
+    pointer->button_serial = best ? best->serial : 0;
+}
+
+static void wayland_pointer_send_button_up(const struct wayland_pointer_button *button)
+{
+    INPUT input = { .type = INPUT_MOUSE };
+
+    if (!button->injected || !button->input_hwnd) return;
+    input.mi.dwFlags = button->up_flags;
+    input.mi.mouseData = button->mouse_data;
+    NtUserSendHardwareInput(NtUserIsWindow(button->input_hwnd) ? button->input_hwnd : NULL,
+                            SEND_HWMSG_RAWINPUT, &input, 0);
+}
+
+void wayland_pointer_clear_button_owners(HWND hwnd)
+{
+    struct wayland_pointer *pointer = &process_wayland.pointer;
+    struct wayland_pointer_button owners[WAYLAND_POINTER_BUTTON_COUNT];
+    unsigned int i, count = 0;
+
+    pthread_mutex_lock(&pointer->mutex);
+    for (i = 0; i < ARRAY_SIZE(pointer->buttons); i++)
+    {
+        struct wayland_pointer_button *button = &pointer->buttons[i];
+
+        if (!button->pressed || (hwnd && button->hwnd != hwnd && button->root_hwnd != hwnd &&
+                                 button->input_hwnd != hwnd)) continue;
+        if (button->injected) owners[count++] = *button;
+        memset(button, 0, sizeof(*button));
+    }
+    wayland_pointer_update_button_compat_locked(pointer);
+    pthread_mutex_unlock(&pointer->mutex);
+
+    for (i = 0; i < count; i++) wayland_pointer_send_button_up(&owners[i]);
 }
 
 static void wayland_pointer_update_dcomp_cursor(HWND hwnd);
@@ -390,6 +462,7 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
 
     TRACE("hwnd=%p\n", wl_surface_get_user_data(wl_surface));
 
+    wayland_pointer_clear_button_owners(NULL);
     pthread_mutex_lock(&pointer->mutex);
     pointer->focused_hwnd = NULL;
     pointer->enter_serial = 0;
@@ -481,30 +554,59 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
                                   uint32_t state)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
-    BOOL edge_resize;
+    struct wayland_pointer_button *owner;
+    struct wayland_pointer_button released = {0};
+    struct wayland_pointer_button injected = {0};
     INPUT input = {0};
-    HWND hwnd, input_hwnd, root, command, caption, resize_hwnd, resize_surface_hwnd;
+    HWND hwnd = NULL, input_hwnd, root = NULL, command, caption, resize_hwnd, resize_surface_hwnd;
+    NTSTATUS status;
     UINT resize_edge;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
-    pthread_mutex_lock(&pointer->mutex);
-    edge_resize = pointer->edge_resize;
-    if (state == WL_POINTER_BUTTON_STATE_PRESSED)
+
+    if (state == WL_POINTER_BUTTON_STATE_RELEASED)
     {
-        pointer->button_serial = serial;
-        pointer->button_hwnd = NULL;
-        pointer->edge_resize = FALSE;
+        pthread_mutex_lock(&pointer->mutex);
+        owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+        if (!owner)
+        {
+            pthread_mutex_unlock(&pointer->mutex);
+            return;
+        }
+        released = *owner;
+        memset(owner, 0, sizeof(*owner));
+        wayland_pointer_update_button_compat_locked(pointer);
+        pthread_mutex_unlock(&pointer->mutex);
+
+        if (released.edge_resize) return;
+        if (released.injected)
+        {
+            wayland_pointer_send_button_up(&released);
+            return;
+        }
+        hwnd = released.hwnd;
+        root = released.root_hwnd;
     }
     else
     {
-        pointer->button_serial = 0;
-        pointer->button_hwnd = NULL;
-        pointer->edge_resize = FALSE;
-    }
-    pthread_mutex_unlock(&pointer->mutex);
+        if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
+        if (!(root = NtUserGetAncestor(hwnd, GA_ROOT))) root = hwnd;
 
-    if (state == WL_POINTER_BUTTON_STATE_RELEASED && edge_resize) return;
-    if (!(hwnd = wayland_pointer_get_focused_hwnd())) return;
+        pthread_mutex_lock(&pointer->mutex);
+        owner = wayland_pointer_find_button_locked(pointer, button, TRUE);
+        if (!owner)
+        {
+            pthread_mutex_unlock(&pointer->mutex);
+            WARN("Dropping button %#x press because the owner table is full\n", button);
+            return;
+        }
+        owner->serial = serial;
+        owner->hwnd = hwnd;
+        owner->root_hwnd = root;
+        owner->edge_resize = FALSE;
+        wayland_pointer_update_button_compat_locked(pointer);
+        pthread_mutex_unlock(&pointer->mutex);
+    }
 
     caption = NtUserGetProp(hwnd, dcomp_caption_overlay_prop) ? hwnd :
             NtUserGetProp(hwnd, dcomp_caption_pointer_prop);
@@ -546,9 +648,6 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
     {
         resize_hwnd = pointer_get_resize_hwnd(hwnd);
         resize_surface_hwnd = pointer_get_resize_surface_hwnd(hwnd, resize_hwnd);
-        pthread_mutex_lock(&pointer->mutex);
-        pointer->button_hwnd = hwnd;
-        pthread_mutex_unlock(&pointer->mutex);
 
         if (button == BTN_LEFT && resize_surface_hwnd &&
             (resize_edge = pointer_get_resize_edge(resize_hwnd, hwnd, resize_surface_hwnd)) &&
@@ -556,7 +655,12 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
                                               SC_SIZE, resize_edge, serial))
         {
             pthread_mutex_lock(&pointer->mutex);
-            pointer->edge_resize = TRUE;
+            owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+            if (owner)
+            {
+                owner->edge_resize = TRUE;
+                wayland_pointer_update_button_compat_locked(pointer);
+            }
             pthread_mutex_unlock(&pointer->mutex);
 
             TRACE("edge resize hwnd=%p focused=%p edge=%u serial=%u\n",
@@ -589,10 +693,60 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 
     TRACE("hwnd=%p button=%#x state=%u\n", hwnd, button, state);
 
-    input_hwnd = wayland_get_pointer_input_hwnd(hwnd);
-    NtUserSendHardwareInput(input_hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
-    if (state == WL_POINTER_BUTTON_STATE_RELEASED && input_hwnd != hwnd)
-        NtUserPostMessage(input_hwnd, WM_WINE_DCOMP_FOCUS, 0, 0);
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED)
+    {
+        BOOL orphaned = FALSE;
+
+        input_hwnd = wayland_get_pointer_input_hwnd(hwnd);
+        pthread_mutex_lock(&pointer->mutex);
+        owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+        if (owner)
+        {
+            owner->input_hwnd = input_hwnd;
+            owner->up_flags = input.mi.dwFlags << 1;
+            owner->mouse_data = input.mi.mouseData;
+            owner->injected = FALSE;
+            injected = *owner;
+        }
+        pthread_mutex_unlock(&pointer->mutex);
+
+        if (!injected.pressed || !input_hwnd || !input.mi.dwFlags)
+        {
+            pthread_mutex_lock(&pointer->mutex);
+            owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+            if (owner && owner->serial == serial)
+            {
+                memset(owner, 0, sizeof(*owner));
+                wayland_pointer_update_button_compat_locked(pointer);
+            }
+            pthread_mutex_unlock(&pointer->mutex);
+            return;
+        }
+
+        status = NtUserSendHardwareInput(input_hwnd, SEND_HWMSG_RAWINPUT, &input, 0);
+        pthread_mutex_lock(&pointer->mutex);
+        owner = wayland_pointer_find_button_locked(pointer, button, FALSE);
+        if (owner && owner->serial == serial)
+        {
+            if (!status)
+                owner->injected = TRUE;
+            else
+            {
+                memset(owner, 0, sizeof(*owner));
+                wayland_pointer_update_button_compat_locked(pointer);
+            }
+        }
+        else if (!status)
+            orphaned = TRUE;
+        pthread_mutex_unlock(&pointer->mutex);
+
+        if (orphaned)
+        {
+            injected.injected = TRUE;
+            wayland_pointer_send_button_up(&injected);
+        }
+        if (status) WARN("Failed to inject pointer button input, status %#x\n", status);
+    }
 }
 
 static void pointer_handle_axis_value120(void *data, struct wl_pointer *wl_pointer,
@@ -792,6 +946,8 @@ void wayland_pointer_init(struct wl_pointer *wl_pointer)
     pointer->wl_pointer = wl_pointer;
     pointer->focused_hwnd = NULL;
     pointer->enter_serial = 0;
+    memset(pointer->buttons, 0, sizeof(pointer->buttons));
+    wayland_pointer_update_button_compat_locked(pointer);
     pthread_mutex_unlock(&pointer->mutex);
     wl_pointer_add_listener(pointer->wl_pointer, &pointer_listener, NULL);
 
@@ -812,6 +968,7 @@ void wayland_pointer_deinit(void)
 {
     struct wayland_pointer *pointer = &process_wayland.pointer;
 
+    wayland_pointer_clear_button_owners(NULL);
     pthread_mutex_lock(&pointer->mutex);
     if (pointer->zwp_confined_pointer_v1)
     {
