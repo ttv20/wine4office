@@ -583,11 +583,11 @@ class QtManagerTests(unittest.TestCase):
         cancel.assert_not_called()
         self.assertTrue(self.window._close_when_idle)
 
-        allow_removal.set()
-        self._wait_task()
         with mock.patch.object(
             qt_module.QTimer, "singleShot"
         ) as single_shot:
+            allow_removal.set()
+            self._wait_task()
             self.window.refresh_state()
 
         callbacks = [call.args[1] for call in single_shot.call_args_list]
