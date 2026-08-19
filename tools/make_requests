@@ -36,6 +36,7 @@ my %formats =
     "thread_id_t"   => [  4,   4,  "%04x" ],
     "d3dkmt_handle_t"=>[  4,   4,  "%08x" ],
     "unsigned __int64" => [ 8, 8,  "&uint64" ],
+    "capability_t"  => [  8,   8,  "<redacted>" ],
     "timeout_t"     => [  8,   8 ],
     "abstime_t"     => [  8,   8 ],
     "ioctl_code_t"  => [  4,   4 ],
@@ -118,33 +119,40 @@ sub DO_DUMP_FUNC($$@)
 	if (defined($formats{$type}))
 	{
             my $fmt = ${$formats{$type}}[2];
-            while ($fmt && $fmt !~ /^[%&]/)
+            if (defined($fmt) && $fmt eq "<redacted>")
             {
-                $type = $fmt;
-                $fmt = ${$formats{$type}}[2];
-            }
-            if (!$fmt)
-            {
-                my $func = $type;
-                $func =~ s/^(struct|union)\s+//;
-                $func =~ s/_t$//;
-                push @trace_lines, "    dump_$func( \"$prefix$var=\", &req->$var );\n";
-                $dump_funcs{$func} = $type;
-            }
-            elsif ($fmt =~ /^&(.*)/)
-            {
-                my $func = $1;
-                push @trace_lines, "    dump_$func( \"$prefix$var=\", &req->$var );\n";
-                $dump_funcs{$func} = $type;
-            }
-            elsif ($fmt =~ /^(%.*)\s+\((.*)\)/)
-            {
-                my ($format, $cast) = ($1, $2);
-                push @trace_lines, "    fprintf( stderr, \"$prefix$var=$format\", ($cast)req->$var );\n";
+                push @trace_lines, "    fprintf( stderr, \"$prefix$var=<redacted>\" );\n";
             }
             else
             {
-                push @trace_lines, "    fprintf( stderr, \"$prefix$var=$fmt\", req->$var );\n";
+                while ($fmt && $fmt !~ /^[%&]/)
+                {
+                    $type = $fmt;
+                    $fmt = ${$formats{$type}}[2];
+                }
+                if (!$fmt)
+                {
+                    my $func = $type;
+                    $func =~ s/^(struct|union)\s+//;
+                    $func =~ s/_t$//;
+                    push @trace_lines, "    dump_$func( \"$prefix$var=\", &req->$var );\n";
+                    $dump_funcs{$func} = $type;
+                }
+                elsif ($fmt =~ /^&(.*)/)
+                {
+                    my $func = $1;
+                    push @trace_lines, "    dump_$func( \"$prefix$var=\", &req->$var );\n";
+                    $dump_funcs{$func} = $type;
+                }
+                elsif ($fmt =~ /^(%.*)\s+\((.*)\)/)
+                {
+                    my ($format, $cast) = ($1, $2);
+                    push @trace_lines, "    fprintf( stderr, \"$prefix$var=$format\", ($cast)req->$var );\n";
+                }
+                else
+                {
+                    push @trace_lines, "    fprintf( stderr, \"$prefix$var=$fmt\", req->$var );\n";
+                }
             }
 	}
 	else  # must be some varargs format

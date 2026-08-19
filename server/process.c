@@ -961,6 +961,8 @@ static void process_killed( struct process *process )
 
     destroy_process_classes( process );
     free_mapped_views( process );
+    cleanup_message_results_process( process );
+    cleanup_dcomp_ime_process( process );
     free_process_user_handles( process );
     remove_process_locks( process );
     set_process_startup_state( process, STARTUP_ABORTED );

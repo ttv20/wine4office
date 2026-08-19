@@ -22,11 +22,13 @@
 #define COBJMACROS
 #include "initguid.h"
 #include "dxgi1_6.h"
+#include "dcomp.h"
 #include "d3d11.h"
 #include "d3d12.h"
 #include "d3d12sdklayers.h"
 #include "winternl.h"
 #include "ddk/d3dkmthk.h"
+#include "wine/dcomp.h"
 #include "wine/test.h"
 
 enum frame_latency
@@ -2418,6 +2420,133 @@ done:
     ok(refcount == !is_d3d12, "Got unexpected refcount %lu.\n", refcount);
     check_window_fullscreen_state(creation_desc.OutputWindow, &initial_state.fullscreen_state);
     DestroyWindow(creation_desc.OutputWindow);
+}
+
+static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
+{
+    typedef HRESULT (WINAPI *dcomp_create_device_proc)(IDXGIDevice *, REFIID, void **);
+    IDXGIFactory *factory_base = NULL;
+    IDXGIFactory2 *factory = NULL;
+    IDXGISwapChain1 *swapchain = NULL;
+    IDCompositionDevice *dcomp_device = NULL;
+    IDCompositionTarget *dcomp_target = NULL;
+    IDCompositionVisual *dcomp_visual = NULL;
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    struct wine_dcomp_ime_token token;
+    dcomp_create_device_proc pDCompositionCreateDevice;
+    HMODULE dcomp = NULL;
+    UINT token_size;
+    HWND window = NULL;
+    HWND target_window = NULL;
+    RECT target_rect, helper_rect;
+    HRESULT hr;
+
+    if (!is_d3d12)
+        return;
+
+    get_factory(device, is_d3d12, &factory_base);
+    hr = IDXGIFactory_QueryInterface(factory_base, &IID_IDXGIFactory2, (void **)&factory);
+    ok(hr == S_OK, "Got unexpected factory query hr %#lx.\n", hr);
+    IDXGIFactory_Release(factory_base);
+    if (FAILED(hr))
+        return;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.Width = 64;
+    desc.Height = 64;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SampleDesc.Count = 1;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+    hr = IDXGIFactory2_CreateSwapChainForComposition(factory, device, &desc, NULL, &swapchain);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!window, "Got NULL composition window.\n");
+
+    token_size = sizeof(token);
+    hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
+    ok(hr == S_OK, "Got unexpected token query hr %#lx.\n", hr);
+    ok(token_size == sizeof(token), "Got token size %u.\n", token_size);
+    ok(token.low || token.high, "Got empty DComp token.\n");
+
+    if (!(dcomp = LoadLibraryW(L"dcomp.dll"))
+            || !(pDCompositionCreateDevice = (void *)GetProcAddress(dcomp, "DCompositionCreateDevice")))
+    {
+        win_skip("DCompositionCreateDevice is unavailable.\n");
+        goto done;
+    }
+    target_window = CreateWindowW(L"static", L"dxgi composition target", WS_OVERLAPPEDWINDOW,
+            100, 100, 320, 200, NULL, NULL, NULL, NULL);
+    if (!target_window)
+    {
+        win_skip("Could not create DComp target window.\n");
+        goto done;
+    }
+    ShowWindow(target_window, SW_SHOW);
+    UpdateWindow(target_window);
+
+    hr = pDCompositionCreateDevice(NULL, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "DCompositionCreateDevice failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, target_window, FALSE, &dcomp_target);
+    ok(hr == S_OK, "CreateTargetForHwnd failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &dcomp_visual);
+    ok(hr == S_OK, "CreateVisual failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDCompositionVisual_SetContent(dcomp_visual, (IUnknown *)swapchain);
+    ok(hr == S_OK, "SetContent failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDCompositionTarget_SetRoot(dcomp_target, dcomp_visual);
+    ok(hr == S_OK, "SetRoot failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+    ok(hr == S_OK, "Got unexpected post-commit GetHwnd hr %#lx.\n", hr);
+    ok(window && IsWindowVisible(window), "Composition helper window %p is not visible.\n", window);
+    ok(GetClientRect(target_window, &target_rect), "GetClientRect failed.\n");
+    MapWindowPoints(target_window, NULL, (POINT *)&target_rect, 2);
+    ok(GetWindowRect(window, &helper_rect), "GetWindowRect failed.\n");
+    ok(helper_rect.left == target_rect.left && helper_rect.top == target_rect.top
+            && helper_rect.right - helper_rect.left == (LONG)desc.Width
+            && helper_rect.bottom - helper_rect.top == (LONG)desc.Height,
+            "Got helper rect {%ld,%ld,%ld,%ld}, target client origin {%ld,%ld}.\n",
+            helper_rect.left, helper_rect.top, helper_rect.right, helper_rect.bottom,
+            target_rect.left, target_rect.top);
+
+    hr = IDCompositionVisual_SetContent(dcomp_visual, NULL);
+    ok(hr == S_OK, "Clearing visual content failed, hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Unbind commit failed, hr %#lx.\n", hr);
+    ok(!IsWindowVisible(window), "Unbound composition helper window %p is still visible.\n", window);
+    ok(!GetPropW(window, L"__wine_dcomp_detached_window"),
+            "Unbound composition helper retained its target.\n");
+
+done:
+    if (dcomp_visual) IDCompositionVisual_Release(dcomp_visual);
+    if (dcomp_target) IDCompositionTarget_Release(dcomp_target);
+    if (dcomp_device) IDCompositionDevice_Release(dcomp_device);
+    if (target_window) DestroyWindow(target_window);
+    if (swapchain) IDXGISwapChain1_Release(swapchain);
+    if (factory) IDXGIFactory2_Release(factory);
+    if (dcomp) FreeLibrary(dcomp);
 }
 
 static void test_get_containing_output(IUnknown *device, BOOL is_d3d12)
@@ -9335,6 +9464,7 @@ START_TEST(dxgi)
     }
 
     run_on_d3d12(test_create_swapchain);
+    run_on_d3d12(test_create_composition_swapchain);
     run_on_d3d12(test_set_fullscreen);
     run_on_d3d12(test_resize_target);
     run_on_d3d12(test_resize_fullscreen);

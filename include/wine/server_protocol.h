@@ -31,6 +31,7 @@ typedef unsigned __int64 file_pos_t;
 typedef unsigned __int64 client_ptr_t;
 typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
+typedef unsigned __int64 capability_t;
 typedef client_ptr_t mod_handle_t;
 
 struct request_header
@@ -3269,12 +3270,12 @@ struct get_message_reply
     lparam_t        wparam;
     lparam_t        lparam;
     int             type;
+    unsigned int    dcomp_ime_authorization;
     int             x;
     int             y;
     unsigned int    time;
     data_size_t     total;
     /* VARARG(data,message_data); */
-    char __pad_52[4];
 };
 
 
@@ -3315,6 +3316,20 @@ struct get_message_reply_reply
     struct reply_header __header;
     lparam_t        result;
     /* VARARG(data,bytes); */
+};
+
+
+
+struct validate_dcomp_ime_message_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct validate_dcomp_ime_message_reply
+{
+    struct reply_header __header;
+    unsigned int    authorization;
+    char __pad_12[4];
 };
 
 
@@ -3620,6 +3635,70 @@ struct destroy_window_reply
 {
     struct reply_header __header;
 };
+
+
+struct create_dcomp_ime_offer_request
+{
+    struct request_header __header;
+    user_handle_t  presentation;
+};
+struct create_dcomp_ime_offer_reply
+{
+    struct reply_header __header;
+    capability_t token_low;
+    capability_t token_high;
+};
+
+
+struct set_dcomp_ime_relationship_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    capability_t token_low;
+    capability_t token_high;
+    user_handle_t  target;
+    char __pad_36[4];
+};
+struct set_dcomp_ime_relationship_reply
+{
+    struct reply_header __header;
+};
+
+
+struct revoke_dcomp_ime_offer_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    capability_t token_low;
+    capability_t token_high;
+};
+struct revoke_dcomp_ime_offer_reply
+{
+    struct reply_header __header;
+};
+
+
+struct update_dcomp_task_delegate_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    capability_t token_low;
+    capability_t token_high;
+    user_handle_t presentation;
+    user_handle_t target;
+    unsigned int flags;
+    char __pad_44[4];
+};
+struct update_dcomp_task_delegate_reply
+{
+    struct reply_header __header;
+};
+
+#define DCOMP_TASK_DELEGATE_BASE 0x01
+#define DCOMP_TASK_DELEGATE_TASK 0x02
+
+#define DCOMP_IME_AUTHORIZE_UPDATE   0x01
+#define DCOMP_IME_AUTHORIZE_SET_RECT 0x02
 
 
 struct update_window_broadcast_exclusion_request
@@ -6575,6 +6654,7 @@ enum request
     REQ_reply_message,
     REQ_accept_hardware_message,
     REQ_get_message_reply,
+    REQ_validate_dcomp_ime_message,
     REQ_set_win_timer,
     REQ_kill_win_timer,
     REQ_is_window_hung,
@@ -6593,6 +6673,10 @@ enum request
     REQ_set_named_pipe_info,
     REQ_create_window,
     REQ_destroy_window,
+    REQ_create_dcomp_ime_offer,
+    REQ_set_dcomp_ime_relationship,
+    REQ_revoke_dcomp_ime_offer,
+    REQ_update_dcomp_task_delegate,
     REQ_update_window_broadcast_exclusion,
     REQ_get_window_broadcast_exclusion,
     REQ_get_desktop_window,
@@ -6903,6 +6987,7 @@ union generic_request
     struct reply_message_request reply_message_request;
     struct accept_hardware_message_request accept_hardware_message_request;
     struct get_message_reply_request get_message_reply_request;
+    struct validate_dcomp_ime_message_request validate_dcomp_ime_message_request;
     struct set_win_timer_request set_win_timer_request;
     struct kill_win_timer_request kill_win_timer_request;
     struct is_window_hung_request is_window_hung_request;
@@ -6921,6 +7006,10 @@ union generic_request
     struct set_named_pipe_info_request set_named_pipe_info_request;
     struct create_window_request create_window_request;
     struct destroy_window_request destroy_window_request;
+    struct create_dcomp_ime_offer_request create_dcomp_ime_offer_request;
+    struct set_dcomp_ime_relationship_request set_dcomp_ime_relationship_request;
+    struct revoke_dcomp_ime_offer_request revoke_dcomp_ime_offer_request;
+    struct update_dcomp_task_delegate_request update_dcomp_task_delegate_request;
     struct update_window_broadcast_exclusion_request update_window_broadcast_exclusion_request;
     struct get_window_broadcast_exclusion_request get_window_broadcast_exclusion_request;
     struct get_desktop_window_request get_desktop_window_request;
@@ -7229,6 +7318,7 @@ union generic_reply
     struct reply_message_reply reply_message_reply;
     struct accept_hardware_message_reply accept_hardware_message_reply;
     struct get_message_reply_reply get_message_reply_reply;
+    struct validate_dcomp_ime_message_reply validate_dcomp_ime_message_reply;
     struct set_win_timer_reply set_win_timer_reply;
     struct kill_win_timer_reply kill_win_timer_reply;
     struct is_window_hung_reply is_window_hung_reply;
@@ -7247,6 +7337,10 @@ union generic_reply
     struct set_named_pipe_info_reply set_named_pipe_info_reply;
     struct create_window_reply create_window_reply;
     struct destroy_window_reply destroy_window_reply;
+    struct create_dcomp_ime_offer_reply create_dcomp_ime_offer_reply;
+    struct set_dcomp_ime_relationship_reply set_dcomp_ime_relationship_reply;
+    struct revoke_dcomp_ime_offer_reply revoke_dcomp_ime_offer_reply;
+    struct update_dcomp_task_delegate_reply update_dcomp_task_delegate_reply;
     struct update_window_broadcast_exclusion_reply update_window_broadcast_exclusion_reply;
     struct get_window_broadcast_exclusion_reply get_window_broadcast_exclusion_reply;
     struct get_desktop_window_reply get_desktop_window_reply;
@@ -7422,6 +7516,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 964
+#define SERVER_PROTOCOL_VERSION 970
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -6757,6 +6757,41 @@ HWND get_shell_window(void)
     return hwnd;
 }
 
+BOOL is_dcomp_ime_relationship( HWND presentation, HWND root, HWND input )
+{
+    static const WCHAR detached_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+    static const WCHAR base_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    static const WCHAR delegated_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            't','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+    static const WCHAR delegated_target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            't','a','s','k','_','d','e','l','e','g','a','t','e','d','_','t','a','r','g','e','t',0};
+    static const WCHAR direct_owner_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+            'h','a','r','d','w','a','r','e','_','i','n','p','u','t','_','o','w','n','e','r',0};
+    DWORD presentation_pid, root_pid, input_pid, target_pid;
+    HWND target;
+
+    if (!NtUserIsWindow( presentation ) || !NtUserIsWindow( root ) || !NtUserIsWindow( input ) ||
+        !(target = NtUserGetProp( presentation, detached_prop )) || !NtUserIsWindow( target ) ||
+        NtUserGetProp( target, base_prop ) != presentation ||
+        NtUserGetAncestor( target, GA_ROOT ) != root || NtUserGetAncestor( target, GA_PARENT ) != input ||
+        NtUserGetProp( presentation, input_prop ) != input || NtUserGetProp( root, input_prop ) != input ||
+        NtUserGetProp( root, delegated_prop ) != presentation ||
+        NtUserGetProp( root, delegated_target_prop ) != target ||
+        NtUserGetProp( input, direct_owner_prop ) != presentation)
+        return FALSE;
+
+    get_window_thread( presentation, &presentation_pid );
+    get_window_thread( root, &root_pid );
+    get_window_thread( input, &input_pid );
+    get_window_thread( target, &target_pid );
+    return presentation_pid && root_pid && presentation_pid != root_pid &&
+           root_pid == input_pid && root_pid == target_pid;
+}
+
 /*******************************************************************
  *           NtUserQueryWindow (win32u.@)
  */

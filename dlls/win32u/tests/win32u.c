@@ -23,6 +23,8 @@
 
 #include "winbase.h"
 #include "ntuser.h"
+#include "wine/dcomp.h"
+#include "wine/server.h"
 
 #define MAX_ATOM_LEN  255
 
@@ -1706,10 +1708,392 @@ static void test_NtUserDisplayConfigGetDeviceInfo(void)
     ok(status == STATUS_UNSUCCESSFUL || status == STATUS_NOT_SUPPORTED, "got %#lx.\n", status);
 }
 
+static LONG private_copydata_calls, dcomp_presentation_process_id;
+static LONG ipc_old_key_down, ipc_old_key_up, ipc_new_key_down, ipc_new_key_up;
+static HWND ipc_root, ipc_input, ipc_target, ipc_presentation;
+static HWND ipc_old_input, ipc_old_target;
+static struct wine_dcomp_ime_token ipc_browser_token;
+static struct wine_dcomp_ime_token *ipc_shared_token;
+static unsigned int (CDECL *p_wine_server_call)( void * );
+static HANDLE dcomp_barrier_enter, dcomp_barrier_release;
+static HANDLE dcomp_barrier_thread, dcomp_barrier_hook;
+static NTSTATUS dcomp_barrier_revoke_status;
+static LONG dcomp_barrier_before_calls;
+static volatile LONG dcomp_barrier_active;
+
+static NTSTATUS create_dcomp_ime_offer( HWND presentation, struct wine_dcomp_ime_token *token )
+{
+    NTSTATUS status;
+
+    token->low = token->high = 0;
+    SERVER_START_REQ( create_dcomp_ime_offer )
+    {
+        req->presentation = wine_server_user_handle( presentation );
+        if (!(status = p_wine_server_call( req )))
+        {
+            token->low = reply->token_low;
+            token->high = reply->token_high;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_dcomp_ime_relationship( const struct wine_dcomp_ime_token *token, HWND target )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( set_dcomp_ime_relationship )
+    {
+        req->token_low = token->low;
+        req->token_high = token->high;
+        req->target = wine_server_user_handle( target );
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS revoke_dcomp_ime_offer( const struct wine_dcomp_ime_token *token )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( revoke_dcomp_ime_offer )
+    {
+        req->token_low = token->low;
+        req->token_high = token->high;
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS update_dcomp_task_delegate( const struct wine_dcomp_ime_token *token,
+                                             HWND presentation, HWND target, unsigned int flags )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( update_dcomp_task_delegate )
+    {
+        req->token_low = token->low;
+        req->token_high = token->high;
+        req->presentation = wine_server_user_handle( presentation );
+        req->target = wine_server_user_handle( target );
+        req->flags = flags;
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+static const WCHAR dcomp_detached_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_base_presentation_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        'b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
+static const WCHAR dcomp_input_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        'i','n','p','u','t','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_keyboard_window_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w',0};
+static const WCHAR direct_hardware_input_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+        'h','a','r','d','w','a','r','e','_','i','n','p','u','t',0};
+static const WCHAR dcomp_task_delegated_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        't','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+static const WCHAR dcomp_task_delegated_target_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+        't','a','s','k','_','d','e','l','e','g','a','t','e','d','_','t','a','r','g','e','t',0};
+static const WCHAR direct_hardware_input_owner_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+        'h','a','r','d','w','a','r','e','_','i','n','p','u','t','_','o','w','n','e','r',0};
+
+struct dcomp_presentation_process_state
+{
+    HWND presentation;
+    struct wine_dcomp_ime_token token;
+    NTSTATUS status;
+};
+
+static struct dcomp_presentation_process_state *dcomp_presentation_state;
+
+static LRESULT WINAPI dcomp_presentation_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
+struct dcomp_presentation_process
+{
+    PROCESS_INFORMATION info;
+    HANDLE mapping;
+    HANDLE ready;
+    HANDLE stop;
+    char stop_name[64];
+    struct dcomp_presentation_process_state *state;
+};
+
+struct dcomp_victim_thread
+{
+    HANDLE ready;
+    HANDLE stop;
+    HANDLE thread;
+    DWORD tid;
+};
+
+static struct dcomp_victim_thread ipc_victim;
+
+static void stop_dcomp_victim_thread(void);
+static void stop_dcomp_revoke_barrier(void);
+
+static DWORD WINAPI dcomp_victim_thread_proc( void *arg )
+{
+    struct dcomp_victim_thread *victim = arg;
+    MSG msg;
+
+    PeekMessageW( &msg, NULL, 0, 0, PM_NOREMOVE );
+    SetEvent( victim->ready );
+    WaitForSingleObject( victim->stop, INFINITE );
+    return 0;
+}
+
+static BOOL start_dcomp_victim_thread(void)
+{
+    memset( &ipc_victim, 0, sizeof(ipc_victim) );
+    ipc_victim.ready = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ipc_victim.stop = CreateEventW( NULL, TRUE, FALSE, NULL );
+    if (!ipc_victim.ready || !ipc_victim.stop) return FALSE;
+    ipc_victim.thread = CreateThread( NULL, 0, dcomp_victim_thread_proc, &ipc_victim, 0, &ipc_victim.tid );
+    if (!ipc_victim.thread || WaitForSingleObject( ipc_victim.ready, 5000 ) != WAIT_OBJECT_0)
+    {
+        stop_dcomp_victim_thread();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void stop_dcomp_victim_thread(void)
+{
+    if (ipc_victim.stop) SetEvent( ipc_victim.stop );
+    if (ipc_victim.thread) WaitForSingleObject( ipc_victim.thread, 5000 );
+    if (ipc_victim.thread) CloseHandle( ipc_victim.thread );
+    if (ipc_victim.ready) CloseHandle( ipc_victim.ready );
+    if (ipc_victim.stop) CloseHandle( ipc_victim.stop );
+    memset( &ipc_victim, 0, sizeof(ipc_victim) );
+}
+
+static DWORD WINAPI dcomp_barrier_revoke_proc( void *arg )
+{
+    HANDLE events[2] = { dcomp_barrier_enter, dcomp_barrier_release };
+    DWORD wait;
+
+    wait = WaitForMultipleObjects( ARRAY_SIZE(events), events, FALSE, INFINITE );
+    if (wait == WAIT_OBJECT_0)
+    {
+        dcomp_barrier_revoke_status = set_dcomp_ime_relationship( &ipc_browser_token, NULL );
+        SetEvent( dcomp_barrier_release );
+    }
+    return 0;
+}
+
+static LRESULT WINAPI dcomp_barrier_hook_proc( INT code, WPARAM wparam, LPARAM lparam )
+{
+    CWPSTRUCT *cwp = (CWPSTRUCT *)lparam;
+
+    if (code == HC_ACTION && InterlockedCompareExchange( &dcomp_barrier_active, 0, 0 ) &&
+        cwp->message == WM_COPYDATA && cwp->hwnd == ipc_input && cwp->lParam)
+    {
+        COPYDATASTRUCT *copydata = (COPYDATASTRUCT *)cwp->lParam;
+        if (copydata->dwData == WINE_IME_UPDATE_COPYDATA)
+        {
+            SetEvent( dcomp_barrier_enter );
+            WaitForSingleObject( dcomp_barrier_release, INFINITE );
+        }
+    }
+    return CallNextHookEx( NULL, code, wparam, lparam );
+}
+
+static void stop_dcomp_revoke_barrier(void);
+
+static BOOL start_dcomp_revoke_barrier(void)
+{
+    stop_dcomp_revoke_barrier();
+    dcomp_barrier_enter = CreateEventW( NULL, TRUE, FALSE, NULL );
+    dcomp_barrier_release = CreateEventW( NULL, TRUE, FALSE, NULL );
+    dcomp_barrier_revoke_status = STATUS_UNSUCCESSFUL;
+    dcomp_barrier_before_calls = private_copydata_calls;
+    if (!dcomp_barrier_enter || !dcomp_barrier_release) goto failed;
+    dcomp_barrier_thread = CreateThread( NULL, 0, dcomp_barrier_revoke_proc, NULL, 0, NULL );
+    if (!dcomp_barrier_thread) goto failed;
+    dcomp_barrier_hook = SetWindowsHookExW( WH_CALLWNDPROC, dcomp_barrier_hook_proc, NULL,
+                                            GetCurrentThreadId() );
+    if (!dcomp_barrier_hook) goto failed;
+    dcomp_barrier_active = TRUE;
+    return TRUE;
+
+failed:
+    stop_dcomp_revoke_barrier();
+    return FALSE;
+}
+
+static void stop_dcomp_revoke_barrier(void)
+{
+    dcomp_barrier_active = FALSE;
+    if (dcomp_barrier_release) SetEvent( dcomp_barrier_release );
+    if (dcomp_barrier_hook)
+    {
+        UnhookWindowsHookEx( dcomp_barrier_hook );
+        dcomp_barrier_hook = NULL;
+    }
+    if (dcomp_barrier_thread)
+    {
+        WaitForSingleObject( dcomp_barrier_thread, 5000 );
+        CloseHandle( dcomp_barrier_thread );
+        dcomp_barrier_thread = NULL;
+    }
+    if (dcomp_barrier_enter) CloseHandle( dcomp_barrier_enter );
+    if (dcomp_barrier_release) CloseHandle( dcomp_barrier_release );
+    dcomp_barrier_enter = NULL;
+    dcomp_barrier_release = NULL;
+}
+
+struct packed_test_copydata
+{
+    ULONGLONG dwData;
+    DWORD cbData;
+    ULONGLONG lpData;
+};
+
+static NTSTATUS raw_dcomp_send( HWND source, HWND destination, DWORD receiver_tid,
+                                const COPYDATASTRUCT *copydata )
+{
+    struct packed_test_copydata packed;
+    NTSTATUS status;
+
+    packed.dwData = (ULONGLONG)copydata->dwData;
+    packed.cbData = copydata->cbData;
+    packed.lpData = copydata->lpData ? 1 : 0;
+    SERVER_START_REQ( send_message )
+    {
+        req->id = receiver_tid;
+        req->type = MSG_OTHER_PROCESS;
+        req->win = wine_server_user_handle( destination );
+        req->msg = WM_COPYDATA;
+        req->wparam = (lparam_t)(ULONG_PTR)source;
+        req->timeout = TIMEOUT_INFINITE;
+        wine_server_add_data( req, &packed, sizeof(packed) );
+        if (copydata->lpData) wine_server_add_data( req, copydata->lpData, copydata->cbData );
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void wait_child_process_with_messages( PROCESS_INFORMATION *info );
+static BOOL start_dcomp_presentation_process( const char *argv0,
+                                               struct dcomp_presentation_process *process );
+static void stop_dcomp_presentation_process( struct dcomp_presentation_process *process );
+static void test_dcomp_presentation_process_child( HANDLE mapping, HANDLE ready,
+                                                       const char *stop_name );
+
 static LRESULT WINAPI test_ipc_message_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     switch (msg)
     {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (hwnd == ipc_old_input) InterlockedIncrement( &ipc_old_key_down );
+        else if (hwnd == ipc_input) InterlockedIncrement( &ipc_new_key_down );
+        break;
+
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (hwnd == ipc_old_input) InterlockedIncrement( &ipc_old_key_up );
+        else if (hwnd == ipc_input) InterlockedIncrement( &ipc_new_key_up );
+        break;
+
+    case WM_USER + 3:
+        flush_events();
+        return 1;
+
+    case WM_USER + 4:
+        {
+            NTSTATUS status;
+
+            ipc_old_input = ipc_input;
+            ipc_old_target = ipc_target;
+            ipc_input = CreateWindowExW( 0, L"TestIPCClass", NULL, WS_CHILD,
+                                         0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+            ipc_target = CreateWindowExW( 0, L"TestIPCClass", NULL, WS_CHILD,
+                                          0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+            if (ipc_input) NtUserSetParent( ipc_input, ipc_root );
+            if (ipc_target) NtUserSetParent( ipc_target, ipc_input );
+            ok( !!ipc_input && !!ipc_target, "failed to create replacement browser topology\n" );
+            status = set_dcomp_ime_relationship( &ipc_browser_token, ipc_target );
+            ok( !status, "replacement relationship returned %#lx\n", status );
+            ok( GetPropW( ipc_presentation, dcomp_keyboard_window_prop ) == ipc_input,
+                "replacement keyboard property was not published\n" );
+            ok( !GetPropW( ipc_old_input, direct_hardware_input_prop ),
+                "old input retained direct input property\n" );
+            return (LRESULT)ipc_input;
+        }
+
+    case WM_USER + 8:
+        ok( start_dcomp_revoke_barrier(), "failed to start DComp revoke barrier\n" );
+        return 1;
+
+    case WM_USER + 7:
+        ok( dcomp_barrier_revoke_status == STATUS_SUCCESS,
+            "post-dequeue DComp revoke returned %#lx\n", dcomp_barrier_revoke_status );
+        ok( private_copydata_calls == dcomp_barrier_before_calls + 1,
+            "revoked update did not reach ordinary WM_COPYDATA handler (%ld, expected %ld)\n",
+            private_copydata_calls, dcomp_barrier_before_calls + 1 );
+        dcomp_barrier_revoke_status = set_dcomp_ime_relationship( &ipc_browser_token, ipc_target );
+        ok( !dcomp_barrier_revoke_status, "post-barrier relationship restore returned %#lx\n",
+            dcomp_barrier_revoke_status );
+        stop_dcomp_revoke_barrier();
+        return 1;
+
+    case WM_USER + 9:
+        {
+            const unsigned int flags = DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK;
+            struct wine_dcomp_ime_token token = *ipc_shared_token;
+            NTSTATUS status;
+
+            ipc_presentation = (HWND)wparam;
+            status = update_dcomp_task_delegate( &token, ipc_presentation, ipc_target, flags );
+            ok( !status, "shared task relationship returned %#lx\n", status );
+            ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == ipc_presentation,
+                "shared base presentation was not published\n" );
+            ok( GetPropW( ipc_root, dcomp_task_delegated_prop ) == ipc_presentation,
+                "shared task delegate was not published\n" );
+            return 1;
+        }
+
+    case WM_USER + 10:
+        ok( !GetPropW( ipc_target, dcomp_base_presentation_prop ),
+            "revoked offer retained base presentation\n" );
+        ok( !GetPropW( ipc_root, dcomp_task_delegated_prop ),
+            "revoked offer retained task delegate\n" );
+        ok( !GetPropW( ipc_root, dcomp_task_delegated_target_prop ),
+            "revoked offer retained task target\n" );
+        return 1;
+
+    case WM_USER + 5:
+        if (wparam == 1)
+        {
+            ok( ipc_old_key_down == 2 && !ipc_old_key_up,
+                "old input counts after down are %ld/%ld\n", ipc_old_key_down, ipc_old_key_up );
+            ok( !ipc_new_key_down && !ipc_new_key_up,
+                "new input received early keys %ld/%ld\n", ipc_new_key_down, ipc_new_key_up );
+        }
+        else if (wparam == 2)
+        {
+            ok( ipc_old_key_down == 2 && ipc_old_key_up == 2,
+                "old input counts after release are %ld/%ld\n", ipc_old_key_down, ipc_old_key_up );
+            ok( !ipc_new_key_down && !ipc_new_key_up,
+                "new input received old releases %ld/%ld\n", ipc_new_key_down, ipc_new_key_up );
+        }
+        else
+        {
+            ok( ipc_new_key_down == 1 && ipc_new_key_up == 1,
+                "new input first key counts are %ld/%ld\n", ipc_new_key_down, ipc_new_key_up );
+        }
+        return 1;
+
     case WM_SETTEXT:
     case CB_FINDSTRING:
         ok( !wcscmp( (const WCHAR *)lparam, L"test" ),
@@ -1729,6 +2113,124 @@ static LRESULT WINAPI test_ipc_message_proc( HWND hwnd, UINT msg, WPARAM wparam,
 
     case WM_GETTEXTLENGTH:
         return 99;
+
+    case WM_COPYDATA:
+        if (((COPYDATASTRUCT *)lparam)->dwData == WINE_IME_UPDATE_COPYDATA ||
+            ((COPYDATASTRUCT *)lparam)->dwData == WINE_IME_SET_RECT_COPYDATA)
+            InterlockedIncrement( &private_copydata_calls );
+        return 7;
+
+    case WM_USER + 1:
+        {
+            RECT rect = {1, 2, 3, 4};
+            COPYDATASTRUCT copydata = { WINE_IME_SET_RECT_COPYDATA, sizeof(rect), &rect };
+            int res;
+
+            ipc_presentation = (HWND)wparam;
+            SetPropW( ipc_presentation, dcomp_detached_window_prop, ipc_target );
+            SetLastError( 0xdeadbeef );
+            ok( !SetPropW( ipc_target, dcomp_base_presentation_prop, ipc_presentation ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved base presentation set returned error %lu\n", GetLastError() );
+            SetLastError( 0xdeadbeef );
+            ok( !SetPropW( ipc_root, dcomp_task_delegated_prop, ipc_presentation ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved task delegate set returned error %lu\n", GetLastError() );
+            SetLastError( 0xdeadbeef );
+            ok( !SetPropW( ipc_root, dcomp_task_delegated_target_prop, ipc_target ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved task target set returned error %lu\n", GetLastError() );
+
+            res = SendMessageW( ipc_presentation, WM_COPYDATA, (WPARAM)ipc_root, (LPARAM)&copydata );
+            ok( res == 7, "property-only IME rect returned %d\n", res );
+            return 1;
+        }
+
+    case WM_USER + 2:
+        {
+            struct wine_dcomp_ime_token token = *ipc_shared_token;
+            RECT rect = {1, 2, 3, 4};
+            COPYDATASTRUCT copydata = { WINE_IME_SET_RECT_COPYDATA, sizeof(rect), &rect };
+            NTSTATUS status;
+            ATOM atom;
+            int res;
+
+            status = create_dcomp_ime_offer( ipc_presentation, &token );
+            ok( status == STATUS_ACCESS_DENIED, "foreign presentation offer returned %#lx\n", status );
+            token = *ipc_shared_token;
+            status = set_dcomp_ime_relationship( &token, ipc_presentation );
+            ok( status == STATUS_ACCESS_DENIED, "foreign target relationship returned %#lx\n", status );
+            status = set_dcomp_ime_relationship( &token, ipc_target );
+            ok( !status, "valid relationship returned %#lx\n", status );
+            ipc_browser_token = token;
+            SecureZeroMemory( ipc_shared_token, sizeof(*ipc_shared_token) );
+            ok( GetPropW( ipc_presentation, dcomp_input_window_prop ) == ipc_input,
+                "presentation input property was not published\n" );
+            ok( GetPropW( ipc_presentation, dcomp_keyboard_window_prop ) == ipc_input,
+                "presentation keyboard property was not published\n" );
+            ok( GetPropW( ipc_root, dcomp_input_window_prop ) == ipc_input,
+                "root input property was not published\n" );
+            ok( GetPropW( ipc_root, dcomp_keyboard_window_prop ) == ipc_input,
+                "root keyboard property was not published\n" );
+            ok( GetPropW( ipc_input, direct_hardware_input_prop ) == ULongToHandle( 0x57444952 ),
+                "direct input property was not published\n" );
+            ok( GetPropW( ipc_input, direct_hardware_input_owner_prop ) == ipc_presentation,
+                "direct input owner was not published\n" );
+            SetLastError( 0xdeadbeef );
+            ok( !RemovePropW( ipc_presentation, dcomp_keyboard_window_prop ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved property removal returned error %lu\n", GetLastError() );
+            ok( SetPropW( ipc_presentation, L"unreserved-test-property", ULongToHandle( 1 ) ),
+                "unreserved property set failed, error %lu\n", GetLastError() );
+            ok( RemovePropW( ipc_presentation, L"unreserved-test-property" ) == ULongToHandle( 1 ),
+                "unreserved property removal failed, error %lu\n", GetLastError() );
+
+            if (start_dcomp_victim_thread())
+            {
+                DWORD owner_tid = GetWindowThreadProcessId( ipc_presentation, NULL );
+                status = raw_dcomp_send( ipc_root, ipc_presentation, owner_tid, &copydata );
+                ok( !status, "owner TID SET_RECT send returned %#lx\n", status );
+                status = raw_dcomp_send( ipc_root, ipc_presentation, ipc_victim.tid, &copydata );
+                ok( status == STATUS_INVALID_PARAMETER,
+                    "mismatched victim TID SET_RECT returned %#lx\n", status );
+                stop_dcomp_victim_thread();
+            }
+            res = SendMessageW( ipc_presentation, WM_COPYDATA, (WPARAM)ipc_root, (LPARAM)&copydata );
+            ok( !res, "authorized IME rect returned %d\n", res );
+
+            status = set_dcomp_ime_relationship( &token, NULL );
+            ok( !status, "relationship deactivation returned %#lx\n", status );
+            ok( !GetPropW( ipc_presentation, dcomp_input_window_prop ),
+                "deactivated presentation retained input property\n" );
+            ok( !GetPropW( ipc_root, dcomp_keyboard_window_prop ),
+                "deactivated root retained keyboard property\n" );
+            SetLastError( 0xdeadbeef );
+            ok( !SetPropW( ipc_presentation, dcomp_input_window_prop, ipc_input ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved string property set returned error %lu\n", GetLastError() );
+            atom = GlobalAddAtomW( direct_hardware_input_prop );
+            ok( !!atom, "reserved property GlobalAddAtomW failed, error %lu\n", GetLastError() );
+            SetLastError( 0xdeadbeef );
+            ok( atom && !SetPropW( ipc_input, (LPCWSTR)MAKEINTATOM( atom ),
+                                   ULongToHandle( 0x57444952 ) ) &&
+                GetLastError() == ERROR_ACCESS_DENIED,
+                "reserved atom property set returned error %lu\n", GetLastError() );
+            if (atom) GlobalDeleteAtom( atom );
+            res = SendMessageW( ipc_presentation, WM_COPYDATA, (WPARAM)ipc_root, (LPARAM)&copydata );
+            ok( res == 7, "deactivated IME rect returned %d\n", res );
+
+            status = set_dcomp_ime_relationship( &token, ipc_target );
+            ok( !status, "relationship rebind returned %#lx\n", status );
+            ok( GetPropW( ipc_presentation, dcomp_input_window_prop ) == ipc_input,
+                "rebound presentation input property was not restored\n" );
+            ok( GetPropW( ipc_root, dcomp_keyboard_window_prop ) == ipc_input,
+                "rebound root keyboard property was not restored\n" );
+            ok( GetPropW( ipc_input, direct_hardware_input_prop ) == ULongToHandle( 0x57444952 ),
+                "rebound direct input property was not restored\n" );
+            res = SendMessageW( ipc_presentation, WM_COPYDATA, (WPARAM)ipc_root, (LPARAM)&copydata );
+            ok( !res, "rebound IME rect returned %d\n", res );
+            return 1;
+        }
 
     case WM_MDICREATE:
         {
@@ -1751,43 +2253,796 @@ static void test_inter_process_messages( const char *argv0 )
     char path[MAX_PATH];
     PROCESS_INFORMATION pi;
     STARTUPINFOA startup;
-    MSG msg;
+    HANDLE mapping = NULL;
     HWND hwnd;
     BOOL ret;
 
+    private_copydata_calls = 0;
+    ipc_old_key_down = ipc_old_key_up = ipc_new_key_down = ipc_new_key_up = 0;
+    ipc_old_input = ipc_old_target = NULL;
+    SecureZeroMemory( &ipc_browser_token, sizeof(ipc_browser_token) );
+    ipc_presentation = NULL;
     cls.lpfnWndProc = test_ipc_message_proc;
     cls.lpszClassName = L"TestIPCClass";
     RegisterClassW( &cls );
 
-    hwnd = CreateWindowExW( 0, L"TestIPCClass", NULL, WS_POPUP | CBS_HASSTRINGS, 0,0,0,0,0,0,0, NULL );
+    ipc_root = CreateWindowExW( 0, L"TestIPCClass", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    ipc_input = CreateWindowExW( 0, L"TestIPCClass", NULL, WS_CHILD, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    ipc_target = CreateWindowExW( 0, L"TestIPCClass", NULL, WS_CHILD, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    if (ipc_root && ipc_input) NtUserSetParent( ipc_input, ipc_root );
+    if (ipc_input && ipc_target) NtUserSetParent( ipc_target, ipc_input );
+    ok( !!ipc_root && !!ipc_input && !!ipc_target &&
+        NtUserGetAncestor( ipc_target, GA_ROOT ) == ipc_root &&
+        NtUserGetAncestor( ipc_target, GA_PARENT ) == ipc_input,
+        "failed to create DComp topology windows root %p input %p target %p, error %lu\n",
+        ipc_root, ipc_input, ipc_target, GetLastError() );
+    if (!ipc_root || !ipc_input || !ipc_target ||
+        NtUserGetAncestor( ipc_target, GA_ROOT ) != ipc_root ||
+        NtUserGetAncestor( ipc_target, GA_PARENT ) != ipc_input)
+    {
+        if (ipc_target) DestroyWindow( ipc_target );
+        if (ipc_input) DestroyWindow( ipc_input );
+        if (ipc_root) DestroyWindow( ipc_root );
+        UnregisterClassW( L"TestIPCClass", NULL );
+        return;
+    }
+    hwnd = ipc_input;
+    ipc_old_input = ipc_input;
+    mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                  sizeof(*ipc_shared_token), NULL );
+    ok( !!mapping, "CreateFileMappingW failed, error %lu\n", GetLastError() );
+    if (!mapping) goto cleanup;
+    ret = SetHandleInformation( mapping, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+    ok( ret, "SetHandleInformation failed, error %lu\n", GetLastError() );
+    if (!ret) goto cleanup;
+    ipc_shared_token = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*ipc_shared_token) );
+    ok( !!ipc_shared_token, "MapViewOfFile failed, error %lu\n", GetLastError() );
+    if (!ipc_shared_token) goto cleanup;
 
     memset( &startup, 0, sizeof(startup) );
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
     startup.wShowWindow = SW_SHOWNORMAL;
-    sprintf( path, "%s win32u ipcmsg %Ix", argv0, (INT_PTR)hwnd );
+    sprintf( path, "%s win32u ipcmsg %Ix %Ix", argv0, (INT_PTR)hwnd, (INT_PTR)mapping );
     ret = CreateProcessA( NULL, path, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &pi );
     ok( ret, "CreateProcess '%s' failed err %lu.\n", path, GetLastError() );
+    if (!ret) goto cleanup;
 
-    do
+    wait_child_process_with_messages( &pi );
+    ok( private_copydata_calls == (p_wine_server_call ? 4 : 2),
+        "application received %ld private-marker messages\n", private_copydata_calls );
+    SecureZeroMemory( ipc_shared_token, sizeof(*ipc_shared_token) );
+
+    if (p_wine_server_call)
     {
-        GetMessageW( &msg, NULL, 0, 0 );
-        TranslateMessage( &msg );
-        DispatchMessageW( &msg );
-    } while (msg.message != WM_USER);
+        struct dcomp_presentation_process first = {0}, replacement = {0}, newest = {0};
+        HWND first_presentation = NULL, replacement_presentation = NULL, newest_presentation = NULL;
+        const unsigned int flags = DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK;
+        NTSTATUS status;
 
-    wait_child_process( &pi );
+        if (start_dcomp_presentation_process( argv0, &first ))
+        {
+            first_presentation = first.state->presentation;
+            status = update_dcomp_task_delegate( &first.state->token, first_presentation,
+                                                 ipc_target, flags );
+            ok( !status, "first presentation relationship returned %#lx\n", status );
+        }
+        if (first_presentation &&
+            start_dcomp_presentation_process( argv0, &replacement ))
+        {
+            replacement_presentation = replacement.state->presentation;
+            status = update_dcomp_task_delegate( &replacement.state->token, replacement_presentation,
+                                                 ipc_target, flags );
+            ok( !status, "replacement presentation relationship returned %#lx\n", status );
+            ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == replacement_presentation,
+                "replacement base presentation was not published\n" );
+            ok( GetPropW( ipc_root, dcomp_task_delegated_prop ) == replacement_presentation,
+                "replacement task delegate was not published\n" );
 
-    DestroyWindow( hwnd );
+            status = update_dcomp_task_delegate( &first.state->token, first_presentation,
+                                                 ipc_target, flags );
+            ok( !status, "refreshed first presentation relationship returned %#lx\n", status );
+            ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == first_presentation,
+                "refreshed first presentation did not become base winner\n" );
+            status = update_dcomp_task_delegate( &replacement.state->token, replacement_presentation,
+                                                 ipc_target, flags );
+            ok( !status, "refreshed replacement relationship returned %#lx\n", status );
+            ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == replacement_presentation,
+                "refreshed replacement did not become base winner\n" );
+
+            stop_dcomp_presentation_process( &first );
+            ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == replacement_presentation,
+                "old presentation teardown removed replacement base presentation\n" );
+            ok( GetPropW( ipc_root, dcomp_task_delegated_prop ) == replacement_presentation,
+                "old presentation teardown removed replacement task delegate\n" );
+            ok( GetPropW( ipc_root, dcomp_task_delegated_target_prop ) == ipc_target,
+                "old presentation teardown removed replacement task target\n" );
+            ok( GetPropW( ipc_root, dcomp_input_window_prop ) == ipc_input,
+                "old presentation teardown removed replacement input property\n" );
+            ok( GetPropW( ipc_input, direct_hardware_input_owner_prop ) == replacement_presentation,
+                "old presentation teardown removed replacement input owner\n" );
+
+            if (start_dcomp_presentation_process( argv0, &newest ))
+            {
+                newest_presentation = newest.state->presentation;
+                status = update_dcomp_task_delegate( &newest.state->token, newest_presentation,
+                                                     ipc_target, flags );
+                ok( !status, "newest presentation relationship returned %#lx\n", status );
+                ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == newest_presentation,
+                    "newest base presentation was not published\n" );
+                stop_dcomp_presentation_process( &newest );
+                ok( GetPropW( ipc_target, dcomp_base_presentation_prop ) == replacement_presentation,
+                    "newest teardown did not restore replacement base presentation\n" );
+                ok( GetPropW( ipc_root, dcomp_task_delegated_prop ) == replacement_presentation,
+                    "newest teardown did not restore replacement task delegate\n" );
+                ok( GetPropW( ipc_input, direct_hardware_input_owner_prop ) == replacement_presentation,
+                    "newest teardown did not restore replacement input owner\n" );
+            }
+
+            stop_dcomp_presentation_process( &replacement );
+            ok( !GetPropW( ipc_target, dcomp_base_presentation_prop ),
+                "replacement teardown retained base presentation\n" );
+            ok( !GetPropW( ipc_root, dcomp_task_delegated_prop ),
+                "replacement teardown retained task delegate\n" );
+            ok( !GetPropW( ipc_root, dcomp_task_delegated_target_prop ),
+                "replacement teardown retained task target\n" );
+            ok( !GetPropW( ipc_root, dcomp_input_window_prop ),
+                "replacement teardown retained input property\n" );
+            ok( !GetPropW( ipc_input, direct_hardware_input_owner_prop ),
+                "replacement teardown retained input owner\n" );
+        }
+        else
+        {
+            stop_dcomp_presentation_process( &first );
+            stop_dcomp_presentation_process( &replacement );
+            stop_dcomp_presentation_process( &newest );
+        }
+    }
+
+cleanup:
+    if (ipc_shared_token) UnmapViewOfFile( ipc_shared_token );
+    if (mapping) CloseHandle( mapping );
+    if (ipc_target) DestroyWindow( ipc_target );
+    if (ipc_input) DestroyWindow( ipc_input );
+    if (ipc_old_target) DestroyWindow( ipc_old_target );
+    if (ipc_old_input) DestroyWindow( ipc_old_input );
+    DestroyWindow( ipc_root );
     UnregisterClassW( L"TestIPCClass", NULL );
 }
 
-static void test_inter_process_child( HWND hwnd )
+static void wait_child_process_with_messages( PROCESS_INFORMATION *info )
+{
+    DWORD start = GetTickCount();
+    HANDLE process = info->hProcess;
+    MSG msg;
+
+    for (;;)
+    {
+        DWORD elapsed = GetTickCount() - start;
+        DWORD timeout = elapsed >= 30000 ? 0 : 30000 - elapsed;
+        DWORD ret = MsgWaitForMultipleObjects( 1, &process, FALSE, timeout, QS_ALLINPUT );
+
+        if (ret == WAIT_OBJECT_0) break;
+        if (ret == WAIT_OBJECT_0 + 1)
+        {
+            while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+            {
+                TranslateMessage( &msg );
+                DispatchMessageW( &msg );
+            }
+            continue;
+        }
+        if (ret == WAIT_TIMEOUT)
+            ok( 0, "timed out waiting for browser helper\n" );
+        else
+            ok( 0, "browser helper wait returned %#lx, error %lu\n", ret, GetLastError() );
+        break;
+    }
+    wait_child_process( info );
+}
+
+static BOOL start_dcomp_presentation_process( const char *argv0,
+                                               struct dcomp_presentation_process *process )
+{
+    STARTUPINFOA startup = { .cb = sizeof(startup) };
+    char path[MAX_PATH];
+    BOOL ret;
+
+    memset( process, 0, sizeof(*process) );
+    sprintf( process->stop_name, "WineDCompPresentationStop-%lu-%ld", GetCurrentProcessId(),
+             InterlockedIncrement( &dcomp_presentation_process_id ) );
+    process->mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                           sizeof(*process->state), NULL );
+    process->ready = CreateEventW( NULL, TRUE, FALSE, NULL );
+    process->stop = CreateEventA( NULL, TRUE, FALSE, process->stop_name );
+    ok( !!process->mapping && !!process->ready && !!process->stop,
+        "failed to create presentation process synchronization, error %lu\n", GetLastError() );
+    if (!process->mapping || !process->ready || !process->stop) goto failed;
+    ret = SetHandleInformation( process->mapping, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT ) &&
+          SetHandleInformation( process->ready, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+    ok( ret, "failed to make presentation synchronization inheritable, error %lu\n", GetLastError() );
+    if (!ret) goto failed;
+    process->state = MapViewOfFile( process->mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                                    sizeof(*process->state) );
+    ok( !!process->state, "presentation state MapViewOfFile failed, error %lu\n", GetLastError() );
+    if (!process->state) goto failed;
+    memset( process->state, 0, sizeof(*process->state) );
+
+    sprintf( path, "%s win32u dcomp_presentation %Ix %Ix %s", argv0,
+             (INT_PTR)process->mapping, (INT_PTR)process->ready, process->stop_name );
+    ret = CreateProcessA( NULL, path, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process->info );
+    ok( ret, "CreateProcess '%s' failed, error %lu\n", path, GetLastError() );
+    if (!ret) goto failed;
+    ret = WaitForSingleObject( process->ready, 30000 ) == WAIT_OBJECT_0;
+    ok( ret, "timed out waiting for presentation helper\n" );
+    ok( ret && !process->state->status && process->state->presentation &&
+        (process->state->token.low || process->state->token.high),
+        "presentation helper returned %#lx, window %p, empty token %d\n",
+        process->state->status, process->state->presentation,
+        !process->state->token.low && !process->state->token.high );
+    if (ret && !process->state->status && process->state->presentation &&
+        (process->state->token.low || process->state->token.high))
+        return TRUE;
+
+failed:
+    stop_dcomp_presentation_process( process );
+    return FALSE;
+}
+
+static void stop_dcomp_presentation_process( struct dcomp_presentation_process *process )
+{
+    if (process->info.hProcess)
+    {
+        DWORD ret;
+
+        if (process->stop) SetEvent( process->stop );
+        ret = WaitForSingleObject( process->info.hProcess, 30000 );
+        ok( ret == WAIT_OBJECT_0, "presentation process wait returned %#lx\n", ret );
+        CloseHandle( process->info.hThread );
+        CloseHandle( process->info.hProcess );
+    }
+    if (process->state) UnmapViewOfFile( process->state );
+    if (process->stop) CloseHandle( process->stop );
+    if (process->ready) CloseHandle( process->ready );
+    if (process->mapping) CloseHandle( process->mapping );
+    memset( process, 0, sizeof(*process) );
+}
+
+static void run_ime_browser_helper( const char *argv0, HWND presentation, HANDLE mapping,
+                                    BOOL reparent, BOOL expect_success )
+{
+    PROCESS_INFORMATION info;
+    STARTUPINFOA startup = { .cb = sizeof(startup) };
+    char path[MAX_PATH];
+    BOOL ret;
+
+    sprintf( path, "%s win32u ime_browser %Ix %Ix %u %u", argv0, (INT_PTR)presentation,
+             (INT_PTR)mapping, reparent, expect_success );
+    ret = CreateProcessA( NULL, path, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &info );
+    ok( ret, "CreateProcess '%s' failed, error %lu\n", path, GetLastError() );
+    if (!ret) return;
+    wait_child_process_with_messages( &info );
+}
+
+static void test_dcomp_presentation_process_child( HANDLE mapping, HANDLE ready,
+                                                       const char *stop_name )
+{
+    struct dcomp_presentation_process_state *state;
+    WNDCLASSW cls = { .lpfnWndProc = DefWindowProcW,
+                      .lpszClassName = L"TestDCompPresentationProcessClass" };
+    HANDLE stop;
+
+    stop = OpenEventA( SYNCHRONIZE, FALSE, stop_name );
+    state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) );
+    if (!stop || !state)
+    {
+        if (state) state->status = STATUS_UNSUCCESSFUL;
+        SetEvent( ready );
+        return;
+    }
+    cls.lpfnWndProc = dcomp_presentation_proc;
+    RegisterClassW( &cls );
+    dcomp_presentation_state = state;
+    state->presentation = CreateWindowExW( 0, cls.lpszClassName, NULL, 0, 0, 0, 0, 0,
+                                           HWND_MESSAGE, 0, 0, NULL );
+    if (!state->presentation)
+        state->status = STATUS_UNSUCCESSFUL;
+    else if (!p_wine_server_call)
+        state->status = STATUS_NOT_IMPLEMENTED;
+    else
+        state->status = create_dcomp_ime_offer( state->presentation, &state->token );
+    SetEvent( ready );
+    WaitForSingleObject( stop, INFINITE );
+    dcomp_presentation_state = NULL;
+    ExitProcess( 0 );
+}
+
+static void test_ime_browser_child( HWND presentation, HANDLE mapping, BOOL reparent,
+                                    BOOL expect_success )
+{
+    struct wine_dcomp_ime_token *token;
+    RECT rect = {1, 2, 3, 4};
+    COPYDATASTRUCT copydata = { WINE_IME_SET_RECT_COPYDATA, sizeof(rect), &rect };
+    WNDCLASSW cls = {0};
+    HWND root, input, target, other_root = NULL;
+    NTSTATUS status;
+    int res;
+
+    token = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, sizeof(*token) );
+    ok( !!token, "browser MapViewOfFile failed, error %lu\n", GetLastError() );
+    if (!token) return;
+
+    cls.lpfnWndProc = test_ipc_message_proc;
+    cls.lpszClassName = L"TestIPCBrowserClass";
+    RegisterClassW( &cls );
+    root = CreateWindowExW( 0, cls.lpszClassName, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    input = CreateWindowExW( 0, cls.lpszClassName, NULL, WS_CHILD, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    target = CreateWindowExW( 0, cls.lpszClassName, NULL, WS_CHILD, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+    if (root && input) NtUserSetParent( input, root );
+    if (input && target) NtUserSetParent( target, input );
+    ok( !!root && !!input && !!target, "failed to create browser topology, error %lu\n", GetLastError() );
+    if (!root || !input || !target) goto done;
+
+    status = set_dcomp_ime_relationship( token, target );
+    if (!expect_success)
+    {
+        ok( status == STATUS_NOT_FOUND, "revoked browser relationship returned %#lx\n", status );
+        goto done;
+    }
+    ok( !status, "browser relationship returned %#lx\n", status );
+    status = update_dcomp_task_delegate( token, presentation, target,
+                                         DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK );
+    ok( !status, "browser task relationship returned %#lx\n", status );
+    ok( GetPropW( target, dcomp_base_presentation_prop ) == presentation,
+        "browser base presentation was not published\n" );
+    ok( GetPropW( root, dcomp_task_delegated_prop ) == presentation,
+        "browser task delegate was not published\n" );
+    res = SendMessageW( presentation, WM_COPYDATA, (WPARAM)root, (LPARAM)&copydata );
+    ok( !res, "browser IME rect returned %d\n", res );
+
+    if (reparent)
+    {
+        other_root = CreateWindowExW( 0, cls.lpszClassName, NULL, 0, 0, 0, 0, 0,
+                                      HWND_MESSAGE, 0, 0, NULL );
+        ok( !!other_root, "failed to create replacement browser root, error %lu\n", GetLastError() );
+        if (other_root)
+        {
+            NtUserSetParent( input, other_root );
+            ok( !GetPropW( target, dcomp_base_presentation_prop ),
+                "reparented target retained base presentation\n" );
+            ok( !GetPropW( root, dcomp_task_delegated_prop ),
+                "reparented root retained task delegate\n" );
+            ok( !GetPropW( root, dcomp_task_delegated_target_prop ),
+                "reparented root retained task target\n" );
+            res = SendMessageW( presentation, WM_COPYDATA, (WPARAM)root, (LPARAM)&copydata );
+            ok( res == 7, "reparented IME rect returned %d\n", res );
+            NtUserSetParent( input, root );
+            status = set_dcomp_ime_relationship( token, target );
+            ok( !status, "reparented relationship returned %#lx\n", status );
+            status = update_dcomp_task_delegate( token, presentation, target,
+                                                 DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK );
+            ok( !status, "reparented task relationship returned %#lx\n", status );
+            res = SendMessageW( presentation, WM_COPYDATA, (WPARAM)root, (LPARAM)&copydata );
+            ok( !res, "rebound reparented IME rect returned %d\n", res );
+        }
+    }
+
+done:
+    if (target) DestroyWindow( target );
+    if (input) DestroyWindow( input );
+    if (other_root) DestroyWindow( other_root );
+    if (root) DestroyWindow( root );
+    UnregisterClassW( cls.lpszClassName, NULL );
+    UnmapViewOfFile( token );
+}
+
+enum dcomp_cross_process_message
+{
+    WM_DCOMP_CROSS_BROWSER_PARENT_TARGET = WM_APP + 0x300,
+    WM_DCOMP_CROSS_BROWSER_PARENT_INPUT,
+    WM_DCOMP_CROSS_GPU_PARENT_TARGET,
+    WM_DCOMP_CROSS_GPU_PARENT_BAD_TARGET,
+    WM_DCOMP_CROSS_GPU_UPDATE_TARGET,
+    WM_DCOMP_CROSS_GPU_UPDATE_BAD_TARGET,
+    WM_DCOMP_CROSS_GPU_CLEAR,
+};
+
+struct dcomp_cross_process_state
+{
+    HWND input;
+    HWND presentation;
+    HWND target;
+    HWND bad_target;
+    struct wine_dcomp_ime_token token;
+    NTSTATUS browser_status;
+    NTSTATUS gpu_status;
+};
+
+struct dcomp_cross_process_helper
+{
+    PROCESS_INFORMATION info;
+    HANDLE ready;
+    HWND window;
+};
+
+static struct dcomp_cross_process_state *dcomp_cross_process_state;
+
+static LRESULT WINAPI dcomp_cross_browser_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    switch (msg)
+    {
+    case WM_DCOMP_CROSS_BROWSER_PARENT_TARGET:
+        NtUserSetParent( dcomp_cross_process_state->target, dcomp_cross_process_state->input );
+        return NtUserGetAncestor( dcomp_cross_process_state->target, GA_PARENT ) ==
+               dcomp_cross_process_state->input;
+
+    case WM_DCOMP_CROSS_BROWSER_PARENT_INPUT:
+        NtUserSetParent( dcomp_cross_process_state->input, (HWND)wparam );
+        return NtUserGetAncestor( dcomp_cross_process_state->input, GA_PARENT ) == (HWND)wparam;
+
+    case WM_CLOSE:
+        DestroyWindow( hwnd );
+        PostQuitMessage( 0 );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
+static LRESULT WINAPI dcomp_cross_gpu_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    const unsigned int flags = DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK;
+
+    switch (msg)
+    {
+    case WM_DCOMP_CROSS_GPU_PARENT_TARGET:
+        NtUserSetParent( dcomp_cross_process_state->target, dcomp_cross_process_state->input );
+        return NtUserGetAncestor( dcomp_cross_process_state->target, GA_PARENT ) ==
+               dcomp_cross_process_state->input;
+
+    case WM_DCOMP_CROSS_GPU_PARENT_BAD_TARGET:
+        NtUserSetParent( dcomp_cross_process_state->bad_target, dcomp_cross_process_state->input );
+        return NtUserGetAncestor( dcomp_cross_process_state->bad_target, GA_PARENT ) ==
+               dcomp_cross_process_state->input;
+
+    case WM_DCOMP_CROSS_GPU_UPDATE_TARGET:
+        dcomp_cross_process_state->gpu_status = update_dcomp_task_delegate(
+                &dcomp_cross_process_state->token, dcomp_cross_process_state->presentation,
+                dcomp_cross_process_state->target, flags );
+        return 1;
+
+    case WM_DCOMP_CROSS_GPU_UPDATE_BAD_TARGET:
+        dcomp_cross_process_state->gpu_status = update_dcomp_task_delegate(
+                &dcomp_cross_process_state->token, dcomp_cross_process_state->presentation,
+                dcomp_cross_process_state->bad_target, flags );
+        return 1;
+
+    case WM_DCOMP_CROSS_GPU_CLEAR:
+        dcomp_cross_process_state->gpu_status = update_dcomp_task_delegate(
+                &dcomp_cross_process_state->token, dcomp_cross_process_state->presentation,
+                NULL, 0 );
+        return 1;
+
+    case WM_CLOSE:
+        DestroyWindow( hwnd );
+        PostQuitMessage( 0 );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
+static void test_dcomp_cross_process_child( const char *role, HANDLE mapping, HANDLE ready )
+{
+    struct dcomp_cross_process_state *state;
+    WNDCLASSW cls = {0};
+    MSG msg;
+
+    state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) );
+    if (!state)
+    {
+        SetEvent( ready );
+        return;
+    }
+    dcomp_cross_process_state = state;
+
+    if (!strcmp( role, "browser" ))
+    {
+        cls.lpfnWndProc = dcomp_cross_browser_proc;
+        cls.lpszClassName = L"TestDCompCrossBrowserClass";
+        RegisterClassW( &cls );
+        state->input = CreateWindowExW( 0, cls.lpszClassName, NULL, WS_CHILD,
+                                        0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+        state->browser_status = state->input ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    }
+    else
+    {
+        cls.lpfnWndProc = dcomp_cross_gpu_proc;
+        cls.lpszClassName = L"TestDCompCrossGpuClass";
+        RegisterClassW( &cls );
+        state->presentation = CreateWindowExW( 0, cls.lpszClassName, NULL, 0,
+                                               0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+        state->target = CreateWindowExW( 0, cls.lpszClassName, NULL, WS_CHILD,
+                                        0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+        state->bad_target = CreateWindowExW( 0, cls.lpszClassName, NULL, WS_CHILD,
+                                            0, 0, 0, 0, HWND_MESSAGE, 0, 0, NULL );
+        if (!state->presentation || !state->target || !state->bad_target)
+            state->gpu_status = STATUS_UNSUCCESSFUL;
+        else if (!p_wine_server_call)
+            state->gpu_status = STATUS_NOT_IMPLEMENTED;
+        else
+            state->gpu_status = create_dcomp_ime_offer( state->presentation, &state->token );
+    }
+    SetEvent( ready );
+
+    while (GetMessageW( &msg, NULL, 0, 0 ))
+    {
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+    }
+
+    if (!strcmp( role, "browser" ))
+    {
+        if (IsWindow( state->input )) DestroyWindow( state->input );
+    }
+    else
+    {
+        if (IsWindow( state->bad_target )) DestroyWindow( state->bad_target );
+        if (IsWindow( state->target )) DestroyWindow( state->target );
+        if (IsWindow( state->presentation )) DestroyWindow( state->presentation );
+    }
+    UnregisterClassW( cls.lpszClassName, NULL );
+    dcomp_cross_process_state = NULL;
+    UnmapViewOfFile( state );
+}
+
+static BOOL start_dcomp_cross_process_helper( const char *argv0, const char *role, HANDLE mapping,
+                                               struct dcomp_cross_process_helper *helper )
+{
+    STARTUPINFOA startup = { .cb = sizeof(startup) };
+    char path[MAX_PATH];
+    BOOL ret;
+
+    memset( helper, 0, sizeof(*helper) );
+    helper->ready = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ok( !!helper->ready, "%s helper ready event creation failed, error %lu\n", role, GetLastError() );
+    if (!helper->ready) return FALSE;
+    ret = SetHandleInformation( helper->ready, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+    ok( ret, "%s helper ready inheritance failed, error %lu\n", role, GetLastError() );
+    if (!ret) goto failed;
+
+    sprintf( path, "%s win32u dcomp_cross %s %Ix %Ix", argv0, role,
+             (INT_PTR)mapping, (INT_PTR)helper->ready );
+    ret = CreateProcessA( NULL, path, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &helper->info );
+    ok( ret, "CreateProcess '%s' failed, error %lu\n", path, GetLastError() );
+    if (!ret) goto failed;
+    ret = WaitForSingleObject( helper->ready, 30000 ) == WAIT_OBJECT_0;
+    ok( ret, "timed out waiting for %s helper\n", role );
+    if (ret) return TRUE;
+
+failed:
+    if (helper->info.hProcess)
+    {
+        TerminateProcess( helper->info.hProcess, 1 );
+        wait_child_process_with_messages( &helper->info );
+    }
+    if (helper->ready) CloseHandle( helper->ready );
+    memset( helper, 0, sizeof(*helper) );
+    return FALSE;
+}
+
+static void stop_dcomp_cross_process_helper( struct dcomp_cross_process_helper *helper )
+{
+    if (helper->info.hProcess)
+    {
+        if (helper->window) PostMessageW( helper->window, WM_CLOSE, 0, 0 );
+        wait_child_process_with_messages( &helper->info );
+    }
+    if (helper->ready) CloseHandle( helper->ready );
+    memset( helper, 0, sizeof(*helper) );
+}
+
+static void check_dcomp_cross_input_mapping( HWND presentation, HWND root, HWND input,
+                                             BOOL published )
+{
+    HWND expected_input = published ? input : NULL;
+    HWND expected_owner = published ? presentation : NULL;
+    HANDLE expected_direct = published ? ULongToHandle( 0x57444952 ) : NULL;
+
+    ok( GetPropW( presentation, dcomp_input_window_prop ) == expected_input,
+        "presentation input mapping is %p, expected %p\n",
+        GetPropW( presentation, dcomp_input_window_prop ), expected_input );
+    ok( GetPropW( presentation, dcomp_keyboard_window_prop ) == expected_input,
+        "presentation keyboard mapping is %p, expected %p\n",
+        GetPropW( presentation, dcomp_keyboard_window_prop ), expected_input );
+    ok( GetPropW( root, dcomp_input_window_prop ) == expected_input,
+        "root input mapping is %p, expected %p\n",
+        GetPropW( root, dcomp_input_window_prop ), expected_input );
+    ok( GetPropW( root, dcomp_keyboard_window_prop ) == expected_input,
+        "root keyboard mapping is %p, expected %p\n",
+        GetPropW( root, dcomp_keyboard_window_prop ), expected_input );
+    ok( GetPropW( input, direct_hardware_input_prop ) == expected_direct,
+        "direct input marker is %p, expected %p\n",
+        GetPropW( input, direct_hardware_input_prop ), expected_direct );
+    ok( GetPropW( input, direct_hardware_input_owner_prop ) == expected_owner,
+        "direct input owner is %p, expected %p\n",
+        GetPropW( input, direct_hardware_input_owner_prop ), expected_owner );
+}
+
+static void test_dcomp_cross_process_parenting( const char *argv0 )
+{
+    struct dcomp_cross_process_helper browser = {0}, gpu = {0};
+    struct dcomp_cross_process_state *state = NULL;
+    WNDCLASSW cls = { .lpfnWndProc = DefWindowProcW,
+                      .lpszClassName = L"TestDCompCrossRootClass" };
+    HANDLE mapping = NULL;
+    HWND root = NULL, unrelated_root = NULL;
+    LRESULT res;
+    BOOL ret;
+
+    mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+                                  sizeof(*state), NULL );
+    ok( !!mapping, "cross-process mapping creation failed, error %lu\n", GetLastError() );
+    if (!mapping) return;
+    ret = SetHandleInformation( mapping, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+    ok( ret, "cross-process mapping inheritance failed, error %lu\n", GetLastError() );
+    if (!ret) goto done;
+    state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) );
+    ok( !!state, "cross-process state mapping failed, error %lu\n", GetLastError() );
+    if (!state) goto done;
+    memset( state, 0, sizeof(*state) );
+
+    RegisterClassW( &cls );
+    root = CreateWindowExW( 0, cls.lpszClassName, NULL, 0, 0, 0, 0, 0,
+                            HWND_MESSAGE, 0, 0, NULL );
+    unrelated_root = CreateWindowExW( 0, cls.lpszClassName, NULL, 0, 0, 0, 0, 0,
+                                      HWND_MESSAGE, 0, 0, NULL );
+    ok( !!root && !!unrelated_root, "cross-process roots creation failed, error %lu\n",
+        GetLastError() );
+    if (!root || !unrelated_root) goto done;
+
+    if (!start_dcomp_cross_process_helper( argv0, "browser", mapping, &browser )) goto done;
+    browser.window = state->input;
+    ok( !state->browser_status && state->input, "browser helper returned %#lx, input %p\n",
+        state->browser_status, state->input );
+    if (state->browser_status || !state->input) goto done;
+
+    if (!start_dcomp_cross_process_helper( argv0, "gpu", mapping, &gpu )) goto done;
+    gpu.window = state->target;
+    ok( !state->gpu_status && state->presentation && state->target && state->bad_target &&
+        (state->token.low || state->token.high),
+        "GPU helper returned %#lx, presentation %p, targets %p/%p, empty token %d\n",
+        state->gpu_status, state->presentation, state->target, state->bad_target,
+        !state->token.low && !state->token.high );
+    if (state->gpu_status || !state->presentation || !state->target || !state->bad_target ||
+        (!state->token.low && !state->token.high)) goto done;
+
+    NtUserSetParent( state->input, root );
+    ok( NtUserGetAncestor( state->input, GA_PARENT ) == root,
+        "root owner failed to parent browser input\n" );
+
+    res = SendMessageW( state->target, WM_DCOMP_CROSS_GPU_PARENT_TARGET, 0, 0 );
+    ok( res, "GPU failed to self-parent target\n" );
+    SendMessageW( state->target, WM_DCOMP_CROSS_GPU_UPDATE_TARGET, 0, 0 );
+    ok( state->gpu_status == STATUS_ACCESS_DENIED,
+        "unconsented target relationship returned %#lx\n", state->gpu_status );
+    ok( !GetPropW( state->target, dcomp_base_presentation_prop ),
+        "unconsented target published base presentation\n" );
+    ok( !GetPropW( root, dcomp_task_delegated_prop ),
+        "unconsented target published task delegate\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, FALSE );
+
+    res = SendMessageW( state->input, WM_DCOMP_CROSS_BROWSER_PARENT_TARGET, 0, 0 );
+    ok( res, "browser owner failed to parent GPU target\n" );
+    SendMessageW( state->target, WM_DCOMP_CROSS_GPU_UPDATE_TARGET, 0, 0 );
+    ok( !state->gpu_status, "consented cross-process relationship returned %#lx\n",
+        state->gpu_status );
+    ok( GetPropW( state->target, dcomp_base_presentation_prop ) == state->presentation,
+        "cross-process base presentation was not published\n" );
+    ok( GetPropW( root, dcomp_task_delegated_prop ) == state->presentation,
+        "cross-process task delegate was not published\n" );
+    ok( GetPropW( root, dcomp_task_delegated_target_prop ) == state->target,
+        "cross-process task target was not published\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, TRUE );
+
+    res = SendMessageW( state->target, WM_DCOMP_CROSS_GPU_PARENT_TARGET, 0, 0 );
+    ok( res, "GPU failed to repeat target parent\n" );
+    SendMessageW( state->target, WM_DCOMP_CROSS_GPU_UPDATE_TARGET, 0, 0 );
+    ok( !state->gpu_status, "repeated target parent lost consent, status %#lx\n",
+        state->gpu_status );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, TRUE );
+
+    res = SendMessageW( state->bad_target, WM_DCOMP_CROSS_GPU_PARENT_BAD_TARGET, 0, 0 );
+    ok( res, "GPU failed to self-parent replacement target\n" );
+    SendMessageW( state->bad_target, WM_DCOMP_CROSS_GPU_UPDATE_BAD_TARGET, 0, 0 );
+    ok( state->gpu_status == STATUS_ACCESS_DENIED,
+        "unconsented replacement returned %#lx\n", state->gpu_status );
+    ok( GetPropW( state->target, dcomp_base_presentation_prop ) == state->presentation,
+        "failed replacement disturbed base winner\n" );
+    ok( GetPropW( root, dcomp_task_delegated_prop ) == state->presentation,
+        "failed replacement disturbed task winner\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, TRUE );
+
+    res = SendMessageW( state->input, WM_DCOMP_CROSS_BROWSER_PARENT_INPUT,
+                        (WPARAM)unrelated_root, 0 );
+    ok( res, "browser failed to reparent input under unrelated root\n" );
+    ok( !GetPropW( state->target, dcomp_base_presentation_prop ),
+        "reparented target retained base presentation\n" );
+    ok( !GetPropW( root, dcomp_task_delegated_prop ),
+        "old root retained task delegate\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, FALSE );
+    SendMessageW( state->target, WM_DCOMP_CROSS_GPU_UPDATE_TARGET, 0, 0 );
+    ok( state->gpu_status == STATUS_ACCESS_DENIED,
+        "unconsented unrelated root returned %#lx\n", state->gpu_status );
+    ok( !GetPropW( unrelated_root, dcomp_task_delegated_prop ),
+        "unrelated root received task delegate\n" );
+    check_dcomp_cross_input_mapping( state->presentation, unrelated_root, state->input, FALSE );
+
+    NtUserSetParent( state->input, root );
+    ok( NtUserGetAncestor( state->input, GA_PARENT ) == root,
+        "root owner failed to restore browser input\n" );
+    SendMessageW( state->target, WM_DCOMP_CROSS_GPU_UPDATE_TARGET, 0, 0 );
+    ok( !state->gpu_status, "restored cross-process relationship returned %#lx\n",
+        state->gpu_status );
+    ok( GetPropW( root, dcomp_task_delegated_prop ) == state->presentation,
+        "restored root task delegate was not published\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, TRUE );
+
+    SendMessageW( state->presentation, WM_DCOMP_CROSS_GPU_CLEAR, 0, 0 );
+    ok( !state->gpu_status, "presentation owner clear returned %#lx\n", state->gpu_status );
+    ok( !GetPropW( state->target, dcomp_base_presentation_prop ),
+        "presentation owner clear retained base presentation\n" );
+    ok( !GetPropW( root, dcomp_task_delegated_prop ),
+        "presentation owner clear retained task delegate\n" );
+    ok( !GetPropW( root, dcomp_task_delegated_target_prop ),
+        "presentation owner clear retained task target\n" );
+    check_dcomp_cross_input_mapping( state->presentation, root, state->input, FALSE );
+
+done:
+    stop_dcomp_cross_process_helper( &gpu );
+    stop_dcomp_cross_process_helper( &browser );
+    if (unrelated_root) DestroyWindow( unrelated_root );
+    if (root) DestroyWindow( root );
+    UnregisterClassW( cls.lpszClassName, NULL );
+    if (state) UnmapViewOfFile( state );
+    if (mapping) CloseHandle( mapping );
+}
+
+static void send_dcomp_test_key( HWND hwnd, WORD vkey, WORD scan, DWORD flags )
+{
+    INPUT input = {0};
+    NTSTATUS status;
+
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vkey;
+    input.ki.wScan = scan;
+    input.ki.dwFlags = flags;
+    status = NtUserSendHardwareInput( hwnd, 0, &input, 0 );
+    ok( !status, "NtUserSendHardwareInput returned %#lx\n", status );
+}
+
+static void test_inter_process_child( const char *argv0, HWND hwnd, HANDLE mapping )
 {
     MDICREATESTRUCTA mdi;
+    struct
+    {
+        UINT cursor_pos;
+        UINT comp_len;
+        UINT result_len;
+        WCHAR strings[9];
+    } ime_update = { .cursor_pos = MAKELONG( 1, 3 ), .comp_len = 5, .result_len = 4,
+                     .strings = {'c','o','m','p',0,'r','e','s',0} };
+    struct wine_dcomp_ime_token token, shared_offer, *shared_token;
+    unsigned int i;
+    COPYDATASTRUCT copydata;
+    WNDCLASSW cls = {0};
     WCHAR bufW[100];
+    HWND presentation, old_input, input;
+    NTSTATUS status;
     char buf[100];
     int res;
+
+    shared_token = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*shared_token) );
+    ok( !!shared_token, "child MapViewOfFile failed, error %lu\n", GetLastError() );
+    if (!shared_token) return;
 
     res = SendMessageA( hwnd, WM_SETTEXT, 0, (LPARAM)"test" );
     ok( res == 6, "WM_SETTEXT returned %d\n", res );
@@ -1844,6 +3099,132 @@ static void test_inter_process_child( HWND hwnd )
     mdi.lParam = 0xdeadbeef;
     res = NtUserMessageCall( hwnd, WM_MDICREATE, 0, (LPARAM)&mdi, NULL, NtUserSendMessage, TRUE );
     ok( res == 0xdeadbeef, "res = %d\n", res );
+
+    copydata.dwData = WINE_IME_UPDATE_COPYDATA;
+    copydata.cbData = 0;
+    copydata.lpData = NULL;
+    res = SendMessageW( hwnd, WM_COPYDATA, 0, (LPARAM)&copydata );
+    ok( res == 7, "unrelated IME update marker returned %d\n", res );
+
+    cls.lpfnWndProc = test_ipc_message_proc;
+    cls.lpszClassName = L"TestIPCPresentationClass";
+    RegisterClassW( &cls );
+    presentation = CreateWindowExW( 0, L"TestIPCPresentationClass", NULL, 0, 0, 0, 0, 0,
+                                    HWND_MESSAGE, 0, 0, NULL );
+    ok( !!presentation, "CreateWindowExW failed, error %lu\n", GetLastError() );
+    res = SendMessageW( hwnd, WM_USER + 1, (WPARAM)presentation, 0 );
+    ok( res == 1, "DComp topology setup returned %d\n", res );
+
+    copydata.cbData = offsetof(struct wine_ime_update, strings);
+    res = SendMessageW( hwnd, WM_COPYDATA, (WPARAM)presentation, (LPARAM)&copydata );
+    ok( res == 7, "property-only IME update returned %d\n", res );
+    if (!p_wine_server_call) goto done;
+
+    status = create_dcomp_ime_offer( presentation, &token );
+    ok( !status && (token.low || token.high), "offer creation returned %#lx with empty token %d\n",
+        status, !token.low && !token.high );
+    status = set_dcomp_ime_relationship( &token, presentation );
+    ok( status == STATUS_ACCESS_DENIED, "same-process relationship returned %#lx\n", status );
+
+    *shared_token = token;
+    res = SendMessageW( hwnd, WM_USER + 2, 0, 0 );
+    ok( res == 1, "relationship setup returned %d\n", res );
+    SecureZeroMemory( &token, sizeof(token) );
+
+    copydata.dwData = WINE_IME_UPDATE_COPYDATA;
+    copydata.cbData = offsetof(struct wine_ime_update, strings) + sizeof(ime_update.strings);
+    copydata.lpData = &ime_update;
+    if (start_dcomp_victim_thread())
+    {
+        DWORD owner_tid = GetWindowThreadProcessId( hwnd, NULL );
+        status = raw_dcomp_send( presentation, hwnd, owner_tid, &copydata );
+        ok( !status, "owner TID UPDATE send returned %#lx\n", status );
+        status = raw_dcomp_send( presentation, hwnd, ipc_victim.tid, &copydata );
+        ok( status == STATUS_INVALID_PARAMETER,
+            "mismatched victim TID UPDATE returned %#lx\n", status );
+        stop_dcomp_victim_thread();
+    }
+
+    res = SendMessageW( hwnd, WM_USER + 8, 0, 0 );
+    ok( res == 1, "post-dequeue revoke barrier setup returned %d\n", res );
+    status = raw_dcomp_send( presentation, hwnd, GetWindowThreadProcessId( hwnd, NULL ), &copydata );
+    ok( !status, "post-dequeue revoke raw UPDATE returned %#lx\n", status );
+    res = SendMessageW( hwnd, WM_USER + 7, 0, 0 );
+    ok( res == 1, "post-dequeue revoke barrier check returned %d\n", res );
+
+    res = SendMessageW( hwnd, WM_COPYDATA, (WPARAM)presentation, (LPARAM)&copydata );
+    ok( res, "authorized IME update returned %d\n", res );
+
+    old_input = input = hwnd;
+    send_dcomp_test_key( old_input, 'A', 0x1e, 0 );
+    send_dcomp_test_key( old_input, VK_RCONTROL, 0x1d, KEYEVENTF_EXTENDEDKEY );
+    ok( SendMessageW( hwnd, WM_USER + 3, 0, 0 ) == 1, "old input drain failed\n" );
+    ok( SendMessageW( hwnd, WM_USER + 5, 1, 0 ) == 1, "old input down check failed\n" );
+    input = (HWND)SendMessageW( hwnd, WM_USER + 4, 0, 0 );
+    ok( !!input, "replacement input creation failed\n" );
+    send_dcomp_test_key( old_input, 'A', 0x1e, KEYEVENTF_KEYUP );
+    send_dcomp_test_key( old_input, VK_RCONTROL, 0x1d, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP );
+    ok( SendMessageW( hwnd, WM_USER + 3, 0, 0 ) == 1, "replacement input drain failed\n" );
+    ok( SendMessageW( hwnd, WM_USER + 5, 2, 0 ) == 1, "old input release check failed\n" );
+    send_dcomp_test_key( input, 'B', 0x30, 0 );
+    send_dcomp_test_key( input, 'B', 0x30, KEYEVENTF_KEYUP );
+    ok( SendMessageW( input, WM_USER + 3, 0, 0 ) == 1, "first replacement key drain failed\n" );
+    ok( SendMessageW( hwnd, WM_USER + 5, 3, 0 ) == 1, "replacement first key check failed\n" );
+
+    DestroyWindow( presentation );
+    ok( !GetPropW( ipc_root, dcomp_input_window_prop ), "root retained DComp input property\n" );
+    ok( !GetPropW( ipc_root, dcomp_keyboard_window_prop ), "root retained DComp keyboard property\n" );
+    ok( !GetPropW( ipc_input, direct_hardware_input_prop ), "input retained direct marker\n" );
+    ok( !GetPropW( ipc_input, direct_hardware_input_owner_prop ), "input retained presentation owner\n" );
+    presentation = CreateWindowExW( 0, L"TestIPCPresentationClass", NULL, 0, 0, 0, 0, 0,
+                                    HWND_MESSAGE, 0, 0, NULL );
+    ok( !!presentation, "shared presentation CreateWindowExW failed, error %lu\n", GetLastError() );
+    if (!presentation) goto done;
+    status = create_dcomp_ime_offer( presentation, &shared_offer );
+    ok( !status && (shared_offer.low || shared_offer.high),
+        "shared offer creation returned %#lx with empty token %d\n",
+        status, !shared_offer.low && !shared_offer.high );
+    for (i = 1; i < 256; i++)
+    {
+        status = create_dcomp_ime_offer( presentation, &token );
+        ok( !status, "shared offer %u returned %#lx\n", i + 1, status );
+        ok( token.low == shared_offer.low && token.high == shared_offer.high,
+            "shared offer %u returned a different token\n", i + 1 );
+    }
+    status = create_dcomp_ime_offer( presentation, &token );
+    ok( status == STATUS_INSUFFICIENT_RESOURCES, "offer beyond cap returned %#lx\n", status );
+    for (i = 1; i < 256; i++)
+    {
+        status = revoke_dcomp_ime_offer( &shared_offer );
+        ok( !status, "shared revoke %u returned %#lx\n", i, status );
+    }
+
+    *shared_token = shared_offer;
+    run_ime_browser_helper( argv0, presentation, mapping, TRUE, TRUE );
+    run_ime_browser_helper( argv0, presentation, mapping, FALSE, TRUE );
+    res = SendMessageW( hwnd, WM_USER + 9, (WPARAM)presentation, 0 );
+    ok( res == 1, "shared task relationship setup returned %d\n", res );
+    status = revoke_dcomp_ime_offer( &shared_offer );
+    ok( !status, "final shared revoke returned %#lx\n", status );
+    res = SendMessageW( hwnd, WM_USER + 10, 0, 0 );
+    ok( res == 1, "shared task relationship cleanup check returned %d\n", res );
+    run_ime_browser_helper( argv0, presentation, mapping, FALSE, FALSE );
+    SecureZeroMemory( shared_token, sizeof(*shared_token) );
+    SecureZeroMemory( &shared_offer, sizeof(shared_offer) );
+
+    DestroyWindow( presentation );
+    presentation = CreateWindowExW( 0, L"TestIPCPresentationClass", NULL, 0, 0, 0, 0, 0,
+                                    HWND_MESSAGE, 0, 0, NULL );
+    ok( !!presentation, "replacement CreateWindowExW failed, error %lu\n", GetLastError() );
+    SetPropW( presentation, dcomp_detached_window_prop, hwnd );
+    res = SendMessageW( hwnd, WM_COPYDATA, (WPARAM)presentation, (LPARAM)&copydata );
+    ok( res == 7, "replacement presentation IME update returned %d\n", res );
+    DestroyWindow( presentation );
+
+done:
+    if (IsWindow( presentation )) DestroyWindow( presentation );
+    UnregisterClassW( L"TestIPCPresentationClass", NULL );
+    UnmapViewOfFile( shared_token );
 
     PostMessageA( hwnd, WM_USER, 0, 0 );
 }
@@ -3050,6 +4431,124 @@ void test_NtUserGetPointerDeviceRects( const char *arg )
         wine_dbgstr_rect( &display ), wine_dbgstr_rect( &screen ) );
 }
 
+static LONG repeat_signature_seed = 0x52455054;
+static LONG repeat_keydown_count, repeat_keyup_captured;
+static ULONG_PTR repeat_signature;
+static KBDLLHOOKSTRUCT repeat_keydown, repeat_keydown_repeat, repeat_keyup;
+
+static LRESULT CALLBACK repeat_keyboard_hook( int code, WPARAM wparam, LPARAM lparam )
+{
+    if (code == HC_ACTION)
+    {
+        const KBDLLHOOKSTRUCT *hook = (const KBDLLHOOKSTRUCT *)lparam;
+        LONG count;
+
+        if (hook->vkCode != 'A' || hook->scanCode != 0x1e || hook->dwExtraInfo != repeat_signature)
+            return CallNextHookEx( NULL, code, wparam, lparam );
+        if (hook->flags & LLKHF_UP)
+        {
+            repeat_keyup = *hook;
+            InterlockedExchange( &repeat_keyup_captured, TRUE );
+        }
+        else
+        {
+            count = InterlockedIncrement( &repeat_keydown_count );
+            if (count == 1) repeat_keydown = *hook;
+            else if (count == 2) repeat_keydown_repeat = *hook;
+        }
+    }
+    return CallNextHookEx( NULL, code, wparam, lparam );
+}
+
+static void test_keyboard_repeat_hook(void)
+{
+    INPUT input = {.type = INPUT_KEYBOARD, .ki = {.wVk = 'A', .wScan = 0x1e,
+                   .dwFlags = KEYEVENTF_EXTENDEDKEY, .time = 0x12345678}};
+    UINT old_delay, old_speed;
+    BOOL old_repeat;
+    HHOOK hook;
+    DWORD start;
+    NTSTATUS status;
+    MSG msg;
+
+    repeat_signature = (ULONG_PTR)InterlockedIncrement( &repeat_signature_seed );
+    input.ki.dwExtraInfo = repeat_signature;
+    SystemParametersInfoW( SPI_GETKEYBOARDDELAY, 0, &old_delay, 0 );
+    SystemParametersInfoW( SPI_GETKEYBOARDSPEED, 0, &old_speed, 0 );
+    SystemParametersInfoW( SPI_SETKEYBOARDDELAY, 0, NULL, 0 );
+    SystemParametersInfoW( SPI_SETKEYBOARDSPEED, 31, NULL, 0 );
+    old_repeat = NtUserCallOneParam( TRUE, NtUserCallOneParam_SetKeyboardAutoRepeat );
+
+    repeat_keydown_count = repeat_keyup_captured = 0;
+    memset( &repeat_keydown, 0, sizeof(repeat_keydown) );
+    memset( &repeat_keydown_repeat, 0, sizeof(repeat_keydown_repeat) );
+    memset( &repeat_keyup, 0, sizeof(repeat_keyup) );
+    hook = SetWindowsHookExW( WH_KEYBOARD_LL, repeat_keyboard_hook, GetModuleHandleW( NULL ), 0 );
+    ok( !!hook, "SetWindowsHookExW failed, error %lu\n", GetLastError() );
+    if (!hook) goto restore;
+
+    status = NtUserSendHardwareInput( NULL, 0, &input, 0 );
+    ok( !status, "physical key-down failed, status %#lx\n", status );
+    start = GetTickCount();
+    while (repeat_keydown_count < 2 && GetTickCount() - start < 2000)
+    {
+        MsgWaitForMultipleObjects( 0, NULL, FALSE, 100, QS_ALLINPUT );
+        while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    ok( repeat_keydown_count >= 2, "received %ld non-key-up key-downs\n", repeat_keydown_count );
+    ok( repeat_keydown.vkCode == 'A', "key-down vkey is %#lx\n", repeat_keydown.vkCode );
+    ok( repeat_keydown.scanCode == 0x1e, "key-down scan is %#lx\n", repeat_keydown.scanCode );
+    ok( repeat_keydown.flags == LLKHF_EXTENDED, "key-down flags are %#lx\n", repeat_keydown.flags );
+    ok( repeat_keydown.time == input.ki.time, "key-down time is %#lx\n", repeat_keydown.time );
+    ok( repeat_keydown.dwExtraInfo == repeat_signature, "key-down extra info is %Ix\n",
+        repeat_keydown.dwExtraInfo );
+    ok( repeat_keydown_repeat.vkCode == 'A', "repeat key-down vkey is %#lx\n",
+        repeat_keydown_repeat.vkCode );
+    ok( repeat_keydown_repeat.scanCode == 0x1e, "repeat key-down scan is %#lx\n",
+        repeat_keydown_repeat.scanCode );
+    ok( repeat_keydown_repeat.flags == LLKHF_EXTENDED, "repeat key-down flags are %#lx\n",
+        repeat_keydown_repeat.flags );
+    ok( repeat_keydown_repeat.time != input.ki.time, "repeat key-down reused input time %#lx\n",
+        repeat_keydown_repeat.time );
+    ok( repeat_keydown_repeat.time - start < 2000, "repeat key-down time is %#lx, start %#lx\n",
+        repeat_keydown_repeat.time, start );
+    ok( repeat_keydown_repeat.dwExtraInfo == repeat_signature,
+        "repeat key-down extra info is %Ix\n", repeat_keydown_repeat.dwExtraInfo );
+
+    input.ki.dwFlags = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
+    status = NtUserSendHardwareInput( NULL, 0, &input, 0 );
+    ok( !status, "physical key-up failed, status %#lx\n", status );
+    start = GetTickCount();
+    while (!repeat_keyup_captured && GetTickCount() - start < 2000)
+    {
+        MsgWaitForMultipleObjects( 0, NULL, FALSE, 100, QS_ALLINPUT );
+        while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    ok( repeat_keyup_captured, "key-up hook was not captured\n" );
+    ok( repeat_keyup.vkCode == 'A', "key-up vkey is %#lx\n", repeat_keyup.vkCode );
+    ok( repeat_keyup.scanCode == 0x1e, "key-up scan is %#lx\n", repeat_keyup.scanCode );
+    ok( repeat_keyup.flags == (LLKHF_EXTENDED | LLKHF_UP),
+        "key-up flags are %#lx\n", repeat_keyup.flags );
+    ok( repeat_keyup.time == input.ki.time, "key-up time is %#lx\n", repeat_keyup.time );
+    ok( repeat_keyup.dwExtraInfo == repeat_signature, "key-up extra info is %Ix\n",
+        repeat_keyup.dwExtraInfo );
+    ok( !!GetDesktopWindow(), "wineserver stopped responding after repeat timer\n" );
+    UnhookWindowsHookEx( hook );
+
+restore:
+    SystemParametersInfoW( SPI_SETKEYBOARDDELAY, old_delay, NULL, 0 );
+    SystemParametersInfoW( SPI_SETKEYBOARDSPEED, old_speed, NULL, 0 );
+    NtUserCallOneParam( old_repeat, NtUserCallOneParam_SetKeyboardAutoRepeat );
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3059,9 +4558,57 @@ START_TEST(win32u)
     GetDesktopWindow();
 
     argc = winetest_get_mainargs( &argv );
-    if (argc > 3 && !strcmp( argv[2], "ipcmsg" ))
+    p_wine_server_call = (void *)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "wine_server_call" );
+    if (argc > 2 && !strcmp( argv[2], "dcomp_cross_main" ))
     {
-        test_inter_process_child( LongToHandle( strtol( argv[3], NULL, 16 )));
+        if (!p_wine_server_call)
+            win_skip( "wine_server_call is unavailable\n" );
+        else
+            test_dcomp_cross_process_parenting( argv[0] );
+        return;
+    }
+
+    if (argc > 5 && !strcmp( argv[2], "dcomp_cross" ))
+    {
+        test_dcomp_cross_process_child( argv[3], LongToHandle( strtol( argv[4], NULL, 16 )),
+                                       LongToHandle( strtol( argv[5], NULL, 16 )) );
+        return;
+    }
+
+    if (argc > 6 && !strcmp( argv[2], "ime_browser" ))
+    {
+        test_ime_browser_child( LongToHandle( strtol( argv[3], NULL, 16 )),
+                                LongToHandle( strtol( argv[4], NULL, 16 )), atoi( argv[5] ),
+                                atoi( argv[6] ) );
+        return;
+    }
+
+    if (argc > 5 && !strcmp( argv[2], "dcomp_presentation" ))
+    {
+        test_dcomp_presentation_process_child( LongToHandle( strtol( argv[3], NULL, 16 )),
+                                               LongToHandle( strtol( argv[4], NULL, 16 )), argv[5] );
+        return;
+    }
+
+    if (argc > 4 && !strcmp( argv[2], "ipcmsg" ))
+    {
+        test_inter_process_child( argv[0], LongToHandle( strtol( argv[3], NULL, 16 )),
+                                  LongToHandle( strtol( argv[4], NULL, 16 )) );
+        return;
+    }
+
+    if (argc > 2 && !strcmp( argv[2], "ime_relay" ))
+    {
+        if (!p_wine_server_call)
+            win_skip( "wine_server_call is unavailable\n" );
+        else
+            test_inter_process_messages( argv[0] );
+        return;
+    }
+
+    if (argc > 2 && !strcmp( argv[2], "repeat_hook" ))
+    {
+        test_keyboard_repeat_hook();
         return;
     }
 
@@ -3102,6 +4649,7 @@ START_TEST(win32u)
     test_message_filter();
     test_timer();
     test_inter_process_messages( argv[0] );
+    if (p_wine_server_call) test_dcomp_cross_process_parenting( argv[0] );
     test_wndproc_hook();
 
     test_NtUserCloseWindowStation();

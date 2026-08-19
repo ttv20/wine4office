@@ -1703,10 +1703,35 @@ NTSTATUS WINAPI wow64_NtUserCallHwndParam( UINT *args )
                 ULONG input;
                 ULONG lparam;
             } *params32 = UlongToPtr( param );
+            INPUT32 *input32 = UlongToPtr( params32->input );
             struct send_hardware_input_params params;
+            INPUT input = {0};
+
+            input.type = input32->type;
+            switch (input.type)
+            {
+            case INPUT_MOUSE:
+                input.mi.dx          = input32->mi.dx;
+                input.mi.dy          = input32->mi.dy;
+                input.mi.mouseData   = input32->mi.mouseData;
+                input.mi.dwFlags     = input32->mi.dwFlags;
+                input.mi.time        = input32->mi.time;
+                input.mi.dwExtraInfo = input32->mi.dwExtraInfo;
+                break;
+            case INPUT_KEYBOARD:
+                input.ki.wVk         = input32->ki.wVk;
+                input.ki.wScan       = input32->ki.wScan;
+                input.ki.dwFlags     = input32->ki.dwFlags;
+                input.ki.time        = input32->ki.time;
+                input.ki.dwExtraInfo = input32->ki.dwExtraInfo;
+                break;
+            case INPUT_HARDWARE:
+                input.hi = input32->hi;
+                break;
+            }
 
             params.flags = params32->flags;
-            params.input = UlongToPtr( params32->input );
+            params.input = &input;
             params.lparam = params32->lparam;
             return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, code );
         }

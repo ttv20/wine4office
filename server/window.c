@@ -21,7 +21,13 @@
 #include "config.h"
 
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
+#include <unistd.h>
+#ifdef HAVE_SYS_RANDOM_H
+#include <sys/random.h>
+#endif
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -57,6 +63,48 @@ enum property_type
 };
 
 
+#define MAX_DCOMP_IME_OFFERS 256
+
+struct dcomp_ime_relationship
+{
+    struct list      entry;
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+    unsigned __int64 generation;
+    unsigned int     offer_refcount;
+    struct process  *presentation_process;
+    struct process  *browser_process;
+    struct window   *presentation;
+    struct window   *root;
+    struct window   *input;
+    struct window   *target;
+    user_handle_t    presentation_root;
+    user_handle_t    presentation_target;
+};
+
+struct dcomp_task_relationship
+{
+    struct list      entry;
+    unsigned __int64 generation;
+    unsigned int     flags;
+    struct window   *presentation;
+    struct window   *root;
+    struct window   *target;
+};
+
+static struct list dcomp_ime_relationships = LIST_INIT( dcomp_ime_relationships );
+static struct list dcomp_task_relationships = LIST_INIT( dcomp_task_relationships );
+static unsigned __int64 dcomp_ime_generation;
+static unsigned __int64 dcomp_task_generation;
+
+static void clear_dcomp_ime_properties( struct dcomp_ime_relationship *relationship );
+static void republish_dcomp_ime_root( struct window *root );
+static void republish_dcomp_ime_input( struct window *input );
+static void republish_dcomp_ime_presentation( struct window *presentation );
+static void republish_dcomp_task_root( struct window *root );
+static void republish_dcomp_task_target( struct window *target );
+static void cleanup_dcomp_task_relationships( struct window *win );
+
 struct window
 {
     struct object    obj;             /* object header */
@@ -86,6 +134,7 @@ struct window
     unsigned int     is_layered : 1;  /* has layered info been set? */
     unsigned int     is_orphan : 1;   /* is window orphaned */
     unsigned int     set_foreground : 1;/* has window been foreground once */
+    unsigned int     parent_owner_authorized : 1; /* parent owner established this edge */
     unsigned int     color_key;       /* color key for a layered window */
     unsigned int     alpha;           /* alpha value for a layered window */
     unsigned int     layered_flags;   /* flags for a layered window */
@@ -172,6 +221,308 @@ static inline struct window *get_window( user_handle_t handle )
     struct window *ret = get_user_object( handle, NTUSER_OBJ_WINDOW );
     if (!ret) set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
     return ret;
+}
+
+static int fill_random_bytes( void *buffer, size_t size )
+{
+    unsigned char *ptr = buffer;
+    int fd;
+
+#ifdef HAVE_GETRANDOM
+    while (size)
+    {
+        ssize_t ret;
+
+        do ret = getrandom( ptr, size, 0 );
+        while (ret == -1 && errno == EINTR);
+        if (ret == -1)
+        {
+            if (errno == ENOSYS) break;
+            return 0;
+        }
+        if (!ret) return 0;
+        ptr += ret;
+        size -= ret;
+    }
+    if (!size) return 1;
+#endif
+
+    if ((fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) == -1) return 0;
+    while (size)
+    {
+        ssize_t ret;
+
+        do ret = read( fd, ptr, size );
+        while (ret == -1 && errno == EINTR);
+        if (ret <= 0)
+        {
+            close( fd );
+            return 0;
+        }
+        ptr += ret;
+        size -= ret;
+    }
+    close( fd );
+    return 1;
+}
+
+static struct dcomp_ime_relationship *find_dcomp_ime_relationship( unsigned __int64 token_low,
+                                                                  unsigned __int64 token_high )
+{
+    struct dcomp_ime_relationship *relationship;
+
+    if (!token_low && !token_high) return NULL;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->token_low == token_low && relationship->token_high == token_high)
+            return relationship;
+    return NULL;
+}
+
+static int generate_dcomp_ime_token( struct dcomp_ime_relationship *relationship )
+{
+    struct dcomp_ime_relationship *collision;
+
+    do
+    {
+        if (!fill_random_bytes( &relationship->token_low,
+                                sizeof(relationship->token_low) + sizeof(relationship->token_high) ))
+        {
+            relationship->token_low = relationship->token_high = 0;
+            set_error( STATUS_UNSUCCESSFUL );
+            return 0;
+        }
+        collision = find_dcomp_ime_relationship( relationship->token_low, relationship->token_high );
+    }
+    while ((!relationship->token_low && !relationship->token_high) ||
+           (collision && collision != relationship));
+    return 1;
+}
+
+static struct dcomp_ime_relationship *find_dcomp_ime_presentation( struct window *presentation )
+{
+    struct dcomp_ime_relationship *relationship;
+
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->presentation == presentation) return relationship;
+    return NULL;
+}
+
+static void deactivate_dcomp_ime_relationship( struct dcomp_ime_relationship *relationship )
+{
+    struct window *root = relationship->root, *input = relationship->input;
+
+    clear_dcomp_ime_properties( relationship );
+    relationship->root = NULL;
+    relationship->input = NULL;
+    relationship->target = NULL;
+    relationship->presentation_root = 0;
+    relationship->presentation_target = 0;
+    relationship->generation = 0;
+    if (root) republish_dcomp_ime_root( root );
+    if (input) republish_dcomp_ime_input( input );
+    republish_dcomp_ime_presentation( relationship->presentation );
+}
+
+static void release_dcomp_ime_browser( struct dcomp_ime_relationship *relationship )
+{
+    deactivate_dcomp_ime_relationship( relationship );
+    if (!relationship->browser_process) return;
+    release_object( relationship->browser_process );
+    relationship->browser_process = NULL;
+}
+
+static void free_dcomp_ime_relationship( struct dcomp_ime_relationship *relationship )
+{
+    release_dcomp_ime_browser( relationship );
+    list_remove( &relationship->entry );
+    release_object( relationship->presentation_process );
+    free( relationship );
+}
+
+static int window_is_dcomp_ime_ancestor( struct window *win,
+                                        struct dcomp_ime_relationship *relationship )
+{
+    struct window *ancestor;
+
+    for (ancestor = relationship->input; ancestor; ancestor = ancestor->parent)
+    {
+        if (ancestor == win) return 1;
+        if (ancestor == relationship->root) break;
+    }
+    return 0;
+}
+
+static void invalidate_dcomp_ime_relationships( struct window *win )
+{
+    struct dcomp_ime_relationship *relationship;
+
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->target == win || window_is_dcomp_ime_ancestor( win, relationship ))
+            deactivate_dcomp_ime_relationship( relationship );
+}
+
+static int window_is_dcomp_task_ancestor( struct window *win,
+                                          struct dcomp_task_relationship *relationship )
+{
+    struct window *ancestor;
+
+    for (ancestor = relationship->target; ancestor; ancestor = ancestor->parent)
+    {
+        if (ancestor == win) return 1;
+        if (ancestor == relationship->root) break;
+    }
+    return 0;
+}
+
+static void remove_dcomp_task_relationship( struct dcomp_task_relationship *relationship )
+{
+    struct window *root = relationship->root, *target = relationship->target;
+
+    list_remove( &relationship->entry );
+    free( relationship );
+    republish_dcomp_task_target( target );
+    republish_dcomp_task_root( root );
+}
+
+static void invalidate_dcomp_task_relationships( struct window *win )
+{
+    struct dcomp_task_relationship *relationship, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( relationship, next, &dcomp_task_relationships,
+                              struct dcomp_task_relationship, entry )
+        if (window_is_dcomp_task_ancestor( win, relationship ))
+            remove_dcomp_task_relationship( relationship );
+}
+
+static void cleanup_dcomp_task_presentation( struct window *presentation )
+{
+    struct dcomp_task_relationship *relationship, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( relationship, next, &dcomp_task_relationships,
+                              struct dcomp_task_relationship, entry )
+        if (relationship->presentation == presentation)
+            remove_dcomp_task_relationship( relationship );
+}
+
+static void cleanup_dcomp_ime_relationships( struct window *win )
+{
+    struct dcomp_ime_relationship *relationship, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( relationship, next, &dcomp_ime_relationships,
+                              struct dcomp_ime_relationship, entry )
+    {
+        if (relationship->presentation == win)
+        {
+            clear_dcomp_key_owners( win->desktop, win->handle );
+            free_dcomp_ime_relationship( relationship );
+        }
+        else if (relationship->target == win || window_is_dcomp_ime_ancestor( win, relationship ))
+            deactivate_dcomp_ime_relationship( relationship );
+    }
+}
+
+void cleanup_dcomp_ime_process( struct process *process )
+{
+    struct dcomp_ime_relationship *relationship, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( relationship, next, &dcomp_ime_relationships,
+                              struct dcomp_ime_relationship, entry )
+    {
+        if (relationship->presentation_process == process)
+        {
+            clear_dcomp_key_owners( relationship->presentation->desktop,
+                                    relationship->presentation->handle );
+            free_dcomp_ime_relationship( relationship );
+        }
+        else if (relationship->browser_process == process)
+            release_dcomp_ime_browser( relationship );
+    }
+}
+
+user_handle_t get_dcomp_keyboard_presentation( user_handle_t destination_handle,
+                                                struct process *sender )
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *destination = get_user_object( destination_handle, NTUSER_OBJ_WINDOW );
+
+    if (!destination || !sender) return 0;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->input == destination && relationship->presentation_process == sender)
+            return relationship->presentation->handle;
+    return 0;
+}
+
+int is_dcomp_presentation_owner( user_handle_t presentation_handle, struct process *sender )
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *presentation = get_user_object( presentation_handle, NTUSER_OBJ_WINDOW );
+
+    if (!presentation || !sender) return 0;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->presentation == presentation && relationship->presentation_process == sender)
+            return 1;
+    return 0;
+}
+
+int is_dcomp_presentation_active( user_handle_t presentation_handle )
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *presentation = get_user_object( presentation_handle, NTUSER_OBJ_WINDOW );
+
+    if (!presentation) return 0;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->presentation == presentation && relationship->offer_refcount) return 1;
+    return 0;
+}
+
+int is_dcomp_keyboard_input( user_handle_t presentation_handle, user_handle_t destination_handle )
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *presentation = get_user_object( presentation_handle, NTUSER_OBJ_WINDOW );
+    struct window *destination = get_user_object( destination_handle, NTUSER_OBJ_WINDOW );
+
+    if (!presentation || !destination) return 0;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->presentation == presentation && relationship->input == destination)
+            return 1;
+    return 0;
+}
+
+unsigned int get_dcomp_ime_message_authorization( user_handle_t source_handle,
+                                                   user_handle_t destination_handle,
+                                                   struct process *sender )
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *source = get_user_object( source_handle, NTUSER_OBJ_WINDOW );
+    struct window *destination = get_user_object( destination_handle, NTUSER_OBJ_WINDOW );
+
+    if (!source || !destination || !sender) return 0;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+    {
+        if (!relationship->browser_process) continue;
+        if (relationship->presentation == source && relationship->input == destination &&
+            relationship->presentation_process == sender)
+            return DCOMP_IME_AUTHORIZE_UPDATE;
+        if (relationship->root == source && relationship->presentation == destination &&
+            relationship->browser_process == sender)
+            return DCOMP_IME_AUTHORIZE_SET_RECT;
+    }
+    return 0;
+}
+
+unsigned int validate_dcomp_ime_message( user_handle_t source_handle,
+                                         user_handle_t destination_handle,
+                                         struct process *sender,
+                                         struct thread *receiver )
+{
+    struct thread *window_thread;
+    unsigned int authorization;
+
+    if (!receiver || !(window_thread = get_window_thread( destination_handle ))) return 0;
+    authorization = window_thread == receiver ?
+            get_dcomp_ime_message_authorization( source_handle, destination_handle, sender ) : 0;
+    release_object( window_thread );
+    return authorization;
 }
 
 /* check if window is the desktop */
@@ -411,6 +762,9 @@ static int set_parent_window( struct window *win, struct window *parent )
         }
     }
 
+    invalidate_dcomp_ime_relationships( win );
+    invalidate_dcomp_task_relationships( win );
+
     if (parent)
     {
         if (win->parent) release_object( win->parent );
@@ -547,6 +901,472 @@ static lparam_t get_property( struct window *win, atom_t atom )
     return 0;
 }
 
+static const WCHAR dcomp_inputW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                     'i','n','p','u','t','_','w','i','n','d','o','w'};
+static const WCHAR dcomp_keyboardW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                        'k','e','y','b','o','a','r','d','_','w','i','n','d','o','w'};
+static const WCHAR direct_inputW[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+                                      'h','a','r','d','w','a','r','e','_','i','n','p','u','t'};
+static const WCHAR direct_ownerW[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
+                                      'h','a','r','d','w','a','r','e','_','i','n','p','u','t','_',
+                                      'o','w','n','e','r'};
+static const WCHAR base_presentationW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                           'b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n'};
+static const WCHAR task_delegatedW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                        't','a','s','k','_','d','e','l','e','g','a','t','e','d'};
+static const WCHAR task_targetW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                     't','a','s','k','_','d','e','l','e','g','a','t','e','d','_',
+                                     't','a','r','g','e','t'};
+
+enum dcomp_property_id
+{
+    DCOMP_PROPERTY_INPUT,
+    DCOMP_PROPERTY_KEYBOARD,
+    DCOMP_PROPERTY_DIRECT_INPUT,
+    DCOMP_PROPERTY_DIRECT_OWNER,
+    DCOMP_PROPERTY_BASE_PRESENTATION,
+    DCOMP_PROPERTY_TASK_DELEGATED,
+    DCOMP_PROPERTY_TASK_TARGET,
+    DCOMP_PROPERTY_COUNT,
+};
+
+static const struct
+{
+    const WCHAR *name;
+    data_size_t size;
+} dcomp_property_names[DCOMP_PROPERTY_COUNT] =
+{
+    {dcomp_inputW, sizeof(dcomp_inputW)},
+    {dcomp_keyboardW, sizeof(dcomp_keyboardW)},
+    {direct_inputW, sizeof(direct_inputW)},
+    {direct_ownerW, sizeof(direct_ownerW)},
+    {base_presentationW, sizeof(base_presentationW)},
+    {task_delegatedW, sizeof(task_delegatedW)},
+    {task_targetW, sizeof(task_targetW)},
+};
+
+static atom_t dcomp_property_atoms[DCOMP_PROPERTY_COUNT];
+
+static atom_t get_dcomp_property_atom( const WCHAR *name, data_size_t size, int create )
+{
+    const struct unicode_str str = {name, size};
+    struct atom_table *table = get_global_atom_table();
+
+    return create ? add_atom( table, &str ) : find_atom( table, &str );
+}
+
+static int init_dcomp_property_atoms(void)
+{
+    unsigned int i;
+
+    for (i = 0; i < DCOMP_PROPERTY_COUNT; i++)
+    {
+        if (dcomp_property_atoms[i]) continue;
+        if (!(dcomp_property_atoms[i] = get_dcomp_property_atom( dcomp_property_names[i].name,
+                                                                 dcomp_property_names[i].size, 1 )))
+            return 0;
+    }
+    return 1;
+}
+
+static int reserve_dcomp_properties( struct window *win, const enum dcomp_property_id *ids,
+                                     unsigned int count )
+{
+    struct property *new_properties;
+    unsigned int active = 0, missing = 0, i, j;
+    int new_alloc;
+
+    for (i = 0; i < win->prop_inuse; i++)
+        if (win->properties[i].type != PROP_TYPE_FREE) active++;
+
+    for (i = 0; i < count; i++)
+    {
+        for (j = 0; j < win->prop_inuse; j++)
+            if (win->properties[j].type != PROP_TYPE_FREE &&
+                win->properties[j].atom == dcomp_property_atoms[ids[i]]) break;
+        if (j == win->prop_inuse) missing++;
+    }
+    if (active + missing <= win->prop_alloc) return 1;
+
+    new_alloc = win->prop_alloc;
+    while (active + missing > new_alloc) new_alloc += 16;
+    if (!(new_properties = realloc( win->properties, sizeof(*new_properties) * new_alloc )))
+    {
+        set_error( STATUS_NO_MEMORY );
+        return 0;
+    }
+    win->properties = new_properties;
+    win->prop_alloc = new_alloc;
+    return 1;
+}
+
+static void set_reserved_dcomp_property( struct window *win, enum dcomp_property_id id,
+                                         lparam_t value )
+{
+    struct atom_table *table = get_global_atom_table();
+    atom_t atom = dcomp_property_atoms[id];
+    int free_slot = -1, i;
+
+    for (i = 0; i < win->prop_inuse; i++)
+    {
+        struct property *property = win->properties + i;
+
+        if (property->type == PROP_TYPE_FREE)
+        {
+            if (free_slot == -1) free_slot = i;
+            continue;
+        }
+        if (property->atom != atom) continue;
+        if (property->type != PROP_TYPE_STRING) grab_atom( table, atom );
+        property->type = PROP_TYPE_STRING;
+        property->data = value;
+        return;
+    }
+
+    if (free_slot == -1)
+    {
+        assert( win->prop_inuse < win->prop_alloc );
+        free_slot = win->prop_inuse++;
+    }
+    grab_atom( table, atom );
+    win->properties[free_slot].atom = atom;
+    win->properties[free_slot].type = PROP_TYPE_STRING;
+    win->properties[free_slot].data = value;
+}
+
+static void remove_reserved_dcomp_property( struct window *win, enum dcomp_property_id id )
+{
+    atom_t atom = dcomp_property_atoms[id];
+
+    if (win && atom) remove_property( win, atom );
+}
+
+static lparam_t get_dcomp_property( struct window *win, const WCHAR *name, data_size_t size )
+{
+    atom_t atom;
+    lparam_t value = 0;
+
+    if (win && (atom = get_dcomp_property_atom( name, size, 0 ))) value = get_property( win, atom );
+    clear_error();
+    return value;
+}
+
+static void remove_dcomp_property( struct window *win, const WCHAR *name, data_size_t size,
+                                   lparam_t value )
+{
+    atom_t atom;
+
+    if (win && (atom = get_dcomp_property_atom( name, size, 0 )) &&
+        get_property( win, atom ) == value)
+        remove_property( win, atom );
+    clear_error();
+}
+
+static int prepare_dcomp_ime_publication( struct window *presentation, struct window *root,
+                                          struct window *input )
+{
+    static const enum dcomp_property_id presentation_ids[] =
+        {DCOMP_PROPERTY_INPUT, DCOMP_PROPERTY_KEYBOARD};
+    static const enum dcomp_property_id input_ids[] =
+        {DCOMP_PROPERTY_DIRECT_INPUT, DCOMP_PROPERTY_DIRECT_OWNER};
+
+    return init_dcomp_property_atoms() &&
+           reserve_dcomp_properties( presentation, presentation_ids, ARRAY_SIZE(presentation_ids) ) &&
+           reserve_dcomp_properties( root, presentation_ids, ARRAY_SIZE(presentation_ids) ) &&
+           reserve_dcomp_properties( input, input_ids, ARRAY_SIZE(input_ids) );
+}
+
+static void clear_dcomp_ime_properties( struct dcomp_ime_relationship *relationship )
+{
+    lparam_t input, owner, presentation;
+    unsigned int error = get_error();
+
+    if (!relationship->input) return;
+    input = relationship->input->handle;
+    presentation = relationship->presentation->handle;
+    owner = get_dcomp_property( relationship->input, direct_ownerW, sizeof(direct_ownerW) );
+    remove_dcomp_property( relationship->presentation, dcomp_inputW, sizeof(dcomp_inputW), input );
+    remove_dcomp_property( relationship->presentation, dcomp_keyboardW, sizeof(dcomp_keyboardW), input );
+    if (!owner || owner == presentation)
+    {
+        remove_dcomp_property( relationship->root, dcomp_inputW, sizeof(dcomp_inputW), input );
+        remove_dcomp_property( relationship->root, dcomp_keyboardW, sizeof(dcomp_keyboardW), input );
+        remove_dcomp_property( relationship->input, direct_inputW, sizeof(direct_inputW), 0x57444952 );
+        remove_dcomp_property( relationship->input, direct_ownerW, sizeof(direct_ownerW), presentation );
+    }
+    set_error( error );
+}
+
+static struct dcomp_ime_relationship *find_dcomp_root_winner( struct window *root )
+{
+    struct dcomp_ime_relationship *rel, *winner = NULL;
+
+    LIST_FOR_EACH_ENTRY( rel, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (rel->root == root && rel->generation && (!winner || rel->generation > winner->generation))
+            winner = rel;
+    return winner;
+}
+
+static struct dcomp_ime_relationship *find_dcomp_input_winner( struct window *input )
+{
+    struct dcomp_ime_relationship *rel, *winner = NULL;
+
+    LIST_FOR_EACH_ENTRY( rel, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (rel->input == input && rel->generation && (!winner || rel->generation > winner->generation))
+            winner = rel;
+    return winner;
+}
+
+static struct dcomp_ime_relationship *find_dcomp_presentation_winner( struct window *presentation )
+{
+    struct dcomp_ime_relationship *rel, *winner = NULL;
+
+    LIST_FOR_EACH_ENTRY( rel, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (rel->presentation == presentation && rel->generation &&
+            (!winner || rel->generation > winner->generation))
+            winner = rel;
+    return winner;
+}
+
+static void republish_dcomp_ime_root( struct window *root )
+{
+    struct dcomp_ime_relationship *winner = find_dcomp_root_winner( root );
+
+    remove_reserved_dcomp_property( root, DCOMP_PROPERTY_INPUT );
+    remove_reserved_dcomp_property( root, DCOMP_PROPERTY_KEYBOARD );
+    if (!winner) return;
+    set_reserved_dcomp_property( root, DCOMP_PROPERTY_INPUT, winner->input->handle );
+    set_reserved_dcomp_property( root, DCOMP_PROPERTY_KEYBOARD, winner->input->handle );
+}
+
+static void republish_dcomp_ime_input( struct window *input )
+{
+    struct dcomp_ime_relationship *winner = find_dcomp_input_winner( input );
+
+    remove_reserved_dcomp_property( input, DCOMP_PROPERTY_DIRECT_INPUT );
+    remove_reserved_dcomp_property( input, DCOMP_PROPERTY_DIRECT_OWNER );
+    if (!winner) return;
+    set_reserved_dcomp_property( input, DCOMP_PROPERTY_DIRECT_INPUT, 0x57444952 );
+    set_reserved_dcomp_property( input, DCOMP_PROPERTY_DIRECT_OWNER, winner->presentation->handle );
+}
+
+static void republish_dcomp_ime_presentation( struct window *presentation )
+{
+    struct dcomp_ime_relationship *winner = find_dcomp_presentation_winner( presentation );
+
+    remove_reserved_dcomp_property( presentation, DCOMP_PROPERTY_INPUT );
+    remove_reserved_dcomp_property( presentation, DCOMP_PROPERTY_KEYBOARD );
+    if (!winner) return;
+    set_reserved_dcomp_property( presentation, DCOMP_PROPERTY_INPUT, winner->input->handle );
+    set_reserved_dcomp_property( presentation, DCOMP_PROPERTY_KEYBOARD, winner->input->handle );
+}
+
+static struct dcomp_task_relationship *find_dcomp_task_winner( struct window *window,
+                                                               unsigned int flag )
+{
+    struct dcomp_task_relationship *rel, *winner = NULL;
+
+    LIST_FOR_EACH_ENTRY( rel, &dcomp_task_relationships, struct dcomp_task_relationship, entry )
+    {
+        if (!(rel->flags & flag)) continue;
+        if ((flag == DCOMP_TASK_DELEGATE_BASE && rel->target != window) ||
+            (flag == DCOMP_TASK_DELEGATE_TASK && rel->root != window)) continue;
+        if (!winner || rel->generation > winner->generation) winner = rel;
+    }
+    return winner;
+}
+
+static void republish_dcomp_task_target( struct window *target )
+{
+    struct dcomp_task_relationship *winner =
+        find_dcomp_task_winner( target, DCOMP_TASK_DELEGATE_BASE );
+
+    remove_reserved_dcomp_property( target, DCOMP_PROPERTY_BASE_PRESENTATION );
+    if (winner)
+        set_reserved_dcomp_property( target, DCOMP_PROPERTY_BASE_PRESENTATION,
+                                     winner->presentation->handle );
+}
+
+static void republish_dcomp_task_root( struct window *root )
+{
+    struct dcomp_task_relationship *winner =
+        find_dcomp_task_winner( root, DCOMP_TASK_DELEGATE_TASK );
+
+    remove_reserved_dcomp_property( root, DCOMP_PROPERTY_TASK_DELEGATED );
+    remove_reserved_dcomp_property( root, DCOMP_PROPERTY_TASK_TARGET );
+    if (!winner) return;
+    set_reserved_dcomp_property( root, DCOMP_PROPERTY_TASK_DELEGATED,
+                                 winner->presentation->handle );
+    set_reserved_dcomp_property( root, DCOMP_PROPERTY_TASK_TARGET, winner->target->handle );
+}
+
+static int prepare_dcomp_task_publication( struct window *root, struct window *target,
+                                           unsigned int flags )
+{
+    static const enum dcomp_property_id base_id[] = {DCOMP_PROPERTY_BASE_PRESENTATION};
+    static const enum dcomp_property_id task_ids[] =
+        {DCOMP_PROPERTY_TASK_DELEGATED, DCOMP_PROPERTY_TASK_TARGET};
+
+    if (!init_dcomp_property_atoms()) return 0;
+    if ((flags & DCOMP_TASK_DELEGATE_BASE) &&
+        !reserve_dcomp_properties( target, base_id, ARRAY_SIZE(base_id) )) return 0;
+    if ((flags & DCOMP_TASK_DELEGATE_TASK) &&
+        !reserve_dcomp_properties( root, task_ids, ARRAY_SIZE(task_ids) )) return 0;
+    return 1;
+}
+
+static void cleanup_dcomp_task_relationships( struct window *win )
+{
+    struct dcomp_task_relationship *rel, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( rel, next, &dcomp_task_relationships,
+                              struct dcomp_task_relationship, entry )
+    {
+        if (rel->presentation != win && rel->root != win && rel->target != win) continue;
+        remove_dcomp_task_relationship( rel );
+    }
+}
+
+static int get_dcomp_task_ancestry( struct window *target, struct window **input,
+                                    struct window **root )
+{
+    struct window *child = target, *parent;
+
+    *input = *root = NULL;
+    while ((parent = child->parent) && !is_desktop_window( parent ))
+    {
+        if (parent->desktop != target->desktop || !child->thread || !parent->thread ||
+            (child->thread->process != parent->thread->process &&
+             !child->parent_owner_authorized)) return 0;
+        if (!*input) *input = parent;
+        *root = parent;
+        child = parent;
+    }
+    return *input != NULL;
+}
+
+DECL_HANDLER(update_dcomp_task_delegate)
+{
+    const unsigned int valid_flags = DCOMP_TASK_DELEGATE_BASE | DCOMP_TASK_DELEGATE_TASK;
+    struct dcomp_task_relationship *task_rel = NULL, *new_task_rel = NULL, *rel;
+    struct dcomp_ime_relationship *relationship;
+    struct window *presentation, *target = NULL, *input = NULL, *root = NULL;
+    struct window *old_task_root = NULL, *old_task_target = NULL;
+    struct window *old_ime_root = NULL, *old_ime_input = NULL;
+    int browser_binding, presentation_binding, input_binding;
+
+    if (req->flags & ~valid_flags || (!req->target && req->flags))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(relationship = find_dcomp_ime_relationship( req->token_low, req->token_high )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (!(presentation = get_window( req->presentation ))) return;
+    if (relationship->presentation != presentation)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    browser_binding = relationship->presentation_process != current->process;
+    presentation_binding = !browser_binding && !relationship->browser_process;
+    input_binding = browser_binding || presentation_binding;
+    if (browser_binding && relationship->browser_process &&
+        relationship->browser_process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
+    LIST_FOR_EACH_ENTRY( rel, &dcomp_task_relationships, struct dcomp_task_relationship, entry )
+        if (rel->presentation == presentation)
+        {
+            task_rel = rel;
+            break;
+        }
+
+    if (req->target)
+    {
+        if (!(target = get_window( req->target ))) return;
+        if (!target->thread || target->thread->process != current->process ||
+            !get_dcomp_task_ancestry( target, &input, &root ) ||
+            root->desktop != presentation->desktop)
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+        if (input_binding && !prepare_dcomp_ime_publication( presentation, root, input )) return;
+        if (req->flags && !prepare_dcomp_task_publication( root, target, req->flags )) return;
+        if (req->flags && (!task_rel || task_rel->root != root || task_rel->target != target) &&
+            !(new_task_rel = mem_alloc( sizeof(*new_task_rel) ))) return;
+    }
+
+    if (task_rel)
+    {
+        old_task_root = task_rel->root;
+        old_task_target = task_rel->target;
+    }
+    if (!req->target || !req->flags || new_task_rel)
+    {
+        if (task_rel)
+        {
+            list_remove( &task_rel->entry );
+            free( task_rel );
+            task_rel = NULL;
+        }
+        if (new_task_rel)
+        {
+            new_task_rel->generation = ++dcomp_task_generation;
+            new_task_rel->flags = req->flags;
+            new_task_rel->presentation = presentation;
+            new_task_rel->root = root;
+            new_task_rel->target = target;
+            list_add_tail( &dcomp_task_relationships, &new_task_rel->entry );
+            task_rel = new_task_rel;
+        }
+    }
+    else if (task_rel)
+    {
+        task_rel->flags = req->flags;
+        task_rel->generation = ++dcomp_task_generation;
+    }
+
+    if (!req->target)
+    {
+        deactivate_dcomp_ime_relationship( relationship );
+        if (old_task_target) republish_dcomp_task_target( old_task_target );
+        if (old_task_root) republish_dcomp_task_root( old_task_root );
+        return;
+    }
+
+    if (input_binding)
+    {
+        old_ime_root = relationship->root;
+        old_ime_input = relationship->input;
+        relationship->root = root;
+        relationship->input = input;
+        relationship->target = target;
+        relationship->presentation_root = root->handle;
+        relationship->presentation_target = target->handle;
+        relationship->generation = ++dcomp_ime_generation;
+        if (browser_binding && !relationship->browser_process)
+            relationship->browser_process = (struct process *)grab_object( current->process );
+
+        if (old_ime_root && old_ime_root != root) republish_dcomp_ime_root( old_ime_root );
+        republish_dcomp_ime_root( root );
+        if (old_ime_input && old_ime_input != input) republish_dcomp_ime_input( old_ime_input );
+        republish_dcomp_ime_input( input );
+        republish_dcomp_ime_presentation( presentation );
+    }
+    if (old_task_target && old_task_target != target) republish_dcomp_task_target( old_task_target );
+    republish_dcomp_task_target( target );
+    if (old_task_root && old_task_root != root) republish_dcomp_task_root( old_task_root );
+    republish_dcomp_task_root( root );
+}
+
 /* destroy all properties of a window */
 static inline void destroy_properties( struct window *win )
 {
@@ -664,6 +1484,8 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->is_layered     = 0;
     win->is_orphan      = 0;
     win->set_foreground = 0;
+    win->parent_owner_authorized = parent && parent->thread &&
+                                   parent->thread->process == current->process;
     win->text           = NULL;
     win->text_len       = 0;
     win->paint_flags    = 0;
@@ -1011,11 +1833,10 @@ static struct window *child_window_from_point( struct window *parent, int x, int
 
 static int window_has_direct_hardware_input( struct window *win )
 {
-    int i;
+    struct dcomp_ime_relationship *relationship;
 
-    for (i = 0; i < win->prop_inuse; i++)
-        if (win->properties[i].type != PROP_TYPE_FREE &&
-            win->properties[i].data == 0x57444952) return 1;
+    LIST_FOR_EACH_ENTRY( relationship, &dcomp_ime_relationships, struct dcomp_ime_relationship, entry )
+        if (relationship->input == win) return 1;
     return 0;
 }
 
@@ -2208,6 +3029,8 @@ void free_window_handle( struct window *win )
     if (win == win->desktop->taskman_window) win->desktop->taskman_window = NULL;
     free_hotkeys( win->desktop, win->handle );
     cleanup_clipboard_window( win->desktop, win->handle );
+    cleanup_dcomp_ime_relationships( win );
+    cleanup_dcomp_task_relationships( win );
     destroy_properties( win );
     if (is_desktop_window(win))
     {
@@ -2356,18 +3179,26 @@ DECL_HANDLER(set_window_fnid)
 DECL_HANDLER(set_parent)
 {
     struct window *win, *parent = NULL;
+    int parent_owner_authorized;
 
     if (!(win = get_window( req->handle ))) return;
     if (req->parent && !(parent = get_window( req->parent ))) return;
+    parent_owner_authorized = parent == win->parent && win->parent_owner_authorized;
 
     if (is_desktop_window(win) || is_orphan_window( win ) || (parent && is_orphan_window( parent )))
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
+    if (parent && parent->thread)
+        parent_owner_authorized = parent_owner_authorized ||
+                parent->thread->process == current->process ||
+                is_current_set_parent_message( win->handle, parent->handle,
+                                               parent->thread->process );
     reply->old_parent  = win->parent->handle;
     reply->full_parent = parent ? parent->handle : 0;
-    set_parent_window( win, parent );
+    if (set_parent_window( win, parent ))
+        win->parent_owner_authorized = parent_owner_authorized;
 }
 
 
@@ -2387,6 +3218,140 @@ DECL_HANDLER(destroy_window)
         else set_error( STATUS_ACCESS_DENIED );
     }
 }
+DECL_HANDLER(create_dcomp_ime_offer)
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *presentation;
+
+    reply->token_low = reply->token_high = 0;
+    if (!(presentation = get_window( req->presentation ))) return;
+    if (!presentation->thread || presentation->thread->process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if ((relationship = find_dcomp_ime_presentation( presentation )))
+    {
+        if (!relationship->offer_refcount)
+        {
+            if (!generate_dcomp_ime_token( relationship )) return;
+            relationship->offer_refcount = 1;
+        }
+        else
+        {
+            if (relationship->offer_refcount == MAX_DCOMP_IME_OFFERS)
+            {
+                set_error( STATUS_INSUFFICIENT_RESOURCES );
+                return;
+            }
+            relationship->offer_refcount++;
+        }
+        reply->token_low = relationship->token_low;
+        reply->token_high = relationship->token_high;
+        return;
+    }
+    if (!(relationship = mem_alloc( sizeof(*relationship) ))) return;
+    relationship->token_low = relationship->token_high = 0;
+    if (!generate_dcomp_ime_token( relationship ))
+    {
+        free( relationship );
+        return;
+    }
+
+    relationship->generation = 0;
+    relationship->offer_refcount = 1;
+    relationship->presentation_process = (struct process *)grab_object( current->process );
+    relationship->browser_process = NULL;
+    relationship->presentation = presentation;
+    relationship->root = NULL;
+    relationship->input = NULL;
+    relationship->target = NULL;
+    relationship->presentation_root = 0;
+    relationship->presentation_target = 0;
+    list_add_tail( &dcomp_ime_relationships, &relationship->entry );
+    reply->token_low = relationship->token_low;
+    reply->token_high = relationship->token_high;
+}
+
+DECL_HANDLER(set_dcomp_ime_relationship)
+{
+    struct dcomp_ime_relationship *relationship;
+    struct window *target, *input, *root, *old_root, *old_input;
+
+    if (!(relationship = find_dcomp_ime_relationship( req->token_low, req->token_high )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (relationship->presentation_process == current->process ||
+        (relationship->browser_process && relationship->browser_process != current->process))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (!req->target)
+    {
+        deactivate_dcomp_ime_relationship( relationship );
+        return;
+    }
+    if (!(target = get_window( req->target )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (!target->thread || target->thread->process != current->process ||
+        !(input = target->parent) || is_desktop_window( input ) ||
+        !input->thread || input->thread->process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    root = input;
+    while (root->parent && !is_desktop_window( root->parent )) root = root->parent;
+    if (!root->thread || root->thread->process != current->process ||
+        root->desktop != relationship->presentation->desktop)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (!prepare_dcomp_ime_publication( relationship->presentation, root, input )) return;
+
+    old_root = relationship->root;
+    old_input = relationship->input;
+    relationship->root = root;
+    relationship->input = input;
+    relationship->target = target;
+    relationship->presentation_root = root->handle;
+    relationship->presentation_target = target->handle;
+    relationship->generation = ++dcomp_ime_generation;
+    if (!relationship->browser_process)
+        relationship->browser_process = (struct process *)grab_object( current->process );
+
+    if (old_root && old_root != root) republish_dcomp_ime_root( old_root );
+    republish_dcomp_ime_root( root );
+    if (old_input && old_input != input) republish_dcomp_ime_input( old_input );
+    republish_dcomp_ime_input( input );
+    republish_dcomp_ime_presentation( relationship->presentation );
+}
+
+DECL_HANDLER(revoke_dcomp_ime_offer)
+{
+    struct dcomp_ime_relationship *relationship;
+
+    if (!(relationship = find_dcomp_ime_relationship( req->token_low, req->token_high ))) return;
+    if (relationship->presentation_process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (--relationship->offer_refcount) return;
+    clear_dcomp_key_owners( relationship->presentation->desktop,
+                            relationship->presentation->handle );
+    cleanup_dcomp_task_presentation( relationship->presentation );
+    release_dcomp_ime_browser( relationship );
+    relationship->token_low = relationship->token_high = 0;
+}
+
 /* Update a helper-owned broadcast exclusion. */
 DECL_HANDLER(update_window_broadcast_exclusion)
 {
@@ -3242,24 +4207,44 @@ DECL_HANDLER(redraw_window)
 }
 
 
+static int is_reserved_dcomp_property( atom_t atom )
+{
+    unsigned int error = get_error();
+    unsigned int i;
+    int found = 0;
+
+    for (i = 0; i < DCOMP_PROPERTY_COUNT; i++)
+    {
+        if (get_dcomp_property_atom( dcomp_property_names[i].name,
+                                     dcomp_property_names[i].size, 0 ) == atom)
+        {
+            found = 1;
+            break;
+        }
+        clear_error();
+    }
+    set_error( error );
+    return found;
+}
+
 /* set a window property */
 DECL_HANDLER(set_window_property)
 {
     struct unicode_str name = get_req_unicode_str();
     struct atom_table *table = get_global_atom_table();
     struct window *win = get_window( req->window );
+    atom_t atom;
 
     if (!win) return;
 
     if (name.len)
     {
-        atom_t atom = add_atom( table, &name );
-        if (atom)
-        {
-            set_property( win, atom, req->data, PROP_TYPE_STRING );
-            release_atom( table, atom );
-        }
+        if (!(atom = add_atom( table, &name ))) return;
+        if (is_reserved_dcomp_property( atom )) set_error( STATUS_ACCESS_DENIED );
+        else set_property( win, atom, req->data, PROP_TYPE_STRING );
+        release_atom( table, atom );
     }
+    else if (is_reserved_dcomp_property( req->atom )) set_error( STATUS_ACCESS_DENIED );
     else set_property( win, req->atom, req->data, PROP_TYPE_ATOM );
 }
 
@@ -3274,7 +4259,8 @@ DECL_HANDLER(remove_window_property)
     if (win)
     {
         atom_t atom = name.len ? find_atom( table, &name ) : req->atom;
-        if (atom) reply->data = remove_property( win, atom );
+        if (atom && is_reserved_dcomp_property( atom )) set_error( STATUS_ACCESS_DENIED );
+        else if (atom) reply->data = remove_property( win, atom );
     }
 }
 

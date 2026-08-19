@@ -47,6 +47,7 @@ typedef unsigned __int64 file_pos_t;
 typedef unsigned __int64 client_ptr_t;
 typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
+typedef unsigned __int64 capability_t;
 typedef client_ptr_t mod_handle_t;
 
 struct request_header
@@ -2499,6 +2500,7 @@ enum message_type
     lparam_t        wparam;    /* parameters */
     lparam_t        lparam;    /* parameters */
     int             type;      /* message type */
+    unsigned int    dcomp_ime_authorization; /* private DComp IME direction */
     int             x;         /* message x position */
     int             y;         /* message y position */
     unsigned int    time;      /* message time */
@@ -2527,6 +2529,13 @@ enum message_type
 @REPLY
     lparam_t        result;    /* message result */
     VARARG(data,bytes);        /* message data for sent messages */
+@END
+
+
+/* Revalidate private DComp authorization for the current sent message */
+@REQ(validate_dcomp_ime_message)
+@REPLY
+    unsigned int    authorization;
 @END
 
 
@@ -2719,6 +2728,42 @@ enum message_type
 @REQ(destroy_window)
     user_handle_t  handle;      /* handle to the window */
 @END
+
+/* Create an IME authorization offer for a DirectComposition presentation window */
+@REQ(create_dcomp_ime_offer)
+    user_handle_t  presentation; /* presentation window owned by the caller */
+@REPLY
+    capability_t token_low;
+    capability_t token_high;
+@END
+
+/* Accept or deactivate a DirectComposition IME authorization offer */
+@REQ(set_dcomp_ime_relationship)
+    capability_t token_low;
+    capability_t token_high;
+    user_handle_t  target;       /* browser target window, zero to deactivate */
+@END
+
+/* Revoke a DirectComposition IME authorization offer */
+@REQ(revoke_dcomp_ime_offer)
+    capability_t token_low;
+    capability_t token_high;
+@END
+
+/* Atomically update a DirectComposition presentation binding. */
+@REQ(update_dcomp_task_delegate)
+    capability_t token_low;
+    capability_t token_high;
+    user_handle_t presentation;
+    user_handle_t target;
+    unsigned int flags;
+@END
+
+#define DCOMP_TASK_DELEGATE_BASE 0x01
+#define DCOMP_TASK_DELEGATE_TASK 0x02
+
+#define DCOMP_IME_AUTHORIZE_UPDATE   0x01
+#define DCOMP_IME_AUTHORIZE_SET_RECT 0x02
 
 /* Update the broadcast exclusion owned by a window */
 @REQ(update_window_broadcast_exclusion)

@@ -1529,6 +1529,7 @@ static void dump_get_message_reply( const struct get_message_reply *req )
     dump_uint64( ", wparam=", &req->wparam );
     dump_uint64( ", lparam=", &req->lparam );
     fprintf( stderr, ", type=%d", req->type );
+    fprintf( stderr, ", dcomp_ime_authorization=%08x", req->dcomp_ime_authorization );
     fprintf( stderr, ", x=%d", req->x );
     fprintf( stderr, ", y=%d", req->y );
     fprintf( stderr, ", time=%08x", req->time );
@@ -1557,6 +1558,15 @@ static void dump_get_message_reply_reply( const struct get_message_reply_reply *
 {
     dump_uint64( " result=", &req->result );
     dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_validate_dcomp_ime_message_request( const struct validate_dcomp_ime_message_request *req )
+{
+}
+
+static void dump_validate_dcomp_ime_message_reply( const struct validate_dcomp_ime_message_reply *req )
+{
+    fprintf( stderr, " authorization=%08x", req->authorization );
 }
 
 static void dump_set_win_timer_request( const struct set_win_timer_request *req )
@@ -1757,6 +1767,39 @@ static void dump_create_window_reply( const struct create_window_reply *req )
 static void dump_destroy_window_request( const struct destroy_window_request *req )
 {
     fprintf( stderr, " handle=%08x", req->handle );
+}
+
+static void dump_create_dcomp_ime_offer_request( const struct create_dcomp_ime_offer_request *req )
+{
+    fprintf( stderr, " presentation=%08x", req->presentation );
+}
+
+static void dump_create_dcomp_ime_offer_reply( const struct create_dcomp_ime_offer_reply *req )
+{
+    fprintf( stderr, " token_low=<redacted>" );
+    fprintf( stderr, ", token_high=<redacted>" );
+}
+
+static void dump_set_dcomp_ime_relationship_request( const struct set_dcomp_ime_relationship_request *req )
+{
+    fprintf( stderr, " token_low=<redacted>" );
+    fprintf( stderr, ", token_high=<redacted>" );
+    fprintf( stderr, ", target=%08x", req->target );
+}
+
+static void dump_revoke_dcomp_ime_offer_request( const struct revoke_dcomp_ime_offer_request *req )
+{
+    fprintf( stderr, " token_low=<redacted>" );
+    fprintf( stderr, ", token_high=<redacted>" );
+}
+
+static void dump_update_dcomp_task_delegate_request( const struct update_dcomp_task_delegate_request *req )
+{
+    fprintf( stderr, " token_low=<redacted>" );
+    fprintf( stderr, ", token_high=<redacted>" );
+    fprintf( stderr, ", presentation=%08x", req->presentation );
+    fprintf( stderr, ", target=%08x", req->target );
+    fprintf( stderr, ", flags=%08x", req->flags );
 }
 
 static void dump_update_window_broadcast_exclusion_request( const struct update_window_broadcast_exclusion_request *req )
@@ -3814,6 +3857,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_reply_message_request,
     (dump_func)dump_accept_hardware_message_request,
     (dump_func)dump_get_message_reply_request,
+    (dump_func)dump_validate_dcomp_ime_message_request,
     (dump_func)dump_set_win_timer_request,
     (dump_func)dump_kill_win_timer_request,
     (dump_func)dump_is_window_hung_request,
@@ -3832,6 +3876,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_named_pipe_info_request,
     (dump_func)dump_create_window_request,
     (dump_func)dump_destroy_window_request,
+    (dump_func)dump_create_dcomp_ime_offer_request,
+    (dump_func)dump_set_dcomp_ime_relationship_request,
+    (dump_func)dump_revoke_dcomp_ime_offer_request,
+    (dump_func)dump_update_dcomp_task_delegate_request,
     (dump_func)dump_update_window_broadcast_exclusion_request,
     (dump_func)dump_get_window_broadcast_exclusion_request,
     (dump_func)dump_get_desktop_window_request,
@@ -4139,6 +4187,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     NULL,
     (dump_func)dump_get_message_reply_reply,
+    (dump_func)dump_validate_dcomp_ime_message_reply,
     (dump_func)dump_set_win_timer_reply,
     NULL,
     (dump_func)dump_is_window_hung_reply,
@@ -4156,6 +4205,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_create_named_pipe_reply,
     NULL,
     (dump_func)dump_create_window_reply,
+    NULL,
+    (dump_func)dump_create_dcomp_ime_offer_reply,
+    NULL,
+    NULL,
     NULL,
     (dump_func)dump_update_window_broadcast_exclusion_reply,
     (dump_func)dump_get_window_broadcast_exclusion_reply,
@@ -4464,6 +4517,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "reply_message",
     "accept_hardware_message",
     "get_message_reply",
+    "validate_dcomp_ime_message",
     "set_win_timer",
     "kill_win_timer",
     "is_window_hung",
@@ -4482,6 +4536,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_named_pipe_info",
     "create_window",
     "destroy_window",
+    "create_dcomp_ime_offer",
+    "set_dcomp_ime_relationship",
+    "revoke_dcomp_ime_offer",
+    "update_dcomp_task_delegate",
     "update_window_broadcast_exclusion",
     "get_window_broadcast_exclusion",
     "get_desktop_window",

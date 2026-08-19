@@ -525,6 +525,45 @@ static void post_ime_update( HWND hwnd, UINT cursor_pos, WCHAR *comp_str, WCHAR 
     free( tmp );
 }
 
+BOOL process_ime_update( HWND hwnd, const COPYDATASTRUCT *copydata, LRESULT *result )
+{
+    const struct wine_ime_update *update;
+    const WCHAR *comp_str = NULL, *result_str = NULL;
+    SIZE_T char_count, expected_size;
+
+    if (!copydata || copydata->dwData != WINE_IME_UPDATE_COPYDATA) return FALSE;
+    *result = FALSE;
+    if (copydata->cbData < offsetof(struct wine_ime_update, strings) || !copydata->lpData)
+        return TRUE;
+
+    update = copydata->lpData;
+    if (update->comp_len > WINE_IME_UPDATE_MAX_CHARS ||
+        update->result_len > WINE_IME_UPDATE_MAX_CHARS)
+        return TRUE;
+    char_count = (SIZE_T)update->comp_len + update->result_len;
+    if (char_count > WINE_IME_UPDATE_MAX_CHARS ||
+        char_count > (MAXDWORD - offsetof(struct wine_ime_update, strings)) / sizeof(WCHAR))
+        return TRUE;
+    expected_size = offsetof(struct wine_ime_update, strings) + char_count * sizeof(WCHAR);
+    if (copydata->cbData != expected_size) return TRUE;
+
+    if (update->comp_len)
+    {
+        comp_str = update->strings;
+        if (comp_str[update->comp_len - 1] || wcslen( comp_str ) != update->comp_len - 1) return TRUE;
+    }
+    if (update->result_len)
+    {
+        result_str = update->strings + update->comp_len;
+        if (result_str[update->result_len - 1] || wcslen( result_str ) != update->result_len - 1)
+            return TRUE;
+    }
+
+    post_ime_update( hwnd, update->cursor_pos, (WCHAR *)comp_str, (WCHAR *)result_str );
+    *result = TRUE;
+    return TRUE;
+}
+
 static UINT get_comp_clause_count( UINT comp_len, UINT cursor_begin, UINT cursor_end )
 {
     if (cursor_begin == cursor_end || (cursor_begin == 0 && cursor_end == comp_len))

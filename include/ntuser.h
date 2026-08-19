@@ -658,6 +658,18 @@ enum wine_internal_message
 #define IMN_WINE_SET_OPEN_STATUS  0x000f
 #define IMN_WINE_SET_COMP_STRING  0x0010
 
+#define WINE_IME_UPDATE_COPYDATA   0x57494d45
+#define WINE_IME_SET_RECT_COPYDATA 0x57494d52
+#define WINE_IME_UPDATE_MAX_CHARS  4096
+
+struct wine_ime_update
+{
+    UINT cursor_pos;
+    UINT comp_len;
+    UINT result_len;
+    WCHAR strings[];
+};
+
 /* not compatible with Windows */
 #define MAKE_FNID(index) ((WORD)(0x8000 | (index)))
 

@@ -205,18 +205,80 @@ static HWND d3d11_swapchain_get_hwnd(struct d3d11_swapchain *swapchain)
     return wined3d_desc.device_window;
 }
 static const struct IDXGISwapChain4Vtbl d3d11_swapchain_vtbl;
+static const struct IDXGISwapChain4Vtbl d3d12_swapchain_vtbl;
 
+static BOOL dcomp_ime_token_is_zero(const struct wine_dcomp_ime_token *token)
+{
+    return !token->low && !token->high;
+}
+
+static HRESULT get_dcomp_ime_token(HWND presentation, SRWLOCK *lock,
+        struct wine_dcomp_ime_token *token, UINT *data_size, void *data)
+{
+    NTSTATUS status = 0;
+
+    if (!data_size) return E_INVALIDARG;
+    if (!data)
+    {
+        *data_size = sizeof(*token);
+        return S_OK;
+    }
+    if (*data_size < sizeof(*token))
+    {
+        *data_size = sizeof(*token);
+        return DXGI_ERROR_MORE_DATA;
+    }
+
+    AcquireSRWLockExclusive(lock);
+    if (dcomp_ime_token_is_zero(token))
+    {
+        SERVER_START_REQ(create_dcomp_ime_offer)
+        {
+            req->presentation = wine_server_user_handle(presentation);
+            if (!(status = wine_server_call(req)))
+            {
+                token->low = reply->token_low;
+                token->high = reply->token_high;
+            }
+        }
+        SERVER_END_REQ;
+    }
+    if (!status) memcpy(data, token, sizeof(*token));
+    ReleaseSRWLockExclusive(lock);
+
+    if (status)
+    {
+        *data_size = 0;
+        return E_FAIL;
+    }
+    *data_size = sizeof(*token);
+    return S_OK;
+}
+
+static void revoke_dcomp_ime_token(SRWLOCK *lock, struct wine_dcomp_ime_token *token)
+{
+    struct wine_dcomp_ime_token revoked;
+
+    AcquireSRWLockExclusive(lock);
+    revoked = *token;
+    token->low = token->high = 0;
+    ReleaseSRWLockExclusive(lock);
+    if (dcomp_ime_token_is_zero(&revoked)) return;
+
+    SERVER_START_REQ(revoke_dcomp_ime_offer)
+    {
+        req->token_low = revoked.low;
+        req->token_high = revoked.high;
+        wine_server_call(req);
+    }
+    SERVER_END_REQ;
+}
 
 static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
 {
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
-void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
-{
-    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
-    swapchain->composition_window = window;
-}
 HRESULT WINAPI __wine_dxgi_set_composition_description(IDXGISwapChain1 *iface,
         const struct wine_dcomp_visual_desc *desc)
 {
@@ -294,6 +356,8 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     {
         IWineDXGIDevice *device = swapchain->device;
         HWND composition_window = swapchain->composition_window;
+
+        revoke_dcomp_ime_token(&swapchain->ime_token_lock, &swapchain->ime_token);
         if (swapchain->present1_shadow)
             ID3D11Texture2D_Release(swapchain->present1_shadow);
         if (swapchain->present1_scratch)
@@ -324,6 +388,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetPrivateData(IDXGISwapChain4 
 
     TRACE("iface %p, guid %s, data_size %u, data %p.\n", iface, debugstr_guid(guid), data_size, data);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID)) return E_INVALIDARG;
     return dxgi_set_private_data(&swapchain->private_store, guid, data_size, data);
 }
 
@@ -334,6 +399,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetPrivateDataInterface(IDXGISw
 
     TRACE("iface %p, guid %s, object %p.\n", iface, debugstr_guid(guid), object);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID)) return E_INVALIDARG;
     return dxgi_set_private_data_interface(&swapchain->private_store, guid, object);
 }
 
@@ -344,6 +410,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetPrivateData(IDXGISwapChain4 
 
     TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID))
+        return get_dcomp_ime_token(d3d11_swapchain_get_hwnd(swapchain), &swapchain->ime_token_lock,
+                &swapchain->ime_token, data_size, data);
     return dxgi_get_private_data(&swapchain->private_store, guid, data_size, data);
 }
 
@@ -1548,6 +1617,8 @@ struct d3d12_swapchain
     IDXGISwapChain4 IDXGISwapChain4_iface;
     LONG refcount;
     struct wined3d_private_store private_store;
+    SRWLOCK ime_token_lock;
+    struct wine_dcomp_ime_token ime_token;
 
     struct wined3d_swapchain_state *state;
     struct wined3d_swapchain_state_parent state_parent;
@@ -1601,6 +1672,7 @@ struct d3d12_swapchain
     IWineDXGIFactory *factory;
 
     HWND window;
+    HWND composition_window;
     IDXGIOutput *target;
     DXGI_SWAP_CHAIN_DESC1 desc;
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc;
@@ -2437,10 +2509,12 @@ static ULONG STDMETHODCALLTYPE d3d12_swapchain_AddRef(IDXGISwapChain4 *iface)
 static void d3d12_swapchain_destroy(struct d3d12_swapchain *swapchain)
 {
     const struct dxgi_vk_funcs *vk_funcs = &swapchain->vk_funcs;
+    HWND composition_window = swapchain->composition_window;
     void *vulkan_module = vk_funcs->vulkan_module;
     struct d3d12_swapchain_op *op, *op2;
     DWORD ret;
 
+    revoke_dcomp_ime_token(&swapchain->ime_token_lock, &swapchain->ime_token);
     EnterCriticalSection(&swapchain->worker_cs);
     swapchain->worker_running = false;
     WakeAllConditionVariable(&swapchain->worker_cv);
@@ -2497,6 +2571,9 @@ static void d3d12_swapchain_destroy(struct d3d12_swapchain *swapchain)
     if (swapchain->factory)
         IWineDXGIFactory_Release(swapchain->factory);
 
+    if (composition_window)
+        DestroyWindow(composition_window);
+
     FreeLibrary(vulkan_module);
 
     wined3d_swapchain_state_destroy(swapchain->state);
@@ -2527,6 +2604,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_swapchain_SetPrivateData(IDXGISwapChain4 
 
     TRACE("iface %p, guid %s, data_size %u, data %p.\n", iface, debugstr_guid(guid), data_size, data);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID)) return E_INVALIDARG;
     return dxgi_set_private_data(&swapchain->private_store, guid, data_size, data);
 }
 
@@ -2537,6 +2615,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_swapchain_SetPrivateDataInterface(IDXGISw
 
     TRACE("iface %p, guid %s, object %p.\n", iface, debugstr_guid(guid), object);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID)) return E_INVALIDARG;
     return dxgi_set_private_data_interface(&swapchain->private_store, guid, object);
 }
 
@@ -2547,6 +2626,9 @@ static HRESULT STDMETHODCALLTYPE d3d12_swapchain_GetPrivateData(IDXGISwapChain4 
 
     TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
 
+    if (IsEqualGUID(guid, &WINE_DCOMP_IME_TOKEN_GUID))
+        return get_dcomp_ime_token(swapchain->window, &swapchain->ime_token_lock,
+                &swapchain->ime_token, data_size, data);
     return dxgi_get_private_data(&swapchain->private_store, guid, data_size, data);
 }
 
@@ -3508,6 +3590,28 @@ static const struct IDXGISwapChain4Vtbl d3d12_swapchain_vtbl =
     /* IDXGISwapChain4 methods */
     d3d12_swapchain_SetHDRMetaData,
 };
+
+void dxgi_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
+{
+    IDXGISwapChain4 *swapchain4;
+
+    if (!iface || FAILED(IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4,
+            (void **)&swapchain4)))
+        return;
+
+    if (swapchain4->lpVtbl == &d3d11_swapchain_vtbl)
+    {
+        struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+        swapchain->composition_window = window;
+    }
+    else if (swapchain4->lpVtbl == &d3d12_swapchain_vtbl)
+    {
+        struct d3d12_swapchain *swapchain = d3d12_swapchain_from_IDXGISwapChain4(swapchain4);
+        swapchain->composition_window = window;
+    }
+
+    IDXGISwapChain4_Release(swapchain4);
+}
 
 static BOOL init_vk_funcs(struct dxgi_vk_funcs *dxgi, VkInstance vk_instance, VkDevice vk_device)
 {

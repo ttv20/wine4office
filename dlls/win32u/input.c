@@ -2581,12 +2581,35 @@ BOOL WINAPI NtUserGetCaretPos( POINT *pt )
     return ret;
 }
 
+BOOL process_ime_set_rect( HWND hwnd, const COPYDATASTRUCT *copydata, LRESULT *result )
+{
+    if (!copydata || copydata->dwData != WINE_IME_SET_RECT_COPYDATA) return FALSE;
+    *result = FALSE;
+    if (copydata->cbData == sizeof(RECT) && copydata->lpData)
+        *result = user_driver->pSetIMECompositionRect( hwnd, *(RECT *)copydata->lpData );
+    return TRUE;
+}
+
 BOOL set_ime_composition_rect( HWND hwnd, RECT rect )
 {
+    static const WCHAR delegated_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            't','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+    static const WCHAR input_prop[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+            'i','n','p','u','t','_','w','i','n','d','o','w',0};
+    struct send_message_timeout_params params = { .flags = SMTO_ABORTIFHUNG, .timeout = 250 };
+    COPYDATASTRUCT copydata = { .dwData = WINE_IME_SET_RECT_COPYDATA, .cbData = sizeof(rect), .lpData = &rect };
+    HWND root, input, presentation;
+
     if (!NtUserIsWindow( hwnd )) return FALSE;
     NtUserMapWindowPoints( hwnd, 0, (POINT *)&rect, 2, 0 /* per-monitor DPI */ );
     rect = map_rect_virt_to_raw( rect, no_dpi /* per-monitor DPI */ );
-    return user_driver->pSetIMECompositionRect( NtUserGetAncestor( hwnd, GA_ROOT ), rect );
+    root = NtUserGetAncestor( hwnd, GA_ROOT );
+    input = NtUserGetProp( root, input_prop );
+    presentation = NtUserGetProp( root, delegated_prop );
+    if (!is_dcomp_ime_relationship( presentation, root, input ))
+        return user_driver->pSetIMECompositionRect( root, rect );
+    return NtUserMessageCall( presentation, WM_COPYDATA, (WPARAM)root, (LPARAM)&copydata, &params,
+                             NtUserSendMessageTimeout, FALSE ) && params.result;
 }
 
 /*****************************************************************
