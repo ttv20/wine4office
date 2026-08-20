@@ -97,4 +97,6 @@ interface IWineJScript : IUnknown
     HRESULT CreateObject(IWineJSDispatch **ret);
     HRESULT CreateArrayBuffer(DWORD size, IWineJSDispatch **ret, void **data);
     HRESULT FillGlobals(IWineJSDispatchHost *script_global);
+    HRESULT CreateArray(DWORD length, IWineJSDispatch **ret);
+    HRESULT IsCallable(IDispatch *dispatch, BOOL *ret);
 }

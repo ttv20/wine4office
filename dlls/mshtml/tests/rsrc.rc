@@ -19,6 +19,9 @@
 /* @makedep: winetest.js */
 winetest.js HTML "winetest.js"
 
+/* @makedep: mutationobserver.js */
+mutationobserver.js HTML "mutationobserver.js"
+
 /* @makedep: exectest.html */
 exectest.html HTML "exectest.html"
 
