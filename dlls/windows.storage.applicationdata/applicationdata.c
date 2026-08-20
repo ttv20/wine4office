@@ -694,11 +694,27 @@ static NTSTATUS add_checked_directory( struct directory_handle_chain *chain, con
 
 static HRESULT create_package_local_state( const WCHAR *local_appdata, HSTRING package_family )
 {
+    static const WCHAR creation_mutex_name[] =
+            L"Global\\WineWindowsStorageApplicationDataLocalStateCreation";
     static const WCHAR packages[] = L"Packages";
     static const WCHAR local_state[] = L"LocalState";
     const WCHAR *family = WindowsGetStringRawBuffer( package_family, NULL );
     struct directory_handle_chain chain = {0};
+    HANDLE mutex;
+    DWORD wait;
     NTSTATUS status;
+    HRESULT hr;
+
+    if (!(mutex = CreateMutexW( NULL, FALSE, creation_mutex_name )))
+        return HRESULT_FROM_WIN32( GetLastError() );
+    wait = WaitForSingleObject( mutex, 30000 );
+    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+    {
+        hr = HRESULT_FROM_WIN32( wait == WAIT_FAILED ? GetLastError() :
+                wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : ERROR_GEN_FAILURE );
+        CloseHandle( mutex );
+        return hr;
+    }
 
     status = open_local_appdata_directory( local_appdata, &chain );
     if (!status) status = add_checked_directory( &chain, packages, ARRAY_SIZE(packages) - 1,
@@ -709,6 +725,8 @@ static HRESULT create_package_local_state( const WCHAR *local_appdata, HSTRING p
             FILE_TRAVERSE );
     if (status) directory_handle_chain_rollback( &chain );
     else directory_handle_chain_clear( &chain );
+    ReleaseMutex( mutex );
+    CloseHandle( mutex );
     return status ? HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) ) : S_OK;
 }
 
