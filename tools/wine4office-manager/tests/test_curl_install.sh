@@ -144,6 +144,13 @@ for _ in {1..50}; do
        "$WINE4OFFICE_HOME/runner/bin/wine-active-test" ]] && break
     sleep 0.02
 done
+write_metadata "$(printf '0%.0s' {1..64})"
+if PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --force >/dev/null 2>&1; then
+    echo "installer accepted invalid staging metadata" >&2
+    exit 1
+fi
+kill -0 "$ACTIVE_WINE"
+write_metadata "$MANAGER_DIGEST"
 if PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null 2>"$TMP/active.err"; then
     echo "installer updated while Wine4Office was active" >&2
     exit 1

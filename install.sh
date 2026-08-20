@@ -120,7 +120,7 @@ is_active_install_pid() {
     local pid=$1 owner executable
     [[ $pid =~ ^[0-9]+$ && -d /proc/$pid ]] || return 1
     owner=$(stat -c %u "/proc/$pid" 2>/dev/null) || return 1
-    [[ $owner == $EUID ]] || return 1
+    [[ $owner == "$EUID" ]] || return 1
     executable=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || return 1
     [[ $executable == "$ROOT"/* ]]
 }
@@ -134,7 +134,7 @@ active_install_pids() {
 }
 
 close_active_install_processes() {
-    local answer pid attempt
+    local answer pid
     local -a active=()
     mapfile -t active < <(active_install_pids)
     ((${#active[@]})) || return 0
@@ -157,7 +157,7 @@ close_active_install_processes() {
     for pid in "${active[@]}"; do
         is_active_install_pid "$pid" && kill -TERM "$pid" 2>/dev/null || true
     done
-    for attempt in {1..50}; do
+    for _ in {1..50}; do
         mapfile -t active < <(active_install_pids)
         ((${#active[@]} == 0)) && return
         sleep 0.1
@@ -168,15 +168,13 @@ close_active_install_processes() {
     for pid in "${active[@]}"; do
         is_active_install_pid "$pid" && kill -KILL "$pid" 2>/dev/null || true
     done
-    for attempt in {1..20}; do
+    for _ in {1..20}; do
         mapfile -t active < <(active_install_pids)
         ((${#active[@]} == 0)) && return
         sleep 0.1
     done
     fail "could not stop every active Wine4Office process"
 }
-
-close_active_install_processes
 
 TMP=$(mktemp -d)
 NEW_RUNNER=$ROOT/.runner.new.$$
@@ -596,6 +594,7 @@ chmod 0644 "$TMP/metadata"/*
 
 exec 9> "$ROOT/.wine4office-update.lock"
 flock 9
+close_active_install_processes
 trap '' INT TERM
 for path in "$RUNNER_BACKUP" "$MANAGER_BACKUP" "$UNINSTALLER_BACKUP"; do
     [[ ! -e $path && ! -L $path ]] || fail "stale installation backup exists: $path"
@@ -621,6 +620,8 @@ done
 COMMITTED=true
 trap 'exit 130' INT
 trap 'exit 143' TERM
+flock -u 9
+exec 9>&-
 
 ln -sfn "$MANAGER_TARGET" "$BIN_HOME/Wine4OfficeManager" || \
     warn "could not create $BIN_HOME/Wine4OfficeManager"

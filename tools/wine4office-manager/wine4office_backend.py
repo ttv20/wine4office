@@ -3766,6 +3766,19 @@ def _install_update_lock(root: Path | None, manager_target: Path | None,
             lock.close()
 
 
+def wait_for_install_update() -> None:
+    """Wait at Manager startup until an installer commit barrier is released."""
+    root = installed_root()
+    if root is None and getattr(sys, "frozen", False):
+        executable = Path(sys.executable).expanduser().resolve()
+        if executable.name == "Wine4OfficeManager" and executable.parent.name == "bin":
+            root = executable.parent.parent
+    if root is None:
+        return
+    with _install_update_lock(root, manager_update_target(), root / "runner"):
+        pass
+
+
 def _commit_update_transaction(
         replacements: list[tuple[Path, Path]],
         text_updates: dict[Path, str],

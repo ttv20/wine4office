@@ -1178,6 +1178,8 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if FROZEN:
+        backend.wait_for_install_update()
     if args.review_incident and (
             args.target or args.documents or args.preload_service or args.preload_worker
             or args.install_shortcut or args.prepare_uninstall or args.remove_prefix
