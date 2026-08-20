@@ -56,7 +56,7 @@
   "Wine environment stopped.": "Wine சூழல் நிறுத்தப்பட்டது.",
   "Wine executable:": "Wine இயக்கக்கோப்பு:",
   "Wine processes stopped.": "Wine செயல்முறைகள் நிறுத்தப்பட்டன.",
-  "Wine runner missing": "Wine இல்லை",
+  "Wine runner missing": "Wine இயக்கி இல்லை",
   "Wine shutdown failed. Review the details below.": "Wine பணிநிறுத்தம் தோல்வியடைந்தது. கீழே உள்ள விவரங்களை மதிப்பாய்வு செய்யவும்.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine பணிநிறுத்தம் முடிவடைகிறது; அது முடிந்ததும் மேலாளர் மூடுவார்.",
   "Wine shutdown was interrupted.": "Wine பணிநிறுத்தம் தடைபட்டது.",

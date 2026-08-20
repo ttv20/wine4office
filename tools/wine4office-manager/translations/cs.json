@@ -59,7 +59,7 @@
   "Wine environment stopped.": "Prostředí Wine bylo zastaveno.",
   "Wine executable:": "Program Wine:",
   "Wine processes stopped.": "Procesy Wine zastaveny.",
-  "Wine runner missing": "Program Wine chybí",
+  "Wine runner missing": "Chybí spouštěč Wine",
   "Wine shutdown failed. Review the details below.": "Vypnutí Wine se nezdařilo. Přečtěte si podrobnosti níže.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "Ukončuje se vypnutí Wine; Správce se po dokončení zavře.",
   "Wine shutdown was interrupted.": "Vypínání Wine bylo přerušeno.",

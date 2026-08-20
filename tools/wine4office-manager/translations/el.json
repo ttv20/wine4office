@@ -59,7 +59,7 @@
   "Wine environment stopped.": "Το περιβάλλον Wine σταμάτησε.",
   "Wine executable:": "Εκτελέσιμο Wine:",
   "Wine processes stopped.": "Wine διεργασίες σταμάτησαν.",
-  "Wine runner missing": "Λείπει το Wine",
+  "Wine runner missing": "Λείπει το εκτελέσιμο Wine",
   "Wine shutdown failed. Review the details below.": "Ο τερματισμός λειτουργίας Wine απέτυχε. Ελέγξτε τις λεπτομέρειες παρακάτω.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "Ο τερματισμός λειτουργίας Wine ολοκληρώνεται. Ο Διαχειριστής θα κλείσει όταν ολοκληρωθεί.",
   "Wine shutdown was interrupted.": "Ο τερματισμός λειτουργίας Wine διακόπηκε.",

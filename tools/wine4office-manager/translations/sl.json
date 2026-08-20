@@ -56,7 +56,7 @@
   "Wine environment stopped.": "Okolje Wine je ustavljeno.",
   "Wine executable:": "Izvršna datoteka Wine:",
   "Wine processes stopped.": "Wine procesi so ustavljeni.",
-  "Wine runner missing": "Wine manjka",
+  "Wine runner missing": "Manjka zaganjalnik Wine",
   "Wine shutdown failed. Review the details below.": "Zaustavitev Wine ni uspela. Preglejte spodnje podrobnosti.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "Zaustavitev Wine se končuje; upravitelj se bo zaprl, ko bo končan.",
   "Wine shutdown was interrupted.": "Zaustavitev Wine je bila prekinjena.",

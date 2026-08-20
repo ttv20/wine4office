@@ -59,7 +59,7 @@
   "Wine environment stopped.": "Wine-miljøet er stoppet.",
   "Wine executable:": "Wine-program:",
   "Wine processes stopped.": "Wine-processerne er stoppet.",
-  "Wine runner missing": "Wine-programmet mangler",
+  "Wine runner missing": "Wine-køreren mangler",
   "Wine shutdown failed. Review the details below.": "Lukning af Wine mislykkedes. Gennemgå detaljerne nedenfor.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine nedlukning afsluttes; Manageren lukker, når den er færdig.",
   "Wine shutdown was interrupted.": "Wine nedlukning blev afbrudt.",

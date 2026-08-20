@@ -134,6 +134,23 @@ class TranslationTests(unittest.TestCase):
                 with self.subTest(language=language, source=source):
                     self.assertNotEqual(i18n.translate(source, language), source)
 
+    def test_corrected_legacy_status_labels_remain_precise(self):
+        expected_runner_labels = {
+            "cs": "Chybí spouštěč Wine",
+            "da": "Wine-køreren mangler",
+            "el": "Λείπει το εκτελέσιμο Wine",
+            "sl": "Manjka zaganjalnik Wine",
+            "sr_Latn": "Nedostaje Wine pokretač",
+            "ta": "Wine இயக்கி இல்லை",
+            "te": "Wine రన్నర్ లేదు",
+        }
+        for language, translated in expected_runner_labels.items():
+            with self.subTest(language=language):
+                self.assertEqual(
+                    i18n.translate("Wine runner missing", language), translated
+                )
+        self.assertEqual(i18n.translate("Open", "fil"), "Bukas")
+
     def test_installer_timeout_and_wine_stop_are_localized_in_every_language(self):
         texts = (
             "Cancel installation",
