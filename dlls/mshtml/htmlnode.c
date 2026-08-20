@@ -87,7 +87,7 @@ static HRESULT WINAPI HTMLDOMChildrenCollection_item(IHTMLDOMChildrenCollection 
 
     nsIDOMNodeList_GetLength(This->nslist, &length);
     if(index < 0 || index >= length)
-        return E_INVALIDARG;
+        return S_OK;
 
     return HTMLDOMChildrenCollection_collection_item(&This->dispex, index, ppItem);
 }

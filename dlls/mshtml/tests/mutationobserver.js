@@ -141,6 +141,35 @@ function test_subtree_and_disconnect() {
     next_test();
 }
 
+function test_reobserve_replaces_options() {
+    var parent = document.createElement("div"), child = document.createElement("span");
+    var text = document.createTextNode("first"), direct = document.createElement("i");
+    var observer, records;
+
+    child.appendChild(text);
+    parent.appendChild(child);
+    observer = new MutationObserver(function() {
+        ok(false, "re-observed mutation was delivered before takeRecords");
+    });
+    observer.observe(parent, {characterData: true, subtree: true});
+    observer.observe(parent, {childList: true});
+    text.data = "second";
+    child.appendChild(document.createElement("b"));
+    parent.appendChild(direct);
+    records = observer.takeRecords();
+    ok(records.length === 1 && records[0].type === "childList" && records[0].target === parent,
+       "re-observe replaced characterData and subtree options");
+
+    observer.observe(parent, {characterData: true, subtree: true});
+    parent.appendChild(document.createElement("em"));
+    text.data = "third";
+    records = observer.takeRecords();
+    ok(records.length === 1 && records[0].type === "characterData" && records[0].target === text,
+       "second re-observe replaced childList options");
+    observer.disconnect();
+    next_test();
+}
+
 function test_childlist_records_and_snapshots() {
     var parent = document.createElement("div"), first = document.createElement("i");
     var second = document.createElement("b"), inserted = document.createElement("em");
@@ -152,6 +181,7 @@ function test_childlist_records_and_snapshots() {
     });
     observer.observe(parent, {childList: true});
 
+    first.id = "snapshot-first";
     parent.appendChild(first);
     records = observer.takeRecords();
     ok(records.length === 1, "append produced one childList record");
@@ -189,6 +219,7 @@ function test_childlist_records_and_snapshots() {
     ok(record.addedNodes.length === 2, "fragment append addedNodes length");
     ok(record.addedNodes.item(0) === batch_first, "fragment append first node");
     ok(record.addedNodes.item(1) === batch_second, "fragment append second node");
+    ok(record.addedNodes.item(2) === null, "fragment append out-of-range item is null");
     ok(record.previousSibling === second, "fragment append previousSibling");
     ok(record.nextSibling === null, "fragment append nextSibling is null");
 
@@ -205,8 +236,9 @@ function test_childlist_records_and_snapshots() {
     parent.removeChild(first);
     ok(observer.takeRecords().length === 1, "snapshot follow-up removal was queued");
     observer.disconnect();
+    first = null;
     CollectGarbage();
-    ok(snapshot.length === 1 && snapshot.item(0) === first,
+    ok(snapshot.length === 1 && snapshot.item(0).id === "snapshot-first",
        "addedNodes snapshot survived disconnect and garbage collection");
     next_test();
 }
@@ -331,6 +363,7 @@ function test_reentrant_delivery_and_lifetime() {
 
 var tests = [test_constructor_and_observe_validation,
              test_take_records_and_fields,
+             test_reobserve_replaces_options,
              test_childlist_records_and_snapshots,
              test_childlist_subtree_and_disconnect,
              test_detached_subtree_before_delivery,

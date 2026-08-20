@@ -57,7 +57,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     TRACE( "class %s, factory %p.\n", debugstr_hstring(classid), factory );
 
+    if (!factory) return E_POINTER;
     *factory = NULL;
+    if (!classid) return CLASS_E_CLASSNOTAVAILABLE;
 
     if (hstring_equals( classid, RuntimeClass_Windows_Security_ExchangeActiveSyncProvisioning_EasClientDeviceInformation ))
         IActivationFactory_QueryInterface( client_device_information_factory, &IID_IActivationFactory, (void **)factory );
