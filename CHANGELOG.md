@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep Word responsive while loading Office Click-to-Run component manifests and presenting startup frames.
+
 ## 0.2.0-beta.1 — 2026-08-19
 
 - Let Office finish proofing-language updates without crashing Click-to-Run.

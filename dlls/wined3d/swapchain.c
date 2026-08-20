@@ -252,6 +252,24 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         return WINED3DERR_INVALIDCALL;
     }
 
+    if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+    {
+        /* Limit input latency by limiting the number of presents that we can
+         * get ahead of the worker thread. Avoid holding the D3D mutex while
+         * waiting, so other threads are not blocked. */
+        wined3d_mutex_unlock();
+        WaitForSingleObject(swapchain->frame_latency_semaphore, INFINITE);
+        wined3d_mutex_lock();
+
+        if (!swapchain->back_buffers)
+        {
+            ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+            WARN("Swapchain doesn't have a backbuffer, returning WINED3DERR_INVALIDCALL.\n");
+            wined3d_mutex_unlock();
+            return WINED3DERR_INVALIDCALL;
+        }
+    }
+
     if (!src_rect)
     {
         SetRect(&s, 0, 0, desc->backbuffer_width, desc->backbuffer_height);
