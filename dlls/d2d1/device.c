@@ -1199,19 +1199,16 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     D2D1_DRAWING_STATE_DESCRIPTION1 previous_state = context->drawing_state;
     float previous_dpi_x = context->desc.dpiX, previous_dpi_y = context->desc.dpiY;
     D2D1_SIZE_U previous_size = context->pixel_size, output_size, size;
-    ID2D1Bitmap1 *target = NULL, *readback = NULL, *resolved = NULL;
+    ID2D1Bitmap1 *target = NULL, *downsample[3] = {NULL};
     ID2D1Image *previous_target = NULL;
-    D2D1_MAPPED_RECT mapped;
     D2D1_MATRIX_3X2_F join_transform, shifted_transform;
     D2D1_RECT_F bounds, dst_rect;
     D2D1_COLOR_F clear = {0};
-    BYTE *pixels = NULL;
     UINT32 origin_x, origin_y, right, bottom;
     BOOL have_bounds = FALSE;
-    size_t clip_count;
-    unsigned int x, y, channel, i;
+    size_t clip_count = context->clip_stack.count;
+    unsigned int i, pass, scale;
     unsigned int aa_scale = 8;
-    unsigned int sample_count = aa_scale * aa_scale;
     HRESULT hr;
 
     if (fill)
@@ -1249,8 +1246,7 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     output_size.width = right - origin_x;
     output_size.height = bottom - origin_y;
     if (!output_size.width || !output_size.height || output_size.width > UINT_MAX / aa_scale
-            || output_size.height > UINT_MAX / aa_scale
-            || (size_t)output_size.width * 4 > SIZE_MAX / output_size.height)
+            || output_size.height > UINT_MAX / aa_scale)
         return FALSE;
 
     properties.pixelFormat = context->desc.pixelFormat;
@@ -1266,12 +1262,6 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     ID2D1DeviceContext6_GetTarget(&context->ID2D1DeviceContext6_iface, &previous_target);
     hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
             size, NULL, 0, &properties, &target);
-    if (FAILED(hr))
-        goto done;
-
-    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
-            size, NULL, 0, &properties, &readback);
     if (FAILED(hr))
         goto done;
 
@@ -1316,58 +1306,44 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     if (FAILED(hr))
         goto restore;
 
-    hr = ID2D1Bitmap1_CopyFromBitmap(readback, NULL, (ID2D1Bitmap *)target, NULL);
-    if (FAILED(hr) || FAILED(hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped)))
-        goto restore;
-    if (!(pixels = malloc((size_t)output_size.width * output_size.height * 4)))
-    {
-        ID2D1Bitmap1_Unmap(readback);
-        hr = E_OUTOFMEMORY;
-        goto restore;
-    }
+    context->clip_stack.count = 0;
+    context->drawing_state.transform = identity;
 
-    for (y = 0; y < output_size.height; ++y)
+    /* Three bilinear 2x reductions produce the same 8x8 box filter as the
+     * previous CPU averaging path, without synchronously reading the render
+     * target back from the GPU on the application's drawing thread. */
+    for (pass = 0, scale = aa_scale / 2; pass < ARRAY_SIZE(downsample); ++pass, scale /= 2)
     {
-        for (x = 0; x < output_size.width; ++x)
-        {
-            for (channel = 0; channel < 4; ++channel)
-            {
-                unsigned int sx, sy, value = 0;
-                for (sy = 0; sy < aa_scale; ++sy)
-                    for (sx = 0; sx < aa_scale; ++sx)
-                        value += mapped.bits[(size_t)(y * aa_scale + sy) * mapped.pitch
-                                + (x * aa_scale + sx) * 4 + channel];
-                pixels[((size_t)y * output_size.width + x) * 4 + channel]
-                        = (value + sample_count / 2) / sample_count;
-            }
-        }
+        properties.dpiX = previous_dpi_x * scale;
+        properties.dpiY = previous_dpi_y * scale;
+        properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        size.width = output_size.width * scale;
+        size.height = output_size.height * scale;
+        hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+                size, NULL, 0, &properties, &downsample[pass]);
+        if (FAILED(hr))
+            goto restore;
+
+        ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface,
+                (ID2D1Image *)downsample[pass]);
+        context->desc.dpiX = properties.dpiX;
+        context->desc.dpiY = properties.dpiY;
+        ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
+                (ID2D1Bitmap *)(pass ? downsample[pass - 1] : target), NULL, 1.0f,
+                D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
     }
-    ID2D1Bitmap1_Unmap(readback);
 
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
     context->desc.dpiX = previous_dpi_x;
     context->desc.dpiY = previous_dpi_y;
     context->drawing_state = previous_state;
-    properties.dpiX = previous_dpi_x;
-    properties.dpiY = previous_dpi_y;
-    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
-    size = output_size;
-    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
-            size, pixels, output_size.width * 4, &properties, &resolved);
-    if (FAILED(hr))
-        goto done;
-
-    clip_count = context->clip_stack.count;
-    context->clip_stack.count = 0;
-    context->drawing_state.transform = identity;
+    context->clip_stack.count = clip_count;
     d2d_rect_set(&dst_rect, origin_x * 96.0f / previous_dpi_x,
             origin_y * 96.0f / previous_dpi_y,
             right * 96.0f / previous_dpi_x, bottom * 96.0f / previous_dpi_y);
     ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
-            (ID2D1Bitmap *)resolved, &dst_rect, 1.0f,
+            (ID2D1Bitmap *)downsample[ARRAY_SIZE(downsample) - 1], &dst_rect, 1.0f,
             D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
-    context->drawing_state = previous_state;
-    context->clip_stack.count = clip_count;
     goto done;
 
  restore:
@@ -1375,11 +1351,11 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     context->desc.dpiX = previous_dpi_x;
     context->desc.dpiY = previous_dpi_y;
     context->drawing_state = previous_state;
+    context->clip_stack.count = clip_count;
 
  done:
-    free(pixels);
-    if (resolved) ID2D1Bitmap1_Release(resolved);
-    if (readback) ID2D1Bitmap1_Release(readback);
+    for (i = 0; i < ARRAY_SIZE(downsample); ++i)
+        if (downsample[i]) ID2D1Bitmap1_Release(downsample[i]);
     if (target) ID2D1Bitmap1_Release(target);
     if (previous_target) ID2D1Image_Release(previous_target);
     return SUCCEEDED(hr);

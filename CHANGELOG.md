@@ -6,7 +6,8 @@
 - Allow 60 seconds for the Office installer to open and report startup timeouts clearly.
 - Show localized graceful-close and forced-kill progress while stopping the selected Wine environment.
 - Improve Wine runner and application-status translations.
-- Keep Word responsive while loading Office Click-to-Run component manifests and presenting startup frames.
+- Keep Word responsive while loading Office Click-to-Run component manifests,
+  presenting startup frames, and drawing antialiased content.
 - Install exact tagged releases and safely close active Wine4Office sessions
   before updating.
 - Let opted-in prerelease updates pass verification and installation.
