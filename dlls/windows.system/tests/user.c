@@ -873,10 +873,12 @@ static void test_packaged_app_scoped_non_roamable_id(void)
     WCHAR temp[MAX_PATH] = {0}, root[MAX_PATH] = {0}, source[MAX_PATH] = {0};
     WCHAR manifest_path[MAX_PATH] = {0}, target[MAX_PATH], output[MAX_PATH], command[3 * MAX_PATH];
     WCHAR *identities[ARRAY_SIZE(executables)] = {0};
+    BYTE *previous_value = NULL;
     HANDLE file = INVALID_HANDLE_VALUE;
     HKEY key = NULL;
-    DWORD length, written, size, read;
-    BOOL ret;
+    DWORD length, written, size, read, previous_size = 0, previous_type = 0;
+    BOOL previous_exists = FALSE, ret, value_written = FALSE;
+    LONG status;
     int formatted;
     unsigned int i;
 
@@ -915,17 +917,40 @@ static void test_packaged_app_scoped_non_roamable_id(void)
     if (!ret || written != sizeof(manifest) - 1) goto done;
 
     if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, key_name, 0, NULL, 0,
-            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL ))
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL ))
     {
         win_skip( "Cannot stage the packaged identity children.\n" );
         goto done;
     }
-    if (RegSetValueExW( key, family, 0, REG_SZ, (const BYTE *)root,
-            (wcslen( root ) + 1) * sizeof(WCHAR) ))
+    status = RegQueryValueExW( key, family, NULL, &previous_type, NULL, &previous_size );
+    if (status == ERROR_SUCCESS)
     {
-        win_skip( "Cannot register the packaged identity children.\n" );
+        if (previous_size && !(previous_value = malloc( previous_size )))
+        {
+            ok( FALSE, "Failed to allocate %lu bytes for the previous staged package value.\n", previous_size );
+            goto done;
+        }
+        if (previous_size && (status = RegQueryValueExW( key, family, NULL, &previous_type,
+                previous_value, &previous_size )))
+        {
+            ok( FALSE, "Reading the previous staged package value failed, error %lu.\n", status );
+            goto done;
+        }
+        previous_exists = TRUE;
+    }
+    else if (status != ERROR_FILE_NOT_FOUND)
+    {
+        win_skip( "Cannot preserve the existing staged package value, error %lu.\n", status );
         goto done;
     }
+    status = RegSetValueExW( key, family, 0, REG_SZ, (const BYTE *)root,
+            (wcslen( root ) + 1) * sizeof(WCHAR) );
+    if (status)
+    {
+        win_skip( "Cannot register the packaged identity children, error %lu.\n", status );
+        goto done;
+    }
+    value_written = TRUE;
 
     for (i = 0; i < ARRAY_SIZE(executables); ++i)
     {
@@ -999,7 +1024,17 @@ done:
     if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
     if (key)
     {
-        RegDeleteValueW( key, family );
+        if (value_written && previous_exists)
+        {
+            status = RegSetValueExW( key, family, 0, previous_type, previous_value, previous_size );
+            ok( !status, "Restoring the previous staged package value failed, error %lu.\n", status );
+        }
+        else if (value_written)
+        {
+            status = RegDeleteValueW( key, family );
+            ok( !status || status == ERROR_FILE_NOT_FOUND,
+                    "Deleting the staged package test value failed, error %lu.\n", status );
+        }
         RegCloseKey( key );
     }
     for (i = 0; i < ARRAY_SIZE(executables); ++i)
@@ -1010,6 +1045,7 @@ done:
     }
     if (manifest_path[0]) DeleteFileW( manifest_path );
     RemoveDirectoryW( root );
+    free( previous_value );
 }
 
 static void run_identity_child( const char *output )
