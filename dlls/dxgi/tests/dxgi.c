@@ -2569,18 +2569,25 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     if (FAILED(hr))
         goto done;
 
-    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!!window, "Got NULL composition window.\n");
-    initial_style = GetWindowLongW(window, GWL_STYLE);
-    initial_exstyle = GetWindowLongW(window, GWL_EXSTYLE);
-    initial_owner = GetWindow(window, GW_OWNER);
-
     token_size = sizeof(token);
-    hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
-    ok(hr == S_OK, "Got unexpected token query hr %#lx.\n", hr);
-    ok(token_size == sizeof(token), "Got token size %u.\n", token_size);
-    ok(token.low || token.high, "Got empty DComp token.\n");
+    if (!strcmp(winetest_platform, "wine"))
+    {
+        hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(!!window, "Got NULL composition window.\n");
+        initial_style = GetWindowLongW(window, GWL_STYLE);
+        initial_exstyle = GetWindowLongW(window, GWL_EXSTYLE);
+        initial_owner = GetWindow(window, GW_OWNER);
+        hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
+        ok(hr == S_OK, "Got unexpected token query hr %#lx.\n", hr);
+        ok(token_size == sizeof(token), "Got token size %u.\n", token_size);
+        ok(token.low || token.high, "Got empty DComp token.\n");
+    }
+    else
+    {
+        hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
+        ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected native token query hr %#lx.\n", hr);
+    }
 
     if (!(dcomp = LoadLibraryW(L"dcomp.dll"))
             || !(pDCompositionCreateDevice = (void *)GetProcAddress(dcomp, "DCompositionCreateDevice")))
@@ -2617,264 +2624,270 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
         goto done;
     flush_events();
 
-    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
-    ok(hr == S_OK, "Got unexpected post-commit GetHwnd hr %#lx.\n", hr);
-    ok(window && IsWindowVisible(window), "Composition helper window %p is not visible.\n", window);
-    ok(get_client_rect_screen(target_window, &target_rect), "Could not map target client rect.\n");
-    ok(get_client_rect_screen(window, &helper_client), "Could not map helper client rect.\n");
-    ok(EqualRect(&helper_client, &target_rect),
-            "Got helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
-            helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
-            target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
-    ok(GetWindowRect(window, &helper_rect), "GetWindowRect failed.\n");
-    ok(helper_rect.left < helper_client.left || helper_rect.top < helper_client.top
-            || helper_rect.right > helper_client.right || helper_rect.bottom > helper_client.bottom,
-            "Helper outer rect {%ld,%ld,%ld,%ld} has no frame around client {%ld,%ld,%ld,%ld}.\n",
-            helper_rect.left, helper_rect.top, helper_rect.right, helper_rect.bottom,
-            helper_client.left, helper_client.top, helper_client.right, helper_client.bottom);
-    target_style = GetWindowLongW(target_window, GWL_STYLE);
-    helper_style = GetWindowLongW(window, GWL_STYLE);
-    ok((helper_style & frame_style_mask) == (target_style & frame_style_mask),
-            "Got helper frame style %#lx, expected %#lx from root style %#lx.\n",
-            helper_style & frame_style_mask, target_style & frame_style_mask, target_style);
-    ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Standard frame helper has no native-frame marker.\n");
-    ok(GetPropW(target_child, L"__wine_dcomp_base_presentation") == window,
-            "Child target base presentation is %p, expected %p.\n",
-            GetPropW(target_child, L"__wine_dcomp_base_presentation"), window);
-    ok(GetPropW(target_window, L"__wine_dcomp_task_delegated") == window,
-            "Root task presentation is %p, expected %p.\n",
-            GetPropW(target_window, L"__wine_dcomp_task_delegated"), window);
-    ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
-            "Standard frame helper has a synthetic caption overlay.\n");
-    dpi = GetDpiForWindow(window);
-    hit_point.x = helper_rect.right - 5 * GetSystemMetricsForDpi(SM_CXSIZE, dpi) / 2;
-    hit_point.y = (helper_rect.top + helper_client.top) / 2;
-    state.custom_hit_test = TRUE;
-    state.hit_test_count = 0;
-    target_hit = SendMessageW(target_window, WM_NCHITTEST, 0,
-            MAKELPARAM(hit_point.x, hit_point.y));
-    ok(target_hit == HTCLIENT, "Root returned hit-test result %Id, expected HTCLIENT.\n",
-            target_hit);
-    ok(state.hit_test_count == 1, "Root received %u hit-test messages, expected 1.\n",
-            state.hit_test_count);
-    state.hit_test_count = 0;
-    helper_hit = SendMessageW(window, WM_NCHITTEST, 0,
-            MAKELPARAM(hit_point.x, hit_point.y));
-    ok(helper_hit == HTMINBUTTON,
-            "Helper returned hit-test result %Id, expected HTMINBUTTON.\n", helper_hit);
-    ok(!state.hit_test_count, "Helper hit testing forwarded %u messages to the root.\n",
-            state.hit_test_count);
-    state.custom_hit_test = FALSE;
-
-    hr = IDXGISwapChain1_Present(swapchain, 0, 0);
-    ok(hr == S_OK, "Present failed, hr %#lx.\n", hr);
-    flush_events();
-    ok(get_client_rect_screen(window, &helper_client), "Could not map post-Present helper client rect.\n");
-    ok(EqualRect(&helper_client, &target_rect),
-            "Post-Present helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
-            helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
-            target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
-
-    SendMessageW(window, WM_TIMER, 1, 0);
-    flush_events();
-    callwndproc_hook = SetWindowsHookExW(WH_CALLWNDPROC, dcomp_frame_callwndproc_hook,
-            NULL, GetCurrentThreadId());
-    ok(!!callwndproc_hook, "Could not install call-window-proc hook, error %lu.\n", GetLastError());
-    if (callwndproc_hook)
+    if (!strcmp(winetest_platform, "wine"))
     {
-        dcomp_frame_hook_window = window;
-        dcomp_frame_windowpos_count = 0;
-        SendMessageW(window, WM_TIMER, 1, 0);
-        ok(!dcomp_frame_windowpos_count,
-                "Unchanged timer refresh sent %u window-position messages.\n",
-                dcomp_frame_windowpos_count);
-        dcomp_frame_windowpos_count = 0;
+        hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+        ok(hr == S_OK, "Got unexpected post-commit GetHwnd hr %#lx.\n", hr);
+        ok(window && IsWindowVisible(window), "Composition helper window %p is not visible.\n", window);
+        ok(get_client_rect_screen(target_window, &target_rect), "Could not map target client rect.\n");
+        ok(get_client_rect_screen(window, &helper_client), "Could not map helper client rect.\n");
+        ok(EqualRect(&helper_client, &target_rect),
+                "Got helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
+                helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
+                target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
+        ok(GetWindowRect(window, &helper_rect), "GetWindowRect failed.\n");
+        ok(helper_rect.left < helper_client.left || helper_rect.top < helper_client.top
+                || helper_rect.right > helper_client.right || helper_rect.bottom > helper_client.bottom,
+                "Helper outer rect {%ld,%ld,%ld,%ld} has no frame around client {%ld,%ld,%ld,%ld}.\n",
+                helper_rect.left, helper_rect.top, helper_rect.right, helper_rect.bottom,
+                helper_client.left, helper_client.top, helper_client.right, helper_client.bottom);
+        target_style = GetWindowLongW(target_window, GWL_STYLE);
+        helper_style = GetWindowLongW(window, GWL_STYLE);
+        ok((helper_style & frame_style_mask) == (target_style & frame_style_mask),
+                "Got helper frame style %#lx, expected %#lx from root style %#lx.\n",
+                helper_style & frame_style_mask, target_style & frame_style_mask, target_style);
+        ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Standard frame helper has no native-frame marker.\n");
+        ok(GetPropW(target_child, L"__wine_dcomp_base_presentation") == window,
+                "Child target base presentation is %p, expected %p.\n",
+                GetPropW(target_child, L"__wine_dcomp_base_presentation"), window);
+        ok(GetPropW(target_window, L"__wine_dcomp_task_delegated") == window,
+                "Root task presentation is %p, expected %p.\n",
+                GetPropW(target_window, L"__wine_dcomp_task_delegated"), window);
+        ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
+                "Standard frame helper has a synthetic caption overlay.\n");
+        dpi = GetDpiForWindow(window);
+        hit_point.x = helper_rect.right - 5 * GetSystemMetricsForDpi(SM_CXSIZE, dpi) / 2;
+        hit_point.y = (helper_rect.top + helper_client.top) / 2;
+        state.custom_hit_test = TRUE;
+        state.hit_test_count = 0;
+        target_hit = SendMessageW(target_window, WM_NCHITTEST, 0,
+                MAKELPARAM(hit_point.x, hit_point.y));
+        ok(target_hit == HTCLIENT, "Root returned hit-test result %Id, expected HTCLIENT.\n",
+                target_hit);
+        ok(state.hit_test_count == 1, "Root received %u hit-test messages, expected 1.\n",
+                state.hit_test_count);
+        state.hit_test_count = 0;
+        helper_hit = SendMessageW(window, WM_NCHITTEST, 0,
+                MAKELPARAM(hit_point.x, hit_point.y));
+        ok(helper_hit == HTMINBUTTON,
+                "Helper returned hit-test result %Id, expected HTMINBUTTON.\n", helper_hit);
+        ok(!state.hit_test_count, "Helper hit testing forwarded %u messages to the root.\n",
+                state.hit_test_count);
+        state.custom_hit_test = FALSE;
+
         hr = IDXGISwapChain1_Present(swapchain, 0, 0);
-        ok(hr == S_OK, "Repeated Present failed, hr %#lx.\n", hr);
-        ok(!dcomp_frame_windowpos_count,
-                "Unchanged Present sent %u window-position messages.\n",
-                dcomp_frame_windowpos_count);
+        ok(hr == S_OK, "Present failed, hr %#lx.\n", hr);
         flush_events();
-        dcomp_frame_hook_window = NULL;
-        UnhookWindowsHookEx(callwndproc_hook);
-        callwndproc_hook = NULL;
-    }
+        ok(get_client_rect_screen(window, &helper_client), "Could not map post-Present helper client rect.\n");
+        ok(EqualRect(&helper_client, &target_rect),
+                "Post-Present helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
+                helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
+                target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
 
-    state.syscommand = 0;
-    SendMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0);
-    flush_events();
-    ok(state.syscommand == SC_CLOSE, "Root got system command %#Ix, expected SC_CLOSE.\n",
-            state.syscommand);
-
-    ok(SetWindowTextW(target_window, L"dxgi composition updated"),
-            "Could not update root title.\n");
-    icon = LoadIconW(NULL, (const WCHAR *)IDI_WARNING);
-    ok(!!icon, "Could not load test icon.\n");
-    SendMessageW(target_window, WM_SETICON, ICON_BIG, (LPARAM)icon);
-    SendMessageW(target_window, WM_SETICON, ICON_SMALL, (LPARAM)icon);
-    SendMessageW(window, WM_TIMER, 1, 0);
-    ok(GetWindowTextW(window, title, ARRAY_SIZE(title)), "Could not query helper title.\n");
-    ok(!wcscmp(title, L"dxgi composition updated"), "Got helper title %s.\n",
-            wine_dbgstr_w(title));
-    ok((HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0) == icon,
-            "Helper did not refresh its large icon.\n");
-    ok((HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0) == icon,
-            "Helper did not refresh its small icon.\n");
-
-    target_exstyle = GetWindowLongW(target_window, GWL_EXSTYLE);
-    SetWindowLongW(target_window, GWL_STYLE, target_style & ~WS_MAXIMIZEBOX);
-    SetWindowLongW(target_window, GWL_EXSTYLE,
-            target_exstyle | WS_EX_RTLREADING | WS_EX_TOOLWINDOW);
-    SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    SendMessageW(window, WM_TIMER, 1, 0);
-    helper_style = GetWindowLongW(window, GWL_STYLE);
-    ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Style refresh removed the native frame.\n");
-    ok(!(helper_style & WS_MAXIMIZEBOX), "Helper retained a removed maximize box.\n");
-    ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_RTLREADING,
-            "Helper did not mirror the root reading direction.\n");
-    ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW,
-            "Helper did not mirror the root tool-window frame.\n");
-    SetWindowLongW(target_window, GWL_STYLE, target_style);
-    SetWindowLongW(target_window, GWL_EXSTYLE, target_exstyle);
-    SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    SendMessageW(window, WM_TIMER, 1, 0);
-
-    clip.left = clip.top = 0.0f;
-    clip.right = desc.Width - 8.0f;
-    clip.bottom = desc.Height - 8.0f;
-    hr = IDCompositionVisual_SetClip(dcomp_visual, &clip);
-    ok(hr == S_OK, "Setting partial visual clip failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Partial visual commit failed, hr %#lx.\n", hr);
-    flush_events();
-    SendMessageW(window, WM_TIMER, 1, 0);
-    ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Clipped visual retained the native frame.\n");
-    ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
-            "Clipped visual helper is not a popup.\n");
-    hr = IDCompositionVisual_SetClipObject(dcomp_visual, NULL);
-    ok(hr == S_OK, "Clearing visual clip failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Visual clip restore commit failed, hr %#lx.\n", hr);
-    flush_events();
-    SendMessageW(window, WM_TIMER, 1, 0);
-    ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Clearing the visual clip did not restore the native frame.\n");
-
-    hr = IDCompositionVisual_SetOffsetX(dcomp_visual, 8.0f);
-    ok(hr == S_OK, "Setting visual offset failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Offset visual commit failed, hr %#lx.\n", hr);
-    flush_events();
-    SendMessageW(window, WM_TIMER, 1, 0);
-    ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Offset visual retained the native frame.\n");
-    ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
-            "Offset visual helper is not a popup.\n");
-    hr = IDCompositionVisual_SetOffsetX(dcomp_visual, 0.0f);
-    ok(hr == S_OK, "Clearing visual offset failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Offset restore commit failed, hr %#lx.\n", hr);
-    flush_events();
-    SendMessageW(window, WM_TIMER, 1, 0);
-    ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Clearing the visual offset did not restore the native frame.\n");
-
-    if (pDwmSetWindowAttribute)
-    {
-        policy = DWMNCRP_DISABLED;
-        hr = pDwmSetWindowAttribute(target_window, DWMWA_NCRENDERING_POLICY,
-                &policy, sizeof(policy));
-        ok(hr == S_OK, "Disabling DWM nonclient rendering failed, hr %#lx.\n", hr);
-        if (SUCCEEDED(hr))
+        SendMessageW(window, WM_TIMER, 1, 0);
+        flush_events();
+        callwndproc_hook = SetWindowsHookExW(WH_CALLWNDPROC, dcomp_frame_callwndproc_hook,
+                NULL, GetCurrentThreadId());
+        ok(!!callwndproc_hook, "Could not install call-window-proc hook, error %lu.\n", GetLastError());
+        if (callwndproc_hook)
         {
+            dcomp_frame_hook_window = window;
+            dcomp_frame_windowpos_count = 0;
             SendMessageW(window, WM_TIMER, 1, 0);
-            ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
-                    "DWM-disabled root retained the native frame.\n");
-            ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
-                    "DWM-disabled root gained a caption overlay.\n");
-            policy = DWMNCRP_USEWINDOWSTYLE;
+            ok(!dcomp_frame_windowpos_count,
+                    "Unchanged timer refresh sent %u window-position messages.\n",
+                    dcomp_frame_windowpos_count);
+            dcomp_frame_windowpos_count = 0;
+            hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+            ok(hr == S_OK, "Repeated Present failed, hr %#lx.\n", hr);
+            ok(!dcomp_frame_windowpos_count,
+                    "Unchanged Present sent %u window-position messages.\n",
+                    dcomp_frame_windowpos_count);
+            flush_events();
+            dcomp_frame_hook_window = NULL;
+            UnhookWindowsHookEx(callwndproc_hook);
+            callwndproc_hook = NULL;
+        }
+
+        state.syscommand = 0;
+        SendMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0);
+        flush_events();
+        ok(state.syscommand == SC_CLOSE, "Root got system command %#Ix, expected SC_CLOSE.\n",
+                state.syscommand);
+
+        ok(SetWindowTextW(target_window, L"dxgi composition updated"),
+                "Could not update root title.\n");
+        icon = LoadIconW(NULL, (const WCHAR *)IDI_WARNING);
+        ok(!!icon, "Could not load test icon.\n");
+        SendMessageW(target_window, WM_SETICON, ICON_BIG, (LPARAM)icon);
+        SendMessageW(target_window, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+        SendMessageW(window, WM_TIMER, 1, 0);
+        ok(GetWindowTextW(window, title, ARRAY_SIZE(title)), "Could not query helper title.\n");
+        ok(!wcscmp(title, L"dxgi composition updated"), "Got helper title %s.\n",
+                wine_dbgstr_w(title));
+        ok((HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0) == icon,
+                "Helper did not refresh its large icon.\n");
+        ok((HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0) == icon,
+                "Helper did not refresh its small icon.\n");
+
+        target_exstyle = GetWindowLongW(target_window, GWL_EXSTYLE);
+        SetWindowLongW(target_window, GWL_STYLE, target_style & ~WS_MAXIMIZEBOX);
+        SetWindowLongW(target_window, GWL_EXSTYLE,
+                target_exstyle | WS_EX_RTLREADING | WS_EX_TOOLWINDOW);
+        SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SendMessageW(window, WM_TIMER, 1, 0);
+        helper_style = GetWindowLongW(window, GWL_STYLE);
+        ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Style refresh removed the native frame.\n");
+        ok(!(helper_style & WS_MAXIMIZEBOX), "Helper retained a removed maximize box.\n");
+        ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_RTLREADING,
+                "Helper did not mirror the root reading direction.\n");
+        ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW,
+                "Helper did not mirror the root tool-window frame.\n");
+        SetWindowLongW(target_window, GWL_STYLE, target_style);
+        SetWindowLongW(target_window, GWL_EXSTYLE, target_exstyle);
+        SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        SendMessageW(window, WM_TIMER, 1, 0);
+
+        clip.left = clip.top = 0.0f;
+        clip.right = desc.Width - 8.0f;
+        clip.bottom = desc.Height - 8.0f;
+        hr = IDCompositionVisual_SetClip(dcomp_visual, &clip);
+        ok(hr == S_OK, "Setting partial visual clip failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Partial visual commit failed, hr %#lx.\n", hr);
+        flush_events();
+        SendMessageW(window, WM_TIMER, 1, 0);
+        ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Clipped visual retained the native frame.\n");
+        ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
+                "Clipped visual helper is not a popup.\n");
+        hr = IDCompositionVisual_SetClipObject(dcomp_visual, NULL);
+        ok(hr == S_OK, "Clearing visual clip failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Visual clip restore commit failed, hr %#lx.\n", hr);
+        flush_events();
+        SendMessageW(window, WM_TIMER, 1, 0);
+        ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Clearing the visual clip did not restore the native frame.\n");
+
+        hr = IDCompositionVisual_SetOffsetX(dcomp_visual, 8.0f);
+        ok(hr == S_OK, "Setting visual offset failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Offset visual commit failed, hr %#lx.\n", hr);
+        flush_events();
+        SendMessageW(window, WM_TIMER, 1, 0);
+        ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Offset visual retained the native frame.\n");
+        ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
+                "Offset visual helper is not a popup.\n");
+        hr = IDCompositionVisual_SetOffsetX(dcomp_visual, 0.0f);
+        ok(hr == S_OK, "Clearing visual offset failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Offset restore commit failed, hr %#lx.\n", hr);
+        flush_events();
+        SendMessageW(window, WM_TIMER, 1, 0);
+        ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Clearing the visual offset did not restore the native frame.\n");
+
+        if (pDwmSetWindowAttribute)
+        {
+            policy = DWMNCRP_DISABLED;
             hr = pDwmSetWindowAttribute(target_window, DWMWA_NCRENDERING_POLICY,
                     &policy, sizeof(policy));
-            ok(hr == S_OK, "Restoring DWM nonclient rendering failed, hr %#lx.\n", hr);
-            SendMessageW(window, WM_TIMER, 1, 0);
-            ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
-                    "Restoring DWM nonclient rendering did not restore the frame.\n");
+            ok(hr == S_OK, "Disabling DWM nonclient rendering failed, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                SendMessageW(window, WM_TIMER, 1, 0);
+                ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
+                        "DWM-disabled root retained the native frame.\n");
+                ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
+                        "DWM-disabled root gained a caption overlay.\n");
+                policy = DWMNCRP_USEWINDOWSTYLE;
+                hr = pDwmSetWindowAttribute(target_window, DWMWA_NCRENDERING_POLICY,
+                        &policy, sizeof(policy));
+                ok(hr == S_OK, "Restoring DWM nonclient rendering failed, hr %#lx.\n", hr);
+                SendMessageW(window, WM_TIMER, 1, 0);
+                ok(!!GetPropW(window, L"__wine_dcomp_native_frame"),
+                        "Restoring DWM nonclient rendering did not restore the frame.\n");
+            }
         }
+        else
+            win_skip("DwmSetWindowAttribute is unavailable.\n");
+
+        state.custom_caption = TRUE;
+        SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ok(GetClientRect(target_window, &target_rect), "Could not query custom root client.\n");
+        SetWindowPos(target_child, NULL, 0, 0, target_rect.right, target_rect.bottom,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        hr = IDCompositionVisual_SetContent(dcomp_visual, NULL);
+        ok(hr == S_OK, "Custom-caption unbind failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Custom-caption unbind commit failed, hr %#lx.\n", hr);
+        hr = IDCompositionVisual_SetContent(dcomp_visual, (IUnknown *)swapchain);
+        ok(hr == S_OK, "Custom-caption rebind failed, hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Custom-caption rebind commit failed, hr %#lx.\n", hr);
+        flush_events();
+        ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Custom-caption rebind gained a native frame.\n");
+        ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
+                "Custom-caption helper is not a popup.\n");
+        caption = GetPropW(window, L"__wine_dcomp_caption_window");
+        ok(caption && IsWindow(caption), "Custom-caption rebind has no caption overlay.\n");
+
+        state.custom_caption = FALSE;
+        SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ok(GetClientRect(target_window, &target_rect), "Could not restore root client.\n");
+        SetWindowPos(target_child, NULL, 0, 0, target_rect.right, target_rect.bottom,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        ok(wait_for_window_prop(window, L"__wine_dcomp_native_frame", TRUE),
+                "Standard frame did not return after custom-caption mode.\n");
+        ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
+                "Standard frame retained the custom caption overlay.\n");
+        ok(!caption || !IsWindow(caption), "Custom caption overlay %p was not destroyed.\n", caption);
+        ok(get_client_rect_screen(target_window, &target_rect),
+                "Could not map restored target client rect.\n");
+        ok(get_client_rect_screen(window, &helper_client),
+                "Could not map restored helper client rect.\n");
+        ok(EqualRect(&helper_client, &target_rect),
+                "Restored helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
+                helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
+                target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
     }
-    else
-        win_skip("DwmSetWindowAttribute is unavailable.\n");
-
-    state.custom_caption = TRUE;
-    SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    ok(GetClientRect(target_window, &target_rect), "Could not query custom root client.\n");
-    SetWindowPos(target_child, NULL, 0, 0, target_rect.right, target_rect.bottom,
-            SWP_NOZORDER | SWP_NOACTIVATE);
-    hr = IDCompositionVisual_SetContent(dcomp_visual, NULL);
-    ok(hr == S_OK, "Custom-caption unbind failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Custom-caption unbind commit failed, hr %#lx.\n", hr);
-    hr = IDCompositionVisual_SetContent(dcomp_visual, (IUnknown *)swapchain);
-    ok(hr == S_OK, "Custom-caption rebind failed, hr %#lx.\n", hr);
-    hr = IDCompositionDevice_Commit(dcomp_device);
-    ok(hr == S_OK, "Custom-caption rebind commit failed, hr %#lx.\n", hr);
-    flush_events();
-    ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Custom-caption rebind gained a native frame.\n");
-    ok(GetWindowLongW(window, GWL_STYLE) & WS_POPUP,
-            "Custom-caption helper is not a popup.\n");
-    caption = GetPropW(window, L"__wine_dcomp_caption_window");
-    ok(caption && IsWindow(caption), "Custom-caption rebind has no caption overlay.\n");
-
-    state.custom_caption = FALSE;
-    SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    ok(GetClientRect(target_window, &target_rect), "Could not restore root client.\n");
-    SetWindowPos(target_child, NULL, 0, 0, target_rect.right, target_rect.bottom,
-            SWP_NOZORDER | SWP_NOACTIVATE);
-    ok(wait_for_window_prop(window, L"__wine_dcomp_native_frame", TRUE),
-            "Standard frame did not return after custom-caption mode.\n");
-    ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
-            "Standard frame retained the custom caption overlay.\n");
-    ok(!caption || !IsWindow(caption), "Custom caption overlay %p was not destroyed.\n", caption);
-    ok(get_client_rect_screen(target_window, &target_rect),
-            "Could not map restored target client rect.\n");
-    ok(get_client_rect_screen(window, &helper_client),
-            "Could not map restored helper client rect.\n");
-    ok(EqualRect(&helper_client, &target_rect),
-            "Restored helper client {%ld,%ld,%ld,%ld}, target client {%ld,%ld,%ld,%ld}.\n",
-            helper_client.left, helper_client.top, helper_client.right, helper_client.bottom,
-            target_rect.left, target_rect.top, target_rect.right, target_rect.bottom);
 
     hr = IDCompositionVisual_SetContent(dcomp_visual, NULL);
     ok(hr == S_OK, "Clearing visual content failed, hr %#lx.\n", hr);
     hr = IDCompositionDevice_Commit(dcomp_device);
     ok(hr == S_OK, "Unbind commit failed, hr %#lx.\n", hr);
-    flush_events();
-    ok(!IsWindowVisible(window), "Unbound composition helper window %p is still visible.\n", window);
-    ok(!GetPropW(window, L"__wine_dcomp_detached_window"),
-            "Unbound composition helper retained its target.\n");
-    ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
-            "Unbound composition helper retained its native-frame marker.\n");
-    ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
-            "Unbound composition helper retained its caption overlay.\n");
-    ok(!GetPropW(target_child, L"__wine_dcomp_base_presentation"),
-            "Unbound child retained its base presentation.\n");
-    ok(!GetPropW(target_window, L"__wine_dcomp_task_delegated"),
-            "Unbound root retained its task presentation.\n");
-    ok(GetWindowLongW(window, GWL_STYLE) == initial_style,
-            "Unbound helper style %#lx, expected %#lx.\n",
-            GetWindowLongW(window, GWL_STYLE), initial_style);
-    ok(GetWindowLongW(window, GWL_EXSTYLE) == initial_exstyle,
-            "Unbound helper exstyle %#lx, expected %#lx.\n",
-            GetWindowLongW(window, GWL_EXSTYLE), initial_exstyle);
-    ok(GetWindow(window, GW_OWNER) == initial_owner,
-            "Unbound helper owner %p, expected %p.\n", GetWindow(window, GW_OWNER), initial_owner);
+    if (!strcmp(winetest_platform, "wine"))
+    {
+        flush_events();
+        ok(!IsWindowVisible(window), "Unbound composition helper window %p is still visible.\n", window);
+        ok(!GetPropW(window, L"__wine_dcomp_detached_window"),
+                "Unbound composition helper retained its target.\n");
+        ok(!GetPropW(window, L"__wine_dcomp_native_frame"),
+                "Unbound composition helper retained its native-frame marker.\n");
+        ok(!GetPropW(window, L"__wine_dcomp_caption_window"),
+                "Unbound composition helper retained its caption overlay.\n");
+        ok(!GetPropW(target_child, L"__wine_dcomp_base_presentation"),
+                "Unbound child retained its base presentation.\n");
+        ok(!GetPropW(target_window, L"__wine_dcomp_task_delegated"),
+                "Unbound root retained its task presentation.\n");
+        ok(GetWindowLongW(window, GWL_STYLE) == initial_style,
+                "Unbound helper style %#lx, expected %#lx.\n",
+                GetWindowLongW(window, GWL_STYLE), initial_style);
+        ok(GetWindowLongW(window, GWL_EXSTYLE) == initial_exstyle,
+                "Unbound helper exstyle %#lx, expected %#lx.\n",
+                GetWindowLongW(window, GWL_EXSTYLE), initial_exstyle);
+        ok(GetWindow(window, GW_OWNER) == initial_owner,
+                "Unbound helper owner %p, expected %p.\n", GetWindow(window, GW_OWNER), initial_owner);
+    }
 
 done:
     dcomp_frame_hook_window = NULL;

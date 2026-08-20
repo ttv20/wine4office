@@ -1025,7 +1025,7 @@ static void set_reserved_dcomp_property( struct window *win, enum dcomp_property
 
     if (free_slot == -1)
     {
-        assert( win->prop_inuse < win->prop_alloc );
+        if (!reserve_dcomp_properties( win, &id, 1 )) return;
         free_slot = win->prop_inuse++;
     }
     grab_atom( table, atom );
