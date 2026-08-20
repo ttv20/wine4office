@@ -677,6 +677,11 @@ class ManagerState:
                     self.output("Stopped the selected Wine environment before updating.")
                 result = backend.install_release_updates(
                     metadata, selected, self.output, self.cancel_event,
+                    expected_channel=backend.accepted_update_channels(
+                        include_prereleases=(
+                            config.get("include_prereleases") is True
+                        )
+                    ),
                     progress=self.set_progress,
                 )
                 if "wine" in selected:

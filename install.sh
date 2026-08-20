@@ -3,7 +3,8 @@
 set -euo pipefail
 umask 077
 
-METADATA_URL=${WINE4OFFICE_METADATA_URL:-https://github.com/ttv20/wine4office/releases/latest/download/release.json}
+DEFAULT_METADATA_URL=https://github.com/ttv20/wine4office/releases/latest/download/release.json
+METADATA_URL=${WINE4OFFICE_METADATA_URL:-$DEFAULT_METADATA_URL}
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
 ROOT=${WINE4OFFICE_HOME:-$DATA_HOME/wine4office}
@@ -15,6 +16,52 @@ fail() {
 warn() {
     printf 'wine4office install warning: %s\n' "$*" >&2
 }
+usage() {
+    cat <<'EOF'
+Usage: install.sh [--tag TAG] [--force]
+
+Install the latest stable Wine4Office release, or install the exact GitHub
+release named by TAG (for example: wine4office-v0.1.10).
+
+If Wine4Office is running, the installer asks permission to close it. --force
+closes active Wine4Office processes without prompting and force-stops any that
+do not exit after the graceful shutdown period.
+EOF
+}
+
+FORCE=false
+TAGGED_RELEASE=false
+while (($#)); do
+    case $1 in
+        --tag)
+            (($# >= 2)) || fail "--tag requires an exact release tag"
+            TAG=$2
+            shift 2
+            ;;
+        --tag=*)
+            TAG=${1#--tag=}
+            shift
+            ;;
+        --force)
+            FORCE=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "unknown argument: $1"
+            ;;
+    esac
+done
+if [[ -v TAG ]]; then
+    [[ $TAG =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || \
+        fail "release tag contains unsupported characters"
+    METADATA_URL="https://github.com/ttv20/wine4office/releases/download/$TAG/release.json"
+    TAGGED_RELEASE=true
+fi
+
 prompt_and_launch_manager() {
     local manager=$1 answer
     if [[ -v WINE4OFFICE_LAUNCH_MANAGER ]]; then
@@ -45,7 +92,7 @@ prompt_and_launch_manager() {
     esac
 }
 
-for command in curl flock install python3 sha256sum stat zstd; do
+for command in curl flock install python3 readlink sha256sum stat zstd; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 [[ $(uname -m) == x86_64 ]] || fail "only x86_64 Linux is currently supported"
@@ -68,6 +115,68 @@ PY
 MANAGER_TARGET=$ROOT/bin/Wine4OfficeManager
 UNINSTALLER_TARGET=$ROOT/bin/wine4office-uninstall
 RUNNER_TARGET=$ROOT/runner
+
+is_active_install_pid() {
+    local pid=$1 owner executable
+    [[ $pid =~ ^[0-9]+$ && -d /proc/$pid ]] || return 1
+    owner=$(stat -c %u "/proc/$pid" 2>/dev/null) || return 1
+    [[ $owner == $EUID ]] || return 1
+    executable=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || return 1
+    [[ $executable == "$ROOT"/* ]]
+}
+
+active_install_pids() {
+    local process pid
+    for process in /proc/[0-9]*; do
+        pid=${process##*/}
+        is_active_install_pid "$pid" && printf '%s\n' "$pid"
+    done
+}
+
+close_active_install_processes() {
+    local answer pid attempt
+    local -a active=()
+    mapfile -t active < <(active_install_pids)
+    ((${#active[@]})) || return 0
+    printf 'Wine4Office is currently running (processes: %s).\n' "${active[*]}" >&2
+    if ! $FORCE; then
+        if [[ -t 0 ]]; then
+            read -r -p 'Close Wine4Office and continue? [y/N] ' answer || answer=n
+        elif [[ -t 1 || -t 2 ]] && [[ -r /dev/tty ]]; then
+            read -r -p 'Close Wine4Office and continue? [y/N] ' answer \
+                </dev/tty || answer=n
+        else
+            fail "close Wine4Office first, or rerun with --force"
+        fi
+        case ${answer,,} in
+            y|yes) ;;
+            *) fail "update cancelled while Wine4Office is running" ;;
+        esac
+    fi
+
+    for pid in "${active[@]}"; do
+        is_active_install_pid "$pid" && kill -TERM "$pid" 2>/dev/null || true
+    done
+    for attempt in {1..50}; do
+        mapfile -t active < <(active_install_pids)
+        ((${#active[@]} == 0)) && return
+        sleep 0.1
+    done
+    if ! $FORCE; then
+        fail "Wine4Office did not close; rerun with --force to stop it"
+    fi
+    for pid in "${active[@]}"; do
+        is_active_install_pid "$pid" && kill -KILL "$pid" 2>/dev/null || true
+    done
+    for attempt in {1..20}; do
+        mapfile -t active < <(active_install_pids)
+        ((${#active[@]} == 0)) && return
+        sleep 0.1
+    done
+    fail "could not stop every active Wine4Office process"
+}
+
+close_active_install_processes
 
 TMP=$(mktemp -d)
 NEW_RUNNER=$ROOT/.runner.new.$$
@@ -160,20 +269,24 @@ fetch_limited() {
 
 printf 'Fetching release metadata…\n'
 fetch_limited "$METADATA_URL" "$TMP/release.json" 1048576
-mapfile -t RELEASE < <(python3 - "$METADATA_URL" "$TMP/release.json" <<'PY'
+mapfile -t RELEASE < <(python3 - "$METADATA_URL" "$TMP/release.json" \
+    "$TAGGED_RELEASE" <<'PY'
 import json
 import re
 import sys
 import urllib.parse
 
-source, path = sys.argv[1:]
+source, path, tagged_text = sys.argv[1:]
+tagged_release = tagged_text == "true"
 with open(path, "rb") as release_file:
     payload = json.load(release_file)
 if not isinstance(payload, dict) or payload.get("schema_version") != 1:
     raise SystemExit("release.json must use schema version 1")
 channel = payload.get("channel")
-if channel != "stable":
-    raise SystemExit("release.json must use the stable channel")
+allowed_channels = {"stable", "prerelease"} if tagged_release else {"stable"}
+if channel not in allowed_channels:
+    expected = "stable or prerelease" if tagged_release else "stable"
+    raise SystemExit(f"release.json must use the {expected} channel")
 
 def https_url(value, base, label):
     if not isinstance(value, str) or not value or any(ord(character) < 32 for character in value):

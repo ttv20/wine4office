@@ -157,8 +157,11 @@ class UpdaterTests(unittest.TestCase):
         )
 
     def test_prerelease_check_uses_discovered_metadata(self):
+        payload = self.metadata()
+        payload["channel"] = "prerelease"
         parsed = backend.parse_release_metadata(
-            self.metadata(), "https://updates.example/release.json"
+            payload, "https://updates.example/release.json",
+            expected_channel="prerelease",
         )
         source = "https://github.com/owner/repo/releases/download/v2/release.json"
         with mock.patch.object(
@@ -174,7 +177,27 @@ class UpdaterTests(unittest.TestCase):
             )
 
         discover.assert_called_once()
-        fetch.assert_called_once_with(source, None, None)
+        fetch.assert_called_once_with(source, None, ("stable", "prerelease"))
+
+    def test_prerelease_channel_requires_explicit_opt_in(self):
+        payload = self.metadata()
+        payload["channel"] = "prerelease"
+        with self.assertRaisesRegex(ValueError, "does not match expected channel"):
+            backend.parse_release_metadata(
+                payload, "https://updates.example/release.json"
+            )
+        parsed = backend.parse_release_metadata(
+            payload, "https://updates.example/release.json",
+            expected_channel=("stable", "prerelease"),
+        )
+        with mock.patch.object(backend, "current_version", return_value="1.0.0"), \
+             mock.patch.object(backend, "current_wine_version", return_value="11.1.0"):
+            self.assertEqual(
+                set(backend.available_updates(
+                    parsed, expected_channel=("stable", "prerelease")
+                )),
+                {"manager", "wine"},
+            )
 
     def test_prerelease_check_rejects_custom_metadata_provider(self):
         with self.assertRaisesRegex(ValueError, "standard GitHub"):
@@ -277,7 +300,10 @@ class UpdaterTests(unittest.TestCase):
             install.assert_not_called()
             state.start_offered_update(["manager"])
             self._wait_for(lambda: not state.snapshot()["task"]["running"])
-            install.assert_called_once()
+            self.assertEqual(
+                install.call_args.kwargs["expected_channel"],
+                ("stable", "prerelease"),
+            )
             post_install.assert_called_once()
             post_config = post_install.call_args.args[0]
             self.assertEqual(post_config["prefix"], config["prefix"])
