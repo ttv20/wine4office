@@ -1167,8 +1167,8 @@ struct mutation_observer_record {
 };
 
 struct mutation_observer_runner {
-    nsISupports nsISupports_iface;
-    LONG ref;
+    task_t task;
+    struct mutation_observer *observer;
     ULONG generation;
 };
 
@@ -1202,11 +1202,6 @@ static inline struct mutation_observer *impl_from_nsIMutationObserver(nsIMutatio
     return CONTAINING_RECORD(iface, struct mutation_observer, nsIMutationObserver_iface);
 }
 
-static inline struct mutation_observer_runner *impl_from_mutation_runner(nsISupports *iface)
-{
-    return CONTAINING_RECORD(iface, struct mutation_observer_runner, nsISupports_iface);
-}
-
 static inline struct mutation_node_list *impl_from_mutation_node_list(nsIDOMNodeList *iface)
 {
     return CONTAINING_RECORD(iface, struct mutation_node_list, nsIDOMNodeList_iface);
@@ -1217,40 +1212,6 @@ static void mutation_observer_disconnect_internal(struct mutation_observer *This
 static HRESULT mutation_observer_create_records(struct mutation_observer *This, IDispatch **ret);
 static HRESULT mutation_observer_get_native_node(HTMLDOMNode *node, nsINode **ret);
 static void mutation_observer_schedule(struct mutation_observer *This);
-
-static nsresult NSAPI mutation_runner_QueryInterface(nsISupports *iface, nsIIDRef riid, void **result)
-{
-    if(!IsEqualGUID(riid, &IID_nsISupports)) {
-        *result = NULL;
-        return NS_NOINTERFACE;
-    }
-
-    *result = iface;
-    nsISupports_AddRef(iface);
-    return NS_OK;
-}
-
-static nsrefcnt NSAPI mutation_runner_AddRef(nsISupports *iface)
-{
-    struct mutation_observer_runner *This = impl_from_mutation_runner(iface);
-    return InterlockedIncrement(&This->ref);
-}
-
-static nsrefcnt NSAPI mutation_runner_Release(nsISupports *iface)
-{
-    struct mutation_observer_runner *This = impl_from_mutation_runner(iface);
-    LONG ref = InterlockedDecrement(&This->ref);
-
-    if(!ref)
-        free(This);
-    return ref;
-}
-
-static const nsISupportsVtbl mutation_runner_vtbl = {
-    mutation_runner_QueryInterface,
-    mutation_runner_AddRef,
-    mutation_runner_Release
-};
 
 static nsresult NSAPI mutation_node_list_QueryInterface(nsIDOMNodeList *iface, nsIIDRef riid, void **result)
 {
@@ -1837,30 +1798,30 @@ static HRESULT mutation_observer_add_transient(struct mutation_observer *This,
     return S_OK;
 }
 
-static nsresult mutation_observer_deliver(HTMLDocumentNode *doc, nsISupports *arg1, nsISupports *arg2)
+static void mutation_observer_deliver(task_t *task)
 {
-    struct mutation_observer *This = impl_from_nsIMutationObserver((nsIMutationObserver *)arg1);
-    struct mutation_observer_runner *runner = arg2 ? impl_from_mutation_runner(arg2) : NULL;
+    struct mutation_observer_runner *runner = CONTAINING_RECORD(task, struct mutation_observer_runner, task);
+    struct mutation_observer *This = runner->observer;
     DISPID named_arg = DISPID_THIS;
     VARIANT args[3], result;
     DISPPARAMS params = {args, &named_arg, ARRAY_SIZE(args), 1};
     IDispatch *records, *callback;
     HRESULT hres;
 
-    if(!runner || !This->delivery_pending || runner->generation != This->delivery_generation)
-        return NS_OK;
+    if(!This->delivery_pending || runner->generation != This->delivery_generation)
+        return;
 
     This->delivery_pending = FALSE;
     mutation_observer_clear_transients(This);
     if(list_empty(&This->records) || !This->callback)
-        return NS_OK;
+        return;
 
     hres = mutation_observer_create_records(This, &records);
     if(FAILED(hres)) {
         WARN("Could not create MutationObserver records array: %08lx\n", hres);
         if(hres == E_UNEXPECTED)
             mutation_observer_clear_records(This);
-        return NS_OK;
+        return;
     }
 
     callback = This->callback;
@@ -1878,36 +1839,52 @@ static nsresult mutation_observer_deliver(HTMLDocumentNode *doc, nsISupports *ar
     IDispatch_Release(records);
     if(FAILED(hres))
         WARN("MutationObserver callback failed: %08lx\n", hres);
-    return NS_OK;
+}
+
+static void mutation_observer_runner_destroy(task_t *task)
+{
+    struct mutation_observer_runner *runner = CONTAINING_RECORD(task, struct mutation_observer_runner, task);
+    struct mutation_observer *This = runner->observer;
+
+    if(This->delivery_pending && runner->generation == This->delivery_generation) {
+        This->delivery_pending = FALSE;
+        ++This->delivery_generation;
+    }
+    IWineMSHTMLMutationObserver_Release(&This->IWineMSHTMLMutationObserver_iface);
 }
 
 static void mutation_observer_schedule(struct mutation_observer *This)
 {
-    struct mutation_observer_target *target;
     struct mutation_observer_runner *runner;
+    HTMLInnerWindow *window;
+    HRESULT hres;
 
     if(This->delivery_pending || (list_empty(&This->records)
             && !mutation_observer_has_transients(This)) || list_empty(&This->targets))
         return;
 
-    target = LIST_ENTRY(list_head(&This->targets), struct mutation_observer_target, entry);
     runner = calloc(1, sizeof(*runner));
     if(!runner)
         return;
 
-    runner->nsISupports_iface.lpVtbl = &mutation_runner_vtbl;
-    runner->ref = 1;
+    window = get_script_global(&This->dispex);
+    if(!window) {
+        free(runner);
+        return;
+    }
+
+    runner->observer = This;
+    IWineMSHTMLMutationObserver_AddRef(&This->IWineMSHTMLMutationObserver_iface);
     runner->generation = ++This->delivery_generation;
     This->delivery_pending = TRUE;
 
-    if(!add_script_runner(target->node->doc, mutation_observer_deliver,
-            (nsISupports *)&This->nsIMutationObserver_iface, &runner->nsISupports_iface)) {
+    hres = push_task(&runner->task, mutation_observer_deliver,
+            mutation_observer_runner_destroy, window->task_magic);
+    IHTMLWindow2_Release(&window->base.IHTMLWindow2_iface);
+    if(FAILED(hres)) {
         This->delivery_pending = FALSE;
         ++This->delivery_generation;
-        nsISupports_Release(&runner->nsISupports_iface);
-        return;
     }
-    nsISupports_Release(&runner->nsISupports_iface);
 }
 
 struct mutation_node_array {

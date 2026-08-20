@@ -20,6 +20,11 @@
 - Improve Wine runner and application-status translations.
 - Keep Word responsive while loading Office Click-to-Run component manifests,
   presenting startup frames, and drawing antialiased content.
+- Install exact tagged releases and safely close active Wine4Office sessions
+  before updating.
+- Let opted-in prerelease updates pass verification and installation.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/0.2.0-beta.1...0.2.1-beta.1)
 
 ## 0.2.0-beta.1 — 2026-08-19
 
