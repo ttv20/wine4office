@@ -353,6 +353,7 @@ struct wayland_surface
     ATOM dcomp_foreign_atom;
 
     struct wayland_surface_config pending, requested, processing, current;
+    BOOL configure_worker_pending;
     BOOL resizing;
     BOOL plasma_positioned;
     BOOL dcomp_overlay;

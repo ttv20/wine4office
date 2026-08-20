@@ -169,12 +169,37 @@ BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom)
 
 static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surface);
 
+static void *configure_window_worker(void *arg)
+{
+    HWND hwnd = arg;
+
+    for (;;)
+    {
+        struct wayland_win_data *data;
+        struct wayland_surface *surface;
+        BOOL repeat = FALSE;
+
+        wayland_configure_window(hwnd);
+        if (!(data = wayland_win_data_get(hwnd))) break;
+        if ((surface = data->wayland_surface))
+        {
+            repeat = wayland_surface_is_toplevel(surface) && !!surface->requested.serial;
+            if (!repeat) surface->configure_worker_pending = FALSE;
+        }
+        wayland_win_data_release(data);
+        if (!repeat) break;
+    }
+    return NULL;
+}
+
 static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_surface,
                                          uint32_t serial)
 {
     struct wayland_surface *surface;
     BOOL should_post = FALSE, configure_directly = FALSE, expose_contents = FALSE;
+    BOOL start_worker = FALSE;
     struct wayland_win_data *data;
+    pthread_t worker;
     HWND hwnd = private, target, root;
 
     TRACE("serial=%u\n", serial);
@@ -205,13 +230,33 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
                              NtUserGetProp(hwnd, dcomp_native_frame_prop) &&
                              NtUserGetProp(target, dcomp_base_presentation_prop) == hwnd &&
                              NtUserGetProp(root, dcomp_task_delegated_prop) == hwnd;
+        if (configure_directly && !surface->configure_worker_pending)
+        {
+            surface->configure_worker_pending = TRUE;
+            start_worker = TRUE;
+        }
     }
 
     wayland_win_data_release(data);
 
-    /* Chromium GPU presentation threads don't pump Win32 configure messages. */
-    if (configure_directly) wayland_configure_window(hwnd);
-    else if (should_post) NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
+    /* Chromium GPU presentation threads don't pump Win32 configure messages.
+     * Use a worker so a hung resize target cannot block Wayland event dispatch. */
+    if (start_worker)
+    {
+        if (!pthread_create(&worker, NULL, configure_window_worker, hwnd))
+            pthread_detach(worker);
+        else
+        {
+            if ((data = wayland_win_data_get(hwnd)))
+            {
+                if ((surface = data->wayland_surface)) surface->configure_worker_pending = FALSE;
+                wayland_win_data_release(data);
+            }
+            NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
+        }
+    }
+    else if (!configure_directly && should_post)
+        NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
 
     /* Flush the window surface in case there is content that we weren't
      * able to flush before due to the lack of the initial configure. */

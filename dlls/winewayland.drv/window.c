@@ -846,6 +846,9 @@ static HICON get_window_icon(HWND hwnd, UINT type, ICONINFO *ret)
     HICON icon;
 
     if ((icon = get_icon_info((HICON)send_message(hwnd, WM_GETICON, type, 0), ret))) return icon;
+    if (type == ICON_SMALL &&
+        (icon = get_icon_info((HICON)NtUserGetClassLongPtrW(hwnd, GCLP_HICONSM), ret)))
+        return icon;
     if ((icon = get_icon_info((HICON)NtUserGetClassLongPtrW(hwnd, GCLP_HICON), ret))) return icon;
     if (type == ICON_BIG)
     {
@@ -854,6 +857,12 @@ static HICON get_window_icon(HWND hwnd, UINT type, ICONINFO *ret)
         return get_icon_info(icon, ret);
     }
     return NULL;
+}
+
+static void free_icon_info(const ICONINFO *ii)
+{
+    if (ii->hbmColor) NtGdiDeleteObjectApp(ii->hbmColor);
+    if (ii->hbmMask) NtGdiDeleteObjectApp(ii->hbmMask);
 }
 
 /***********************************************************************
@@ -1011,6 +1020,8 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             }
             wayland_win_data_release(data);
         }
+        if (big) free_icon_info(&ii);
+        if (small) free_icon_info(&ii_small);
     }
     if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
     if (client_restack_toplevel)
@@ -1362,6 +1373,8 @@ void WAYLAND_SetWindowIcons(HWND hwnd, HICON icon, const ICONINFO *ii, HICON ico
             wayland_win_data_release(data);
         }
     }
+    if (icon) free_icon_info(ii);
+    if (icon_small) free_icon_info(ii_small);
 }
 
 /***********************************************************************
