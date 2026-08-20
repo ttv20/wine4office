@@ -78,7 +78,10 @@ static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_cou
     if (iid_count) *iid_count = 0;
     if (iids) *iids = NULL;
     if (!iid_count || !iids) return E_POINTER;
-    return E_NOTIMPL;
+    if (!(*iids = CoTaskMemAlloc( sizeof(**iids) ))) return E_OUTOFMEMORY;
+    **iids = IID_IEducationSettingsStatics;
+    *iid_count = 1;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )

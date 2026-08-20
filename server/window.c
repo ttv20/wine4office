@@ -1439,6 +1439,10 @@ static struct window *create_window( struct window *parent, struct window *owner
     struct obj_locator class_locator;
     unsigned int fnid;
 
+    /* Keep the protected property atom ids stable before applications can
+     * allocate and release ids that would otherwise be reused here. */
+    if (!init_dcomp_property_atoms()) return NULL;
+
     if (!(desktop = get_thread_desktop( current, DESKTOP_CREATEWINDOW ))) return NULL;
 
     if (!(class = grab_class( current->process, atom, class_instance, &class_locator )))

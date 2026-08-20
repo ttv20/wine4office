@@ -1271,7 +1271,8 @@ static void test_AppCapability(void)
         L"Windows.Security.Authorization.AppCapabilityAccess.AppCapability";
     IAppCapabilityStatics *statics = (void *)0xdeadbeef;
     IAppCapability *capability = (void *)0xdeadbeef;
-    IUser *user = NULL;
+    IUserStatics2 *user_statics = NULL;
+    IUser *user = NULL, *default_user = NULL;
     IAppCapability *other_capability;
     IAsyncOperation_AppCapabilityAccessStatus *operation;
     IAsyncOperation_IMapView_HSTRING_AppCapabilityAccessStatus *map_operation = NULL;
@@ -1414,6 +1415,35 @@ static void test_AppCapability(void)
                         "got hr %#lx, status %u.\n", hr, status );
                 IAppCapability_Release( other_capability );
             }
+
+            hr = WindowsCreateString( RuntimeClass_Windows_System_User,
+                    ARRAY_SIZE(RuntimeClass_Windows_System_User) - 1, &class );
+            ok( hr == S_OK, "Windows.System.User class creation returned %#lx.\n", hr );
+            if (SUCCEEDED(hr))
+            {
+                hr = RoGetActivationFactory( class, &IID_IUserStatics2, (void **)&user_statics );
+                ok( hr == S_OK && user_statics, "Windows.System.User activation returned %#lx and %p.\n",
+                        hr, user_statics );
+                WindowsDeleteString( class );
+                class = NULL;
+            }
+            if (user_statics)
+            {
+                hr = IUserStatics2_GetDefault( user_statics, &default_user );
+                ok( hr == S_OK && default_user, "GetDefault returned %#lx and %p.\n", hr, default_user );
+            }
+            if (default_user)
+            {
+                other_capability = (IAppCapability *)0xdeadbeef;
+                hr = IAppCapabilityStatics_CreateWithProcessIdForUser( statics, default_user, name,
+                        GetCurrentProcessId(), &other_capability );
+                ok( hr == S_OK && other_capability,
+                        "CreateWithProcessIdForUser(GetDefault) returned %#lx and %p.\n", hr, other_capability );
+                if (other_capability && other_capability != (void *)0xdeadbeef)
+                    IAppCapability_Release( other_capability );
+            }
+            if (default_user) IUser_Release( default_user );
+            if (user_statics) IUserStatics2_Release( user_statics );
         }
         if (user) IUser_Release( user );
         IAppCapability_Release( capability );

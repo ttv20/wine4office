@@ -1492,8 +1492,12 @@ def parse_windows_apps_package(path_value: PathValue) -> WindowsAppsPackage | No
     if parsed is None or path.is_symlink() or not path.is_dir():
         return None
     family, version, architecture, publisher_id = parsed
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return None
     return WindowsAppsPackage(
-        family, version, architecture, publisher_id, path.resolve(strict=True),
+        family, version, architecture, publisher_id, resolved,
     )
 
 
@@ -1513,7 +1517,11 @@ def windows_apps_packages(
     except ValueError:
         return
     expected_families = set(families)
-    for package_path in windows_apps.iterdir():
+    try:
+        package_paths = list(windows_apps.iterdir())
+    except OSError:
+        return
+    for package_path in package_paths:
         package = parse_windows_apps_package(package_path)
         if package is None:
             continue
@@ -1544,26 +1552,36 @@ def _package_app_candidates(
             yield InstalledApp(package.path / executable_name, package)
 
 
+def _validated_package_app(candidate: InstalledApp) -> InstalledApp | None:
+    """Return a package app only when its executable remains a contained real file."""
+    executable = candidate.executable
+    try:
+        if executable.is_symlink() or not executable.is_file():
+            return None
+        resolved = executable.resolve(strict=True)
+        resolved.relative_to(candidate.package.path)
+    except (OSError, ValueError):
+        return None
+    return InstalledApp(resolved, candidate.package)
+
+
 def teams_candidates(prefix: Path) -> Iterable[Path]:
     """Yield installed new-Teams executables, newest package version first."""
     for candidate in _package_app_candidates(
             prefix, ("MSTeams", "Microsoft.MSTeams"),
             ("ms-teams.exe", "MSTeams.exe")):
-        yield candidate.executable
+        validated = _validated_package_app(candidate)
+        if validated is not None:
+            yield validated.executable
 
 
 def outlook_candidates(prefix: Path) -> Iterable[InstalledApp]:
     """Yield validated New Outlook packages, newest version first, then classic."""
     for candidate in _package_app_candidates(
             prefix, (OUTLOOK_PACKAGE_FAMILY,), ("olk.exe",)):
-        executable = candidate.executable
-        if executable.is_symlink() or not executable.is_file():
-            continue
-        try:
-            executable.resolve(strict=True).relative_to(candidate.package.path)
-        except ValueError:
-            continue
-        yield candidate
+        validated = _validated_package_app(candidate)
+        if validated is not None:
+            yield validated
     for executable in office_candidates(prefix, APP_META["outlook"]["exe"]):
         yield InstalledApp(executable)
 
@@ -1731,9 +1749,7 @@ def launch_app_process(
     """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    installation = find_office_app_info(str(prefix), app)
-    if installation is None:
-        raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    installation = installed_app(prefix, app)
     executable = installation.executable
     managed = is_prefix_owned(prefix)
     ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
@@ -2069,6 +2085,8 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path,
             'new_outlook_executable=',
             'new_outlook_identity=',
             'new_outlook_version=',
+            '# Keep this package parser, version ordering, and containment logic synchronized',
+            '# with parse_windows_apps_package_name() and outlook_candidates() in the manager.',
             'version_is_newer() {',
             '    local left=$1 right=$2 left_part right_part',
             '    local -a left_parts right_parts',
@@ -2095,8 +2113,11 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path,
             '    fi',
             'done',
             'if [[ $windows_apps_safe == true ]]; then',
-            '    windows_apps_resolved=$(readlink -f -- "$windows_apps")',
-            '    case "$windows_apps_resolved/" in "$prefix_resolved/"*) ;; *) windows_apps_safe=false ;; esac',
+            '    if windows_apps_resolved=$(readlink -f -- "$windows_apps"); then',
+            '        case "$windows_apps_resolved/" in "$prefix_resolved/"*) ;; *) windows_apps_safe=false ;; esac',
+            '    else',
+            '        windows_apps_safe=false',
+            '    fi',
             'fi',
             'if [[ $windows_apps_safe == true ]]; then',
             '    for package in "$windows_apps"/Microsoft.OutlookForWindows_*__8wekyb3d8bbwe; do',
@@ -2112,11 +2133,11 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path,
             '            fi',
             '        done',
             '        [[ $package_version_valid == true ]] || continue',
-            '        package_resolved=$(readlink -f -- "$package")',
+            '        package_resolved=$(readlink -f -- "$package") || continue',
             '        case "$package_resolved/" in "$windows_apps_resolved/"*) ;; *) continue ;; esac',
             '        candidate="$package/olk.exe"',
             '        [[ -f "$candidate" && ! -L "$candidate" ]] || continue',
-            '        candidate_resolved=$(readlink -f -- "$candidate")',
+            '        candidate_resolved=$(readlink -f -- "$candidate") || continue',
             '        case "$candidate_resolved" in "$package_resolved/"*) ;; *) continue ;; esac',
             '        if [[ -z "$new_outlook_version" ]] || version_is_newer "$package_version" "$new_outlook_version"; then',
             '            new_outlook_version=$package_version',
@@ -2128,6 +2149,25 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path,
             'if [[ -n "$new_outlook_executable" ]]; then',
             '    executable=$new_outlook_executable',
             '    outlook_package_identity=$new_outlook_identity',
+            'else',
+            '    for classic_candidate in "$prefix_resolved/drive_c/Program Files/Microsoft Office/root/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files (x86)/Microsoft Office/root/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files/Microsoft Office/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files (x86)/Microsoft Office/Office16/OUTLOOK.EXE"; do',
+            '        [[ -f "$classic_candidate" && ! -L "$classic_candidate" ]] || continue',
+            '        classic_relative=${classic_candidate#"$prefix_resolved/"}',
+            '        [[ $classic_relative != "$classic_candidate" ]] || continue',
+            '        classic_safe=true',
+            '        classic_current=$prefix_resolved',
+            "        IFS='/' read -r -a classic_parts <<< \"$classic_relative\"",
+            '        for classic_part in "${classic_parts[@]}"; do',
+            '            classic_current="$classic_current/$classic_part"',
+            '            if [[ -L "$classic_current" ]]; then',
+            '                classic_safe=false',
+            '                break',
+            '            fi',
+            '        done',
+            '        [[ $classic_safe == true ]] || continue',
+            '        classic_resolved=$(readlink -f -- "$classic_candidate") || continue',
+            '        case "$classic_resolved" in "$prefix_resolved/"*) executable=$classic_resolved; break ;; esac',
+            '    done',
             'fi',
         ])
     lines.extend([
