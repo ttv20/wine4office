@@ -43,6 +43,52 @@ static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
 static const WCHAR dcomp_caption_overlay_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_task_delegated_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
+static const WCHAR dcomp_task_delegated_target_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d','_','t','a','r','g','e','t',0};
+static const WCHAR dcomp_base_presentation_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
+static const WCHAR dcomp_task_delegate_timer_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','_','t','i','m','e','r',0};
+
+BOOL wayland_window_is_dcomp_task_delegated(HWND root)
+{
+    HWND delegate = NtUserGetProp(root, dcomp_task_delegated_prop);
+    HWND target = NtUserGetProp(root, dcomp_task_delegated_target_prop);
+
+    return delegate && target && NtUserIsWindow(delegate) && NtUserIsWindow(target) &&
+           NtUserGetAncestor(target, GA_ROOT) == root &&
+           NtUserGetProp(delegate, dcomp_detached_window_prop) == target &&
+           NtUserGetProp(target, dcomp_base_presentation_prop) == delegate;
+}
+
+static void WINAPI wayland_dcomp_task_delegate_timer(HWND hwnd, UINT msg, UINT_PTR id, DWORD time)
+{
+    if (wayland_window_is_dcomp_task_delegated(hwnd)) return;
+
+    NtUserKillTimer(hwnd, id);
+    if (NtUserGetProp(hwnd, dcomp_task_delegate_timer_prop) == (HANDLE)id)
+        NtUserRemoveProp(hwnd, dcomp_task_delegate_timer_prop);
+    NtUserPostMessage(hwnd, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+}
+
+static void wayland_update_dcomp_task_delegate_timer(HWND hwnd, BOOL delegated)
+{
+    UINT_PTR id = (UINT_PTR)NtUserGetProp(hwnd, dcomp_task_delegate_timer_prop);
+
+    if (delegated && !id)
+    {
+        id = NtUserSetTimer(hwnd, 0, 1000, wayland_dcomp_task_delegate_timer,
+                            TIMERV_DEFAULT_COALESCING);
+        if (id) NtUserSetProp(hwnd, dcomp_task_delegate_timer_prop, (HANDLE)id);
+    }
+    else if (!delegated && id)
+    {
+        NtUserKillTimer(hwnd, id);
+        NtUserRemoveProp(hwnd, dcomp_task_delegate_timer_prop);
+    }
+}
 
 
 static int wayland_win_data_cmp_rb(const void *key,
@@ -409,10 +455,12 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         !data->contents_presented && !state->has_background)
         visible = FALSE;
 
-    /* A DirectComposition-only notification host is a logical Win32 target,
-     * not a presentation surface. Keep it role-less and let the detached
-     * composition window be the only compositor-visible surface. */
-    if (!visible || (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
+    /* DirectComposition-only notification hosts and roots which delegated
+     * their desktop task are logical Win32 targets, not presentation
+     * surfaces. Mapping the delegated root beside its opaque DComp base leaves
+     * two unrelated toplevels and lets the root's white buffer cover the app. */
+    if (!visible || wayland_window_is_dcomp_task_delegated(data->hwnd) ||
+        (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
         role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
@@ -757,6 +805,9 @@ void WAYLAND_DestroyWindow(HWND hwnd)
 
     TRACE("%p\n", hwnd);
 
+    wayland_update_dcomp_task_delegate_timer(hwnd, FALSE);
+    wayland_pointer_clear_button_owners(hwnd);
+    wayland_keyboard_destroy_window(hwnd);
     if (!(data = wayland_win_data_get(hwnd))) return;
     wayland_win_data_destroy(data);
 }
@@ -1098,13 +1149,44 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_DCOMP_EXPORT:
     {
         struct wayland_win_data *data;
+        struct wayland_window_state state;
+        BOOL delegated, reapply_clip = FALSE, update_clients = FALSE;
 
+        delegated = wayland_window_is_dcomp_task_delegated(hwnd);
+        wayland_update_dcomp_task_delegate_timer(hwnd, delegated);
+        get_wayland_window_state(hwnd, &state);
         if ((data = wayland_win_data_get(hwnd)))
         {
-            if (data->wayland_surface)
-                wayland_surface_export_toplevel(data->wayland_surface);
+            enum wayland_surface_role old_role = data->wayland_surface ?
+                                                  data->wayland_surface->role :
+                                                  WAYLAND_SURFACE_ROLE_NONE;
+            BOOL surface_recreated = FALSE;
+
+            /* A wl_surface cannot shed an xdg_toplevel role. Destroy the
+             * compositor object when its Win32 root delegates presentation;
+             * the detached DComp base remains as the sole desktop task. */
+            if (delegated && data->wayland_surface &&
+                data->wayland_surface->role != WAYLAND_SURFACE_ROLE_NONE)
+            {
+                struct wayland_surface *surface = data->wayland_surface;
+
+                data->wayland_surface = NULL;
+                wayland_surface_destroy(surface);
+                update_clients = TRUE;
+            }
+            if (wayland_win_data_create_wayland_surface(data, NULL, &state,
+                                                        &reapply_clip, &surface_recreated))
+            {
+                update_clients = surface_recreated ||
+                                 old_role != data->wayland_surface->role;
+                wayland_win_data_update_wayland_state(data);
+                if (wayland_surface_is_toplevel(data->wayland_surface))
+                    wayland_surface_export_toplevel(data->wayland_surface);
+            }
             wayland_win_data_release(data);
         }
+        if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
+        if (update_clients) update_client_surfaces(hwnd);
         return 0;
     }
     case WM_WAYLAND_SET_KEYBOARD_LAYOUT:

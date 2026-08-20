@@ -256,6 +256,8 @@ static void registry_handle_global_remove(void *data, struct wl_registry *regist
     {
         TRACE("removing seat\n");
         if (process_wayland.pointer.wl_pointer) wayland_pointer_deinit();
+        else wayland_pointer_clear_button_owners(NULL);
+        wayland_keyboard_deinit();
         if (process_wayland.text_input.zwp_text_input_v3) wayland_text_input_deinit();
         pthread_mutex_lock(&seat->mutex);
         wl_seat_release(seat->wl_seat);

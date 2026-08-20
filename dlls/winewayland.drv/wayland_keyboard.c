@@ -36,6 +36,8 @@
 #include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(keyboard);
+
+#define WM_WINE_DCOMP_FOCUS 0x80000ff0
 WINE_DECLARE_DEBUG_CHANNEL(key);
 
 static BOOL is_ime_hkl(HKL hkl)
@@ -111,6 +113,8 @@ static struct rxkb_context *rxkb_context;
 static HKL keyboard_hkl; /* the HKL matching the currently active xkb group */
 static LANGID keyboard_lang; /* the language matching the currently active xkb group */
 
+static HWND wayland_keyboard_input_hwnd(HWND hwnd);
+
 static BOOL keyboard_language_uses_ime(void)
 {
     switch (PRIMARYLANGID(keyboard_lang))
@@ -130,6 +134,7 @@ void activate_keyboard_hkl(HWND hwnd, BOOL ime)
 
     if (ime && keyboard_language_uses_ime() && !is_ime_hkl(hkl))
         hkl = get_ime_hkl(keyboard_lang ? keyboard_lang : LOWORD(hkl));
+    if (!(hwnd = wayland_keyboard_input_hwnd(hwnd))) return;
     TRACE("Changing keyboard layout to %p\n", hkl);
     NtUserPostMessage(hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0, (LPARAM)hkl);
 }
@@ -658,7 +663,8 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
     keyboard_hkl = hkl;
 
     pthread_mutex_lock(&text_input->mutex);
-    ime = text_input->focused_hwnd && text_input->focused_hwnd == keyboard->focused_hwnd;
+    ime = text_input->focused_surface_hwnd &&
+          text_input->focused_surface_hwnd == keyboard->focused_hwnd;
     pthread_mutex_unlock(&text_input->mutex);
 
     activate_keyboard_hkl(keyboard->focused_hwnd, ime);
@@ -684,39 +690,113 @@ static BOOL find_xkb_layout_variant(const char *name, const char **layout, const
 
 static HWND wayland_keyboard_input_hwnd(HWND hwnd)
 {
-    HWND mapped = wayland_get_input_hwnd(hwnd);
-
-    return mapped == hwnd ? hwnd : NULL;
+    return hwnd ? wayland_get_input_hwnd(hwnd) : NULL;
 }
 
-static void release_all_keys(HWND hwnd)
+static void send_right_control(HWND hwnd, uint32_t state);
+
+static BOOL right_control_is_pressed(const struct wayland_keyboard *keyboard)
 {
-    BYTE state[256];
-    int vkey;
+    return keyboard->key_hwnds[KEY_RIGHTCTRL] || keyboard->synthetic_right_control_hwnd;
+}
+
+static void update_right_control(struct wayland_keyboard *keyboard, HWND hwnd, BOOL physical, BOOL pressed)
+{
+    BOOL was_pressed = right_control_is_pressed(keyboard);
+
+    if (physical) keyboard->key_hwnds[KEY_RIGHTCTRL] = pressed ? hwnd : NULL;
+    else keyboard->synthetic_right_control_hwnd = pressed ? hwnd : NULL;
+    if (was_pressed == right_control_is_pressed(keyboard)) return;
+    if (pressed)
+    {
+        keyboard->right_control_hwnd = hwnd;
+        send_right_control(hwnd, WL_KEYBOARD_KEY_STATE_PRESSED);
+    }
+    else
+    {
+        send_right_control(keyboard->right_control_hwnd, WL_KEYBOARD_KEY_STATE_RELEASED);
+        keyboard->right_control_hwnd = NULL;
+    }
+}
+
+static void send_key_input(HWND hwnd, uint32_t key, uint32_t state)
+{
+    UINT scan = key2scan(key);
     INPUT input = {.type = INPUT_KEYBOARD};
 
-    hwnd = wayland_keyboard_input_hwnd(hwnd);
+    input.ki.wScan = (scan & 0x300) ? scan + 0xdf00 : scan;
+    input.ki.dwFlags = KEYEVENTF_SCANCODE;
+    if (scan & ~0xff) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (state == WL_KEYBOARD_KEY_STATE_RELEASED) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+}
 
-    NtUserGetAsyncKeyboardState(state);
+static void release_all_keys(struct wayland_keyboard *keyboard)
+{
+    uint32_t key;
 
-    for (vkey = 1; vkey < 256; vkey++)
+    for (key = 0; key < WAYLAND_KEY_COUNT; key++)
     {
-        /* Skip mouse buttons. */
-        if (vkey < 7 && vkey != VK_CANCEL) continue;
-        /* Skip left/right-agnostic modifier vkeys. */
-        if (vkey == VK_SHIFT || vkey == VK_CONTROL || vkey == VK_MENU) continue;
+        HWND hwnd = keyboard->key_hwnds[key];
 
-        if (state[vkey] & 0x80)
+        if (!hwnd) continue;
+        if (key == KEY_RIGHTALT)
+            update_right_control(keyboard, keyboard->synthetic_right_control_hwnd, FALSE, FALSE);
+        if (key == KEY_RIGHTCTRL)
+            update_right_control(keyboard, hwnd, TRUE, FALSE);
+        else
         {
-            UINT scan = NtUserMapVirtualKeyEx(vkey, MAPVK_VK_TO_VSC_EX,
-                                              keyboard_hkl);
-            input.ki.wVk = vkey;
-            input.ki.wScan = scan & 0xff;
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            if (scan & ~0xff) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-            NtUserSendHardwareInput(hwnd, 0, &input, 0);
+            send_key_input(hwnd, key, WL_KEYBOARD_KEY_STATE_RELEASED);
+            keyboard->key_hwnds[key] = NULL;
         }
     }
+    if (keyboard->synthetic_right_control_hwnd)
+        update_right_control(keyboard, keyboard->synthetic_right_control_hwnd, FALSE, FALSE);
+}
+
+static BOOL clear_keyboard_focus(HWND hwnd, HWND *input_hwnd, unsigned int *generation)
+{
+    struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+    BOOL focused = FALSE;
+
+    pthread_mutex_lock(&keyboard->mutex);
+    if (keyboard->focused_hwnd == hwnd)
+    {
+        if (input_hwnd) *input_hwnd = keyboard->focused_input_hwnd;
+        release_all_keys(keyboard);
+        keyboard->focused_hwnd = NULL;
+        keyboard->focused_input_hwnd = NULL;
+        keyboard->focus_generation++;
+        if (generation) *generation = keyboard->focus_generation;
+        focused = TRUE;
+    }
+    pthread_mutex_unlock(&keyboard->mutex);
+    return focused;
+}
+
+BOOL wayland_keyboard_clear_surface_focus(HWND hwnd)
+{
+    return clear_keyboard_focus(hwnd, NULL, NULL);
+}
+
+void wayland_keyboard_destroy_window(HWND hwnd)
+{
+    struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+
+    pthread_mutex_lock(&keyboard->mutex);
+    if (keyboard->focused_hwnd == hwnd)
+    {
+        release_all_keys(keyboard);
+        keyboard->focused_hwnd = NULL;
+        keyboard->focused_input_hwnd = NULL;
+        keyboard->focus_generation++;
+    }
+    else if (keyboard->focused_input_hwnd == hwnd)
+    {
+        release_all_keys(keyboard);
+        keyboard->focused_input_hwnd = NULL;
+    }
+    pthread_mutex_unlock(&keyboard->mutex);
 }
 
 /**********************************************************************
@@ -817,7 +897,7 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     struct wayland_surface *surface;
     struct wayland_win_data *data;
-    HWND hwnd;
+    HWND hwnd, input_hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
@@ -826,14 +906,30 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     /* The wl_surface user data remains valid and immutable for the whole
      * lifetime of the object, so it's safe to access without locking. */
     hwnd = wl_surface_get_user_data(wl_surface);
+    if (!hwnd) return;
     TRACE("serial=%u hwnd=%p\n", serial, hwnd);
 
-    pthread_mutex_lock(&keyboard->mutex);
-    keyboard->focused_hwnd = hwnd;
-    pthread_mutex_unlock(&keyboard->mutex);
+    input_hwnd = wayland_keyboard_input_hwnd(hwnd);
 
-    NtUserPostMessage(keyboard->focused_hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0,
-                      (LPARAM)keyboard_hkl);
+    pthread_mutex_lock(&keyboard->mutex);
+    if (keyboard->focused_hwnd != hwnd || keyboard->focused_input_hwnd != input_hwnd)
+    {
+        release_all_keys(keyboard);
+        keyboard->focus_generation++;
+    }
+    keyboard->focused_hwnd = hwnd;
+    keyboard->focused_input_hwnd = input_hwnd;
+    pthread_mutex_unlock(&keyboard->mutex);
+    if (input_hwnd && input_hwnd != hwnd)
+    {
+        /* A detached DirectComposition surface may not be the Win32 input
+         * endpoint. Synchronize focus with its mapped host before routing
+         * keyboard input and layout changes there. */
+        NtUserPostMessage(input_hwnd, WM_WAYLAND_SET_FOREGROUND, 0, 0);
+        NtUserPostMessage(input_hwnd, WM_WINE_DCOMP_FOCUS, 0, 0);
+    }
+    if (input_hwnd)
+        NtUserPostMessage(input_hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0, (LPARAM)keyboard_hkl);
 
     if (!(data = wayland_win_data_get(hwnd))) return;
 
@@ -843,7 +939,7 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
          * directly once it's updated to not explicitly deactivate the old
          * foreground window when both the old and new foreground windows
          * are in the same non-current thread. */
-        if (surface->window.managed)
+        if (surface->window.managed && input_hwnd == hwnd)
             NtUserPostMessage(hwnd, WM_WAYLAND_SET_FOREGROUND, 0, 0);
     }
 
@@ -853,7 +949,9 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
 struct foreground_sync
 {
     struct wl_callback *callback;
-    HWND hwnd;
+    HWND presentation_hwnd;
+    HWND input_hwnd;
+    unsigned int focus_generation;
 };
 
 static void foreground_sync_done(void *data, struct wl_callback *callback, uint32_t serial)
@@ -864,14 +962,15 @@ static void foreground_sync_done(void *data, struct wl_callback *callback, uint3
     BOOL focused;
 
     pthread_mutex_lock(&keyboard->mutex);
-    focused = !!keyboard->focused_hwnd;
+    focused = keyboard->focus_generation != sync->focus_generation ||
+              !!keyboard->focused_hwnd;
     pthread_mutex_unlock(&keyboard->mutex);
 
     /* A keyboard leave is also sent while the compositor switches between
      * surfaces belonging to one activated toplevel.  Keep the Windows
      * foreground state in that case; xdg_toplevel activation is the
      * compositor's authoritative application-focus state. */
-    if (!focused && (win_data = wayland_win_data_get(sync->hwnd)))
+    if (!focused && (win_data = wayland_win_data_get(sync->presentation_hwnd)))
     {
         struct wayland_surface *surface = win_data->wayland_surface;
         enum wayland_surface_config_state state = 0;
@@ -887,7 +986,7 @@ static void foreground_sync_done(void *data, struct wl_callback *callback, uint3
     }
 
     wl_callback_destroy(callback);
-    if (!focused && NtUserGetForegroundWindow() == sync->hwnd)
+    if (!focused && NtUserGetForegroundWindow() == sync->input_hwnd)
         NtUserSetForegroundWindowInternal(NtUserGetDesktopWindow());
     free(sync);
 }
@@ -900,10 +999,10 @@ static const struct wl_callback_listener foreground_sync_listener =
 static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
                                   uint32_t serial, struct wl_surface *wl_surface)
 {
-    struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     struct foreground_sync *sync;
+    unsigned int focus_generation;
     BOOL clear_foreground = FALSE;
-    HWND hwnd;
+    HWND hwnd, input_hwnd = NULL;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
@@ -912,23 +1011,16 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
     /* The wl_surface user data remains valid and immutable for the whole
      * lifetime of the object, so it's safe to access without locking. */
     hwnd = wl_surface_get_user_data(wl_surface);
+    if (!hwnd) return;
     TRACE("serial=%u hwnd=%p\n", serial, hwnd);
 
-    pthread_mutex_lock(&keyboard->mutex);
-    if (keyboard->focused_hwnd == hwnd)
-    {
-        keyboard->focused_hwnd = NULL;
-        clear_foreground = TRUE;
-    }
-    pthread_mutex_unlock(&keyboard->mutex);
-
-    /* The spec for the leave event tells us to treat all keys as released,
-     * and for any key repetition to stop. */
-    release_all_keys(hwnd);
+    clear_foreground = clear_keyboard_focus(hwnd, &input_hwnd, &focus_generation);
 
     if (clear_foreground && (sync = malloc(sizeof(*sync))))
     {
-        sync->hwnd = hwnd;
+        sync->presentation_hwnd = hwnd;
+        sync->input_hwnd = input_hwnd;
+        sync->focus_generation = focus_generation;
         sync->callback = wl_display_sync(process_wayland.wl_display);
         wl_proxy_set_queue((struct wl_proxy *)sync->callback, process_wayland.wl_event_queue);
         wl_callback_add_listener(sync->callback, &foreground_sync_listener, sync);
@@ -950,27 +1042,66 @@ static void keyboard_handle_key(void *data, struct wl_keyboard *wl_keyboard,
                                 uint32_t serial, uint32_t time, uint32_t key,
                                 uint32_t state)
 {
-    UINT scan = key2scan(key);
-    INPUT input = {0};
+    struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
 
-    if (!(hwnd = wayland_keyboard_get_focused_hwnd())) return;
-    hwnd = wayland_keyboard_input_hwnd(hwnd);
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+    {
+        HWND input_hwnd, presentation_hwnd;
 
-    TRACE_(key)("serial=%u hwnd=%p key=%d scan=%#x state=%#x\n", serial, hwnd, key, scan, state);
+        pthread_mutex_lock(&keyboard->mutex);
+        presentation_hwnd = keyboard->focused_hwnd;
+        pthread_mutex_unlock(&keyboard->mutex);
+        input_hwnd = wayland_keyboard_input_hwnd(presentation_hwnd);
 
-    /* NOTE: Windows normally sends VK_CONTROL + VK_MENU only if the layout has KLLF_ALTGR */
-    if (key == KEY_RIGHTALT) send_right_control(hwnd, state);
+        pthread_mutex_lock(&keyboard->mutex);
+        if (keyboard->focused_hwnd == presentation_hwnd &&
+            keyboard->focused_input_hwnd != input_hwnd)
+        {
+            release_all_keys(keyboard);
+            keyboard->focused_input_hwnd = input_hwnd;
+            if (input_hwnd && input_hwnd != presentation_hwnd)
+            {
+                NtUserPostMessage(input_hwnd, WM_WAYLAND_SET_FOREGROUND, 0, 0);
+                NtUserPostMessage(input_hwnd, WM_WINE_DCOMP_FOCUS, 0, 0);
+                NtUserPostMessage(input_hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0,
+                                  (LPARAM)keyboard_hkl);
+            }
+        }
+    }
+    else
+        pthread_mutex_lock(&keyboard->mutex);
 
-    input.type = INPUT_KEYBOARD;
-    input.ki.wScan = (scan & 0x300) ? scan + 0xdf00 : scan;
-    input.ki.dwFlags = KEYEVENTF_SCANCODE;
-    if (scan & ~0xff) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (key >= WAYLAND_KEY_COUNT)
+    {
+        pthread_mutex_unlock(&keyboard->mutex);
+        return;
+    }
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+        hwnd = keyboard->focused_input_hwnd;
+    else
+        hwnd = keyboard->key_hwnds[key];
+    if (!hwnd)
+    {
+        pthread_mutex_unlock(&keyboard->mutex);
+        return;
+    }
 
-    if (state == WL_KEYBOARD_KEY_STATE_RELEASED) input.ki.dwFlags |= KEYEVENTF_KEYUP;
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    TRACE_(key)("serial=%u hwnd=%p key=%d scan=%#x state=%#x\n", serial, hwnd, key,
+            key2scan(key), state);
+
+    if (key == KEY_RIGHTALT)
+        update_right_control(keyboard, hwnd, FALSE, state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    if (key == KEY_RIGHTCTRL)
+        update_right_control(keyboard, hwnd, TRUE, state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    else
+    {
+        send_key_input(hwnd, key, state);
+        keyboard->key_hwnds[key] = state == WL_KEYBOARD_KEY_STATE_PRESSED ? hwnd : NULL;
+    }
+    pthread_mutex_unlock(&keyboard->mutex);
 }
 
 static void keyboard_handle_modifiers(void *data, struct wl_keyboard *wl_keyboard,
@@ -1062,6 +1193,10 @@ void wayland_keyboard_deinit(void)
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
 
     pthread_mutex_lock(&keyboard->mutex);
+    release_all_keys(keyboard);
+    keyboard->focused_hwnd = NULL;
+    keyboard->focused_input_hwnd = NULL;
+    keyboard->focus_generation++;
     if (keyboard->wl_keyboard)
     {
         wl_keyboard_destroy(keyboard->wl_keyboard);

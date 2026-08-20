@@ -36,8 +36,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR dcomp_foreign_handle_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','e','x','p','o','r','t','_','h','a','n','d','l','e',0};
-static const WCHAR dcomp_task_delegated_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
 static const WCHAR dcomp_task_app_id_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
 static const WCHAR dcomp_detached_window_prop[] =
@@ -98,8 +96,6 @@ static void wayland_surface_enable_plasma_positioning(struct wayland_surface *su
 
 BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
 {
-    BOOL task_delegated;
-
     if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
         !surface->xdg_toplevel)
         return FALSE;
@@ -110,8 +106,8 @@ BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
      * positioning request.  Position the exported host through Plasma as
      * well, so its Win32 screen coordinates and the detached surfaces share
      * the same origin. */
-    task_delegated = !!NtUserGetProp(surface->hwnd, dcomp_task_delegated_prop);
-    wayland_surface_enable_plasma_positioning(surface, task_delegated);
+    wayland_surface_enable_plasma_positioning(surface,
+            wayland_window_is_dcomp_task_delegated(surface->hwnd));
 
     if (surface->zxdg_exported_v2) return TRUE;
 
@@ -384,15 +380,10 @@ void wayland_surface_destroy(struct wayland_surface *surface)
         wayland_pointer_clear_constraint();
     pthread_mutex_unlock(&process_wayland.pointer.mutex);
 
-    pthread_mutex_lock(&process_wayland.keyboard.mutex);
-    if (process_wayland.keyboard.focused_hwnd == surface->hwnd)
-        process_wayland.keyboard.focused_hwnd = NULL;
-    pthread_mutex_unlock(&process_wayland.keyboard.mutex);
+    wayland_pointer_clear_button_owners(surface->hwnd);
+    wayland_keyboard_clear_surface_focus(surface->hwnd);
 
-    pthread_mutex_lock(&process_wayland.text_input.mutex);
-    if (process_wayland.text_input.focused_hwnd == surface->hwnd)
-        process_wayland.text_input.focused_hwnd = NULL;
-    pthread_mutex_unlock(&process_wayland.text_input.mutex);
+    wayland_text_input_clear_focus(surface->hwnd);
 
     wayland_surface_clear_role(surface);
 
