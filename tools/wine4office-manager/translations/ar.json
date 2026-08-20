@@ -150,6 +150,7 @@
   "Wine environment": "بيئة Wine",
   "Wine environment stopped.": "توقفت بيئة Wine.",
   "Wine executable:": "ملف Wine التنفيذي:",
+  "Wine processes stopped.": "توقفت عمليات Wine.",
   "Wine runner": "مشغّل Wine",
   "Wine runner missing": "مشغّل Wine مفقود",
   "Wine shutdown failed. Review the details below.": "فشل إيقاف Wine. راجع التفاصيل أدناه.",

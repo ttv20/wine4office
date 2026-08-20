@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Allow 60 seconds for the Office installer to open and report startup timeouts clearly.
-- Show graceful-close and forced-kill progress while stopping the selected Wine environment.
+- Show localized graceful-close and forced-kill progress while stopping the selected Wine environment.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

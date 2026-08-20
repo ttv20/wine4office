@@ -151,6 +151,7 @@
   "Wine environment": "Wine environment",
   "Wine environment stopped.": "Wine environment stopped.",
   "Wine executable:": "Wine executable:",
+  "Wine processes stopped.": "Wine processes stopped.",
   "Wine runner": "Wine runner",
   "Wine runner missing": "Wine runner missing",
   "Wine shutdown failed. Review the details below.": "Wine shutdown failed. Review the details below.",

@@ -1654,7 +1654,10 @@ class ManagerWindow(QMainWindow):
                 config["prefix"], config["wine"], tool, use_x11=config["use_x11"],
                 progress_callback=(self.state.set_progress if tool == "stop" else None),
             )
-            return "Wine processes stopped." if pid is None else f"Tool started (PID {pid})."
+            return (
+                self._tr("Wine processes stopped.")
+                if pid is None else f"Tool started (PID {pid})."
+            )
 
         try:
             task_kind = "wine-stop" if tool == "stop" else "tool"

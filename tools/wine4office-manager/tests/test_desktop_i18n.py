@@ -134,6 +134,40 @@ class TranslationTests(unittest.TestCase):
                 with self.subTest(language=language, source=source):
                     self.assertNotEqual(i18n.translate(source, language), source)
 
+    def test_installer_timeout_and_wine_stop_are_localized_in_every_language(self):
+        texts = (
+            "Cancel installation",
+            "Closing Office applications gracefully…",
+            "Force-killing remaining Wine processes…",
+            "Office installer did not open within 60 seconds. Installation was stopped.",
+            "Office installer opened.",
+            "Office installer startup progress",
+            "Operation details will appear here.",
+            "Please wait",
+            "Preparing Office installer…",
+            "Preparing the Office Deployment Tool. The installer will open shortly.",
+            "Selected Wine environment",
+            "Starting Office installation",
+            "Stopping Wine",
+            "Stopping Wine environment…",
+            "Wine environment stopped.",
+            "Wine processes stopped.",
+            "Wine shutdown failed. Review the details below.",
+            "Wine shutdown is finishing; the Manager will close when it completes.",
+            "Wine shutdown was interrupted.",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            for source in texts:
+                with self.subTest(language=language, source=source):
+                    translated = i18n.CATALOGS[language].get(source)
+                    self.assertIsNotNone(translated)
+                    if language != "en":
+                        self.assertNotEqual(translated, source)
+                    if "Wine" in source:
+                        self.assertIn("Wine", translated)
+                    if "Office" in source:
+                        self.assertIn("Office", translated)
+
     def test_additional_language_catalogs_are_complete_and_ltr(self):
         expected = {
             "de", "es", "fr", "it", "pt", "nl", "ru", "uk", "pl", "tr",

@@ -150,6 +150,7 @@
   "Wine environment": "סביבת Wine",
   "Wine environment stopped.": "סביבת Wine נעצרה.",
   "Wine executable:": "קובץ ההפעלה של Wine:",
+  "Wine processes stopped.": "תהליכי Wine נעצרו.",
   "Wine runner": "רכיב Wine",
   "Wine runner missing": "רכיב Wine חסר",
   "Wine shutdown failed. Review the details below.": "עצירת Wine נכשלה. יש לעיין בפרטים שלהלן.",
