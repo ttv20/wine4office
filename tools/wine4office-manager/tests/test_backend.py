@@ -2227,7 +2227,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 configuration,
                 lambda line: None,
                 configuration_payload=original_payload,
-                installer_started_callback=installer_started,
+                installer_process_callback=installer_started,
             )
 
         self.assertEqual(result, "Office installation completed successfully.")
@@ -2264,10 +2264,11 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertEqual(stream.call_args_list[1].kwargs["cwd"], extraction_directory)
         setup_process_callback = stream.call_args_list[1].kwargs["process_callback"]
-        setup_process_callback(mock.Mock())
-        installer_started.assert_called_once_with()
+        setup_process = mock.Mock()
+        setup_process_callback(setup_process)
+        installer_started.assert_called_once_with(setup_process)
         setup_process_callback(None)
-        installer_started.assert_called_once_with()
+        installer_started.assert_called_with(None)
         self.assertEqual(converted_paths[0], extraction_directory)
         self.assertEqual(converted_paths[1].name, "configuration.xml")
         self.assertEqual(converted_paths[1].parent, extraction_directory.parent)

@@ -1593,7 +1593,7 @@ class QtManagerTests(unittest.TestCase):
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
             configuration_payload=configuration_payload,
-            installer_started_callback=self.state.mark_foreground_ready,
+            installer_process_callback=self.state.set_foreground_process,
         )
         self.assertIsNone(self.window.pending_odt_xml)
 

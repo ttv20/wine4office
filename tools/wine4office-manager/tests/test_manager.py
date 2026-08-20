@@ -894,12 +894,14 @@ class ManagerTests(unittest.TestCase):
         state = manager.ManagerState()
         release = __import__("threading").Event()
         state.start_task("odt-install", lambda: release.wait(1) or "installed")
-        state.mark_foreground_ready()
+        process = mock.Mock()
+        state.set_foreground_process(process)
 
         self.assertFalse(state.fail_pending_foreground_start(
             "odt-install", "Office installer did not open within 60 seconds."
         ))
         self.assertFalse(state.cancel_event.is_set())
+        self.assertIs(state.process, process)
         release.set()
         self._wait(state)
         self.assertEqual(state.snapshot()["task"]["status"], "completed")

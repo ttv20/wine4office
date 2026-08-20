@@ -979,10 +979,13 @@ class ManagerState:
                 max(0, min(100, int(value))) if value is not None else None
             )
 
-    def mark_foreground_ready(self) -> None:
-        """Signal that a task's external foreground window is starting."""
+    def set_foreground_process(self, process: subprocess.Popen | None) -> None:
+        """Register the foreground process and its startup atomically."""
         with self.lock:
-            if self.task["running"] and not self._forced_failure:
+            self.process = process
+            if (process is not None and self.task["running"]
+                    and not self._forced_failure
+                    and not self.cancel_event.is_set()):
                 self.task["foreground_ready"] = True
 
     def start_task(self, kind: str, operation, completion=None) -> None:

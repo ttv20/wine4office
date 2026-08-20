@@ -792,7 +792,7 @@ class ManagerWindow(QMainWindow):
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     configuration_payload=payload,
-                    installer_started_callback=self.state.mark_foreground_ready,
+                    installer_process_callback=self.state.set_foreground_process,
                 ),
             )
             self.pending_odt_xml = (
