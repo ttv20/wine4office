@@ -11,5 +11,6 @@ SOURCES = \
 	core_application.c \
 	lifecycle.c \
 	data_transfer.c \
+	education_settings.c \
 	main.c \
 	retail_info.c

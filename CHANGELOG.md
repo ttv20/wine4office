@@ -4,6 +4,8 @@
 
 - Let modern Office identify the current user without exposing machine, account,
   or application identifiers.
+- Let packaged Office components discover their local application-data folders
+  and education-environment state.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

@@ -19,6 +19,7 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "knownfolders.h"
 
 #include "wine/debug.h"
 
@@ -30,17 +31,28 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+static BOOL hstring_equals( HSTRING string, const WCHAR *value )
+{
+    UINT32 length = WindowsGetStringLen( string );
+    SIZE_T value_length = wcslen( value );
+
+    return length == value_length && !memcmp( WindowsGetStringRawBuffer( string, NULL ), value,
+            length * sizeof(*value) );
+}
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
-    const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
-
     TRACE( "class %s, factory %p.\n", debugstr_hstring( classid ), factory );
 
+    if (!factory) return E_POINTER;
     *factory = NULL;
+    if (!classid) return CLASS_E_CLASSNOTAVAILABLE;
 
-    if (!wcscmp( buffer, RuntimeClass_Windows_Storage_ApplicationData ))
-        IActivationFactory_QueryInterface( application_data_factory, &IID_IActivationFactory, (void **)factory );
+    if (hstring_equals( classid, RuntimeClass_Windows_Storage_ApplicationData ))
+        return IActivationFactory_QueryInterface( application_data_factory, &IID_IActivationFactory, (void **)factory );
+    if (hstring_equals( classid, RuntimeClass_Windows_Management_Core_ApplicationDataManager ))
+        return IActivationFactory_QueryInterface( application_data_manager_factory, &IID_IActivationFactory,
+                (void **)factory );
 
-    if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
 }

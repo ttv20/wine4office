@@ -35,8 +35,11 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Storage
 #include "windows.storage.h"
+#define WIDL_using_Windows_Management_Core
+#include "windows.management.core.h"
 
 extern IActivationFactory *application_data_factory;
+extern IActivationFactory *application_data_manager_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
