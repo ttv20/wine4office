@@ -20,6 +20,7 @@
 #define __WINE_DXGI_PRIVATE_H
 
 #include "wine/debug.h"
+#include "wine/server.h"
 
 #include <assert.h>
 
@@ -39,6 +40,7 @@
 #endif
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
+#include "wine/dcomp.h"
 
 enum dxgi_frame_latency
 {
@@ -185,6 +187,8 @@ struct d3d11_swapchain
     ID3D11Texture2D *present1_scratch;
     BOOL present1_shadow_valid;
     HWND composition_window;
+    SRWLOCK ime_token_lock;
+    struct wine_dcomp_ime_token ime_token;
 
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc;
     IDXGIOutput *target;
@@ -192,7 +196,7 @@ struct d3d11_swapchain
     LONG in_set_fullscreen_state;
 };
 
-void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
+void dxgi_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc);

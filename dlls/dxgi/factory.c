@@ -823,17 +823,6 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     UpdateWindow(caption);
 }
 
-static void dxgi_composition_window_clear_task_delegate(HWND window, HWND target)
-{
-    HWND root = target ? GetAncestor(target, GA_ROOT) : NULL;
-
-    if (root && GetPropW(root, dcomp_task_delegated_prop) == window)
-    {
-        RemovePropW(root, dcomp_task_delegated_prop);
-        PostMessageW(root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
-    }
-}
-
 static void dxgi_composition_window_update_identity(HWND window, HWND root)
 {
     WCHAR current[256], title[256];
@@ -998,11 +987,6 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                 if ((root = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(root);
                 RemovePropW(window, dcomp_caption_window_prop);
                 KillTimer(window, 1);
-                if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
-                {
-                    RemovePropW(target, L"__wine_dcomp_base_presentation");
-                    dxgi_composition_window_clear_task_delegate(window, target);
-                }
                 break;
 
             case WM_MOUSEMOVE:
@@ -1040,55 +1024,43 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
             : DefWindowProcW(window, message, wparam, lparam);
 }
 
-void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
+void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
+        const struct wine_dcomp_ime_token *ime_token)
 {
     HWND old_target = GetPropW(window, L"__wine_dcomp_detached_window");
-    HWND input_window, old_input_window, old_target_root, target_root;
+    HWND input_window, target_root;
     BOOL base_presentation;
     DWORD exstyle, target_style, target_exstyle;
     BOOL transparent_base;
+    NTSTATUS status;
     RECT rect;
 
     TRACE("Binding composition window %p to target %p (old target %p).\n",
             window, target, old_target);
 
-    old_input_window = GetPropW(window, L"__wine_dcomp_input_window");
-    old_target_root = old_target ? GetAncestor(old_target, GA_ROOT) : NULL;
-
-    if (old_target && old_target != target
-            && GetPropW(old_target, L"__wine_dcomp_base_presentation") == window)
-        RemovePropW(old_target, L"__wine_dcomp_base_presentation");
-    if (old_target && old_target != target)
-        dxgi_composition_window_clear_task_delegate(window, old_target);
-
     if (!target)
     {
+        SERVER_START_REQ(update_dcomp_task_delegate)
+        {
+            req->token_low = ime_token ? ime_token->low : 0;
+            req->token_high = ime_token ? ime_token->high : 0;
+            req->presentation = wine_server_user_handle(window);
+            req->target = 0;
+            req->flags = 0;
+            status = wine_server_call(req);
+        }
+        SERVER_END_REQ;
+        if (status) WARN("Failed to clear DComp task delegation, status %#lx.\n", status);
         if ((input_window = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(input_window);
         RemovePropW(window, dcomp_caption_window_prop);
-        dxgi_composition_window_clear_task_delegate(window, old_target);
         ShowWindow(window, SW_HIDE);
         RemovePropW(window, L"__wine_dcomp_detached_window");
         RemovePropW(window, L"__wine_dcomp_raised_while_active");
-        RemovePropW(window, L"__wine_dcomp_input_window");
-        RemovePropW(window, L"__wine_dcomp_keyboard_window");
         RemovePropW(window, L"__wine_dcomp_composite_alpha_background");
         RemovePropW(window, L"__wine_dcomp_task_minimized");
         RemovePropW(window, L"__wine_dcomp_task_identity");
         RemovePropW(window, dcomp_task_app_id_prop);
         RemovePropW(window, L"__wine_dcomp_client_rect");
-        if (old_input_window && GetPropW(old_input_window,
-                L"__wine_direct_hardware_input_owner") == window)
-        {
-            RemovePropW(old_input_window, L"__wine_direct_hardware_input");
-            RemovePropW(old_input_window, L"__wine_direct_hardware_input_owner");
-        }
-        if (old_target_root)
-        {
-            if (GetPropW(old_target_root, L"__wine_dcomp_input_window") == old_input_window)
-                RemovePropW(old_target_root, L"__wine_dcomp_input_window");
-            if (GetPropW(old_target_root, L"__wine_dcomp_keyboard_window") == old_input_window)
-                RemovePropW(old_target_root, L"__wine_dcomp_keyboard_window");
-        }
         return;
     }
 
@@ -1101,6 +1073,23 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     base_presentation = old_target == target
             ? GetPropW(target, L"__wine_dcomp_base_presentation") == window
             : !GetPropW(target, L"__wine_dcomp_base_presentation");
+    SERVER_START_REQ(update_dcomp_task_delegate)
+    {
+        req->token_low = ime_token ? ime_token->low : 0;
+        req->token_high = ime_token ? ime_token->high : 0;
+        req->presentation = wine_server_user_handle(window);
+        req->target = wine_server_user_handle(target);
+        req->flags = base_presentation ? DCOMP_TASK_DELEGATE_BASE : 0;
+        if (base_presentation && !transparent_base && target_root)
+            req->flags |= DCOMP_TASK_DELEGATE_TASK;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    if (status)
+    {
+        WARN("Failed to update DComp task delegation, status %#lx.\n", status);
+        return;
+    }
     exstyle = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
     if (!base_presentation || transparent_base) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
 
@@ -1108,18 +1097,10 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     SetWindowLongW(window, GWL_STYLE, WS_POPUP);
     SetWindowLongW(window, GWL_EXSTYLE, exstyle);
     SetWindowLongPtrW(window, GWLP_HWNDPARENT, (LONG_PTR)target);
-    if (base_presentation)
+    if (base_presentation && !transparent_base && target_root)
     {
-        SetPropW(target, L"__wine_dcomp_base_presentation", window);
-        if (!transparent_base && target_root)
-        {
-            /* The opaque presentation surface owns the pixels that desktop
-             * compositors use for previews.  Let it represent the Win32 root
-             * in the task list while retaining the root's application identity. */
-            SetPropW(target_root, dcomp_task_delegated_prop, window);
-            PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
-            dxgi_composition_window_update_identity(window, target_root);
-        }
+        PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
+        dxgi_composition_window_update_identity(window, target_root);
     }
     if (!base_presentation || transparent_base)
     {
@@ -1135,18 +1116,6 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target)
     else
         RemovePropW(window, L"__wine_dcomp_client_rect");
 
-    if (input_window)
-    {
-        SetPropW(window, L"__wine_dcomp_input_window", input_window);
-        SetPropW(window, L"__wine_dcomp_keyboard_window", input_window);
-        SetPropW(input_window, L"__wine_direct_hardware_input", ULongToHandle(0x57444952));
-        SetPropW(input_window, L"__wine_direct_hardware_input_owner", window);
-        if (target_root)
-        {
-            SetPropW(target_root, L"__wine_dcomp_input_window", input_window);
-            SetPropW(target_root, L"__wine_dcomp_keyboard_window", input_window);
-        }
-    }
     if (target_root) PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
     if (!GetPropW(window, L"__wine_dcomp_old_proc"))
     {
@@ -1192,7 +1161,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         }
         return hr;
     }
-    if (own_window) d3d11_swapchain_set_composition_window(*swapchain, window);
+    if (own_window) dxgi_swapchain_set_composition_window(*swapchain, window);
     return S_OK;
 }
 

@@ -57,14 +57,22 @@ enum message_kind { SEND_MESSAGE, POST_MESSAGE };
 
 /* list of processes registered for rawinput in the input desktop */
 static struct list rawinput_processes = LIST_INIT(rawinput_processes);
+static struct list message_results = LIST_INIT(message_results);
 
 struct message_result
 {
+    struct list            entry;         /* entry in global result list */
     struct list            sender_entry;  /* entry in sender list */
     struct message        *msg;           /* message the result is for */
     struct message_result *recv_next;     /* next in receiver list */
     struct msg_queue      *sender;        /* sender queue */
     struct msg_queue      *receiver;      /* receiver queue */
+    struct process        *sender_process;/* non-owning sender process */
+    user_handle_t          dcomp_source;  /* DComp source window */
+    user_handle_t          dcomp_destination; /* DComp destination window */
+    unsigned int           dcomp_message; /* message code */
+    user_handle_t          set_parent_child; /* WM_WINE_SETPARENT destination */
+    user_handle_t          set_parent_parent; /* WM_WINE_SETPARENT parent */
     int                    replied;       /* has it been replied to? */
     unsigned int           error;         /* error code to pass back to sender */
     lparam_t               result;        /* reply result */
@@ -90,6 +98,10 @@ struct message
     void                  *data;      /* message data for sent messages */
     unsigned int           data_size; /* size of message data */
     unsigned int           unique_id; /* unique id for nested hw message waits */
+    user_handle_t          dcomp_presentation; /* authorized keyboard presentation */
+    unsigned short         dcomp_scan; /* authorized physical keyboard scan */
+    unsigned int           dcomp_generation; /* pending key-owner generation */
+    unsigned char          dcomp_keyup; /* consumes a prior authorized key-down */
     struct message_result *result;    /* result in sender queue */
 };
 
@@ -188,6 +200,7 @@ static struct cursor_pos cursor_history[64];
 static unsigned int cursor_history_latest;
 
 static void queue_hardware_message( struct desktop *desktop, struct message *msg, int always_queue );
+static void cancel_dcomp_key_owner( struct desktop *desktop, struct message *msg );
 static void free_message( struct message *msg );
 
 /* set the caret window in a given thread input, requires write lock on the thread input shared member */
@@ -895,6 +908,7 @@ static int merge_message( struct thread_input *input, const struct message *msg 
 /* free a result structure */
 static void free_result( struct message_result *result )
 {
+    list_remove( &result->entry );
     if (result->timeout) remove_timeout_user( result->timeout );
     free( result->data );
     if (result->callback_msg) free_message( result->callback_msg );
@@ -928,7 +942,10 @@ static void store_message_result( struct message_result *res, lparam_t result, u
     if (res->hardware_msg)
     {
         if (!error && result)  /* rejected by the hook */
+        {
+            cancel_dcomp_key_owner( res->desktop, res->hardware_msg );
             free_message( res->hardware_msg );
+        }
         else
             queue_hardware_message( res->desktop, res->hardware_msg, 0 );
 
@@ -1023,6 +1040,12 @@ static struct message_result *alloc_message_result( struct msg_queue *send_queue
         result->msg          = msg;
         result->sender       = send_queue;
         result->receiver     = recv_queue;
+        result->sender_process = current ? current->process : NULL;
+        result->dcomp_source = 0;
+        result->dcomp_destination = 0;
+        result->dcomp_message = 0;
+        result->set_parent_child = 0;
+        result->set_parent_parent = 0;
         result->replied      = 0;
         result->data         = NULL;
         result->data_size    = 0;
@@ -1062,10 +1085,40 @@ static struct message_result *alloc_message_result( struct msg_queue *send_queue
             clear_queue_bits( send_queue, QS_SMRESULT );
         }
 
+        if (msg->msg == WM_COPYDATA)
+        {
+            result->dcomp_source = (user_handle_t)msg->wparam;
+            result->dcomp_destination = msg->win;
+            result->dcomp_message = msg->msg;
+        }
+        else if (msg->msg == WM_WINE_SETPARENT)
+        {
+            result->set_parent_child = msg->win;
+            result->set_parent_parent = (user_handle_t)msg->wparam;
+        }
         if (timeout != TIMEOUT_INFINITE)
             result->timeout = add_timeout_user( timeout, result_timeout, result );
+        list_add_tail( &message_results, &result->entry );
     }
     return result;
+}
+
+void cleanup_message_results_process( struct process *process )
+{
+    struct message_result *result;
+
+    LIST_FOR_EACH_ENTRY( result, &message_results, struct message_result, entry )
+        if (result->sender_process == process) result->sender_process = NULL;
+}
+
+int is_current_set_parent_message( user_handle_t child, user_handle_t parent,
+                                   struct process *sender )
+{
+    struct message_result *result;
+
+    if (!current->queue || !(result = current->queue->recv_result)) return 0;
+    return result->sender_process == sender && result->set_parent_child == child &&
+           result->set_parent_parent == parent;
 }
 
 /* receive a message, removing it from the sent queue */
@@ -1081,6 +1134,15 @@ static void receive_message( struct msg_queue *queue, struct message *msg,
         return;
     }
     reply->type   = msg->type;
+    reply->dcomp_ime_authorization = 0;
+    if (result)
+    {
+        struct thread *window_thread = get_window_thread( msg->win );
+        if (window_thread && window_thread->queue == queue)
+            reply->dcomp_ime_authorization = get_dcomp_ime_message_authorization(
+                    (user_handle_t)msg->wparam, msg->win, result->sender_process );
+        if (window_thread) release_object( window_thread );
+    }
     reply->win    = msg->win;
     reply->msg    = msg->msg;
     reply->wparam = msg->wparam;
@@ -1795,7 +1857,12 @@ static user_handle_t find_hardware_message_window( struct desktop *desktop, stru
         if (!(win = msg->win) && input) win = input_shm->focus;
         break;
     case QS_KEY:
-        if (input && !(win = input_shm->focus))
+        if (msg->dcomp_presentation &&
+            (is_dcomp_keyboard_input( msg->dcomp_presentation, msg->win ) ||
+             (msg->dcomp_keyup && msg->dcomp_generation &&
+              is_dcomp_presentation_active( msg->dcomp_presentation ))))
+            win = msg->win;
+        else if (input && !(win = input_shm->focus))
         {
             win = input_shm->active;
             if (*msg_code < WM_SYSKEYDOWN) *msg_code += WM_SYSKEYDOWN - WM_KEYDOWN;
@@ -1858,6 +1925,50 @@ static unsigned int get_rawinput_device_flags( struct process *process, struct m
     return 0;
 }
 
+static struct dcomp_key_owner *get_dcomp_key_owner( struct desktop *desktop, unsigned short scan )
+{
+    if (scan >= DCOMP_KEY_COUNT) return NULL;
+    return &desktop->dcomp_keys[scan];
+}
+
+static unsigned short get_dcomp_key_scan( const union hw_input *input )
+{
+    return input->kbd.scan | ((input->kbd.flags & KEYEVENTF_EXTENDEDKEY) ? 0x100 : 0);
+}
+
+static unsigned int reserve_dcomp_key_owner( struct desktop *desktop, unsigned short scan,
+                                             user_handle_t win, user_handle_t presentation )
+{
+    struct dcomp_key_owner *owner = get_dcomp_key_owner( desktop, scan );
+
+    if (!owner) return 0;
+    if (!++owner->generation) owner->generation++;
+    owner->win = get_user_full_handle( win );
+    owner->presentation = get_user_full_handle( presentation );
+    return owner->generation;
+}
+
+static void cancel_dcomp_key_owner( struct desktop *desktop, struct message *msg )
+{
+    struct dcomp_key_owner *owner;
+
+    if (msg->dcomp_keyup || !msg->dcomp_generation ||
+        !(owner = get_dcomp_key_owner( desktop, msg->dcomp_scan ))) return;
+    if (owner->generation == msg->dcomp_generation) memset( owner, 0, sizeof(*owner) );
+}
+
+void clear_dcomp_key_owners( struct desktop *desktop, user_handle_t presentation )
+{
+    unsigned int i;
+
+    presentation = get_user_full_handle( presentation );
+    for (i = 0; i < ARRAY_SIZE(desktop->dcomp_keys); i++)
+        if (desktop->dcomp_keys[i].presentation == presentation)
+            memset( &desktop->dcomp_keys[i], 0, sizeof(desktop->dcomp_keys[i]) );
+    if (desktop->key_repeat.dcomp_presentation == presentation)
+        desktop->key_repeat.dcomp_presentation = 0;
+}
+
 /* queue a hardware message into a given thread input */
 static void queue_hardware_message( struct desktop *desktop, struct message *msg, int always_queue )
 {
@@ -1867,6 +1978,7 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
     struct thread_input *input;
     struct hardware_msg_data *msg_data = msg->data;
     unsigned int msg_code;
+    int dcomp_authorized = 0;
     int flags, msg_bit;
 
     update_desktop_key_state( desktop, msg->msg, msg->wparam );
@@ -1876,7 +1988,15 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
     switch ((msg_bit = get_hardware_msg_bit( msg->msg )))
     {
     case QS_KEY:
-        if (queue_hotkey_message( desktop, msg )) return;
+        dcomp_authorized = msg->dcomp_presentation &&
+                (is_dcomp_keyboard_input( msg->dcomp_presentation, msg->win ) ||
+                 (msg->dcomp_keyup && msg->dcomp_generation &&
+                  is_dcomp_presentation_active( msg->dcomp_presentation )));
+        if (queue_hotkey_message( desktop, msg ))
+        {
+            cancel_dcomp_key_owner( desktop, msg );
+            return;
+        }
         if (desktop_shm->keystate[VK_MENU] & 0x80) msg->lparam |= KF_ALTDOWN << 16;
         if (msg->wparam == VK_SHIFT || msg->wparam == VK_LSHIFT || msg->wparam == VK_RSHIFT)
             msg->lparam &= ~(KF_EXTENDED << 16);
@@ -1906,6 +2026,7 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
     else input = desktop->foreground_input;
 
     win = find_hardware_message_window( desktop, input, msg, &msg_code, &thread );
+    if (msg_bit == QS_KEY && !dcomp_authorized) cancel_dcomp_key_owner( desktop, msg );
     flags = thread ? get_rawinput_device_flags( thread->process, msg ) : 0;
     if (thread) input = thread->queue->input;
     if (input && (get_hardware_msg_bit( msg->msg ) & (QS_KEY | QS_MOUSEBUTTON)))
@@ -1913,6 +2034,7 @@ static void queue_hardware_message( struct desktop *desktop, struct message *msg
 
     if (!win || !thread || (flags & RIDEV_NOLEGACY))
     {
+        if (msg_bit == QS_KEY) cancel_dcomp_key_owner( desktop, msg );
         if (input && !(flags & RIDEV_NOLEGACY)) update_thread_input_key_state( input, msg->msg, msg->wparam );
         free_message( msg );
         if (thread) release_object( thread );
@@ -2320,14 +2442,16 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
 }
 
 static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
-                                   unsigned int origin, struct msg_queue *sender, int repeat );
+                                   unsigned int origin, struct msg_queue *sender, int repeat,
+                                   user_handle_t dcomp_presentation );
 
 static void key_repeat_timeout( void *private )
 {
     struct desktop *desktop = private;
 
     desktop->key_repeat.timeout = NULL;
-    queue_keyboard_message( desktop, desktop->key_repeat.win, &desktop->key_repeat.input, IMO_HARDWARE, NULL, 1 );
+    queue_keyboard_message( desktop, desktop->key_repeat.win, &desktop->key_repeat.input,
+                            IMO_HARDWARE, NULL, 1, desktop->key_repeat.dcomp_presentation );
 }
 
 static void stop_key_repeat( struct desktop *desktop )
@@ -2335,12 +2459,14 @@ static void stop_key_repeat( struct desktop *desktop )
     if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
     desktop->key_repeat.timeout = NULL;
     desktop->key_repeat.win = 0;
+    desktop->key_repeat.dcomp_presentation = 0;
     memset( &desktop->key_repeat.input, 0, sizeof(desktop->key_repeat.input) );
 }
 
 /* queue a hardware message for a keyboard event */
 static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
-                                   unsigned int origin, struct msg_queue *sender, int repeat )
+                                   unsigned int origin, struct msg_queue *sender, int repeat,
+                                   user_handle_t dcomp_presentation )
 {
     desktop_shm_t *desktop_shm = desktop->shared;
     struct hw_msg_source source = { IMDT_KEYBOARD, origin };
@@ -2352,7 +2478,30 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
     lparam_t lparam = input->kbd.scan << 16;
     unsigned int flags = 0;
     BOOL unicode = input->kbd.flags & KEYEVENTF_UNICODE;
+    struct dcomp_key_owner *key_owner = NULL;
+    unsigned short dcomp_scan = 0;
+    unsigned int dcomp_generation = 0;
+    int dcomp_keyup = 0;
     int wait;
+
+    if (origin == IMO_HARDWARE && !repeat && !unicode)
+    {
+        dcomp_scan = get_dcomp_key_scan( input );
+        key_owner = get_dcomp_key_owner( desktop, dcomp_scan );
+        if (input->kbd.flags & KEYEVENTF_KEYUP)
+        {
+            if (key_owner && key_owner->win == get_user_full_handle( win ) &&
+                is_dcomp_presentation_owner( key_owner->presentation, current->process ))
+            {
+                dcomp_presentation = key_owner->presentation;
+                dcomp_generation = key_owner->generation;
+                dcomp_keyup = 1;
+                memset( key_owner, 0, sizeof(*key_owner) );
+            }
+        }
+        else if (dcomp_presentation)
+            dcomp_generation = reserve_dcomp_key_owner( desktop, dcomp_scan, win, dcomp_presentation );
+    }
 
     if (!(time = input->kbd.time)) time = get_tick_count();
 
@@ -2458,6 +2607,7 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
             desktop->key_repeat.input = *input;
             desktop->key_repeat.input.kbd.time = 0;
             desktop->key_repeat.win = win;
+            desktop->key_repeat.dcomp_presentation = dcomp_presentation;
             if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
             desktop->key_repeat.timeout = add_timeout_user( timeout, key_repeat_timeout, desktop );
         }
@@ -2478,11 +2628,21 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
         release_object( foreground );
     }
 
-    if (!(msg = alloc_hardware_message( input->kbd.info, source, time, 0 ))) return 0;
+    if (!(msg = alloc_hardware_message( input->kbd.info, source, time, 0 )))
+    {
+        if (dcomp_generation && !dcomp_keyup && key_owner &&
+            key_owner->generation == dcomp_generation)
+            memset( key_owner, 0, sizeof(*key_owner) );
+        return 0;
+    }
     msg_data = msg->data;
 
-    msg->win       = get_user_full_handle( win );
-    msg->msg       = message_code;
+    msg->win = get_user_full_handle( win );
+    msg->dcomp_presentation = dcomp_presentation;
+    msg->dcomp_scan = dcomp_scan;
+    msg->dcomp_generation = dcomp_generation;
+    msg->dcomp_keyup = dcomp_keyup;
+    msg->msg = message_code;
     if (origin == IMO_INJECTED) msg_data->flags = LLKHF_INJECTED;
 
     if (!unicode || input->kbd.vkey)
@@ -3237,6 +3397,19 @@ DECL_HANDLER(send_message)
     release_object( thread );
 }
 
+/* Revalidate authorization at dispatch time, after relationship changes. */
+DECL_HANDLER(validate_dcomp_ime_message)
+{
+    struct message_result *result;
+    struct thread *receiver = current;
+
+    reply->authorization = 0;
+    if (!current->queue || !(result = current->queue->recv_result)) return;
+    if (result->dcomp_message == WM_COPYDATA)
+        reply->authorization = validate_dcomp_ime_message( result->dcomp_source,
+                result->dcomp_destination, result->sender_process, receiver );
+}
+
 /* send a hardware message to a thread queue */
 DECL_HANDLER(send_hardware_message)
 {
@@ -3266,7 +3439,8 @@ DECL_HANDLER(send_hardware_message)
         wait = queue_mouse_message( desktop, req->win, &req->input, origin, sender, rawinput );
         break;
     case INPUT_KEYBOARD:
-        wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, 0 );
+        wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, 0,
+                origin == IMO_HARDWARE ? get_dcomp_keyboard_presentation( req->win, current->process ) : 0 );
         break;
     case INPUT_HARDWARE:
         queue_custom_hardware_message( desktop, req->win, origin, &req->input );
@@ -3311,6 +3485,7 @@ DECL_HANDLER(get_message)
     }
 
     if (!queue) return;
+    reply->dcomp_ime_authorization = 0;
     queue_shm = queue->shared;
 
     /* check for any hardware internal message */

@@ -9,6 +9,7 @@
 - Let modern Office web views observe text and child-node changes reliably.
 - Keep Outlook shortcuts working safely across Store package changes and
   classic Outlook fallback.
+- Improve keyboard and IME input across cross-process DirectComposition views.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

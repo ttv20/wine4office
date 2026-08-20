@@ -735,13 +735,15 @@ static HRESULT WINAPI dcomp_visual_SetClip(IDCompositionVisual2 *iface, const D2
 
 static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
 {
-    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
+    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND, const struct wine_dcomp_ime_token *);
     typedef HRESULT (WINAPI *set_composition_description_t)(IDXGISwapChain1 *,
             const struct wine_dcomp_visual_desc *);
     bind_composition_window_t bind_composition_window;
     set_composition_description_t set_composition_description;
     IDXGISwapChain1 *swapchain;
+    struct wine_dcomp_ime_token ime_token;
     HMODULE dxgi;
+    UINT ime_token_size = sizeof(ime_token);
     HWND window;
 
     if (!visual->applied_content || FAILED(visual->applied_content->lpVtbl->QueryInterface(
@@ -752,6 +754,9 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
             && (set_composition_description = (set_composition_description_t)GetProcAddress(dxgi,
             "__wine_dxgi_set_composition_description")))
         set_composition_description(swapchain, NULL);
+    if (FAILED(swapchain->lpVtbl->GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID,
+            &ime_token_size, &ime_token)))
+        ime_token.low = ime_token.high = 0;
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
         RemovePropW(window, L"__wine_dcomp_clip_enabled");
@@ -775,7 +780,7 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
         if ((dxgi = GetModuleHandleW(L"dxgi.dll")) &&
             (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
                     "__wine_dxgi_bind_composition_window")))
-            bind_composition_window(window, NULL);
+            bind_composition_window(window, NULL, &ime_token);
         else
             ShowWindow(window, SW_HIDE);
     }
@@ -784,13 +789,15 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
 
 static void dcomp_visual_bind_content(struct dcomp_visual *visual)
 {
-    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
+    typedef void (WINAPI *bind_composition_window_t)(HWND, HWND, const struct wine_dcomp_ime_token *);
     bind_composition_window_t bind_composition_window;
     typedef HRESULT (WINAPI *set_composition_description_t)(IDXGISwapChain1 *,
             const struct wine_dcomp_visual_desc *);
     IDXGISwapChain1 *swapchain;
     set_composition_description_t set_composition_description;
+    struct wine_dcomp_ime_token ime_token;
     HMODULE dxgi;
+    UINT ime_token_size = sizeof(ime_token);
     HWND window;
     RECT rect;
 
@@ -803,6 +810,9 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
             && (set_composition_description = (set_composition_description_t)GetProcAddress(dxgi,
             "__wine_dxgi_set_composition_description")))
         set_composition_description(swapchain, &visual->applied_description);
+    if (FAILED(swapchain->lpVtbl->GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID,
+            &ime_token_size, &ime_token)))
+        ime_token.low = ime_token.high = 0;
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
         LONG offset_x, offset_y, scale_x, scale_y;
@@ -841,7 +851,7 @@ static void dcomp_visual_bind_content(struct dcomp_visual *visual)
         if ((dxgi = GetModuleHandleW(L"dxgi.dll"))
                 && (bind_composition_window = (bind_composition_window_t)GetProcAddress(dxgi,
                 "__wine_dxgi_bind_composition_window")))
-            bind_composition_window(window, visual->target_window);
+            bind_composition_window(window, visual->target_window, &ime_token);
         else if (visual->target_window && window != visual->target_window)
         {
             GetClientRect(visual->target_window, &rect);

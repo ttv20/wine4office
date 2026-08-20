@@ -58,7 +58,17 @@ struct key_repeat
     timeout_t            period;           /* auto-repeat period */
     union hw_input       input;            /* the input to repeat */
     user_handle_t        win;              /* target window for input event */
+    user_handle_t        dcomp_presentation; /* authorized DComp presentation */
     struct timeout_user *timeout;          /* timeout for repeat */
+};
+
+#define DCOMP_KEY_COUNT 0x200
+
+struct dcomp_key_owner
+{
+    user_handle_t win;
+    user_handle_t presentation;
+    unsigned int generation;
 };
 
 struct desktop
@@ -83,6 +93,7 @@ struct desktop
     unsigned int         users;            /* processes and threads using this desktop */
     unsigned char        alt_pressed;      /* last key press was Alt (used to determine msg on release) */
     struct key_repeat    key_repeat;       /* key auto-repeat */
+    struct dcomp_key_owner dcomp_keys[DCOMP_KEY_COUNT]; /* authorized DComp key destinations */
     unsigned int         clip_flags;       /* last cursor clip flags */
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
@@ -136,6 +147,7 @@ extern void post_win_event( struct thread *thread, unsigned int event,
 extern void free_hotkeys( struct desktop *desktop, user_handle_t window );
 extern void free_pointers( struct desktop *desktop );
 extern void set_rawinput_process( struct process *process, int enable );
+extern void clear_dcomp_key_owners( struct desktop *desktop, user_handle_t presentation );
 
 /* region functions */
 
@@ -183,6 +195,22 @@ extern struct thread *get_window_thread( user_handle_t handle );
 extern user_handle_t shallow_window_from_point( struct desktop *desktop, int x, int y );
 extern struct thread *window_thread_from_point( user_handle_t scope, int x, int y );
 extern int is_direct_hardware_input_window( user_handle_t handle );
+extern user_handle_t get_dcomp_keyboard_presentation( user_handle_t destination,
+                                                      struct process *sender );
+extern int is_dcomp_presentation_owner( user_handle_t presentation, struct process *sender );
+extern int is_dcomp_presentation_active( user_handle_t presentation );
+extern int is_dcomp_keyboard_input( user_handle_t presentation, user_handle_t destination );
+extern unsigned int get_dcomp_ime_message_authorization( user_handle_t source,
+                                                         user_handle_t destination,
+                                                         struct process *sender );
+extern unsigned int validate_dcomp_ime_message( user_handle_t source,
+                                               user_handle_t destination,
+                                               struct process *sender,
+                                               struct thread *receiver );
+extern void cleanup_dcomp_ime_process( struct process *process );
+extern void cleanup_message_results_process( struct process *process );
+extern int is_current_set_parent_message( user_handle_t child, user_handle_t parent,
+                                          struct process *sender );
 extern user_handle_t find_window_to_repaint( user_handle_t parent, struct thread *thread );
 extern struct window_class *get_window_class( user_handle_t window );
 extern void set_window_rect_visible( user_handle_t window, struct rectangle rect );

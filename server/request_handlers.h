@@ -137,6 +137,7 @@ DECL_HANDLER(get_message);
 DECL_HANDLER(reply_message);
 DECL_HANDLER(accept_hardware_message);
 DECL_HANDLER(get_message_reply);
+DECL_HANDLER(validate_dcomp_ime_message);
 DECL_HANDLER(set_win_timer);
 DECL_HANDLER(kill_win_timer);
 DECL_HANDLER(is_window_hung);
@@ -155,6 +156,10 @@ DECL_HANDLER(create_named_pipe);
 DECL_HANDLER(set_named_pipe_info);
 DECL_HANDLER(create_window);
 DECL_HANDLER(destroy_window);
+DECL_HANDLER(create_dcomp_ime_offer);
+DECL_HANDLER(set_dcomp_ime_relationship);
+DECL_HANDLER(revoke_dcomp_ime_offer);
+DECL_HANDLER(update_dcomp_task_delegate);
 DECL_HANDLER(update_window_broadcast_exclusion);
 DECL_HANDLER(get_window_broadcast_exclusion);
 DECL_HANDLER(get_desktop_window);
@@ -462,6 +467,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_reply_message,
     (req_handler)req_accept_hardware_message,
     (req_handler)req_get_message_reply,
+    (req_handler)req_validate_dcomp_ime_message,
     (req_handler)req_set_win_timer,
     (req_handler)req_kill_win_timer,
     (req_handler)req_is_window_hung,
@@ -480,6 +486,10 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_named_pipe_info,
     (req_handler)req_create_window,
     (req_handler)req_destroy_window,
+    (req_handler)req_create_dcomp_ime_offer,
+    (req_handler)req_set_dcomp_ime_relationship,
+    (req_handler)req_revoke_dcomp_ime_offer,
+    (req_handler)req_update_dcomp_task_delegate,
     (req_handler)req_update_window_broadcast_exclusion,
     (req_handler)req_get_window_broadcast_exclusion,
     (req_handler)req_get_desktop_window,
@@ -659,6 +669,7 @@ C_ASSERT( sizeof(abstime_t) == 8 );
 C_ASSERT( sizeof(affinity_t) == 8 );
 C_ASSERT( sizeof(apc_param_t) == 8 );
 C_ASSERT( sizeof(atom_t) == 4 );
+C_ASSERT( sizeof(capability_t) == 8 );
 C_ASSERT( sizeof(char) == 1 );
 C_ASSERT( sizeof(client_ptr_t) == 8 );
 C_ASSERT( sizeof(d3dkmt_handle_t) == 4 );
@@ -1432,10 +1443,11 @@ C_ASSERT( offsetof(struct get_message_reply, msg) == 12 );
 C_ASSERT( offsetof(struct get_message_reply, wparam) == 16 );
 C_ASSERT( offsetof(struct get_message_reply, lparam) == 24 );
 C_ASSERT( offsetof(struct get_message_reply, type) == 32 );
-C_ASSERT( offsetof(struct get_message_reply, x) == 36 );
-C_ASSERT( offsetof(struct get_message_reply, y) == 40 );
-C_ASSERT( offsetof(struct get_message_reply, time) == 44 );
-C_ASSERT( offsetof(struct get_message_reply, total) == 48 );
+C_ASSERT( offsetof(struct get_message_reply, dcomp_ime_authorization) == 36 );
+C_ASSERT( offsetof(struct get_message_reply, x) == 40 );
+C_ASSERT( offsetof(struct get_message_reply, y) == 44 );
+C_ASSERT( offsetof(struct get_message_reply, time) == 48 );
+C_ASSERT( offsetof(struct get_message_reply, total) == 52 );
 C_ASSERT( sizeof(struct get_message_reply) == 56 );
 C_ASSERT( offsetof(struct reply_message_request, remove) == 12 );
 C_ASSERT( offsetof(struct reply_message_request, result) == 16 );
@@ -1446,6 +1458,9 @@ C_ASSERT( offsetof(struct get_message_reply_request, cancel) == 12 );
 C_ASSERT( sizeof(struct get_message_reply_request) == 16 );
 C_ASSERT( offsetof(struct get_message_reply_reply, result) == 8 );
 C_ASSERT( sizeof(struct get_message_reply_reply) == 16 );
+C_ASSERT( sizeof(struct validate_dcomp_ime_message_request) == 16 );
+C_ASSERT( offsetof(struct validate_dcomp_ime_message_reply, authorization) == 8 );
+C_ASSERT( sizeof(struct validate_dcomp_ime_message_reply) == 16 );
 C_ASSERT( offsetof(struct set_win_timer_request, win) == 12 );
 C_ASSERT( offsetof(struct set_win_timer_request, msg) == 16 );
 C_ASSERT( offsetof(struct set_win_timer_request, rate) == 20 );
@@ -1551,6 +1566,24 @@ C_ASSERT( offsetof(struct create_window_reply, class_ptr) == 24 );
 C_ASSERT( sizeof(struct create_window_reply) == 32 );
 C_ASSERT( offsetof(struct destroy_window_request, handle) == 12 );
 C_ASSERT( sizeof(struct destroy_window_request) == 16 );
+C_ASSERT( offsetof(struct create_dcomp_ime_offer_request, presentation) == 12 );
+C_ASSERT( sizeof(struct create_dcomp_ime_offer_request) == 16 );
+C_ASSERT( offsetof(struct create_dcomp_ime_offer_reply, token_low) == 8 );
+C_ASSERT( offsetof(struct create_dcomp_ime_offer_reply, token_high) == 16 );
+C_ASSERT( sizeof(struct create_dcomp_ime_offer_reply) == 24 );
+C_ASSERT( offsetof(struct set_dcomp_ime_relationship_request, token_low) == 16 );
+C_ASSERT( offsetof(struct set_dcomp_ime_relationship_request, token_high) == 24 );
+C_ASSERT( offsetof(struct set_dcomp_ime_relationship_request, target) == 32 );
+C_ASSERT( sizeof(struct set_dcomp_ime_relationship_request) == 40 );
+C_ASSERT( offsetof(struct revoke_dcomp_ime_offer_request, token_low) == 16 );
+C_ASSERT( offsetof(struct revoke_dcomp_ime_offer_request, token_high) == 24 );
+C_ASSERT( sizeof(struct revoke_dcomp_ime_offer_request) == 32 );
+C_ASSERT( offsetof(struct update_dcomp_task_delegate_request, token_low) == 16 );
+C_ASSERT( offsetof(struct update_dcomp_task_delegate_request, token_high) == 24 );
+C_ASSERT( offsetof(struct update_dcomp_task_delegate_request, presentation) == 32 );
+C_ASSERT( offsetof(struct update_dcomp_task_delegate_request, target) == 36 );
+C_ASSERT( offsetof(struct update_dcomp_task_delegate_request, flags) == 40 );
+C_ASSERT( sizeof(struct update_dcomp_task_delegate_request) == 48 );
 C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, window) == 12 );
 C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, target) == 16 );
 C_ASSERT( offsetof(struct update_window_broadcast_exclusion_request, flags) == 20 );

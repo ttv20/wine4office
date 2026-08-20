@@ -105,6 +105,7 @@ struct received_message_info
     UINT  type;
     MSG   msg;
     UINT  flags;  /* InSendMessageEx return flags */
+    UINT  dcomp_ime_authorization;
     struct received_message_info *prev;
 };
 
@@ -2341,8 +2342,20 @@ BOOL WINAPI NtUserGetGUIThreadInfo( DWORD id, GUITHREADINFO *info )
  *
  * Call a window procedure and the corresponding hooks.
  */
+static UINT validate_dcomp_ime_message(void)
+{
+    UINT authorization = 0;
+
+    SERVER_START_REQ( validate_dcomp_ime_message )
+    {
+        if (!wine_server_call( req )) authorization = reply->authorization;
+    }
+    SERVER_END_REQ;
+    return authorization;
+}
+
 static LRESULT call_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
-                                 enum message_type type, BOOL same_thread,
+                                 enum message_type type, BOOL same_thread, UINT dcomp_ime_authorization,
                                  enum wm_char_mapping mapping, BOOL ansi_dst )
 {
     struct user_thread_info *thread_info = get_user_thread_info();
@@ -2366,15 +2379,28 @@ static LRESULT call_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     prev_source = thread_info->client_info->msg_source;
     thread_info->client_info->msg_source = msg_source_unavailable;
 
-    packed_size = user_message_size( hwnd, msg, wparam, lparam, type == MSG_OTHER_PROCESS, ansi, &reply_size );
-
-    /* first the WH_CALLWNDPROC hook */
     cwp.lParam  = lparam;
     cwp.wParam  = wparam;
     cwp.message = msg;
     cwp.hwnd    = hwnd = get_full_window_handle( hwnd );
+    packed_size = user_message_size( hwnd, msg, wparam, lparam, type == MSG_OTHER_PROCESS, ansi, &reply_size );
+
+    /* first the WH_CALLWNDPROC hook */
     call_message_hooks( WH_CALLWNDPROC, HC_ACTION, same_thread, (LPARAM)&cwp, sizeof(cwp),
                         packed_size, ansi );
+
+    if (msg == WM_COPYDATA)
+    {
+        COPYDATASTRUCT *copydata = (COPYDATASTRUCT *)lparam;
+
+        if (!same_thread && dcomp_ime_authorization) dcomp_ime_authorization = validate_dcomp_ime_message();
+        if ((dcomp_ime_authorization & DCOMP_IME_AUTHORIZE_UPDATE) &&
+            process_ime_update( hwnd, copydata, &result ))
+            goto callwndprocret;
+        if ((dcomp_ime_authorization & DCOMP_IME_AUTHORIZE_SET_RECT) &&
+            process_ime_set_rect( hwnd, copydata, &result ))
+            goto callwndprocret;
+    }
 
     if (packed_size)
     {
@@ -2399,6 +2425,7 @@ static LRESULT call_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
     copy_user_result( ret_ptr, min( ret_len, reply_size ), result, msg, wparam, lparam, ansi );
 
+callwndprocret:
     /* and finally the WH_CALLWNDPROCRET hook */
     cwpret.lResult = result;
     cwpret.lParam  = lparam;
@@ -3062,6 +3089,7 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
             {
                 size = wine_server_reply_size( reply );
                 info.type        = reply->type;
+                info.dcomp_ime_authorization = reply->dcomp_ime_authorization;
                 info.msg.hwnd    = wine_server_ptr_handle( reply->win );
                 info.msg.message = reply->msg;
                 info.msg.wParam  = reply->wparam;
@@ -3300,8 +3328,8 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
         info.prev = thread_info->receive_info;
         thread_info->receive_info = &info;
         result = call_window_proc( info.msg.hwnd, info.msg.message, info.msg.wParam,
-                                   info.msg.lParam, info.type, FALSE, WMCHAR_MAP_RECVMESSAGE,
-                                   info.type == MSG_ASCII );
+                                   info.msg.lParam, info.type, FALSE, info.dcomp_ime_authorization,
+                                   WMCHAR_MAP_RECVMESSAGE, info.type == MSG_ASCII );
         if (thread_info->receive_info == &info)
             reply_winproc_result( result, info.msg.hwnd, info.msg.message,
                                   info.msg.wParam, info.msg.lParam );
@@ -4514,7 +4542,7 @@ static BOOL process_message( struct send_message_info *info, DWORD_PTR *res_ptr,
     else
     {
         result = call_window_proc( info->hwnd, info->msg, info->wparam, info->lparam,
-                                   info->type, TRUE, info->wm_char, ansi );
+                                   info->type, TRUE, 0, info->wm_char, ansi );
         if (info->type == MSG_CALLBACK)
             call_sendmsg_callback( info->callback, info->hwnd, info->msg, info->data, result );
         ret = TRUE;

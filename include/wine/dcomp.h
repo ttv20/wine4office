@@ -17,6 +17,15 @@
 #define WINE_DCOMP_VISUAL_RENDERER_ACTIVE 0x00000008
 #define WINE_DCOMP_VISUAL_TRANSFORM_ABSOLUTE 0x00000010
 
+struct wine_dcomp_ime_token
+{
+    UINT64 low;
+    UINT64 high;
+};
+
+static const GUID WINE_DCOMP_IME_TOKEN_GUID =
+    {0xdfe53f32, 0x7c4d, 0x4f25, {0xb8, 0x2c, 0xa4, 0x84, 0x65, 0x88, 0xe9, 0xb6}};
+
 struct wine_dcomp_visual_desc
 {
     UINT version;
