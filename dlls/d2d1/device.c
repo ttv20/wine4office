@@ -1336,14 +1336,14 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
     context->desc.dpiX = previous_dpi_x;
     context->desc.dpiY = previous_dpi_y;
-    context->drawing_state = previous_state;
-    context->clip_stack.count = clip_count;
     d2d_rect_set(&dst_rect, origin_x * 96.0f / previous_dpi_x,
             origin_y * 96.0f / previous_dpi_y,
             right * 96.0f / previous_dpi_x, bottom * 96.0f / previous_dpi_y);
     ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
             (ID2D1Bitmap *)downsample[ARRAY_SIZE(downsample) - 1], &dst_rect, 1.0f,
             D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+    context->drawing_state = previous_state;
+    context->clip_stack.count = clip_count;
     goto done;
 
  restore:
