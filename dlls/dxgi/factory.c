@@ -952,22 +952,19 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     UpdateWindow(caption);
 }
 
-static void dxgi_composition_window_clear_owned_icons(HWND window)
+static void dxgi_composition_window_clear_task_icons(HWND window)
 {
-    HICON icon;
+    HICON big_icon, small_icon;
 
-    if ((icon = RemovePropW(window, dcomp_task_icon_big_prop)))
-    {
-        if ((HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0) == icon)
-            SendMessageW(window, WM_SETICON, ICON_BIG, 0);
-        DestroyIcon(icon);
-    }
-    if ((icon = RemovePropW(window, dcomp_task_icon_small_prop)))
-    {
-        if ((HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0) == icon)
-            SendMessageW(window, WM_SETICON, ICON_SMALL, 0);
-        DestroyIcon(icon);
-    }
+    big_icon = RemovePropW(window, dcomp_task_icon_big_prop);
+    small_icon = RemovePropW(window, dcomp_task_icon_small_prop);
+    TRACE("Clearing task icons for window %p, current %p/%p, owned %p/%p.\n", window,
+            (HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0),
+            (HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0), big_icon, small_icon);
+    SendMessageW(window, WM_SETICON, ICON_BIG, 0);
+    SendMessageW(window, WM_SETICON, ICON_SMALL, 0);
+    if (big_icon) DestroyIcon(big_icon);
+    if (small_icon) DestroyIcon(small_icon);
 }
 
 static BOOL dxgi_composition_window_set_executable_icons(HWND window, const WCHAR *image)
@@ -1018,7 +1015,7 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
     if (GetPropW(window, L"__wine_dcomp_task_identity") != root)
     {
         RemovePropW(window, L"__wine_dcomp_task_identity");
-        dxgi_composition_window_clear_owned_icons(window);
+        dxgi_composition_window_clear_task_icons(window);
         if ((process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)))
         {
             if (QueryFullProcessImageNameW(process, 0, image, &image_len))
@@ -1194,7 +1191,7 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
             case WM_DESTROY:
                 if ((root = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(root);
                 RemovePropW(window, dcomp_caption_window_prop);
-                dxgi_composition_window_clear_owned_icons(window);
+                dxgi_composition_window_clear_task_icons(window);
                 KillTimer(window, 1);
                 break;
 
@@ -1268,7 +1265,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
         RemovePropW(window, L"__wine_dcomp_raised_while_active");
         RemovePropW(window, L"__wine_dcomp_composite_alpha_background");
         RemovePropW(window, L"__wine_dcomp_task_minimized");
-        dxgi_composition_window_clear_owned_icons(window);
+        dxgi_composition_window_clear_task_icons(window);
         RemovePropW(window, L"__wine_dcomp_task_identity");
         RemovePropW(window, dcomp_task_app_id_prop);
         RemovePropW(window, L"__wine_dcomp_client_rect");

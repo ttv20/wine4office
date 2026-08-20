@@ -2516,7 +2516,7 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     HHOOK callwndproc_hook = NULL;
     WCHAR title[64];
     UINT token_size;
-    HICON icon;
+    HICON icon = NULL;
     ATOM class_atom = 0;
     HRESULT hr;
 
@@ -2879,6 +2879,12 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
                 "Unbound child retained its base presentation.\n");
         ok(!GetPropW(target_window, L"__wine_dcomp_task_delegated"),
                 "Unbound root retained its task presentation.\n");
+        ok((HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0) != icon,
+                "Unbound helper large icon %p still matches root icon %p.\n",
+                (HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0), icon);
+        ok((HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0) != icon,
+                "Unbound helper small icon %p still matches root icon %p.\n",
+                (HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0), icon);
         ok(GetWindowLongW(window, GWL_STYLE) == initial_style,
                 "Unbound helper style %#lx, expected %#lx.\n",
                 GetWindowLongW(window, GWL_STYLE), initial_style);
