@@ -1965,6 +1965,8 @@ void clear_dcomp_key_owners( struct desktop *desktop, user_handle_t presentation
     for (i = 0; i < ARRAY_SIZE(desktop->dcomp_keys); i++)
         if (desktop->dcomp_keys[i].presentation == presentation)
             memset( &desktop->dcomp_keys[i], 0, sizeof(desktop->dcomp_keys[i]) );
+    if (desktop->key_repeat.dcomp_presentation == presentation)
+        desktop->key_repeat.dcomp_presentation = 0;
 }
 
 /* queue a hardware message into a given thread input */
@@ -3348,21 +3350,6 @@ DECL_HANDLER(send_message)
         msg->result    = NULL;
         msg->data      = NULL;
         msg->data_size = get_req_data_size();
-
-        if (msg->msg == WM_COPYDATA && msg->win)
-        {
-            struct thread *window_thread = get_window_thread( msg->win );
-            if (window_thread != thread && get_dcomp_ime_message_authorization(
-                    (user_handle_t)msg->wparam, msg->win, current->process ))
-            {
-                if (window_thread) release_object( window_thread );
-                set_error( STATUS_INVALID_PARAMETER );
-                free( msg );
-                release_object( thread );
-                return;
-            }
-            if (window_thread) release_object( window_thread );
-        }
 
         get_message_defaults( recv_queue, &msg->x, &msg->y, &msg->time );
 

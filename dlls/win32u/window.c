@@ -6771,7 +6771,7 @@ BOOL is_dcomp_ime_relationship( HWND presentation, HWND root, HWND input )
             't','a','s','k','_','d','e','l','e','g','a','t','e','d','_','t','a','r','g','e','t',0};
     static const WCHAR direct_owner_prop[] = {'_','_','w','i','n','e','_','d','i','r','e','c','t','_',
             'h','a','r','d','w','a','r','e','_','i','n','p','u','t','_','o','w','n','e','r',0};
-    DWORD presentation_pid, root_pid, input_pid, target_pid;
+    DWORD presentation_pid = 0, root_pid = 0, input_pid = 0, target_pid = 0;
     HWND target;
 
     if (!NtUserIsWindow( presentation ) || !NtUserIsWindow( root ) || !NtUserIsWindow( input ) ||
@@ -6784,11 +6784,10 @@ BOOL is_dcomp_ime_relationship( HWND presentation, HWND root, HWND input )
         NtUserGetProp( input, direct_owner_prop ) != presentation)
         return FALSE;
 
-    get_window_thread( presentation, &presentation_pid );
-    get_window_thread( root, &root_pid );
-    get_window_thread( input, &input_pid );
-    get_window_thread( target, &target_pid );
-    return presentation_pid && root_pid && presentation_pid != root_pid &&
+    if (!get_window_thread( presentation, &presentation_pid ) ||
+        !get_window_thread( root, &root_pid ) || !get_window_thread( input, &input_pid ) ||
+        !get_window_thread( target, &target_pid )) return FALSE;
+    return presentation_pid != root_pid &&
            root_pid == input_pid && root_pid == target_pid;
 }
 
