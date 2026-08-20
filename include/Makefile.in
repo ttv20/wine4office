@@ -1164,6 +1164,7 @@ SOURCES = \
 	wine/winedmo.h \
 	wine/winedxgi.idl \
 	wine/wingdi16.h \
+	wine/windows_system.h \
 	wine/winnet16.h \
 	wine/winuser16.h \
 	winerror.h \

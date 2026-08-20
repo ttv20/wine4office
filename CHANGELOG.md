@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Let modern Office identify the current user without exposing machine, account,
+  or application identifiers.
+- Let packaged Office components discover their local application-data folders
+  and education-environment state.
+- Let modern Office web views observe text and child-node changes reliably.
+- Keep Outlook shortcuts working safely across Store package changes and
+  classic Outlook fallback.
+- Improve keyboard and IME input across cross-process DirectComposition views.
+- Route keyboard, pointer, and IME input through delegated DirectComposition
+  surfaces on Wayland.
+- Give DirectComposition-hosted Office windows their original frame and task identity.
 - Add initial New Outlook support with WebView2 input, native window frames, and correct Outlook taskbar identity.
 
 ## 0.2.0-beta.1 — 2026-08-19

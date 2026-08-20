@@ -36,12 +36,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR dcomp_foreign_handle_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','x','d','g','_','e','x','p','o','r','t','_','h','a','n','d','l','e',0};
-static const WCHAR dcomp_task_delegated_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
-static const WCHAR dcomp_task_delegated_target_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d','_','t','a','r','g','e','t',0};
-static const WCHAR dcomp_base_presentation_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','b','a','s','e','_','p','r','e','s','e','n','t','a','t','i','o','n',0};
 static const WCHAR dcomp_task_app_id_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
 static const WCHAR dcomp_detached_window_prop[] =
@@ -104,9 +98,6 @@ static void wayland_surface_enable_plasma_positioning(struct wayland_surface *su
 
 BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
 {
-    HWND delegate, target;
-    BOOL task_delegated;
-
     if (!process_wayland.zxdg_exporter_v2 || surface->role != WAYLAND_SURFACE_ROLE_TOPLEVEL ||
         !surface->xdg_toplevel)
         return FALSE;
@@ -117,13 +108,8 @@ BOOL wayland_surface_export_toplevel(struct wayland_surface *surface)
      * positioning request.  Position the exported host through Plasma as
      * well, so its Win32 screen coordinates and the detached surfaces share
      * the same origin. */
-    delegate = NtUserGetProp(surface->hwnd, dcomp_task_delegated_prop);
-    target = NtUserGetProp(surface->hwnd, dcomp_task_delegated_target_prop);
-    task_delegated = delegate && target && NtUserIsWindow(delegate) && NtUserIsWindow(target) &&
-                     NtUserGetAncestor(target, GA_ROOT) == surface->hwnd &&
-                     NtUserGetProp(delegate, dcomp_detached_window_prop) == target &&
-                     NtUserGetProp(target, dcomp_base_presentation_prop) == delegate;
-    wayland_surface_enable_plasma_positioning(surface, task_delegated);
+    wayland_surface_enable_plasma_positioning(surface,
+            wayland_window_is_dcomp_task_delegated(surface->hwnd));
 
     if (surface->zxdg_exported_v2) return TRUE;
 

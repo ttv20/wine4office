@@ -441,21 +441,14 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
 
-static BOOL d3d11_composition_window_needs_update(HWND window, const RECT *rect, UINT flags)
-{
-    RECT current;
-
-    if ((flags & SWP_SHOWWINDOW) && !IsWindowVisible(window)) return TRUE;
-    if ((flags & SWP_FRAMECHANGED) || !(flags & SWP_NOZORDER)) return TRUE;
-    return !GetWindowRect(window, &current) || !EqualRect(&current, rect);
-}
-
 static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
 {
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
     ATOM foreign_atom, old_foreign_atom;
     HWND base, foreign_parent, root;
+    DWORD root_style, root_exstyle;
+    BOOL base_presentation, transparent_base;
     RECT rect;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
@@ -495,6 +488,13 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
         return;
     }
 
+    base_presentation = GetPropW(target, L"__wine_dcomp_base_presentation") == window;
+    root_style = GetWindowLongW(root, GWL_STYLE);
+    root_exstyle = GetWindowLongW(root, GWL_EXSTYLE);
+    transparent_base = (root_style & WS_POPUP) && (root_exstyle & WS_EX_TOOLWINDOW) &&
+            (root_exstyle & WS_EX_TOPMOST);
+    dxgi_composition_window_update_frame(window, target, root,
+            base_presentation, transparent_base);
     if (!dxgi_composition_window_get_rect(window, target, &rect)) return;
     if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
             && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
@@ -509,7 +509,7 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
                 || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
             RemovePropW(window, L"__wine_dcomp_raised_while_active");
     }
-    if (d3d11_composition_window_needs_update(window, &rect, flags))
+    if (dxgi_composition_window_needs_update(window, &rect, flags))
         SetWindowPos(window, HWND_TOP, rect.left, rect.top,
                 max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
                 flags);
