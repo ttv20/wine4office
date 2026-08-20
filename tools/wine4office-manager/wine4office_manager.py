@@ -215,7 +215,7 @@ class ManagerState:
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
             "restart_required": False, "progress_label": "", "progress_value": None,
-            "foreground_ready": False,
+            "foreground_pending": False, "foreground_ready": False,
         }
         self.cancel_event = threading.Event()
         self.process: subprocess.Popen | None = None
@@ -981,12 +981,29 @@ class ManagerState:
 
     def set_foreground_process(self, process: subprocess.Popen | None) -> None:
         """Register the foreground process and its startup atomically."""
+        terminate = None
         with self.lock:
             self.process = process
             if (process is not None and self.task["running"]
                     and not self._forced_failure
                     and not self.cancel_event.is_set()):
                 self.task["foreground_ready"] = True
+            elif process is not None and self.cancel_event.is_set():
+                terminate = process
+        if terminate is not None and terminate.poll() is None:
+            threading.Thread(
+                target=self._terminate_process,
+                args=(terminate,),
+                name="wine4office-late-cancel",
+                daemon=True,
+            ).start()
+
+    def mark_foreground_pending(self) -> None:
+        """Start the foreground-launch deadline at the launch boundary."""
+        with self.lock:
+            if (self.task["running"] and not self._forced_failure
+                    and not self.cancel_event.is_set()):
+                self.task["foreground_pending"] = True
 
     def start_task(self, kind: str, operation, completion=None) -> None:
         """Run a blocking operation away from Qt and report its result.
@@ -1002,7 +1019,7 @@ class ManagerState:
                 "running": True, "kind": kind, "status": "running", "log": "",
                 "restart_required": False,
                 "progress_label": "Preparing operation", "progress_value": None,
-                "foreground_ready": False,
+                "foreground_pending": False, "foreground_ready": False,
             }
             self.cancel_event.clear()
             self._forced_failure = ""
@@ -1087,8 +1104,8 @@ class ManagerState:
             process.wait()
 
     def cancel(self) -> None:
-        self.cancel_event.set()
         with self.lock:
+            self.cancel_event.set()
             process = self.process
         if process and process.poll() is None:
             threading.Thread(
@@ -1102,10 +1119,20 @@ class ManagerState:
         """Fail and cancel a task only while its foreground process is pending."""
         with self.lock:
             if (not self.task["running"] or self.task["kind"] != kind
-                    or self.task.get("foreground_ready")):
+                    or not self.task.get("foreground_pending")
+                    or self.task.get("foreground_ready")
+                    or self.cancel_event.is_set()):
                 return False
             self._forced_failure = str(message)
-        self.cancel()
+            self.cancel_event.set()
+            process = self.process
+        if process and process.poll() is None:
+            threading.Thread(
+                target=self._terminate_process,
+                args=(process,),
+                name="wine4office-timeout",
+                daemon=True,
+            ).start()
         return True
 
 

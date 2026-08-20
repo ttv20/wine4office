@@ -2195,6 +2195,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         snapshot_payloads = []
         odt_url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
         installer_started = mock.Mock()
+        installer_launching = mock.Mock()
 
         def resolve_latest(cancel_event):
             configuration.write_bytes(changed_payload)
@@ -2227,6 +2228,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 configuration,
                 lambda line: None,
                 configuration_payload=original_payload,
+                installer_launching_callback=installer_launching,
                 installer_process_callback=installer_started,
             )
 
@@ -2264,6 +2266,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertEqual(stream.call_args_list[1].kwargs["cwd"], extraction_directory)
         setup_process_callback = stream.call_args_list[1].kwargs["process_callback"]
+        installer_launching.assert_called_once_with()
         setup_process = mock.Mock()
         setup_process_callback(setup_process)
         installer_started.assert_called_once_with(setup_process)

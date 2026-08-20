@@ -1593,6 +1593,7 @@ class QtManagerTests(unittest.TestCase):
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
             configuration_payload=configuration_payload,
+            installer_launching_callback=self.state.mark_foreground_pending,
             installer_process_callback=self.state.set_foreground_process,
         )
         self.assertIsNone(self.window.pending_odt_xml)
@@ -1604,21 +1605,32 @@ class QtManagerTests(unittest.TestCase):
         self.assertTrue(self.window.office_startup_dialog.isVisible())
         self.assertEqual(self.window.office_startup_bar.minimum(), 0)
         self.assertEqual(self.window.office_startup_bar.maximum(), 0)
+        self.assertFalse(self.window.office_startup_timer.isActive())
+        self.window._refresh_office_startup_progress({
+            "kind": "odt-install",
+            "running": True,
+            "foreground_pending": False,
+            "foreground_ready": False,
+        })
+        self.assertIsNotNone(self.window.office_startup_dialog)
+        self.assertFalse(self.window.office_startup_timer.isActive())
+
+        self.window._refresh_office_startup_progress({
+            "kind": "odt-install",
+            "running": True,
+            "foreground_pending": True,
+            "foreground_ready": False,
+        })
         self.assertTrue(self.window.office_startup_timer.isActive())
         self.assertEqual(
             self.window.office_startup_timer.interval(),
             qt_module.OFFICE_INSTALLER_STARTUP_TIMEOUT_MS,
         )
-        self.window._refresh_office_startup_progress({
-            "kind": "odt-install",
-            "running": True,
-            "foreground_ready": False,
-        })
-        self.assertIsNotNone(self.window.office_startup_dialog)
 
         self.window._refresh_office_startup_progress({
             "kind": "odt-install",
             "running": True,
+            "foreground_pending": True,
             "foreground_ready": True,
         })
         self.assertIsNone(self.window.office_startup_dialog)

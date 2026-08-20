@@ -792,6 +792,7 @@ class ManagerWindow(QMainWindow):
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     configuration_payload=payload,
+                    installer_launching_callback=self.state.mark_foreground_pending,
                     installer_process_callback=self.state.set_foreground_process,
                 ),
             )
@@ -841,7 +842,6 @@ class ManagerWindow(QMainWindow):
         )
         self._translate_ui(dialog)
         dialog.show()
-        self.office_startup_timer.start(OFFICE_INSTALLER_STARTUP_TIMEOUT_MS)
 
     def _clear_office_startup_progress(self, dialog: QDialog) -> None:
         if self.office_startup_dialog is not dialog:
@@ -865,6 +865,9 @@ class ManagerWindow(QMainWindow):
         if dialog is None or task.get("kind") != "odt-install":
             return
         ready = bool(task.get("foreground_ready"))
+        if (task.get("running") and task.get("foreground_pending") and not ready
+                and not self.office_startup_timer.isActive()):
+            self.office_startup_timer.start(OFFICE_INSTALLER_STARTUP_TIMEOUT_MS)
         if task.get("running") and not ready:
             return
         dialog.accept()

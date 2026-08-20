@@ -3381,6 +3381,7 @@ def _require_extracted_setup(path: Path) -> Path:
 def install_office_with_odt(prefix, wine, config_path, output,
                             cancel_event=None, process_callback=None, *,
                             configuration_payload=None,
+                            installer_launching_callback=None,
                             installer_process_callback=None) -> str:
     """Snapshot configuration, fetch current ODT, then run setup /configure."""
     prefix_path = validate_prefix(prefix)
@@ -3424,6 +3425,8 @@ def install_office_with_odt(prefix, wine, config_path, output,
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
             output("Installing Office with the selected configuration.")
+            if installer_launching_callback:
+                installer_launching_callback()
 
             _stream_command(
                 [str(wine_path), str(setup), "/configure", windows_configuration],
