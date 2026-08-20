@@ -482,6 +482,7 @@ static HRESULT WINAPI capability_user_QueryInterface( IUser *iface, REFIID iid, 
 {
     if (!out) return E_POINTER;
     *out = NULL;
+    if (!iid) return E_NOINTERFACE;
     if (IsEqualGUID( iid, &IID_IWineSystemUserIdentity ))
         *out = &impl_from_IUser( iface )->IWineSystemUserIdentity_iface;
     else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
