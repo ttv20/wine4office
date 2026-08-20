@@ -44,7 +44,7 @@ static void check_interface_( unsigned int line, void *obj, const IID *iid )
     HRESULT hr;
 
     hr = IUnknown_QueryInterface( iface, iid, (void **)&unk );
-    ok_(__FILE__, line)( hr == S_OK, "got hr %#lx.\n", hr );
+    ok_(__FILE__, line)( hr == S_OK && unk, "got hr %#lx and interface %p.\n", hr, unk );
     if (unk) IUnknown_Release( unk );
 }
 
@@ -546,6 +546,67 @@ static HRESULT test_package_local_folder( IApplicationData *data, const WCHAR *f
     return result;
 }
 
+struct local_folder_thread_context
+{
+    IApplicationData *data;
+    HANDLE start;
+    IStorageFolder *folder;
+    HRESULT hr;
+};
+
+static DWORD WINAPI local_folder_thread( void *arg )
+{
+    struct local_folder_thread_context *context = arg;
+
+    if (WaitForSingleObject( context->start, 30000 ) != WAIT_OBJECT_0)
+    {
+        context->hr = HRESULT_FROM_WIN32( ERROR_TIMEOUT );
+        return 0;
+    }
+    context->hr = IApplicationData_get_LocalFolder( context->data, &context->folder );
+    return 0;
+}
+
+static void test_package_local_folder_concurrent( IApplicationData *data, IApplicationData *other )
+{
+    struct local_folder_thread_context contexts[4] = {0};
+    HANDLE threads[ARRAY_SIZE(contexts)] = {0}, start;
+    DWORD wait;
+    unsigned int count, i;
+
+    start = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ok( !!start, "CreateEventW failed, error %lu.\n", GetLastError() );
+    if (!start) return;
+
+    for (count = 0; count < ARRAY_SIZE(contexts); ++count)
+    {
+        contexts[count].data = count & 1 ? other : data;
+        contexts[count].start = start;
+        contexts[count].hr = E_FAIL;
+        threads[count] = CreateThread( NULL, 0, local_folder_thread, &contexts[count], 0, NULL );
+        ok( !!threads[count], "CreateThread %u failed, error %lu.\n", count, GetLastError() );
+        if (!threads[count]) break;
+    }
+    SetEvent( start );
+    if (count)
+    {
+        wait = WaitForMultipleObjects( count, threads, TRUE, 35000 );
+        ok( wait == WAIT_OBJECT_0,
+                "Concurrent LocalFolder wait returned %#lx, error %lu.\n", wait, GetLastError() );
+        if (wait != WAIT_OBJECT_0)
+            WaitForMultipleObjects( count, threads, TRUE, INFINITE );
+    }
+    for (i = 0; i < count; ++i)
+    {
+        ok( contexts[i].hr == S_OK && contexts[i].folder,
+                "Concurrent LocalFolder %u returned %#lx and %p.\n",
+                i, contexts[i].hr, contexts[i].folder );
+        if (contexts[i].folder) IStorageFolder_Release( contexts[i].folder );
+        CloseHandle( threads[i] );
+    }
+    CloseHandle( start );
+}
+
 static void test_package_local_folder_reparse( IApplicationDataManagerStatics *manager )
 {
     static const DWORD symlink_flags = SYMBOLIC_LINK_FLAG_DIRECTORY |
@@ -871,6 +932,7 @@ static void test_ApplicationDataManager(void)
         hr = IApplicationData_get_RoamingStorageQuota( data, &quota );
         ok( hr == E_NOTIMPL && !quota, "RoamingStorageQuota returned %#lx and %#I64x.\n", hr, quota );
     }
+    test_package_local_folder_concurrent( data, other );
     hr = test_package_local_folder( data, valid_family, &survivor );
     ok( hr == S_OK && survivor, "package LocalFolder tests returned %#lx and %p.\n", hr, survivor );
     IApplicationDataManagerStatics_Release( manager );
