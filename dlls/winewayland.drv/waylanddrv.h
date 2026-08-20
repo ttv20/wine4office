@@ -478,6 +478,7 @@ void wayland_reapply_cursor_clipping(HWND hwnd);
 void wayland_restack_after_surface_flush(HWND owner);
 void wayland_window_surface_presented(HWND hwnd);
 BOOL wayland_window_is_dcomp_task_delegated(HWND root);
+BOOL wayland_window_is_dcomp_task_delegate(HWND root, HWND delegate);
 void wayland_window_init(void);
 
 /**********************************************************************

@@ -214,8 +214,7 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
         root = target ? NtUserGetAncestor(target, GA_ROOT) : NULL;
         configure_directly = surface->resize_target && surface->resize_target == root &&
                              NtUserGetProp(hwnd, dcomp_native_frame_prop) &&
-                             NtUserGetProp(target, dcomp_base_presentation_prop) == hwnd &&
-                             NtUserGetProp(root, dcomp_task_delegated_prop) == hwnd;
+                             wayland_window_is_dcomp_task_delegate(root, hwnd);
         if (configure_directly && !surface->configure_worker_pending)
         {
             surface->configure_worker_pending = TRUE;

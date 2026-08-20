@@ -63,8 +63,6 @@ static const WCHAR dcomp_caption_rtl_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
 static const WCHAR dcomp_native_frame_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','n','a','t','i','v','e','_','f','r','a','m','e',0};
-static const WCHAR dcomp_task_delegated_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
 
 enum dcomp_caption_part
 {
@@ -283,7 +281,7 @@ static HWND wayland_get_native_frame_root(HWND hwnd)
         !(target = NtUserGetProp(hwnd, dcomp_detached_window_prop)) ||
         NtUserGetProp(target, dcomp_base_presentation_prop) != hwnd ||
         !(root = NtUserGetAncestor(target, GA_ROOT)) ||
-        NtUserGetProp(root, dcomp_task_delegated_prop) != hwnd)
+        !wayland_window_is_dcomp_task_delegate(root, hwnd))
         return NULL;
     return root;
 }

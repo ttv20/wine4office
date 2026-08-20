@@ -65,6 +65,12 @@ BOOL wayland_window_is_dcomp_task_delegated(HWND root)
            NtUserGetProp(target, dcomp_base_presentation_prop) == delegate;
 }
 
+BOOL wayland_window_is_dcomp_task_delegate(HWND root, HWND delegate)
+{
+    return NtUserGetProp(root, dcomp_task_delegated_prop) == delegate &&
+           wayland_window_is_dcomp_task_delegated(root);
+}
+
 static void WINAPI wayland_dcomp_task_delegate_timer(HWND hwnd, UINT msg, UINT_PTR id, DWORD time)
 {
     if (wayland_window_is_dcomp_task_delegated(hwnd)) return;
@@ -1476,8 +1482,7 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
     if (NtUserGetProp(hwnd, dcomp_native_frame_prop) &&
         (target = NtUserGetProp(hwnd, dcomp_detached_window_prop)) &&
         (root = NtUserGetAncestor(target, GA_ROOT)) &&
-        wayland_dcomp_task_delegated(root) &&
-        NtUserGetProp(root, dcomp_task_delegated_prop) == hwnd)
+        wayland_window_is_dcomp_task_delegate(root, hwnd))
         target_hwnd = root;
 
     pthread_mutex_lock(&process_wayland.pointer.mutex);
