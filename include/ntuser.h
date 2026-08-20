@@ -1632,7 +1632,7 @@ struct send_hardware_input_params
     };
 };
 
-static inline BOOL NtUserSendHardwareInput( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam )
+static inline NTSTATUS NtUserSendHardwareInput( HWND hwnd, UINT flags, const INPUT *input, LPARAM lparam )
 {
     struct send_hardware_input_params params = {.flags = flags, .input = input, .lparam = lparam};
     return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, NtUserCallHwndParam_SendHardwareInput );

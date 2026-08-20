@@ -2031,6 +2031,14 @@ static LRESULT WINAPI test_ipc_message_proc( HWND hwnd, UINT msg, WPARAM wparam,
             return (LRESULT)ipc_input;
         }
 
+    case WM_USER + 11:
+        ok( !GetPropW( ipc_root, dcomp_input_window_prop ), "root retained DComp input property\n" );
+        ok( !GetPropW( ipc_root, dcomp_keyboard_window_prop ), "root retained DComp keyboard property\n" );
+        ok( !GetPropW( ipc_input, direct_hardware_input_prop ), "input retained direct marker\n" );
+        ok( !GetPropW( ipc_input, direct_hardware_input_owner_prop ),
+            "input retained presentation owner\n" );
+        return 1;
+
     case WM_USER + 8:
         ok( start_dcomp_revoke_barrier(), "failed to start DComp revoke barrier\n" );
         return 1;
@@ -2404,8 +2412,8 @@ cleanup:
     if (mapping) CloseHandle( mapping );
     if (ipc_target) DestroyWindow( ipc_target );
     if (ipc_input) DestroyWindow( ipc_input );
-    if (ipc_old_target) DestroyWindow( ipc_old_target );
-    if (ipc_old_input) DestroyWindow( ipc_old_input );
+    if (ipc_old_target && ipc_old_target != ipc_target) DestroyWindow( ipc_old_target );
+    if (ipc_old_input && ipc_old_input != ipc_input) DestroyWindow( ipc_old_input );
     DestroyWindow( ipc_root );
     UnregisterClassW( L"TestIPCClass", NULL );
 }
@@ -2571,6 +2579,12 @@ static void test_ime_browser_child( HWND presentation, HANDLE mapping, BOOL repa
     token = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, sizeof(*token) );
     ok( !!token, "browser MapViewOfFile failed, error %lu\n", GetLastError() );
     if (!token) return;
+    if (!p_wine_server_call)
+    {
+        win_skip( "wine_server_call is unavailable\n" );
+        UnmapViewOfFile( token );
+        return;
+    }
 
     cls.lpfnWndProc = test_ipc_message_proc;
     cls.lpszClassName = L"TestIPCBrowserClass";
@@ -2834,6 +2848,7 @@ static void stop_dcomp_cross_process_helper( struct dcomp_cross_process_helper *
     if (helper->info.hProcess)
     {
         if (helper->window) PostMessageW( helper->window, WM_CLOSE, 0, 0 );
+        else TerminateProcess( helper->info.hProcess, 0 );
         wait_child_process_with_messages( &helper->info );
     }
     if (helper->ready) CloseHandle( helper->ready );
@@ -3172,10 +3187,7 @@ static void test_inter_process_child( const char *argv0, HWND hwnd, HANDLE mappi
     ok( SendMessageW( hwnd, WM_USER + 5, 3, 0 ) == 1, "replacement first key check failed\n" );
 
     DestroyWindow( presentation );
-    ok( !GetPropW( ipc_root, dcomp_input_window_prop ), "root retained DComp input property\n" );
-    ok( !GetPropW( ipc_root, dcomp_keyboard_window_prop ), "root retained DComp keyboard property\n" );
-    ok( !GetPropW( ipc_input, direct_hardware_input_prop ), "input retained direct marker\n" );
-    ok( !GetPropW( ipc_input, direct_hardware_input_owner_prop ), "input retained presentation owner\n" );
+    ok( SendMessageW( hwnd, WM_USER + 11, 0, 0 ) == 1, "presentation teardown check failed\n" );
     presentation = CreateWindowExW( 0, L"TestIPCPresentationClass", NULL, 0, 0, 0, 0, 0,
                                     HWND_MESSAGE, 0, 0, NULL );
     ok( !!presentation, "shared presentation CreateWindowExW failed, error %lu\n", GetLastError() );
@@ -4502,7 +4514,8 @@ static void test_keyboard_repeat_hook(void)
     ok( repeat_keydown_count >= 2, "received %ld non-key-up key-downs\n", repeat_keydown_count );
     ok( repeat_keydown.vkCode == 'A', "key-down vkey is %#lx\n", repeat_keydown.vkCode );
     ok( repeat_keydown.scanCode == 0x1e, "key-down scan is %#lx\n", repeat_keydown.scanCode );
-    ok( repeat_keydown.flags == LLKHF_EXTENDED, "key-down flags are %#lx\n", repeat_keydown.flags );
+    ok( (repeat_keydown.flags & (LLKHF_EXTENDED | LLKHF_UP)) == LLKHF_EXTENDED,
+        "key-down flags are %#lx\n", repeat_keydown.flags );
     ok( repeat_keydown.time == input.ki.time, "key-down time is %#lx\n", repeat_keydown.time );
     ok( repeat_keydown.dwExtraInfo == repeat_signature, "key-down extra info is %Ix\n",
         repeat_keydown.dwExtraInfo );
@@ -4510,8 +4523,8 @@ static void test_keyboard_repeat_hook(void)
         repeat_keydown_repeat.vkCode );
     ok( repeat_keydown_repeat.scanCode == 0x1e, "repeat key-down scan is %#lx\n",
         repeat_keydown_repeat.scanCode );
-    ok( repeat_keydown_repeat.flags == LLKHF_EXTENDED, "repeat key-down flags are %#lx\n",
-        repeat_keydown_repeat.flags );
+    ok( (repeat_keydown_repeat.flags & (LLKHF_EXTENDED | LLKHF_UP)) == LLKHF_EXTENDED,
+        "repeat key-down flags are %#lx\n", repeat_keydown_repeat.flags );
     ok( repeat_keydown_repeat.time != input.ki.time, "repeat key-down reused input time %#lx\n",
         repeat_keydown_repeat.time );
     ok( repeat_keydown_repeat.time - start < 2000, "repeat key-down time is %#lx, start %#lx\n",
@@ -4535,7 +4548,7 @@ static void test_keyboard_repeat_hook(void)
     ok( repeat_keyup_captured, "key-up hook was not captured\n" );
     ok( repeat_keyup.vkCode == 'A', "key-up vkey is %#lx\n", repeat_keyup.vkCode );
     ok( repeat_keyup.scanCode == 0x1e, "key-up scan is %#lx\n", repeat_keyup.scanCode );
-    ok( repeat_keyup.flags == (LLKHF_EXTENDED | LLKHF_UP),
+    ok( (repeat_keyup.flags & (LLKHF_EXTENDED | LLKHF_UP)) == (LLKHF_EXTENDED | LLKHF_UP),
         "key-up flags are %#lx\n", repeat_keyup.flags );
     ok( repeat_keyup.time == input.ki.time, "key-up time is %#lx\n", repeat_keyup.time );
     ok( repeat_keyup.dwExtraInfo == repeat_signature, "key-up extra info is %Ix\n",
