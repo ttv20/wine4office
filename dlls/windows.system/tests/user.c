@@ -759,33 +759,71 @@ done:
     WindowsDeleteString( key );
 }
 
+static BOOL wait_for_identity_child( HANDLE process, const char *context )
+{
+    DWORD error, wait;
+    BOOL ret;
+
+    wait = WaitForSingleObject( process, 10000 );
+    if (wait == WAIT_OBJECT_0) return TRUE;
+    if (wait == WAIT_TIMEOUT)
+    {
+        ret = TerminateProcess( process, ERROR_TIMEOUT );
+        error = GetLastError();
+        ok( ret, "%s termination failed, error %lu.\n", context, error );
+        wait = WaitForSingleObject( process, ret ? INFINITE : 10000 );
+        ok( wait == WAIT_OBJECT_0, "%s reap returned %#lx.\n", context, wait );
+        return FALSE;
+    }
+    if (wait == WAIT_FAILED)
+        ok( FALSE, "%s wait failed, error %lu.\n", context, GetLastError() );
+    else
+        ok( FALSE, "%s wait returned %#lx.\n", context, wait );
+    return FALSE;
+}
+
 static void test_executable_scoped_non_roamable_id( HSTRING value )
 {
-    WCHAR self[MAX_PATH], temp_path[MAX_PATH], child[MAX_PATH], output[MAX_PATH], command[3 * MAX_PATH];
+    WCHAR self[MAX_PATH] = {0}, temp_path[MAX_PATH] = {0}, child[MAX_PATH] = {0};
+    WCHAR output[MAX_PATH] = {0}, command[3 * MAX_PATH];
     STARTUPINFOW startup = { .cb = sizeof(startup) };
     PROCESS_INFORMATION process;
     WCHAR *child_value = NULL;
-    DWORD size, read, wait;
+    DWORD length, size, read;
     HANDLE file;
-    BOOL ret;
+    BOOL child_created = FALSE, output_created = FALSE, ret;
+    int written;
 
-    ok( GetModuleFileNameW( NULL, self, ARRAY_SIZE(self) ), "GetModuleFileNameW failed, error %lu.\n", GetLastError() );
-    ok( GetTempPathW( ARRAY_SIZE(temp_path), temp_path ), "GetTempPathW failed, error %lu.\n", GetLastError() );
-    ok( GetTempFileNameW( temp_path, L"usr", 0, output ), "GetTempFileNameW failed, error %lu.\n", GetLastError() );
-    ok( GetTempFileNameW( temp_path, L"usr", 0, child ), "GetTempFileNameW failed, error %lu.\n", GetLastError() );
+    length = GetModuleFileNameW( NULL, self, ARRAY_SIZE(self) );
+    ok( length && length < ARRAY_SIZE(self), "GetModuleFileNameW returned %lu, error %lu.\n",
+            length, GetLastError() );
+    if (!length || length >= ARRAY_SIZE(self)) goto done;
+    length = GetTempPathW( ARRAY_SIZE(temp_path), temp_path );
+    ok( length && length < ARRAY_SIZE(temp_path), "GetTempPathW returned %lu, error %lu.\n",
+            length, GetLastError() );
+    if (!length || length >= ARRAY_SIZE(temp_path)) goto done;
+    ret = GetTempFileNameW( temp_path, L"usr", 0, output );
+    ok( ret, "GetTempFileNameW(output) failed, error %lu.\n", GetLastError() );
+    if (!ret) goto done;
+    output_created = TRUE;
+    ret = GetTempFileNameW( temp_path, L"usr", 0, child );
+    ok( ret, "GetTempFileNameW(child) failed, error %lu.\n", GetLastError() );
+    if (!ret) goto done;
+    child_created = TRUE;
     ret = CopyFileW( self, child, FALSE );
     ok( ret, "CopyFileW failed, error %lu.\n", GetLastError() );
     if (!ret) goto done;
 
-    swprintf( command, ARRAY_SIZE(command), L"\"%s\" user identity-child \"%s\"", child, output );
+    written = swprintf( command, ARRAY_SIZE(command), L"\"%s\" user identity-child \"%s\"", child, output );
+    ok( written >= 0 && written < ARRAY_SIZE(command), "Formatting child command returned %d.\n", written );
+    if (written < 0 || written >= ARRAY_SIZE(command)) goto done;
     ret = CreateProcessW( child, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
     ok( ret, "CreateProcessW failed, error %lu.\n", GetLastError() );
     if (!ret) goto done;
-    wait = WaitForSingleObject( process.hProcess, 10000 );
-    ok( wait == WAIT_OBJECT_0, "Child process wait returned %#lx.\n", wait );
+    ret = wait_for_identity_child( process.hProcess, "Executable identity child" );
     CloseHandle( process.hThread );
     CloseHandle( process.hProcess );
-    if (wait != WAIT_OBJECT_0) goto done;
+    if (!ret) goto done;
 
     file = CreateFileW( output, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
     ok( file != INVALID_HANDLE_VALUE, "Opening child identity failed, error %lu.\n", GetLastError() );
@@ -814,8 +852,8 @@ static void test_executable_scoped_non_roamable_id( HSTRING value )
 
 done:
     free( child_value );
-    DeleteFileW( child );
-    DeleteFileW( output );
+    if (child_created) DeleteFileW( child );
+    if (output_created) DeleteFileW( output );
 }
 
 static void test_packaged_app_scoped_non_roamable_id(void)
@@ -832,13 +870,14 @@ static void test_packaged_app_scoped_non_roamable_id(void)
         "</Applications></Package>";
     STARTUPINFOW startup = {.cb = sizeof(startup)};
     PROCESS_INFORMATION process;
-    WCHAR temp[MAX_PATH], root[MAX_PATH], source[MAX_PATH], manifest_path[MAX_PATH];
-    WCHAR target[MAX_PATH], output[MAX_PATH], command[3 * MAX_PATH];
+    WCHAR temp[MAX_PATH] = {0}, root[MAX_PATH] = {0}, source[MAX_PATH] = {0};
+    WCHAR manifest_path[MAX_PATH] = {0}, target[MAX_PATH], output[MAX_PATH], command[3 * MAX_PATH];
     WCHAR *identities[ARRAY_SIZE(executables)] = {0};
     HANDLE file = INVALID_HANDLE_VALUE;
     HKEY key = NULL;
-    DWORD written, size, read, wait;
+    DWORD length, written, size, read;
     BOOL ret;
+    int formatted;
     unsigned int i;
 
     if (strcmp( winetest_platform, "wine" ))
@@ -846,12 +885,25 @@ static void test_packaged_app_scoped_non_roamable_id(void)
         win_skip( "Wine staged-package bridge is unavailable on Windows.\n" );
         return;
     }
-    GetTempPathW( ARRAY_SIZE(temp), temp );
-    if (!GetTempFileNameW( temp, L"wui", 0, root )) return;
+    length = GetTempPathW( ARRAY_SIZE(temp), temp );
+    ok( length && length < ARRAY_SIZE(temp), "GetTempPathW returned %lu, error %lu.\n",
+            length, GetLastError() );
+    if (!length || length >= ARRAY_SIZE(temp)) return;
+    ret = GetTempFileNameW( temp, L"wui", 0, root );
+    ok( ret, "GetTempFileNameW(root) failed, error %lu.\n", GetLastError() );
+    if (!ret) return;
     DeleteFileW( root );
-    if (!CreateDirectoryW( root, NULL )) return;
-    GetModuleFileNameW( NULL, source, ARRAY_SIZE(source) );
-    swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%s\\AppxManifest.xml", root );
+    ret = CreateDirectoryW( root, NULL );
+    ok( ret, "CreateDirectoryW failed, error %lu.\n", GetLastError() );
+    if (!ret) return;
+    length = GetModuleFileNameW( NULL, source, ARRAY_SIZE(source) );
+    ok( length && length < ARRAY_SIZE(source), "GetModuleFileNameW returned %lu, error %lu.\n",
+            length, GetLastError() );
+    if (!length || length >= ARRAY_SIZE(source)) goto done;
+    formatted = swprintf( manifest_path, ARRAY_SIZE(manifest_path), L"%s\\AppxManifest.xml", root );
+    ok( formatted >= 0 && formatted < ARRAY_SIZE(manifest_path), "Formatting manifest path returned %d.\n",
+            formatted );
+    if (formatted < 0 || formatted >= ARRAY_SIZE(manifest_path)) goto done;
     file = CreateFileW( manifest_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
     ok( file != INVALID_HANDLE_VALUE, "Creating manifest failed, error %lu.\n", GetLastError() );
     if (file == INVALID_HANDLE_VALUE) goto done;
@@ -877,12 +929,24 @@ static void test_packaged_app_scoped_non_roamable_id(void)
 
     for (i = 0; i < ARRAY_SIZE(executables); ++i)
     {
-        swprintf( target, ARRAY_SIZE(target), L"%s\\%s", root, executables[i] );
+        formatted = swprintf( target, ARRAY_SIZE(target), L"%s\\%s", root, executables[i] );
+        ok( formatted >= 0 && formatted < ARRAY_SIZE(target), "Formatting target %u returned %d.\n",
+                i, formatted );
+        if (formatted < 0 || formatted >= ARRAY_SIZE(target)) continue;
         ret = CopyFileW( source, target, FALSE );
         ok( ret, "CopyFileW(%s) failed, error %lu.\n", wine_dbgstr_w( executables[i] ), GetLastError() );
         if (!ret) continue;
-        if (!GetTempFileNameW( temp, L"wui", 0, output )) continue;
-        swprintf( command, ARRAY_SIZE(command), L"\"%s\" user identity-child \"%s\"", target, output );
+        ret = GetTempFileNameW( temp, L"wui", 0, output );
+        ok( ret, "GetTempFileNameW(output %u) failed, error %lu.\n", i, GetLastError() );
+        if (!ret) continue;
+        formatted = swprintf( command, ARRAY_SIZE(command), L"\"%s\" user identity-child \"%s\"", target, output );
+        ok( formatted >= 0 && formatted < ARRAY_SIZE(command), "Formatting command %u returned %d.\n",
+                i, formatted );
+        if (formatted < 0 || formatted >= ARRAY_SIZE(command))
+        {
+            DeleteFileW( output );
+            continue;
+        }
         ret = CreateProcessW( target, command, NULL, NULL, FALSE, 0, NULL, root, &startup, &process );
         ok( ret, "CreateProcessW(%s) failed, error %lu.\n", wine_dbgstr_w( executables[i] ), GetLastError() );
         if (!ret)
@@ -890,11 +954,10 @@ static void test_packaged_app_scoped_non_roamable_id(void)
             DeleteFileW( output );
             continue;
         }
-        wait = WaitForSingleObject( process.hProcess, 10000 );
-        ok( wait == WAIT_OBJECT_0, "Packaged child %u wait returned %#lx.\n", i, wait );
+        ret = wait_for_identity_child( process.hProcess, "Packaged identity child" );
         CloseHandle( process.hThread );
         CloseHandle( process.hProcess );
-        if (wait == WAIT_OBJECT_0 && (file = CreateFileW( output, GENERIC_READ, FILE_SHARE_READ,
+        if (ret && (file = CreateFileW( output, GENERIC_READ, FILE_SHARE_READ,
                 NULL, OPEN_EXISTING, 0, NULL )) != INVALID_HANDLE_VALUE)
         {
             size = GetFileSize( file, NULL );
@@ -941,11 +1004,11 @@ done:
     }
     for (i = 0; i < ARRAY_SIZE(executables); ++i)
     {
-        swprintf( target, ARRAY_SIZE(target), L"%s\\%s", root, executables[i] );
-        DeleteFileW( target );
+        formatted = swprintf( target, ARRAY_SIZE(target), L"%s\\%s", root, executables[i] );
+        if (formatted >= 0 && formatted < ARRAY_SIZE(target)) DeleteFileW( target );
         free( identities[i] );
     }
-    DeleteFileW( manifest_path );
+    if (manifest_path[0]) DeleteFileW( manifest_path );
     RemoveDirectoryW( root );
 }
 
