@@ -26,6 +26,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
 
+LONG WINAPI GetCurrentPackageFamilyName( UINT32 *length, WCHAR *name );
+
 struct application_data_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -1177,11 +1179,42 @@ static HRESULT application_data_create( HSTRING package_family, IApplicationData
     return S_OK;
 }
 
+static HRESULT get_current_package_family( HSTRING *package_family )
+{
+    WCHAR *buffer;
+    UINT32 length = 0;
+    LONG status;
+    HRESULT hr;
+
+    *package_family = NULL;
+    status = GetCurrentPackageFamilyName( &length, NULL );
+    if (status == APPMODEL_ERROR_NO_PACKAGE) return S_FALSE;
+    if (status != ERROR_INSUFFICIENT_BUFFER) return HRESULT_FROM_WIN32( status );
+    if (!length || length > 256) return E_UNEXPECTED;
+    if (!(buffer = malloc( length * sizeof(*buffer) ))) return E_OUTOFMEMORY;
+    status = GetCurrentPackageFamilyName( &length, buffer );
+    if (status)
+        hr = HRESULT_FROM_WIN32( status );
+    else if (!length)
+        hr = E_UNEXPECTED;
+    else
+        hr = WindowsCreateString( buffer, length - 1, package_family );
+    free( buffer );
+    return hr;
+}
+
 static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStatics *iface, IApplicationData **value )
 {
+    HSTRING package_family = NULL;
+    HRESULT hr;
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_INVALIDARG;
-    return application_data_create( NULL, value );
+    hr = get_current_package_family( &package_family );
+    if (FAILED(hr)) return hr;
+    hr = application_data_create( package_family, value );
+    WindowsDeleteString( package_family );
+    return hr;
 }
 
 static HRESULT WINAPI application_data_manager_GetRuntimeClassName( IApplicationDataManagerStatics *iface, HSTRING *name )

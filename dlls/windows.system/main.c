@@ -18,10 +18,12 @@
 #include "initguid.h"
 #include "roapi.h"
 #include "lmcons.h"
+#include "bcrypt.h"
 #include "sddl.h"
 #include "wincrypt.h"
 #include "winreg.h"
 #include "activation.h"
+#include "wine/windows_system.h"
 
 LONG WINAPI GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id );
 HRESULT WINAPI GetCurrentProcessExplicitAppUserModelID( WCHAR **appid );
@@ -200,12 +202,20 @@ static const IKnownUserPropertiesStaticsVtbl known_statics_vtbl =
 struct user
 {
     IUser IUser_iface;
+    IWineSystemUserIdentity IWineSystemUserIdentity_iface;
+    HSTRING sid;
+    HSTRING non_roamable_id;
     LONG ref;
 };
 
 static inline struct user *impl_from_user( IUser *iface )
 {
     return CONTAINING_RECORD( iface, struct user, IUser_iface );
+}
+
+static inline struct user *impl_from_user_identity( IWineSystemUserIdentity *iface )
+{
+    return CONTAINING_RECORD( iface, struct user, IWineSystemUserIdentity_iface );
 }
 
 static HRESULT WINAPI user_QueryInterface( IUser *iface, REFIID iid, void **out )
@@ -215,11 +225,14 @@ static HRESULT WINAPI user_QueryInterface( IUser *iface, REFIID iid, void **out 
     if (out) *out = NULL;
     if (!out) return E_POINTER;
     if (!iid) return E_NOINTERFACE;
-    if (!IsEqualGUID( iid, &IID_IUnknown ) && !IsEqualGUID( iid, &IID_IInspectable ) &&
-        !IsEqualGUID( iid, &IID_IAgileObject ) && !IsEqualGUID( iid, &IID_IUser ))
+    if (IsEqualGUID( iid, &IID_IWineSystemUserIdentity ))
+        *out = &impl->IWineSystemUserIdentity_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+             IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IUser ))
+        *out = &impl->IUser_iface;
+    else
         return E_NOINTERFACE;
 
-    *out = &impl->IUser_iface;
     InterlockedIncrement( &impl->ref );
     return S_OK;
 }
@@ -234,7 +247,12 @@ static ULONG WINAPI user_Release( IUser *iface )
     struct user *impl = impl_from_user( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->sid );
+        WindowsDeleteString( impl->non_roamable_id );
+        free( impl );
+    }
     return ref;
 }
 
@@ -431,37 +449,108 @@ static HRESULT get_app_identity( WCHAR **value )
     }
 }
 
-static HRESULT WINAPI user_get_NonRoamableId( IUser *iface, HSTRING *value )
+static HRESULT hash_identity_component( BCRYPT_HASH_HANDLE hash, const WCHAR *value )
 {
-    static const WCHAR format[] = L"wine:%s:%s:%s";
-    WCHAR *machine = NULL, *sid = NULL, *app = NULL, *buffer;
-    SIZE_T length;
+    BYTE encoded_length[4];
+    SIZE_T length = value ? wcslen( value ) : 0;
+    NTSTATUS status;
+
+    if (length > ~(DWORD)0 / sizeof(*value)) return E_OUTOFMEMORY;
+    encoded_length[0] = length;
+    encoded_length[1] = length >> 8;
+    encoded_length[2] = length >> 16;
+    encoded_length[3] = length >> 24;
+    if ((status = BCryptHashData( hash, encoded_length, sizeof(encoded_length), 0 )) ||
+        (length && (status = BCryptHashData( hash, (BYTE *)value, length * sizeof(*value), 0 ))))
+        return HRESULT_FROM_NT( status );
+    return S_OK;
+}
+
+static HRESULT create_non_roamable_id( const WCHAR *machine, const WCHAR *sid, const WCHAR *app,
+        HSTRING *value )
+{
+    static const WCHAR prefix[] = L"wine:";
+    static const WCHAR hex[] = L"0123456789abcdef";
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    BYTE *object = NULL;
+    BYTE digest[32];
+    WCHAR output[ARRAY_SIZE(prefix) - 1 + ARRAY_SIZE(digest) * 2 + 1];
+    DWORD object_size, result_size;
+    NTSTATUS status;
     HRESULT hr;
+    unsigned int i;
 
-    (void)iface;
-    if (value) *value = NULL;
-    if (!value) return E_POINTER;
-    if (FAILED(hr = get_machine_guid( &machine ))) goto done;
-    if (FAILED(hr = get_user_sid( &sid ))) goto done;
-    if (FAILED(hr = get_app_identity( &app ))) goto done;
-
-    length = wcslen( format ) - 6 + wcslen( machine ) + wcslen( sid ) + (app ? wcslen( app ) : 0) + 1;
-    if (!(buffer = malloc( length * sizeof(*buffer) )))
+    *value = NULL;
+    if ((status = BCryptOpenAlgorithmProvider( &algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0 )))
+        return HRESULT_FROM_NT( status );
+    if ((status = BCryptGetProperty( algorithm, BCRYPT_OBJECT_LENGTH, (BYTE *)&object_size,
+            sizeof(object_size), &result_size, 0 )))
+    {
+        hr = HRESULT_FROM_NT( status );
+        goto done;
+    }
+    if (!(object = malloc( object_size )))
     {
         hr = E_OUTOFMEMORY;
         goto done;
     }
-    if (swprintf( buffer, length, format, machine, sid, app ? app : L"" ) < 0)
-        hr = E_FAIL;
-    else
-        hr = WindowsCreateString( buffer, wcslen( buffer ), value );
-    free( buffer );
+    if ((status = BCryptCreateHash( algorithm, &hash, object, object_size, NULL, 0, 0 )))
+    {
+        hr = HRESULT_FROM_NT( status );
+        goto done;
+    }
+    if (FAILED(hr = hash_identity_component( hash, machine )) ||
+        FAILED(hr = hash_identity_component( hash, sid )) ||
+        FAILED(hr = hash_identity_component( hash, app )))
+        goto done;
+    if ((status = BCryptFinishHash( hash, digest, sizeof(digest), 0 )))
+    {
+        hr = HRESULT_FROM_NT( status );
+        goto done;
+    }
+
+    memcpy( output, prefix, (ARRAY_SIZE(prefix) - 1) * sizeof(*output) );
+    for (i = 0; i < ARRAY_SIZE(digest); ++i)
+    {
+        output[ARRAY_SIZE(prefix) - 1 + i * 2] = hex[digest[i] >> 4];
+        output[ARRAY_SIZE(prefix) + i * 2] = hex[digest[i] & 0xf];
+    }
+    output[ARRAY_SIZE(output) - 1] = 0;
+    hr = WindowsCreateString( output, ARRAY_SIZE(output) - 1, value );
+
+done:
+    if (hash) BCryptDestroyHash( hash );
+    if (algorithm) BCryptCloseAlgorithmProvider( algorithm, 0 );
+    free( object );
+    return hr;
+}
+
+static HRESULT user_initialize( struct user *impl )
+{
+    WCHAR *machine = NULL, *sid = NULL, *app = NULL;
+    HRESULT hr;
+
+    if (FAILED(hr = get_machine_guid( &machine ))) goto done;
+    if (FAILED(hr = get_user_sid( &sid ))) goto done;
+    if (FAILED(hr = get_app_identity( &app ))) goto done;
+    if (FAILED(hr = WindowsCreateString( sid, wcslen( sid ), &impl->sid ))) goto done;
+    hr = create_non_roamable_id( machine, sid, app, &impl->non_roamable_id );
 
 done:
     free( machine );
     free( sid );
     free( app );
     return hr;
+}
+
+static HRESULT WINAPI user_get_NonRoamableId( IUser *iface, HSTRING *value )
+{
+    struct user *impl = impl_from_user( iface );
+
+    if (value) *value = NULL;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->non_roamable_id, value );
 }
 
 static HRESULT WINAPI user_get_AuthenticationStatus( IUser *iface, UserAuthenticationStatus *value )
@@ -636,12 +725,12 @@ static HRESULT user_operation_put_completed( struct user_completed_operation *im
     IUnknown *callback = NULL;
     HRESULT hr = S_OK;
 
-    if (!handler) return E_POINTER;
-    IUnknown_AddRef( handler );
+    if (handler) IUnknown_AddRef( handler );
 
     EnterCriticalSection( &impl->lock );
     if (impl->closed) hr = E_ILLEGAL_METHOD_CALL;
     else if (impl->handler) hr = E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    else if (!handler) hr = E_POINTER;
     else
     {
         impl->handler = handler;
@@ -1092,6 +1181,38 @@ static HRESULT WINAPI user_GetPictureAsync( IUser *iface, UserPictureSize desire
     return E_NOTIMPL;
 }
 
+static HRESULT WINAPI user_identity_QueryInterface( IWineSystemUserIdentity *iface, REFIID iid, void **out )
+{
+    return user_QueryInterface( &impl_from_user_identity( iface )->IUser_iface, iid, out );
+}
+
+static ULONG WINAPI user_identity_AddRef( IWineSystemUserIdentity *iface )
+{
+    return user_AddRef( &impl_from_user_identity( iface )->IUser_iface );
+}
+
+static ULONG WINAPI user_identity_Release( IWineSystemUserIdentity *iface )
+{
+    return user_Release( &impl_from_user_identity( iface )->IUser_iface );
+}
+
+static HRESULT WINAPI user_identity_GetSid( IWineSystemUserIdentity *iface, HSTRING *sid )
+{
+    struct user *impl = impl_from_user_identity( iface );
+
+    if (sid) *sid = NULL;
+    if (!sid) return E_POINTER;
+    return WindowsDuplicateString( impl->sid, sid );
+}
+
+static const IWineSystemUserIdentityVtbl user_identity_vtbl =
+{
+    user_identity_QueryInterface,
+    user_identity_AddRef,
+    user_identity_Release,
+    user_identity_GetSid,
+};
+
 static const IUserVtbl user_vtbl =
 {
     user_QueryInterface, user_AddRef, user_Release,
@@ -1223,13 +1344,20 @@ static HRESULT WINAPI user_statics2_GetTrustLevel( IUserStatics2 *iface, TrustLe
 static HRESULT WINAPI user_statics2_GetDefault( IUserStatics2 *iface, IUser **value )
 {
     struct user *impl;
+    HRESULT hr;
 
     if (value) *value = NULL;
     if (!value) return E_POINTER;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IUser_iface.lpVtbl = &user_vtbl;
+    impl->IWineSystemUserIdentity_iface.lpVtbl = &user_identity_vtbl;
     impl->ref = 1;
+    if (FAILED(hr = user_initialize( impl )))
+    {
+        user_Release( &impl->IUser_iface );
+        return hr;
+    }
     *value = &impl->IUser_iface;
     return S_OK;
 }
