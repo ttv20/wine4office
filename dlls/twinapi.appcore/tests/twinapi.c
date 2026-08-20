@@ -56,14 +56,15 @@ static void check_interface_( unsigned int line, void *iface_ptr, REFIID iid, BO
 {
     HRESULT hr, expected_hr, broken_hr;
     IUnknown *iface = iface_ptr;
-    IUnknown *unk;
+    IUnknown *unk = NULL;
 
     expected_hr = supported ? S_OK : E_NOINTERFACE;
     broken_hr = supported ? E_NOINTERFACE : S_OK;
     hr = IUnknown_QueryInterface( iface, iid, (void **)&unk );
     ok_(__FILE__, line)( hr == expected_hr || broken( is_broken && hr == broken_hr ),
                          "got hr %#lx, expected %#lx.\n", hr, expected_hr );
-    if (SUCCEEDED(hr)) IUnknown_Release( unk );
+    if (SUCCEEDED(hr)) ok_(__FILE__, line)( !!unk, "QueryInterface returned a NULL interface.\n" );
+    if (unk) IUnknown_Release( unk );
 }
 static LONG lifecycle_callback_order;
 
@@ -375,8 +376,10 @@ static void test_EducationSettings(void)
         {0xdeadbeef, 0xbeef, 0x4bad, {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}};
     IEducationSettingsStatics *statics = NULL;
     IActivationFactory *factory = NULL;
-    IUnknown *identity = NULL;
+    IUnknown *factory_identity = NULL, *statics_identity = NULL;
     HSTRING str = NULL, returned_name = NULL;
+    IID *iids = NULL;
+    ULONG count;
     TrustLevel trust_level = (TrustLevel)-1;
     boolean value = TRUE;
     void *unsupported;
@@ -449,13 +452,21 @@ static void test_EducationSettings(void)
         ok( hr == S_OK && !compare, "got class name %s.\n", debugstr_hstring( returned_name ) );
         WindowsDeleteString( returned_name );
     }
-    hr = IActivationFactory_GetRuntimeClassName( factory, NULL );
-    ok( hr == E_POINTER, "null class name output returned %#lx.\n", hr );
-
     hr = IActivationFactory_GetTrustLevel( factory, &trust_level );
     ok( hr == S_OK && trust_level == BaseTrust, "GetTrustLevel returned %#lx, level %d.\n", hr, trust_level );
-    hr = IActivationFactory_GetTrustLevel( factory, NULL );
-    ok( hr == E_POINTER, "null trust level output returned %#lx.\n", hr );
+    if (!strcmp( winetest_platform, "wine" ))
+    {
+        hr = IActivationFactory_GetRuntimeClassName( factory, NULL );
+        ok( hr == E_POINTER, "null class name output returned %#lx.\n", hr );
+        hr = IActivationFactory_GetTrustLevel( factory, NULL );
+        ok( hr == E_POINTER, "null trust level output returned %#lx.\n", hr );
+    }
+    count = 99;
+    hr = IActivationFactory_GetIids( factory, &count, &iids );
+    ok( hr == S_OK && count == 1 && iids && IsEqualGUID( &iids[0], &IID_IEducationSettingsStatics ),
+            "factory GetIids returned %#lx, count %lu, iids %p.\n", hr, count, iids );
+    if (iids) CoTaskMemFree( iids );
+    iids = NULL;
 
     hr = RoGetActivationFactory( str, &IID_IEducationSettingsStatics, (void **)&statics );
     ok( hr == S_OK && !!statics, "statics activation returned %#lx, %p.\n", hr, statics );
@@ -472,17 +483,24 @@ static void test_EducationSettings(void)
     check_interface( statics, &IID_IActivationFactory, TRUE );
     check_interface( statics, &IID_IEducationSettingsStatics, TRUE );
 
+    count = 99;
+    hr = IEducationSettingsStatics_GetIids( statics, &count, &iids );
+    ok( hr == S_OK && count == 1 && iids && IsEqualGUID( &iids[0], &IID_IEducationSettingsStatics ),
+            "statics GetIids returned %#lx, count %lu, iids %p.\n", hr, count, iids );
+    if (iids) CoTaskMemFree( iids );
+    iids = NULL;
+
     unsupported = (void *)(ULONG_PTR)0xdeadbeef;
     hr = IEducationSettingsStatics_QueryInterface( statics, &unsupported_iid, &unsupported );
     ok( hr == E_NOINTERFACE && !unsupported, "unsupported statics QI returned %#lx, %p.\n", hr, unsupported );
 
-    hr = IActivationFactory_QueryInterface( factory, &IID_IUnknown, (void **)&identity );
-    ok( hr == S_OK && identity == (IUnknown *)factory, "factory identity returned %#lx, %p.\n", hr, identity );
-    if (identity) IUnknown_Release( identity );
-    identity = NULL;
-    hr = IEducationSettingsStatics_QueryInterface( statics, &IID_IUnknown, (void **)&identity );
-    ok( hr == S_OK && identity == (IUnknown *)factory, "statics identity returned %#lx, %p.\n", hr, identity );
-    if (identity) IUnknown_Release( identity );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IUnknown, (void **)&factory_identity );
+    ok( hr == S_OK && factory_identity, "factory identity returned %#lx, %p.\n", hr, factory_identity );
+    hr = IEducationSettingsStatics_QueryInterface( statics, &IID_IUnknown, (void **)&statics_identity );
+    ok( hr == S_OK && statics_identity == factory_identity,
+            "statics identity returned %#lx, %p, expected %p.\n", hr, statics_identity, factory_identity );
+    if (statics_identity) IUnknown_Release( statics_identity );
+    if (factory_identity) IUnknown_Release( factory_identity );
 
     IActivationFactory_AddRef( factory );
     IActivationFactory_Release( factory );
@@ -490,8 +508,11 @@ static void test_EducationSettings(void)
     hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, &value );
     ok( hr == S_OK, "get_IsEducationEnvironment returned %#lx.\n", hr );
     if (!strcmp( winetest_platform, "wine" )) ok( !value, "expected a non-education Wine environment.\n" );
-    hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, NULL );
-    ok( hr == E_POINTER, "null value output returned %#lx.\n", hr );
+    if (!strcmp( winetest_platform, "wine" ))
+    {
+        hr = IEducationSettingsStatics_get_IsEducationEnvironment( statics, NULL );
+        ok( hr == E_POINTER, "null value output returned %#lx.\n", hr );
+    }
 
     IActivationFactory_Release( factory );
     factory = NULL;

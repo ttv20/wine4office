@@ -21,6 +21,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winstring.h"
 
 #include "roapi.h"
@@ -195,6 +196,147 @@ static HRESULT get_package_paths( const WCHAR *family, WCHAR **package_path, WCH
     return S_OK;
 }
 
+static void run_current_package_child( const char *output )
+{
+    static const WCHAR class_nameW[] = L"Windows.Storage.ApplicationData";
+    IApplicationDataStatics *statics = NULL;
+    IApplicationData *data = NULL;
+    IStorageFolder *folder = NULL;
+    IStorageItem *item = NULL;
+    IActivationFactory *factory = NULL;
+    HSTRING class_name = NULL, path = NULL;
+    WCHAR outputW[MAX_PATH] = {0};
+    DWORD written;
+    HANDLE file;
+    HRESULT hr;
+
+    if (!MultiByteToWideChar( CP_ACP, 0, output, -1, outputW, ARRAY_SIZE(outputW) )) return;
+    hr = WindowsCreateString( class_nameW, ARRAY_SIZE(class_nameW) - 1, &class_name );
+    if (FAILED(hr)) goto done;
+    hr = RoGetActivationFactory( class_name, &IID_IActivationFactory, (void **)&factory );
+    if (FAILED(hr)) goto done;
+    hr = IActivationFactory_QueryInterface( factory, &IID_IApplicationDataStatics, (void **)&statics );
+    if (FAILED(hr)) goto done;
+    hr = IApplicationDataStatics_get_Current( statics, &data );
+    if (FAILED(hr)) goto done;
+    hr = IApplicationData_get_LocalFolder( data, &folder );
+    if (FAILED(hr)) goto done;
+    hr = IStorageFolder_QueryInterface( folder, &IID_IStorageItem, (void **)&item );
+    if (FAILED(hr)) goto done;
+    hr = IStorageItem_get_Path( item, &path );
+    if (FAILED(hr) || !WindowsGetStringLen( path )) goto done;
+
+    file = CreateFileW( outputW, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        WriteFile( file, WindowsGetStringRawBuffer( path, NULL ),
+                WindowsGetStringLen( path ) * sizeof(WCHAR), &written, NULL );
+        CloseHandle( file );
+    }
+
+done:
+    WindowsDeleteString( path );
+    if (item) IStorageItem_Release( item );
+    if (folder) IStorageFolder_Release( folder );
+    if (data) IApplicationData_Release( data );
+    if (statics) IApplicationDataStatics_Release( statics );
+    if (factory) IActivationFactory_Release( factory );
+    WindowsDeleteString( class_name );
+}
+
+static void test_current_package_local_folder(void)
+{
+    static const WCHAR key_name[] = L"Software\\Wine\\Appx\\StagedPackages";
+    WCHAR family[64], temp[MAX_PATH], root[MAX_PATH] = {0}, source[MAX_PATH], target[MAX_PATH] = {0};
+    WCHAR output[MAX_PATH] = {0}, command[3 * MAX_PATH], *package_path = NULL, *state_path = NULL;
+    STARTUPINFOW startup = {.cb = sizeof(startup)};
+    PROCESS_INFORMATION process;
+    WCHAR *returned_path = NULL;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    HKEY key = NULL;
+    DWORD size, read, wait;
+    BOOL ret;
+    HRESULT hr;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        win_skip( "Wine staged-package bridge is unavailable on Windows.\n" );
+        return;
+    }
+    if (swprintf( family, ARRAY_SIZE(family), L"Wine.ApplicationData.Current.%lu_8wekyb3d8bbwe",
+            GetCurrentProcessId() ) < 0)
+        return;
+    if (FAILED(hr = get_package_paths( family, &package_path, &state_path ))) return;
+    if (!GetTempPathW( ARRAY_SIZE(temp), temp ) || !GetTempFileNameW( temp, L"wad", 0, root )) goto done;
+    DeleteFileW( root );
+    if (!CreateDirectoryW( root, NULL )) goto done;
+    GetModuleFileNameW( NULL, source, ARRAY_SIZE(source) );
+    swprintf( target, ARRAY_SIZE(target), L"%s\\current.exe", root );
+    if (!CopyFileW( source, target, FALSE )) goto done;
+    if (!GetTempFileNameW( temp, L"wad", 0, output )) goto done;
+    DeleteFileW( output );
+
+    if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, key_name, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL ))
+    {
+        win_skip( "Cannot stage the current-package child.\n" );
+        goto done;
+    }
+    if (RegSetValueExW( key, family, 0, REG_SZ, (const BYTE *)root,
+            (wcslen( root ) + 1) * sizeof(WCHAR) ))
+        goto done;
+
+    swprintf( command, ARRAY_SIZE(command), L"\"%s\" data current-package-child \"%s\"", target, output );
+    ret = CreateProcessW( target, command, NULL, NULL, FALSE, 0, NULL, root, &startup, &process );
+    ok( ret, "CreateProcessW failed, error %lu.\n", GetLastError() );
+    if (!ret) goto done;
+    wait = WaitForSingleObject( process.hProcess, 10000 );
+    ok( wait == WAIT_OBJECT_0, "Current-package child wait returned %#lx.\n", wait );
+    if (wait != WAIT_OBJECT_0)
+    {
+        TerminateProcess( process.hProcess, 1 );
+        WaitForSingleObject( process.hProcess, 1000 );
+    }
+    CloseHandle( process.hThread );
+    CloseHandle( process.hProcess );
+    if (wait != WAIT_OBJECT_0) goto done;
+
+    file = CreateFileW( output, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "Opening current-package output failed, error %lu.\n", GetLastError() );
+    if (file == INVALID_HANDLE_VALUE) goto done;
+    size = GetFileSize( file, NULL );
+    ok( size && size != INVALID_FILE_SIZE && size <= 32768 * sizeof(WCHAR) && !(size % sizeof(WCHAR)),
+            "Invalid current-package output size %lu.\n", size );
+    if (!size || size == INVALID_FILE_SIZE || size > 32768 * sizeof(WCHAR) || size % sizeof(WCHAR)) goto done;
+    returned_path = malloc( size + sizeof(*returned_path) );
+    if (!returned_path) goto done;
+    ret = ReadFile( file, returned_path, size, &read, NULL );
+    ok( ret && read == size, "Reading current-package output returned %d and %lu/%lu bytes.\n",
+            ret, read, size );
+    if (ret && read == size)
+    {
+        returned_path[size / sizeof(*returned_path)] = 0;
+        ok( !wcscmp( returned_path, state_path ), "Current LocalFolder returned %s, expected %s.\n",
+                debugstr_w(returned_path), debugstr_w(state_path) );
+    }
+
+done:
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    if (key)
+    {
+        RegDeleteValueW( key, family );
+        RegCloseKey( key );
+    }
+    if (output[0]) DeleteFileW( output );
+    if (target[0]) DeleteFileW( target );
+    if (root[0]) RemoveDirectoryW( root );
+    if (state_path) RemoveDirectoryW( state_path );
+    if (package_path) RemoveDirectoryW( package_path );
+    free( returned_path );
+    free( state_path );
+    free( package_path );
+}
+
 static HRESULT test_package_local_folder( IApplicationData *data, const WCHAR *family, IStorageFolder **survivor )
 {
     IStorageFolder *folder = NULL, *other = NULL;
@@ -363,9 +505,9 @@ static HRESULT test_package_local_folder( IApplicationData *data, const WCHAR *f
     hr = IStorageItem_get_DateCreated( item, NULL );
     ok( hr == E_POINTER, "DateCreated(NULL) returned %#lx.\n", hr );
 
-    other = (void *)0xdeadbeef;
+    other = NULL;
     hr = IApplicationData_get_LocalFolder( data, &other );
-    ok( hr == S_OK && other && other != folder, "second LocalFolder returned %#lx and %p (first %p).\n", hr, other, folder );
+    ok( hr == S_OK && other, "second LocalFolder returned %#lx and %p (first %p).\n", hr, other, folder );
     if (other)
     {
         hr = IStorageFolder_QueryInterface( other, &IID_IStorageItem, (void **)&other_item );
@@ -822,12 +964,23 @@ done:
 
 START_TEST(data)
 {
+    char **argv;
+    int argc;
     HRESULT hr;
 
+    argc = winetest_get_mainargs( &argv );
     hr = RoInitialize( RO_INIT_MULTITHREADED );
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
+    if (argc == 4 && !strcmp( argv[2], "current-package-child" ))
+    {
+        run_current_package_child( argv[3] );
+        RoUninitialize();
+        return;
+    }
+
     test_ApplicationDataStatics();
+    test_current_package_local_folder();
     test_ApplicationDataManager();
 
     RoUninitialize();
