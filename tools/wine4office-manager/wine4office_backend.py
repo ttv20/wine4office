@@ -1185,7 +1185,8 @@ def _run_cancellable_command(command: list[str], env: dict[str, str], *,
 
 
 def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
-              *, _deadline: float | None = None) -> None:
+              *, _deadline: float | None = None,
+              progress_callback: Callable[[str, int | None], None] | None = None) -> None:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     env = wine_environment(prefix, wine, use_x11)
@@ -1201,6 +1202,8 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         if _deadline is not None
         else time.monotonic() + STOP_GRACE_SECONDS
     )
+    if progress_callback is not None:
+        progress_callback("Closing Office applications gracefully…", None)
     graceful_close = False
     detection_failed = False
     try:
@@ -1247,6 +1250,8 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             pass
 
+    if progress_callback is not None:
+        progress_callback("Force-killing remaining Wine processes…", None)
     try:
         subprocess.run([str(wineserver), "-k"], env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL,
@@ -1675,7 +1680,8 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 
 
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
-                use_x11: bool = True) -> int | None:
+                use_x11: bool = True,
+                progress_callback: Callable[[str, int | None], None] | None = None) -> int | None:
     if tool == "stop":
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         restart_preload = _preload_active_for_environment(
@@ -1684,7 +1690,10 @@ def launch_tool(prefix_value: str, wine_value: str, tool: str,
         if restart_preload:
             _stop_preload_unit_and_wait(_deadline=deadline)
         try:
-            stop_wine(prefix_value, wine_value, use_x11, _deadline=deadline)
+            stop_wine(
+                prefix_value, wine_value, use_x11, _deadline=deadline,
+                progress_callback=progress_callback,
+            )
         finally:
             if restart_preload:
                 _systemctl_user(["start", PRELOAD_UNIT])
@@ -3372,7 +3381,8 @@ def _require_extracted_setup(path: Path) -> Path:
 def install_office_with_odt(prefix, wine, config_path, output,
                             cancel_event=None, process_callback=None, *,
                             configuration_payload=None,
-                            installer_started_callback=None) -> str:
+                            installer_launching_callback=None,
+                            installer_process_callback=None) -> str:
     """Snapshot configuration, fetch current ODT, then run setup /configure."""
     prefix_path = validate_prefix(prefix)
     if not (prefix_path / "system.reg").is_file():
@@ -3415,17 +3425,14 @@ def install_office_with_odt(prefix, wine, config_path, output,
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
             output("Installing Office with the selected configuration.")
-
-            def setup_process_callback(process) -> None:
-                if process_callback:
-                    process_callback(process)
-                if process is not None and installer_started_callback:
-                    installer_started_callback()
+            if installer_launching_callback:
+                installer_launching_callback()
 
             _stream_command(
                 [str(wine_path), str(setup), "/configure", windows_configuration],
                 environment, output, cwd=extraction_directory,
-                cancel_event=cancel_event, process_callback=setup_process_callback,
+                cancel_event=cancel_event,
+                process_callback=installer_process_callback or process_callback,
             )
     finally:
         if odt is not None:

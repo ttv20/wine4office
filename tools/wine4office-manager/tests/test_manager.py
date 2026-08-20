@@ -867,6 +867,85 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(preload_helper.main(["/snapshot", "/status"]), 7)
         worker.assert_called_once_with(Path("/snapshot"), Path("/status"))
 
+    def test_pending_office_startup_timeout_fails_with_clear_error(self):
+        state = manager.ManagerState()
+        entered = __import__("threading").Event()
+
+        def wait_for_cancel():
+            entered.set()
+            state.cancel_event.wait(1)
+            raise RuntimeError("helper terminated")
+
+        state.start_task("odt-install", wait_for_cancel)
+        self.assertTrue(entered.wait(1))
+        state.mark_foreground_pending()
+        self.assertTrue(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        self._wait(state)
+
+        task = state.snapshot()["task"]
+        self.assertEqual(task["status"], "failed")
+        self.assertIn(
+            "ERROR: Office installer did not open within 60 seconds.",
+            task["log"],
+        )
+
+    def test_office_start_before_deadline_cannot_be_failed_by_timeout(self):
+        state = manager.ManagerState()
+        release = __import__("threading").Event()
+        state.start_task("odt-install", lambda: release.wait(1) or "installed")
+        state.mark_foreground_pending()
+        process = mock.Mock()
+        state.set_foreground_process(process)
+
+        self.assertFalse(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        self.assertFalse(state.cancel_event.is_set())
+        self.assertIs(state.process, process)
+        release.set()
+        self._wait(state)
+        self.assertEqual(state.snapshot()["task"]["status"], "completed")
+
+    def test_timeout_terminates_setup_registered_after_cancellation(self):
+        state = manager.ManagerState()
+        release = __import__("threading").Event()
+        state.start_task("odt-install", lambda: release.wait(1) or "installed")
+        state.mark_foreground_pending()
+        self.assertTrue(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        process = mock.Mock()
+        process.poll.return_value = None
+
+        with mock.patch.object(manager.threading, "Thread") as thread:
+            state.set_foreground_process(process)
+
+        thread.assert_called_once_with(
+            target=state._terminate_process,
+            args=(process,),
+            name="wine4office-late-cancel",
+            daemon=True,
+        )
+        thread.return_value.start.assert_called_once_with()
+        self.assertFalse(state.snapshot()["task"]["foreground_ready"])
+        release.set()
+        self._wait(state)
+
+    def test_user_cancellation_is_not_replaced_by_startup_timeout(self):
+        state = manager.ManagerState()
+        release = __import__("threading").Event()
+        state.start_task("odt-install", lambda: release.wait(1) or "installed")
+        state.mark_foreground_pending()
+        state.cancel()
+
+        self.assertFalse(state.fail_pending_foreground_start(
+            "odt-install", "Office installer did not open within 60 seconds."
+        ))
+        release.set()
+        self._wait(state)
+
     def _wait(self, state):
         deadline = time.monotonic() + 2
         while state.snapshot()["task"]["running"] and time.monotonic() < deadline:

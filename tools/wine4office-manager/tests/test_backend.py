@@ -604,10 +604,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_stop_wine_gracefully_closes_windows_before_server(self):
         prefix = self._make_prefix(self.home / ".wine4office")
+        progress = []
         with mock.patch.object(
             backend, "_owned_office_pids", return_value=[4132]
         ), mock.patch.object(backend.subprocess, "run") as run:
-            backend.stop_wine(str(prefix), str(self.wine))
+            backend.stop_wine(
+                str(prefix), str(self.wine),
+                progress_callback=lambda label, value: progress.append((label, value)),
+            )
 
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
@@ -619,6 +623,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertTrue(run.call_args_list[0].kwargs["check"])
         self.assertLessEqual(run.call_args_list[0].kwargs["timeout"], 10)
         self.assertGreater(run.call_args_list[0].kwargs["timeout"], 0)
+        self.assertEqual(
+            progress, [("Closing Office applications gracefully…", None)]
+        )
 
 
     def test_stop_wine_passes_only_authenticated_office_pids_to_close_helper(self):
@@ -638,6 +645,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_stop_wine_hard_kills_when_graceful_close_fails(self):
         prefix = self._make_prefix(self.home / ".wine4office")
+        progress = []
         with mock.patch.object(
             backend, "_owned_office_pids", return_value=[4132]
         ), mock.patch.object(
@@ -648,7 +656,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 mock.DEFAULT,
             ],
         ) as run:
-            backend.stop_wine(str(prefix), str(self.wine))
+            backend.stop_wine(
+                str(prefix), str(self.wine),
+                progress_callback=lambda label, value: progress.append((label, value)),
+            )
 
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
@@ -658,6 +669,10 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 [str(self.runner / "wineserver"), "-w"],
             ],
         )
+        self.assertEqual(progress, [
+            ("Closing Office applications gracefully…", None),
+            ("Force-killing remaining Wine processes…", None),
+        ])
 
     def test_stop_wine_force_kills_only_revalidated_owned_processes(self):
         prefix = self._make_prefix(self.home / ".wine4office")
@@ -2180,6 +2195,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         snapshot_payloads = []
         odt_url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
         installer_started = mock.Mock()
+        installer_launching = mock.Mock()
 
         def resolve_latest(cancel_event):
             configuration.write_bytes(changed_payload)
@@ -2212,7 +2228,8 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 configuration,
                 lambda line: None,
                 configuration_payload=original_payload,
-                installer_started_callback=installer_started,
+                installer_launching_callback=installer_launching,
+                installer_process_callback=installer_started,
             )
 
         self.assertEqual(result, "Office installation completed successfully.")
@@ -2249,10 +2266,12 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertEqual(stream.call_args_list[1].kwargs["cwd"], extraction_directory)
         setup_process_callback = stream.call_args_list[1].kwargs["process_callback"]
-        setup_process_callback(mock.Mock())
-        installer_started.assert_called_once_with()
+        installer_launching.assert_called_once_with()
+        setup_process = mock.Mock()
+        setup_process_callback(setup_process)
+        installer_started.assert_called_once_with(setup_process)
         setup_process_callback(None)
-        installer_started.assert_called_once_with()
+        installer_started.assert_called_with(None)
         self.assertEqual(converted_paths[0], extraction_directory)
         self.assertEqual(converted_paths[1].name, "configuration.xml")
         self.assertEqual(converted_paths[1].parent, extraction_directory.parent)
@@ -2667,6 +2686,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_stop_wine_tool_restarts_matching_active_background_service(self):
         prefix = self._make_prefix(self.home / "stop-and-restart")
+        progress = mock.Mock()
         with mock.patch.object(
             backend, "_preload_active_for_environment", return_value=True
         ) as active, mock.patch.object(
@@ -2676,14 +2696,18 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ) as stop, mock.patch.object(
             backend, "_systemctl_user"
         ) as systemctl:
-            result = backend.launch_tool(str(prefix), str(self.wine), "stop", False)
+            result = backend.launch_tool(
+                str(prefix), str(self.wine), "stop", False,
+                progress_callback=progress,
+            )
 
         self.assertIsNone(result)
         active.assert_called_once_with(str(prefix), str(self.wine), False)
         self.assertEqual(stop_service.call_count, 1)
         deadline = stop_service.call_args.kwargs["_deadline"]
         stop.assert_called_once_with(
-            str(prefix), str(self.wine), False, _deadline=deadline
+            str(prefix), str(self.wine), False, _deadline=deadline,
+            progress_callback=progress,
         )
         systemctl.assert_called_once_with(["start", backend.PRELOAD_UNIT])
 
