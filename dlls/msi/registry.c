@@ -1508,6 +1508,7 @@ static UINT enum_office_c2r_ui_qualifiers( const WCHAR *component, DWORD index, 
 #define OFFICE_C2R_MAX_XML_DEPTH 128
 #define OFFICE_C2R_MAX_COMPONENTS 4096
 #define OFFICE_C2R_MAX_PUBLISH_COMPONENTS 4096
+#define OFFICE_C2R_HASH_SIZE 8192
 
 struct office_c2r_xml_tag
 {
@@ -1545,9 +1546,11 @@ struct office_c2r_manifest
 {
     WCHAR product_code[GUID_SIZE];
     struct office_c2r_component *components;
-    DWORD component_count;
+    DWORD component_count, component_capacity;
+    DWORD *component_hash;
     struct office_c2r_publish_component *publish_components;
-    DWORD publish_component_count;
+    DWORD publish_component_count, publish_component_capacity;
+    DWORD *publish_component_hash;
 };
 
 struct office_c2r_seen_key
@@ -1745,10 +1748,18 @@ static BOOL office_c2r_valid_guid( const WCHAR *value )
            value[GUID_SIZE - 2] == '}' && SUCCEEDED( CLSIDFromString( value, &guid ) );
 }
 
+static DWORD office_c2r_hash_string( DWORD hash, const WCHAR *value )
+{
+    while (*value) hash = (hash ^ towlower( *value++ )) * 16777619;
+    return hash;
+}
+
 static void office_c2r_manifest_free( struct office_c2r_manifest *manifest )
 {
     free( manifest->components );
+    free( manifest->component_hash );
     free( manifest->publish_components );
+    free( manifest->publish_component_hash );
     memset( manifest, 0, sizeof(*manifest) );
 }
 
@@ -1758,7 +1769,7 @@ static BOOL office_c2r_manifest_add_component( struct office_c2r_manifest *manif
     WCHAR id[GUID_SIZE], keypath[1024];
     BOOL id_present, keypath_present;
     struct office_c2r_component *new_components;
-    DWORD i;
+    DWORD hash, index, new_capacity;
 
     if (!office_c2r_xml_attribute( tag, L"ComponentId", id, ARRAY_SIZE(id), &id_present ) ||
         !id_present || !office_c2r_valid_guid( id ))
@@ -1766,27 +1777,42 @@ static BOOL office_c2r_manifest_add_component( struct office_c2r_manifest *manif
     if (!office_c2r_xml_attribute( tag, L"KeyPath", keypath, ARRAY_SIZE(keypath), &keypath_present ))
         return TRUE;
 
-    for (i = 0; i < manifest->component_count; i++)
+    if (!manifest->component_hash &&
+        !(manifest->component_hash = calloc( OFFICE_C2R_HASH_SIZE,
+                                             sizeof(*manifest->component_hash) )))
+        return FALSE;
+    hash = office_c2r_hash_string( 2166136261u, id ) & (OFFICE_C2R_HASH_SIZE - 1);
+    while ((index = manifest->component_hash[hash]))
     {
-        if (wcsicmp( manifest->components[i].id, id )) continue;
-        if (!manifest->components[i].has_keypath && keypath_present && keypath[0])
+        index--;
+        if (wcsicmp( manifest->components[index].id, id ))
         {
-            lstrcpyW( manifest->components[i].keypath, keypath );
-            manifest->components[i].has_keypath = TRUE;
+            hash = (hash + 1) & (OFFICE_C2R_HASH_SIZE - 1);
+            continue;
+        }
+        if (!manifest->components[index].has_keypath && keypath_present && keypath[0])
+        {
+            lstrcpyW( manifest->components[index].keypath, keypath );
+            manifest->components[index].has_keypath = TRUE;
         }
         return TRUE;
     }
     if (manifest->component_count == OFFICE_C2R_MAX_COMPONENTS) return TRUE;
-    if (!(new_components = realloc( manifest->components,
-                                    (manifest->component_count + 1) *
-                                    sizeof(*manifest->components) )))
-        return FALSE;
-    manifest->components = new_components;
+    if (manifest->component_count == manifest->component_capacity)
+    {
+        new_capacity = manifest->component_capacity ? manifest->component_capacity * 2 : 32;
+        if (new_capacity > OFFICE_C2R_MAX_COMPONENTS) new_capacity = OFFICE_C2R_MAX_COMPONENTS;
+        if (!(new_components = realloc( manifest->components,
+                                        new_capacity * sizeof(*manifest->components) )))
+            return FALSE;
+        manifest->components = new_components;
+        manifest->component_capacity = new_capacity;
+    }
     lstrcpyW( manifest->components[manifest->component_count].id, id );
     manifest->components[manifest->component_count].has_keypath = keypath_present && keypath[0];
     if (manifest->components[manifest->component_count].has_keypath)
         lstrcpyW( manifest->components[manifest->component_count].keypath, keypath );
-    manifest->component_count++;
+    manifest->component_hash[hash] = ++manifest->component_count;
     return TRUE;
 }
 
@@ -1799,7 +1825,7 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
     BOOL publish_id_present, qualifier_present, component_id_present, feature_present;
     BOOL appdata_present, keyfile_present;
     struct office_c2r_publish_component *new_publish_components;
-    DWORD i;
+    DWORD hash, index, new_capacity;
 
     if (!office_c2r_xml_attribute( tag, L"PublishComponentId", publish_component_id,
                                    ARRAY_SIZE(publish_component_id), &publish_id_present ) ||
@@ -1826,24 +1852,42 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
         !office_c2r_xml_attribute( tag, L"KeyFile", keyfile, ARRAY_SIZE(keyfile), &keyfile_present ))
         return TRUE;
 
-    for (i = 0; i < manifest->publish_component_count; i++)
+    if (!manifest->publish_component_hash &&
+        !(manifest->publish_component_hash = calloc( OFFICE_C2R_HASH_SIZE,
+                                                     sizeof(*manifest->publish_component_hash) )))
+        return FALSE;
+    hash = office_c2r_hash_string( 2166136261u, publish_component_id );
+    hash = office_c2r_hash_string( hash, qualifier ) & (OFFICE_C2R_HASH_SIZE - 1);
+    while ((index = manifest->publish_component_hash[hash]))
     {
-        if (wcsicmp( manifest->publish_components[i].publish_component_id, publish_component_id ) ||
-            wcsicmp( manifest->publish_components[i].qualifier, qualifier ))
-            continue;
-        if (!manifest->publish_components[i].has_keyfile && keyfile_present && keyfile[0])
+        index--;
+        if (wcsicmp( manifest->publish_components[index].publish_component_id,
+                     publish_component_id ) ||
+            wcsicmp( manifest->publish_components[index].qualifier, qualifier ))
         {
-            lstrcpyW( manifest->publish_components[i].keyfile, keyfile );
-            manifest->publish_components[i].has_keyfile = TRUE;
+            hash = (hash + 1) & (OFFICE_C2R_HASH_SIZE - 1);
+            continue;
+        }
+        if (!manifest->publish_components[index].has_keyfile && keyfile_present && keyfile[0])
+        {
+            lstrcpyW( manifest->publish_components[index].keyfile, keyfile );
+            manifest->publish_components[index].has_keyfile = TRUE;
         }
         return TRUE;
     }
     if (manifest->publish_component_count == OFFICE_C2R_MAX_PUBLISH_COMPONENTS) return TRUE;
-    if (!(new_publish_components = realloc( manifest->publish_components,
-                                            (manifest->publish_component_count + 1) *
-                                            sizeof(*manifest->publish_components) )))
-        return FALSE;
-    manifest->publish_components = new_publish_components;
+    if (manifest->publish_component_count == manifest->publish_component_capacity)
+    {
+        new_capacity = manifest->publish_component_capacity ?
+                manifest->publish_component_capacity * 2 : 32;
+        if (new_capacity > OFFICE_C2R_MAX_PUBLISH_COMPONENTS)
+            new_capacity = OFFICE_C2R_MAX_PUBLISH_COMPONENTS;
+        if (!(new_publish_components = realloc( manifest->publish_components,
+                                                new_capacity * sizeof(*manifest->publish_components) )))
+            return FALSE;
+        manifest->publish_components = new_publish_components;
+        manifest->publish_component_capacity = new_capacity;
+    }
     lstrcpyW( manifest->publish_components[manifest->publish_component_count].publish_component_id,
               publish_component_id );
     lstrcpyW( manifest->publish_components[manifest->publish_component_count].qualifier, qualifier );
@@ -1855,7 +1899,7 @@ static BOOL office_c2r_manifest_add_publish_component( struct office_c2r_manifes
         keyfile_present && keyfile[0];
     if (manifest->publish_components[manifest->publish_component_count].has_keyfile)
         lstrcpyW( manifest->publish_components[manifest->publish_component_count].keyfile, keyfile );
-    manifest->publish_component_count++;
+    manifest->publish_component_hash[hash] = ++manifest->publish_component_count;
     return TRUE;
 }
 
