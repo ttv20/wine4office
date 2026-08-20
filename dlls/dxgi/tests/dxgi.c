@@ -2467,15 +2467,22 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     if (FAILED(hr))
         goto done;
 
-    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(!!window, "Got NULL composition window.\n");
-
     token_size = sizeof(token);
-    hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
-    ok(hr == S_OK, "Got unexpected token query hr %#lx.\n", hr);
-    ok(token_size == sizeof(token), "Got token size %u.\n", token_size);
-    ok(token.low || token.high, "Got empty DComp token.\n");
+    if (!strcmp(winetest_platform, "wine"))
+    {
+        hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(!!window, "Got NULL composition window.\n");
+        hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
+        ok(hr == S_OK, "Got unexpected token query hr %#lx.\n", hr);
+        ok(token_size == sizeof(token), "Got token size %u.\n", token_size);
+        ok(token.low || token.high, "Got empty DComp token.\n");
+    }
+    else
+    {
+        hr = IDXGISwapChain1_GetPrivateData(swapchain, &WINE_DCOMP_IME_TOKEN_GUID, &token_size, &token);
+        ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected native token query hr %#lx.\n", hr);
+    }
 
     if (!(dcomp = LoadLibraryW(L"dcomp.dll"))
             || !(pDCompositionCreateDevice = (void *)GetProcAddress(dcomp, "DCompositionCreateDevice")))
@@ -2518,26 +2525,32 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     if (FAILED(hr))
         goto done;
 
-    hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
-    ok(hr == S_OK, "Got unexpected post-commit GetHwnd hr %#lx.\n", hr);
-    ok(window && IsWindowVisible(window), "Composition helper window %p is not visible.\n", window);
-    ok(GetClientRect(target_window, &target_rect), "GetClientRect failed.\n");
-    MapWindowPoints(target_window, NULL, (POINT *)&target_rect, 2);
-    ok(GetWindowRect(window, &helper_rect), "GetWindowRect failed.\n");
-    ok(helper_rect.left == target_rect.left && helper_rect.top == target_rect.top
-            && helper_rect.right - helper_rect.left == (LONG)desc.Width
-            && helper_rect.bottom - helper_rect.top == (LONG)desc.Height,
-            "Got helper rect {%ld,%ld,%ld,%ld}, target client origin {%ld,%ld}.\n",
-            helper_rect.left, helper_rect.top, helper_rect.right, helper_rect.bottom,
-            target_rect.left, target_rect.top);
+    if (!strcmp(winetest_platform, "wine"))
+    {
+        hr = IDXGISwapChain1_GetHwnd(swapchain, &window);
+        ok(hr == S_OK, "Got unexpected post-commit GetHwnd hr %#lx.\n", hr);
+        ok(window && IsWindowVisible(window), "Composition helper window %p is not visible.\n", window);
+        ok(GetClientRect(target_window, &target_rect), "GetClientRect failed.\n");
+        MapWindowPoints(target_window, NULL, (POINT *)&target_rect, 2);
+        ok(GetWindowRect(window, &helper_rect), "GetWindowRect failed.\n");
+        ok(helper_rect.left == target_rect.left && helper_rect.top == target_rect.top
+                && helper_rect.right - helper_rect.left == (LONG)desc.Width
+                && helper_rect.bottom - helper_rect.top == (LONG)desc.Height,
+                "Got helper rect {%ld,%ld,%ld,%ld}, target client origin {%ld,%ld}.\n",
+                helper_rect.left, helper_rect.top, helper_rect.right, helper_rect.bottom,
+                target_rect.left, target_rect.top);
+    }
 
     hr = IDCompositionVisual_SetContent(dcomp_visual, NULL);
     ok(hr == S_OK, "Clearing visual content failed, hr %#lx.\n", hr);
     hr = IDCompositionDevice_Commit(dcomp_device);
     ok(hr == S_OK, "Unbind commit failed, hr %#lx.\n", hr);
-    ok(!IsWindowVisible(window), "Unbound composition helper window %p is still visible.\n", window);
-    ok(!GetPropW(window, L"__wine_dcomp_detached_window"),
-            "Unbound composition helper retained its target.\n");
+    if (!strcmp(winetest_platform, "wine"))
+    {
+        ok(!IsWindowVisible(window), "Unbound composition helper window %p is still visible.\n", window);
+        ok(!GetPropW(window, L"__wine_dcomp_detached_window"),
+                "Unbound composition helper retained its target.\n");
+    }
 
 done:
     if (dcomp_visual) IDCompositionVisual_Release(dcomp_visual);
