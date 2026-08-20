@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+
+import pathlib
+import unittest
+
+
+class AuthorizeUrlSourceTest(unittest.TestCase):
+    def test_browser_navigates_to_converted_authorize_url(self):
+        source = (pathlib.Path(__file__).parents[1] / "wine4officeauth.cpp").read_text()
+        build = source.index('authorize_url = "https://login.microsoftonline.com/"')
+        convert = source.index("authorize_url_w = utf8_to_wide(authorize_url);", build)
+        validate = source.index("if (authorize_url_w.empty()) return false;", convert)
+        navigate = source.index("url = SysAllocString(authorize_url_w.c_str());", validate)
+
+        self.assertLess(build, convert)
+        self.assertLess(convert, validate)
+        self.assertLess(validate, navigate)
+
+
+if __name__ == "__main__":
+    unittest.main()

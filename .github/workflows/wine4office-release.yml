@@ -115,6 +115,8 @@ jobs:
         run: tools/wine4office-manager/tests/test_curl_install.sh
       - name: Test release archive packaging
         run: tools/wine4office-manager/tests/test_release_artifacts.sh
+      - name: Test OAuth helper source contracts
+        run: python3 programs/wine4officeauth/tests/test_authorize_url.py
 
       - name: Configure and build Wine4Office
         run: |
