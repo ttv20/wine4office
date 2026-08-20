@@ -10,11 +10,13 @@ class AuthorizeUrlSourceTest(unittest.TestCase):
         build = source.index('authorize_url = "https://login.microsoftonline.com/"')
         convert = source.index("authorize_url_w = utf8_to_wide(authorize_url);", build)
         validate = source.index("if (authorize_url_w.empty()) return false;", convert)
-        navigate = source.index("url = SysAllocString(authorize_url_w.c_str());", validate)
+        allocate = source.index("url = SysAllocString(authorize_url_w.c_str());", validate)
+        navigate = source.index("hr = browser->Navigate(url,", allocate)
 
         self.assertLess(build, convert)
         self.assertLess(convert, validate)
-        self.assertLess(validate, navigate)
+        self.assertLess(validate, allocate)
+        self.assertLess(allocate, navigate)
 
 
 if __name__ == "__main__":
