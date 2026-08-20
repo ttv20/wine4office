@@ -41,6 +41,7 @@ static const WCHAR *office_targets[] =
     L"msaccess.exe",
     L"mspub.exe",
     L"onenote.exe",
+    L"olk.exe",
     L"outlook.exe",
     L"powerpnt.exe",
     L"visio.exe",

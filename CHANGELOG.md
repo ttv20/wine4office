@@ -7,6 +7,8 @@
 - Let packaged Office components discover their local application-data folders
   and education-environment state.
 - Let modern Office web views observe text and child-node changes reliably.
+- Keep Outlook shortcuts working safely across Store package changes and
+  classic Outlook fallback.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

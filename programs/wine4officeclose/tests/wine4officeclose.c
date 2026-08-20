@@ -107,7 +107,7 @@ static BOOL run_close_utility_discovery(const WCHAR *utility, DWORD *exit_code)
     return TRUE;
 }
 
-static void test_owned_window_is_the_only_close_target(void)
+static void test_owned_window_is_the_only_close_target(const WCHAR *executable)
 {
     WCHAR module[32768], utility[32768], full_utility[32768];
     WCHAR child_path[MAX_PATH], temp_path[MAX_PATH], command[32768], *slash;
@@ -138,7 +138,7 @@ static void test_owned_window_is_the_only_close_target(void)
         ok(exit_code == 2, "Close utility accepted no targets: %lu\n", exit_code);
 
     ok(GetTempPathW(ARRAY_SIZE(temp_path), temp_path), "GetTempPathW failed: %lu\n", GetLastError());
-    swprintf(child_path, ARRAY_SIZE(child_path), L"%swinword.exe", temp_path);
+    swprintf(child_path, ARRAY_SIZE(child_path), L"%s%s", temp_path, executable);
     ok(CopyFileW(module, child_path, FALSE), "CopyFileW failed: %lu\n", GetLastError());
 
     security.nLength = sizeof(security);
@@ -177,7 +177,8 @@ static void test_owned_window_is_the_only_close_target(void)
     {
         ok(run_close_utility(utility, child_info.dwProcessId, &exit_code),
            "Could not launch close utility\n");
-        ok(exit_code == 0, "Close utility returned %lu\n", exit_code);
+        ok(exit_code == 0, "Close utility returned %lu for %s\n", exit_code,
+           wine_dbgstr_w(executable));
         ok(WaitForSingleObject(child_info.hProcess, 5000) == WAIT_OBJECT_0,
            "Owned Office-like process remained open\n");
         ok(IsWindow(unrelated), "Unrelated top-level window was closed\n");
@@ -199,7 +200,8 @@ static void test_owned_window_is_the_only_close_target(void)
         {
             ok(run_close_utility_discovery(utility, &exit_code),
                "Could not launch close utility discovery\n");
-            ok(exit_code == 0, "Close utility discovery returned %lu\n", exit_code);
+            ok(exit_code == 0, "Close utility discovery returned %lu for %s\n", exit_code,
+               wine_dbgstr_w(executable));
             ok(WaitForSingleObject(child_info.hProcess, 5000) == WAIT_OBJECT_0,
                "Discovered Office-like process remained open\n");
             ok(IsWindow(unrelated), "Discovery closed an unrelated top-level window\n");
@@ -224,5 +226,8 @@ START_TEST(wine4officeclose)
     if (child)
         run_owned_child(child + ARRAY_SIZE(L" --child ") - 1);
     else
-        test_owned_window_is_the_only_close_target();
+    {
+        test_owned_window_is_the_only_close_target(L"winword.exe");
+        test_owned_window_is_the_only_close_target(L"olk.exe");
+    }
 }

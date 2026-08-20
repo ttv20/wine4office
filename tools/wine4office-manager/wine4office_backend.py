@@ -7,6 +7,7 @@ import csv
 import io
 import fcntl
 import hashlib
+from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
 import os
@@ -33,6 +34,44 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 PathValue = str | os.PathLike[str]
+WINDOWS_APPS_PUBLISHER_ID = "8wekyb3d8bbwe"
+OUTLOOK_PACKAGE_FAMILY = "Microsoft.OutlookForWindows"
+_WINDOWS_APPS_PACKAGE_NAME = re.compile(
+    rf"^(?P<family>[A-Za-z0-9][A-Za-z0-9.-]*)_"
+    rf"(?P<version>[0-9]+(?:\.[0-9]+)*)_"
+    rf"(?P<architecture>[A-Za-z0-9.-]+)__{re.escape(WINDOWS_APPS_PUBLISHER_ID)}$"
+)
+
+
+@dataclass(frozen=True)
+class WindowsAppsPackage:
+    family: str
+    version: tuple[int, ...]
+    architecture: str
+    publisher_id: str
+    path: Path
+
+    @property
+    def identity(self) -> str:
+        return self.path.name
+
+
+@dataclass(frozen=True)
+class InstalledApp:
+    executable: Path
+    package: WindowsAppsPackage | None = None
+
+    @property
+    def is_new_outlook(self) -> bool:
+        package = self.package
+        return (
+            package is not None
+            and package.family == OUTLOOK_PACKAGE_FAMILY
+            and package.publisher_id == WINDOWS_APPS_PUBLISHER_ID
+            and self.executable == package.path / "olk.exe"
+        )
+
+
 OFFICE_TELEMETRY_POLICY_KEY = (
     r"HKCU\Software\Policies\Microsoft\Office\Common\ClientTelemetry"
 )
@@ -41,7 +80,7 @@ OFFICE_TELEMETRY_DISABLED = "3"
 WINE_DECORATED_VALUE = "Decorated"
 WINE_XVIDMODE_VALUE = "UseXVidMode"
 OFFICE_X11_EXECUTABLES = (
-    "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE",
+    "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE", "OLK.EXE",
     "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
 )
 STOP_GRACE_SECONDS = 10.0
@@ -1399,51 +1438,183 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
 
 
 def office_candidates(prefix: Path, executable: str) -> Iterable[Path]:
-    roots = [
-        prefix / "drive_c/Program Files/Microsoft Office/root/Office16",
-        prefix / "drive_c/Program Files (x86)/Microsoft Office/root/Office16",
-        prefix / "drive_c/Program Files/Microsoft Office/Office16",
-        prefix / "drive_c/Program Files (x86)/Microsoft Office/Office16",
-    ]
-    for root in roots:
-        yield root / executable
+    prefix = prefix.resolve(strict=True)
+    roots = (
+        "drive_c/Program Files/Microsoft Office/root/Office16",
+        "drive_c/Program Files (x86)/Microsoft Office/root/Office16",
+        "drive_c/Program Files/Microsoft Office/Office16",
+        "drive_c/Program Files (x86)/Microsoft Office/Office16",
+    )
+    for relative_root in roots:
+        root = prefix
+        for component in Path(relative_root).parts:
+            root /= component
+            if root.is_symlink() or not root.is_dir():
+                break
+        else:
+            root = root.resolve(strict=True)
+            candidate = root / executable
+            try:
+                root.relative_to(prefix)
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(root)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            if not candidate.is_symlink() and resolved.is_file():
+                yield resolved
 
+
+
+def parse_windows_apps_package_name(
+        name: str,
+) -> tuple[str, tuple[int, ...], str, str] | None:
+    """Parse a WindowsApps identity with a numeric version and publisher ID."""
+    match = _WINDOWS_APPS_PACKAGE_NAME.fullmatch(name)
+    if match is None:
+        return None
+    try:
+        version = tuple(int(part) for part in match.group("version").split("."))
+    except ValueError:
+        return None
+    if len(version) != 4 or any(part > 0xffff for part in version):
+        return None
+    return (
+        match.group("family"), version, match.group("architecture"),
+        WINDOWS_APPS_PUBLISHER_ID,
+    )
+
+
+def parse_windows_apps_package(path_value: PathValue) -> WindowsAppsPackage | None:
+    """Return validated package metadata for an existing WindowsApps directory."""
+    raw_value = path_value.strip() if isinstance(path_value, str) else os.fspath(path_value)
+    path = Path(os.path.expandvars(raw_value)).expanduser()
+    parsed = parse_windows_apps_package_name(path.name)
+    if parsed is None or path.is_symlink() or not path.is_dir():
+        return None
+    family, version, architecture, publisher_id = parsed
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return None
+    return WindowsAppsPackage(
+        family, version, architecture, publisher_id, resolved,
+    )
+
+
+def windows_apps_packages(
+        prefix: Path, families: Iterable[str],
+) -> Iterable[WindowsAppsPackage]:
+    """Yield validated package identities for the requested package families."""
+    prefix = prefix.resolve(strict=True)
+    windows_apps = prefix
+    for component in ("drive_c", "Program Files", "WindowsApps"):
+        windows_apps /= component
+        if windows_apps.is_symlink() or not windows_apps.is_dir():
+            return
+    windows_apps = windows_apps.resolve(strict=True)
+    try:
+        windows_apps.relative_to(prefix)
+    except ValueError:
+        return
+    expected_families = set(families)
+    try:
+        package_paths = list(windows_apps.iterdir())
+    except OSError:
+        return
+    for package_path in package_paths:
+        package = parse_windows_apps_package(package_path)
+        if package is None:
+            continue
+        try:
+            package.path.relative_to(windows_apps)
+        except ValueError:
+            continue
+        if package.family in expected_families:
+            yield package
+
+
+def sorted_windows_apps_packages(
+        prefix: Path, families: Iterable[str],
+) -> list[WindowsAppsPackage]:
+    """Return validated packages in descending numeric version order."""
+    return sorted(
+        windows_apps_packages(prefix, families),
+        key=lambda package: (package.version, package.identity),
+        reverse=True,
+    )
+
+
+def _package_app_candidates(
+        prefix: Path, families: Iterable[str], executable_names: Iterable[str],
+) -> Iterable[InstalledApp]:
+    for package in sorted_windows_apps_packages(prefix, families):
+        for executable_name in executable_names:
+            yield InstalledApp(package.path / executable_name, package)
+
+
+def _validated_package_app(candidate: InstalledApp) -> InstalledApp | None:
+    """Return a package app only when its executable remains a contained real file."""
+    executable = candidate.executable
+    try:
+        if executable.is_symlink() or not executable.is_file():
+            return None
+        resolved = executable.resolve(strict=True)
+        resolved.relative_to(candidate.package.path)
+    except (OSError, ValueError):
+        return None
+    return InstalledApp(resolved, candidate.package)
 
 
 def teams_candidates(prefix: Path) -> Iterable[Path]:
     """Yield installed new-Teams executables, newest package version first."""
-    windows_apps = prefix / "drive_c/Program Files/WindowsApps"
-    packages: list[tuple[tuple[int, ...], str, Path]] = []
-    for package_pattern in (
-            "MSTeams_*__8wekyb3d8bbwe",
-            "Microsoft.MSTeams_*__8wekyb3d8bbwe"):
-        for package in windows_apps.glob(package_pattern):
-            if not package.is_dir():
-                continue
-            parts = package.name.split("_")
-            try:
-                version = tuple(int(part) for part in parts[1].split("."))
-            except (IndexError, ValueError):
-                continue
-            packages.append((version, package.name, package))
-    for _version, _name, package in sorted(packages, reverse=True):
-        yield package / "ms-teams.exe"
-        yield package / "MSTeams.exe"
+    for candidate in _package_app_candidates(
+            prefix, ("MSTeams", "Microsoft.MSTeams"),
+            ("ms-teams.exe", "MSTeams.exe")):
+        validated = _validated_package_app(candidate)
+        if validated is not None:
+            yield validated.executable
 
 
-def find_office_app(prefix_value: str, app: str) -> Path | None:
+def outlook_candidates(prefix: Path) -> Iterable[InstalledApp]:
+    """Yield validated New Outlook packages, newest version first, then classic."""
+    for candidate in _package_app_candidates(
+            prefix, (OUTLOOK_PACKAGE_FAMILY,), ("olk.exe",)):
+        validated = _validated_package_app(candidate)
+        if validated is not None:
+            yield validated
+    for executable in office_candidates(prefix, APP_META["outlook"]["exe"]):
+        yield InstalledApp(executable)
+
+
+def _office_app_candidates(prefix: Path, app: str) -> Iterable[InstalledApp]:
+    executable = APP_META[app]["exe"]
+    if app == "teams":
+        yield from (
+            InstalledApp(candidate)
+            for candidate in teams_candidates(prefix)
+        )
+    elif app == "outlook":
+        yield from outlook_candidates(prefix)
+    else:
+        yield from (
+            InstalledApp(candidate)
+            for candidate in office_candidates(prefix, executable)
+        )
+
+
+def find_office_app_info(prefix_value: str, app: str) -> InstalledApp | None:
     if app not in APP_META:
         raise ValueError(f"Unknown Office application: {app}")
     prefix = validate_prefix(prefix_value)
-    executable = APP_META[app]["exe"]
-    candidates = (
-        teams_candidates(prefix)
-        if app == "teams" else office_candidates(prefix, executable)
-    )
-    for candidate in candidates:
-        if candidate.is_file():
+    for candidate in _office_app_candidates(prefix, app):
+        if candidate.executable.is_file():
             return candidate
     return None
+
+
+def find_office_app(prefix_value: str, app: str) -> Path | None:
+    candidate = find_office_app_info(prefix_value, app)
+    return candidate.executable if candidate is not None else None
 
 
 def environment_status(prefix_value: str, wine_value: str) -> dict:
@@ -1578,9 +1749,8 @@ def launch_app_process(
     """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    executable = find_office_app(str(prefix), app)
-    if not executable:
-        raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
+    installation = installed_app(prefix, app)
+    executable = installation.executable
     managed = is_prefix_owned(prefix)
     ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
     if app == "word":
@@ -1588,7 +1758,7 @@ def launch_app_process(
     register_cloud_fonts(prefix, wine, helper, use_x11)
     env = wine_environment(prefix, wine, use_x11)
     arguments = [_windows_document_path(document, wine, env) for document in documents]
-    if app == "outlook" and managed:
+    if app == "outlook" and managed and not installation.is_new_outlook:
         prepare_outlook_first_run(prefix, wine, env)
         env = _outlook_environment(env)
     if capture_diagnostics:
@@ -1846,11 +2016,15 @@ def write_desktop_file(path: Path, name: str, comment: str, command: list[str], 
     os.replace(temporary, path)
 
 
-def installed_app_executable(prefix: Path, app: str) -> Path:
-    executable = find_office_app(str(prefix), app)
-    if executable is None:
+def installed_app(prefix: Path, app: str) -> InstalledApp:
+    installation = find_office_app_info(str(prefix), app)
+    if installation is None:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
-    return executable
+    return installation
+
+
+def installed_app_executable(prefix: Path, app: str) -> Path:
+    return installed_app(prefix, app).executable
 
 
 def shortcut_launcher_directory() -> Path:
@@ -1880,12 +2054,17 @@ def _install_shortcut_font_helper(helper: Path | None) -> Path | None:
     return destination
 
 
-def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path,
-                            font_helper: Path | None) -> str:
+def _shortcut_launcher_text(app: str, prefix: Path, wine: Path,
+                            installation: InstalledApp, font_helper: Path | None) -> str:
+    executable = installation.executable
     prefix_value = shlex.quote(str(prefix))
     wine_value = shlex.quote(str(wine))
     executable_value = shlex.quote(str(executable))
     helper_value = shlex.quote(str(font_helper)) if font_helper else "''"
+    outlook_package_identity = (
+        shlex.quote(installation.package.identity)
+        if installation.is_new_outlook else "''"
+    )
     winappsdk_runtime = office_winappsdk_runtime_environment(prefix)
     lines = [
         "#!/usr/bin/env bash",
@@ -1895,7 +2074,103 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         f"prefix={prefix_value}",
         f"wine={wine_value}",
         f"executable={executable_value}",
+        f"outlook_package_identity={outlook_package_identity}",
         f"font_helper={helper_value}",
+    ]
+    if app == "outlook" and installation.is_new_outlook:
+        lines.extend([
+            'windows_apps="$prefix/drive_c/Program Files/WindowsApps"',
+            'executable=',
+            'outlook_package_identity=',
+            'new_outlook_executable=',
+            'new_outlook_identity=',
+            'new_outlook_version=',
+            '# Keep this package parser, version ordering, and containment logic synchronized',
+            '# with parse_windows_apps_package_name() and outlook_candidates() in the manager.',
+            'version_is_newer() {',
+            '    local left=$1 right=$2 left_part right_part',
+            '    local -a left_parts right_parts',
+            "    IFS='.' read -r -a left_parts <<< \"$left\"",
+            "    IFS='.' read -r -a right_parts <<< \"$right\"",
+            '    local count=${#left_parts[@]} index',
+            '    (( ${#right_parts[@]} > count )) && count=${#right_parts[@]}',
+            '    for ((index = 0; index < count; index++)); do',
+            '        left_part=${left_parts[index]:-0}',
+            '        right_part=${right_parts[index]:-0}',
+            '        (( 10#$left_part > 10#$right_part )) && return 0',
+            '        (( 10#$left_part < 10#$right_part )) && return 1',
+            '    done',
+            '    return 1',
+            '}',
+            'prefix_resolved=$(readlink -f -- "$prefix")',
+            'windows_apps_safe=true',
+            'current=$prefix',
+            'for component in drive_c "Program Files" WindowsApps; do',
+            '    current="$current/$component"',
+            '    if [[ ! -d "$current" || -L "$current" ]]; then',
+            '        windows_apps_safe=false',
+            '        break',
+            '    fi',
+            'done',
+            'if [[ $windows_apps_safe == true ]]; then',
+            '    if windows_apps_resolved=$(readlink -f -- "$windows_apps"); then',
+            '        case "$windows_apps_resolved/" in "$prefix_resolved/"*) ;; *) windows_apps_safe=false ;; esac',
+            '    else',
+            '        windows_apps_safe=false',
+            '    fi',
+            'fi',
+            'if [[ $windows_apps_safe == true ]]; then',
+            '    for package in "$windows_apps"/Microsoft.OutlookForWindows_*__8wekyb3d8bbwe; do',
+            '        [[ -d "$package" && ! -L "$package" ]] || continue',
+            '        package_identity=${package##*/}',
+            r'        [[ $package_identity =~ ^Microsoft\.OutlookForWindows_([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)_([A-Za-z0-9.-]+)__8wekyb3d8bbwe$ ]] || continue',
+            '        package_version=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}.${BASH_REMATCH[4]}',
+            '        package_version_valid=true',
+            '        for package_version_part in "${BASH_REMATCH[@]:1:4}"; do',
+            '            if (( 10#$package_version_part > 65535 )); then',
+            '                package_version_valid=false',
+            '                break',
+            '            fi',
+            '        done',
+            '        [[ $package_version_valid == true ]] || continue',
+            '        package_resolved=$(readlink -f -- "$package") || continue',
+            '        case "$package_resolved/" in "$windows_apps_resolved/"*) ;; *) continue ;; esac',
+            '        candidate="$package/olk.exe"',
+            '        [[ -f "$candidate" && ! -L "$candidate" ]] || continue',
+            '        candidate_resolved=$(readlink -f -- "$candidate") || continue',
+            '        case "$candidate_resolved" in "$package_resolved/"*) ;; *) continue ;; esac',
+            '        if [[ -z "$new_outlook_version" ]] || version_is_newer "$package_version" "$new_outlook_version"; then',
+            '            new_outlook_version=$package_version',
+            '            new_outlook_identity=$package_identity',
+            '            new_outlook_executable=$candidate_resolved',
+            '        fi',
+            '    done',
+            'fi',
+            'if [[ -n "$new_outlook_executable" ]]; then',
+            '    executable=$new_outlook_executable',
+            '    outlook_package_identity=$new_outlook_identity',
+            'else',
+            '    for classic_candidate in "$prefix_resolved/drive_c/Program Files/Microsoft Office/root/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files (x86)/Microsoft Office/root/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files/Microsoft Office/Office16/OUTLOOK.EXE" "$prefix_resolved/drive_c/Program Files (x86)/Microsoft Office/Office16/OUTLOOK.EXE"; do',
+            '        [[ -f "$classic_candidate" && ! -L "$classic_candidate" ]] || continue',
+            '        classic_relative=${classic_candidate#"$prefix_resolved/"}',
+            '        [[ $classic_relative != "$classic_candidate" ]] || continue',
+            '        classic_safe=true',
+            '        classic_current=$prefix_resolved',
+            "        IFS='/' read -r -a classic_parts <<< \"$classic_relative\"",
+            '        for classic_part in "${classic_parts[@]}"; do',
+            '            classic_current="$classic_current/$classic_part"',
+            '            if [[ -L "$classic_current" ]]; then',
+            '                classic_safe=false',
+            '                break',
+            '            fi',
+            '        done',
+            '        [[ $classic_safe == true ]] || continue',
+            '        classic_resolved=$(readlink -f -- "$classic_candidate") || continue',
+            '        case "$classic_resolved" in "$prefix_resolved/"*) executable=$classic_resolved; break ;; esac',
+            '    done',
+            'fi',
+        ])
+    lines.extend([
         'if [[ ! -x "$wine" ]]; then',
         '    printf \'Wine4Office launcher: Wine is unavailable: %s\\n\' "$wine" >&2',
         "    exit 1",
@@ -1935,7 +2210,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         'elif [[ $managed_prefix == true && -n ${WAYLAND_DISPLAY:-} ]]; then',
         "    unset DISPLAY",
         "fi",
-    ]
+    ])
     if app == "word":
         lines.extend([
             'if [[ $managed_prefix == true ]]; then',
@@ -1978,7 +2253,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
     ])
     if app == "outlook":
         lines.extend([
-            'if [[ $managed_prefix == true ]]; then',
+            'if [[ $managed_prefix == true && -z $outlook_package_identity ]]; then',
             r"outlook_key='HKCU\Software\Microsoft\Office\16.0\Outlook'",
             'outlook_query=$("$wine" reg query "$outlook_key" /v LastUILanguage 2>/dev/null || true)',
             'if [[ $outlook_query != *LastUILanguage* ]]; then',
@@ -2089,14 +2364,14 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
     return "\n".join(lines)
 
 
-def write_shortcut_launcher(app: str, prefix: Path, wine: Path, executable: Path,
-                            font_helper: Path | None) -> Path:
+def write_shortcut_launcher(app: str, prefix: Path, wine: Path,
+                            installation: InstalledApp, font_helper: Path | None) -> Path:
     path = shortcut_launcher_path(app)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
         temporary.write_text(
-            _shortcut_launcher_text(app, prefix, wine, executable, font_helper)
+            _shortcut_launcher_text(app, prefix, wine, installation, font_helper)
         )
         temporary.chmod(0o755)
         os.replace(temporary, path)
@@ -2115,10 +2390,11 @@ def create_app_shortcuts(apps: Iterable[str], prefix_value: PathValue, wine_valu
         if app not in APP_META:
             raise ValueError(f"Unknown Office application: {app}")
         meta = APP_META[app]
-        executable = installed_app_executable(prefix, app)
+        installation = installed_app(prefix, app)
+        executable = installation.executable
         icon = app_icon_path(app, executable)
         launcher = write_shortcut_launcher(
-            app, prefix, wine, executable, installed_helper
+            app, prefix, wine, installation, installed_helper
         )
         command = [str(launcher)]
         if meta["mime"]:
@@ -2169,15 +2445,16 @@ def refresh_managed_app_shortcuts(prefix_value: PathValue, wine_value: PathValue
     installed_helper = _install_shortcut_font_helper(helper)
     for app, paths in existing.items():
         meta = APP_META[app]
-        executable = find_office_app(str(prefix), app)
-        if executable is None:
+        installation = find_office_app_info(str(prefix), app)
+        if installation is None:
             result["skipped"][app] = (
                 f"{meta['exe']} is not installed in {prefix}"
             )
             continue
+        executable = installation.executable
         icon = app_icon_path(app, executable)
         launcher = write_shortcut_launcher(
-            app, prefix, wine, executable, installed_helper
+            app, prefix, wine, installation, installed_helper
         )
         command = [str(launcher)]
         if meta["mime"]:
