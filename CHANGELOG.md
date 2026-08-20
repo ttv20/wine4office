@@ -13,6 +13,7 @@
 - Route keyboard, pointer, and IME input through delegated DirectComposition
   surfaces on Wayland.
 - Give DirectComposition-hosted Office windows their original frame and task identity.
+- Add initial New Outlook support with WebView2 input, native window frames, and correct Outlook taskbar identity.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

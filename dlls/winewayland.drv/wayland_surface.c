@@ -48,6 +48,8 @@ static const WCHAR dcomp_caption_rtl_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','r','t','l',0};
 static const WCHAR dcomp_task_minimized_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','m','i','n','i','m','i','z','e','d',0};
+static const WCHAR dcomp_native_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','n','a','t','i','v','e','_','f','r','a','m','e',0};
 
 static void dcomp_exported_handle(void *data, struct zxdg_exported_v2 *exported,
                                   const char *handle)
@@ -153,13 +155,38 @@ BOOL wayland_surface_import_toplevel(struct wayland_surface *surface, ATOM atom)
 
 static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surface);
 
+static void *configure_window_worker(void *arg)
+{
+    HWND hwnd = arg;
+
+    for (;;)
+    {
+        struct wayland_win_data *data;
+        struct wayland_surface *surface;
+        BOOL repeat = FALSE;
+
+        wayland_configure_window(hwnd);
+        if (!(data = wayland_win_data_get(hwnd))) break;
+        if ((surface = data->wayland_surface))
+        {
+            repeat = wayland_surface_is_toplevel(surface) && !!surface->requested.serial;
+            if (!repeat) surface->configure_worker_pending = FALSE;
+        }
+        wayland_win_data_release(data);
+        if (!repeat) break;
+    }
+    return NULL;
+}
+
 static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_surface,
                                          uint32_t serial)
 {
     struct wayland_surface *surface;
-    BOOL should_post = FALSE, expose_contents = FALSE;
+    BOOL should_post = FALSE, configure_directly = FALSE, expose_contents = FALSE;
+    BOOL start_worker = FALSE;
     struct wayland_win_data *data;
-    HWND hwnd = private;
+    pthread_t worker;
+    HWND hwnd = private, target, root;
 
     TRACE("serial=%u\n", serial);
 
@@ -182,11 +209,39 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
         surface->pending.serial = serial;
         surface->requested = surface->pending;
         memset(&surface->pending, 0, sizeof(surface->pending));
+
+        target = NtUserGetProp(hwnd, dcomp_detached_window_prop);
+        root = target ? NtUserGetAncestor(target, GA_ROOT) : NULL;
+        configure_directly = surface->resize_target && surface->resize_target == root &&
+                             NtUserGetProp(hwnd, dcomp_native_frame_prop) &&
+                             wayland_window_is_dcomp_task_delegate(root, hwnd);
+        if (configure_directly && !surface->configure_worker_pending)
+        {
+            surface->configure_worker_pending = TRUE;
+            start_worker = TRUE;
+        }
     }
 
     wayland_win_data_release(data);
 
-    if (should_post) NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
+    /* Chromium GPU presentation threads don't pump Win32 configure messages.
+     * Use a worker so a hung resize target cannot block Wayland event dispatch. */
+    if (start_worker)
+    {
+        if (!pthread_create(&worker, NULL, configure_window_worker, hwnd))
+            pthread_detach(worker);
+        else
+        {
+            if ((data = wayland_win_data_get(hwnd)))
+            {
+                if ((surface = data->wayland_surface)) surface->configure_worker_pending = FALSE;
+                wayland_win_data_release(data);
+            }
+            NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
+        }
+    }
+    else if (!configure_directly && should_post)
+        NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
 
     /* Flush the window surface in case there is content that we weren't
      * able to flush before due to the lack of the initial configure. */
@@ -256,7 +311,7 @@ static void xdg_toplevel_handle_configure(void *private,
     }
 
     wayland_win_data_release(data);
-    if (restore_root) NtUserShowWindow(restore_root, SW_RESTORE);
+    if (restore_root) NtUserPostMessage(restore_root, WM_SYSCOMMAND, SC_RESTORE, 0);
 }
 
 static void xdg_toplevel_handle_close(void *data, struct xdg_toplevel *xdg_toplevel)
@@ -1740,17 +1795,22 @@ static const struct wl_buffer_listener dummy_buffer_listener =
 void wayland_surface_ensure_contents(struct wayland_surface *surface)
 {
     struct wayland_shm_buffer *dummy_shm_buffer;
+    RECT presentation_rect;
     ULONG_PTR backdrop;
     uint32_t format;
     HRGN damage;
-    int width, height;
+    int width, height, content_width, content_height;
     BOOL needs_contents;
 
     width = surface->window.rect.right - surface->window.rect.left;
     height = surface->window.rect.bottom - surface->window.rect.top;
+    if (width <= 0 || height <= 0) return;
+    presentation_rect = wayland_surface_get_presentation_rect(surface);
+    content_width = max(1, min(presentation_rect.right - presentation_rect.left, width));
+    content_height = max(1, min(presentation_rect.bottom - presentation_rect.top, height));
     needs_contents = surface->window.visible &&
-                     (surface->content_width != width ||
-                      surface->content_height != height);
+                     (surface->content_width != content_width ||
+                      surface->content_height != content_height);
 
     TRACE("surface=%p hwnd=%p needs_contents=%d\n",
           surface, surface->hwnd, needs_contents);
