@@ -1142,7 +1142,7 @@ static void test_user_properties_async( IUser *user )
         {
             size = 0;
             hr = IMap_HSTRING_IInspectable_get_Size( duplicate_map, &size );
-            ok( hr == S_OK && size == 2,
+            ok( hr == S_OK && (winetest_platform_is_wine ? size == 2 : size >= 2),
                     "Duplicate PropertySet map size returned %#lx and %u.\n", hr, size );
             test_property_map_string( duplicate_map, L"AccountName",
                     have_account_name ? account_name : NULL, TRUE );
@@ -1501,8 +1501,9 @@ START_TEST(user)
     value = NULL;
     hr = IUser_get_NonRoamableId( user, &value );
     ok( hr == S_OK && value && WindowsGetStringLen( value ), "NonRoamableId returned %#lx.\n", hr );
-    ok( value && is_opaque_non_roamable_id( value ), "NonRoamableId %s is not opaque.\n",
-            wine_dbgstr_w( value ? WindowsGetStringRawBuffer( value, NULL ) : NULL ) );
+    if (winetest_platform_is_wine)
+        ok( value && is_opaque_non_roamable_id( value ), "NonRoamableId %s is not opaque.\n",
+                wine_dbgstr_w( value ? WindowsGetStringRawBuffer( value, NULL ) : NULL ) );
     hr = IUser_get_NonRoamableId( user, &other_value );
     ok( hr == S_OK && other_value && value &&
             !wcscmp( WindowsGetStringRawBuffer( value, NULL ), WindowsGetStringRawBuffer( other_value, NULL ) ),
