@@ -860,6 +860,7 @@ static void test_packaged_app_scoped_non_roamable_id(void)
 {
     static const WCHAR key_name[] = L"Software\\Wine\\Appx\\StagedPackages";
     static const WCHAR family[] = L"Wine.UserIdentity_123456789abcd";
+    static const WCHAR mutex_name[] = L"Local\\WineWindowsSystemUserStagedPackageTest";
     static const WCHAR *executables[] = {L"first.exe", L"second.exe"};
     static const char manifest[] =
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
@@ -874,10 +875,10 @@ static void test_packaged_app_scoped_non_roamable_id(void)
     WCHAR manifest_path[MAX_PATH] = {0}, target[MAX_PATH], output[MAX_PATH], command[3 * MAX_PATH];
     WCHAR *identities[ARRAY_SIZE(executables)] = {0};
     BYTE *previous_value = NULL;
-    HANDLE file = INVALID_HANDLE_VALUE;
+    HANDLE file = INVALID_HANDLE_VALUE, mutex = NULL;
     HKEY key = NULL;
-    DWORD length, written, size, read, previous_size = 0, previous_type = 0;
-    BOOL previous_exists = FALSE, ret, value_written = FALSE;
+    DWORD length, written, size, read, wait, previous_size = 0, previous_type = 0;
+    BOOL mutex_acquired = FALSE, previous_exists = FALSE, ret, value_written = FALSE;
     LONG status;
     int formatted;
     unsigned int i;
@@ -915,6 +916,15 @@ static void test_packaged_app_scoped_non_roamable_id(void)
     CloseHandle( file );
     file = INVALID_HANDLE_VALUE;
     if (!ret || written != sizeof(manifest) - 1) goto done;
+
+    mutex = CreateMutexW( NULL, FALSE, mutex_name );
+    ok( mutex != NULL, "CreateMutexW failed, error %lu.\n", GetLastError() );
+    if (!mutex) goto done;
+    wait = WaitForSingleObject( mutex, 30000 );
+    ok( wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED,
+            "Waiting for staged-package test mutex returned %#lx, error %lu.\n", wait, GetLastError() );
+    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED) goto done;
+    mutex_acquired = TRUE;
 
     if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, key_name, 0, NULL, 0,
             KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL ))
@@ -1046,6 +1056,8 @@ done:
     if (manifest_path[0]) DeleteFileW( manifest_path );
     RemoveDirectoryW( root );
     free( previous_value );
+    if (mutex_acquired) ReleaseMutex( mutex );
+    if (mutex) CloseHandle( mutex );
 }
 
 static void run_identity_child( const char *output )
