@@ -12,6 +12,7 @@
 - Improve keyboard and IME input across cross-process DirectComposition views.
 - Route keyboard, pointer, and IME input through delegated DirectComposition
   surfaces on Wayland.
+- Give DirectComposition-hosted Office windows their original frame and task identity.
 
 ## 0.2.0-beta.1 — 2026-08-19
 

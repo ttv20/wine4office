@@ -27,8 +27,16 @@ WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 #define WM_WAYLAND_DCOMP_CAPTION_REDRAW (WM_APP + 0x104)
 #define WM_WINE_DCOMP_FOCUS     0x80000ff0
 
+#define DCOMP_FRAME_STYLE_MASK (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | \
+        WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+#define DCOMP_FRAME_EXSTYLE_MASK (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | \
+        WS_EX_STATICEDGE | WS_EX_WINDOWEDGE | WS_EX_LAYOUTRTL | \
+        WS_EX_RTLREADING | WS_EX_LEFTSCROLLBAR | WS_EX_TOOLWINDOW)
+
 static const WCHAR dcomp_synthetic_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
+static const WCHAR dcomp_native_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','n','a','t','i','v','e','_','f','r','a','m','e',0};
 
 static void dxgi_mark_synthetic_window(HWND window)
 {
@@ -431,12 +439,13 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
 }
 
-static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+static BOOL dxgi_composition_window_get_content_rect(HWND window, HWND target, RECT *rect)
 {
     HWND root;
     LONG offset_x, offset_y, scale_x = 10000, scale_y = 10000;
     LONGLONG base_width, base_height, scaled_width, scaled_height;
     LONGLONG left, top, right, bottom;
+
     if (GetPropW(window, L"__wine_dcomp_bounds_enabled"))
     {
         LONG bounds_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_x"));
@@ -458,7 +467,6 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
         SetRect(rect, left, top, right, bottom);
         return TRUE;
     }
-
 
     if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
         !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
@@ -504,6 +512,37 @@ static BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rec
     return TRUE;
 }
 
+BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
+{
+    RECT frame;
+    DWORD style, exstyle;
+    UINT dpi;
+
+    if (!dxgi_composition_window_get_content_rect(window, target, rect)) return FALSE;
+    if (!GetPropW(window, dcomp_native_frame_prop)) return TRUE;
+
+    style = GetWindowLongW(window, GWL_STYLE);
+    exstyle = GetWindowLongW(window, GWL_EXSTYLE);
+    dpi = GetDpiForWindow(window);
+    SetRect(&frame, 0, 0, rect->right - rect->left, rect->bottom - rect->top);
+    if (!AdjustWindowRectExForDpi(&frame, style, FALSE, exstyle, dpi)) return FALSE;
+    frame.right += rect->left;
+    frame.bottom += rect->top;
+    frame.left += rect->left;
+    frame.top += rect->top;
+    *rect = frame;
+    return TRUE;
+}
+
+BOOL dxgi_composition_window_needs_update(HWND window, const RECT *rect, UINT flags)
+{
+    RECT current;
+
+    if ((flags & SWP_SHOWWINDOW) && !IsWindowVisible(window)) return TRUE;
+    if ((flags & SWP_FRAMECHANGED) || !(flags & SWP_NOZORDER)) return TRUE;
+    return !GetWindowRect(window, &current) || !EqualRect(&current, rect);
+}
+
 static BOOL dxgi_apps_use_light_theme(void)
 {
     DWORD light_theme = TRUE, size = sizeof(light_theme);
@@ -518,6 +557,10 @@ static const WCHAR dcomp_task_delegated_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','d',0};
 static const WCHAR dcomp_task_app_id_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','a','p','p','_','i','d',0};
+static const WCHAR dcomp_task_icon_big_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','i','c','o','n','_','b','i','g',0};
+static const WCHAR dcomp_task_icon_small_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','i','c','o','n','_','s','m','a','l','l',0};
 static const WCHAR dcomp_caption_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','w','i','n','d','o','w',0};
 static const WCHAR dcomp_caption_root_prop[] =
@@ -756,6 +799,92 @@ static BOOL dxgi_composition_window_has_dwm_caption(HWND root)
     return client_rect.top - window_rect.top < MulDiv(16, dpi, USER_DEFAULT_SCREEN_DPI);
 }
 
+static BOOL dxgi_composition_window_has_native_frame(HWND window, HWND target, HWND root,
+        BOOL base_presentation, BOOL transparent_base)
+{
+    HANDLE transform, policy;
+    DWORD style;
+    LONG offset_x, offset_y, scale_x, scale_y;
+    BOOL custom_caption;
+    RECT content, client;
+
+    if (!base_presentation || transparent_base || !root) return FALSE;
+    policy = GetPropW(root, wine_dwm_nc_rendering_policy_prop);
+    style = GetWindowLongW(root, GWL_STYLE);
+    transform = GetPropW(window, L"__wine_dcomp_transform_enabled");
+    offset_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_offset_x"));
+    offset_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_offset_y"));
+    scale_x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_x"));
+    scale_y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_scale_y"));
+    custom_caption = dxgi_composition_window_has_dwm_caption(root);
+    TRACE("DComp frame gate window %p target %p root %p style %#lx menu %p client %p clip %p "
+            "policy %p custom %u offset %ld,%ld transform %p scale %ld,%ld.\n",
+            window, target, root, style, GetMenu(root),
+            GetPropW(window, L"__wine_dcomp_client_rect"),
+            GetPropW(window, L"__wine_dcomp_clip_enabled"), policy, custom_caption,
+            offset_x, offset_y, transform, scale_x, scale_y);
+
+    if ((style & (WS_CHILD | WS_POPUP)) ||
+        (style & (WS_CAPTION | WS_SYSMENU)) != (WS_CAPTION | WS_SYSMENU) ||
+        GetMenu(root) || GetPropW(window, L"__wine_dcomp_client_rect") ||
+        GetPropW(window, L"__wine_dcomp_clip_enabled") ||
+        (policy && HandleToULong(policy) == DWMNCRP_DISABLED + 1) || custom_caption ||
+        offset_x || offset_y || (transform && (scale_x != 10000 || scale_y != 10000)))
+        return FALSE;
+
+    if (!dxgi_composition_window_get_content_rect(window, target, &content) ||
+        !GetClientRect(root, &client))
+        return FALSE;
+    MapWindowPoints(root, NULL, (POINT *)&client, 2);
+    TRACE("DComp frame geometry window %p content %s client %s equal %u.\n",
+            window, wine_dbgstr_rect(&content), wine_dbgstr_rect(&client), EqualRect(&content, &client));
+    return EqualRect(&content, &client);
+}
+
+BOOL dxgi_composition_window_update_frame(HWND window, HWND target, HWND root,
+        BOOL base_presentation, BOOL transparent_base)
+{
+    DWORD old_style, old_exstyle, root_style, root_exstyle;
+    DWORD style, exstyle;
+    BOOL native_frame, old_native_frame;
+
+    TRACE("Updating DComp frame window %p target %p root %p base %u transparent %u.\n",
+            window, target, root, base_presentation, transparent_base);
+    native_frame = dxgi_composition_window_has_native_frame(window, target, root,
+            base_presentation, transparent_base);
+    old_style = GetWindowLongW(window, GWL_STYLE);
+    old_exstyle = GetWindowLongW(window, GWL_EXSTYLE);
+    old_native_frame = !!GetPropW(window, dcomp_native_frame_prop);
+    root_style = root ? GetWindowLongW(root, GWL_STYLE) : 0;
+    root_exstyle = root ? GetWindowLongW(root, GWL_EXSTYLE) : 0;
+
+    style = old_style & (WS_VISIBLE | WS_CLIPSIBLINGS);
+    if (native_frame)
+        style |= root_style & (DCOMP_FRAME_STYLE_MASK | WS_DISABLED | WS_MINIMIZE | WS_MAXIMIZE);
+    else
+        style |= WS_POPUP | (old_style & (WS_DISABLED | WS_MINIMIZE | WS_MAXIMIZE));
+
+    exstyle = native_frame ? root_exstyle & DCOMP_FRAME_EXSTYLE_MASK :
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    if (!base_presentation || transparent_base) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
+
+    if (style == old_style && exstyle == old_exstyle && native_frame == old_native_frame)
+        return native_frame;
+
+    if (native_frame)
+        SetPropW(window, dcomp_native_frame_prop, ULongToHandle(1));
+    else
+        RemovePropW(window, dcomp_native_frame_prop);
+    if (style != old_style) SetWindowLongW(window, GWL_STYLE, style);
+    if (exstyle != old_exstyle) SetWindowLongW(window, GWL_EXSTYLE, exstyle);
+    SetWindowPos(window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+            SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (native_frame)
+        RedrawWindow(window, NULL, NULL,
+                RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW | RDW_NOCHILDREN);
+    return native_frame;
+}
+
 static void dxgi_composition_window_update_caption(HWND window, HWND root)
 {
     static INIT_ONCE caption_class_once = INIT_ONCE_STATIC_INIT;
@@ -823,11 +952,57 @@ static void dxgi_composition_window_update_caption(HWND window, HWND root)
     UpdateWindow(caption);
 }
 
+static void dxgi_composition_window_clear_task_icons(HWND window)
+{
+    HICON big_icon, small_icon;
+
+    big_icon = RemovePropW(window, dcomp_task_icon_big_prop);
+    small_icon = RemovePropW(window, dcomp_task_icon_small_prop);
+    TRACE("Clearing task icons for window %p, current %p/%p, owned %p/%p.\n", window,
+            (HICON)SendMessageW(window, WM_GETICON, ICON_BIG, 0),
+            (HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0), big_icon, small_icon);
+    SendMessageW(window, WM_SETICON, ICON_BIG, 0);
+    SendMessageW(window, WM_SETICON, ICON_SMALL, 0);
+    if (big_icon) DestroyIcon(big_icon);
+    if (small_icon) DestroyIcon(small_icon);
+}
+
+static BOOL dxgi_composition_window_set_executable_icons(HWND window, const WCHAR *image)
+{
+    HICON big_icon = NULL, small_icon = NULL;
+    BOOL installed = FALSE;
+    UINT count;
+
+    count = PrivateExtractIconExW(image, 0, &big_icon, &small_icon, 1);
+    if (!count || count == ~0u) return FALSE;
+    if (big_icon)
+    {
+        if (SetPropW(window, dcomp_task_icon_big_prop, big_icon))
+        {
+            SendMessageW(window, WM_SETICON, ICON_BIG, (LPARAM)big_icon);
+            installed = TRUE;
+        }
+        else
+            DestroyIcon(big_icon);
+    }
+    if (small_icon)
+    {
+        if (SetPropW(window, dcomp_task_icon_small_prop, small_icon))
+        {
+            SendMessageW(window, WM_SETICON, ICON_SMALL, (LPARAM)small_icon);
+            installed = TRUE;
+        }
+        else
+            DestroyIcon(small_icon);
+    }
+    return installed;
+}
+
 static void dxgi_composition_window_update_identity(HWND window, HWND root)
 {
     WCHAR current[256], title[256];
     WCHAR image[MAX_PATH], *name;
-    DWORD image_len = ARRAY_SIZE(image), process_id;
+    DWORD image_len = ARRAY_SIZE(image), process_id = 0;
     DWORD_PTR icon;
     HANDLE process;
     ATOM atom;
@@ -836,31 +1011,37 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
         (!GetWindowTextW(window, current, ARRAY_SIZE(current)) || wcscmp(current, title)))
         SetWindowTextW(window, title);
 
-    if (GetPropW(window, L"__wine_dcomp_task_identity") == root) return;
-
     GetWindowThreadProcessId(root, &process_id);
-    if ((process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)))
+    if (GetPropW(window, L"__wine_dcomp_task_identity") != root)
     {
-        if (!QueryFullProcessImageNameW(process, 0, image, &image_len))
+        RemovePropW(window, L"__wine_dcomp_task_identity");
+        dxgi_composition_window_clear_task_icons(window);
+        if ((process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)))
         {
+            if (QueryFullProcessImageNameW(process, 0, image, &image_len))
+            {
+                name = wcsrchr(image, '\\');
+                if (!name) name = wcsrchr(image, '/');
+                name = name ? name + 1 : image;
+                if ((atom = RegisterWindowMessageW(name)) &&
+                    HandleToULong(GetPropW(window, dcomp_task_app_id_prop)) != atom)
+                {
+                    SetPropW(window, dcomp_task_app_id_prop, ULongToHandle(atom));
+                    SetWindowPos(window, NULL, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                            SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                }
+                if (process_id == GetCurrentProcessId() ||
+                    dxgi_composition_window_set_executable_icons(window, image))
+                    SetPropW(window, L"__wine_dcomp_task_identity", root);
+            }
             CloseHandle(process);
-            return;
         }
-        name = wcsrchr(image, '\\');
-        if (!name) name = wcsrchr(image, '/');
-        name = name ? name + 1 : image;
-        if ((atom = RegisterWindowMessageW(name)) &&
-            HandleToULong(GetPropW(window, dcomp_task_app_id_prop)) != atom)
-        {
-            SetPropW(window, dcomp_task_app_id_prop, ULongToHandle(atom));
-            SetWindowPos(window, NULL, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                    SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        }
-        CloseHandle(process);
     }
-    else
-        return;
+
+    /* USER icon handles are process-local, so foreign roots use icons
+     * reconstructed from their process image above. */
+    if (process_id != GetCurrentProcessId()) return;
 
     icon = 0;
     SendMessageTimeoutW(root, WM_GETICON, ICON_BIG, 0, SMTO_ABORTIFHUNG, 100, &icon);
@@ -873,7 +1054,6 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
     if (!icon) icon = GetClassLongPtrW(root, GCLP_HICONSM);
     if (icon && (HICON)SendMessageW(window, WM_GETICON, ICON_SMALL, 0) != (HICON)icon)
         SendMessageW(window, WM_SETICON, ICON_SMALL, icon);
-    SetPropW(window, L"__wine_dcomp_task_identity", root);
 }
 
 static void dxgi_composition_window_update_backdrop(HWND window)
@@ -897,15 +1077,39 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
     {
         switch (message)
         {
+            case WM_NCHITTEST:
+            case WM_SETCURSOR:
+            case WM_NCMOUSEMOVE:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCLBUTTONUP:
+            case WM_NCLBUTTONDBLCLK:
+            case WM_NCRBUTTONDOWN:
+            case WM_NCRBUTTONUP:
+            case WM_NCRBUTTONDBLCLK:
+                if (GetPropW(window, dcomp_native_frame_prop))
+                    return DefWindowProcW(window, message, wparam, lparam);
+                break;
+
             case WM_TIMER:
             {
                 UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+                BOOL base_presentation, transparent_base = FALSE;
+                DWORD root_style = 0, root_exstyle = 0;
 
                 if (wparam != 1) break;
-                if (GetPropW(target, L"__wine_dcomp_base_presentation") == window)
-                    dxgi_composition_window_update_backdrop(window);
+                base_presentation = GetPropW(target, L"__wine_dcomp_base_presentation") == window;
+                if (base_presentation) dxgi_composition_window_update_backdrop(window);
                 root = GetAncestor(target, GA_ROOT);
-                if (root && GetPropW(target, L"__wine_dcomp_base_presentation") == window &&
+                if (root)
+                {
+                    root_style = GetWindowLongW(root, GWL_STYLE);
+                    root_exstyle = GetWindowLongW(root, GWL_EXSTYLE);
+                    transparent_base = (root_style & WS_POPUP) &&
+                            (root_exstyle & WS_EX_TOOLWINDOW) && (root_exstyle & WS_EX_TOPMOST);
+                    dxgi_composition_window_update_frame(window, target, root,
+                            base_presentation, transparent_base);
+                }
+                if (root && base_presentation &&
                     GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
                     dxgi_composition_window_update_caption(window, root);
                 if (!root || !IsWindowVisible(root) || !IsWindowVisible(target))
@@ -941,9 +1145,10 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
                             RemovePropW(window, L"__wine_dcomp_raised_while_active");
                     }
                     dxgi_composition_window_update_identity(window, root);
-                    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
-                            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
-                            flags);
+                    if (dxgi_composition_window_needs_update(window, &rect, flags))
+                        SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+                                max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+                                flags);
                 }
                 return 0;
             }
@@ -986,6 +1191,7 @@ static LRESULT CALLBACK dxgi_composition_window_proc(HWND window, UINT message, 
             case WM_DESTROY:
                 if ((root = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(root);
                 RemovePropW(window, dcomp_caption_window_prop);
+                dxgi_composition_window_clear_task_icons(window);
                 KillTimer(window, 1);
                 break;
 
@@ -1030,7 +1236,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
     HWND old_target = GetPropW(window, L"__wine_dcomp_detached_window");
     HWND input_window, target_root;
     BOOL base_presentation;
-    DWORD exstyle, target_style, target_exstyle;
+    DWORD target_style, target_exstyle;
     BOOL transparent_base;
     NTSTATUS status;
     RECT rect;
@@ -1051,6 +1257,7 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
         }
         SERVER_END_REQ;
         if (status) WARN("Failed to clear DComp task delegation, status %#lx.\n", status);
+        KillTimer(window, 1);
         if ((input_window = GetPropW(window, dcomp_caption_window_prop))) DestroyWindow(input_window);
         RemovePropW(window, dcomp_caption_window_prop);
         ShowWindow(window, SW_HIDE);
@@ -1058,9 +1265,18 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
         RemovePropW(window, L"__wine_dcomp_raised_while_active");
         RemovePropW(window, L"__wine_dcomp_composite_alpha_background");
         RemovePropW(window, L"__wine_dcomp_task_minimized");
+        dxgi_composition_window_clear_task_icons(window);
         RemovePropW(window, L"__wine_dcomp_task_identity");
         RemovePropW(window, dcomp_task_app_id_prop);
         RemovePropW(window, L"__wine_dcomp_client_rect");
+        RemovePropW(window, dcomp_native_frame_prop);
+        SetWindowLongW(window, GWL_STYLE, WS_POPUP);
+        SetWindowLongW(window, GWL_EXSTYLE,
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED);
+        SetWindowLongPtrW(window, GWLP_HWNDPARENT, 0);
+        SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA);
+        SetWindowPos(window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
+                SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         return;
     }
 
@@ -1090,13 +1306,15 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
         WARN("Failed to update DComp task delegation, status %#lx.\n", status);
         return;
     }
-    exstyle = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
-    if (!base_presentation || transparent_base) exstyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT;
-
     SetPropW(window, L"__wine_dcomp_detached_window", target);
-    SetWindowLongW(window, GWL_STYLE, WS_POPUP);
-    SetWindowLongW(window, GWL_EXSTYLE, exstyle);
     SetWindowLongPtrW(window, GWLP_HWNDPARENT, (LONG_PTR)target);
+    if (transparent_base)
+        SetPropW(window, L"__wine_dcomp_client_rect", ULongToHandle(1));
+    else
+        RemovePropW(window, L"__wine_dcomp_client_rect");
+    dxgi_composition_window_update_frame(window, target, target_root,
+            base_presentation, transparent_base);
+
     if (base_presentation && !transparent_base && target_root)
     {
         PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
@@ -1111,22 +1329,18 @@ void WINAPI __wine_dxgi_bind_composition_window(HWND window, HWND target,
         dxgi_composition_window_update_backdrop(window);
     if (base_presentation && !transparent_base && target_root)
         dxgi_composition_window_update_caption(window, target_root);
-    if (transparent_base)
-        SetPropW(window, L"__wine_dcomp_client_rect", ULongToHandle(1));
-    else
-        RemovePropW(window, L"__wine_dcomp_client_rect");
 
     if (target_root) PostMessageW(target_root, WM_WAYLAND_DCOMP_EXPORT, 0, 0);
     if (!GetPropW(window, L"__wine_dcomp_old_proc"))
-    {
         SetPropW(window, L"__wine_dcomp_old_proc", (HANDLE)SetWindowLongPtrW(window, GWLP_WNDPROC,
                 (LONG_PTR)dxgi_composition_window_proc));
-        SetTimer(window, 1, 250, NULL);
-    }
+    SetTimer(window, 1, 250, NULL);
     if (dxgi_composition_window_get_rect(window, target, &rect))
+    {
         SetWindowPos(window, HWND_TOP, rect.left, rect.top,
                 max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,

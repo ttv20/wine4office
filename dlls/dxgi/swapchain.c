@@ -441,45 +441,14 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
 
-static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
-{
-    HWND root;
-    if (GetPropW(window, L"__wine_dcomp_bounds_enabled"))
-    {
-        LONG x = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_x"));
-        LONG y = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_y"));
-        LONG width = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_width"));
-        LONG height = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_bounds_height"));
-
-        if ((root = GetAncestor(target, GA_ROOT))) target = root;
-        if (width <= 0 || height <= 0 || !GetClientRect(target, rect)) return FALSE;
-        MapWindowPoints(target, NULL, (POINT *)rect, 2);
-        if ((LONGLONG)rect->left + x < INT_MIN || (LONGLONG)rect->left + x > INT_MAX
-                || (LONGLONG)rect->top + y < INT_MIN || (LONGLONG)rect->top + y > INT_MAX
-                || (LONGLONG)rect->left + x + width > INT_MAX
-                || (LONGLONG)rect->top + y + height > INT_MAX)
-            return FALSE;
-        SetRect(rect, rect->left + x, rect->top + y,
-                rect->left + x + width, rect->top + y + height);
-        return TRUE;
-    }
-
-
-    if (!GetPropW(window, L"__wine_dcomp_client_rect") &&
-        !GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
-        return GetWindowRect(target, rect);
-    if ((root = GetAncestor(target, GA_ROOT))) target = root;
-    if (!GetClientRect(target, rect)) return FALSE;
-    MapWindowPoints(target, NULL, (POINT *)rect, 2);
-    return TRUE;
-}
-
 static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
 {
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
     HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
     ATOM foreign_atom, old_foreign_atom;
     HWND base, foreign_parent, root;
+    DWORD root_style, root_exstyle;
+    BOOL base_presentation, transparent_base;
     RECT rect;
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
 
@@ -519,7 +488,14 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
         return;
     }
 
-    if (!d3d11_composition_window_get_rect(window, target, &rect)) return;
+    base_presentation = GetPropW(target, L"__wine_dcomp_base_presentation") == window;
+    root_style = GetWindowLongW(root, GWL_STYLE);
+    root_exstyle = GetWindowLongW(root, GWL_EXSTYLE);
+    transparent_base = (root_style & WS_POPUP) && (root_exstyle & WS_EX_TOOLWINDOW) &&
+            (root_exstyle & WS_EX_TOPMOST);
+    dxgi_composition_window_update_frame(window, target, root,
+            base_presentation, transparent_base);
+    if (!dxgi_composition_window_get_rect(window, target, &rect)) return;
     if (!(flags & SWP_FRAMECHANGED) && IsWindowVisible(window)
             && GetPropW(window, L"__wine_dcomp_composite_alpha_background"))
     {
@@ -533,9 +509,10 @@ static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *sw
                 || !GetWindowTextLengthW(root) || GetForegroundWindow() != root)
             RemovePropW(window, L"__wine_dcomp_raised_while_active");
     }
-    SetWindowPos(window, HWND_TOP, rect.left, rect.top,
-            max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
-            flags);
+    if (dxgi_composition_window_needs_update(window, &rect, flags))
+        SetWindowPos(window, HWND_TOP, rect.left, rect.top,
+                max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1),
+                flags);
 }
 
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
