@@ -28,7 +28,7 @@ static const struct
 }
 present_contracts[] =
 {
-    { L"Windows.Foundation.UniversalApiContract", 10, },
+    { L"Windows.Foundation.UniversalApiContract", 12, },
 };
 
 static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int version )

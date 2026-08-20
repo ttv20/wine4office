@@ -54,8 +54,10 @@ namespace Windows.System
     interface IDispatcherQueueShutdownStartingEventArgs;
     interface IDispatcherQueueStatics;
     interface IDispatcherQueueTimer;
+    interface IKnownUserPropertiesStatics;
     interface IUser;
     interface IUserStatics;
+    interface IUserStatics2;
     interface IUserChangedEventArgs;
     interface IUserChangedEventArgs2;
 
@@ -63,6 +65,7 @@ namespace Windows.System
     runtimeclass DispatcherQueueController;
     runtimeclass DispatcherQueueShutdownStartingEventArgs;
     runtimeclass DispatcherQueueTimer;
+    runtimeclass KnownUserProperties;
     runtimeclass User;
     runtimeclass UserChangedEventArgs;
 
@@ -465,6 +468,24 @@ namespace Windows.System
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.KnownUserProperties),
+        uuid(7755911a-70c5-48e5-b637-5ba3441e4ee4)
+    ]
+    interface IKnownUserPropertiesStatics : IInspectable
+    {
+        [propget] HRESULT DisplayName([out, retval] HSTRING *value);
+        [propget] HRESULT FirstName([out, retval] HSTRING *value);
+        [propget] HRESULT LastName([out, retval] HSTRING *value);
+        [propget] HRESULT ProviderName([out, retval] HSTRING *value);
+        [propget] HRESULT AccountName([out, retval] HSTRING *value);
+        [propget] HRESULT GuestHost([out, retval] HSTRING *value);
+        [propget] HRESULT PrincipalName([out, retval] HSTRING *value);
+        [propget] HRESULT DomainName([out, retval] HSTRING *value);
+        [propget] HRESULT SessionInitiationProtocolUri([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         exclusiveto(Windows.System.User),
         uuid(df9a26c6-e746-4bcd-b5d4-120103c4209b)
     ]
@@ -476,6 +497,16 @@ namespace Windows.System
         HRESULT GetPropertyAsync([in] HSTRING value, [out, retval] Windows.Foundation.IAsyncOperation<IInspectable *> **operation);
         HRESULT GetPropertiesAsync([in] Windows.Foundation.Collections.IVectorView<HSTRING> *values, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IPropertySet *> **operation);
         HRESULT GetPictureAsync([in] Windows.System.UserPictureSize desired_size, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IRandomAccessStreamReference *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 12.0),
+        exclusiveto(Windows.System.User),
+        uuid(74a37e11-2eb5-4487-b0d5-2c6790e013e9)
+    ]
+    interface IUserStatics2 : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.System.User **value);
     }
 
     [
@@ -532,7 +563,18 @@ namespace Windows.System
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
+        static(Windows.System.IKnownUserPropertiesStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass KnownUserProperties
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
         /* static(Windows.System.IUserStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.System.IUserStatics2, Windows.Foundation.UniversalApiContract, 12.0),
         threading(both),
     ]
     runtimeclass User

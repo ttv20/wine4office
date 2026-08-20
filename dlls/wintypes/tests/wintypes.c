@@ -452,7 +452,7 @@ static void test_IApiInformationStatics(void)
     }
     present_contracts[] =
     {
-        { L"Windows.Foundation.UniversalApiContract", 10, },
+        { L"Windows.Foundation.UniversalApiContract", 12, },
     };
 
     static const WCHAR *class_name = L"Windows.Foundation.Metadata.ApiInformation";
@@ -852,10 +852,17 @@ static void test_IApiInformationStatics(void)
         for (j = 0; j <= present_contracts[i].max_major; ++j)
         {
             ret = FALSE;
-            hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str, i, &ret);
+            hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str, j, &ret);
             ok(hr == S_OK, "IsApiContractPresentByMajor failed, hr %#lx, i %u, major %u.\n", hr, i, j);
             ok(ret == TRUE, "IsApiContractPresentByMajor returned FALSE, i %u, major %u.\n", i, j);
         }
+        ret = TRUE;
+        hr = IApiInformationStatics_IsApiContractPresentByMajor(statics, str,
+                present_contracts[i].max_major + 1, &ret);
+        ok(hr == S_OK, "IsApiContractPresentByMajor failed, hr %#lx, i %u, major %u.\n",
+                hr, i, present_contracts[i].max_major + 1);
+        ok(ret == FALSE, "IsApiContractPresentByMajor returned TRUE, i %u, major %u.\n",
+                i, present_contracts[i].max_major + 1);
         WindowsDeleteString(str);
     }
 

@@ -1,0 +1,6 @@
+TESTDLL = windows.system.dll
+IMPORTS = advapi32 combase uuid
+
+SOURCES = \
+	known_user_properties.c \
+	user.c

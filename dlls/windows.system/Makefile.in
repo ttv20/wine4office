@@ -1,0 +1,6 @@
+MODULE = windows.system.dll
+IMPORTS = advapi32 bcrypt combase shell32 uuid
+
+SOURCES = \
+	classes.idl \
+	main.c

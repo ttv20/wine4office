@@ -17,6 +17,7 @@
  */
 
 #ifdef __WIDL__
+#pragma makedep header install winmd
 #pragma winrt ns_prefix
 #endif
 
@@ -34,12 +35,14 @@ namespace Windows.System.Profile {
     interface IAnalyticsInfoStatics2;
     interface IAnalyticsVersionInfo;
     interface IAnalyticsVersionInfo2;
+    interface IEducationSettingsStatics;
     interface IRetailInfoStatics;
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
     interface IWindowsIntegrityPolicyStatics;
     runtimeclass AnalyticsVersionInfo;
     runtimeclass AnalyticsInfo;
+    runtimeclass EducationSettings;
     runtimeclass RetailInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
@@ -75,6 +78,16 @@ namespace Windows.System.Profile {
     {
         [propget] HRESULT DeviceFamily([out, retval] HSTRING *value);
         [propget] HRESULT DeviceFamilyVersion([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.System.Profile.EducationSettings),
+        uuid(fc53f0ef-4d3e-4e13-9b23-505f4d091e92)
+    ]
+    interface IEducationSettingsStatics : IInspectable
+    {
+        [propget] HRESULT IsEducationEnvironment([out, retval] boolean *value);
     }
 
     [
@@ -145,6 +158,16 @@ namespace Windows.System.Profile {
         threading(both)
     ]
     runtimeclass AnalyticsInfo
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IEducationSettingsStatics, Windows.Foundation.UniversalApiContract, 4.0),
+        threading(both)
+    ]
+    runtimeclass EducationSettings
     {
     }
 
