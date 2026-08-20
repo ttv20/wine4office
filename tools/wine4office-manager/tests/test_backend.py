@@ -1096,6 +1096,26 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             with self.subTest(malformed=malformed):
                 self.assertIsNone(backend.parse_windows_apps_package_name(malformed))
 
+    def test_windows_apps_package_skips_concurrent_removal(self):
+        package = self.home / (
+            "Microsoft.OutlookForWindows_1.2026.720.100_x64__8wekyb3d8bbwe"
+        )
+        package.mkdir()
+
+        with mock.patch.object(Path, "resolve", side_effect=FileNotFoundError):
+            self.assertIsNone(backend.parse_windows_apps_package(package))
+
+    def test_windows_apps_discovery_tolerates_directory_removal(self):
+        prefix = self._make_prefix(self.home / ".wine4office-removed-windowsapps")
+        windows_apps = prefix / "drive_c/Program Files/WindowsApps"
+        windows_apps.mkdir(parents=True)
+
+        with mock.patch.object(Path, "iterdir", side_effect=FileNotFoundError):
+            self.assertEqual(
+                list(backend.windows_apps_packages(prefix, (backend.OUTLOOK_PACKAGE_FAMILY,))),
+                [],
+            )
+
     def test_outlook_detection_selects_highest_valid_package_with_olk(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         windows_apps = prefix / "drive_c/Program Files/WindowsApps"
@@ -1160,13 +1180,39 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 if symlink.exists():
                     symlink.rmdir()
                 symlink.parent.mkdir(parents=True, exist_ok=True)
-                target = outside if ancestor == "drive_c" else outside
                 if ancestor == "drive_c":
                     (outside / "Program Files").mkdir()
                     windows_apps.rename(outside / "Program Files/WindowsApps")
-                symlink.symlink_to(target, target_is_directory=True)
+                symlink.symlink_to(outside, target_is_directory=True)
 
                 self.assertIsNone(backend.find_office_app_info(str(prefix), "outlook"))
+
+    def test_outlook_detection_rejects_symlinked_windowsapps_directory(self):
+        prefix = self._make_prefix(self.home / ".wine4office-windowsapps-link")
+        program_files = prefix / "drive_c/Program Files"
+        program_files.mkdir(parents=True)
+        outside = self.home / "outside-windowsapps"
+        package = outside / (
+            "Microsoft.OutlookForWindows_1.2026.900.100_x64__8wekyb3d8bbwe"
+        )
+        package.mkdir(parents=True)
+        (package / "olk.exe").write_bytes(b"outside")
+        (program_files / "WindowsApps").symlink_to(outside, target_is_directory=True)
+
+        self.assertIsNone(backend.find_office_app_info(str(prefix), "outlook"))
+
+    def test_teams_detection_rejects_symlinked_package_executable(self):
+        prefix = self._make_prefix(self.home / ".wine4office-teams-link")
+        package = prefix / (
+            "drive_c/Program Files/WindowsApps/"
+            "MSTeams_1.2026.900.100_x64__8wekyb3d8bbwe"
+        )
+        package.mkdir(parents=True)
+        outside = self.home / "outside-ms-teams.exe"
+        outside.write_bytes(b"outside")
+        (package / "ms-teams.exe").symlink_to(outside)
+
+        self.assertIsNone(backend.find_office_app_info(str(prefix), "teams"))
 
     def test_outlook_detection_rejects_symlinked_classic_ancestor(self):
         prefix = self._make_prefix(self.home / ".wine4office")
@@ -1841,6 +1887,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Office application is unavailable", result.stderr)
         self.assertFalse(log.exists())
 
     def test_new_outlook_shortcut_rejects_symlinked_windowsapps_ancestor(self):
@@ -1883,7 +1930,46 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Office application is unavailable", result.stderr)
         self.assertFalse(log.exists())
+
+    def test_new_outlook_shortcut_falls_back_to_classic_after_package_removal(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        package = prefix / (
+            "drive_c/Program Files/WindowsApps/"
+            "Microsoft.OutlookForWindows_1.2026.720.100_x64__8wekyb3d8bbwe"
+        )
+        package.mkdir(parents=True)
+        outlook = package / "olk.exe"
+        outlook.write_bytes(b"new")
+        classic = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
+        classic.mkdir(parents=True)
+        classic_outlook = classic / "OUTLOOK.EXE"
+        classic_outlook.write_bytes(b"classic")
+        icon = backend.data_home() / "icons/wine4office/outlook.ico"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"cached icon")
+        backend.create_app_shortcuts(["outlook"], str(prefix), str(self.wine), False)
+        outlook.unlink()
+        package.rmdir()
+
+        log = self.root / "classic-fallback-shortcut.log"
+        self._script(
+            "wine",
+            "#!/bin/bash\n"
+            "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n",
+        )
+        environment = os.environ.copy()
+        environment["WINE4OFFICE_TEST_LOG"] = str(log)
+
+        subprocess.run(
+            [str(backend.shortcut_launcher_path("outlook"))],
+            env=environment, check=True,
+        )
+
+        self.assertEqual(
+            log.read_text().splitlines()[-1], f"ARG={classic_outlook.resolve()}",
+        )
 
     def test_classic_outlook_shortcut_keeps_classic_setup(self):
         prefix = self._make_prefix(self.home / ".wine4office")
