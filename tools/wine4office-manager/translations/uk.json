@@ -95,7 +95,7 @@
   "Wine processes stopped.": "Wine процесів зупинено.",
   "Wine runner missing": "Компонент Wine відсутній",
   "Wine shutdown failed. Review the details below.": "Не вдалося завершити роботу Wine. Перегляньте деталі нижче.",
-  "Wine shutdown is finishing; the Manager will close when it completes.": "Вимкнення Wine завершується; менеджер закриється, коли він завершиться.",
+  "Wine shutdown is finishing; the Manager will close when it completes.": "Вимкнення Wine завершується; менеджер закриється, коли вимкнення завершиться.",
   "Wine shutdown was interrupted.": "Вимкнення Wine було перервано.",
   "Wine tools": "Інструменти Wine",
   "Wine4Office Manager": "Менеджер Wine4Office",

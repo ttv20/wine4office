@@ -94,9 +94,9 @@
   "Wine executable:": "Wine yürütülebiliri:",
   "Wine processes stopped.": "Wine işlemleri durduruldu.",
   "Wine runner missing": "Wine çalıştırıcısı eksik",
-  "Wine shutdown failed. Review the details below.": "Wine'in kapatılması başarısız oldu. Aşağıdaki ayrıntıları inceleyin.",
-  "Wine shutdown is finishing; the Manager will close when it completes.": "Wine'nin kapatılması tamamlanıyor; Yönetici tamamlandığında kapanacaktır.",
-  "Wine shutdown was interrupted.": "Wine'nin kapatılması kesintiye uğradı.",
+  "Wine shutdown failed. Review the details below.": "Wine'ın kapatılması başarısız oldu. Aşağıdaki ayrıntıları inceleyin.",
+  "Wine shutdown is finishing; the Manager will close when it completes.": "Wine'ın kapatılması tamamlanıyor; Yönetici tamamlandığında kapanacaktır.",
+  "Wine shutdown was interrupted.": "Wine'ın kapatılması kesintiye uğradı.",
   "Wine tools": "Wine araçları",
   "Wine4Office Manager": "Wine4Office Yöneticisi",
   "Working folder:": "Çalışma klasörü:"

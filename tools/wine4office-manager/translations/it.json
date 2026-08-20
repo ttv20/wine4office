@@ -92,7 +92,7 @@
   "Wine environment": "Ambiente Wine",
   "Wine environment stopped.": "L'ambiente Wine è stato interrotto.",
   "Wine executable:": "Eseguibile Wine:",
-  "Wine processes stopped.": "Wine processi interrotti.",
+  "Wine processes stopped.": "I processi Wine sono stati fermati.",
   "Wine runner missing": "Runner Wine mancante",
   "Wine shutdown failed. Review the details below.": "L'arresto di Wine non è riuscito. Esamina i dettagli di seguito.",
   "Wine shutdown is finishing; the Manager will close when it completes.": "L'arresto di Wine sta terminando; il Manager si chiuderà al termine.",

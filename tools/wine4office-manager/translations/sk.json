@@ -61,7 +61,7 @@
   "Wine processes stopped.": "Wine procesy boli zastavené.",
   "Wine runner missing": "Program Wine chýba",
   "Wine shutdown failed. Review the details below.": "Wine vypnutie zlyhalo. Pozrite si podrobnosti nižšie.",
-  "Wine shutdown is finishing; the Manager will close when it completes.": "Wine sa dokončuje vypnutie; manažér sa po dokončení zatvorí.",
+  "Wine shutdown is finishing; the Manager will close when it completes.": "Vypínanie Wine sa dokončuje; manažér sa po dokončení zatvorí.",
   "Wine shutdown was interrupted.": "Vypnutie Wine bolo prerušené.",
   "Wine tools": "Nástroje Wine",
   "Wine4Office Manager": "Správca Wine4Office",

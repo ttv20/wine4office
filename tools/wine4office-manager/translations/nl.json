@@ -95,7 +95,7 @@
   "Wine processes stopped.": "Wine processen gestopt.",
   "Wine runner missing": "Wine-runner ontbreekt",
   "Wine shutdown failed. Review the details below.": "Wine afsluiten mislukt. Bekijk de details hieronder.",
-  "Wine shutdown is finishing; the Manager will close when it completes.": "Het afsluiten van Wine is voltooid; de Manager wordt gesloten wanneer deze is voltooid.",
+  "Wine shutdown is finishing; the Manager will close when it completes.": "Het afsluiten van Wine wordt voltooid; de Manager wordt gesloten zodra dit is afgerond.",
   "Wine shutdown was interrupted.": "Het afsluiten van Wine is onderbroken.",
   "Wine tools": "Wine-hulpmiddelen",
   "Wine4Office Manager": "Wine4Office-beheer",
