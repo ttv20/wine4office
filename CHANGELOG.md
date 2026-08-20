@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Open Microsoft 365 sign-in pages correctly in Word.
 - Allow 60 seconds for the Office installer to open and report startup timeouts clearly.
 - Show localized graceful-close and forced-kill progress while stopping the selected Wine environment.
 - Improve Wine runner and application-status translations.

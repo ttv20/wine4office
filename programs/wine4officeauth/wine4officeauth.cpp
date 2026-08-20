@@ -1739,6 +1739,8 @@ static bool run_owned_oauth(HINSTANCE instance, HWND owner, const std::string &l
         url_encode(requested_redirect_uri) + "&scope=" + url_encode(requested_scope) +
         "&code_challenge=" + challenge + "&code_challenge_method=S256&state=" + oauth_state;
     if (!login_hint.empty()) authorize_url += "&login_hint=" + url_encode(login_hint);
+    authorize_url_w = utf8_to_wide(authorize_url);
+    if (authorize_url_w.empty()) return false;
 
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = instance;
