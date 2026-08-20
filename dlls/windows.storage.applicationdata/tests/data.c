@@ -655,6 +655,8 @@ static void test_ApplicationDataManager(void)
         L"../foo_8wekyb3d8bbwe", L"Microsoft.OutlookForWindows_8wekyb3d8bbwE",
         L"Microsoft.OutlookForWindows_iiiiiiiiiiiii", L"Microsoft.OutlookForWindows_lllllllllllll",
         L"Microsoft.OutlookForWindows_ooooooooooooo", L"Microsoft.OutlookForWindows_uuuuuuuuuuuuu",
+        L"con_8wekyb3d8bbwe", L"CON.foo_8wekyb3d8bbwe", L"xn--foo_8wekyb3d8bbwe",
+        L"foo.xn--bar_8wekyb3d8bbwe",
         L"foo..bar_8wekyb3d8bbwe", L".foo_8wekyb3d8bbwe", L"foo._8wekyb3d8bbwe",
         L"foo\tbar_8wekyb3d8bbwe", L"foo\nbar_8wekyb3d8bbwe", L"foo" L"\x00e9" L"bar_8wekyb3d8bbwe",
         L"Microsoft.OutlookForWindows_8wekyb3d8bb_w e",

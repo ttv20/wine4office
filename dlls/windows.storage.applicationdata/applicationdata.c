@@ -1113,6 +1113,30 @@ static HRESULT WINAPI application_data_manager_GetTrustLevel( IApplicationDataMa
     return IActivationFactory_GetTrustLevel( &impl->IActivationFactory_iface, trust_level );
 }
 
+static BOOL package_name_is_reserved( const WCHAR *name, UINT32 length )
+{
+    static const WCHAR *reserved[] =
+    {
+        L"con", L"prn", L"aux", L"nul",
+        L"com1", L"com2", L"com3", L"com4", L"com5", L"com6", L"com7", L"com8", L"com9",
+        L"lpt1", L"lpt2", L"lpt3", L"lpt4", L"lpt5", L"lpt6", L"lpt7", L"lpt8", L"lpt9",
+    };
+    UINT32 i;
+
+    for (i = 0; i < ARRAY_SIZE(reserved); ++i)
+    {
+        UINT32 reserved_length = wcslen( reserved[i] );
+
+        if (length >= reserved_length && !wcsnicmp( name, reserved[i], reserved_length ) &&
+                (length == reserved_length || name[reserved_length] == L'.'))
+            return TRUE;
+    }
+    if (length >= 4 && !wcsnicmp( name, L"xn--", 4 )) return TRUE;
+    for (i = 0; i + 5 <= length; ++i)
+        if (name[i] == L'.' && !wcsnicmp( name + i + 1, L"xn--", 4 )) return TRUE;
+    return FALSE;
+}
+
 static BOOL valid_package_family( HSTRING package_family )
 {
     const WCHAR *str;
@@ -1133,7 +1157,9 @@ static BOOL valid_package_family( HSTRING package_family )
     if (!separator || separator == length) return FALSE;
 
     name_length = separator - 1;
-    if (name_length < 3 || name_length > 50 || length - separator != 13) return FALSE;
+    if (name_length < 3 || name_length > 50 || length - separator != 13 ||
+            package_name_is_reserved( str, name_length ))
+        return FALSE;
 
     for (i = 0; i < name_length; ++i)
     {
