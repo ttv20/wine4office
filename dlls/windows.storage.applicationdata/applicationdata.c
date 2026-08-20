@@ -631,8 +631,7 @@ static NTSTATUS open_local_appdata_directory( const WCHAR *path, struct director
         goto done;
     }
 
-    status = open_checked_directory( NULL, nt_path.Buffer, 7,
-            FILE_TRAVERSE | FILE_ADD_SUBDIRECTORY, FILE_OPEN, &next, &created );
+    status = open_checked_directory( NULL, nt_path.Buffer, 7, FILE_TRAVERSE, FILE_OPEN, &next, &created );
     if (status) goto done;
     if (!directory_handle_chain_add( chain, next, FALSE ))
     {
@@ -657,7 +656,8 @@ static NTSTATUS open_local_appdata_directory( const WCHAR *path, struct director
 
         parent = chain->entries[chain->count - 1].handle;
         status = open_checked_directory( parent, start, separator - start,
-                FILE_TRAVERSE | FILE_ADD_SUBDIRECTORY, FILE_OPEN_IF, &next, &created );
+                FILE_TRAVERSE | (separator == end ? FILE_ADD_SUBDIRECTORY : 0),
+                separator == end ? FILE_OPEN_IF : FILE_OPEN, &next, &created );
         if (status) break;
         if (!directory_handle_chain_add( chain, next, created ))
         {
