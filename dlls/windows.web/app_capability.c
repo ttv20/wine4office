@@ -15,6 +15,7 @@
 #include "sddl.h"
 #include "xmllite.h"
 #include "wine/debug.h"
+#include "wine/windows_system.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(web);
 static const IID xml_reader_iid =
@@ -462,6 +463,7 @@ static HRESULT inspectable_get_iids( const IID *iid, ULONG *count, IID **iids )
 struct capability_user
 {
     IUser IUser_iface;
+    IWineSystemUserIdentity IWineSystemUserIdentity_iface;
     LONG ref;
     HSTRING sid;
 };
@@ -471,18 +473,24 @@ static inline struct capability_user *impl_from_IUser( IUser *iface )
     return CONTAINING_RECORD( iface, struct capability_user, IUser_iface );
 }
 
+static inline struct capability_user *impl_from_IWineSystemUserIdentity( IWineSystemUserIdentity *iface )
+{
+    return CONTAINING_RECORD( iface, struct capability_user, IWineSystemUserIdentity_iface );
+}
+
 static HRESULT WINAPI capability_user_QueryInterface( IUser *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IUser ))
-    {
-        *out = iface;
-        IUser_AddRef( iface );
-        return S_OK;
-    }
     *out = NULL;
-    return E_NOINTERFACE;
+    if (IsEqualGUID( iid, &IID_IWineSystemUserIdentity ))
+        *out = &impl_from_IUser( iface )->IWineSystemUserIdentity_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IUser ))
+        *out = iface;
+    else
+        return E_NOINTERFACE;
+    IUser_AddRef( iface );
+    return S_OK;
 }
 
 static ULONG WINAPI capability_user_AddRef( IUser *iface )
@@ -568,6 +576,39 @@ static HRESULT WINAPI capability_user_GetPictureAsync( IUser *iface,
     return E_NOTIMPL;
 }
 
+static HRESULT WINAPI capability_user_identity_QueryInterface( IWineSystemUserIdentity *iface,
+        REFIID iid, void **out )
+{
+    return capability_user_QueryInterface( &impl_from_IWineSystemUserIdentity( iface )->IUser_iface, iid, out );
+}
+
+static ULONG WINAPI capability_user_identity_AddRef( IWineSystemUserIdentity *iface )
+{
+    return capability_user_AddRef( &impl_from_IWineSystemUserIdentity( iface )->IUser_iface );
+}
+
+static ULONG WINAPI capability_user_identity_Release( IWineSystemUserIdentity *iface )
+{
+    return capability_user_Release( &impl_from_IWineSystemUserIdentity( iface )->IUser_iface );
+}
+
+static HRESULT WINAPI capability_user_identity_GetSid( IWineSystemUserIdentity *iface, HSTRING *sid )
+{
+    struct capability_user *impl = impl_from_IWineSystemUserIdentity( iface );
+
+    if (sid) *sid = NULL;
+    if (!sid) return E_POINTER;
+    return WindowsDuplicateString( impl->sid, sid );
+}
+
+static const IWineSystemUserIdentityVtbl capability_user_identity_vtbl =
+{
+    capability_user_identity_QueryInterface,
+    capability_user_identity_AddRef,
+    capability_user_identity_Release,
+    capability_user_identity_GetSid,
+};
+
 static const IUserVtbl capability_user_vtbl =
 {
     capability_user_QueryInterface,
@@ -594,6 +635,7 @@ static HRESULT capability_user_create( const WCHAR *sid, IUser **out )
     if (!sid || !*sid) return E_INVALIDARG;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IUser_iface.lpVtbl = &capability_user_vtbl;
+    impl->IWineSystemUserIdentity_iface.lpVtbl = &capability_user_identity_vtbl;
     impl->ref = 1;
     if (FAILED(hr = WindowsCreateString( sid, wcslen( sid ), &impl->sid )))
     {
@@ -606,6 +648,7 @@ static HRESULT capability_user_create( const WCHAR *sid, IUser **out )
 
 static HRESULT capability_user_get_sid( IUser *user, WCHAR **out )
 {
+    IWineSystemUserIdentity *identity = NULL;
     PSID sid = NULL;
     WCHAR *canonical = NULL;
     HSTRING value = NULL;
@@ -615,7 +658,11 @@ static HRESULT capability_user_get_sid( IUser *user, WCHAR **out )
     if (!out) return E_POINTER;
     *out = NULL;
     if (!user) return E_INVALIDARG;
-    if (FAILED(hr = IUser_get_NonRoamableId( user, &value ))) return hr;
+    if (FAILED(IUser_QueryInterface( user, &IID_IWineSystemUserIdentity, (void **)&identity )))
+        return E_INVALIDARG;
+    hr = IWineSystemUserIdentity_GetSid( identity, &value );
+    IWineSystemUserIdentity_Release( identity );
+    if (FAILED(hr)) return hr;
     raw = WindowsGetStringRawBuffer( value, NULL );
     if (!raw || !*raw || !ConvertStringSidToSidW( raw, &sid ))
     {

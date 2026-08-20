@@ -1,5 +1,5 @@
 MODULE = windows.system.dll
-IMPORTS = advapi32 combase shell32 uuid
+IMPORTS = advapi32 bcrypt combase shell32 uuid
 
 SOURCES = \
 	classes.idl \

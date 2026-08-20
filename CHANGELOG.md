@@ -9,6 +9,7 @@
 - Let modern Office web views observe text and child-node changes reliably.
 - Keep Outlook shortcuts working safely across Store package changes and
   classic Outlook fallback.
+- Improve keyboard and IME input across cross-process DirectComposition views.
 - Route keyboard, pointer, and IME input through delegated DirectComposition
   surfaces on Wayland.
 
