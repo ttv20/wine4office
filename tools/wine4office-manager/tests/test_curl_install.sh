@@ -41,8 +41,10 @@ write_metadata() {
     manager_digest=$1
     manager_version=${2:-0.1.0}
     wine_version=${3:-0.1.0}
+    release_channel=${4:-stable}
     RELEASE="$RELEASE" MANAGER_DIGEST="$manager_digest" \
-        MANAGER_VERSION="$manager_version" WINE_VERSION="$wine_version" python3 - <<'PY'
+        MANAGER_VERSION="$manager_version" WINE_VERSION="$wine_version" \
+        RELEASE_CHANNEL="$release_channel" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -52,7 +54,7 @@ manager = root / "Wine4OfficeManager"
 wine = root / "wine.tar.zst"
 payload = {
     "schema_version": 1,
-    "channel": "stable",
+    "channel": os.environ["RELEASE_CHANNEL"],
     "metadata_url": "https://example.invalid/release.json",
     "manager": {
         "version": os.environ["MANAGER_VERSION"],
@@ -86,6 +88,7 @@ while (($#)); do
     esac
 done
 [[ -n $url ]]
+printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 case $url in
     */release.json) source=$FAKE_RELEASE/release.json ;;
     */Wine4OfficeManager) source=$FAKE_RELEASE/Wine4OfficeManager ;;
@@ -100,10 +103,22 @@ export HOME=$HOME_DIR
 export XDG_DATA_HOME=$HOME_DIR/data
 export WINE4OFFICE_BIN_HOME=$HOME_DIR/bin
 export WINE4OFFICE_HOME=$HOME_DIR/data/wine4office
-export WINE4OFFICE_METADATA_URL=https://example.invalid/release.json
 export FAKE_RELEASE=$RELEASE
+export FAKE_CURL_LOG=$TMP/curl.log
 export WINE4OFFICE_TEST_MANAGER_LOG=$TMP/manager.log
-PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
+
+for invalid_args in "--tag" "--tag invalid/tag" "--unknown"; do
+    if PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" $invalid_args >/dev/null 2>&1; then
+        echo "installer accepted invalid arguments: $invalid_args" >&2
+        exit 1
+    fi
+done
+[[ ! -e $FAKE_CURL_LOG ]]
+
+PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --tag wine4office-v0.1.10 >/dev/null
+[[ $(head -n 1 "$FAKE_CURL_LOG") == \
+   https://github.com/ttv20/wine4office/releases/download/wine4office-v0.1.10/release.json ]]
+export WINE4OFFICE_METADATA_URL=https://example.invalid/release.json
 
 [[ -x $WINE4OFFICE_HOME/bin/Wine4OfficeManager ]]
 [[ -x $WINE4OFFICE_HOME/bin/wine4office-uninstall ]]
@@ -120,6 +135,38 @@ fi
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_URL") == https://example.invalid/release.json ]]
 [[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == stable ]]
 [[ $(cat "$WINE4OFFICE_HOME/STANDALONE") == Wine4OfficeManager ]]
+
+cp /bin/dash "$WINE4OFFICE_HOME/runner/bin/wine-active-test"
+"$WINE4OFFICE_HOME/runner/bin/wine-active-test" -c 'while :; do :; done' &
+ACTIVE_WINE=$!
+for _ in {1..50}; do
+    [[ $(readlink -f "/proc/$ACTIVE_WINE/exe" 2>/dev/null || true) == \
+       "$WINE4OFFICE_HOME/runner/bin/wine-active-test" ]] && break
+    sleep 0.02
+done
+write_metadata "$(printf '0%.0s' {1..64})"
+if PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --force >/dev/null 2>&1; then
+    echo "installer accepted invalid staging metadata" >&2
+    exit 1
+fi
+kill -0 "$ACTIVE_WINE"
+write_metadata "$MANAGER_DIGEST"
+if PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null 2>"$TMP/active.err"; then
+    echo "installer updated while Wine4Office was active" >&2
+    exit 1
+fi
+grep -q -- 'rerun with --force' "$TMP/active.err"
+kill -0 "$ACTIVE_WINE"
+PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --force >/dev/null
+if kill -0 "$ACTIVE_WINE" 2>/dev/null; then
+    echo "installer --force left Wine4Office running" >&2
+    exit 1
+fi
+write_metadata "$MANAGER_DIGEST" 0.2.0-beta.1 0.2.0-beta.1 prerelease
+PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --tag 0.2.0-beta.1 >/dev/null
+[[ $(cat "$WINE4OFFICE_HOME/VERSION") == 0.2.0-beta.1 ]]
+[[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == stable ]]
+write_metadata "$MANAGER_DIGEST"
 if [[ -z $REAL_MANAGER ]]; then
     [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]
 

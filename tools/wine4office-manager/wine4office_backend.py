@@ -2345,31 +2345,48 @@ def _parse_component(payload: object, name: str, metadata_url: str) -> dict:
     return result
 
 
-def _expected_update_channel(expected_channel: str | None) -> str:
-    expected_channel = configured_update_channel() \
+def accepted_update_channels(
+        expected_channel: str | Iterable[str] | None = None,
+        include_prereleases: bool = False) -> tuple[str, ...]:
+    """Return the validated channels allowed by the current update consent."""
+    configured = configured_update_channel() \
         if expected_channel is None else expected_channel
-    if (not isinstance(expected_channel, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", expected_channel)):
+    if isinstance(configured, str):
+        values = [configured]
+    else:
+        try:
+            values = list(configured)
+        except TypeError:
+            values = [configured]
+    if include_prereleases:
+        values.append("prerelease")
+    channels = tuple(dict.fromkeys(values))
+    if not channels or any(
+        not isinstance(channel, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", channel)
+        for channel in channels
+    ):
         raise ValueError("Expected update channel is invalid.")
-    return expected_channel
+    return channels
 
 
-def _validate_update_channel(metadata: dict, expected_channel: str | None) -> str:
-    expected_channel = _expected_update_channel(expected_channel)
+def _validate_update_channel(
+        metadata: dict, expected_channel: str | Iterable[str] | None) -> str:
+    expected_channels = accepted_update_channels(expected_channel)
     channel = metadata.get("channel")
     if not isinstance(channel, str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", channel):
         raise ValueError("Release metadata has an invalid channel.")
-    if channel != expected_channel:
+    if channel not in expected_channels:
         raise ValueError(
             f"Release metadata channel {channel!r} does not match expected "
-            f"channel {expected_channel!r}."
+            f"channel {expected_channels[0]!r}."
         )
     return channel
 
 
 def parse_release_metadata(payload: bytes | str | dict, source_url: str,
-                           expected_channel: str | None = None) -> dict:
+                           expected_channel: str | Iterable[str] | None = None) -> dict:
     """Validate and normalize provider-neutral schema-v1 release metadata."""
     source_url = _https_url(source_url, "Metadata address")
     if isinstance(payload, (bytes, str)):
@@ -2406,7 +2423,7 @@ def _https_context() -> ssl.SSLContext:
 
 
 def fetch_release_metadata(metadata_url: str, output: Output | None = None,
-                           expected_channel: str | None = None) -> dict:
+                           expected_channel: str | Iterable[str] | None = None) -> dict:
     metadata_url = _https_url(metadata_url, "Metadata address")
     if output:
         output(f"Checking {metadata_url}")
@@ -2518,7 +2535,7 @@ def compare_versions(left: str, right: str) -> int:
 
 
 def available_updates(metadata: dict, skipped: dict | None = None,
-                      expected_channel: str | None = None) -> dict:
+                      expected_channel: str | Iterable[str] | None = None) -> dict:
     _validate_update_channel(metadata, expected_channel)
     skipped = skipped if isinstance(skipped, dict) else {}
     installed = {"manager": current_version(), "wine": current_wine_version()}
@@ -2540,16 +2557,19 @@ def available_updates(metadata: dict, skipped: dict | None = None,
 
 def check_for_updates(metadata_url: str, skipped: dict | None = None,
                       output: Output | None = None,
-                      expected_channel: str | None = None,
+                      expected_channel: str | Iterable[str] | None = None,
                       include_prereleases: bool = False) -> dict:
     source_url = (
         _github_latest_release_metadata_url(metadata_url)
         if include_prereleases else metadata_url
     )
-    metadata = fetch_release_metadata(source_url, output, expected_channel)
+    expected_channels = accepted_update_channels(
+        expected_channel, include_prereleases
+    )
+    metadata = fetch_release_metadata(source_url, output, expected_channels)
     return {
         "metadata": metadata,
-        "updates": available_updates(metadata, skipped, expected_channel),
+        "updates": available_updates(metadata, skipped, expected_channels),
     }
 
 
@@ -3746,6 +3766,19 @@ def _install_update_lock(root: Path | None, manager_target: Path | None,
             lock.close()
 
 
+def wait_for_install_update() -> None:
+    """Wait at Manager startup until an installer commit barrier is released."""
+    root = installed_root()
+    if root is None and getattr(sys, "frozen", False):
+        executable = Path(sys.executable).expanduser().resolve()
+        if executable.name == "Wine4OfficeManager" and executable.parent.name == "bin":
+            root = executable.parent.parent
+    if root is None:
+        return
+    with _install_update_lock(root, manager_update_target(), root / "runner"):
+        pass
+
+
 def _commit_update_transaction(
         replacements: list[tuple[Path, Path]],
         text_updates: dict[Path, str],
@@ -3806,7 +3839,7 @@ def _commit_update_transaction(
 
 def install_release_updates(metadata: dict, components: Iterable[str], output: Output,
                             cancel_event=None,
-                            expected_channel: str | None = None,
+                            expected_channel: str | Iterable[str] | None = None,
                             progress: Callable[[str, int | None], None] | None = None) -> str:
     """Stage every selected payload, then commit all components transactionally."""
     selected = list(dict.fromkeys(components))
@@ -3814,7 +3847,7 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
         raise ValueError("Select at least one valid update component.")
     if not isinstance(metadata, dict):
         raise ValueError("Release metadata must be a JSON object.")
-    expected_channel = _expected_update_channel(expected_channel)
+    expected_channel = accepted_update_channels(expected_channel)
     metadata = parse_release_metadata(
         metadata, metadata.get("metadata_url", ""), expected_channel
     )

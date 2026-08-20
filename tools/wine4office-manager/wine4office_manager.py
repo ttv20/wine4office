@@ -677,6 +677,11 @@ class ManagerState:
                     self.output("Stopped the selected Wine environment before updating.")
                 result = backend.install_release_updates(
                     metadata, selected, self.output, self.cancel_event,
+                    expected_channel=backend.accepted_update_channels(
+                        include_prereleases=(
+                            config.get("include_prereleases") is True
+                        )
+                    ),
                     progress=self.set_progress,
                 )
                 if "wine" in selected:
@@ -1173,6 +1178,8 @@ def main() -> int:
                         help=argparse.SUPPRESS)
     parser.add_argument("documents", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if FROZEN:
+        backend.wait_for_install_update()
     if args.review_incident and (
             args.target or args.documents or args.preload_service or args.preload_worker
             or args.install_shortcut or args.prepare_uninstall or args.remove_prefix

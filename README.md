@@ -40,6 +40,17 @@ It installs `Wine4OfficeManager` in `~/.local/bin`, creates the application-menu
 shortcut, and asks whether to launch **Wine4Office Manager** immediately
 (default: Yes). The default Wine environment remains `~/.wine4office`.
 
+To install an exact published release instead of the latest stable release:
+
+```sh
+curl -fsSL https://github.com/ttv20/wine4office/releases/latest/download/install.sh | \
+  bash -s -- --tag wine4office-v0.1.10
+```
+
+The installer asks before closing an active Wine4Office Manager or Wine
+session. For unattended updates, pass `--force` to close those processes
+without prompting (and force-stop them only if graceful shutdown times out).
+
 ---
 
 ## Build It Yourself
