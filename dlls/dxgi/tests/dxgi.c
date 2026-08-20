@@ -2502,7 +2502,7 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     struct wine_dcomp_ime_token token;
     dcomp_create_device_proc pDCompositionCreateDevice;
     dwm_set_window_attribute_proc pDwmSetWindowAttribute = NULL;
-    DWORD initial_style, initial_exstyle, helper_style, target_style, target_exstyle;
+    DWORD initial_style = 0, initial_exstyle = 0, helper_style, target_style, target_exstyle;
     RECT target_rect, helper_rect, helper_client;
     HWND window = NULL, target_window = NULL, target_child = NULL, caption;
     LRESULT helper_hit, target_hit;
@@ -2510,7 +2510,7 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     UINT dpi;
     enum DWMNCRENDERINGPOLICY policy;
     D2D_RECT_F clip;
-    HWND initial_owner;
+    HWND initial_owner = NULL;
     WNDCLASSW wc = {0};
     HMODULE dcomp = NULL, dwmapi = NULL;
     HHOOK callwndproc_hook = NULL;
