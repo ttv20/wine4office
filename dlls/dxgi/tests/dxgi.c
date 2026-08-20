@@ -2649,7 +2649,7 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
             "Standard frame helper has a synthetic caption overlay.\n");
     dpi = GetDpiForWindow(window);
     hit_point.x = helper_rect.right - 5 * GetSystemMetricsForDpi(SM_CXSIZE, dpi) / 2;
-    hit_point.y = helper_rect.top + GetSystemMetricsForDpi(SM_CYSIZE, dpi) / 2;
+    hit_point.y = (helper_rect.top + helper_client.top) / 2;
     state.custom_hit_test = TRUE;
     state.hit_test_count = 0;
     target_hit = SendMessageW(target_window, WM_NCHITTEST, 0,
@@ -2724,7 +2724,8 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
 
     target_exstyle = GetWindowLongW(target_window, GWL_EXSTYLE);
     SetWindowLongW(target_window, GWL_STYLE, target_style & ~WS_MAXIMIZEBOX);
-    SetWindowLongW(target_window, GWL_EXSTYLE, target_exstyle | WS_EX_RTLREADING);
+    SetWindowLongW(target_window, GWL_EXSTYLE,
+            target_exstyle | WS_EX_RTLREADING | WS_EX_TOOLWINDOW);
     SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     SendMessageW(window, WM_TIMER, 1, 0);
@@ -2734,6 +2735,8 @@ static void test_create_composition_swapchain(IUnknown *device, BOOL is_d3d12)
     ok(!(helper_style & WS_MAXIMIZEBOX), "Helper retained a removed maximize box.\n");
     ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_RTLREADING,
             "Helper did not mirror the root reading direction.\n");
+    ok(GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW,
+            "Helper did not mirror the root tool-window frame.\n");
     SetWindowLongW(target_window, GWL_STYLE, target_style);
     SetWindowLongW(target_window, GWL_EXSTYLE, target_exstyle);
     SetWindowPos(target_window, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE |

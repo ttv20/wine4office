@@ -31,7 +31,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
         WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
 #define DCOMP_FRAME_EXSTYLE_MASK (WS_EX_DLGMODALFRAME | WS_EX_CLIENTEDGE | \
         WS_EX_STATICEDGE | WS_EX_WINDOWEDGE | WS_EX_LAYOUTRTL | \
-        WS_EX_RTLREADING | WS_EX_LEFTSCROLLBAR)
+        WS_EX_RTLREADING | WS_EX_LEFTSCROLLBAR | WS_EX_TOOLWINDOW)
 
 static const WCHAR dcomp_synthetic_window_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','s','y','n','t','h','e','t','i','c','_','w','i','n','d','o','w',0};
@@ -516,7 +516,6 @@ BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 {
     RECT frame;
     DWORD style, exstyle;
-    HWND root;
     UINT dpi;
 
     if (!dxgi_composition_window_get_content_rect(window, target, rect)) return FALSE;
@@ -524,8 +523,7 @@ BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 
     style = GetWindowLongW(window, GWL_STYLE);
     exstyle = GetWindowLongW(window, GWL_EXSTYLE);
-    root = GetAncestor(target, GA_ROOT);
-    dpi = GetDpiForWindow(root ? root : window);
+    dpi = GetDpiForWindow(window);
     SetRect(&frame, 0, 0, rect->right - rect->left, rect->bottom - rect->top);
     if (!AdjustWindowRectExForDpi(&frame, style, FALSE, exstyle, dpi)) return FALSE;
     frame.right += rect->left;
@@ -536,7 +534,7 @@ BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect)
     return TRUE;
 }
 
-static BOOL dxgi_composition_window_needs_update(HWND window, const RECT *rect, UINT flags)
+BOOL dxgi_composition_window_needs_update(HWND window, const RECT *rect, UINT flags)
 {
     RECT current;
 
@@ -843,7 +841,7 @@ static BOOL dxgi_composition_window_has_native_frame(HWND window, HWND target, H
     return EqualRect(&content, &client);
 }
 
-static BOOL dxgi_composition_window_update_frame(HWND window, HWND target, HWND root,
+BOOL dxgi_composition_window_update_frame(HWND window, HWND target, HWND root,
         BOOL base_presentation, BOOL transparent_base)
 {
     DWORD old_style, old_exstyle, root_style, root_exstyle;
@@ -972,27 +970,35 @@ static void dxgi_composition_window_clear_owned_icons(HWND window)
     }
 }
 
-static void dxgi_composition_window_set_executable_icons(HWND window, const WCHAR *image)
+static BOOL dxgi_composition_window_set_executable_icons(HWND window, const WCHAR *image)
 {
     HICON big_icon = NULL, small_icon = NULL;
+    BOOL installed = FALSE;
     UINT count;
 
     count = PrivateExtractIconExW(image, 0, &big_icon, &small_icon, 1);
-    if (!count || count == ~0u) return;
+    if (!count || count == ~0u) return FALSE;
     if (big_icon)
     {
         if (SetPropW(window, dcomp_task_icon_big_prop, big_icon))
+        {
             SendMessageW(window, WM_SETICON, ICON_BIG, (LPARAM)big_icon);
+            installed = TRUE;
+        }
         else
             DestroyIcon(big_icon);
     }
     if (small_icon)
     {
         if (SetPropW(window, dcomp_task_icon_small_prop, small_icon))
+        {
             SendMessageW(window, WM_SETICON, ICON_SMALL, (LPARAM)small_icon);
+            installed = TRUE;
+        }
         else
             DestroyIcon(small_icon);
     }
+    return installed;
 }
 
 static void dxgi_composition_window_update_identity(HWND window, HWND root)
@@ -1027,9 +1033,9 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
                             SWP_NOACTIVATE | SWP_FRAMECHANGED);
                 }
-                if (process_id != GetCurrentProcessId())
-                    dxgi_composition_window_set_executable_icons(window, image);
-                SetPropW(window, L"__wine_dcomp_task_identity", root);
+                if (process_id == GetCurrentProcessId() ||
+                    dxgi_composition_window_set_executable_icons(window, image))
+                    SetPropW(window, L"__wine_dcomp_task_identity", root);
             }
             CloseHandle(process);
         }

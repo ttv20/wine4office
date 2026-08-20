@@ -2077,7 +2077,7 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
         {
             BOOL min_or_max_box = (style & WS_SYSMENU) && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
             int button_width = get_system_metrics( ex_style & WS_EX_TOOLWINDOW ?
-                                                  SM_CYCAPTION : SM_CXSIZE );
+                                                  SM_CYSMCAPTION : SM_CXSIZE );
             if (ex_style & WS_EX_LAYOUTRTL)
             {
                 /* Check system menu */

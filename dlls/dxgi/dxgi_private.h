@@ -198,6 +198,9 @@ struct d3d11_swapchain
 
 void dxgi_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
 BOOL dxgi_composition_window_get_rect(HWND window, HWND target, RECT *rect);
+BOOL dxgi_composition_window_needs_update(HWND window, const RECT *rect, UINT flags);
+BOOL dxgi_composition_window_update_frame(HWND window, HWND target, HWND root,
+        BOOL base_presentation, BOOL transparent_base);
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc);
