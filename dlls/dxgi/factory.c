@@ -1017,6 +1017,7 @@ static void dxgi_composition_window_update_identity(HWND window, HWND root)
     GetWindowThreadProcessId(root, &process_id);
     if (GetPropW(window, L"__wine_dcomp_task_identity") != root)
     {
+        RemovePropW(window, L"__wine_dcomp_task_identity");
         dxgi_composition_window_clear_owned_icons(window);
         if ((process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)))
         {
