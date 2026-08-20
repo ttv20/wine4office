@@ -52,7 +52,7 @@ static const WCHAR dcomp_base_presentation_prop[] =
 static const WCHAR dcomp_task_delegate_timer_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','s','k','_','d','e','l','e','g','a','t','e','_','t','i','m','e','r',0};
 
-static BOOL wayland_dcomp_task_delegated(HWND root)
+BOOL wayland_window_is_dcomp_task_delegated(HWND root)
 {
     HWND delegate = NtUserGetProp(root, dcomp_task_delegated_prop);
     HWND target = NtUserGetProp(root, dcomp_task_delegated_target_prop);
@@ -65,7 +65,7 @@ static BOOL wayland_dcomp_task_delegated(HWND root)
 
 static void WINAPI wayland_dcomp_task_delegate_timer(HWND hwnd, UINT msg, UINT_PTR id, DWORD time)
 {
-    if (wayland_dcomp_task_delegated(hwnd)) return;
+    if (wayland_window_is_dcomp_task_delegated(hwnd)) return;
 
     NtUserKillTimer(hwnd, id);
     if (NtUserGetProp(hwnd, dcomp_task_delegate_timer_prop) == (HANDLE)id)
@@ -459,7 +459,7 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
      * their desktop task are logical Win32 targets, not presentation
      * surfaces. Mapping the delegated root beside its opaque DComp base leaves
      * two unrelated toplevels and lets the root's white buffer cover the app. */
-    if (!visible || wayland_dcomp_task_delegated(data->hwnd) ||
+    if (!visible || wayland_window_is_dcomp_task_delegated(data->hwnd) ||
         (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
         role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
@@ -1152,7 +1152,7 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         struct wayland_window_state state;
         BOOL delegated, reapply_clip = FALSE, update_clients = FALSE;
 
-        delegated = wayland_dcomp_task_delegated(hwnd);
+        delegated = wayland_window_is_dcomp_task_delegated(hwnd);
         wayland_update_dcomp_task_delegate_timer(hwnd, delegated);
         get_wayland_window_state(hwnd, &state);
         if ((data = wayland_win_data_get(hwnd)))
