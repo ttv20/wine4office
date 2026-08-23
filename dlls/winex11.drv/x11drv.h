@@ -434,6 +434,8 @@ struct x11drv_thread_data
 #ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
     XIValuatorClassInfo x_valuator;
     XIValuatorClassInfo y_valuator;
+    double              raw_x;
+    double              raw_y;
     int      xinput2_pointer;      /* XInput2 master pointer device id */
     int      root_window_users;    /* counter for root window XISelectEvents */
 #endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
@@ -733,6 +735,7 @@ struct x11drv_win_data
     unsigned long wm_normal_hints_serial;/* serial of last pending WM_NORMAL_HINTS request */
     unsigned long configure_serial;    /* serial of last pending configure request */
     unsigned long net_wm_icon_serial;  /* serial of last pending _NET_WM_ICON request */
+    unsigned long state_locks;         /* X11 state requests lock while updating win32 state */
 };
 
 extern struct x11drv_win_data *get_win_data( HWND hwnd );

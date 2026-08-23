@@ -728,7 +728,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
     {
         ERR("Failed to create image, vr %s.\n", wined3d_debug_vkresult(vr));
         image->vk_image = VK_NULL_HANDLE;
-        return FALSE;
+        return false;
     }
 
     VK_CALL(vkGetImageMemoryRequirements(device_vk->vk_device, image->vk_image,
@@ -741,7 +741,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
         ERR("Failed to find suitable image memory type.\n");
         VK_CALL(vkDestroyImage(device_vk->vk_device, image->vk_image, NULL));
         image->vk_image = VK_NULL_HANDLE;
-        return FALSE;
+        return false;
     }
 
     if (shared_handle)
@@ -787,7 +787,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
         ERR("Failed to allocate image memory.\n");
         VK_CALL(vkDestroyImage(device_vk->vk_device, image->vk_image, NULL));
         image->vk_image = VK_NULL_HANDLE;
-        return FALSE;
+        return false;
     }
 
     vr = VK_CALL(vkBindImageMemory(device_vk->vk_device, image->vk_image, image->vk_memory,
@@ -803,7 +803,7 @@ BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkIm
         image->memory = NULL;
         image->vk_memory = VK_NULL_HANDLE;
         image->vk_image = VK_NULL_HANDLE;
-        return FALSE;
+        return false;
     }
 
     if (shared_handle && !*shared_handle)
@@ -1285,6 +1285,30 @@ void wined3d_context_vk_destroy_vk_video_parameters(struct wined3d_context_vk *c
     o->command_buffer_id = command_buffer_id;
 }
 
+void wined3d_context_vk_destroy_va_decoder(struct wined3d_context_vk *context_vk,
+        uint64_t handle, uint64_t command_buffer_id)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
+    struct wined3d_retired_object_vk *o;
+
+    if (context_vk->completed_command_buffer_id >= command_buffer_id)
+    {
+        wined3d_decoder_va_vk_destroy_va_decoder(device_vk, handle);
+        TRACE("Destroyed VA decoder 0x%s.\n", wine_dbgstr_longlong(handle));
+        return;
+    }
+
+    if (!(o = wined3d_context_vk_get_retired_object_vk(context_vk)))
+    {
+        ERR("Leaking VA decoder 0x%s.\n", wine_dbgstr_longlong(handle));
+        return;
+    }
+
+    o->type = WINED3D_RETIRED_DECODER_VA_VK;
+    o->u.va_decoder = handle;
+    o->command_buffer_id = command_buffer_id;
+}
+
 void wined3d_context_vk_destroy_image(struct wined3d_context_vk *context_vk, struct wined3d_image_vk *image)
 {
     wined3d_context_vk_destroy_vk_image(context_vk, image->vk_image, image->command_buffer_id);
@@ -1596,6 +1620,10 @@ static void wined3d_context_vk_cleanup_resources(struct wined3d_context_vk *cont
             case WINED3D_RETIRED_AUX_COMMAND_BUFFER_VK:
                 wined3d_aux_command_pool_vk_complete_buffer(context_vk,
                         o->u.aux_command_buffer.pool, &o->u.aux_command_buffer.buffer);
+                break;
+
+            case WINED3D_RETIRED_DECODER_VA_VK:
+                wined3d_decoder_va_vk_destroy_va_decoder(device_vk, o->u.va_decoder);
                 break;
 
             default:
@@ -2827,8 +2855,11 @@ static void wined3d_context_vk_set_dynamic_blend_state(const struct wined3d_cont
         static const VkColorComponentFlags default_write_mask[WINED3D_MAX_RENDER_TARGETS] = {X, X, X, X, X, X, X, X};
 #undef X
 
-        VK_CALL(vkCmdSetColorBlendEnableEXT(vk_command_buffer, 0, rt_count, default_enable));
-        VK_CALL(vkCmdSetColorWriteMaskEXT(vk_command_buffer, 0, rt_count, default_write_mask));
+        if (rt_count)
+        {
+            VK_CALL(vkCmdSetColorBlendEnableEXT(vk_command_buffer, 0, rt_count, default_enable));
+            VK_CALL(vkCmdSetColorWriteMaskEXT(vk_command_buffer, 0, rt_count, default_write_mask));
+        }
         return;
     }
 
@@ -2846,9 +2877,12 @@ static void wined3d_context_vk_set_dynamic_blend_state(const struct wined3d_cont
         blend_equation_from_wined3d(context_vk, &equations[i], rt, state->fb.render_targets[i]);
     }
 
-    VK_CALL(vkCmdSetColorBlendEnableEXT(vk_command_buffer, 0, rt_count, enable));
-    VK_CALL(vkCmdSetColorWriteMaskEXT(vk_command_buffer, 0, rt_count, write_mask));
-    VK_CALL(vkCmdSetColorBlendEquationEXT(vk_command_buffer, 0, rt_count, equations));
+    if (rt_count)
+    {
+        VK_CALL(vkCmdSetColorBlendEnableEXT(vk_command_buffer, 0, rt_count, enable));
+        VK_CALL(vkCmdSetColorWriteMaskEXT(vk_command_buffer, 0, rt_count, write_mask));
+        VK_CALL(vkCmdSetColorBlendEquationEXT(vk_command_buffer, 0, rt_count, equations));
+    }
 }
 
 static VkFormat vk_format_from_component_type(enum wined3d_component_type component_type)

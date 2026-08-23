@@ -556,7 +556,7 @@ static void set_abs_axis_value(struct unix_device *iface, int code, int value)
 
 static NTSTATUS build_report_descriptor(struct unix_device *iface, struct udev_device *dev, struct lnxev_info *info)
 {
-    struct input_absinfo abs_info[ABS_CNT];
+    struct input_absinfo abs_info[ABS_CNT] = {0};
     USHORT count = 0;
     USAGE usages[16];
     int i;
@@ -581,7 +581,6 @@ static NTSTATUS build_report_descriptor(struct unix_device *iface, struct udev_d
             LONG min = impl->abs_min[i], max = impl->abs_max[i];
             USAGE_AND_PAGE usage = absolute_usages[i];
             if (!impl->abs_map[i]) continue;
-            ioctl(impl->base.device_fd, EVIOCGABS(i), abs_info + i);
             if (!hid_device_add_axes(iface, 1, usage.UsagePage, &usage.Usage, FALSE,
                                      min, max))
                 return STATUS_NO_MEMORY;
@@ -637,6 +636,7 @@ static NTSTATUS build_report_descriptor(struct unix_device *iface, struct udev_d
         USAGE_AND_PAGE usage = absolute_usages[i];
         if (!usage.UsagePage || !usage.Usage) continue;
         if (!test_bit(info->abs, i)) continue;
+        ioctl(impl->base.device_fd, EVIOCGABS(i), abs_info + i);
         set_abs_axis_value(iface, i, abs_info[i].value);
     }
 
@@ -1174,6 +1174,19 @@ static void get_device_subsystem_info(struct udev_device *dev, const char *subsy
     }
 }
 
+static void get_usb_interface_info(struct udev_device *dev, struct device_desc *desc)
+{
+    UINT class = 0, subclass = 0, protocol = 0;
+    struct udev_device *iface;
+    const char *tmp;
+
+    if (!(iface = udev_device_get_parent_with_subsystem_devtype(dev, "usb", "usb_interface"))) return;
+    if ((tmp = udev_device_get_sysattr_value(iface, "bInterfaceClass"))) sscanf(tmp, "%x", &class);
+    if ((tmp = udev_device_get_sysattr_value(iface, "bInterfaceSubClass"))) sscanf(tmp, "%x", &subclass);
+    if ((tmp = udev_device_get_sysattr_value(iface, "bInterfaceProtocol"))) sscanf(tmp, "%x", &protocol);
+    desc->bus_id = ((class & 0xff) << 16) | ((subclass & 0xff) << 8) | (protocol & 0xff);
+}
+
 static NTSTATUS hidraw_device_create(struct udev_device *dev, int fd, const char *devnode, struct device_desc desc)
 {
 #ifdef HAVE_LINUX_HIDRAW_H
@@ -1346,7 +1359,7 @@ static NTSTATUS lnxev_device_create(struct udev_device *dev, int fd, const char 
 
 static void udev_add_device(struct udev_device *dev, int fd)
 {
-    struct device_desc desc = { .input = -1 };
+    struct device_desc desc = { .input = -1, .bus_id = -1 };
     const char *subsystem, *devnode;
     int bus = 0;
 
@@ -1369,6 +1382,8 @@ static void udev_add_device(struct udev_device *dev, int fd)
     get_device_subsystem_info(dev, "usb", "usb_device", &desc, &bus);
     if (bus == BUS_BLUETOOTH) desc.bus_type = BUS_TYPE_BLUETOOTH;
     else if (bus == BUS_USB) desc.bus_type = BUS_TYPE_USB;
+
+    if (desc.bus_type == BUS_TYPE_USB) get_usb_interface_info(dev, &desc);
 
     if (!(subsystem = udev_device_get_subsystem(dev)))
     {
@@ -1538,6 +1553,24 @@ static void maybe_remove_devnode(const char *base, const char *dir)
     else WARN("failed to find device for path %s\n", devnode);
 }
 
+static void process_attrib_change(const char *base, const char *dir, const char *subsystem)
+{
+    char devnode[MAX_PATH];
+    int fd;
+
+    snprintf(devnode, sizeof(devnode), "%s/%s", dir, base);
+    if (!find_device_from_devnode(devnode))
+    {
+        maybe_add_devnode(base, dir, subsystem);
+        return;
+    }
+
+    if ((fd = open(devnode, O_RDWR)) < 0)
+        maybe_remove_devnode(base, dir);
+    else
+        close(fd);
+}
+
 static void process_inotify_event(int fd)
 {
     union
@@ -1564,10 +1597,7 @@ static void process_inotify_event(int fd)
                 else if (buf.event.mask & (IN_CREATE | IN_MOVED_TO))
                     maybe_add_devnode(buf.event.name, "/dev", "hidraw");
                 else if (buf.event.mask & IN_ATTRIB)
-                {
-                    maybe_remove_devnode(buf.event.name, "/dev");
-                    maybe_add_devnode(buf.event.name, "/dev", "hidraw");
-                }
+                    process_attrib_change(buf.event.name, "/dev", "hidraw");
             }
 #ifdef HAS_PROPER_INPUT_HEADER
             else if (buf.event.wd == devinput_watch)
@@ -1579,10 +1609,7 @@ static void process_inotify_event(int fd)
                 else if (buf.event.mask & (IN_CREATE | IN_MOVED_TO))
                     maybe_add_devnode(buf.event.name, "/dev/input", "input");
                 else if (buf.event.mask & IN_ATTRIB)
-                {
-                    maybe_remove_devnode(buf.event.name, "/dev/input");
-                    maybe_add_devnode(buf.event.name, "/dev/input", "input");
-                }
+                    process_attrib_change(buf.event.name, "/dev/input", "input");
             }
 #endif
         }

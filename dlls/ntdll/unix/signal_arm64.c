@@ -177,6 +177,8 @@ struct callback_stack_layout
 C_ASSERT( offsetof(struct callback_stack_layout, sp) == 0x20 );
 C_ASSERT( sizeof(struct callback_stack_layout) == 0x30 );
 
+#define RESTORE_FLAGS_EMULATION  0x00010000
+
 struct syscall_frame
 {
     ULONG64               x[29];          /* 000 */
@@ -311,7 +313,7 @@ static void save_context( CONTEXT *context, const ucontext_t *sigcontext )
 {
     DWORD i;
 
-    context->ContextFlags = CONTEXT_FULL;
+    context->ContextFlags = CONTEXT_FULL | CONTEXT_ARM64_X18;
     context->Fp   = FP_sig(sigcontext);     /* Frame pointer */
     context->Lr   = LR_sig(sigcontext);     /* Link register */
     context->Sp   = SP_sig(sigcontext);     /* Stack pointer */
@@ -366,16 +368,6 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
 
     if (!status && (context->ContextFlags & CONTEXT_INTEGER) == CONTEXT_INTEGER)
         frame->restore_flags |= CONTEXT_INTEGER;
-
-    if (is_arm64ec() && !is_ec_code( frame->pc ))
-    {
-        CONTEXT *user_context = (CONTEXT *)((frame->sp - sizeof(CONTEXT)) & ~15);
-
-        user_context->ContextFlags = CONTEXT_FULL;
-        NtGetContextThread( GetCurrentThread(), user_context );
-        frame->sp = (ULONG_PTR)user_context;
-        frame->pc = (ULONG_PTR)pKiUserEmulationDispatcher;
-    }
     return status;
 }
 
@@ -432,6 +424,11 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
         frame->sp    = context->Sp;
         frame->pc    = context->Pc;
         frame->cpsr  = context->Cpsr;
+        if (is_arm64ec())
+        {
+            if (!is_ec_code( frame->pc )) flags |= RESTORE_FLAGS_EMULATION;
+            else frame->restore_flags &= ~RESTORE_FLAGS_EMULATION;
+        }
     }
     if (flags & CONTEXT_FLOATING_POINT)
     {
@@ -469,7 +466,9 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
 
     if (needed_flags & CONTEXT_INTEGER)
     {
-        memcpy( context->X, frame->x, sizeof(context->X[0]) * 29 );
+        memcpy( context->X, frame->x, sizeof(context->X[0]) * 18 );
+        /* skip x18 */
+        memcpy( context->X + 19, frame->x + 19, sizeof(context->X[0]) * 10 );
         context->ContextFlags |= CONTEXT_INTEGER;
     }
     if (needed_flags & CONTEXT_CONTROL)
@@ -487,6 +486,11 @@ NTSTATUS WINAPI NtGetContextThread( HANDLE handle, CONTEXT *context )
         context->Fpsr = frame->fpsr;
         memcpy( context->V, frame->v, sizeof(context->V) );
         context->ContextFlags |= CONTEXT_FLOATING_POINT;
+    }
+    if (needed_flags & CONTEXT_ARM64_X18)
+    {
+        context->X[18] = frame->x[18];
+        context->ContextFlags |= CONTEXT_ARM64_X18;
     }
     if (needed_flags & CONTEXT_DEBUG_REGISTERS) FIXME( "debug registers not supported\n" );
     set_context_exception_reporting_flags( &context->ContextFlags, CONTEXT_SERVICE_ACTIVE );
@@ -1389,7 +1393,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     }
     else if (is_inside_syscall( data, SP_sig(sigcontext) ))
     {
-        context.ContextFlags = CONTEXT_FULL | CONTEXT_EXCEPTION_REQUEST;
+        context.ContextFlags = CONTEXT_FULL | CONTEXT_ARM64_X18 | CONTEXT_EXCEPTION_REQUEST;
         NtGetContextThread( GetCurrentThread(), &context );
         wait_suspend( &context );
         NtSetContextThread( GetCurrentThread(), &context );
@@ -1399,6 +1403,16 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
         save_context( &context, sigcontext );
         context.ContextFlags |= CONTEXT_EXCEPTION_REPORTING;
         wait_suspend( &context );
+        if (is_arm64ec() && !is_ec_code( context.Pc ))
+        {
+            CONTEXT *user_context = (CONTEXT *)((context.Sp - sizeof(CONTEXT)) & ~15);
+
+            chpe->InSimulation = 1;
+            *user_context = context;
+            user_context->ContextFlags = CONTEXT_FULL;
+            context.Sp = (ULONG_PTR)user_context;
+            context.Pc = (ULONG_PTR)pKiUserEmulationDispatcher;
+        }
         restore_context( &context, sigcontext );
     }
 }
@@ -1419,10 +1433,23 @@ static void usr2_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     if (!is_inside_syscall( data, SP_sig(sigcontext) )) return;
     if (!frame) return;
 
+    if (is_arm64ec() && !is_ec_code( frame->pc ))
+    {
+        CONTEXT *user_context = (CONTEXT *)((frame->sp - sizeof(CONTEXT)) & ~15);
+
+        data->teb->ChpeV2CpuAreaInfo->InSimulation = 1;
+        user_context->ContextFlags = CONTEXT_FULL;
+        NtGetContextThread( GetCurrentThread(), user_context );
+        SP_sig(sigcontext) = (ULONG_PTR)user_context;
+        PC_sig(sigcontext) = (ULONG_PTR)pKiUserEmulationDispatcher;
+    }
+    else
+    {
+        SP_sig(sigcontext) = frame->sp;
+        PC_sig(sigcontext) = frame->pc;
+    }
     FP_sig(sigcontext)     = frame->fp;
     LR_sig(sigcontext)     = frame->lr;
-    SP_sig(sigcontext)     = frame->sp;
-    PC_sig(sigcontext)     = frame->pc;
     PSTATE_sig(sigcontext) = frame->cpsr;
     for (i = 0; i <= 28; i++) REGn_sig( i, sigcontext ) = frame->x[i];
 
@@ -1572,7 +1599,7 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
 
     ctx = (CONTEXT *)((ULONG_PTR)context.Sp & ~15) - 1;
     *ctx = context;
-    ctx->ContextFlags = CONTEXT_FULL;
+    ctx->ContextFlags = CONTEXT_FULL | CONTEXT_ARM64_X18;
     signal_set_full_context( ctx );
 
     frame->sp    = (ULONG64)ctx;
@@ -1705,7 +1732,9 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
                    __ASM_CFI_CFA_IS_AT2(sp, 0x98, 0x02) /* frame->syscall_cfa */
                    __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") ":\n\t"
                    "ldr w16, [sp, #0x10c]\n\t"  /* frame->restore_flags */
-                   "tbz x16, #1, 2f\n\t"        /* CONTEXT_INTEGER */
+                   "tbz x16, #16, 1f\n\t"       /* RESTORE_FLAGS_EMULATION */
+                   "bl " __ASM_NAME("syscall_dispatcher_return_slowpath") "\n"
+                   "1:\ttbz x16, #1, 2f\n"      /* CONTEXT_INTEGER */
                    "ldp x12, x13, [sp, #0x80]\n\t" /* frame->x[16..17] */
                    "ldp x14, x15, [sp, #0xf8]\n\t" /* frame->sp, frame->pc */
                    "cmp x12, x15\n\t"              /* frame->x16 == frame->pc? */

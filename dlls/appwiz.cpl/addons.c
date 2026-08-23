@@ -56,10 +56,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(appwizcpl);
 #define GECKO_SHA "???"
 #endif
 
-#define MONO_VERSION "11.2.0"
+#define MONO_VERSION "11.3.0"
 #if defined(__i386__) || defined(__x86_64__)
 #define MONO_ARCH "x86"
-#define MONO_SHA "b4525679e7da30d4658ceb85739cbc55c771791054abbb4b3152fe96ded0b897"
+#define MONO_SHA "df2dfc1665c2511882e7cabd56eafd0c0a3d94e5a7e86f969277f6c189d418d3"
+#elif defined(__aarch64__)
+#define MONO_ARCH "arm64"
+#define MONO_SHA "b0c47d374efaf22cbff76cb10488ac2d1627b067e085aef7acec573884120e0f"
 #else
 #define MONO_ARCH ""
 #define MONO_SHA "???"
@@ -71,6 +74,7 @@ typedef struct {
     const WCHAR *subdir_name;
     const char *sha;
     const char *url_default;
+    const char *arch;
     const WCHAR *config_key;
     const WCHAR *url_config_key;
     const WCHAR *dir_config_key;
@@ -87,6 +91,7 @@ static const addon_info_t addons_info[] = {
         L"gecko",
         GECKO_SHA,
         "http://source.winehq.org/winegecko.php",
+        GECKO_ARCH,
         L"MSHTML", L"GeckoUrl", L"GeckoCabDir",
         MAKEINTRESOURCEW(ID_DWL_GECKO_DIALOG)
     },
@@ -96,6 +101,7 @@ static const addon_info_t addons_info[] = {
         L"mono",
         MONO_SHA,
         "http://source.winehq.org/winemono.php",
+        MONO_ARCH,
         L"Dotnet", L"MonoUrl", L"MonoCabDir",
         MAKEINTRESOURCEW(ID_DWL_MONO_DIALOG)
     }
@@ -612,7 +618,7 @@ static void append_url_params( WCHAR *url )
 
     lstrcpyW(url+len, L"?arch=");
     len += lstrlenW(L"?arch=");
-    len += MultiByteToWideChar(CP_ACP, 0, GECKO_ARCH, sizeof(GECKO_ARCH),
+    len += MultiByteToWideChar(CP_ACP, 0, addon->arch, strlen(addon->arch) + 1,
                                url+len, size/sizeof(WCHAR)-len)-1;
     lstrcpyW(url+len, L"&v=");
     len += lstrlenW(L"&v=");
@@ -752,10 +758,10 @@ static INT_PTR CALLBACK installer_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 BOOL install_addon(addon_t addon_type)
 {
-    if(!*GECKO_ARCH)
-        return FALSE;
-
     addon = addons_info+addon_type;
+
+    if(!*addon->arch)
+        return FALSE;
 
     p_wine_get_version = (void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
 

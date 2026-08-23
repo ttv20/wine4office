@@ -2,7 +2,6 @@
 
 typedef ULONG PTR32;
 
-extern BOOL wrap_wglCopyContext( TEB *teb, HGLRC hglrcSrc, HGLRC hglrcDst, UINT mask );
 extern BOOL wrap_wglDeleteContext( TEB *teb, HGLRC oldContext );
 extern BOOL wrap_wglSwapBuffers( TEB *teb, HDC hdc );
 extern void wrap_glClear( TEB *teb, GLbitfield mask, PFN_glClear func );
@@ -28,6 +27,7 @@ extern void wrap_glFramebufferDrawBufferEXT( TEB *teb, GLuint framebuffer, GLenu
 extern void wrap_glFramebufferDrawBuffersEXT( TEB *teb, GLuint framebuffer, GLsizei n, const GLenum *bufs, PFN_glFramebufferDrawBuffersEXT func );
 extern void wrap_glFramebufferReadBufferEXT( TEB *teb, GLuint framebuffer, GLenum mode, PFN_glFramebufferReadBufferEXT func );
 extern void wrap_glGetFramebufferParameteriv( TEB *teb, GLenum target, GLenum pname, GLint *params, PFN_glGetFramebufferParameteriv func );
+extern void wrap_glGetFramebufferParameterivEXT( TEB *teb, GLuint framebuffer, GLenum pname, GLint *params, PFN_glGetFramebufferParameterivEXT func );
 extern void wrap_glGetInteger64v( TEB *teb, GLenum pname, GLint64 *data, PFN_glGetInteger64v func );
 extern void wrap_glGetUnsignedBytevEXT( TEB *teb, GLenum pname, GLubyte *data, PFN_glGetUnsignedBytevEXT func );
 extern GLsync wrap_glImportSyncEXT( TEB *teb, GLenum external_sync_type, GLintptr external_sync, GLbitfield flags, GLsync handle, PFN_glImportSyncEXT func );

@@ -139,7 +139,7 @@ struct context_data
         struct { unsigned __int64 rax, rbx, rcx, rdx, rbp, rsi, rdi,
                                   r8, r9, r10, r11, r12, r13, r14, r15; } x86_64_regs;
         struct { unsigned int r[13]; } arm_regs;
-        struct { unsigned __int64 x[31]; } arm64_regs;
+        struct { unsigned __int64 x0[18], x19[12]; } arm64_regs;
     } integer;
     union
     {
@@ -173,16 +173,21 @@ struct context_data
     {
         struct { struct { unsigned __int64 low, high; } ymm_high[16]; } regs;
     } ymm;
+    union
+    {
+        unsigned __int64 arm64_x18;
+    } tls;
 };
 
-#define SERVER_CTX_CONTROL            0x01
-#define SERVER_CTX_INTEGER            0x02
-#define SERVER_CTX_SEGMENTS           0x04
-#define SERVER_CTX_FLOATING_POINT     0x08
-#define SERVER_CTX_DEBUG_REGISTERS    0x10
-#define SERVER_CTX_EXTENDED_REGISTERS 0x20
-#define SERVER_CTX_YMM_REGISTERS      0x40
-#define SERVER_CTX_EXEC_SPACE         0x80
+#define SERVER_CTX_CONTROL            0x0001
+#define SERVER_CTX_INTEGER            0x0002
+#define SERVER_CTX_SEGMENTS           0x0004
+#define SERVER_CTX_FLOATING_POINT     0x0008
+#define SERVER_CTX_DEBUG_REGISTERS    0x0010
+#define SERVER_CTX_EXTENDED_REGISTERS 0x0020
+#define SERVER_CTX_YMM_REGISTERS      0x0040
+#define SERVER_CTX_EXEC_SPACE         0x0080
+#define SERVER_CTX_TLS                0x0100
 
 
 struct send_fd
@@ -3892,6 +3897,7 @@ struct get_window_rectangles_reply
     struct reply_header __header;
     struct rectangle window;
     struct rectangle client;
+    struct rectangle visible;
 };
 enum coords_relative
 {
@@ -4125,12 +4131,10 @@ struct get_window_properties_reply
 struct create_winstation_request
 {
     struct request_header __header;
-    unsigned int flags;
     unsigned int access;
-    unsigned int attributes;
-    obj_handle_t rootdir;
-    /* VARARG(name,unicode_str); */
-    char __pad_28[4];
+    unsigned int flags;
+    /* VARARG(objattr,object_attributes); */
+    char __pad_20[4];
 };
 struct create_winstation_reply
 {
@@ -4228,10 +4232,10 @@ struct enum_winstation_reply
 struct create_desktop_request
 {
     struct request_header __header;
-    unsigned int flags;
     unsigned int access;
-    unsigned int attributes;
-    /* VARARG(name,unicode_str); */
+    unsigned int flags;
+    /* VARARG(objattr,object_attributes); */
+    char __pad_20[4];
 };
 struct create_desktop_reply
 {

@@ -2996,6 +2996,114 @@ static void test_integral_resize(void)
     DestroyWindow(parent);
 }
 
+static void test_LB_SETTOPINDEX(void)
+{
+    HWND parent, listbox;
+    int i;
+    int ret;
+
+    parent = create_parent();
+    listbox = CreateWindowA(WC_LISTBOXA, "TestList",
+        WS_CHILD | WS_VISIBLE, 0, 0, 200, 100, parent, NULL, NULL, 0);
+    ok(!!listbox, "got error %lu\n", GetLastError());
+
+    for (i = 0; i < 10; i++)
+    {
+        SendMessageA(listbox, LB_ADDSTRING, 0, (LPARAM)"item");
+    }
+
+    /* Normal range */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 3, 0);
+    ok(!ret, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 3, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 0, 0);
+    ok(!ret, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 0, "got %d\n", ret);
+
+    /* Less than item count, but greater than max top index (to which it gets clamped) */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 5, 0);
+    ok(!ret, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 4, "got %d\n", ret);
+
+    /* Reset to a non-boundary top item */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 2, 0);
+    ok(!ret, "got %d\n", ret);
+
+    /* Greater than or equal to item count (out of bounds) */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 10, 0);
+    ok(ret == LB_ERR, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 2, "got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, 20, 0);
+    ok(ret == LB_ERR, "Expected LB_ERR, got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 2, "got %d\n", ret);
+
+    /* Negative (out of bounds) */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, -1, 0);
+    ok(ret == LB_ERR, "Expected LB_ERR, got %d\n", ret);
+
+    ret = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(ret == 2, "got %d\n", ret);
+
+    DestroyWindow(listbox);
+    DestroyWindow(parent);
+}
+
+static void test_multicolumn_redraw(void)
+{
+    HWND parent, listbox;
+    int top_index_before, top_index_after;
+    int i, initial_items = 7;
+    int ret;
+
+    parent = create_parent();
+    listbox = CreateWindowA(WC_LISTBOXA, "TestList",
+        WS_CHILD | WS_VISIBLE | LBS_MULTICOLUMN,
+        0, 0, 200, 100, parent, NULL, NULL, 0);
+    ok(!!listbox, "got error %lu\n", GetLastError());
+
+    /* Add enough items to span multiple columns */
+    for (i = 0; i < initial_items; i++)
+    {
+        SendMessageA(listbox, LB_ADDSTRING, 0, (LPARAM)"item");
+    }
+
+    /* Scroll to bottom of list */
+    ret = SendMessageA(listbox, LB_SETTOPINDEX, initial_items - 1, 0);
+    ok(!ret, "got %d\n", ret);
+
+    top_index_before = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(top_index_before > 0, "Expected non-zero top index.\n");
+
+    ret = SendMessageA(listbox, WM_SETREDRAW, FALSE, 0);
+    ok(!ret, "got %d\n", ret);
+
+    /* Force LBS_DISPLAYCHANGED */
+    SendMessageA(listbox, LB_ADDSTRING, 0, (LPARAM)"new item");
+
+    ret = SendMessageA(listbox, WM_SETREDRAW, TRUE, 0);
+    ok(!ret, "got %d\n", ret);
+
+    /* Ensure top_index is correct after redraw */
+    top_index_after = SendMessageA(listbox, LB_GETTOPINDEX, 0, 0);
+    ok(top_index_after == top_index_before,
+        "Expected top index %d after WM_SETREDRAW, got %d\n",
+        top_index_before, top_index_after);
+
+    DestroyWindow(parent);
+}
+
 START_TEST(listbox)
 {
     ULONG_PTR ctx_cookie;
@@ -3030,6 +3138,8 @@ START_TEST(listbox)
     test_LB_FINDSTRING();
     test_keypresses();
     test_integral_resize();
+    test_LB_SETTOPINDEX();
+    test_multicolumn_redraw();
 
     uninit_winevent_hook();
 

@@ -55,6 +55,7 @@ struct services;
 static HRESULT EnumVARIANT_create( struct services *, IEnumWbemClassObject *, IEnumVARIANT ** );
 static HRESULT ISWbemSecurity_create( ISWbemSecurity ** );
 static HRESULT SWbemObject_create( struct services *, IWbemClassObject *, ISWbemObject ** );
+static HRESULT SWbemObjectPath_create( IWbemClassObject *, ISWbemObjectPath ** );
 
 enum type_id
 {
@@ -69,6 +70,7 @@ enum type_id
     ISWbemNamedValue_tid,
     ISWbemMethodSet_tid,
     ISWbemMethod_tid,
+    ISWbemObjectPath_tid,
     last_tid
 };
 
@@ -88,6 +90,7 @@ static REFIID wbemdisp_tid_id[] =
     &IID_ISWbemNamedValue,
     &IID_ISWbemMethodSet,
     &IID_ISWbemMethod,
+    &IID_ISWbemObjectPath,
 };
 
 static HRESULT get_typeinfo( enum type_id tid, ITypeInfo **ret )
@@ -173,6 +176,7 @@ static HRESULT WINAPI property_QueryInterface( ISWbemProperty *iface, REFIID rii
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *obj = NULL;
         return E_NOINTERFACE;
     }
     ISWbemProperty_AddRef( iface );
@@ -372,6 +376,7 @@ static HRESULT WINAPI propertyset_QueryInterface( ISWbemPropertySet *iface,
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *obj = NULL;
         return E_NOINTERFACE;
     }
     ISWbemPropertySet_AddRef( iface );
@@ -584,6 +589,7 @@ static HRESULT WINAPI method_QueryInterface( ISWbemMethod *iface, REFIID riid, v
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemMethod_AddRef( iface );
@@ -807,6 +813,7 @@ static HRESULT WINAPI methodset_QueryInterface( ISWbemMethodSet *iface, REFIID r
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemMethodSet_AddRef( iface );
@@ -1037,6 +1044,7 @@ static HRESULT WINAPI object_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemObject_AddRef( iface );
@@ -1061,8 +1069,8 @@ static HRESULT WINAPI object_GetTypeInfo(
     ITypeInfo **info )
 {
     struct object *object = impl_from_ISWbemObject( iface );
-    FIXME( "%p, %u, %#lx, %p\n", object, index, lcid, info );
-    return E_NOTIMPL;
+    TRACE( "%p, %u, %#lx, %p\n", object, index, lcid, info );
+    return get_typeinfo( ISWbemObject_tid, info );
 }
 
 static BOOL object_reserve_member( struct object *object, unsigned int count, unsigned int *capacity )
@@ -1600,8 +1608,8 @@ static HRESULT WINAPI object_get_Path_(
     ISWbemObject *iface,
     ISWbemObjectPath **objWbemObjectPath )
 {
-    FIXME( "\n" );
-    return E_NOTIMPL;
+    struct object *object = impl_from_ISWbemObject( iface );
+    return SWbemObjectPath_create( object->object, objWbemObjectPath );
 }
 
 static HRESULT WINAPI object_get_Security_(
@@ -1739,6 +1747,7 @@ static HRESULT WINAPI objectset_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemObjectSet_AddRef( iface );
@@ -2006,6 +2015,7 @@ static HRESULT WINAPI enumvar_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     IEnumVARIANT_AddRef( iface );
@@ -2019,6 +2029,8 @@ static HRESULT WINAPI enumvar_Next( IEnumVARIANT *iface, ULONG celt, VARIANT *va
     ULONG count = 0;
 
     TRACE( "%p, %lu, %p, %p\n", iface, celt, var, fetched );
+
+    if (!var) return S_FALSE;
 
     if (celt) IEnumWbemClassObject_Next( enumvar->objectenum, WBEM_INFINITE, 1, &obj, &count );
     if (count)
@@ -2135,6 +2147,7 @@ static HRESULT WINAPI services_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemServices_AddRef( iface );
@@ -2640,6 +2653,7 @@ static HRESULT WINAPI locator_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemLocator_AddRef( iface );
@@ -2879,6 +2893,7 @@ static HRESULT WINAPI security_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemSecurity_AddRef( iface );
@@ -3091,6 +3106,7 @@ static HRESULT WINAPI namedvalue_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemNamedValue_AddRef( iface );
@@ -3267,6 +3283,7 @@ static HRESULT WINAPI namedvalueset_QueryInterface(
     else
     {
         WARN( "interface %s not implemented\n", debugstr_guid(riid) );
+        *ppvObject = NULL;
         return E_NOINTERFACE;
     }
     ISWbemNamedValueSet_AddRef( iface );
@@ -3515,5 +3532,340 @@ HRESULT SWbemNamedValueSet_create( void **obj )
 
     *obj = &set->ISWbemNamedValueSet_iface;
     TRACE( "returning iface %p\n", *obj );
+    return hr;
+}
+
+struct objectpath
+{
+    ISWbemObjectPath ISWbemObjectPath_iface;
+    LONG refs;
+    IWbemPath *path;
+};
+
+static struct objectpath *impl_from_ISWbemObjectPath( ISWbemObjectPath *iface )
+{
+    return CONTAINING_RECORD( iface, struct objectpath, ISWbemObjectPath_iface );
+}
+
+static HRESULT WINAPI objectpath_QueryInterface( ISWbemObjectPath *iface, REFIID riid, void **ppvObject )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+
+    TRACE( "%p %s %p\n", objectpath, debugstr_guid( riid ), ppvObject );
+
+    if (IsEqualGUID( riid, &IID_ISWbemObjectPath ) ||
+        IsEqualGUID( riid, &IID_IDispatch ) ||
+        IsEqualGUID( riid, &IID_IUnknown ))
+    {
+        *ppvObject = iface;
+    }
+    else
+    {
+        WARN( "interface %s not implemented\n", debugstr_guid( riid ) );
+        *ppvObject = NULL;
+        return E_NOINTERFACE;
+    }
+
+    ISWbemObjectPath_AddRef( iface );
+    return S_OK;
+}
+
+static ULONG WINAPI objectpath_AddRef( ISWbemObjectPath *iface )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+    return InterlockedIncrement( &objectpath->refs );
+}
+
+static ULONG WINAPI objectpath_Release( ISWbemObjectPath *iface )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+    LONG refs = InterlockedDecrement( &objectpath->refs );
+
+    if (!refs)
+    {
+        TRACE( "destroying %p\n", objectpath );
+        IWbemPath_Release( objectpath->path );
+        free( objectpath );
+    }
+
+    return refs;
+}
+
+static HRESULT WINAPI objectpath_GetTypeInfoCount( ISWbemObjectPath *iface, UINT *count )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+
+    TRACE( "%p, %p\n", objectpath, count );
+
+    *count = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI objectpath_GetTypeInfo( ISWbemObjectPath *iface, UINT index, LCID lcid, ITypeInfo **info )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+
+    TRACE( "%p, %u, %#lx, %p\n", objectpath, index, lcid, info );
+
+    return get_typeinfo( ISWbemObjectPath_tid, info );
+}
+
+static HRESULT WINAPI objectpath_GetIDsOfNames( ISWbemObjectPath *iface, REFIID riid,
+        LPOLESTR *names, UINT count, LCID lcid, DISPID *dispid )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+    ITypeInfo *typeinfo;
+    HRESULT hr;
+
+    TRACE( "%p, %s, %p, %u, %#lx, %p\n", objectpath, debugstr_guid( riid ), names, count, lcid, dispid );
+
+    if (!names || !count || !dispid) return E_INVALIDARG;
+
+    hr = get_typeinfo( ISWbemObjectPath_tid, &typeinfo );
+    if (SUCCEEDED(hr))
+    {
+        hr = ITypeInfo_GetIDsOfNames( typeinfo, names, count, dispid );
+        ITypeInfo_Release( typeinfo );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI objectpath_Invoke( ISWbemObjectPath *iface, DISPID member, REFIID riid, LCID lcid,
+        WORD flags, DISPPARAMS *params, VARIANT *result, EXCEPINFO *excep_info, UINT *arg_err )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+    ITypeInfo *typeinfo;
+    HRESULT hr;
+
+    TRACE( "%p, %ld, %s, %#lx, %#x, %p, %p, %p, %p\n", objectpath, member, debugstr_guid( riid ),
+            lcid, flags, params, result, excep_info, arg_err );
+
+    hr = get_typeinfo( ISWbemObjectPath_tid, &typeinfo );
+    if (SUCCEEDED(hr))
+    {
+        hr = ITypeInfo_Invoke( typeinfo, &objectpath->ISWbemObjectPath_iface, member, flags,
+                params, result, excep_info, arg_err );
+        ITypeInfo_Release( typeinfo );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI objectpath_get_Path( ISWbemObjectPath *iface, BSTR *strPath )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Path( ISWbemObjectPath *iface, BSTR strPath )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_RelPath( ISWbemObjectPath *iface, BSTR *strRelPath )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_RelPath( ISWbemObjectPath *iface, BSTR strRelPath )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Server( ISWbemObjectPath *iface, BSTR *strServer )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Server( ISWbemObjectPath *iface, BSTR strServer )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Namespace( ISWbemObjectPath *iface, BSTR *strNamespace )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Namespace( ISWbemObjectPath *iface, BSTR strNamespace )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_ParentNamespace( ISWbemObjectPath *iface, BSTR *strParentNamespace )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_DisplayName( ISWbemObjectPath *iface, BSTR *strDisplayName )
+{
+    struct objectpath *objectpath = impl_from_ISWbemObjectPath( iface );
+    ULONG len = 0;
+    WCHAR *buf;
+    HRESULT hr;
+
+    FIXME( "%p, %p semi-stub\n", objectpath, strDisplayName );
+
+    if (FAILED( hr = IWbemPath_GetText( objectpath->path, WBEMPATH_GET_SERVER_TOO, &len, NULL ) )) return hr;
+    if (!(buf = SysAllocStringLen( L"winmgmts:", len + ARRAY_SIZE( L"winmgmts:" ) - 2 ) )) return E_OUTOFMEMORY;
+    /* TODO: add 'authenticationLevel' and 'impersonationLevel' from the security object. Native also
+     * includes 'Name', 'SoftwareElementID', 'SoftwareElementState' and 'TargetOperatingSystem' values.
+     * The last three are currently missing from the properties. */
+    if (FAILED( hr = IWbemPath_GetText( objectpath->path, WBEMPATH_GET_SERVER_TOO, &len, buf + wcslen( buf ) ) ))
+    {
+        SysFreeString( buf );
+        buf = NULL;
+    }
+
+    *strDisplayName = buf;
+    return hr;
+}
+
+static HRESULT WINAPI objectpath_put_DisplayName( ISWbemObjectPath *iface, BSTR strDisplayName )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Class( ISWbemObjectPath *iface, BSTR *strClass )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Class( ISWbemObjectPath *iface, BSTR strClass )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_IsClass( ISWbemObjectPath *iface, VARIANT_BOOL *bIsClass )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_SetAsClass( ISWbemObjectPath *iface )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_IsSingleton( ISWbemObjectPath *iface, VARIANT_BOOL *bIsSingleton )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_SetAsSingleton( ISWbemObjectPath *iface )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Keys( ISWbemObjectPath *iface, ISWbemNamedValueSet **objWbemNamedValueSet )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Security_( ISWbemObjectPath *iface, ISWbemSecurity **objWbemSecurity )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Locale( ISWbemObjectPath *iface, BSTR *strLocale )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Locale( ISWbemObjectPath *iface, BSTR strLocale )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_get_Authority( ISWbemObjectPath *iface, BSTR *strAuthority )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI objectpath_put_Authority( ISWbemObjectPath *iface, BSTR strAuthority )
+{
+    FIXME( "\n" );
+    return E_NOTIMPL;
+}
+
+static const ISWbemObjectPathVtbl objectpath_vtbl =
+{
+    objectpath_QueryInterface,
+    objectpath_AddRef,
+    objectpath_Release,
+    objectpath_GetTypeInfoCount,
+    objectpath_GetTypeInfo,
+    objectpath_GetIDsOfNames,
+    objectpath_Invoke,
+    objectpath_get_Path,
+    objectpath_put_Path,
+    objectpath_get_RelPath,
+    objectpath_put_RelPath,
+    objectpath_get_Server,
+    objectpath_put_Server,
+    objectpath_get_Namespace,
+    objectpath_put_Namespace,
+    objectpath_get_ParentNamespace,
+    objectpath_get_DisplayName,
+    objectpath_put_DisplayName,
+    objectpath_get_Class,
+    objectpath_put_Class,
+    objectpath_get_IsClass,
+    objectpath_SetAsClass,
+    objectpath_get_IsSingleton,
+    objectpath_SetAsSingleton,
+    objectpath_get_Keys,
+    objectpath_get_Security_,
+    objectpath_get_Locale,
+    objectpath_put_Locale,
+    objectpath_get_Authority,
+    objectpath_put_Authority,
+};
+
+static HRESULT SWbemObjectPath_create( IWbemClassObject *object, ISWbemObjectPath **obj )
+{
+    struct objectpath *objectpath;
+    VARIANT var;
+    HRESULT hr;
+
+    TRACE( "%p\n", obj );
+
+    if (!(objectpath = calloc( 1, sizeof(*objectpath) ))) return E_OUTOFMEMORY;
+    objectpath->ISWbemObjectPath_iface.lpVtbl = &objectpath_vtbl;
+    objectpath->refs = 1;
+
+    if (FAILED( hr = CoCreateInstance( &CLSID_WbemDefPath, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemPath,
+            (void **)&objectpath->path ) )) goto error;
+    VariantInit( &var );
+    if (FAILED( hr = IWbemClassObject_Get( object, L"__PATH", 0, &var, NULL, NULL ) )) goto error;
+    if (FAILED( hr = IWbemPath_SetText( objectpath->path, WBEMPATH_CREATE_ACCEPT_ALL, V_BSTR( &var ) ))) goto error;
+    VariantClear( &var );
+
+    *obj = &objectpath->ISWbemObjectPath_iface;
+    TRACE( "returning iface %p\n", *obj );
+    return S_OK;
+
+error:
+    VariantClear( &var );
+    if (objectpath->path) IWbemPath_Release( objectpath->path );
+    free( objectpath );
     return hr;
 }

@@ -18,6 +18,7 @@
 
 #include "wined3d_private.h"
 #include "wined3d_vk.h"
+#include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 
@@ -34,6 +35,13 @@ struct wined3d_decoder
     unsigned int feedback_number;
     uint8_t feedback_pic_entry;
     bool feedback_field;
+
+    /* The dimensions of the actual images can change mid-stream, and need not
+     * match the dimensions of the output textures or the dimensions the
+     * decoder was initialized with.
+     * These describe the dimensions of the most recent image decoded.
+     * Accessed only from the CS thread. */
+    unsigned int width, height;
 };
 
 static void wined3d_decoder_cleanup(struct wined3d_decoder *decoder)
@@ -77,7 +85,7 @@ static bool is_supported_codec(struct wined3d_adapter *adapter, const GUID *code
 }
 
 static HRESULT wined3d_decoder_init(struct wined3d_decoder *decoder,
-        struct wined3d_device *device, const struct wined3d_decoder_desc *desc)
+        struct wined3d_device *device, const struct wined3d_decoder_desc *desc, bool gpu_bitstream)
 {
     HRESULT hr;
 
@@ -89,6 +97,8 @@ static HRESULT wined3d_decoder_init(struct wined3d_decoder *decoder,
     decoder->ref = 1;
     decoder->device = device;
     decoder->desc = *desc;
+    decoder->width = desc->width;
+    decoder->height = desc->height;
     wined3d_lock_init(&decoder->feedback_cs, "wined3d_decoder.feedback_cs");
 
     buffer_desc.byte_width = sizeof(DXVA_PicParams_H264);
@@ -119,9 +129,12 @@ static HRESULT wined3d_decoder_init(struct wined3d_decoder *decoder,
      * is at most 1 byte). AMD makes it larger than that.
      * Go with the smaller of the two. */
     buffer_desc.byte_width = desc->width * desc->height;
-    buffer_desc.bind_flags = WINED3D_BIND_DECODER_SRC;
-    buffer_desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_W;
-    buffer_desc.usage = WINED3DUSAGE_DYNAMIC;
+    if (gpu_bitstream)
+    {
+        buffer_desc.bind_flags = WINED3D_BIND_DECODER_SRC;
+        buffer_desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_W;
+        buffer_desc.usage = WINED3DUSAGE_DYNAMIC;
+    }
 
     if (FAILED(hr = wined3d_buffer_create(device, &buffer_desc,
             NULL, NULL, &wined3d_null_parent_ops, &decoder->bitstream)))
@@ -280,22 +293,8 @@ static void wined3d_decoder_vk_get_profiles(struct wined3d_adapter *adapter, uns
     }
 }
 
-static void wined3d_decoder_vk_destroy_object(void *object)
+static void wined3d_decoder_vk_destroy_images(struct wined3d_decoder_vk *decoder_vk, struct wined3d_context_vk *context_vk)
 {
-    struct wined3d_decoder_vk *decoder_vk = object;
-    struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_vk->d.device);
-    struct wined3d_vk_info *vk_info = &device_vk->vk_info;
-    struct wined3d_context_vk *context_vk;
-
-    TRACE("decoder_vk %p.\n", decoder_vk);
-
-    context_vk = wined3d_context_vk(context_acquire(decoder_vk->d.device, NULL, 0));
-
-    if (decoder_vk->session_memory)
-        wined3d_context_vk_free_memory(context_vk, decoder_vk->session_memory);
-    else
-        VK_CALL(vkFreeMemory(device_vk->vk_device, decoder_vk->vk_session_memory, NULL));
-
     for (unsigned int i = 0; i < ARRAY_SIZE(decoder_vk->images); ++i)
     {
         struct wined3d_decoder_image_vk *image = &decoder_vk->images[i];
@@ -304,11 +303,13 @@ static void wined3d_decoder_vk_destroy_object(void *object)
         {
             wined3d_context_vk_destroy_image(context_vk, &image->output_image);
             wined3d_context_vk_destroy_vk_image_view(context_vk, image->output_view, decoder_vk->command_buffer_id);
+            image->output_view = VK_NULL_HANDLE;
         }
         if (decoder_vk->distinct_dpb && image->dpb_view)
         {
             wined3d_context_vk_destroy_image(context_vk, &image->dpb_image);
             wined3d_context_vk_destroy_vk_image_view(context_vk, image->dpb_view, decoder_vk->command_buffer_id);
+            image->dpb_view = VK_NULL_HANDLE;
         }
     }
 
@@ -330,9 +331,26 @@ static void wined3d_decoder_vk_destroy_object(void *object)
                 wined3d_context_vk_destroy_image(context_vk, &image->dpb_image);
         }
     }
+}
 
+static void wined3d_decoder_vk_destroy_object(void *object)
+{
+    struct wined3d_decoder_vk *decoder_vk = object;
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_vk->d.device);
+    struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    struct wined3d_context_vk *context_vk;
+
+    TRACE("decoder_vk %p.\n", decoder_vk);
+
+    context_vk = wined3d_context_vk(context_acquire(decoder_vk->d.device, NULL, 0));
+
+    if (decoder_vk->session_memory)
+        wined3d_context_vk_free_memory(context_vk, decoder_vk->session_memory);
+    else
+        VK_CALL(vkFreeMemory(device_vk->vk_device, decoder_vk->vk_session_memory, NULL));
+
+    wined3d_decoder_vk_destroy_images(decoder_vk, context_vk);
     wined3d_context_vk_destroy_vk_video_session(context_vk, decoder_vk->vk_session, decoder_vk->command_buffer_id);
-
     free(decoder_vk);
 }
 
@@ -351,13 +369,13 @@ static bool wined3d_decoder_vk_create_image(struct wined3d_decoder_vk *decoder_v
     const struct wined3d_format *output_format = wined3d_get_format(
             decoder_vk->d.device->adapter, decoder_vk->d.desc.output_format, 0);
     VkVideoProfileListInfoKHR profile_list = {.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR};
-    unsigned int layer_count = decoder_vk->layered_dpb ? ARRAY_SIZE(decoder_vk->images) : 1;
     VkImageViewCreateInfo view_desc = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     VkVideoProfileInfoKHR profile = {.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR};
     struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_vk->d.device);
     VkFormat vk_format = wined3d_format_vk(output_format)->vk_format;
     const struct wined3d_vk_info *vk_info = context_vk->vk_info;
     VkImageSubresourceRange vk_range = {0};
+    VkImageCreateInfo image_desc;
     VkResult vr;
 
     if (!decoder_vk->distinct_dpb)
@@ -376,7 +394,7 @@ static bool wined3d_decoder_vk_create_image(struct wined3d_decoder_vk *decoder_v
 
     vk_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vk_range.levelCount = 1;
-    vk_range.layerCount = layer_count;
+    vk_range.layerCount = image_desc.arrayLayers;
 
     wined3d_context_vk_image_barrier(context_vk, decoder_vk->command_buffer.vk_command_buffer,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
@@ -473,6 +491,57 @@ out:
     context_release(&context_vk->c);
 }
 
+static void wined3d_decoder_vk_create_layered_image(struct wined3d_decoder_vk *decoder_vk)
+{
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_vk->d.device);
+    struct wined3d_context_vk *context_vk = &device_vk->context_vk;
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    const struct wined3d_format_vk *output_format;
+
+    output_format = wined3d_format_vk(wined3d_get_format(device_vk->d.adapter, decoder_vk->d.desc.output_format, 0));
+
+    if (!decoder_vk->distinct_dpb)
+        usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+
+    if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, usage,
+            VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, &decoder_vk->layered_output_image, NULL))
+        return;
+
+    if (decoder_vk->distinct_dpb && !wined3d_decoder_vk_create_image(decoder_vk,
+            context_vk, VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
+            VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR, &decoder_vk->layered_dpb_image, NULL))
+        return;
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(decoder_vk->images); ++i)
+    {
+        VkImageViewCreateInfo view_desc = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        struct wined3d_decoder_image_vk *image = &decoder_vk->images[i];
+        VkResult vr;
+
+        view_desc.image = decoder_vk->layered_output_image.vk_image;
+        view_desc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_desc.format = output_format->vk_format;
+        view_desc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view_desc.subresourceRange.baseArrayLayer = i;
+        view_desc.subresourceRange.layerCount = 1;
+        view_desc.subresourceRange.levelCount = 1;
+        if ((vr = VK_CALL(vkCreateImageView(device_vk->vk_device, &view_desc, NULL, &image->output_view))))
+            ERR("Failed to create image view, vr %s.\n", wined3d_debug_vkresult(vr));
+
+        if (decoder_vk->distinct_dpb)
+        {
+            view_desc.image = decoder_vk->layered_dpb_image.vk_image;
+            if ((vr = VK_CALL(vkCreateImageView(device_vk->vk_device, &view_desc, NULL, &image->dpb_view))))
+                ERR("Failed to create image view, vr %s.\n", wined3d_debug_vkresult(vr));
+        }
+        else
+        {
+            image->dpb_view = image->output_view;
+        }
+    }
+}
+
 static void wined3d_decoder_vk_cs_init(void *object)
 {
     VkVideoDecodeH264CapabilitiesKHR h264_caps = {.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_CAPABILITIES_KHR};
@@ -539,49 +608,7 @@ static void wined3d_decoder_vk_cs_init(void *object)
     bind_video_session_memory(decoder_vk);
 
     if (decoder_vk->layered_dpb)
-    {
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        struct wined3d_context_vk *context_vk = &device_vk->context_vk;
-
-        if (!decoder_vk->distinct_dpb)
-            usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
-
-        if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, usage,
-                VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, &decoder_vk->layered_output_image, NULL))
-            return;
-
-        if (decoder_vk->distinct_dpb && !wined3d_decoder_vk_create_image(decoder_vk,
-                context_vk, VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
-                VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR, &decoder_vk->layered_dpb_image, NULL))
-            return;
-
-        for (unsigned int i = 0; i < ARRAY_SIZE(decoder_vk->images); ++i)
-        {
-            VkImageViewCreateInfo view_desc = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-            struct wined3d_decoder_image_vk *image = &decoder_vk->images[i];
-
-            view_desc.image = decoder_vk->layered_output_image.vk_image;
-            view_desc.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            view_desc.format = output_format->vk_format;
-            view_desc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            view_desc.subresourceRange.baseArrayLayer = i;
-            view_desc.subresourceRange.layerCount = 1;
-            view_desc.subresourceRange.levelCount = 1;
-            if ((vr = VK_CALL(vkCreateImageView(device_vk->vk_device, &view_desc, NULL, &image->output_view))))
-                ERR("Failed to create image view, vr %s.\n", wined3d_debug_vkresult(vr));
-
-            if (decoder_vk->distinct_dpb)
-            {
-                view_desc.image = decoder_vk->layered_dpb_image.vk_image;
-                if ((vr = VK_CALL(vkCreateImageView(device_vk->vk_device, &view_desc, NULL, &image->dpb_view))))
-                    ERR("Failed to create image view, vr %s.\n", wined3d_debug_vkresult(vr));
-            }
-            else
-            {
-                image->dpb_view = image->output_view;
-            }
-        }
-    }
+        wined3d_decoder_vk_create_layered_image(decoder_vk);
 }
 
 static HRESULT wined3d_decoder_vk_create(struct wined3d_device *device,
@@ -593,7 +620,7 @@ static HRESULT wined3d_decoder_vk_create(struct wined3d_device *device,
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    if (FAILED(hr = wined3d_decoder_init(&object->d, device, desc)))
+    if (FAILED(hr = wined3d_decoder_init(&object->d, device, desc, true)))
     {
         free(object);
         return hr;
@@ -918,8 +945,8 @@ static void init_h264_reference_info(VkVideoReferenceSlotInfoKHR *reference_slot
     reference_slot->pPictureResource = &info->picture_info;
 
     info->picture_info.sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
-    info->picture_info.codedExtent.width = decoder_vk->d.desc.width;
-    info->picture_info.codedExtent.height = decoder_vk->d.desc.height;
+    info->picture_info.codedExtent.width = decoder_vk->d.width;
+    info->picture_info.codedExtent.height = decoder_vk->d.height;
     info->picture_info.baseArrayLayer = 0;
     info->picture_info.imageViewBinding = decoder_vk->images[slot_index].dpb_view;
 
@@ -957,6 +984,47 @@ static bool find_unused_slot(struct wined3d_decoder_vk *decoder_vk, unsigned int
     return false;
 }
 
+static bool wined3d_decoder_vk_prepare_image(struct wined3d_decoder_vk *decoder_vk,
+        struct wined3d_context_vk *context_vk, unsigned int width, unsigned int height,
+        struct wined3d_decoder_image_vk *image)
+{
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+    if (width != decoder_vk->d.width || height != decoder_vk->d.height)
+    {
+        TRACE("Dynamic resize from %ux%u to %ux%u.\n", decoder_vk->d.width, decoder_vk->d.height, width, height);
+        wined3d_decoder_vk_destroy_images(decoder_vk, context_vk);
+        decoder_vk->d.width = width;
+        decoder_vk->d.height = height;
+        if (decoder_vk->layered_dpb)
+            wined3d_decoder_vk_create_layered_image(decoder_vk);
+    }
+
+    if (image->output_view)
+        return true;
+
+    if (!decoder_vk->distinct_dpb)
+        usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+
+    if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, usage,
+            VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, &image->output_image, &image->output_view))
+        return false;
+
+    if (decoder_vk->distinct_dpb)
+    {
+        if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
+                VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR, &image->dpb_image, &image->dpb_view))
+            return false;
+        wined3d_context_vk_reference_image(context_vk, &image->dpb_image);
+    }
+    else
+    {
+        image->dpb_view = image->output_view;
+    }
+
+    return true;
+}
+
 static void wined3d_decoder_vk_blit_output(struct wined3d_decoder_vk *decoder_vk, struct wined3d_context_vk *context_vk,
         struct wined3d_decoder_output_view_vk *output_view_vk, unsigned int slot_index)
 {
@@ -979,8 +1047,8 @@ static void wined3d_decoder_vk_blit_output(struct wined3d_decoder_vk *decoder_vk
     regions[0].dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
     regions[0].dstSubresource.baseArrayLayer = output_view_vk->v.desc.u.texture.layer_idx;
     regions[0].dstSubresource.layerCount = 1;
-    regions[0].extent.width = texture_vk->t.resource.width;
-    regions[0].extent.height = texture_vk->t.resource.height;
+    regions[0].extent.width = decoder_vk->d.width;
+    regions[0].extent.height = decoder_vk->d.height;
     regions[0].extent.depth = 1;
 
     if (decoder_vk->layered_dpb)
@@ -1149,29 +1217,10 @@ static void wined3d_decoder_vk_decode_h264(struct wined3d_decoder_vk *decoder_vk
 
     image->dxva_index = h264_params->CurrPic.Index7Bits;
 
-    if (!image->output_view)
-    {
-        VkImageUsageFlags usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    wined3d_decoder_vk_prepare_image(decoder_vk, context_vk,
+            (h264_params->wFrameWidthInMbsMinus1 + 1) * 16,
+            (h264_params->wFrameHeightInMbsMinus1 + 1) * 16, image);
 
-        if (!decoder_vk->distinct_dpb)
-            usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
-
-        if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, usage,
-                VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR, &image->output_image, &image->output_view))
-            goto out;
-
-        if (decoder_vk->distinct_dpb)
-        {
-            if (!wined3d_decoder_vk_create_image(decoder_vk, context_vk, VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
-                    VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR, &image->dpb_image, &image->dpb_view))
-                goto out;
-            wined3d_context_vk_reference_image(context_vk, &image->dpb_image);
-        }
-        else
-        {
-            image->dpb_view = image->output_view;
-        }
-    }
     if (decoder_vk->layered_dpb)
         wined3d_context_vk_reference_image(context_vk, &decoder_vk->layered_output_image);
     else
@@ -1213,6 +1262,8 @@ static void wined3d_decoder_vk_decode_h264(struct wined3d_decoder_vk *decoder_vk
     decode_info->pReferenceSlots = reference_slots;
     decode_info->referenceSlotCount = slot_count;
     decode_info->dstPictureResource.imageViewBinding = image->output_view;
+    decode_info->dstPictureResource.codedExtent.width = decoder_vk->d.width;
+    decode_info->dstPictureResource.codedExtent.height = decoder_vk->d.height;
 
     h264_picture.flags.field_pic_flag = h264_params->field_pic_flag;
     /* ffmpeg treats these two as identical. */
@@ -1289,8 +1340,6 @@ static void wined3d_decoder_vk_decode(struct wined3d_context *context, struct wi
     decode_info.srcBufferOffset = bitstream_bo->b.buffer_offset;
     decode_info.srcBufferRange = align(bitstream_size, decoder_vk->bitstream_alignment);
     decode_info.dstPictureResource.sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
-    decode_info.dstPictureResource.codedExtent.width = decoder_vk->d.desc.width;
-    decode_info.dstPictureResource.codedExtent.height = decoder_vk->d.desc.height;
     decode_info.dstPictureResource.baseArrayLayer = 0;
 
     wined3d_decoder_vk_decode_h264(decoder_vk, context_vk, output_view_vk,
@@ -1307,6 +1356,361 @@ const struct wined3d_decoder_ops wined3d_decoder_vk_ops =
     .create = wined3d_decoder_vk_create,
     .destroy = wined3d_decoder_vk_destroy,
     .decode = wined3d_decoder_vk_decode,
+};
+
+struct wined3d_decoder_va_vk
+{
+    struct wined3d_decoder d;
+    uint64_t va_decoder;
+
+    struct wined3d_decoder_image_va_vk
+    {
+        VkImage image;
+        uint64_t command_buffer_id;
+        bool valid, used;
+        uint8_t dxva_index;
+    } images[VA_DECODER_SURFACE_COUNT];
+};
+
+static struct wined3d_decoder_va_vk *wined3d_decoder_va_vk(struct wined3d_decoder *decoder)
+{
+    return CONTAINING_RECORD(decoder, struct wined3d_decoder_va_vk, d);
+}
+
+static void wined3d_decoder_va_vk_get_profiles(struct wined3d_adapter *adapter, unsigned int *count, GUID *profiles)
+{
+    struct va_get_profiles_vk_params params;
+    NTSTATUS status;
+
+    *count = 0;
+
+    /* We are under wined3d_mutex, so this is thread safe. */
+    if ((status = __wine_init_unix_call()))
+    {
+        WARN("Failed to load Unix library, status %#lx.\n", status);
+        return;
+    }
+
+    params.physical_device = (uintptr_t)wined3d_adapter_vk(adapter)->physical_device;
+    params.count = (uintptr_t)count;
+    params.profiles = (uintptr_t)profiles;
+    WINE_UNIX_CALL(unix_va_get_profiles_vk, &params);
+}
+
+static void wined3d_decoder_va_vk_create_va_decoder(struct wined3d_decoder_va_vk *decoder_va,
+        struct wined3d_context_vk *context_vk)
+{
+    struct wined3d_adapter_vk *adapter_vk = wined3d_adapter_vk(decoder_va->d.device->adapter);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(decoder_va->d.device);
+    struct va_decoder_create_vk_params params;
+    HRESULT hr;
+
+    params.desc = decoder_va->d.desc;
+    params.physical_device = (uintptr_t)adapter_vk->physical_device;
+    params.device = (uintptr_t)device_vk->vk_device;
+    params.width = decoder_va->d.width;
+    params.height = decoder_va->d.height;
+
+    if (FAILED(hr = WINE_UNIX_CALL(unix_va_decoder_create_vk, &params)))
+    {
+        ERR("Failed to initialize decoder, hr %#lx.\n", hr);
+        return;
+    }
+
+    decoder_va->va_decoder = params.decoder;
+
+    for (unsigned int i = 0; i < VA_DECODER_SURFACE_COUNT; ++i)
+    {
+        struct wined3d_decoder_image_va_vk *image = &decoder_va->images[i];
+        VkImageSubresourceRange vk_range = {0};
+
+        image->image = params.surfaces[i].image;
+
+        vk_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vk_range.levelCount = 1;
+        vk_range.layerCount = 1;
+        wined3d_context_vk_image_barrier(context_vk, wined3d_context_vk_get_command_buffer(context_vk),
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, image->image, &vk_range);
+    }
+}
+
+static void wined3d_decoder_va_vk_cs_init(void *object)
+{
+    struct wined3d_decoder_va_vk *decoder_va = object;
+    struct wined3d_context_vk *context_vk;
+
+    context_vk = wined3d_context_vk(context_acquire(decoder_va->d.device, NULL, 0));
+    wined3d_decoder_va_vk_create_va_decoder(decoder_va, context_vk);
+    context_release(&context_vk->c);
+}
+
+static HRESULT wined3d_decoder_va_vk_create(struct wined3d_device *device,
+        const struct wined3d_decoder_desc *desc, struct wined3d_decoder **decoder)
+{
+    struct wined3d_decoder_va_vk *object;
+    NTSTATUS status;
+    HRESULT hr;
+
+    /* We are under wined3d_mutex, so this is thread safe. */
+    if ((status = __wine_init_unix_call()))
+    {
+        WARN("Failed to load Unix library, status %#lx.\n", status);
+        return E_FAIL;
+    }
+
+    if (!(object = calloc(1, sizeof(*object))))
+        return E_OUTOFMEMORY;
+    if (FAILED(hr = wined3d_decoder_init(&object->d, device, desc, false)))
+    {
+        free(object);
+        return hr;
+    }
+
+    wined3d_cs_init_object(device->cs, wined3d_decoder_va_vk_cs_init, object);
+
+    TRACE("Created decoder %p.\n", object);
+    *decoder = &object->d;
+
+    return WINED3D_OK;
+}
+
+void wined3d_decoder_va_vk_destroy_va_decoder(struct wined3d_device_vk *device_vk, uint64_t handle)
+{
+    struct va_decoder_destroy_vk_params params;
+
+    params.device = (uintptr_t)device_vk->vk_device;
+    params.decoder = handle;
+    WINE_UNIX_CALL(unix_va_decoder_destroy_vk, &params);
+}
+
+static void wined3d_decoder_va_vk_cleanup(struct wined3d_decoder_va_vk *decoder_va,
+        struct wined3d_context_vk *context_vk)
+{
+    uint64_t command_buffer_id = 0;
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(decoder_va->images); ++i)
+    {
+        struct wined3d_decoder_image_va_vk *image = &decoder_va->images[i];
+
+        wined3d_context_vk_destroy_vk_image(context_vk, image->image, image->command_buffer_id);
+        command_buffer_id = max(command_buffer_id, image->command_buffer_id);
+    }
+
+    /* We probably don't need to wait to destroy the VA decoder, since it's not
+     * a Vulkan object, but we did allocate Vulkan memory on the Unix side
+     * which we need to make sure isn't freed until the GPU is done with it. */
+    wined3d_context_vk_destroy_va_decoder(context_vk, decoder_va->va_decoder, command_buffer_id);
+}
+
+static void wined3d_decoder_va_vk_destroy_object(void *object)
+{
+    struct wined3d_decoder_va_vk *decoder_va = object;
+    struct wined3d_context_vk *context_vk;
+
+    TRACE("decoder_va %p.\n", decoder_va);
+
+    context_vk = wined3d_context_vk(context_acquire(decoder_va->d.device, NULL, 0));
+    wined3d_decoder_va_vk_cleanup(decoder_va, context_vk);
+    context_release(&context_vk->c);
+    free(decoder_va);
+}
+
+static void wined3d_decoder_va_vk_destroy(struct wined3d_decoder *decoder)
+{
+    struct wined3d_decoder_va_vk *decoder_va = wined3d_decoder_va_vk(decoder);
+
+    wined3d_decoder_cleanup(&decoder_va->d);
+    wined3d_cs_destroy_object(decoder->device->cs, wined3d_decoder_va_vk_destroy_object, decoder_va);
+}
+
+static bool decoder_va_vk_find_reference_slot(struct wined3d_decoder_va_vk *decoder_va,
+        uint8_t dxva_index, unsigned int *slot)
+{
+    for (unsigned int i = 0; i < VA_DECODER_SURFACE_COUNT; ++i)
+    {
+        if (decoder_va->images[i].valid && decoder_va->images[i].dxva_index == dxva_index)
+        {
+            *slot = i;
+            return true;
+        }
+    }
+
+    ERR("Reference index %u was never written.\n", dxva_index);
+    return false;
+}
+
+static unsigned int decoder_va_vk_find_available_output_slot(struct wined3d_decoder_va_vk *decoder_va,
+        struct wined3d_context_vk *context_vk)
+{
+    uint64_t earliest_command_buffer_id = UINT64_MAX;
+    unsigned int earliest_slot = 0;
+
+    for (unsigned int i = 0; i < VA_DECODER_SURFACE_COUNT; ++i)
+    {
+        struct wined3d_decoder_image_va_vk *image = &decoder_va->images[i];
+
+        if (image->used)
+            continue;
+
+        if (!image->valid || context_vk->completed_command_buffer_id >= image->command_buffer_id)
+            return i;
+
+        if (image->command_buffer_id < earliest_command_buffer_id)
+        {
+            earliest_command_buffer_id = image->command_buffer_id;
+            earliest_slot = i;
+        }
+    }
+
+    /* We need to make sure that Vulkan is done reading from this image.
+     * Unfortunately, we cannot do GPU-side synchronization between VA and
+     * Vulkan. We need to do a CPU wait. */
+    if (earliest_command_buffer_id == context_vk->current_command_buffer.id)
+        wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
+    wined3d_context_vk_wait_command_buffer(context_vk, earliest_command_buffer_id);
+    return earliest_slot;
+}
+
+/* Copy from the shared VA image to the application destination image. */
+static void blit_va_image(struct wined3d_decoder_va_vk *decoder_va, struct wined3d_context_vk *context_vk,
+        unsigned int output_idx, struct wined3d_decoder_output_view_vk *output_view_vk)
+{
+    struct wined3d_texture_vk *texture_vk = wined3d_texture_vk(output_view_vk->v.texture);
+    unsigned int sub_resource_idx = output_view_vk->v.desc.u.texture.layer_idx;
+    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+    VkCommandBuffer command_buffer;
+    VkImageSubresourceRange range;
+    VkImageLayout dst_layout;
+    VkImageCopy region = {0};
+
+    command_buffer = wined3d_context_vk_get_command_buffer(context_vk);
+
+    if (texture_vk->layout == VK_IMAGE_LAYOUT_GENERAL)
+        dst_layout = VK_IMAGE_LAYOUT_GENERAL;
+    else
+        dst_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    range.aspectMask = vk_aspect_mask_from_format(texture_vk->t.resource.format);
+    range.baseMipLevel = sub_resource_idx % texture_vk->t.level_count;
+    range.levelCount = 1;
+    range.baseArrayLayer = sub_resource_idx / texture_vk->t.level_count;
+    range.layerCount = 1;
+
+    wined3d_context_vk_image_barrier(context_vk, command_buffer,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk_access_mask_from_bind_flags(texture_vk->t.resource.bind_flags),
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            texture_vk->layout, dst_layout, texture_vk->image.vk_image, &range);
+
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    region.srcSubresource.baseArrayLayer = 0;
+    region.srcSubresource.layerCount = 1;
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+    region.dstSubresource.baseArrayLayer = sub_resource_idx;
+    region.dstSubresource.layerCount = 1;
+    region.extent.width = decoder_va->d.width;
+    region.extent.height = decoder_va->d.height;
+    region.extent.depth = 1;
+
+    VK_CALL(vkCmdCopyImage(command_buffer, decoder_va->images[output_idx].image,
+            VK_IMAGE_LAYOUT_GENERAL, texture_vk->image.vk_image, dst_layout, 1, &region));
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT;
+    region.extent.width /= 2;
+    region.extent.height /= 2;
+    VK_CALL(vkCmdCopyImage(command_buffer, decoder_va->images[output_idx].image,
+            VK_IMAGE_LAYOUT_GENERAL, texture_vk->image.vk_image, dst_layout, 1, &region));
+
+    wined3d_context_vk_image_barrier(context_vk, command_buffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            vk_access_mask_from_bind_flags(texture_vk->t.resource.bind_flags),
+            dst_layout, texture_vk->layout, texture_vk->image.vk_image, &range);
+
+    decoder_va->images[output_idx].command_buffer_id = context_vk->current_command_buffer.id;
+}
+
+static void wined3d_decoder_va_vk_decode(struct wined3d_context *context,
+        struct wined3d_decoder *decoder, struct wined3d_decoder_output_view *output_view,
+        unsigned int bitstream_size, unsigned int slice_control_size)
+{
+    struct wined3d_decoder_output_view_vk *output_view_vk = wined3d_decoder_output_view_vk(output_view);
+    const DXVA_PicParams_H264 *h264_params = wined3d_buffer_load_sysmem(decoder->parameters, context);
+    struct wined3d_decoder_va_vk *decoder_va = wined3d_decoder_va_vk(decoder);
+    unsigned int sub_resource_idx = output_view_vk->v.desc.u.texture.layer_idx;
+    struct wined3d_context_vk *context_vk = wined3d_context_vk(context);
+    struct wined3d_texture *texture = output_view->texture;
+    struct va_decoder_decode_params params;
+    unsigned int output_idx, width, height;
+
+    wined3d_texture_prepare_location(texture, sub_resource_idx, &context_vk->c, WINED3D_LOCATION_TEXTURE_RGB);
+    wined3d_texture_validate_location(texture, sub_resource_idx, WINED3D_LOCATION_TEXTURE_RGB);
+    wined3d_texture_invalidate_location(texture, sub_resource_idx, ~WINED3D_LOCATION_TEXTURE_RGB);
+
+    for (unsigned int i = 0; i < VA_DECODER_SURFACE_COUNT; ++i)
+        decoder_va->images[i].used = false;
+
+    for (unsigned int i = 0; i < ARRAY_SIZE(h264_params->RefFrameList); ++i)
+    {
+        unsigned int slot_index;
+
+        if (h264_params->RefFrameList[i].bPicEntry == 0xff)
+            continue;
+
+        /* NVidia's DXVA implementation apparently expects each frame to appear
+         * in its own references list. VA does not expect or need this. */
+        if (h264_params->RefFrameList[i].Index7Bits == h264_params->CurrPic.Index7Bits)
+            continue;
+
+        if (!decoder_va_vk_find_reference_slot(decoder_va, h264_params->RefFrameList[i].Index7Bits, &slot_index))
+            return;
+
+        decoder_va->images[slot_index].used = true;
+    }
+
+    output_idx = decoder_va_vk_find_available_output_slot(decoder_va, context_vk);
+    decoder_va->images[output_idx].valid = true;
+    decoder_va->images[output_idx].dxva_index = h264_params->CurrPic.Index7Bits;
+
+    width = (h264_params->wFrameWidthInMbsMinus1 + 1) * 16;
+    height = (h264_params->wFrameHeightInMbsMinus1 + 1) * 16;
+    if (width != decoder_va->d.width || height != decoder_va->d.height)
+    {
+        TRACE("Dynamic resize from %ux%u to %ux%u.\n", decoder_va->d.width, decoder_va->d.height, width, height);
+        wined3d_decoder_va_vk_cleanup(decoder_va, context_vk);
+        decoder_va->d.width = width;
+        decoder_va->d.height = height;
+        wined3d_decoder_va_vk_create_va_decoder(decoder_va, context_vk);
+    }
+
+    params.decoder = decoder_va->va_decoder;
+    params.bitstream = (uintptr_t)wined3d_buffer_load_sysmem(decoder_va->d.bitstream, context);
+    params.parameters = (uintptr_t)wined3d_buffer_load_sysmem(decoder_va->d.parameters, context);
+    params.matrix = (uintptr_t)wined3d_buffer_load_sysmem(decoder_va->d.matrix, context);
+    params.slice_control = (uintptr_t)wined3d_buffer_load_sysmem(decoder_va->d.slice_control, context);
+    params.bitstream_size = bitstream_size;
+    params.slice_control_size = slice_control_size;
+    params.output_idx = output_idx;
+    WINE_UNIX_CALL(unix_va_decoder_decode, &params);
+
+    blit_va_image(decoder_va, context_vk, output_idx, output_view_vk);
+
+    EnterCriticalSection(&decoder_va->d.feedback_cs);
+    decoder_va->d.feedback_number = h264_params->StatusReportFeedbackNumber;
+    decoder_va->d.feedback_pic_entry = h264_params->CurrPic.bPicEntry;
+    decoder_va->d.feedback_field = h264_params->field_pic_flag;
+    LeaveCriticalSection(&decoder_va->d.feedback_cs);
+
+    wined3d_context_vk_reference_texture(context_vk, wined3d_texture_vk(texture));
+}
+
+const struct wined3d_decoder_ops wined3d_decoder_va_vk_ops =
+{
+    .get_profiles = wined3d_decoder_va_vk_get_profiles,
+    .create = wined3d_decoder_va_vk_create,
+    .destroy = wined3d_decoder_va_vk_destroy,
+    .decode = wined3d_decoder_va_vk_decode,
 };
 
 struct wined3d_resource * CDECL wined3d_decoder_get_buffer(

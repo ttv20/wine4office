@@ -399,7 +399,7 @@ extern HRESULT node_transform_node(struct domnode*,IXMLDOMNode*,BSTR*);
 extern HRESULT node_transform_node_params(struct domnode*,IXMLDOMNode*,BSTR*,ISequentialStream*,
     const struct xslprocessor_params*);
 extern HRESULT node_create_supporterrorinfo(const tid_t*,void**);
-extern HRESULT node_save(struct domnode *, IStream *);
+extern HRESULT node_save(struct domnode *, ISequentialStream *);
 extern HRESULT node_get_elements_by_tagname(struct domnode *,BSTR,IXMLDOMNodeList**);
 extern HRESULT node_validate(struct domnode *, IXMLDOMNode *, IXMLDOMParseError **);
 extern void node_move_children(struct domnode *dst, struct domnode *src);
@@ -409,6 +409,7 @@ extern HRESULT node_substring_data(struct domnode *, LONG, LONG, BSTR *);
 extern HRESULT node_get_data_length(struct domnode *, LONG *);
 extern HRESULT node_insert_data(struct domnode *, LONG, BSTR);
 extern HRESULT node_replace_data(struct domnode *, LONG, LONG, BSTR);
+extern void node_unlink_children(struct domnode *);
 
 extern UINT get_codepage_for_encoding(const WCHAR *encoding);
 

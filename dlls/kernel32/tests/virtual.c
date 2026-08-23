@@ -30,6 +30,7 @@
 #include "winerror.h"
 #include "winuser.h"
 #include "excpt.h"
+#include "ddk/wdm.h"
 #include "wine/test.h"
 
 #define NUM_THREADS 4
@@ -40,6 +41,7 @@ static SYSTEM_INFO si;
 static BOOL is_wow64;
 static UINT   (WINAPI *pGetWriteWatch)(DWORD,LPVOID,SIZE_T,LPVOID*,ULONG_PTR*,ULONG*);
 static UINT   (WINAPI *pResetWriteWatch)(LPVOID,SIZE_T);
+static SIZE_T (WINAPI *pGetLargePageMinimum)(void);
 static NTSTATUS (WINAPI *pNtAreMappedFilesTheSame)(PVOID,PVOID);
 static NTSTATUS (WINAPI *pNtCreateSection)(HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES *,
                                            const LARGE_INTEGER *, ULONG, ULONG, HANDLE );
@@ -578,6 +580,68 @@ static void test_VirtualAlloc(void)
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "got %ld, expected ERROR_INVALID_PARAMETER\n", GetLastError());
 
     ok(VirtualFree(addr1, 0, MEM_RELEASE), "VirtualFree failed\n");
+
+    SetLastError( 0xdeadbeef );
+    ok( !VirtualAlloc( 0, 0x2000, MEM_PHYSICAL, PAGE_READWRITE ), "MEM_PHYSICAL succeeded\n" );
+    ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+    SetLastError( 0xdeadbeef );
+    ok( !VirtualAlloc( 0, 0x2000, MEM_RESERVE | MEM_COMMIT | MEM_PHYSICAL, PAGE_READWRITE ),
+        "MEM_PHYSICAL succeeded\n" );
+    ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+    addr1 = VirtualAlloc( 0, 0x2000, MEM_RESERVE | MEM_PHYSICAL, PAGE_READWRITE );
+    ok( addr1 != NULL, "MEM_PHYSICAL failed err %ld\n", GetLastError() );
+    ok(VirtualFree(addr1, 0, MEM_RELEASE), "VirtualFree failed\n");
+
+    if (pGetLargePageMinimum && pGetLargePageMinimum())
+    {
+        SIZE_T size = pGetLargePageMinimum();
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, size, MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, size, MEM_RESERVE | MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER || broken(GetLastError() == ERROR_PRIVILEGE_NOT_HELD),
+            "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, size / 2, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER || broken(GetLastError() == ERROR_PRIVILEGE_NOT_HELD),
+            "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, size + size / 2, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER || broken(GetLastError() == ERROR_PRIVILEGE_NOT_HELD),
+            "got %ld\n", GetLastError());
+        ok( !VirtualAlloc( 0, size, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_PRIVILEGE_NOT_HELD, "got %ld\n", GetLastError());
+
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, size, MEM_PHYSICAL | MEM_LARGE_PAGES, PAGE_READWRITE ),
+            "MEM_PHYSICAL | MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, 0x2000, MEM_RESERVE | MEM_PHYSICAL | MEM_LARGE_PAGES,
+                           PAGE_READWRITE ), "MEM_PHYSICAL | MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        ok( !VirtualAlloc( 0, 0x2000, MEM_RESERVE | MEM_COMMIT | MEM_PHYSICAL | MEM_LARGE_PAGES,
+                           PAGE_READWRITE ), "MEM_PHYSICAL | MEM_LARGE_PAGES succeeded\n" );
+        ok( GetLastError() == ERROR_INVALID_PARAMETER, "got %ld\n", GetLastError());
+        SetLastError( 0xdeadbeef );
+        /* only 64K alignment is required */
+        addr1 = VirtualAlloc( 0, 0x10000, MEM_RESERVE | MEM_PHYSICAL | MEM_LARGE_PAGES, PAGE_READWRITE );
+        ok( addr1 != NULL || broken(!addr1 && GetLastError() == ERROR_INVALID_PARAMETER),
+            "MEM_PHYSICAL | MEM_LARGE_PAGES failed err %ld\n", GetLastError() );
+        if (addr1) ok(VirtualFree(addr1, 0, MEM_RELEASE), "VirtualFree failed\n");
+        SetLastError( 0xdeadbeef );
+        addr1 = VirtualAlloc( 0, 0x10000, MEM_RESERVE | MEM_COMMIT | MEM_PHYSICAL | MEM_LARGE_PAGES, PAGE_READWRITE );
+        ok( addr1 != NULL || broken(!addr1 && GetLastError() == ERROR_INVALID_PARAMETER),
+            "MEM_PHYSICAL | MEM_LARGE_PAGES failed err %ld\n", GetLastError() );
+        if (addr1) ok(VirtualFree(addr1, 0, MEM_RELEASE), "VirtualFree failed\n");
+    }
 }
 
 static void test_MapViewOfFile(void)
@@ -2420,6 +2484,24 @@ static void test_write_watch(void)
     ok( count == 0, "wrong count %Iu\n", count );
 
     VirtualFree( base, 0, MEM_RELEASE );
+}
+
+static void test_largepages(void)
+{
+    const KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+    SIZE_T size;
+
+    if (!pGetLargePageMinimum) {
+        win_skip("No GetLargePageMinimum support.\n");
+        return;
+    }
+    size = pGetLargePageMinimum();
+
+    ok((size == 0) || (size == 2*1024*1024) || (size == 4*1024*1024),
+        "GetLargePageMinimum reports %Id size\n", size);
+
+    ok( user_shared_data->LargePageMinimum == size, "wrong large page minimum %lx / %Ix\n",
+        user_shared_data->LargePageMinimum, size );
 }
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -4795,6 +4877,7 @@ START_TEST(virtual)
 
     pGetWriteWatch = (void *) GetProcAddress(hkernel32, "GetWriteWatch");
     pResetWriteWatch = (void *) GetProcAddress(hkernel32, "ResetWriteWatch");
+    pGetLargePageMinimum = (void *)GetProcAddress(hkernel32, "GetLargePageMinimum");
     pIsWow64Process = (void *)GetProcAddress( hkernel32, "IsWow64Process" );
     pNtAreMappedFilesTheSame = (void *)GetProcAddress( hntdll, "NtAreMappedFilesTheSame" );
     pNtCreateSection = (void *)GetProcAddress( hntdll, "NtCreateSection" );
@@ -4834,6 +4917,7 @@ START_TEST(virtual)
     test_IsBadWritePtr();
     test_IsBadCodePtr();
     test_write_watch();
+    test_largepages();
     test_PrefetchVirtualMemory();
     test_ReadProcessMemory();
     test_FlushProcessWriteBuffers();

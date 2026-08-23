@@ -1240,12 +1240,7 @@ BOOL WINAPI GetNumberOfConsoleMouseButtons( DWORD *count )
 BOOL WINAPI DECLSPEC_HOTPATCH PeekConsoleInputA( HANDLE handle, INPUT_RECORD *buffer,
                                                  DWORD length, DWORD *count )
 {
-    DWORD read;
-
-    if (!PeekConsoleInputW( handle, buffer, length, &read )) return FALSE;
-    input_records_WtoA( buffer, read );
-    if (count) *count = read;
-    return TRUE;
+    return ReadConsoleInputExA( handle, buffer, length, count, CONSOLE_READ_NOREMOVE | CONSOLE_READ_NOWAIT );
 }
 
 
@@ -1255,11 +1250,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH PeekConsoleInputA( HANDLE handle, INPUT_RECORD *bu
 BOOL WINAPI DECLSPEC_HOTPATCH PeekConsoleInputW( HANDLE handle, INPUT_RECORD *buffer,
                                                  DWORD length, DWORD *count )
 {
-    DWORD read;
-    if (!console_ioctl( handle, IOCTL_CONDRV_PEEK, NULL, 0, buffer, length * sizeof(*buffer), &read ))
-        return FALSE;
-    if (count) *count = read / sizeof(*buffer);
-    return TRUE;
+    return ReadConsoleInputExW( handle, buffer, length, count, CONSOLE_READ_NOREMOVE | CONSOLE_READ_NOWAIT );
 }
 
 
@@ -1812,12 +1803,7 @@ BOOL WINAPI SetCurrentConsoleFontEx( HANDLE handle, BOOL maxwindow, CONSOLE_FONT
  */
 BOOL WINAPI ReadConsoleInputA( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count )
 {
-    DWORD read;
-
-    if (!ReadConsoleInputW( handle, buffer, length, &read )) return FALSE;
-    input_records_WtoA( buffer, read );
-    if (count) *count = read;
-    return TRUE;
+    return ReadConsoleInputExA( handle, buffer, length, count, 0 );
 }
 
 
@@ -1826,10 +1812,30 @@ BOOL WINAPI ReadConsoleInputA( HANDLE handle, INPUT_RECORD *buffer, DWORD length
  */
 BOOL WINAPI ReadConsoleInputW( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count )
 {
-    if (!console_ioctl( handle, IOCTL_CONDRV_READ_INPUT, NULL, 0,
-                        buffer, length * sizeof(*buffer), count ))
-        return FALSE;
-    *count /= sizeof(*buffer);
+    return ReadConsoleInputExW( handle, buffer, length, count, 0 );
+}
+
+
+/***********************************************************************
+ *            ReadConsoleInputExA   (kernelbase.@)
+ */
+BOOL WINAPI ReadConsoleInputExA( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count, USHORT flags )
+{
+    if (!ReadConsoleInputExW(handle, buffer, length, count, flags )) return FALSE;
+    input_records_WtoA( buffer, *count );
+    return TRUE;
+}
+
+
+/***********************************************************************
+ *            ReadConsoleInputExW   (kernelbase.@)
+ */
+BOOL WINAPI ReadConsoleInputExW( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count, USHORT flags )
+{
+    DWORD ioctl_code = (flags & CONSOLE_READ_NOWAIT) ? IOCTL_CONDRV_PEEK : IOCTL_CONDRV_READ_INPUT;
+    if (!console_ioctl( handle, ioctl_code, (void *) &flags, sizeof(USHORT),
+                        buffer, length * sizeof(INPUT_RECORD), count )) return FALSE;
+    *count /= sizeof(INPUT_RECORD);
     return TRUE;
 }
 

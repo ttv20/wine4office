@@ -135,3 +135,61 @@ HRESULT WINAPI BeginMethodEnumeration(int vFunc, IWbemClassObject *ptr, LONG lEn
 
     return IWbemClassObject_BeginMethodEnumeration(ptr, lEnumFlags);
 }
+
+HRESULT WINAPI NextMethod(int vFunc, IWbemClassObject *ptr, LONG lFlags, BSTR *pstrName,
+    IWbemClassObject **ppInSignature, IWbemClassObject **ppOutSignature)
+{
+    TRACE("%i %p, %lx, %p, %p, %p\n", vFunc, ptr, lFlags, pstrName, ppInSignature, ppOutSignature);
+
+    return IWbemClassObject_NextMethod(ptr, lFlags, pstrName, ppInSignature, ppOutSignature);
+}
+
+HRESULT WINAPI EndMethodEnumeration(int vFunc, IWbemClassObject *ptr)
+{
+    TRACE("%i %p\n", vFunc, ptr);
+
+    return IWbemClassObject_EndMethodEnumeration(ptr);
+}
+
+HRESULT WINAPI GetMethod(int vFunc, IWbemClassObject *ptr, LPCWSTR wszName, LONG lFlags,
+    IWbemClassObject **ppInSignature, IWbemClassObject **ppOutSignature)
+{
+	TRACE("%i %p %s %lx %p %p\n", vFunc, ptr, debugstr_w(wszName), lFlags, ppInSignature, ppOutSignature);
+
+	return IWbemClassObject_GetMethod(ptr, wszName, lFlags, ppInSignature, ppOutSignature);
+}
+
+HRESULT WINAPI GetMethodQualifierSet(int vFunc, IWbemClassObject *ptr, LPCWSTR wszMethod, IWbemQualifierSet **ppQualSet)
+{
+    TRACE("%i %p %s %p\n", vFunc, ptr, debugstr_w(wszMethod), ppQualSet);
+
+    return IWbemClassObject_GetMethodQualifierSet(ptr, wszMethod, ppQualSet);
+}
+
+HRESULT WINAPI QualifierSet_Get(int vFunc, IWbemQualifierSet* ptr, LPCWSTR wszName, LONG lFlags, VARIANT *pVal, LONG *plFlavor)
+{
+    TRACE("%i %p %s %lx %p %p\n", vFunc, ptr, debugstr_w(wszName), lFlags, pVal, plFlavor);
+
+    return IWbemQualifierSet_Get(ptr, wszName, lFlags, pVal, plFlavor);
+}
+
+HRESULT WINAPI GetPropertyQualifierSet(int vFunc, IWbemClassObject *ptr, LPCWSTR wszProperty, IWbemQualifierSet **ppQualSet)
+{
+    TRACE("%i %p %s %p\n", vFunc, ptr, debugstr_w(wszProperty), ppQualSet);
+
+    return IWbemClassObject_GetPropertyQualifierSet(ptr, wszProperty, ppQualSet);
+}
+
+IErrorInfo* WINAPI wminet_utils_GetErrorInfo(void)
+{
+    IErrorInfo *error_info = NULL;
+    HRESULT hr;
+
+    hr = GetErrorInfo(0, &error_info);
+    TRACE("returning %p, hr %#lx\n", error_info, hr);
+
+    if (FAILED(hr))
+        return NULL;
+
+    return error_info;
+}

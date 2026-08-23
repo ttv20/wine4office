@@ -315,6 +315,7 @@ static SYSTEM_LOGICAL_PROCESSOR_INFORMATION *logical_proc_info;
 static unsigned int logical_proc_info_len, logical_proc_info_alloc_len;
 static SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *logical_proc_info_ex;
 static unsigned int logical_proc_info_ex_size, logical_proc_info_ex_alloc_size;
+static SYSTEM_NUMA_INFORMATION numa_info;
 static ULONG_PTR system_cpu_mask;
 
 static pthread_mutex_t timezone_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -691,6 +692,13 @@ static void init_cpu_model(void)
         }
         fclose( f );
     }
+#elif defined(__APPLE__)
+    size_t size = sizeof(cpu_name);
+
+    if (sysctlbyname( "machdep.cpu.brand_string", cpu_name, &size, NULL, 0 ))
+        cpu_name[sizeof(cpu_name) - 1] = '\0';
+
+    implementer = 0x61;
 #endif
     cpu_level = part;
     cpu_revision = (variant << 8) | revision;
@@ -706,6 +714,7 @@ static void init_cpu_model(void)
     case 0x51: strcpy( cpu_vendor, "Qualcomm" ); break;
     case 0x53: strcpy( cpu_vendor, "Samsung" ); break;
     case 0x56: strcpy( cpu_vendor, "Marvell" ); break;
+    case 0x61: strcpy( cpu_vendor, "Apple" ); break;
     case 0x66: strcpy( cpu_vendor, "Faraday" ); break;
     case 0x69: strcpy( cpu_vendor, "Intel" ); break;
     }
@@ -1643,6 +1652,8 @@ static pthread_once_t logical_proc_init_once = PTHREAD_ONCE_INIT;
 
 static void init_logical_proc_info(void)
 {
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *p;
+    unsigned numa_node_count = 0;
     NTSTATUS status;
 
     if ((status = create_logical_proc_info()))
@@ -1664,6 +1675,27 @@ static void init_logical_proc_info(void)
         logical_proc_info_ex_alloc_size = logical_proc_info_ex_size;
     }
     init_tsc_frequency();
+
+    if (logical_proc_info_ex)
+    {
+        p = logical_proc_info_ex;
+        while ((char *)p - (char *)logical_proc_info_ex < logical_proc_info_ex_size)
+        {
+            if (p->Relationship == RelationNumaNode || p->Relationship == RelationNumaNodeEx)
+            {
+                numa_info.ActiveProcessorsGroupAffinity[p->NumaNode.NodeNumber] = p->NumaNode.GroupMask;
+                ++numa_node_count;
+            }
+            p = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)((char *)p + p->Size);
+        }
+    }
+    if (!numa_node_count)
+    {
+        numa_node_count = 1;
+        numa_info.ActiveProcessorsGroupAffinity[0].Group = 0;
+        numa_info.ActiveProcessorsGroupAffinity[0].Mask = system_cpu_mask;
+    }
+    numa_info.HighestNodeNumber = numa_node_count - 1;
 }
 
 static void read_dev_urandom( void *buf, ULONG len )
@@ -3723,6 +3755,28 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
         break;
     }
 
+    case SystemNumaProcessorMap:  /* 55 */
+    {
+        SYSTEM_NUMA_INFORMATION *ret_info = info;
+        ULONG data_size;
+
+        pthread_once( &logical_proc_init_once, init_logical_proc_info );
+
+        len = sizeof(ULONG);
+        if (size < len)
+        {
+            ret = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+        ret_info->HighestNodeNumber = numa_info.HighestNodeNumber;
+        data_size = offsetof(SYSTEM_NUMA_INFORMATION, ActiveProcessorsGroupAffinity[numa_info.HighestNodeNumber + 1]);
+        if (size < data_size) break;
+        len = data_size;
+        memcpy( ret_info->ActiveProcessorsGroupAffinity, numa_info.ActiveProcessorsGroupAffinity,
+                sizeof (*numa_info.ActiveProcessorsGroupAffinity) * (numa_info.HighestNodeNumber + 1) );
+        break;
+    }
+
     case SystemExtendedProcessInformation:  /* 57 */
         ret = get_system_process_info( class, info, size, &len );
         break;
@@ -3985,6 +4039,9 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
     }
 
     case SystemProcessorBrandString:  /* 105 */
+#if !defined(__i386__) && !defined(__x86_64__)
+        return STATUS_NOT_SUPPORTED;
+#endif
         if (!cpu_name[0]) return STATUS_NOT_SUPPORTED;
         if ((ULONG_PTR)info & 3) return STATUS_DATATYPE_MISALIGNMENT;
         len = sizeof(cpu_name);

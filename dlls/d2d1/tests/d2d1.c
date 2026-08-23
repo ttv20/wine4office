@@ -38,6 +38,13 @@ DEFINE_GUID(GUID_TestVertexShader, 0x5bcdcfae,0x1e92,0x4dc1,0x94,0xfa,0x3b,0x01,
 DEFINE_GUID(GUID_TestPixelShader,  0x53015748,0xfc13,0x4168,0xbd,0x13,0x0f,0xcf,0x15,0x29,0x7f,0x01);
 DEFINE_GUID(GUID_CustomVertexBuffer, 0x53015748,0xfc13,0x4168,0xbd,0x13,0x0f,0xcf,0x15,0x29,0x7f,0x02);
 
+static const D2D1_MATRIX_3X2_F identity =
+{{{
+    1.0f, 0.0f,
+    0.0f, 1.0f,
+    0.0f, 0.0f,
+}}};
+
 static ULONG get_refcount(void *iface)
 {
     IUnknown *unknown = iface;
@@ -908,6 +915,14 @@ static BOOL compare_rect(const D2D1_RECT_F *rect, float left, float top, float r
             && compare_float(rect->top, top, ulps)
             && compare_float(rect->right, right, ulps)
             && compare_float(rect->bottom, bottom, ulps);
+}
+
+static BOOL compare_rect_u(const D2D1_RECT_U *rect, UINT left, UINT top, UINT right, UINT bottom)
+{
+    return rect->left == left &&
+            rect->top == top &&
+            rect->right == right &&
+            rect->bottom == bottom;
 }
 
 static BOOL compare_bezier_segment(const D2D1_BEZIER_SEGMENT *b, float x1, float y1,
@@ -1985,12 +2000,6 @@ static void test_clip(BOOL d3d11)
     D2D1_SIZE_F size;
     HRESULT hr;
     BOOL match;
-    static const D2D1_MATRIX_3X2_F identity =
-    {{{
-        1.0f, 0.0f,
-        0.0f, 1.0f,
-        0.0f, 0.0f,
-    }}};
 
     if (!init_test_context(&ctx, d3d11))
         return;
@@ -2177,12 +2186,6 @@ static void test_state_block(BOOL d3d11)
     ULONG refcount;
     HRESULT hr;
     void *ptr;
-    static const D2D1_MATRIX_3X2_F identity =
-    {{{
-        1.0f, 0.0f,
-        0.0f, 1.0f,
-        0.0f, 0.0f,
-    }}};
     static const D2D1_MATRIX_3X2_F transform1 =
     {{{
         1.0f, 2.0f,
@@ -3091,12 +3094,6 @@ static void test_image_brush(BOOL d3d11)
         0xffffffff, 0xffffffff, 0xffffffff, 0xff000000,
         0xffffffff, 0xff000000, 0xff000000, 0xff000000,
     };
-    static const D2D1_MATRIX_3X2_F identity =
-    {{{
-        1.0f, 0.0f,
-        0.0f, 1.0f,
-        0.0f, 0.0f,
-    }}};
 
     if (!init_test_context(&ctx, d3d11))
         return;
@@ -18806,6 +18803,7 @@ START_TEST(d2d1)
     queue_d3d10_test(test_transformed_geometry);
     queue_test(test_command_list_glyph_run_lifetime);
     queue_d3d10_test(test_glyph_run_world_bounds);
+    queue_test(test_sprite_batch);
 
     run_queued_tests();
 }

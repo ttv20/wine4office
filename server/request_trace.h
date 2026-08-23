@@ -1961,6 +1961,7 @@ static void dump_get_window_rectangles_reply( const struct get_window_rectangles
 {
     dump_rectangle( " window=", &req->window );
     dump_rectangle( ", client=", &req->client );
+    dump_rectangle( ", visible=", &req->visible );
 }
 
 static void dump_get_window_text_request( const struct get_window_text_request *req )
@@ -2103,11 +2104,9 @@ static void dump_get_window_properties_reply( const struct get_window_properties
 
 static void dump_create_winstation_request( const struct create_winstation_request *req )
 {
-    fprintf( stderr, " flags=%08x", req->flags );
-    fprintf( stderr, ", access=%08x", req->access );
-    fprintf( stderr, ", attributes=%08x", req->attributes );
-    fprintf( stderr, ", rootdir=%04x", req->rootdir );
-    dump_varargs_unicode_str( ", name=", cur_size );
+    fprintf( stderr, " access=%08x", req->access );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
 }
 
 static void dump_create_winstation_reply( const struct create_winstation_reply *req )
@@ -2172,10 +2171,9 @@ static void dump_enum_winstation_reply( const struct enum_winstation_reply *req 
 
 static void dump_create_desktop_request( const struct create_desktop_request *req )
 {
-    fprintf( stderr, " flags=%08x", req->flags );
-    fprintf( stderr, ", access=%08x", req->access );
-    fprintf( stderr, ", attributes=%08x", req->attributes );
-    dump_varargs_unicode_str( ", name=", cur_size );
+    fprintf( stderr, " access=%08x", req->access );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
 }
 
 static void dump_create_desktop_reply( const struct create_desktop_reply *req )
@@ -4736,6 +4734,7 @@ static const struct
     { "INVALID_PIPE_STATE",          STATUS_INVALID_PIPE_STATE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },
     { "INVALID_SECURITY_DESCR",      STATUS_INVALID_SECURITY_DESCR },
+    { "INVALID_STATE_TRANSITION",    STATUS_INVALID_STATE_TRANSITION },
     { "INVALID_USER_BUFFER",         STATUS_INVALID_USER_BUFFER },
     { "IO_REPARSE_DATA_INVALID",     STATUS_IO_REPARSE_DATA_INVALID },
     { "IO_REPARSE_TAG_INVALID",      STATUS_IO_REPARSE_TAG_INVALID },

@@ -406,8 +406,8 @@ static const struct wined3d_parent_ops d3d_buffer_wined3d_parent_ops =
 
 static BOOL validate_buffer_desc(D3D11_BUFFER_DESC *desc, D3D_FEATURE_LEVEL feature_level)
 {
-    if (!validate_d3d11_resource_access_flags(D3D11_RESOURCE_DIMENSION_BUFFER,
-            desc->Usage, desc->BindFlags, desc->CPUAccessFlags, feature_level))
+    if (!validate_d3d11_resource_flags(D3D11_RESOURCE_DIMENSION_BUFFER,
+            desc->Usage, desc->BindFlags, desc->CPUAccessFlags, desc->MiscFlags, feature_level))
         return FALSE;
 
     if (desc->MiscFlags & D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS)
@@ -467,7 +467,7 @@ static HRESULT d3d_buffer_init(struct d3d_buffer *buffer, struct d3d_device *dev
         return E_INVALIDARG;
 
     wined3d_desc.byte_width = buffer->desc.ByteWidth;
-    wined3d_desc.usage = wined3d_usage_from_d3d11(buffer->desc.Usage);
+    wined3d_desc.usage = wined3d_usage_from_d3d11(buffer->desc.Usage, buffer->desc.MiscFlags);
     wined3d_desc.bind_flags = wined3d_bind_flags_from_d3d11(buffer->desc.BindFlags, buffer->desc.MiscFlags);
     wined3d_desc.access = wined3d_access_from_d3d11(buffer->desc.Usage, buffer->desc.CPUAccessFlags);
     wined3d_desc.misc_flags = buffer->desc.MiscFlags;
