@@ -751,6 +751,7 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawRectangle(ID2D1DeviceContex
     if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, rect, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
@@ -781,6 +782,7 @@ static void STDMETHODCALLTYPE d2d_device_context_FillRectangle(ID2D1DeviceContex
     if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, rect, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
@@ -983,12 +985,14 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
@@ -1008,6 +1012,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1018,6 +1023,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1034,6 +1040,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, FALSE)))
         {
             WARN("Failed to update curve ps constant buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1044,6 +1051,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create curves index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1054,6 +1062,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1075,6 +1084,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create arcs index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1085,11 +1095,14 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create arcs vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
+        if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
+            d2d_device_context_set_error(render_target, hr);
+        else
             d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_ARC_OUTLINE, ib,
                     3 * geometry->outline.arc_face_count, vb,
                     sizeof(*geometry->outline.arcs), brush, NULL);
@@ -1413,10 +1426,14 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
     }
 
     if (stroke_width < 1.0f
-            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
-            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl, NULL,
-                    stroke_width, stroke_style_impl, FALSE))
-        return;
+            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+    {
+        if (d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl, NULL,
+                stroke_width, stroke_style_impl, FALSE))
+            return;
+        if (FAILED(context->error.code))
+            return;
+    }
 
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
 }
@@ -1439,12 +1456,14 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, 0.0f)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
@@ -1457,6 +1476,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1467,6 +1487,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1487,6 +1508,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1505,12 +1527,17 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create arc vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, TRUE, TRUE)))
-            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.arc_vertex_count, vb,
-                    sizeof(*geometry->fill.arc_vertices), brush, opacity_brush);
+        if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush,
+                opacity_brush, FALSE, TRUE, TRUE)))
+            d2d_device_context_set_error(render_target, hr);
+        else
+            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL,
+                    geometry->fill.arc_vertex_count, vb, sizeof(*geometry->fill.arc_vertices),
+                    brush, opacity_brush);
 
         ID3D11Buffer_Release(vb);
     }
@@ -1550,10 +1577,15 @@ static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext
                     || brush_impl->type == D2D_BRUSH_TYPE_LINEAR)
             && geometry_impl->fill.face_count >= 16
             && (geometry_impl->fill.bezier_vertex_count >= 24
-                    || geometry_impl->fill.arc_vertex_count >= 12)
-            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl,
-                    opacity_brush_impl, 0.0f, NULL, TRUE))
-        return;
+                    || geometry_impl->fill.arc_vertex_count >= 12))
+    {
+        if (d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl,
+                opacity_brush_impl, 0.0f, NULL, TRUE))
+            return;
+        if (FAILED(context->error.code))
+            return;
+        d2d_device_context_fill_geometry(context, geometry_impl, brush_impl, opacity_brush_impl);
+    }
     else
         d2d_device_context_fill_geometry(context, geometry_impl, brush_impl, opacity_brush_impl);
 }
@@ -1658,6 +1690,7 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
     if (FAILED(hr = d2d_bitmap_brush_create(context->factory, bitmap, &bitmap_brush_desc, &brush_desc, &brush)))
     {
         ERR("Failed to create bitmap brush, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
