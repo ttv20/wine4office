@@ -220,13 +220,9 @@ jobs:
           TAGGED_RELEASE: ${{ steps.version.outputs.tagged_release }}
         run: |
           set -euo pipefail
-          metadata_url=$CONFIGURED_METADATA_URL
           release_base_url=$CONFIGURED_RELEASE_BASE_URL
           if [[ $TAGGED_RELEASE == true ]]; then
             tagged_release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-            if [[ $metadata_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/release.json" ]]; then
-              metadata_url="$tagged_release_url/release.json"
-            fi
             if [[ $release_base_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" ]]; then
               release_base_url=$tagged_release_url
             fi
@@ -236,7 +232,7 @@ jobs:
             build/manager/Wine4OfficeManager \
             release \
             '${{ steps.version.outputs.version }}' \
-            "$metadata_url" \
+            "$CONFIGURED_METADATA_URL" \
             "$release_base_url" \
             '${{ steps.version.outputs.channel }}'
           install -m 0755 install.sh release/install.sh
@@ -292,5 +288,7 @@ jobs:
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               "${release_args[@]}"
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --prerelease="$TAGGED_PRERELEASE"
           gh release upload "$GITHUB_REF_NAME" "${artifacts[@]}" \
             --repo "$GITHUB_REPOSITORY" --clobber
