@@ -1274,6 +1274,8 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     context->clip_stack.count = 0;
     ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
     context->clip_stack.count = clip_count;
+    if (FAILED(hr = context->error.code))
+        goto restore;
     shifted_transform = previous_state.transform;
     shifted_transform._31 -= origin_x * 96.0f / previous_dpi_x;
     shifted_transform._32 -= origin_y * 96.0f / previous_dpi_y;
@@ -1335,6 +1337,8 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         /* Bitmap contents are undefined without initial data, and the draw
          * uses source-over blending.  Start each reduction from transparent. */
         ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+        if (FAILED(hr = context->error.code))
+            goto restore;
         ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
                 (ID2D1Bitmap *)(pass ? downsample[pass - 1] : target), NULL, 1.0f,
                 D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
@@ -2590,6 +2594,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
             0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
     {
         WARN("Failed to map vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
         return;
     }
@@ -2618,6 +2623,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
             0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
     {
         WARN("Failed to map ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
         return;
     }
