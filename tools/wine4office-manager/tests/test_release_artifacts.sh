@@ -24,7 +24,7 @@ printf 'runner payload\n' > "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
 printf 'hidden payload\n' > "$RUNNER/.runner-metadata"
 printf 'gecko x86 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86.msi"
 printf 'gecko x86_64 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
-printf 'mono x86 fixture\n' > "$RUNNER/share/wine/mono/wine-mono-11.2.0-x86.msi"
+printf 'mono x86 fixture\n' > "$RUNNER/share/wine/mono/wine-mono-11.3.0-x86.msi"
 ln -s ../lib/wine/x86_64-windows/kernel32.dll "$RUNNER/bin/kernel32-link"
 printf 'shared hardlink payload\n' > "$RUNNER/share/wine4office/shared target"
 chmod 0640 "$RUNNER/share/wine4office/shared target"
@@ -52,7 +52,7 @@ grep -F "Runner is missing bundled Wine Gecko:" "$TMP/missing-gecko.log" >/dev/n
 
 MISSING_MONO_RUNNER="$TMP/missing-mono-runner"
 cp -a "$RUNNER" "$MISSING_MONO_RUNNER"
-rm "$MISSING_MONO_RUNNER/share/wine/mono/wine-mono-11.2.0-x86.msi"
+rm "$MISSING_MONO_RUNNER/share/wine/mono/wine-mono-11.3.0-x86.msi"
 if "$HERE/packaging/build-release-artifacts.sh" \
     "$MISSING_MONO_RUNNER" "$MANAGER" "$TMP/release-missing-mono" "$VERSION" \
     "https://updates.example/releases/stable/release.json" \
@@ -106,7 +106,7 @@ grep -F "$ROOT/bin/shared symlink -> ../share/wine4office/shared target" \
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi" >/dev/null
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
-    | grep -Fx "$ROOT/share/wine/mono/wine-mono-11.2.0-x86.msi" >/dev/null
+    | grep -Fx "$ROOT/share/wine/mono/wine-mono-11.3.0-x86.msi" >/dev/null
 EXTRACTED="$TMP/extracted"
 mkdir -p "$EXTRACTED"
 tar --zstd -xf "$RELEASE/$WINE_NAME" -C "$EXTRACTED"
