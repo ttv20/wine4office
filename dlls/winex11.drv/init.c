@@ -385,7 +385,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     struct x11drv_win_data *data;
     BOOL have_visual = FALSE;
     XVisualInfo dst_visual;
-    RECT rect_dst, rect_src = client->virtual_rect, rect;
+    RECT rect_dst = client->monitor_rect, rect_src = client->virtual_rect, rect = {0};
     Drawable window;
     HRGN region;
 

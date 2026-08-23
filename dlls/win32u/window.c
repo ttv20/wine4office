@@ -5985,7 +5985,8 @@ void destroy_thread_windows(void)
  * Create a window handle with the server.
  */
 static WND *create_window_handle( HWND parent, HWND owner, HWND broadcast_owner, UNICODE_STRING *name,
-                                  HINSTANCE class_instance, HINSTANCE instance, BOOL ansi, DWORD style, DWORD ex_style )
+                                  HINSTANCE class_instance, const CREATESTRUCTW *cs, BOOL ansi,
+                                  DWORD style, DWORD ex_style )
 {
     struct ratio dpi = { system_dpi, 1 }, raw_dpi = { system_dpi, 1 };
     RECT rect = { cs->x, cs->y, cs->x + cs->cx, cs->y + cs->cy };
@@ -6245,7 +6246,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     style = cs.style & ~WS_VISIBLE;
     ex_style = cs.dwExStyle & ~WS_EX_LAYERED;
     if (!(win = create_window_handle( parent, owner, broadcast_owner, class_name, class_instance,
-                                      cs.hInstance, ansi, style, ex_style )))
+                                      &cs, ansi, style, ex_style )))
         return 0;
     hwnd = win->handle;
 

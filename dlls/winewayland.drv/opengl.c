@@ -80,19 +80,6 @@ static BOOL client_surface_needs_alpha(HWND hwnd)
     return type > ERROR;
 }
 
-static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
-{
-    int client_width, client_height;
-    RECT client_rect = {0};
-
-    NtUserGetClientRect(gl->base.client->hwnd, &client_rect, NtUserGetDpiForWindow(gl->base.client->hwnd));
-    client_width = client_rect.right - client_rect.left;
-    client_height = client_rect.bottom - client_rect.top;
-    if (client_width == 0 || client_height == 0) client_width = client_height = 1;
-
-    wl_egl_window_resize(gl->wl_egl_window, client_width, client_height, 0, 0);
-}
-
 static BOOL wayland_opengl_surface_create(struct client_surface *client, int format, struct opengl_drawable **drawable)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
@@ -102,10 +89,6 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     HWND hwnd = client->hwnd;
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
-
-    NtUserGetClientRect(hwnd, &rect, NtUserGetDpiForWindow(hwnd));
-    if (rect.right == rect.left) rect.right = rect.left + 1;
-    if (rect.bottom == rect.top) rect.bottom = rect.top + 1;
 
     if (!client_surface_needs_alpha(hwnd))
     {
