@@ -18676,6 +18676,153 @@ done:
 }
 
 
+static void test_sprite_batch(BOOL d3d11)
+{
+    D2D1_MATRIX_3X2_F transforms[4];
+    ID2D1SpriteBatch *sprite_batch;
+    struct d2d1_test_context ctx;
+    ID2D1DeviceContext3 *context;
+    D2D1_COLOR_F colors[4];
+    D2D1_RECT_U sources[2];
+    D2D1_RECT_F dests[2];
+    UINT32 count;
+    HRESULT hr;
+    BOOL match;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    hr = ID2D1DeviceContext_QueryInterface(ctx.context, &IID_ID2D1DeviceContext3, (void **)&context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1DeviceContext3_CreateSpriteBatch(context, &sprite_batch);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    check_interface(sprite_batch, &IID_IUnknown, TRUE);
+    check_interface(sprite_batch, &IID_ID2D1Resource, TRUE);
+    check_interface(sprite_batch, &IID_ID2D1SpriteBatch, TRUE);
+
+    hr = ID2D1SpriteBatch_AddSprites(sprite_batch, 2, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    count = ID2D1SpriteBatch_GetSpriteCount(sprite_batch);
+    ok(!count, "Unexpected sprite count %u.\n", count);
+
+    set_rect_u(&sources[0], 0, 0, 1, 1);
+    set_rect_u(&sources[1], 1, 1, 2, 2);
+
+    hr = ID2D1SpriteBatch_AddSprites(sprite_batch, 2, NULL, sources, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    count = ID2D1SpriteBatch_GetSpriteCount(sprite_batch);
+    ok(!count, "Unexpected sprite count %u.\n", count);
+
+    set_rect(&dests[0], 0.0f, 0.0f, 4.0f, 4.0f);
+    set_rect(&dests[1], 5.0f, 5.0f, 9.0f, 9.0f);
+
+    hr = ID2D1SpriteBatch_AddSprites(sprite_batch, 2, dests, NULL, NULL, NULL, sizeof(*dests), 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    count = ID2D1SpriteBatch_GetSpriteCount(sprite_batch);
+    ok(count == 2, "Unexpected sprite count %u.\n", count);
+
+    memset(colors, 0, sizeof(colors));
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 2, dests, sources, colors, transforms);
+    ok(hr == S_OK, "Got unexpected hr %#lx\n", hr);
+
+    match = compare_rect(&dests[0], 0.0f, 0.0f, 4.0f, 4.0f, 0);
+    ok(match, "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            dests[0].left, dests[0].top, dests[0].right, dests[0].bottom);
+
+    match = compare_rect(&dests[1], 5.0f, 5.0f, 9.0f, 9.0f, 0);
+    ok(match, "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            dests[1].left, dests[1].top, dests[1].right, dests[1].bottom);
+
+    match = compare_rect_u(&sources[0], 0, 0, UINT_MAX, UINT_MAX);
+    ok(match, "Got unexpected rectangle {%u, %u, %u, %u}.\n",
+            sources[0].left, sources[0].top, sources[0].right, sources[0].bottom);
+    match = compare_rect_u(&sources[1], 0, 0, UINT_MAX, UINT_MAX);
+    ok(match, "Got unexpected rectangle {%u, %u, %u, %u}.\n",
+            sources[1].left, sources[1].top, sources[1].right, sources[1].bottom);
+
+    ok(compare_colour_f(&colors[0], 1.0f, 1.0f, 1.0f, 1.0f, 0),
+            "Got unexpected colour {%.8e, %.8e, %.8e, %.8e}.\n",
+            colors[0].r, colors[0].g, colors[0].b, colors[0].a);
+    ok(compare_colour_f(&colors[1], 1.0f, 1.0f, 1.0f, 1.0f, 0),
+            "Got unexpected colour {%.8e, %.8e, %.8e, %.8e}.\n",
+            colors[1].r, colors[1].g, colors[1].b, colors[1].a);
+
+    ok(!memcmp(&transforms[0], &identity, sizeof(identity)), "Expected identity matrix.\n");
+    ok(!memcmp(&transforms[1], &identity, sizeof(identity)), "Expected identity matrix.\n");
+
+    hr = ID2D1SpriteBatch_SetSprites(sprite_batch, 0, 0, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_SetSprites(sprite_batch, 0, 8, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_SetSprites(sprite_batch, 5, 1, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_SetSprites(sprite_batch, 0, 1, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_SetSprites(sprite_batch, 0, 8, dests, NULL, NULL, NULL, 0, 0, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 1, 1, dests, NULL, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ok(compare_rect(&dests[0], 5.0f, 5.0f, 9.0f, 9.0f, 0), "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            dests[0].left, dests[0].top, dests[0].right, dests[0].bottom);
+
+    ID2D1SpriteBatch_Clear(sprite_batch);
+    count = ID2D1SpriteBatch_GetSpriteCount(sprite_batch);
+    ok(!count, "Unexpected sprite count %u.\n", count);
+
+    hr = ID2D1SpriteBatch_AddSprites(sprite_batch, 2, dests, NULL, NULL, NULL, sizeof(*dests), 0, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    count = ID2D1SpriteBatch_GetSpriteCount(sprite_batch);
+    ok(count == 2, "Unexpected sprite count %u.\n", count);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 4, dests, sources, colors, transforms);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 3, 1, dests, sources, colors, transforms);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 3, 0, dests, sources, colors, transforms);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 0, dests, sources, colors, transforms);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 2, NULL, NULL, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 2, dests, sources, colors, transforms);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 2, NULL, sources, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1SpriteBatch_GetSprites(sprite_batch, 0, 2, dests, NULL, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    match = compare_rect(&dests[0], 5.0f, 5.0f, 9.0f, 9.0f, 0);
+    ok(match, "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            dests[0].left, dests[0].top, dests[0].right, dests[0].bottom);
+
+    match = compare_rect(&dests[1], 5.0f, 5.0f, 9.0f, 9.0f, 0);
+    ok(match, "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e}.\n",
+            dests[1].left, dests[1].top, dests[1].right, dests[1].bottom);
+
+    ID2D1DeviceContext3_Release(context);
+    ID2D1SpriteBatch_Release(sprite_batch);
+    release_test_context(&ctx);
+}
+
 START_TEST(d2d1)
 {
     HMODULE d2d1_dll = GetModuleHandleA("d2d1.dll");
