@@ -1211,6 +1211,9 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     unsigned int aa_scale = 8;
     HRESULT hr;
 
+    if (context->drawing_state.primitiveBlend != D2D1_PRIMITIVE_BLEND_SOURCE_OVER)
+        return FALSE;
+
     if (fill)
     {
         for (i = 0; i < geometry->fill.vertex_count; ++i)
@@ -1268,6 +1271,9 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)target);
     context->desc.dpiX = previous_dpi_x * aa_scale;
     context->desc.dpiY = previous_dpi_y * aa_scale;
+    context->clip_stack.count = 0;
+    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+    context->clip_stack.count = clip_count;
     shifted_transform = previous_state.transform;
     shifted_transform._31 -= origin_x * 96.0f / previous_dpi_x;
     shifted_transform._32 -= origin_y * 96.0f / previous_dpi_y;
@@ -1280,7 +1286,6 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         context->clip_stack.stack[i].right = (context->clip_stack.stack[i].right - origin_x) * aa_scale;
         context->clip_stack.stack[i].bottom = (context->clip_stack.stack[i].bottom - origin_y) * aa_scale;
     }
-    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
     if (fill)
         d2d_device_context_fill_geometry(context, geometry, brush, opacity_brush);
     else
@@ -1294,7 +1299,6 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
         context->drawing_state.transform = shifted_transform;
     }
-    d2d_device_context_flush_gpu(context);
     hr = context->error.code;
     for (i = 0; i < context->clip_stack.count; ++i)
     {
