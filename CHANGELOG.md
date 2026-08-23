@@ -5,6 +5,10 @@
 ## 0.2.1-beta.1 — 2026-08-23
 
 - Update the Wine base to WineHQ 11.16.
+- Enable VA-API hardware H.264 video decoding with Vulkan-shared surfaces.
+- Update bundled Wine Mono to 11.3.0 and improve ARM64EC exception handling.
+- Include WineHQ fixes for WebView2 input, Wine Wayland, WPF, TLS,
+  certificates, and other application compatibility issues.
 - Open Microsoft 365 sign-in pages correctly in Word.
 - Allow 60 seconds for the Office installer to open and report startup timeouts clearly.
 - Show localized graceful-close and forced-kill progress while stopping the selected Wine environment.
