@@ -1328,6 +1328,9 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
                 (ID2D1Image *)downsample[pass]);
         context->desc.dpiX = properties.dpiX;
         context->desc.dpiY = properties.dpiY;
+        /* Bitmap contents are undefined without initial data, and the draw
+         * uses source-over blending.  Start each reduction from transparent. */
+        ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
         ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
                 (ID2D1Bitmap *)(pass ? downsample[pass - 1] : target), NULL, 1.0f,
                 D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
