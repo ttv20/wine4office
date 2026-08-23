@@ -794,10 +794,8 @@ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *c
 void wined3d_context_vk_cleanup(struct wined3d_context_vk *context_vk);
 BOOL wined3d_context_vk_create_bo(struct wined3d_context_vk *context_vk, VkDeviceSize size,
         VkBufferUsageFlags usage, VkMemoryPropertyFlags memory_type, struct wined3d_bo_vk *bo);
-BOOL wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk, VkImageType vk_image_type,
-        VkImageUsageFlags usage, VkFormat vk_format, unsigned int width, unsigned int height, unsigned int depth,
-        unsigned int sample_count, unsigned int mip_levels, unsigned int layer_count, unsigned int flags,
-        const void *next, HANDLE *shared_handle, struct wined3d_image_vk *image);
+bool wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk,
+        const VkImageCreateInfo *desc, HANDLE *shared_handle, struct wined3d_image_vk *image);
 void wined3d_context_vk_destroy_allocator_block(struct wined3d_context_vk *context_vk,
         struct wined3d_allocator_block *block, uint64_t command_buffer_id);
 void wined3d_context_vk_destroy_bo(struct wined3d_context_vk *context_vk,
