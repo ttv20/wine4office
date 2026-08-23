@@ -23,7 +23,7 @@ for gecko_arch in x86 x86_64; do
     gecko="$RUNNER/share/wine/gecko/wine-gecko-${GECKO_VERSION}-${gecko_arch}.msi"
     [[ -f "$gecko" ]] || { echo "Runner is missing bundled Wine Gecko: $gecko" >&2; exit 1; }
 done
-MONO_VERSION=11.2.0
+MONO_VERSION=11.3.0
 mono="$RUNNER/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi"
 [[ -f "$mono" ]] || { echo "Runner is missing bundled Wine Mono: $mono" >&2; exit 1; }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }

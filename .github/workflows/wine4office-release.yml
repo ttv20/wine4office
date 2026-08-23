@@ -22,7 +22,7 @@ on:
   push:
     tags:
       - "wine4office-v*"
-      - "0.*.*"
+      - "0.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
@@ -38,7 +38,8 @@ jobs:
     env:
       CONFIGURED_METADATA_URL: ${{ inputs.metadata_url || vars.WINE4OFFICE_METADATA_URL || 'https://github.com/ttv20/wine4office/releases/latest/download/release.json' }}
       CONFIGURED_RELEASE_BASE_URL: ${{ inputs.release_base_url || vars.WINE4OFFICE_RELEASE_BASE_URL || 'https://github.com/ttv20/wine4office/releases/latest/download' }}
-      CONFIGURED_RELEASE_CHANNEL: ${{ inputs.channel || vars.WINE4OFFICE_RELEASE_CHANNEL || 'stable' }}
+      REQUESTED_RELEASE_CHANNEL: ${{ inputs.channel }}
+      DEFAULT_RELEASE_CHANNEL: ${{ vars.WINE4OFFICE_RELEASE_CHANNEL || 'stable' }}
     steps:
       - name: Check out Wine4Office
         uses: actions/checkout@v4
@@ -102,17 +103,37 @@ jobs:
         run: |
           set -euo pipefail
           requested=${REQUESTED_VERSION:-}
+          tagged_release=false
           if [[ -n "$requested" ]]; then
             version=$requested
           elif [[ $GITHUB_REF == refs/tags/wine4office-v* ]]; then
             version=${GITHUB_REF_NAME#wine4office-v}
+            tagged_release=true
           elif [[ $GITHUB_REF == refs/tags/0.*.* ]]; then
+            [[ $GITHUB_REF_NAME =~ ^0\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
+              echo "Unsupported numeric release tag: $GITHUB_REF_NAME" >&2
+              exit 1
+            }
             version=$GITHUB_REF_NAME
+            tagged_release=true
           else
             version="0.0.0-${GITHUB_SHA:0:12}"
           fi
           [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]]
+          prerelease=false
+          [[ $version == *-* ]] && prerelease=true
+          if [[ -n ${REQUESTED_RELEASE_CHANNEL:-} ]]; then
+            channel=$REQUESTED_RELEASE_CHANNEL
+          elif [[ $prerelease == true ]]; then
+            channel=prerelease
+          else
+            channel=$DEFAULT_RELEASE_CHANNEL
+          fi
+          [[ $channel =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tagged_release=$tagged_release" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Test verified curl installer
         run: tools/wine4office-manager/tests/test_curl_install.sh
@@ -190,26 +211,34 @@ jobs:
             tools/wine4office-manager/packaging/build-qt-binary.sh \
             build/manager/Wine4OfficeManager \
             '${{ steps.version.outputs.version }}' \
-            "$CONFIGURED_RELEASE_CHANNEL"
+            '${{ steps.version.outputs.channel }}'
           QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
             build/manager/Wine4OfficeManager --smoke-test
 
       - name: Package separate release artifacts
+        env:
+          TAGGED_RELEASE: ${{ steps.version.outputs.tagged_release }}
         run: |
           set -euo pipefail
+          metadata_url=$CONFIGURED_METADATA_URL
           release_base_url=$CONFIGURED_RELEASE_BASE_URL
-          if [[ ($GITHUB_REF == refs/tags/wine4office-v* || $GITHUB_REF == refs/tags/0.*.*) \
-                && $release_base_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" ]]; then
-            release_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          if [[ $TAGGED_RELEASE == true ]]; then
+            tagged_release_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+            if [[ $metadata_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/release.json" ]]; then
+              metadata_url="$tagged_release_url/release.json"
+            fi
+            if [[ $release_base_url == "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" ]]; then
+              release_base_url=$tagged_release_url
+            fi
           fi
           tools/wine4office-manager/packaging/build-release-artifacts.sh \
             stage/opt/wine4office \
             build/manager/Wine4OfficeManager \
             release \
             '${{ steps.version.outputs.version }}' \
-            "$CONFIGURED_METADATA_URL" \
+            "$metadata_url" \
             "$release_base_url" \
-            "$CONFIGURED_RELEASE_CHANNEL"
+            '${{ steps.version.outputs.channel }}'
           install -m 0755 install.sh release/install.sh
 
       - name: Upload Wine4OfficeManager CI artifact
@@ -242,13 +271,16 @@ jobs:
           if-no-files-found: error
 
       - name: Publish tagged GitHub release
-        if: startsWith(github.ref, 'refs/tags/wine4office-v') || startsWith(github.ref, 'refs/tags/0.')
+        if: steps.version.outputs.tagged_release == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAGGED_PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'
+          release_args=(--verify-tag --generate-notes)
+          [[ $TAGGED_PRERELEASE == true ]] && release_args+=(--prerelease)
           artifacts=(
             "release/Wine4OfficeManager-${version}-x86_64"
             "release/Wine4OfficeManager-${version}-x86_64.sha256"
@@ -259,6 +291,6 @@ jobs:
           )
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --verify-tag --generate-notes
+              "${release_args[@]}"
           gh release upload "$GITHUB_REF_NAME" "${artifacts[@]}" \
             --repo "$GITHUB_REPOSITORY" --clobber
