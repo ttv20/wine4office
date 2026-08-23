@@ -58,6 +58,7 @@ extern "C" {
 #define BCRYPT_HASH_BLOCK_LENGTH    L"HashBlockLength"
 #define BCRYPT_HASH_LENGTH          L"HashDigestLength"
 #define BCRYPT_HASH_OID_LIST        L"HashOIDList"
+#define BCRYPT_INITIALIZATION_VECTOR L"IV"
 #define BCRYPT_KEY_LENGTH           L"KeyLength"
 #define BCRYPT_KEY_LENGTHS          L"KeyLengths"
 #define BCRYPT_KEY_OBJECT_LENGTH    L"KeyObjectLength"
@@ -120,6 +121,13 @@ extern "C" {
 #define BCRYPT_SHA256_ALGORITHM     L"SHA256"
 #define BCRYPT_SHA384_ALGORITHM     L"SHA384"
 #define BCRYPT_SHA512_ALGORITHM     L"SHA512"
+#define BCRYPT_TLS1_1_KDF_ALGORITHM L"TLS1_1_KDF"
+#define BCRYPT_TLS1_2_KDF_ALGORITHM L"TLS1_2_KDF"
+#define BCRYPT_HKDF_ALGORITHM       L"HKDF"
+
+#define BCRYPT_HKDF_HASH_ALGORITHM      L"HkdfHashAlgorithm"
+#define BCRYPT_HKDF_SALT_AND_FINALIZE   L"HkdfSaltAndFinalize"
+#define BCRYPT_HKDF_PRK_AND_FINALIZE    L"HkdfPrkAndFinalize"
 
 #define BCRYPT_CHAIN_MODE_NA        L"ChainingModeN/A"
 #define BCRYPT_CHAIN_MODE_CBC       L"ChainingModeCBC"
@@ -141,6 +149,7 @@ extern "C" {
 #define BCRYPT_KDF_TLS_PRF          L"TLS_PRF"
 #define BCRYPT_KDF_SP80056A_CONCAT  L"SP800_56A_CONCAT"
 #define BCRYPT_KDF_RAW_SECRET       L"TRUNCATE"
+#define BCRYPT_KDF_HKDF             L"HKDF"
 
 #define BCRYPT_DH_PARAMETERS        L"DHParameters"
 
@@ -155,6 +164,7 @@ static const WCHAR BCRYPT_EFFECTIVE_KEY_LENGTH[] = {'E','f','f','e','c','t','i',
 static const WCHAR BCRYPT_HASH_BLOCK_LENGTH[] = {'H','a','s','h','B','l','o','c','k','L','e','n','g','t','h',0};
 static const WCHAR BCRYPT_HASH_LENGTH[] = {'H','a','s','h','D','i','g','e','s','t','L','e','n','g','t','h',0};
 static const WCHAR BCRYPT_HASH_OID_LIST[] = {'H','a','s','h','O','I','D','L','i','s','t',0};
+static const WCHAR BCRYPT_INITIALIZATION_VECTOR[] = {'I','V',0};
 static const WCHAR BCRYPT_KEY_LENGTH[] = {'K','e','y','L','e','n','g','t','h',0};
 static const WCHAR BCRYPT_KEY_LENGTHS[] = {'K','e','y','L','e','n','g','t','h','s',0};
 static const WCHAR BCRYPT_KEY_OBJECT_LENGTH[] = {'K','e','y','O','b','j','e','c','t','L','e','n','g','t','h',0};
@@ -219,6 +229,13 @@ static const WCHAR BCRYPT_SHA1_ALGORITHM[] = {'S','H','A','1',0};
 static const WCHAR BCRYPT_SHA256_ALGORITHM[] = {'S','H','A','2','5','6',0};
 static const WCHAR BCRYPT_SHA384_ALGORITHM[] = {'S','H','A','3','8','4',0};
 static const WCHAR BCRYPT_SHA512_ALGORITHM[] = {'S','H','A','5','1','2',0};
+static const WCHAR BCRYPT_TLS1_1_KDF_ALGORITHM[] = {'T','L','S','1','_','1','_','K','D','F',0};
+static const WCHAR BCRYPT_TLS1_2_KDF_ALGORITHM[] = {'T','L','S','1','_','2','_','K','D','F',0};
+static const WCHAR BCRYPT_HKDF_ALGORITHM[] = {'H','K','D','F',0};
+
+static const WCHAR BCRYPT_HKDF_HASH_ALGORITHM[] = {'H','k','d','f','H','a','s','h','A','l','g','o','r','i','t','h','m',0};
+static const WCHAR BCRYPT_HKDF_SALT_AND_FINALIZE[] = {'H','k','d','f','S','a','l','t','A','n','d','F','i','n','a','l','i','z','e',0};
+static const WCHAR BCRYPT_HKDF_PRK_AND_FINALIZE[] = {'H','k','d','f','P','r','k','A','n','d','F','i','n','a','l','i','z','e',0};
 
 static const WCHAR BCRYPT_CHAIN_MODE_NA[] = {'C','h','a','i','n','i','n','g','M','o','d','e','N','/','A',0};
 static const WCHAR BCRYPT_CHAIN_MODE_CBC[] = {'C','h','a','i','n','i','n','g','M','o','d','e','C','B','C',0};
@@ -240,6 +257,7 @@ static const WCHAR BCRYPT_KDF_HMAC[] = {'H','M','A','C',0};
 static const WCHAR BCRYPT_KDF_TLS_PRF[] = {'T','L','S','_','P','R','F',0};
 static const WCHAR BCRYPT_KDF_SP80056A_CONCAT[] = {'S','P','8','0','0','_','5','6','A','_','C','O','N','C','A','T',0};
 static const WCHAR BCRYPT_KDF_RAW_SECRET[] = {'T','R','U','N','C','A','T','E',0};
+static const WCHAR BCRYPT_KDF_HKDF[] = {'H','K','D','F',0};
 
 static const WCHAR BCRYPT_DH_PARAMETERS[] = {'D','H','P','a','r','a','m','e','t','e','r','s',0};
 static const WCHAR BCRYPT_MESSAGE_BLOCK_LENGTH[] = {'M','e','s','s','a','g','e','B','l','o','c','k','L','e','n','g','t','h',0};
@@ -476,6 +494,7 @@ typedef struct _BCRYPT_KEY_DATA_BLOB_HEADER
 #define KDF_CONTEXT             0x0e
 #define KDF_SALT                0x0f
 #define KDF_ITERATION_COUNT     0x10
+#define KDF_HKDF_INFO           0x14
 
 typedef struct _BCryptBuffer
 {

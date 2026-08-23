@@ -26,6 +26,7 @@
 
 #include "wine/server.h"
 #include "wine/debug.h"
+#include "mmsystem.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(console);
 
@@ -490,10 +491,13 @@ static NTSTATUS read_console_input( struct console *console, size_t out_size )
     read_complete( console, STATUS_SUCCESS, console->records, count * sizeof(*console->records),
                    console->record_count > count );
 
-    if (count < console->record_count)
-        memmove( console->records, console->records + count,
-                 (console->record_count - count) * sizeof(*console->records) );
-    console->record_count -= count;
+    if (!(console->read_flags & CONSOLE_READ_NOREMOVE))
+    {
+        if (count < console->record_count)
+            memmove( console->records, console->records + count,
+                     (console->record_count - count) * sizeof(*console->records) );
+        console->record_count -= count;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -2103,6 +2107,20 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
     return STATUS_SUCCESS;
 }
 
+static void play_console_beep( struct console *console )
+{
+    if (console->is_unix)
+    {
+        tty_write( console, "\a", 1 );
+        tty_flush( console );
+    }
+    else
+    {
+        if (!PlaySoundW( L"console_beep", GetModuleHandleW( NULL ), SND_RESOURCE | SND_ASYNC ))
+            ERR( "Failed to play console beep using PlaySoundW\n" );
+    }
+}
+
 static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR *buffer, size_t len )
 {
     RECT update_rect;
@@ -2138,7 +2156,7 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR 
                 }
                 continue;
             case '\a':
-                FIXME( "beep\n" );
+                play_console_beep( screen_buffer->console );
                 continue;
             case '\r':
                 screen_buffer->cursor_x = 0;
@@ -2700,8 +2718,19 @@ static NTSTATUS console_input_ioctl( struct console *console, unsigned int code,
 
     case IOCTL_CONDRV_READ_INPUT:
         {
-            if (in_size) return STATUS_INVALID_PARAMETER;
+            USHORT flags = 0;
+            console->read_flags = 0;
+            if (in_size)
+            {
+                if (in_size != sizeof(USHORT)) return STATUS_INVALID_PARAMETER;
+                flags = *(USHORT *)in_data;
+                if (flags & ~CONSOLE_READ_NOREMOVE) return STATUS_INVALID_PARAMETER;
+
+                console->read_flags = flags;
+            }
+
             ensure_tty_input_thread( console );
+
             if (!console->record_count && *out_size)
             {
                 TRACE( "pending read\n" );
@@ -2721,12 +2750,31 @@ static NTSTATUS console_input_ioctl( struct console *console, unsigned int code,
     case IOCTL_CONDRV_PEEK:
         {
             void *result;
+            DWORD flags = 0;
             TRACE( "peek\n" );
-            if (in_size) return STATUS_INVALID_PARAMETER;
+            if (in_size)
+            {
+                if (in_size != sizeof(USHORT)) return STATUS_INVALID_PARAMETER;
+                flags = *(USHORT *)in_data;
+                if (!(flags & CONSOLE_READ_NOWAIT) ||
+                    flags & ~(CONSOLE_READ_NOREMOVE | CONSOLE_READ_NOWAIT)) return STATUS_INVALID_PARAMETER;
+            }
+
             ensure_tty_input_thread( console );
             *out_size = min( *out_size, console->record_count * sizeof(INPUT_RECORD) );
             if (!(result = alloc_ioctl_buffer( *out_size ))) return STATUS_NO_MEMORY;
             if (*out_size) memcpy( result, console->records, *out_size );
+
+            if (!(flags & CONSOLE_READ_NOREMOVE))
+            {
+                if (*out_size)
+                {
+                    size_t count = *out_size / sizeof(INPUT_RECORD);
+                    memmove(console->records, console->records + count,
+                            (console->record_count - count) * sizeof(INPUT_RECORD));
+                    console->record_count -= count;
+                }
+            }
             return STATUS_SUCCESS;
         }
 
@@ -2806,11 +2854,7 @@ static NTSTATUS console_input_ioctl( struct console *console, unsigned int code,
 
     case IOCTL_CONDRV_BEEP:
         if (in_size || *out_size) return STATUS_INVALID_PARAMETER;
-        if (console->is_unix)
-        {
-            tty_write( console, "\a", 1 );
-            tty_sync( console );
-        }
+        play_console_beep( console );
         return STATUS_SUCCESS;
 
     case IOCTL_CONDRV_FLUSH:

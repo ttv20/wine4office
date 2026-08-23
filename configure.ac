@@ -60,6 +60,7 @@ AC_ARG_WITH(sdl,       AS_HELP_STRING([--without-sdl],[do not use SDL]))
 AC_ARG_WITH(udev,      AS_HELP_STRING([--without-udev],[do not use udev (plug and play support)]))
 AC_ARG_WITH(usb,       AS_HELP_STRING([--without-usb],[do not use the libusb library]))
 AC_ARG_WITH(v4l2,      AS_HELP_STRING([--without-v4l2],[do not use v4l2 (video capture)]))
+AC_ARG_WITH(va,        AS_HELP_STRING([--without-va],[do not use VA-API (hardware video decoding)]))
 AC_ARG_WITH(vulkan,    AS_HELP_STRING([--without-vulkan],[do not use Vulkan]))
 AC_ARG_WITH(wayland,   AS_HELP_STRING([--without-wayland],[do not build the Wayland driver]))
 AC_ARG_WITH(xcomposite,AS_HELP_STRING([--without-xcomposite],[do not use the Xcomposite extension]),
@@ -175,14 +176,6 @@ dnl Some special cases for the Windows platform
 case $build_os in
   cygwin*|mingw32*) AC_SUBST(toolsext,".exe") ;;
   *) AC_SUBST(toolsext,"") ;;
-esac
-
-case $host_os in
-  mingw32*)
-    enable_archs=${enable_archs:-$HOST_ARCH}
-    AS_VAR_SET(${HOST_ARCH}_CC,$CC)
-    with_mingw=${with_mingw:-no}
-    ;;
 esac
 
 case $host_os in
@@ -390,10 +383,16 @@ AS_VAR_SET_IF([enable_archs],
            *) AC_MSG_ERROR([Unknown cross-compilation architecture '$arch']) ;;
          esac
      done],
-    [if test "x$with_mingw" != xno
-     then
-         test $HOST_ARCH = unknown || cross_archs=$HOST_ARCH
-     fi])
+    [cross_archs=$HOST_ARCH
+     case $HOST_ARCH-$host_os in
+       unknown-*) PE_ARCHS=none ;;
+       *-mingw32*) AS_VAR_SET(${HOST_ARCH}_CC,$CC) ;;
+       x86_64-darwin*|arm-*|aarch64-*|*-cygwin*) AS_VAR_IF([with_mingw],[no],
+                 [AC_MSG_ERROR([The --without-mingw option is not supported on $HOST_ARCH-$host_os.])]) ;;
+       *) AS_VAR_IF([with_mingw],[no],[cross_archs=""],
+                    [mingw_notice="
+Use the --without-mingw option if you really want a non-PE build."]) ;;
+     esac])
 
 AS_VAR_IF([PE_ARCHS],[none],[cross_archs=])
 
@@ -412,6 +411,13 @@ do
     x86_64) extra_arch="" ;;
   esac
 done
+
+AC_DEFUN([WINE_NO_PE_ERROR],[AS_IF([$1],
+    [AS_VAR_SET_IF([enable_archs],
+        [AC_MSG_ERROR([$2
+This is an error since --enable-archs=$wine_arch was requested.])],
+        [AC_MSG_ERROR([$2$mingw_notice])])
+     continue])])
 
 for wine_arch in $cross_archs $extra_arch
 do
@@ -510,13 +516,8 @@ do
         AS_VAR_POPDEF([wine_cv_crosscc])
     fi
 
-    if test -z "$target"
-    then
-        AS_VAR_SET_IF([enable_archs],
-            [AC_MSG_ERROR([$wine_arch PE cross-compiler not found.
-This is an error since --enable-archs=$wine_arch was requested.])])
-        continue
-    fi
+    WINE_NO_PE_ERROR([test -z "$target"],[$wine_arch PE compiler not found.
+Please install mingw-w64, clang/llvm-dlltool/lld, or llvm-mingw.])
 
     AS_VAR_SET([${wine_arch}_TARGET],[$target])
     AS_VAR_SET([${wine_arch}_STRIP],[$target_strip])
@@ -537,15 +538,11 @@ This is an error since --enable-archs=$wine_arch was requested.])])
     AS_VAR_POPDEF([wine_cv_crosscc_c99])
     case "x$res" in
       x) AC_MSG_RESULT([none needed]) ;;
-      xno) AC_MSG_RESULT([unsupported])
-           AS_VAR_SET_IF([enable_archs],
-                [AC_MSG_ERROR([$wine_arch PE cross-compiler supporting C99 not found.
-This is an error since --enable-archs=$wine_arch was requested.])])
-           continue
-           ;;
+      xno) AC_MSG_RESULT([unsupported]) ;;
       x*) AC_MSG_RESULT([$res])
           AS_VAR_APPEND([${wine_arch}_CC],[" $res"]) ;;
     esac
+    WINE_NO_PE_ERROR([test "x$res" = xno],[The $wine_arch PE compiler doesn't support C99.])
 
     AS_VAR_IF([wine_arch],[i386],[],
               [AS_VAR_PUSHDEF([wine_cv_seh_support],[ac_cv_${wine_arch}_seh_support])
@@ -554,11 +551,8 @@ This is an error since --enable-archs=$wine_arch was requested.])])
                                      [AS_VAR_SET([wine_cv_seh_support],[yes])],[AS_VAR_SET([wine_cv_seh_support],[no])]))
                AS_VAR_COPY([res],[wine_cv_seh_support])
                AS_VAR_POPDEF([wine_cv_seh_support])
-               AS_VAR_IF([res],[yes],[],
-                         [AS_VAR_SET_IF([enable_archs],
-                             [AC_MSG_ERROR([The $wine_arch PE cross-compiler doesn't support SEH directives.
-This is an error since --enable-archs=$wine_arch was requested.])])
-                          continue])])
+               WINE_NO_PE_ERROR([test "x$res" != xyes],
+                                [The $wine_arch PE compiler doesn't support SEH directives.])])
 
     AS_VAR_IF([wine_arch],[$extra_arch],[],[AS_VAR_APPEND([PE_ARCHS],[" $wine_arch"])])
 
@@ -583,7 +577,7 @@ This is an error since --enable-archs=$wine_arch was requested.])])
       x) AC_MSG_RESULT([none needed])
          enable_cplusplus="$enable_cplusplus,$wine_arch" ;;
       xno) AC_MSG_RESULT([unsupported])
-           WINE_WARNING([$wine_arch PE cross-compiler supporting C++17 not found, some modules won't be built.]) ;;
+           WINE_WARNING([$wine_arch PE compiler supporting C++17 not found, some modules won't be built.]) ;;
       x*) AC_MSG_RESULT([$res])
           AS_VAR_APPEND([${wine_arch}_CXX],[" $res"])
           enable_cplusplus="$enable_cplusplus,$wine_arch" ;;
@@ -699,13 +693,10 @@ CXXFLAGS=$saved_CXXFLAGS
 LDFLAGS=$saved_LDFLAGS
 
 case $HOST_ARCH-$host_os in
-  x86_64-darwin*|arm-*|aarch64-*|*-cygwin*)
-    test "x$PE_ARCHS" != x || AC_MSG_ERROR([PE cross-compilation is required for $host, please install mingw-w64, clang/llvm-dlltool/lld, or llvm-mingw.])
+  x86_64-darwin*|arm-*|aarch64-*|*-cygwin*|*-mingw32*)
     DLLEXT="" ;;
   *)
-    AC_SUBST(DLLEXT,".so")
-    WINE_WARNING_WITH(mingw,[test "x$PE_ARCHS" = "x"],
-                      [Suitable PE cross-compiler not found, you should install mingw-w64 or llvm-mingw.]) ;;
+    AC_SUBST(DLLEXT,".so") ;;
 esac
 
 dnl **** Check for some libraries ****
@@ -971,7 +962,6 @@ WINE_CONFIG_HELPERS
 case $host_os in
   cygwin*|mingw32*)
     LIBEXT="dll"
-    DLLEXT=""
     ;;
 
   darwin*)
@@ -1627,6 +1617,22 @@ then
 fi
 WINE_NOTICE_WITH(v4l2,[test "x$ac_cv_lib_soname_v4l2" = "x"],
                  [libv4l2 ${notice_platform}development files not found.])
+
+dnl **** Check for libva ****
+if test "x$with_va" != "xno"
+then
+    WINE_PACKAGE_FLAGS(VA,[libva libva-drm],[-lva-drm -lva],,,
+        [AC_CHECK_HEADERS(va/va_drm.h)
+        if test "$ac_cv_header_va_va_drm_h" = "yes"
+        then
+            WINE_CHECK_SONAME(va-drm, vaGetDisplayDRM,,[VA_CFLAGS=""])
+            WINE_CHECK_SONAME(va, vaInitialize,,[VA_CFLAGS=""])
+        else
+            VA_CFLAGS=""
+        fi])
+fi
+WINE_NOTICE_WITH(va,[test "x$ac_cv_lib_soname_va_drm" = x -o "x$ac_cv_lib_soname_va" = x],
+                 [libva-drm ${notice_platform}development files not found, VA video acceleration won't be supported.])
 
 dnl **** Check for libgphoto2 ****
 if test "x$with_gphoto" != "xno"

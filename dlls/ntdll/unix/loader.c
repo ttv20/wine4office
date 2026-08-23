@@ -482,7 +482,8 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info 
     char preloader_reserve[64], socket_env[64];
 
     if (pe_info->wine_fakedll) res_start = res_end = 0;
-    if (pe_info->image_flags & IMAGE_FLAGS_ComPlusNativeReady) machine = native_machine;
+    if (pe_info->image_flags & IMAGE_FLAGS_ComPlusNativeReady)
+        machine = is_machine_64bit( native_machine ) ? IMAGE_FILE_MACHINE_AMD64 : native_machine;
 
     signal( SIGPIPE, SIG_DFL );
 
@@ -1445,7 +1446,7 @@ static NTSTATUS open_main_image( UNICODE_STRING *nt_name, void **module, SECTION
         status = virtual_map_module( mapping, module, &size, info, 0, 0, machine );
         if (status == STATUS_IMAGE_MACHINE_TYPE_MISMATCH && info->ComPlusNativeReady)
         {
-            info->Machine = native_machine;
+            info->Machine = is_machine_64bit( native_machine ) ? IMAGE_FILE_MACHINE_AMD64 : native_machine;
             status = STATUS_SUCCESS;
         }
         NtClose( mapping );
@@ -1472,12 +1473,18 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **mod
     enum loadorder loadorder = get_load_order( nt_name, is_system_dir, NULL );
 
     status = open_main_image( nt_name, module, &main_image_info, loadorder, load_machine );
-    if (status != STATUS_DLL_NOT_FOUND) return status;
 
-    /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
-    if (loadorder != LO_NATIVE && is_prefix_bootstrap && is_system_dir)
-        status = find_builtin_dll( nt_name, NULL, module, &size, &main_image_info, 0, 0,
-                                   search_machine, load_machine, FALSE, 0 );
+    switch (status)
+    {
+    case STATUS_DLL_NOT_FOUND:
+    case STATUS_INVALID_IMAGE_FORMAT:
+    case STATUS_NOT_SUPPORTED:
+        /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
+        if (loadorder != LO_NATIVE && is_prefix_bootstrap && is_system_dir)
+            status = find_builtin_dll( nt_name, NULL, module, &size, &main_image_info, 0, 0,
+                                       search_machine, load_machine, FALSE, 0 );
+        break;
+    }
     return status;
 }
 

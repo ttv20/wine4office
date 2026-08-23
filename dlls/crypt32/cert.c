@@ -624,6 +624,20 @@ static BOOL CertContext_GetProperty(cert_t *cert, DWORD dwPropId,
     return ret;
 }
 
+static const WCHAR *get_cng_sign_alg( const char *oid )
+{
+    if (!strcmp( oid, szOID_RSA_SHA1RSA ) || !strcmp( oid, szOID_OIWSEC_sha1RSASign )) return L"RSA/SHA1";
+    if (!strcmp( oid, szOID_RSA_SHA256RSA )) return L"RSA/SHA256";
+    if (!strcmp( oid, szOID_RSA_SHA384RSA )) return L"RSA/SHA384";
+    if (!strcmp( oid, szOID_RSA_SHA512RSA )) return L"RSA/SHA512";
+    if (!strcmp( oid, szOID_ECDSA_SHA256 ))  return L"ECDSA/SHA256";
+    if (!strcmp( oid, szOID_ECDSA_SHA384 ))  return L"ECDSA/SHA384";
+    if (!strcmp( oid, szOID_ECDSA_SHA512 ))  return L"ECDSA/SHA512";
+
+    FIXME( "unhandled oid %s\n", debugstr_a(oid) );
+    return NULL;
+}
+
 BOOL WINAPI CertGetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
  DWORD dwPropId, void *pvData, DWORD *pcbData)
 {
@@ -691,6 +705,19 @@ BOOL WINAPI CertGetCertificateContextProperty(PCCERT_CONTEXT pCertContext,
         if (ret && pvData)
             fix_KeyProvInfoProperty(pvData);
         break;
+    case CERT_SIGN_HASH_CNG_ALG_PROP_ID:
+    {
+        const WCHAR *alg = get_cng_sign_alg(cert->ctx.pCertInfo->SignatureAlgorithm.pszObjId);
+
+        if (alg)
+            ret = CertContext_CopyParam(pvData, pcbData, alg, (wcslen(alg) + 1) * sizeof(WCHAR));
+        else
+        {
+            SetLastError(CRYPT_E_NOT_FOUND);
+            ret = FALSE;
+        }
+        break;
+    }
     default:
         ret = CertContext_GetProperty(cert, dwPropId, pvData,
          pcbData);
@@ -3783,7 +3810,7 @@ static HCRYPTPROV CRYPT_CreateKeyProv(void)
 
     if (!container) return 0;
 
-    if (CryptAcquireContextW( &hProv, container, MS_DEF_PROV_W, PROV_RSA_FULL, CRYPT_NEWKEYSET ))
+    if (CryptAcquireContextW( &hProv, container, MS_STRONG_PROV_W, PROV_RSA_FULL, CRYPT_NEWKEYSET ))
     {
         HCRYPTKEY key;
         if (CryptGenKey( hProv, AT_SIGNATURE, 0, &key ))

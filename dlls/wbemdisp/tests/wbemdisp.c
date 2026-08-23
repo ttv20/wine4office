@@ -138,6 +138,15 @@ static void test_ParseDisplayName(void)
                         DISPID dispid;
                         DISPPARAMS params;
                         UINT arg_err;
+                        ISWbemObjectPath *objpath;
+                        ISWbemObject *object;
+                        BSTR dispname, dispname2;
+                        ISWbemPropertySet *props;
+                        IEnumVARIANT *setenumvar, *propenumvar;
+                        VARIANT vars[40] = {0};
+                        ISWbemProperty *prop;
+                        ISWbemMethodSet *methods;
+                        ISWbemQualifierSet *quals = NULL;
 
                         fetched = 0xdeadbeef;
                         hr = IEnumVARIANT_Next( enumvar, 0, &var, &fetched );
@@ -238,6 +247,135 @@ static void test_ParseDisplayName(void)
                         ok( V_VT( &res ) == VT_BSTR, "got %u\n", V_VT( &res ) );
                         ok( V_BSTR( &res ) != (BSTR)0xdeadbeef, "got %u\n", V_VT( &res ) );
                         VariantClear( &res );
+
+                        str = SysAllocString( L"Path_" );
+                        dispid = 0xdeadbeef;
+                        hr = IDispatch_GetIDsOfNames( dispatch, &IID_NULL, &str, 1, english, &dispid );
+                        SysFreeString( str );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        ok( dispid == 0x18, "got %#lx\n", dispid );
+
+                        V_VT( &res ) = VT_ERROR;
+                        V_DISPATCH( &res ) = (IDispatch *)0xdeadbeef;
+                        memset( &params, 0, sizeof(params) );
+                        hr = IDispatch_Invoke( dispatch, dispid, &IID_NULL, english,
+                                               DISPATCH_METHOD|DISPATCH_PROPERTYGET,
+                                               &params, &res, NULL, NULL );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        ok( params.rgvarg == NULL, "got %p\n", params.rgvarg );
+                        ok( params.rgdispidNamedArgs == NULL, "got %p\n", params.rgdispidNamedArgs );
+                        ok( !params.cArgs, "got %u\n", params.cArgs );
+                        ok( !params.cNamedArgs, "got %u\n", params.cNamedArgs );
+                        ok( V_VT( &res ) == VT_DISPATCH, "got %u\n", V_VT( &res ) );
+
+                        hr = IDispatch_QueryInterface( V_DISPATCH( &res ), &IID_ISWbemObjectPath, (void**)&objpath );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        VariantClear( &res );
+
+                        hr = ISWbemObjectPath_get_DisplayName( objpath, &dispname );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        SysFreeString( dispname );
+                        ISWbemObjectPath_Release( objpath );
+
+                        hr = IDispatch_QueryInterface( dispatch, &IID_ISWbemObject, (void**)&object );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = ISWbemObject_get_Properties_( object, &props );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = ISWbemObject_get_Methods_( object, &methods );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = ISWbemObject_get_Qualifiers_( object, &quals );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        ISWbemObject_Release( object );
+
+                        hr = ISWbemPropertySet_get__NewEnum( props, (IUnknown **)&setenumvar );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        if (hr == S_OK)
+                        {
+                        V_VT( vars + ARRAY_SIZE(vars) - 1 ) = VT_ERROR;
+                        hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
+                        ok( hr == S_FALSE, "got %#lx\n", hr );
+                        ok( !!fetched, "got %lu\n", fetched );
+                        todo_wine
+                        ok ( V_VT( vars + ARRAY_SIZE(vars) - 1 ) == VT_EMPTY, "got %u\n", V_VT( vars + ARRAY_SIZE(vars) - 1 ) );
+
+                        dispname = NULL;
+                        for (i = 0; i < fetched; ++i)
+                        {
+                            ok( V_VT( vars + i ) == VT_DISPATCH, "got %u\n", V_VT( vars + i ) );
+                            hr = IDispatch_QueryInterface( V_DISPATCH(vars + i), &IID_ISWbemProperty, (void**)&prop );
+                            ok( hr == S_OK, "got %#lx\n", hr );
+                            VariantClear( vars + i );
+                            hr = ISWbemProperty_get_Name( prop, &dispname );
+                            todo_wine
+                            ok( hr == S_OK, "got %#lx\n", hr );
+                            SysFreeString( dispname );
+                            hr = ISWbemProperty_get_Value( prop, &res );
+                            ok( hr == S_OK, "got %#lx\n", hr );
+                            VariantClear( &res );
+                            ISWbemProperty_Release( prop );
+                        }
+
+                        /* enums are independent */
+                        hr = IEnumVARIANT_Reset( setenumvar );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = IEnumVARIANT_Next( setenumvar, 1, vars, &fetched );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = ISWbemPropertySet_get__NewEnum( props, (IUnknown **)&propenumvar );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = IEnumVARIANT_Next( setenumvar, 1, vars + 1, &fetched );
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        hr = ISWbemProperty_get_Name( (ISWbemProperty *)V_DISPATCH(vars), &dispname );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        dispname2 = NULL;
+                        hr = ISWbemProperty_get_Name( (ISWbemProperty *)V_DISPATCH(vars + 1), &dispname2 );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        if (dispname) ok( wcscmp( dispname, dispname2 ), "got equal names\n" );
+                        SysFreeString( dispname );
+                        SysFreeString( dispname2 );
+                        VariantClear( vars );
+                        VariantClear( vars + 1 );
+                        IEnumVARIANT_Release( setenumvar );
+                        IEnumVARIANT_Release( propenumvar );
+                        }
+
+                        ISWbemPropertySet_Release( props );
+
+                        hr = ISWbemMethodSet_get__NewEnum( methods, (IUnknown **)&setenumvar );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        if (hr == S_OK)
+                        {
+                        hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
+                        ok( hr == S_FALSE, "got %#lx\n", hr );
+                        ok( !fetched, "got %lu\n", fetched );
+                        IEnumVARIANT_Release( setenumvar );
+                        }
+
+                        ISWbemMethodSet_Release( methods );
+
+                        if (quals)
+                        {
+                        hr = ISWbemQualifierSet_get__NewEnum( quals, (IUnknown **)&setenumvar );
+                        todo_wine
+                        ok( hr == S_OK, "got %#lx\n", hr );
+                        if (hr == S_OK)
+                        {
+                        hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
+                        ok( hr == S_FALSE, "got %#lx\n", hr );
+                        todo_wine
+                        ok( !!fetched, "got %lu\n", fetched );
+                        for (i = 0; i < fetched; ++i)
+                            VariantClear( vars + i );
+                        IEnumVARIANT_Release( setenumvar );
+                        }
+
+                        ISWbemQualifierSet_Release( quals );
+                        }
+
                         VariantClear( &var );
 
                         fetched = 0xdeadbeef;
@@ -372,6 +510,8 @@ static void test_locator(void)
     hr = ISWbemObjectSet_get__NewEnum( object_set, (IUnknown**)&enum_var );
     ok( hr == S_OK, "got %#lx\n", hr );
 
+    hr = IEnumVARIANT_Next( enum_var, 1, NULL, NULL );
+    ok( hr == S_FALSE, "got %#lx\n", hr );
     VariantInit( &var );
     hr = IEnumVARIANT_Next( enum_var, 1, &var, NULL );
     ok( hr == S_OK, "got %#lx\n", hr );

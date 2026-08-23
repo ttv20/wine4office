@@ -64,6 +64,7 @@
 #include "mmdeviceapi.h"
 #include "initguid.h"
 #include "audioclient.h"
+#include "devpkey.h"
 #include "wine/debug.h"
 #include "wine/unixlib.h"
 
@@ -101,9 +102,6 @@ struct coreaudio_stream
     WAVEFORMATEX *fmt;
     BYTE *local_buffer, *cap_buffer, *wrap_buffer, *resamp_buffer, *tmp_buffer;
 };
-
-static const REFERENCE_TIME def_period = 100000;
-static const REFERENCE_TIME min_period = 50000;
 
 static ULONG_PTR zero_bits = 0;
 
@@ -698,9 +696,100 @@ static AudioDeviceID dev_id_from_device(const char *device)
     return id;
 }
 
+static HRESULT get_device_period_frame_range(AudioDeviceID dev_id, EDataFlow flow,
+                                             unsigned int *min_period_frames,
+                                             unsigned int *max_period_frames)
+{
+    AudioObjectPropertyAddress addr;
+    AudioValueRange range;
+    UInt32 size;
+    OSStatus sc;
+
+    addr.mSelector = kAudioDevicePropertyBufferFrameSizeRange;
+    addr.mScope = get_scope(flow);
+    addr.mElement = kAudioObjectPropertyElementMain;
+    size = sizeof(range);
+    sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, &range);
+    if (sc != noErr)
+    {
+        WARN("Failed to get device buffer frame size range: %x\n", (int)sc);
+        return osstatus_to_hresult(sc);
+    }
+
+    *min_period_frames = range.mMinimum;
+    *max_period_frames = range.mMaximum;
+    return S_OK;
+}
+
+static HRESULT get_device_period_frame_size(AudioDeviceID dev_id, EDataFlow flow,
+                                            unsigned int *period_frames)
+{
+    AudioObjectPropertyAddress addr;
+    UInt32 size;
+    OSStatus sc;
+
+    addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+    addr.mScope = get_scope(flow);
+    addr.mElement = kAudioObjectPropertyElementMain;
+    size = sizeof(*period_frames);
+    sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, period_frames);
+    if (sc != noErr)
+    {
+        WARN("Failed to get device buffer frame size: %x\n", (int)sc);
+        return osstatus_to_hresult(sc);
+    }
+
+    return S_OK;
+}
+
+static HRESULT set_device_period_frame_size(AudioDeviceID dev_id, EDataFlow flow,
+                                            unsigned int period_frames)
+{
+    AudioObjectPropertyAddress addr;
+    UInt32 size;
+    OSStatus sc;
+
+    addr.mSelector = kAudioDevicePropertyBufferFrameSize;
+    addr.mScope = get_scope(flow);
+    addr.mElement = kAudioObjectPropertyElementMain;
+    size = sizeof(period_frames);
+    sc = AudioObjectSetPropertyData(dev_id, &addr, 0, NULL, size, &period_frames);
+    if (sc != noErr)
+    {
+        WARN("Failed to set device buffer frame size: %x\n", (int)sc);
+        return osstatus_to_hresult(sc);
+    }
+
+    return S_OK;
+}
+
+static HRESULT get_device_sample_rate(AudioDeviceID dev_id, EDataFlow flow,
+                                      unsigned int *n_samples_per_sec)
+{
+    AudioObjectPropertyAddress addr;
+    Float64 rate;
+    UInt32 size;
+    OSStatus sc;
+
+    addr.mSelector = kAudioDevicePropertyNominalSampleRate;
+    addr.mScope = get_scope(flow);
+    addr.mElement = kAudioObjectPropertyElementMain;
+    size = sizeof(Float64);
+    sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, &rate);
+    if (sc != noErr)
+    {
+        WARN("Unable to get device nominal sample rate: %x\n", (int)sc);
+        return osstatus_to_hresult(sc);
+    }
+
+    *n_samples_per_sec = rate;
+    return S_OK;
+}
+
 static NTSTATUS unix_create_stream(void *args)
 {
     struct create_stream_params *params = args;
+    unsigned int min_period_frames, max_period_frames;
     struct coreaudio_stream *stream;
     AURenderCallbackStruct input;
     OSStatus sc;
@@ -719,9 +808,7 @@ static NTSTATUS unix_create_stream(void *args)
         goto end;
     }
 
-    stream->period = params->period;
     stream->period_frames = muldiv(params->period, stream->fmt->nSamplesPerSec, 10000000);
-
     if (stream->period_frames == 0)
     {
         params->result = E_INVALIDARG;
@@ -732,6 +819,16 @@ static NTSTATUS unix_create_stream(void *args)
     stream->flow = params->flow;
     stream->flags = params->flags;
     stream->share = params->share;
+
+    if (FAILED(params->result = get_device_period_frame_range(stream->dev_id, stream->flow,
+                                                              &min_period_frames,
+                                                              &max_period_frames)))
+        goto end;
+
+    stream->period_frames = max(min_period_frames, min(stream->period_frames, max_period_frames));
+    stream->period = muldiv(stream->period_frames, 10000000, stream->fmt->nSamplesPerSec);
+    if (FAILED(params->result = set_device_period_frame_size(stream->dev_id, stream->flow, stream->period_frames)))
+        goto end;
 
     stream->bufsize_frames = muldiv(params->duration, stream->fmt->nSamplesPerSec, 10000000);
     if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE)
@@ -992,7 +1089,6 @@ static NTSTATUS unix_get_mix_format(void *args)
     AudioObjectPropertyAddress addr;
     AudioChannelLayout *layout;
     AudioBufferList *buffers;
-    Float64 rate;
     UInt32 size;
     OSStatus sc;
     int i;
@@ -1065,15 +1161,8 @@ static NTSTATUS unix_get_mix_format(void *args)
         params->fmt->dwChannelMask = get_channel_mask(params->fmt->Format.nChannels);
     }
 
-    addr.mSelector = kAudioDevicePropertyNominalSampleRate;
-    size = sizeof(Float64);
-    sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, &rate);
-    if(sc != noErr){
-        WARN("Unable to get _NominalSampleRate property: %x\n", (int)sc);
-        params->result = osstatus_to_hresult(sc);
+    if(FAILED(params->result = get_device_sample_rate(dev_id, params->flow, &params->fmt->Format.nSamplesPerSec)))
         return STATUS_SUCCESS;
-    }
-    params->fmt->Format.nSamplesPerSec = rate;
 
     params->fmt->Format.wBitsPerSample = 32;
     params->fmt->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -1110,11 +1199,33 @@ static NTSTATUS unix_is_format_supported(void *args)
 static NTSTATUS unix_get_device_period(void *args)
 {
     struct get_device_period_params *params = args;
+    unsigned int n_samples_per_sec;
+    AudioDeviceID dev_id;
+
+    dev_id = dev_id_from_device(params->device);
+    if (FAILED(params->result = get_device_sample_rate(dev_id, params->flow, &n_samples_per_sec)))
+        return STATUS_SUCCESS;
 
     if (params->def_period)
-        *params->def_period = def_period;
+    {
+        unsigned int period_frames;
+
+        if (FAILED(params->result = get_device_period_frame_size(dev_id, params->flow, &period_frames)))
+            return STATUS_SUCCESS;
+
+        *params->def_period = muldiv(period_frames, 10000000, n_samples_per_sec);
+    }
+
     if (params->min_period)
-        *params->min_period = min_period;
+    {
+        unsigned int min_period_frames, max_period_frames;
+
+        if (FAILED(params->result = get_device_period_frame_range(dev_id, params->flow,
+                                                                  &min_period_frames, &max_period_frames)))
+            return STATUS_SUCCESS;
+
+        *params->min_period = muldiv(min_period_frames, 10000000, n_samples_per_sec);
+    }
 
     params->result = S_OK;
 
@@ -1700,12 +1811,76 @@ static NTSTATUS unix_is_started(void *args)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS get_device_vid_pid(const char *device, DWORD *vid, DWORD *pid)
+{
+    UInt32 type_property;
+    UInt32 size;
+    OSStatus sc;
+    AudioObjectPropertyAddress addr;
+    const AudioDeviceID dev_id = dev_id_from_device(device);
+
+    addr.mScope = kAudioObjectPropertyScopeGlobal;
+    addr.mElement = kAudioObjectPropertyElementMain;
+    addr.mSelector = kAudioDevicePropertyTransportType;
+    type_property = 0;
+    size = sizeof(type_property);
+    sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, &type_property);
+    if(sc == noErr && type_property == kAudioDeviceTransportTypeUSB){
+        CFStringRef property_value = NULL;
+
+        addr.mSelector = kAudioDevicePropertyModelUID;
+        size = sizeof(property_value);
+        sc = AudioObjectGetPropertyData(dev_id, &addr, 0, NULL, &size, &property_value);
+        if(sc == noErr){
+            WCHAR output[255];
+
+            size = min(CFStringGetLength(property_value), ARRAY_SIZE(output) - 1);
+            CFStringGetCharacters(property_value, CFRangeMake(0, size), (UniChar*)output);
+            output[size] = 0;
+            CFRelease(property_value);
+
+            if(size > 10 && output[size - 5] == ':' && output[size - 10] == ':'){
+                *vid = wcstoul(&output[size - 9], NULL, 16);
+                *pid = wcstoul(&output[size - 4], NULL, 16);
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    return STATUS_UNSUCCESSFUL;
+}
+
 static NTSTATUS unix_get_prop_value(void *args)
 {
     struct get_prop_value_params *params = args;
+    const PROPERTYKEY *prop = params->prop;
+
+    if(IsEqualPropertyKey(*prop, DEVPKEY_Device_InstanceId)){
+        DWORD vid = 0, pid = 0;
+
+        if (SUCCEEDED(get_device_vid_pid(params->device, &vid, &pid))){
+            int len;
+            char buf[128];
+            PROPVARIANT *out = params->value;
+
+            len = sizeof(buf);
+            snprintf(buf, len, "{1}.USB\\VID_%04X&PID_%04X", vid, pid);
+
+            len = strlen(buf) + 1;
+            if(*params->buffer_size < len * sizeof(WCHAR)){
+                params->result = E_NOT_SUFFICIENT_BUFFER;
+                *params->buffer_size = len * sizeof(WCHAR);
+                return STATUS_SUCCESS;
+            }
+
+            out->vt = VT_LPWSTR;
+            out->pwszVal = params->buffer;
+            ntdll_umbstowcs(buf, len, out->pwszVal, len);
+            params->result = S_OK;
+            return STATUS_SUCCESS;
+        }
+    }
 
     params->result = E_NOTIMPL;
-
     return STATUS_SUCCESS;
 }
 

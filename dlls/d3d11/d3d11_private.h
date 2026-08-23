@@ -127,7 +127,7 @@ void d3d11_primitive_topology_from_wined3d_primitive_type(enum wined3d_primitive
 void wined3d_primitive_type_from_d3d11_primitive_topology(D3D11_PRIMITIVE_TOPOLOGY topology,
         enum wined3d_primitive_type *type, unsigned int *patch_vertex_count);
 unsigned int wined3d_getdata_flags_from_d3d11_async_getdata_flags(unsigned int d3d11_flags);
-DWORD wined3d_usage_from_d3d11(enum D3D11_USAGE usage);
+uint32_t wined3d_usage_from_d3d11(enum D3D11_USAGE usage, UINT misc_flags);
 struct wined3d_resource *wined3d_resource_from_d3d11_resource(ID3D11Resource *resource);
 struct wined3d_resource *wined3d_resource_from_d3d10_resource(ID3D10Resource *resource);
 DWORD wined3d_map_flags_from_d3d11_map_type(D3D11_MAP map_type);
@@ -146,9 +146,8 @@ UINT d3d10_cpu_access_flags_from_d3d11_cpu_access_flags(UINT cpu_access_flags);
 UINT d3d11_resource_misc_flags_from_d3d10_resource_misc_flags(UINT resource_misc_flags);
 UINT d3d10_resource_misc_flags_from_d3d11_resource_misc_flags(UINT resource_misc_flags);
 
-BOOL validate_d3d11_resource_access_flags(D3D11_RESOURCE_DIMENSION resource_dimension,
-        D3D11_USAGE usage, UINT bind_flags, UINT cpu_access_flags,
-        D3D_FEATURE_LEVEL feature_level);
+bool validate_d3d11_resource_flags(D3D11_RESOURCE_DIMENSION resource_dimension, D3D11_USAGE usage,
+        UINT bind_flags, UINT cpu_access_flags, UINT misc_flags, D3D_FEATURE_LEVEL feature_level);
 
 HRESULT d3d_get_private_data(struct wined3d_private_store *store,
         REFGUID guid, UINT *data_size, void *data);

@@ -364,24 +364,31 @@ HWINSTA WINAPI NtUserCreateWindowStation( OBJECT_ATTRIBUTES *attr, ACCESS_MASK a
                                           ULONG arg4, ULONG arg5, ULONG arg6, ULONG arg7 )
 {
     HANDLE ret;
+    NTSTATUS status;
+    data_size_t len;
+    struct object_attributes *objattr;
 
     if (attr->ObjectName->Length >= MAX_PATH * sizeof(WCHAR))
     {
         RtlSetLastWin32Error( ERROR_FILENAME_EXCED_RANGE );
         return 0;
     }
+    if ((status = wine_server_alloc_object_attributes( attr, &objattr, &len )))
+    {
+        RtlSetLastWin32Error( RtlNtStatusToDosError(status) );
+        return 0;
+    }
 
     SERVER_START_REQ( create_winstation )
     {
-        req->flags      = 0;
-        req->access     = access;
-        req->attributes = attr->Attributes;
-        req->rootdir    = wine_server_obj_handle( attr->RootDirectory );
-        wine_server_add_data( req, attr->ObjectName->Buffer, attr->ObjectName->Length );
+        req->access = access;
+        req->flags  = 0;
+        wine_server_add_data( req, objattr, len );
         wine_server_call_err( req );
         ret = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
+    free( objattr );
     return ret;
 }
 
@@ -462,6 +469,9 @@ HDESK WINAPI NtUserCreateDesktopEx( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *dev
 {
     WCHAR buffer[MAX_PATH];
     HANDLE ret;
+    NTSTATUS status;
+    data_size_t len;
+    struct object_attributes *objattr;
 
     if ((device && device->Length) || (devmode && !(flags & DF_WINE_VIRTUAL_DESKTOP)))
     {
@@ -473,16 +483,21 @@ HDESK WINAPI NtUserCreateDesktopEx( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *dev
         RtlSetLastWin32Error( ERROR_FILENAME_EXCED_RANGE );
         return 0;
     }
+    if ((status = wine_server_alloc_object_attributes( attr, &objattr, &len )))
+    {
+        RtlSetLastWin32Error( RtlNtStatusToDosError(status) );
+        return 0;
+    }
     SERVER_START_REQ( create_desktop )
     {
-        req->flags      = flags;
-        req->access     = access;
-        req->attributes = attr->Attributes;
-        wine_server_add_data( req, attr->ObjectName->Buffer, attr->ObjectName->Length );
+        req->access = access;
+        req->flags  = flags;
+        wine_server_add_data( req, objattr, len );
         wine_server_call_err( req );
         ret = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
+    free( objattr );
     if (!devmode) return ret;
 
     lstrcpynW( buffer, attr->ObjectName->Buffer, attr->ObjectName->Length / sizeof(WCHAR) + 1 );
@@ -818,11 +833,13 @@ HWND get_desktop_window(void)
         static const WCHAR system_dir[] = {'C',':','\\','w','i','n','d','o','w','s','\\',
             's','y','s','t','e','m','3','2','\\',0};
         RTL_USER_PROCESS_PARAMETERS params = { sizeof(params), sizeof(params) };
-        PS_ATTRIBUTE_LIST ps_attr;
+        ULONG_PTR attr_buffer[offsetof(PS_ATTRIBUTE_LIST,Attributes[2]) / sizeof(ULONG_PTR)];
+        SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION machines[8];
+        PS_ATTRIBUTE_LIST *ps_attr = (PS_ATTRIBUTE_LIST *)attr_buffer;
         PS_CREATE_INFO create_info;
         WCHAR desktop[MAX_PATH];
         PEB *peb = RtlGetCurrentPeb();
-        HANDLE process, thread;
+        HANDLE process = 0, thread;
         unsigned int status;
 
         SERVER_START_REQ( set_user_object_info )
@@ -851,24 +868,28 @@ HWND get_desktop_window(void)
         RtlInitUnicodeString( &params.WindowTitle, appnameW + 4 );
         RtlInitUnicodeString( &params.Desktop, desktop );
 
-        ps_attr.TotalLength = sizeof(ps_attr);
-        ps_attr.Attributes[0].Attribute    = PS_ATTRIBUTE_IMAGE_NAME;
-        ps_attr.Attributes[0].Size         = sizeof(appnameW) - sizeof(WCHAR);
-        ps_attr.Attributes[0].ValuePtr     = (WCHAR *)appnameW;
-        ps_attr.Attributes[0].ReturnLength = NULL;
+        NtQuerySystemInformationEx( SystemSupportedProcessorArchitectures, &process, sizeof(process),
+                                    machines, sizeof(machines), NULL );
+        ps_attr->TotalLength = sizeof(attr_buffer);
+        ps_attr->Attributes[0].Attribute    = PS_ATTRIBUTE_IMAGE_NAME;
+        ps_attr->Attributes[0].Size         = sizeof(appnameW) - sizeof(WCHAR);
+        ps_attr->Attributes[0].ValuePtr     = (WCHAR *)appnameW;
+        ps_attr->Attributes[0].ReturnLength = NULL;
+        ps_attr->Attributes[1].Attribute    = PS_ATTRIBUTE_MACHINE_TYPE;
+        ps_attr->Attributes[1].Value        = machines[0].Machine;
 
         if (NtCurrentTeb64() && !NtCurrentTeb64()->TlsSlots[WOW64_TLS_FILESYSREDIR])
         {
             NtCurrentTeb64()->TlsSlots[WOW64_TLS_FILESYSREDIR] = TRUE;
             status = NtCreateUserProcess( &process, &thread, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS,
                                           NULL, NULL, 0, THREAD_CREATE_FLAGS_CREATE_SUSPENDED, &params,
-                                          &create_info, &ps_attr );
+                                          &create_info, ps_attr );
             NtCurrentTeb64()->TlsSlots[WOW64_TLS_FILESYSREDIR] = FALSE;
         }
         else
             status = NtCreateUserProcess( &process, &thread, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS,
                                           NULL, NULL, 0, THREAD_CREATE_FLAGS_CREATE_SUSPENDED, &params,
-                                          &create_info, &ps_attr );
+                                          &create_info, ps_attr );
         if (!status)
         {
             NtResumeThread( thread, NULL );
@@ -990,7 +1011,7 @@ void winstation_init(void)
     }
 
     /* set winstation if explicitly specified, or if we don't have one yet */
-    if (buffer || !NtUserGetProcessWindowStation())
+    if (buffer || !(handle = NtUserGetProcessWindowStation()))
     {
         str.Buffer = (WCHAR *)(winstation ? winstation : winsta0);
         str.Length = str.MaximumLength = lstrlenW( str.Buffer ) * sizeof(WCHAR);
@@ -1018,9 +1039,7 @@ void winstation_init(void)
         char buffer[4096];
         str.Buffer = (WCHAR *)(desktop ? desktop : get_default_desktop( buffer, sizeof(buffer) ));
         str.Length = str.MaximumLength = lstrlenW( str.Buffer ) * sizeof(WCHAR);
-        if (!dir) dir = get_winstations_dir_handle();
-        InitializeObjectAttributes( &attr, &str, OBJ_CASE_INSENSITIVE | OBJ_OPENIF,
-                                    dir, NULL );
+        InitializeObjectAttributes( &attr, &str, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, handle, NULL );
 
         handle = NtUserCreateDesktopEx( &attr, NULL, NULL, 0, STANDARD_RIGHTS_REQUIRED | DESKTOP_ALL_ACCESS, 0 );
         if (handle) NtUserSetThreadDesktop( handle );

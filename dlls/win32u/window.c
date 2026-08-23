@@ -296,35 +296,44 @@ void *free_user_handle( HANDLE handle, unsigned short type )
 }
 
 static pthread_mutex_t surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct list client_surfaces = LIST_INIT( client_surfaces );
+static struct list client_surfaces = LIST_INIT( client_surfaces ); /* non-owning used client surfaces */
+static struct list unused_surfaces = LIST_INIT( unused_surfaces ); /* owning unused client surfaces */
+
+static void client_surface_detach_locked( struct client_surface *surface )
+{
+    if (!surface->hwnd) return;
+
+    list_remove( &surface->entry );
+    surface->funcs->detach( surface );
+    surface->toplevel = NULL;
+    surface->hwnd = NULL;
+}
+
+static void client_surface_release_locked( struct client_surface *surface )
+{
+    ULONG ref = InterlockedDecrement( &surface->ref );
+    TRACE( "%s decreasing refcount to %u\n", debugstr_client_surface( surface ), ref );
+
+    if (!ref)
+    {
+        client_surface_detach_locked( surface );
+        surface->funcs->destroy( surface );
+        free( surface );
+    }
+}
 
 void detach_client_surfaces( HWND hwnd )
 {
-    struct list detached = LIST_INIT( detached );
     struct client_surface *surface, *next;
 
     pthread_mutex_lock( &surfaces_lock );
 
     LIST_FOR_EACH_ENTRY_SAFE( surface, next, &client_surfaces, struct client_surface, entry )
-    {
-        if (surface->hwnd != hwnd) continue;
-
-        list_remove( &surface->entry );
-        list_add_tail( &detached, &surface->entry );
-        client_surface_add_ref( surface );
-
-        surface->funcs->detach( surface );
-        surface->toplevel = NULL;
-        surface->hwnd = NULL;
-    }
+        if (surface->hwnd == hwnd) client_surface_detach_locked( surface );
+    LIST_FOR_EACH_ENTRY_SAFE( surface, next, &unused_surfaces, struct client_surface, entry )
+        if (surface->hwnd == hwnd) client_surface_release_locked( surface );
 
     pthread_mutex_unlock( &surfaces_lock );
-
-    LIST_FOR_EACH_ENTRY_SAFE( surface, next, &detached, struct client_surface, entry )
-    {
-        list_remove( &surface->entry );
-        client_surface_release( surface );
-    }
 }
 
 static RECT get_client_surface_rects( HWND toplevel, HWND hwnd, RECT *monitor_rect )
@@ -342,8 +351,12 @@ static RECT get_client_surface_rects( HWND toplevel, HWND hwnd, RECT *monitor_re
 
     get_win_monitor_dpi( hwnd, &raw_dpi );
     *monitor_rect = map_dpi_rect( rect, dpi, raw_dpi );
+
+    /* use toplevel visible rect relative position, so drivers can then assume it */
     OffsetRect( monitor_rect, monitor_rects.client.left - monitor_rects.visible.left,
                 monitor_rects.client.top - monitor_rects.visible.top );
+    OffsetRect( &rect, rects.client.left - rects.visible.left,
+                rects.client.top - rects.visible.top );
 
     return rect;
 }
@@ -362,6 +375,7 @@ static void client_surface_update_locked( struct client_surface *surface )
 void update_client_surfaces( HWND hwnd )
 {
     struct client_surface *surface, *next;
+    UINT count = 0;
 
     pthread_mutex_lock( &surfaces_lock );
 
@@ -371,10 +385,14 @@ void update_client_surfaces( HWND hwnd )
         client_surface_update_locked( surface );
     }
 
+    /* discard extra unused surfaces when updating window */
+    LIST_FOR_EACH_ENTRY_SAFE( surface, next, &unused_surfaces, struct client_surface, entry )
+        if (surface->hwnd == hwnd && count++) client_surface_release_locked( surface );
+
     pthread_mutex_unlock( &surfaces_lock );
 }
 
-void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd )
+void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd, int format )
 {
     HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
     struct client_surface *surface;
@@ -383,12 +401,13 @@ void *client_surface_create( UINT size, const struct client_surface_funcs *funcs
     surface->funcs = funcs;
     surface->ref = 1;
     surface->hwnd = hwnd;
+    surface->format = format;
     surface->toplevel = toplevel;
     surface->virtual_rect = get_client_surface_rects( toplevel, hwnd, &surface->monitor_rect );
     list_init( &surface->entry );
 
-    TRACE( "created %s, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ), toplevel,
-           wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
+    TRACE( "created %s, format %d, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ),
+           format, toplevel, wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
     return surface;
 }
 
@@ -400,22 +419,9 @@ void client_surface_add_ref( struct client_surface *surface )
 
 void client_surface_release( struct client_surface *surface )
 {
-    ULONG ref = InterlockedDecrement( &surface->ref );
-    TRACE( "%s decreasing refcount to %u\n", debugstr_client_surface( surface ), ref );
-
-    if (!ref)
-    {
-        pthread_mutex_lock( &surfaces_lock );
-        if (surface->hwnd)
-        {
-            surface->funcs->detach( surface );
-            list_remove( &surface->entry );
-        }
-        pthread_mutex_unlock( &surfaces_lock );
-
-        surface->funcs->destroy( surface );
-        free( surface );
-    }
+    pthread_mutex_lock( &surfaces_lock );
+    client_surface_release_locked( surface );
+    pthread_mutex_unlock( &surfaces_lock );
 }
 
 void client_surface_present( struct client_surface *surface )
@@ -441,15 +447,68 @@ void client_surface_update( struct client_surface *surface )
     pthread_mutex_unlock( &surfaces_lock );
 }
 
-void add_window_client_surface( HWND hwnd, struct client_surface *surface )
+BOOL client_surface_get_size( struct client_surface *surface, SIZE *virtual_size, SIZE *monitor_size )
 {
+    BOOL updated;
+
     pthread_mutex_lock( &surfaces_lock );
 
-    surface->hwnd = hwnd;
-    list_add_tail( &client_surfaces, &surface->entry );
-    client_surface_update_locked( surface );
+    virtual_size->cx = max( 1, surface->virtual_rect.right - surface->virtual_rect.left );
+    virtual_size->cy = max( 1, surface->virtual_rect.bottom - surface->virtual_rect.top );
+    monitor_size->cx = max( 1, surface->monitor_rect.right - surface->monitor_rect.left );
+    monitor_size->cy = max( 1, surface->monitor_rect.bottom - surface->monitor_rect.top );
+    updated = surface->updated;
+    surface->updated = FALSE;
 
     pthread_mutex_unlock( &surfaces_lock );
+
+    return updated;
+}
+
+void use_window_client_surface( struct client_surface *surface, BOOL use )
+{
+    TRACE( "surface %s, use %u\n", debugstr_client_surface( surface ), use );
+
+    pthread_mutex_lock( &surfaces_lock );
+
+    if (!surface->hwnd)
+        WARN( "surface %s has been detached already, ignoring.\n", debugstr_client_surface( surface ) );
+    else if (use)
+    {
+        /* surface wasn't used, it shouldn't be in any list */
+        list_add_tail( &client_surfaces, &surface->entry );
+        client_surface_update_locked( surface );
+    }
+    else
+    {
+        list_remove( &surface->entry ); /* remove it from client_surfaces, if it was used */
+        list_add_head( &unused_surfaces, &surface->entry ); /* add it to the head, so we discard older ones */
+        client_surface_add_ref( surface );
+    }
+
+    pthread_mutex_unlock( &surfaces_lock );
+}
+
+struct client_surface *get_unused_client_surface( HWND hwnd, int format )
+{
+    struct client_surface *surface;
+
+    pthread_mutex_lock( &surfaces_lock );
+
+    LIST_FOR_EACH_ENTRY( surface, &unused_surfaces, struct client_surface, entry )
+    {
+        if (surface->hwnd != hwnd || surface->format != format) continue;
+        client_surface_update_locked( surface ); /* refresh it before creating GL/VK drawable */
+        list_remove( &surface->entry ); /* take over its reference */
+        list_init( &surface->entry );
+        break;
+    }
+    if (&surface->entry == &unused_surfaces) surface = NULL;
+
+    pthread_mutex_unlock( &surfaces_lock );
+
+    if (surface) TRACE( "Reusing surface %s\n", debugstr_client_surface( surface ) );
+    return surface ? surface : user_driver->pCreateClientSurface( hwnd, format );
 }
 
 BOOL is_client_surface_window( struct client_surface *surface, HWND hwnd )
@@ -1981,7 +2040,7 @@ other_process:
         {
             rects->window = wine_server_get_rect( reply->window );
             rects->client = wine_server_get_rect( reply->client );
-            rects->visible = rects->window;
+            rects->visible = wine_server_get_rect( reply->visible );
         }
     }
     SERVER_END_REQ;
@@ -5926,12 +5985,27 @@ void destroy_thread_windows(void)
  * Create a window handle with the server.
  */
 static WND *create_window_handle( HWND parent, HWND owner, HWND broadcast_owner, UNICODE_STRING *name,
-                                  HINSTANCE class_instance, HINSTANCE instance, BOOL ansi, DWORD style, DWORD ex_style )
+                                  HINSTANCE class_instance, const CREATESTRUCTW *cs, BOOL ansi,
+                                  DWORD style, DWORD ex_style )
 {
+    struct ratio dpi = { system_dpi, 1 }, raw_dpi = { system_dpi, 1 };
+    RECT rect = { cs->x, cs->y, cs->x + cs->cx, cs->y + cs->cy };
     UINT dpi_context = get_thread_dpi_awareness_context();
     HWND handle = 0, full_parent = 0, full_owner = 0;
     struct tagCLASS *class = NULL;
     WND *win;
+
+    if (NTUSER_DPI_CONTEXT_IS_MONITOR_AWARE( dpi_context ) && dpi_context != NTUSER_DPI_PER_MONITOR_AWARE)
+    {
+        FIXME( "DPI context %#x not implemented\n", dpi_context );
+        dpi_context = NTUSER_DPI_PER_MONITOR_AWARE;
+    }
+
+    if (!is_desktop_class( name ))
+    {
+        if (parent && parent != get_desktop_window()) dpi = get_win_monitor_dpi( parent, &raw_dpi );
+        else dpi = monitor_dpi_from_rect( rect, get_thread_dpi(), &raw_dpi );
+    }
 
     SERVER_START_REQ( create_window )
     {
@@ -5939,12 +6013,14 @@ static WND *create_window_handle( HWND parent, HWND owner, HWND broadcast_owner,
         req->owner           = wine_server_user_handle( owner );
         req->broadcast_owner = wine_server_user_handle( broadcast_owner );
         req->class_instance  = wine_server_client_ptr( class_instance );
-        req->instance        = wine_server_client_ptr( instance );
+        req->instance        = wine_server_client_ptr( cs->hInstance );
         req->dpi_context     = dpi_context;
         req->style           = style;
         req->ex_style        = ex_style;
         req->ansi            = ansi;
         req->atom            = wine_server_add_atom( req, name );
+        req->dpi             = dpi;
+        req->raw_dpi         = raw_dpi;
         if (!wine_server_call_err( req ))
         {
             handle      = wine_server_ptr_handle( reply->handle );
@@ -6170,7 +6246,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     style = cs.style & ~WS_VISIBLE;
     ex_style = cs.dwExStyle & ~WS_EX_LAYERED;
     if (!(win = create_window_handle( parent, owner, broadcast_owner, class_name, class_instance,
-                                      cs.hInstance, ansi, style, ex_style )))
+                                      &cs, ansi, style, ex_style )))
         return 0;
     hwnd = win->handle;
 

@@ -44,6 +44,7 @@
 #include "mtdll.h"
 #include "wine/asm.h"
 #include "wine/debug.h"
+#include "wine/asm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
@@ -573,16 +574,21 @@ static void msvcrt_free_fd(int fd)
   release_ioinfo(fdinfo);
 }
 
-static void msvcrt_set_fd(ioinfo *fdinfo, HANDLE hand, int flag)
+static void msvcrt_set_fdinfo(ioinfo *fdinfo, HANDLE hand, int flag)
 {
   fdinfo->handle = hand;
-  fdinfo->wxflag = WX_OPEN | (flag & (WX_DONTINHERIT | WX_APPEND | WX_TEXT | WX_PIPE | WX_TTY));
+  fdinfo->wxflag = WX_OPEN | flag;
   fdinfo->lookahead[0] = '\n';
   fdinfo->lookahead[1] = '\n';
   fdinfo->lookahead[2] = '\n';
   ioinfo_set_unicode(fdinfo, FALSE);
   ioinfo_set_textmode(fdinfo, TEXTMODE_ANSI);
+}
 
+static void msvcrt_set_fd(ioinfo *fdinfo, HANDLE hand, int flag)
+{
+  flag &= ~(WX_ATEOF | WX_READNL);
+  msvcrt_set_fdinfo(fdinfo, hand, flag);
   if (hand != MSVCRT_NO_CONSOLE)
   {
     switch (fdinfo-MSVCRT___pioinfo[0])
@@ -742,7 +748,7 @@ void msvcrt_init_io(void)
       {
         fdinfo = get_ioinfo_alloc_fd(i);
         if(fdinfo != &MSVCRT___badioinfo)
-            msvcrt_set_fd(fdinfo, *handle_ptr, *wxflag_ptr);
+            msvcrt_set_fdinfo(fdinfo, *handle_ptr, *wxflag_ptr | (i < 3 ? WX_TEXT : 0));
         release_ioinfo(fdinfo);
       }
 
@@ -750,62 +756,34 @@ void msvcrt_init_io(void)
     }
   }
 
-  fdinfo = get_ioinfo_alloc_fd(STDIN_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
+  for (i = 0; i < 3; ++i)
+  {
+    static const DWORD std_handle[3] = { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE };
+    DWORD flags = WX_OPEN | WX_TEXT, type;
+    HANDLE h;
 
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
+    fdinfo = get_ioinfo_alloc_fd(i);
+    if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE)
+    {
+        h = GetStdHandle(std_handle[i]);
+        type = GetFileType(h);
+        if (type == FILE_TYPE_UNKNOWN)
+        {
+            h = MSVCRT_NO_CONSOLE;
+            flags |= WX_TTY;
+        }
+        else if ((type & 0xf) == FILE_TYPE_CHAR)
+        {
+            flags |= WX_TTY;
+        }
+        else if ((type & 0xf) == FILE_TYPE_PIPE)
+        {
+            flags |= WX_PIPE;
+        }
+        msvcrt_set_fdinfo(fdinfo, h, flags);
     }
-
-    msvcrt_set_fd(fdinfo, h, flags);
+    release_ioinfo(fdinfo);
   }
-  release_ioinfo(fdinfo);
-
-  fdinfo = get_ioinfo_alloc_fd(STDOUT_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
-
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
-    }
-
-    msvcrt_set_fd(fdinfo, h, flags);
-  }
-  release_ioinfo(fdinfo);
-
-  fdinfo = get_ioinfo_alloc_fd(STDERR_FILENO);
-  if (!(fdinfo->wxflag & WX_OPEN) || fdinfo->handle == INVALID_HANDLE_VALUE) {
-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    DWORD flags = WX_OPEN | WX_TEXT;
-    DWORD type = GetFileType(h);
-
-    if (type == FILE_TYPE_UNKNOWN) {
-        h = MSVCRT_NO_CONSOLE;
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_CHAR) {
-        flags |= WX_TTY;
-    } else if ((type & 0xf) == FILE_TYPE_PIPE) {
-        flags |= WX_PIPE;
-    }
-
-    msvcrt_set_fd(fdinfo, h, flags);
-  }
-  release_ioinfo(fdinfo);
 
   TRACE(":handles (%p)(%p)(%p)\n", get_ioinfo_nolock(STDIN_FILENO)->handle,
         get_ioinfo_nolock(STDOUT_FILENO)->handle,
@@ -855,12 +833,25 @@ static int msvcrt_flush_buffer(FILE* file)
 /*********************************************************************
  *		_isatty (MSVCRT.@)
  */
-int CDECL _isatty(int fd)
+int CDECL MSVCRT__isatty(int fd)
 {
     TRACE(":fd (%d)\n",fd);
 
     return get_ioinfo_nolock(fd)->wxflag & WX_TTY;
 }
+#if defined(__x86_64__) && !defined(__arm64ec__)
+__ASM_GLOBAL_FUNC( _isatty,
+        "jmp " __ASM_NAME("MSVCRT__isatty") "\n\t"
+        /* These instructions are needed for Ruby runtime to find internal pioinfo address. */
+        "lea MSVCRT___pioinfo(%rip),%rdx\n\t"
+        "addq $0,%rsp\n\t"
+        "ret" )
+#else
+int CDECL _isatty(int fd)
+{
+    return MSVCRT__isatty(fd);
+}
+#endif
 
 /* INTERNAL: Allocate stdio file buffer */
 static BOOL msvcrt_alloc_buffer(FILE* file)

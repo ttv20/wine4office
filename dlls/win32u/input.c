@@ -401,7 +401,7 @@ static const KBDTABLES kbdus_tables =
     .pKeyNames = (VSC_LPWSTR *)key_names,
     .pKeyNamesExt = (VSC_LPWSTR *)key_names_ext,
     .pusVSCtoVK = (USHORT *)vsc_to_vk,
-    .bMaxVSCtoVK = ARRAY_SIZE(vsc_to_vk),
+    .bMaxVSCtoVK = ARRAY_SIZE(vsc_to_vk) - 1,
     .pVSCtoVK_E0 = (VSC_VK *)vsc_to_vk_e0,
     .pVSCtoVK_E1 = (VSC_VK *)vsc_to_vk_e1,
     .fLocaleFlags = MAKELONG(0, KBD_VERSION),
@@ -607,6 +607,8 @@ BOOL WINAPI NtUserAttachThreadInput( DWORD from, DWORD to, BOOL attach )
 {
     BOOL ret;
 
+    TRACE( "from %04x, to %04x, attach %u\n", from, to, attach );
+
     SERVER_START_REQ( attach_thread_input )
     {
         req->tid_from = from;
@@ -673,7 +675,7 @@ static NTSTATUS send_mouse_motion( UINT flags )
     INPUT input = info->mouse_motion;
     NTSTATUS status;
 
-    if (!input.mi.dwFlags && !input.mi.mouseData) return STATUS_SUCCESS; /* ignore empty inputs */
+    if (!input.mi.dwFlags && !input.mi.mouseData && !info->raw_mouse.count) return STATUS_SUCCESS; /* ignore empty inputs */
 
     TRACE( "Sending %s (%u raw frames)\n", debugstr_mouseinput( &input.mi ), info->raw_mouse.count );
     status = server_send_hardware_message( info->mouse_hwnd, flags, &input, (LPARAM)&info->raw_mouse );
@@ -3149,6 +3151,7 @@ BOOL WINAPI NtUserGetPointerInfoList( UINT32 id, POINTER_INPUT_TYPE type, UINT_P
     TRACE( "id %d, type %#x, unk0 %#lx, unk1 %#lx, size %#lx, entry_count %p, pointer_count %p, pointer_info %p\n",
             id, type, (long)unk0, (long)unk1, size, entry_count, pointer_count, pointer_info );
 
+    /* same checks in wow64_NtUserGetPointerInfoList */
     switch (type)
     {
     case PT_MOUSE:

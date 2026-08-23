@@ -1474,7 +1474,7 @@ BOOLEAN WINAPI RtlBarrier( RTL_BARRIER *barrier, ULONG flags )
 
     /* Wait for previous wait iteration to complete. */
     count = 0;
-    while (ReadAcquire( &b->reached_thread_count ) == b->total_thread_count)
+    while (ReadAcquire( &b->reached_thread_count ) >= b->total_thread_count)
     {
         if (count < spin_count)
         {
@@ -1486,7 +1486,7 @@ BOOLEAN WINAPI RtlBarrier( RTL_BARRIER *barrier, ULONG flags )
                           sizeof(b->reached_thread_count), NULL );
     }
     InterlockedIncrement( &b->waiting_thread_count );
-    if (InterlockedIncrement( &b->reached_thread_count ) == b->total_thread_count)
+    if (InterlockedIncrement( &b->reached_thread_count ) >= b->total_thread_count)
     {
         WriteRelease( &b->wait_barrier_complete, 1 );
         RtlWakeAddressAll( (const void *)&b->wait_barrier_complete );

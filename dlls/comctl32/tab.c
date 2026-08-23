@@ -276,13 +276,16 @@ static LRESULT TAB_SetCurFocus (TAB_INFO *infoPtr, INT iItem)
   TRACE("(%p %d)\n", infoPtr, iItem);
 
   if (iItem < 0) {
-      infoPtr->uFocus = -1;
-      if (infoPtr->iSelected != -1) {
-          infoPtr->iSelected = -1;
-          TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGE);
-          TAB_InvalidateTabArea(infoPtr);
-          if (!(infoPtr->dwStyle & TCS_BUTTONS))
-            NotifyWinEvent(EVENT_OBJECT_SELECTION, infoPtr->hwnd, OBJID_CLIENT, 0);
+      if (!(infoPtr->dwStyle & TCS_BUTTONS))
+      {
+          infoPtr->uFocus = -1;
+          if (infoPtr->iSelected != -1) {
+              infoPtr->iSelected = -1;
+              TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGE);
+              TAB_InvalidateTabArea(infoPtr);
+              if (!(infoPtr->dwStyle & TCS_BUTTONS))
+                NotifyWinEvent(EVENT_OBJECT_SELECTION, infoPtr->hwnd, OBJID_CLIENT, 0);
+          }
       }
   }
   else if (iItem < infoPtr->uNumItem) {
@@ -305,21 +308,24 @@ static LRESULT TAB_SetCurFocus (TAB_INFO *infoPtr, INT iItem)
         TAB_SendSimpleNotify(infoPtr, TCN_FOCUSCHANGE);
         NotifyWinEvent(EVENT_OBJECT_FOCUS, infoPtr->hwnd, OBJID_CLIENT, iItem + 1);
       }
-    } else {
-      INT oldFocus = infoPtr->uFocus;
-      if (infoPtr->iSelected != iItem || oldFocus == -1 ) {
-        infoPtr->uFocus = iItem;
-        if (oldFocus != -1) {
-          if (!TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGING))  {
-            infoPtr->iSelected = iItem;
-            TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGE);
-          }
-          else
-            infoPtr->iSelected = iItem;
-          TAB_EnsureSelectionVisible(infoPtr);
-          TAB_InvalidateTabArea(infoPtr);
-          NotifyWinEvent(EVENT_OBJECT_SELECTION, infoPtr->hwnd, OBJID_CLIENT, iItem + 1);
+    }
+    else
+    {
+      infoPtr->uFocus = iItem;
+      if (infoPtr->iSelected != iItem)
+      {
+        if (infoPtr->iSelected != -1)
+          TAB_GetItem(infoPtr, infoPtr->iSelected)->dwState &= ~TCIS_BUTTONPRESSED;
+        TAB_GetItem(infoPtr, iItem)->dwState |= TCIS_BUTTONPRESSED;
+        if (!TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGING))  {
+          infoPtr->iSelected = iItem;
+          TAB_SendSimpleNotify(infoPtr, TCN_SELCHANGE);
         }
+        else
+          infoPtr->iSelected = iItem;
+        TAB_EnsureSelectionVisible(infoPtr);
+        TAB_InvalidateTabArea(infoPtr);
+        NotifyWinEvent(EVENT_OBJECT_SELECTION, infoPtr->hwnd, OBJID_CLIENT, iItem + 1);
       }
     }
   }

@@ -341,7 +341,11 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
     enum wayland_surface_config_state window_state = 0;
     DWORD style = state->style;
 
-    conf->rect = data->rects.window;
+    /* Wayland geometry must describe the part backed by a surface on the
+     * host, rather than a non-client or off-screen portion of the Win32
+     * window. Keep popup classification from the state snapshot: querying
+     * Win32 while holding win_data_mutex would invert the user lock order. */
+    conf->rect = data->rects.visible;
     conf->popup = !!(style & WS_POPUP);
 
     TRACE("window=%s style=%#x\n", wine_dbgstr_rect(&conf->rect), style);

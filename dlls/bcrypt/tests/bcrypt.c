@@ -29,8 +29,6 @@
 #include "wine/test.h"
 
 static NTSTATUS (WINAPI *pBCryptHash)(BCRYPT_ALG_HANDLE, UCHAR *, ULONG, UCHAR *, ULONG, UCHAR *, ULONG);
-static NTSTATUS (WINAPI *pBCryptKeyDerivation)(BCRYPT_KEY_HANDLE,
-        BCryptBufferDesc *, UCHAR *, ULONG, ULONG *, ULONG);
 
 static void test_BCryptGenRandom(void)
 {
@@ -168,6 +166,18 @@ static void _test_hash_length(unsigned line, void *handle, ULONG exlen)
     ok_(__FILE__,line)(len == exlen, "len = %lu, expected %lu\n", len, exlen);
 }
 
+#define test_hash_block_length(a,b) _test_hash_block_length(__LINE__,a,b)
+static void _test_hash_block_length(unsigned line, void *handle, ULONG exlen)
+{
+    ULONG len = 0xdeadbeef, size = 0xdeadbeef;
+    NTSTATUS status;
+
+    status = BCryptGetProperty(handle, BCRYPT_HASH_BLOCK_LENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok_(__FILE__,line)(status == STATUS_SUCCESS, "BCryptGetProperty failed: %#lx\n", status);
+    ok_(__FILE__,line)(size == sizeof(len), "got %lu\n", size);
+    ok_(__FILE__,line)(len == exlen, "len = %lu, expected %lu\n", len, exlen);
+}
+
 #define test_alg_name(a,b) _test_alg_name(__LINE__,a,b)
 static void _test_alg_name(unsigned line, void *handle, const WCHAR *exname)
 {
@@ -187,6 +197,7 @@ struct hash_test
 {
     const WCHAR *alg;
     unsigned hash_size;
+    unsigned block_size;
     const char *hash;
     const char *hash2;
     const char *hmac_hash;
@@ -209,6 +220,7 @@ static void test_hash(const struct hash_test *test)
 
     test_object_length(alg);
     test_hash_length(alg, test->hash_size);
+    test_hash_block_length(alg, test->block_size);
     test_alg_name(alg, test->alg);
 
     hash = NULL;
@@ -359,19 +371,19 @@ static void test_hashes(void)
 {
     static const struct hash_test tests[] =
     {
-        { L"SHA1", 20,
+        { L"SHA1", 20, 64,
         "961fa64958818f767707072755d7018dcd278e94",
         "9314f62ff64197143c91fc86de37e9ae776a3fb8",
         "2472cf65d0e090618d769d3e46f0d9446cf212da",
         "b2d2ba8cfd714d474cf0d9622cc5d15e1f53d53f",
         },
-        { L"SHA256", 32,
+        { L"SHA256", 32, 64,
         "ceb73749c899693706ede1e30c9929b3fd5dd926163831c2fb8bd41e6efb1126",
         "ea0938c118a7b15954f41b85195f2b42aec3a9429c63f593cfa65c137ffaa986",
         "34c1aa473a4468a91d06e7cdbc75bc4f93b830ccfc2a47ffd74e8e6ed29e4c72",
         "55feb7052060bd99e33f36eb0982c7f4856eb6a84fbefe19a1afd9faafc3af6f",
         },
-        { L"SHA384", 48,
+        { L"SHA384", 48, 128,
         "62b21e90c9022b101671ba1f808f8631a8149f0f12904055839a35c1ca78ae53"
         "63eed1e743a692d70e0504b0cfd12ef9",
         "724db7c0bbc51ef1ac3fc793083fc54c0e5c423faec9b11378c01c236b19aaaf"
@@ -381,7 +393,7 @@ static void test_hashes(void)
         "03e1818e5c165a0e54619e513acb06c393e1a6cb0ddbb4036b5f29617b334642"
         "e6e0be8b214d8508595b17a8c4b4e7db",
         },
-        { L"SHA512", 64,
+        { L"SHA512", 64, 128,
         "d55ced17163bf5386f2cd9ff21d6fd7fe576a915065c24744d09cfae4ec84ee1"
         "ef6ef11bfbc5acce3639bab725b50a1fe2c204f8c820d6d7db0df0ecbc49c5ca",
         "7752d707b54d2b00e7d1c09120d189475b0fd2e31ebb988cf0a01fc8492ddc0b"
@@ -391,19 +403,19 @@ static void test_hashes(void)
         "1487bcecba46ae677622fa499e4cb2f0fdf92f6f3427cba76382d537a06e49c3"
         "3e70a2fc1fc730092bf21128c3704cc6387f6dfbf7e2f9f315bbb894505a1205",
         },
-        { L"MD2", 16,
+        { L"MD2", 16, 16,
         "1bb33606ba908912a84221109d29cd7e",
         "b9a6ad9323b17e2d0cd389dddd6ef78a",
         "7f05b0638d77f4a27f3a9c4d353cd648",
         "05980873e6bfdd05dd7b30078de7e42a",
         },
-        { L"MD4", 16,
+        { L"MD4", 16, 64,
         "74b5db93c0b41e36ca7074338fc0b637",
         "a14a9ff2059a8c28f47b01e6bc48a1bf",
         "bc2e8ac4d8248ed21b8d26227a30ea3a",
         "b609db0eb4b8669db74f2c20099701e4",
         },
-        { L"MD5", 16,
+        { L"MD5", 16, 64,
         "e2a3e68d23ce348b8f68b3079de3d4c9",
         "bcdd7ca574342aa9db0e212348eacb16",
         "7bda029b93fa8d817fcc9e13d6bdf092",
@@ -446,6 +458,10 @@ static void test_BcryptHash(void)
     ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
     format_hash( md5, sizeof(md5), str );
     ok(!strcmp(str, expected), "got %s\n", str);
+
+    /* With a secret but without BCRYPT_ALG_HANDLE_HMAC_FLAG */
+    ret = pBCryptHash(alg, (UCHAR *)"key", sizeof("key"), (UCHAR *)"test", sizeof("test"), md5, sizeof(md5));
+    ok(ret == STATUS_INVALID_PARAMETER, "got %#lx\n", ret);
 
     ret = BCryptCloseAlgorithmProvider(alg, 0);
     ok(ret == STATUS_SUCCESS, "got %#lx\n", ret);
@@ -3330,9 +3346,12 @@ struct ecdh_test
     BYTE *ecdh_secret;
     ULONG ecdh_secret_len;
     BYTE *hashed_secret;
+    BYTE *hashed_secret_prepended;
     DWORD public_magic;
     DWORD private_magic;
 };
+
+static const UCHAR hash_prepend[][2] = {{0xca, 0xfe}, {0xf0, 0x0d}};
 
 static void test_ECDH_alg(const struct ecdh_test *t)
 {
@@ -3344,12 +3363,36 @@ static void test_ECDH_alg(const struct ecdh_test *t)
             (void *)BCRYPT_SHA1_ALGORITHM,
         }
     };
+    BCryptBuffer hash_param_buffers_prepended[] =
+    {
+        {
+            sizeof(BCRYPT_SHA1_ALGORITHM),
+            KDF_HASH_ALGORITHM,
+            (void *)BCRYPT_SHA1_ALGORITHM,
+        },
+        {
+            sizeof(hash_prepend[0]),
+            KDF_SECRET_PREPEND,
+            (void *)hash_prepend[0],
+        },
+        {
+            sizeof(hash_prepend[1]),
+            KDF_SECRET_PREPEND,
+            (void *)hash_prepend[1],
+        }
+    };
 
     BCryptBufferDesc hash_params =
     {
         BCRYPTBUFFER_VERSION,
         ARRAY_SIZE(hash_param_buffers),
         hash_param_buffers,
+    };
+    BCryptBufferDesc hash_params_prepended =
+    {
+        BCRYPTBUFFER_VERSION,
+        ARRAY_SIZE(hash_param_buffers_prepended),
+        hash_param_buffers_prepended,
     };
     BYTE *buf;
     BCRYPT_ECCKEY_BLOB *ecckey;
@@ -3449,6 +3492,17 @@ static void test_ECDH_alg(const struct ecdh_test *t)
     ok(!(memcmp(t->ecdh_secret, buf, size)), "wrong data\n");
     free(buf);
 
+    /* Raw secret with a BCryptBufferDesc, which is ignored */
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_RAW_SECRET, &hash_params_prepended, NULL, 0, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+
+    ok(size == (t->bitlen + 7) / 8, "size of secret key incorrect, got %lu, expected 32\n", size);
+    buf = malloc(size);
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_RAW_SECRET, &hash_params_prepended, buf, size, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(!(memcmp(t->ecdh_secret, buf, size)), "wrong data\n");
+    free(buf);
+
 raw_secret_end:
     status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &hash_params, NULL, 0, &size, 0);
     ok (status == STATUS_SUCCESS, "got %#lx\n", status);
@@ -3459,6 +3513,16 @@ raw_secret_end:
     status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &hash_params, buf, size, &size, 0);
     ok(status == STATUS_SUCCESS, "got %#lx\n", status);
     ok(!(memcmp(t->hashed_secret, buf, size)), "wrong data\n");
+    free(buf);
+
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &hash_params_prepended, NULL, 0, &size, 0);
+    ok (status == STATUS_SUCCESS, "got %#lx\n", status);
+
+    ok (size == 20, "got %lu\n", size);
+    buf = malloc(size);
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &hash_params_prepended, buf, size, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(!(memcmp(t->hashed_secret_prepended, buf, size)), "wrong data\n");
     free(buf);
 
     /* ulVersion is not verified */
@@ -3515,6 +3579,11 @@ static void test_ECDH(void)
         0x1b, 0xe7, 0xbf, 0x0f, 0x65, 0x1e, 0xd0, 0x07, 0xf9, 0xf4, 0x77, 0x48, 0x48, 0x39, 0xd0, 0xf8,
         0xf3, 0xce, 0xfc, 0x89
     };
+    static BYTE hashed256_secret_prepended[] =
+    {
+        0x10, 0x99, 0x5f, 0x01, 0xef, 0xa8, 0x18, 0x82, 0xd2, 0x62, 0x37, 0xab, 0xe0, 0x7c, 0x62, 0xc7,
+        0x50, 0x7f, 0xa6, 0xa0,
+    };
 
     static BYTE ecc384privkey[] =
     {
@@ -3549,6 +3618,11 @@ static void test_ECDH(void)
     {
         0x78, 0xf8, 0x07, 0xab, 0x00, 0x35, 0xaa, 0x8c, 0x22, 0xd0, 0xe7, 0x06, 0xfc, 0x0b, 0x74, 0x41,
         0xed, 0xdc, 0x16, 0x6c,
+    };
+    static BYTE hashed384_secret_prepended[] =
+    {
+        0x3d, 0xe0, 0x30, 0xd9, 0xe2, 0xdc, 0x61, 0xad, 0x26, 0x21, 0xad, 0xa3, 0x3e, 0xaf, 0xd5, 0x8e,
+        0xb6, 0xbc, 0x5a, 0x51,
     };
 
     static BYTE ecc521privkey[] =
@@ -3594,22 +3668,27 @@ static void test_ECDH(void)
         0x72, 0x39, 0x73, 0x5f, 0xc9, 0x26, 0x1f, 0x8e, 0xe3, 0x30, 0x11, 0xe1, 0x4f, 0xc4, 0x65, 0xc0,
         0xde, 0xf9, 0xe6, 0x6a,
     };
+    static BYTE hashed521_secret_prepended[] =
+    {
+        0x2e, 0x6f, 0x51, 0xc9, 0x15, 0xfb, 0x9f, 0xd0, 0xad, 0x92, 0x43, 0xdb, 0xc8, 0x6b, 0xd9, 0xe6,
+        0x1a, 0x5f, 0x52, 0xa6,
+    };
 
     static const struct ecdh_test tests[] =
     {
         {
             BCRYPT_ECDH_P256_ALGORITHM, 256, ecc256privkey, sizeof(ecc256privkey), ecdh256_pubkey, sizeof(ecdh256_pubkey),
-            ecdh256_secret, sizeof(ecdh256_secret), hashed256_secret,
+            ecdh256_secret, sizeof(ecdh256_secret), hashed256_secret, hashed256_secret_prepended,
             BCRYPT_ECDH_PUBLIC_P256_MAGIC, BCRYPT_ECDH_PRIVATE_P256_MAGIC,
         },
         {
             BCRYPT_ECDH_P384_ALGORITHM, 384, ecc384privkey, sizeof(ecc384privkey), ecdh384_pubkey, sizeof(ecdh384_pubkey),
-            ecdh384_secret, sizeof(ecdh384_secret), hashed384_secret,
+            ecdh384_secret, sizeof(ecdh384_secret), hashed384_secret, hashed384_secret_prepended,
             BCRYPT_ECDH_PUBLIC_P384_MAGIC, BCRYPT_ECDH_PRIVATE_P384_MAGIC,
         },
         {
             BCRYPT_ECDH_P521_ALGORITHM, 521, ecc521privkey, sizeof(ecc521privkey), ecdh521_pubkey, sizeof(ecdh521_pubkey),
-            ecdh521_secret, sizeof(ecdh521_secret), hashed521_secret,
+            ecdh521_secret, sizeof(ecdh521_secret), hashed521_secret, hashed521_secret_prepended,
             BCRYPT_ECDH_PUBLIC_P521_MAGIC, BCRYPT_ECDH_PRIVATE_P521_MAGIC,
         },
     };
@@ -3786,6 +3865,12 @@ static BYTE dh_hashed_secret[] =
     0xb5, 0x0a, 0xfe, 0x8f,
 };
 
+static BYTE dh_hashed_secret_prepended[] =
+{
+    0x03, 0x9d, 0x31, 0x52, 0x32, 0xca, 0xfc, 0x12, 0x23, 0x2e, 0x63, 0x0b, 0x7a, 0x1c, 0xaf, 0xee,
+    0x17, 0xf0, 0x7b, 0xc6,
+};
+
 BCryptBuffer dh_hash_param_buffers[] =
 {
     {
@@ -3794,12 +3879,36 @@ BCryptBuffer dh_hash_param_buffers[] =
         (void *)BCRYPT_SHA1_ALGORITHM,
     }
 };
+BCryptBuffer dh_hash_param_buffers_prepended[] =
+{
+    {
+        sizeof(BCRYPT_SHA1_ALGORITHM),
+        KDF_HASH_ALGORITHM,
+        (void *)BCRYPT_SHA1_ALGORITHM,
+    },
+    {
+        sizeof(hash_prepend[0]),
+        KDF_SECRET_PREPEND,
+        (void *)hash_prepend[0],
+    },
+    {
+        sizeof(hash_prepend[1]),
+        KDF_SECRET_PREPEND,
+        (void *)hash_prepend[1],
+    }
+};
 
 BCryptBufferDesc dh_hash_params =
 {
     BCRYPTBUFFER_VERSION,
     ARRAY_SIZE(dh_hash_param_buffers),
     dh_hash_param_buffers,
+};
+BCryptBufferDesc dh_hash_params_prepended =
+{
+    BCRYPTBUFFER_VERSION,
+    ARRAY_SIZE(dh_hash_param_buffers_prepended),
+    dh_hash_param_buffers_prepended,
 };
 
 static void test_DH(void)
@@ -3928,6 +4037,18 @@ static void test_DH(void)
     ok(!memcmp(dh_secret, buf, size), "wrong data\n");
     free(buf);
 
+    /* Raw secret with a BCryptBufferDesc, which is ignored */
+    size = 0;
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_RAW_SECRET, &dh_hash_params_prepended, NULL, 0, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(size == 64, "got %lu\n", size);
+
+    buf = calloc(1, size);
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_RAW_SECRET, &dh_hash_params_prepended, buf, size, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(!memcmp(dh_secret, buf, size), "wrong data\n");
+    free(buf);
+
     size = 0;
     status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, NULL, NULL, 0, &size, 0);
     ok(status == STATUS_SUCCESS, "got %#lx\n", status);
@@ -3945,6 +4066,17 @@ static void test_DH(void)
     status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &dh_hash_params, buf, size, &size, 0);
     ok(status == STATUS_SUCCESS, "got %#lx\n", status);
     ok(!memcmp(dh_hashed_secret, buf, size), "wrong data\n");
+    ok(size == 20, "got %lu\n", size);
+
+    size = 0;
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &dh_hash_params_prepended, NULL, 0, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(size == 20, "got %lu\n", size);
+
+    buf = calloc(1, size);
+    status = BCryptDeriveKey(secret, BCRYPT_KDF_HASH, &dh_hash_params_prepended, buf, size, &size, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+    ok(!memcmp(dh_hashed_secret_prepended, buf, size), "wrong data\n");
     ok(size == 20, "got %lu\n", size);
 
     memset(buf, 0, 20);
@@ -4209,6 +4341,91 @@ static void test_aes_vector(void)
     ok(!ret, "got %#lx\n", ret);
     ok(size == 16, "got %lu\n", size);
     ok(!memcmp(output, expect3, sizeof(expect3)), "wrong cipher text\n");
+
+    ret = BCryptDestroyKey(key);
+    ok(!ret, "got %#lx\n", ret);
+
+    ret = BCryptCloseAlgorithmProvider(alg, 0);
+    ok(!ret, "got %#lx\n", ret);
+}
+
+static void test_aes_vector_property(void)
+{
+    static const UCHAR secret[] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10};
+    static const UCHAR vector[] = {0x0f,0x0e,0x0d,0x0c,0x0b,0x0a,0x09,0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,0x00};
+    static const UCHAR expect[] = {0x3e,0xfa,0x1a,0xc8,0x92,0x54,0xe4,0x21,0x1a,0x3d,0xfd,0x42,0x1c,0xc0,0x7d,0x20};
+    static const UCHAR expect2[] = {0xb0,0xcb,0xf5,0x80,0xd4,0xe3,0x55,0x23,0x6e,0x19,0x5b,0xdb,0xfe,0xe0,0x6c,0xd3};
+    static UCHAR input[] = {'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p'};
+    UCHAR data[sizeof(BCRYPT_KEY_DATA_BLOB_HEADER) + sizeof(secret)];
+    BCRYPT_KEY_DATA_BLOB_HEADER *blob = (BCRYPT_KEY_DATA_BLOB_HEADER *)data;
+    UCHAR output[16], iv[16];
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key;
+    ULONG size;
+    NTSTATUS ret;
+
+    ret = BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, NULL, 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    size = sizeof(BCRYPT_CHAIN_MODE_CBC);
+    ret = BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, (UCHAR *)BCRYPT_CHAIN_MODE_CBC, size, 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    blob->dwMagic   = BCRYPT_KEY_DATA_BLOB_MAGIC;
+    blob->dwVersion = BCRYPT_KEY_DATA_BLOB_VERSION1;
+    blob->cbKeyData = sizeof(secret);
+    memcpy(data + sizeof(*blob), secret, sizeof(secret));
+    size = sizeof(BCRYPT_KEY_DATA_BLOB_HEADER) + sizeof(secret);
+    ret = BCryptImportKey(alg, NULL, BCRYPT_KEY_DATA_BLOB, &key, NULL, 0, data, size, 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    ret = BCryptSetProperty(key, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)vector, sizeof(vector) - 1, 0);
+    ok(ret == STATUS_INVALID_PARAMETER, "got %#lx\n", ret);
+
+    /* the initialization vector can be set on the key instead of being passed to BCryptEncrypt() */
+    ret = BCryptSetProperty(key, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)vector, sizeof(vector), 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    size = 0;
+    memset(output, 0, sizeof(output));
+    ret = BCryptEncrypt(key, input, sizeof(input), NULL, NULL, 0, output, sizeof(output), &size, 0);
+    ok(!ret, "got %#lx\n", ret);
+    ok(size == 16, "got %lu\n", size);
+    ok(!memcmp(output, expect, sizeof(expect)), "wrong cipher text\n");
+
+    /* setting it again restarts the chain instead of continuing it */
+    ret = BCryptSetProperty(key, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)vector, sizeof(vector), 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    size = 0;
+    memset(output, 0, sizeof(output));
+    ret = BCryptEncrypt(key, input, sizeof(input), NULL, NULL, 0, output, sizeof(output), &size, 0);
+    ok(!ret, "got %#lx\n", ret);
+    ok(size == 16, "got %lu\n", size);
+    ok(!memcmp(output, expect, sizeof(expect)), "wrong cipher text\n");
+
+    /* a vector passed to BCryptEncrypt() overrides the one set on the key */
+    ret = BCryptSetProperty(key, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)vector, sizeof(vector), 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    size = 0;
+    memset(iv, 0, sizeof(iv));
+    memset(output, 0, sizeof(output));
+    ret = BCryptEncrypt(key, input, sizeof(input), NULL, iv, sizeof(iv), output, sizeof(output), &size, 0);
+    ok(!ret, "got %#lx\n", ret);
+    ok(size == 16, "got %lu\n", size);
+    ok(!memcmp(output, expect2, sizeof(expect2)), "wrong cipher text\n");
+
+    /* and the same vector decrypts what it encrypted */
+    ret = BCryptSetProperty(key, BCRYPT_INITIALIZATION_VECTOR, (UCHAR *)vector, sizeof(vector), 0);
+    ok(!ret, "got %#lx\n", ret);
+
+    size = 0;
+    memset(output, 0, sizeof(output));
+    ret = BCryptDecrypt(key, (UCHAR *)expect, sizeof(expect), NULL, NULL, 0, output, sizeof(output), &size, 0);
+    ok(!ret, "got %#lx\n", ret);
+    ok(size == 16, "got %lu\n", size);
+    ok(!memcmp(output, input, sizeof(input)), "wrong plain text\n");
 
     ret = BCryptDestroyKey(key);
     ok(!ret, "got %#lx\n", ret);
@@ -4945,10 +5162,9 @@ static void test_PBKDF2(void)
         0x4d, 0x16, 0xe4, 0x04, 0xcd, 0xab, 0x43, 0x77,
         0x25, 0x3e, 0x1d, 0xb4, 0x95, 0x5f, 0xf7, 0x01,
     };
-
     BCRYPT_KEY_LENGTHS_STRUCT key_lengths;
     BCRYPT_ALG_HANDLE alg;
-    BCRYPT_KEY_HANDLE key;
+    BCRYPT_KEY_HANDLE key, key2;
     NTSTATUS status;
     ULONG val, size;
     static BYTE buf[32];
@@ -4960,7 +5176,6 @@ static void test_PBKDF2(void)
         return;
     }
     ok(!status, "got %#lx\n", status);
-    ok(pBCryptKeyDerivation != NULL, "BCryptKeyDerivation not available\n");
 
     val = size = 0;
     status = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (UCHAR *)&val, sizeof(val), &size, 0);
@@ -4989,22 +5204,339 @@ static void test_PBKDF2(void)
     ok(!status, "got %#lx\n", status);
     ok(val == strlen("test") * 8, "got %lu\n", val);
 
-    status = pBCryptKeyDerivation(key, &pbkdf2_params, NULL, 0, &size, 0);
+    status = BCryptKeyDerivation(key, &pbkdf2_params, NULL, 0, &size, 0);
     ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
 
     buf[0] = buf[1] = 'x';
-    status = pBCryptKeyDerivation(key, &pbkdf2_params, buf, 1, &size, 0);
+    status = BCryptKeyDerivation(key, &pbkdf2_params, buf, 1, &size, 0);
     ok(!status, "got %#lx\n", status);
     ok(size == 1, "size = %lu\n", size);
     ok(buf[0] == pbkdf2_hash[0], "buf[0] = %x\n", buf[0]);
     ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
 
     memset(buf, 'x', sizeof(buf));
-    status = pBCryptKeyDerivation(key, &pbkdf2_params, buf, sizeof(buf), &size, 0);
+    status = BCryptKeyDerivation(key, &pbkdf2_params, buf, sizeof(buf), &size, 0);
     ok(!status, "got %#lx\n", status);
     ok(size == sizeof(buf), "size = %lu\n", size);
     ok(!memcmp(buf, pbkdf2_hash, sizeof(pbkdf2_hash)),
             "wrong data (%s)\n", wine_dbgstr_an((char *)buf, size));
+
+    status = BCryptDuplicateKey(key, &key2, NULL, 0, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+
+    status = BCryptDestroyKey(key);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptDestroyKey(key2);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptCloseAlgorithmProvider(alg, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+}
+
+static void test_TLS_PRF(void)
+{
+    static const UCHAR expect[32] =
+    {
+        0x28,0xd2,0xfd,0xb7,0x19,0x56,0x47,0x9d,0x88,0xd1,0x13,0x50,0x01,0x08,0x40,0x8e,
+        0xfa,0xb3,0x92,0x80,0xe4,0xe2,0x6a,0x2a,0xd0,0xe6,0xac,0x39,0x80,0x18,0xeb,0x30
+    };
+    static const UCHAR expect2[32] =
+    {
+        0x33,0x63,0x83,0x14,0x8c,0x50,0x48,0x99,0x63,0x7b,0xc0,0x33,0x81,0xb1,0x0e,0x4f,
+        0x5c,0x27,0xe3,0xe8,0x23,0xa8,0xb3,0xe8,0x52,0x96,0x47,0xa5,0xf8,0xca,0x17,0x24
+    };
+    static UCHAR label[32] = "label", seed[32] = "seed", buf[32];
+    static BCryptBuffer param_buffers[] =
+    {
+        {
+            sizeof(BCRYPT_SHA256_ALGORITHM),
+            KDF_HASH_ALGORITHM,
+            (void *)BCRYPT_SHA256_ALGORITHM,
+        },
+        {
+            sizeof(label),
+            KDF_TLS_PRF_LABEL,
+            label,
+        },
+        {
+            sizeof(seed),
+            KDF_TLS_PRF_SEED,
+            seed,
+        }
+    };
+    static BCryptBufferDesc params =
+    {
+        BCRYPTBUFFER_VERSION,
+        ARRAY_SIZE(param_buffers),
+        param_buffers,
+    };
+    NTSTATUS status;
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key, key2;
+    BCRYPT_KEY_LENGTHS_STRUCT key_lengths;
+    ULONG len, size;
+
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_TLS1_1_KDF_ALGORITHM, NULL, 0);
+    if (status == STATUS_NOT_FOUND) /* win8 */
+    {
+        win_skip("BCRYPT_TLS1_1_KDF_ALGORITHM not available\n");
+        return;
+    }
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len, "got %lu\n", len);
+    ok(size == sizeof(len), "got %lu\n", size);
+
+    len = size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_BLOCK_LENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(status == STATUS_NOT_SUPPORTED, "got %#lx\n", status);
+
+    memset(&key_lengths, 0xfe, sizeof(key_lengths));
+    size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_KEY_LENGTHS, (UCHAR *)&key_lengths, sizeof(key_lengths), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(key_lengths), "got %lu\n", size);
+    ok(key_lengths.dwMinLength == 0, "got %lu\n", key_lengths.dwMinLength);
+    ok(key_lengths.dwMaxLength == 16384, "got %lu\n", key_lengths.dwMaxLength);
+    ok(key_lengths.dwIncrement == 8, "got %lu\n", key_lengths.dwIncrement);
+
+    status = BCryptGenerateSymmetricKey(alg, &key, NULL, 0, (UCHAR *)"test", 4, 0);
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(key, BCRYPT_KEY_STRENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len == strlen("test") * 8, "got %lu\n", len);
+
+    status = BCryptKeyDerivation(key, &params, NULL, 0, &size, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    buf[0] = buf[1] = 'x';
+    status = BCryptKeyDerivation(key, &params, buf, 1, &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == 1, "size = %lu\n", size);
+    ok(buf[0] == expect[0], "buf[0] = %x\n", buf[0]);
+    ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
+
+    memset(buf, 'x', sizeof(buf));
+    status = BCryptKeyDerivation(key, &params, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(buf), "size = %lu\n", size);
+    ok(!memcmp(buf, expect, sizeof(expect)), "wrong data (%s)\n", wine_dbgstr_an((char *)buf, size));
+
+    status = BCryptDestroyKey(key);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptCloseAlgorithmProvider(alg, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_TLS1_2_KDF_ALGORITHM, NULL, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptGenerateSymmetricKey(alg, &key, NULL, 0, (UCHAR *)"test", 4, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptKeyDerivation(key, &params, NULL, 0, &size, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    buf[0] = buf[1] = 'x';
+    status = BCryptKeyDerivation(key, &params, buf, 1, &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == 1, "size = %lu\n", size);
+    ok(buf[0] == expect2[0], "buf[0] = %x\n", buf[0]);
+    ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
+
+    memset(buf, 'x', sizeof(buf));
+    status = BCryptKeyDerivation(key, &params, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(buf), "size = %lu\n", size);
+    ok(!memcmp(buf, expect2, sizeof(expect2)), "wrong data\n");
+
+    /* label is optional */
+    param_buffers[1].cbBuffer   = 0;
+    param_buffers[1].pvBuffer   = NULL;
+    status = BCryptKeyDerivation(key, &params, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptDuplicateKey(key, &key2, NULL, 0, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+
+    status = BCryptDestroyKey(key);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptDestroyKey(key2);
+    ok(!status, "got %#lx\n", status);
+    status = BCryptCloseAlgorithmProvider(alg, 0);
+    ok(status == STATUS_SUCCESS, "got %#lx\n", status);
+}
+
+static void test_HKDF(void)
+{
+    static const UCHAR expect[] =
+    {
+        0x9e,0xc7,0x96,0xeb,0x03,0xf9,0xbd,0xaa,0xfa,0x68,0x90,0x1c,0x7b,0x71,0x20,0xda,
+        0x88,0xf1,0xc2,0x15,0x07,0xaf,0xc6,0xde,0x1a,0x86,0xb5,0x6e,0x96,0xe9,0x7d,0x7a
+    };
+    static const UCHAR expect2[] =
+    {
+        0x54,0xe0,0x42,0xd2,0x92,0xc8,0x02,0x02,0x14,0xae,0x57,0xe8,0x7e,0x67,0x32,0xd7,
+        0x46,0x90,0xca,0x7b,0xef,0x5a,0x62,0x74,0x90,0x8f,0x1e,0x99,0x20,0x04,0x1e,0x27
+    };
+    static const UCHAR expect3[] =
+    {
+        0xb5,0x12,0x7d,0x38,0x03,0x6a,0x64,0xd0,0x76,0xde,0x48,0xe2,0xa0,0x7a,0x4f,0x3d,
+        0x6f,0xc8,0x55,0xab,0xf5,0x14,0x66,0x5d,0xd6,0x02,0x1c,0x28,0x75,0xe7,0xdc,0x96
+    };
+    UCHAR buf[32], salt[] = "salt";
+    static BCryptBuffer param_buffers[] =
+    {
+        {
+            sizeof("info"),
+            KDF_HKDF_INFO,
+            (void *)"info",
+        },
+    };
+    static BCryptBufferDesc params =
+    {
+        BCRYPTBUFFER_VERSION,
+        ARRAY_SIZE(param_buffers),
+        param_buffers,
+    };
+    NTSTATUS status;
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key;
+    BCRYPT_KEY_LENGTHS_STRUCT key_lengths;
+    ULONG len, size;
+
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_HKDF_ALGORITHM, NULL, 0);
+    if (status == STATUS_NOT_FOUND) /* win8 */
+    {
+        win_skip("BCRYPT_HKDF_ALGORITHM not available\n");
+        return;
+    }
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len, "got %lu\n", len);
+    ok(size == sizeof(len), "got %lu\n", size);
+
+    len = size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_BLOCK_LENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(status == STATUS_NOT_SUPPORTED, "got %#lx\n", status);
+
+    memset(&key_lengths, 0xfe, sizeof(key_lengths));
+    size = 0;
+    status = BCryptGetProperty(alg, BCRYPT_KEY_LENGTHS, (UCHAR *)&key_lengths, sizeof(key_lengths), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(key_lengths), "got %lu\n", size);
+    ok(key_lengths.dwMinLength == 0, "got %lu\n", key_lengths.dwMinLength);
+    ok(key_lengths.dwMaxLength == 16384, "got %lu\n", key_lengths.dwMaxLength);
+    ok(key_lengths.dwIncrement == 8, "got %lu\n", key_lengths.dwIncrement);
+
+    /* salt, info */
+    status = BCryptGenerateSymmetricKey(alg, &key, NULL, 0, (UCHAR *)"test", 4, 0);
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(key, BCRYPT_KEY_STRENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len == strlen("test") * 8, "got %lu\n", len);
+
+    size = sizeof(BCRYPT_SHA256_ALGORITHM);
+    status = BCryptSetProperty(key, BCRYPT_HKDF_HASH_ALGORITHM, (UCHAR *)BCRYPT_SHA256_ALGORITHM, size, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptSetProperty(key, BCRYPT_HKDF_SALT_AND_FINALIZE, salt, sizeof(salt), 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptKeyDerivation(key, &params, NULL, 0, &size, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    buf[0] = buf[1] = 'x';
+    status = BCryptKeyDerivation(key, &params, buf, 1, &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == 1, "size = %lu\n", size);
+    ok(buf[0] == expect[0], "buf[0] = %x\n", buf[0]);
+    ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
+
+    memset(buf, 'x', sizeof(buf));
+    status = BCryptKeyDerivation(key, &params, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(buf), "size = %lu\n", size);
+    ok(!memcmp(buf, expect, sizeof(expect)), "wrong data (%s)\n", wine_dbgstr_an((char *)buf, size));
+
+    status = BCryptDestroyKey(key);
+    ok(!status, "got %#lx\n", status);
+
+    /* no salt, info */
+    status = BCryptGenerateSymmetricKey(alg, &key, NULL, 0, (UCHAR *)"test", 4, 0);
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(key, BCRYPT_KEY_STRENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len == strlen("test") * 8, "got %lu\n", len);
+
+    size = sizeof(BCRYPT_SHA256_ALGORITHM);
+    status = BCryptSetProperty(key, BCRYPT_HKDF_HASH_ALGORITHM, (UCHAR *)BCRYPT_SHA256_ALGORITHM, size, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptSetProperty(key, BCRYPT_HKDF_PRK_AND_FINALIZE, NULL, 0, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptKeyDerivation(key, &params, NULL, 0, &size, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    buf[0] = buf[1] = 'x';
+    status = BCryptKeyDerivation(key, &params, buf, 1, &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == 1, "size = %lu\n", size);
+    ok(buf[0] == expect2[0], "buf[0] = %x\n", buf[0]);
+    ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
+
+    memset(buf, 'x', sizeof(buf));
+    status = BCryptKeyDerivation(key, &params, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(buf), "size = %lu\n", size);
+    ok(!memcmp(buf, expect2, sizeof(expect2)), "wrong data (%s)\n", wine_dbgstr_an((char *)buf, size));
+
+    status = BCryptDestroyKey(key);
+    ok(!status, "got %#lx\n", status);
+
+    /* salt, no info */
+    status = BCryptGenerateSymmetricKey(alg, &key, NULL, 0, (UCHAR *)"test", 4, 0);
+    ok(!status, "got %#lx\n", status);
+
+    len = size = 0;
+    status = BCryptGetProperty(key, BCRYPT_KEY_STRENGTH, (UCHAR *)&len, sizeof(len), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(len == strlen("test") * 8, "got %lu\n", len);
+
+    size = sizeof(BCRYPT_SHA256_ALGORITHM);
+    status = BCryptSetProperty(key, BCRYPT_HKDF_HASH_ALGORITHM, (UCHAR *)BCRYPT_SHA256_ALGORITHM, size, 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptSetProperty(key, BCRYPT_HKDF_SALT_AND_FINALIZE, salt, sizeof(salt), 0);
+    ok(!status, "got %#lx\n", status);
+
+    status = BCryptKeyDerivation(key, NULL, NULL, 0, &size, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "got %#lx\n", status);
+
+    buf[0] = buf[1] = 'x';
+    status = BCryptKeyDerivation(key, NULL, buf, 1, &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == 1, "size = %lu\n", size);
+    ok(buf[0] == expect3[0], "buf[0] = %x\n", buf[0]);
+    ok(buf[1] == 'x', "buf[1] = %x\n", buf[1]);
+
+    memset(buf, 'x', sizeof(buf));
+    status = BCryptKeyDerivation(key, NULL, buf, sizeof(buf), &size, 0);
+    ok(!status, "got %#lx\n", status);
+    ok(size == sizeof(buf), "size = %lu\n", size);
+    ok(!memcmp(buf, expect3, sizeof(expect3)), "wrong data (%s)\n", wine_dbgstr_an((char *)buf, size));
 
     status = BCryptDestroyKey(key);
     ok(!status, "got %#lx\n", status);
@@ -5057,7 +5589,6 @@ START_TEST(bcrypt)
         return;
     }
     pBCryptHash = (void *)GetProcAddress(module, "BCryptHash");
-    pBCryptKeyDerivation = (void *)GetProcAddress(module, "BCryptKeyDerivation");
 
     test_BCryptGenRandom();
     test_BCryptGetFipsAlgorithmMode();
@@ -5080,12 +5611,15 @@ START_TEST(bcrypt)
     test_BCryptSignHash();
     test_BCryptEnumAlgorithms();
     test_aes_vector();
+    test_aes_vector_property();
     test_BcryptDeriveKeyCapi();
     test_DSA();
     test_SecretAgreement();
     test_rsa_encrypt();
     test_RC4();
     test_PBKDF2();
+    test_TLS_PRF();
+    test_HKDF();
     test_CHACHA20_POLY1305();
 
     FreeLibrary(module);

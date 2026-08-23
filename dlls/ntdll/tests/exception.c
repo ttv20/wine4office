@@ -1563,34 +1563,43 @@ static DWORD simd_fault_handler( EXCEPTION_RECORD *rec, EXCEPTION_REGISTRATION_R
                                  CONTEXT *context, EXCEPTION_REGISTRATION_RECORD **dispatcher )
 {
     int *stage = *(int **)(frame + 1);
+    DWORD expected;
 
     got_exception++;
 
-    if( *stage == 1) {
-        /* fault while executing sse instruction */
-        context->Eip += 3; /* skip addps */
+    switch(*stage)
+    {
+        case 1: /* fault while executing sse instruction */
+            context->Eip += 3; /* skip addps */
+            return ExceptionContinueExecution;
+        case 2: /* divide by zero */
+        case 3: /* invalid operation */
+            expected = STATUS_FLOAT_MULTIPLE_TRAPS;
+            context->Eip += 3; /* skip instruction */
+            break;
+        case 4: /* overflow */
+            expected = STATUS_FLOAT_MULTIPLE_FAULTS;
+            context->Eip += 3; /* skip instruction */
+            break;
+        default:
+            ok(FALSE, "unexpected stage %d\n", *stage);
+            return ExceptionContinueExecution;
+    }
+
+    if (rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
+    {
+        skip("system doesn't support SIMD exceptions\n");
         return ExceptionContinueExecution;
     }
-    else if ( *stage == 2 || *stage == 3 ) {
-        /* stage 2 - divide by zero fault */
-        /* stage 3 - invalid operation fault */
-        if( rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
-            skip("system doesn't support SIMD exceptions\n");
-        else {
-            ok( rec->ExceptionCode ==  STATUS_FLOAT_MULTIPLE_TRAPS,
-                "exception code: %#lx, should be %#lx\n",
-                rec->ExceptionCode,  STATUS_FLOAT_MULTIPLE_TRAPS);
-            ok( rec->NumberParameters == is_wow64 ? 2 : 1, "# of params: %li\n", rec->NumberParameters);
-            ok( rec->ExceptionInformation[0] == 0, "param #1: %Ix, should be 0\n", rec->ExceptionInformation[0]);
-            if (rec->NumberParameters == 2)
-                ok( rec->ExceptionInformation[1] == ((XSAVE_FORMAT *)context->ExtendedRegisters)->MxCsr,
-                    "param #1: %Ix / %lx\n", rec->ExceptionInformation[1],
-                    ((XSAVE_FORMAT *)context->ExtendedRegisters)->MxCsr);
-        }
-        context->Eip += 3; /* skip divps */
-    }
-    else
-        ok(FALSE, "unexpected stage %x\n", *stage);
+
+    ok( rec->ExceptionCode == expected, "exception code: %#lx, should be %#lx\n",
+        rec->ExceptionCode, expected);
+    ok( rec->NumberParameters == is_wow64 ? 2 : 1, "# of params: %li\n", rec->NumberParameters);
+    ok( rec->ExceptionInformation[0] == 0, "param #0: %Ix\n", rec->ExceptionInformation[0]);
+    if (rec->NumberParameters == 2)
+        ok( rec->ExceptionInformation[1] == ((XSAVE_FORMAT *)context->ExtendedRegisters)->MxCsr,
+            "param #1: %Ix / %lx\n", rec->ExceptionInformation[1],
+            ((XSAVE_FORMAT *)context->ExtendedRegisters)->MxCsr);
 
     return ExceptionContinueExecution;
 }
@@ -1630,6 +1639,25 @@ static const BYTE simd_exception_test2[] = {
     0xc3,                                /* ret */
 };
 
+static const BYTE simd_exception_test3[] = {
+    0x83, 0xec, 0x04,                    /* sub    $4,%esp        */
+    0x0f, 0xae, 0x1c, 0x24,              /* stmxcsr (%esp)        */
+    0x8b, 0x04, 0x24,                    /* mov    (%esp),%eax    * store mxcsr */
+    0x66, 0x81, 0x24, 0x24, 0xff, 0xfb,  /* andw   $0xfbff,(%esp) * enable overflow */
+    0x0f, 0xae, 0x14, 0x24,              /* ldmxcsr (%esp)        * operation exceptions */
+    0x68, 0xff, 0xff, 0x7f, 0x7f,        /* push   0x7f7fffff     * load large float values */
+    0x68, 0xff, 0xff, 0x7f, 0x7f,
+    0x68, 0xff, 0xff, 0x7f, 0x7f,
+    0x68, 0xff, 0xff, 0x7f, 0x7f,
+    0x0f, 0x10, 0x0c, 0x24,              /* movups (%esp),%xmm1   */
+    0x0f, 0x59, 0xc9,                    /* mulps  %xmm1,%xmm1    * generate overflow fault */
+    0x83, 0xc4, 0x10,                    /* add    $16,%esp       * pop float value */
+    0x89, 0x04, 0x24,                    /* mov    %eax,(%esp)    * restore to old mxcsr */
+    0x0f, 0xae, 0x14, 0x24,              /* ldmxcsr (%esp)        */
+    0x83, 0xc4, 0x04,                    /* add    $4,%esp        */
+    0xc3                                 /* ret                   */
+};
+
 static const BYTE sse_check[] = {
     0x0f, 0x58, 0xc8,                    /* addps  %xmm0,%xmm1 */
     0xc3,                                /* ret */
@@ -1660,6 +1688,13 @@ static void test_simd_exceptions(void)
     got_exception = 0;
     run_exception_test(simd_fault_handler, &stage, simd_exception_test2,
                        sizeof(simd_exception_test2), 0);
+    ok(got_exception == 1, "got exception: %i, should be 1\n", got_exception);
+
+    /* generate a SIMD overflow exception */
+    stage = 4;
+    got_exception = 0;
+    run_exception_test(simd_fault_handler, &stage, simd_exception_test3,
+                       sizeof(simd_exception_test3), 0);
     ok(got_exception == 1, "got exception: %i, should be 1\n", got_exception);
 }
 
@@ -3442,35 +3477,44 @@ static DWORD WINAPI simd_fault_handler( EXCEPTION_RECORD *rec, ULONG64 frame,
                                         CONTEXT *context, DISPATCHER_CONTEXT *dispatcher )
 {
     int *stage = *(int **)dispatcher->HandlerData;
+    DWORD expected;
 
     got_exception++;
 
-    if (*stage == 1)
+    switch(*stage)
     {
-        /* fault while executing sse instruction */
-        context->Rip += 3; /* skip addps */
+        case 1: /* fault while executing sse instruction */
+            context->Rip += 3; /* skip addps */
+            return ExceptionContinueExecution;
+        case 2: /* divide by zero */
+            expected = STATUS_FLOAT_DIVIDE_BY_ZERO;
+            context->Rip += 3; /* skip instruction */
+            break;
+        case 3: /* invalid operation */
+            expected = STATUS_FLOAT_INVALID_OPERATION;
+            context->Rip += 3; /* skip instruction */
+            break;
+        case 4: /* overflow */
+            expected = STATUS_FLOAT_OVERFLOW;
+            context->Rip += 3; /* skip instruction */
+            break;
+        default:
+            ok(FALSE, "unexpected stage %d\n", *stage);
+            return ExceptionContinueExecution;
+    }
+
+    if (rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
+    {
+        skip("system doesn't support SIMD exceptions\n");
         return ExceptionContinueExecution;
     }
-    else if (*stage == 2 || *stage == 3 )
-    {
-        /* stage 2 - divide by zero fault */
-        /* stage 3 - invalid operation fault */
-        if( rec->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
-            skip("system doesn't support SIMD exceptions\n");
-        else
-        {
-            ULONG expect = *stage == 2 ? EXCEPTION_FLT_DIVIDE_BY_ZERO : EXCEPTION_FLT_INVALID_OPERATION;
-            ok( rec->ExceptionCode == expect, "exception code: %#lx, should be %#lx\n",
-                rec->ExceptionCode, expect );
-            ok( rec->NumberParameters == 2, "# of params: %li, should be 2\n", rec->NumberParameters);
-            ok( rec->ExceptionInformation[0] == 0, "param #0: %Ix\n", rec->ExceptionInformation[0]);
-            ok( rec->ExceptionInformation[1] == context->MxCsr, "param #1: %Ix / %lx\n",
-                rec->ExceptionInformation[1], context->MxCsr);
-        }
-        context->Rip += 3; /* skip divps */
-    }
-    else
-        ok(FALSE, "unexpected stage %x\n", *stage);
+
+    ok( rec->ExceptionCode == expected, "exception code: %#lx, should be %#lx\n",
+        rec->ExceptionCode, expected);
+    ok( rec->NumberParameters == 2, "# of params: %li, should be 2\n", rec->NumberParameters);
+    ok( rec->ExceptionInformation[0] == 0, "param #0: %Ix\n", rec->ExceptionInformation[0]);
+    ok( rec->ExceptionInformation[1] == context->MxCsr, "param #1: %Ix / %lx\n",
+        rec->ExceptionInformation[1], context->MxCsr);
 
     return ExceptionContinueExecution;
 }
@@ -3508,6 +3552,23 @@ static const BYTE simd_exception_test2[] =
     0xc3,                                /* ret */
 };
 
+static const BYTE simd_exception_test3[] =
+{
+    0x48, 0x83, 0xec, 0x08,              /* sub    $0x8,%rsp      */
+    0x0f, 0xae, 0x1c, 0x24,              /* stmxcsr (%rsp)        */
+    0x8b, 0x04, 0x24,                    /* mov    (%rsp),%eax    * store mxcsr */
+    0x66, 0x81, 0x24, 0x24, 0xff, 0xfb,  /* andw   $0xfbff,(%rsp) * unmask overflow exception */
+    0x0f, 0xae, 0x14, 0x24,              /* ldmxcsr (%rsp)        * zero exceptions  */
+    0xb9, 0xff, 0xff, 0x7f, 0x7f,        /* mov  $0x7f7fffff,%ecx * load large number */
+    0x66, 0x0f, 0x6e, 0xc9,              /* movd   %ecx,%xmm1     * transfer to sse register */
+    0x0f, 0xc6, 0xc9, 0x00,              /* shufps $0,%xmm1,%xmm1 * replicate to all 4 lanes */
+    0x0f, 0x59, 0xc9,                    /* mulps  %xmm1,%xmm1    * generate overflow fault */
+    0x89, 0x04, 0x24,                    /* mov    %eax,(%rsp)    * restore to old mxcsr */
+    0x0f, 0xae, 0x14, 0x24,              /* ldmxcsr (%rsp)        */
+    0x48, 0x83, 0xc4, 0x08,              /* add    $0x8,%rsp      */
+    0xc3,                                /* ret */
+};
+
 static const BYTE sse_check[] =
 {
     0x0f, 0x58, 0xc8,                    /* addps  %xmm0,%xmm1 */
@@ -3539,6 +3600,13 @@ static void test_simd_exceptions(void)
     got_exception = 0;
     run_exception_test(simd_fault_handler, &stage, simd_exception_test2,
                        sizeof(simd_exception_test2), 0);
+    ok(got_exception == 1, "got exception: %i, should be 1\n", got_exception);
+
+    /* generate a SIMD overflow exception */
+    stage = 4;
+    got_exception = 0;
+    run_exception_test(simd_fault_handler, &stage, simd_exception_test3,
+                       sizeof(simd_exception_test3), 0);
     ok(got_exception == 1, "got exception: %i, should be 1\n", got_exception);
 }
 
@@ -3648,18 +3716,16 @@ static void rtlraiseexception_handler_( EXCEPTION_RECORD *rec, void *frame, CONT
     trace( "exception: %08lx flags:%lx addr:%p context: Rip:%p\n",
            rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, (void *)context->Rip );
 
-    if (is_arm64ec) /* addr points to RtlRaiseException entry thunk */
+    ok( addr == (char *)code_mem + 0x0c || broken( addr == code_mem || !addr ) /* 2008 */,
+        "ExceptionAddress at %p instead of %p\n", addr, (char *)code_mem + 0x0c );
+    if (is_arm64ec)
     {
-        ok( ((ULONG *)addr)[-1] == 0xd63f0120 /* blr x9 */,
-            "ExceptionAddress not in entry thunk %p (ntdll+%Ix)\n",
-            addr, (char *)addr - (char *)hntdll );
-        ok( context->ContextFlags == (CONTEXT_FULL | CONTEXT_UNWOUND_TO_CALL),
+        todo_wine
+        ok( context->ContextFlags == (CONTEXT_FULL | CONTEXT_XSTATE | CONTEXT_UNWOUND_TO_CALL),
             "wrong context flags %lx\n", context->ContextFlags );
     }
     else
     {
-        ok( addr == (char *)code_mem + 0x0c || broken( addr == code_mem || !addr ) /* 2008 */,
-            "ExceptionAddress at %p instead of %p\n", addr, (char *)code_mem + 0x0c );
         ok( context->ContextFlags == CONTEXT_ALL || context->ContextFlags == (CONTEXT_ALL | CONTEXT_XSTATE)
             || context->ContextFlags == (CONTEXT_FULL | CONTEXT_SEGMENTS)
             || context->ContextFlags == (CONTEXT_FULL | CONTEXT_SEGMENTS | CONTEXT_XSTATE),
@@ -3669,7 +3735,7 @@ static void rtlraiseexception_handler_( EXCEPTION_RECORD *rec, void *frame, CONT
     /* check that pc is fixed up only for EXCEPTION_BREAKPOINT
      * even if raised by RtlRaiseException
      */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage && !is_arm64ec)
+    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage)
         ok( context->Rip == (UINT_PTR)addr - 1,
             "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)addr - 1 );
     else
@@ -3750,18 +3816,13 @@ static LONG CALLBACK rtlraiseexception_vectored_handler(EXCEPTION_POINTERS *Exce
     PEXCEPTION_RECORD rec = ExceptionInfo->ExceptionRecord;
     void *addr = rec->ExceptionAddress;
 
-    if (is_arm64ec) /* addr points to RtlRaiseException entry thunk */
-        ok( ((ULONG *)addr)[-1] == 0xd63f0120 /* blr x9 */,
-            "ExceptionAddress not in entry thunk %p (ntdll+%Ix)\n",
-            addr, (char *)addr - (char *)hntdll );
-    else
-        ok( addr == (char *)code_mem + 0xc || broken(addr == code_mem || !addr ) /* 2008 */,
-            "ExceptionAddress at %p instead of %p\n", addr, (char *)code_mem + 0xc );
+    ok( addr == (char *)code_mem + 0xc || broken(addr == code_mem || !addr ) /* 2008 */,
+        "ExceptionAddress at %p instead of %p\n", addr, (char *)code_mem + 0xc );
 
     /* check that Rip is fixed up only for EXCEPTION_BREAKPOINT
      * even if raised by RtlRaiseException
      */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage && !is_arm64ec)
+    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT && test_stage)
         ok( context->Rip == (UINT_PTR)addr - 1,
             "%d: Rip at %Ix instead of %Ix\n", test_stage, context->Rip, (UINT_PTR)addr - 1 );
     else
@@ -3832,13 +3893,8 @@ static void run_rtlraiseexception_test(DWORD exceptioncode)
     rtlraiseexception_teb_handler_called = 0;
     rtlraiseexception_unhandled_handler_called = 0;
     func(pRtlRaiseException, &record);
-    if (is_arm64ec) /* addr points to RtlRaiseException entry thunk */
-        ok( ((ULONG *)record.ExceptionAddress)[-1] == 0xd63f0120 /* blr x9 */,
-            "ExceptionAddress not in entry thunk %p (ntdll+%Ix)\n",
-            record.ExceptionAddress, (char *)record.ExceptionAddress - (char *)hntdll );
-    else
-        ok( record.ExceptionAddress == (char *)code_mem + 0x0c,
-            "address set to %p instead of %p\n", record.ExceptionAddress, (char *)code_mem + 0x0c );
+    ok( record.ExceptionAddress == (char *)code_mem + 0x0c,
+        "address set to %p instead of %p\n", record.ExceptionAddress, (char *)code_mem + 0x0c );
 
     todo_wine
     ok( !rtlraiseexception_teb_handler_called, "Frame TEB handler called\n" );
@@ -7720,9 +7776,15 @@ static void test_restore_context(void)
 
 #elif defined(__aarch64__)
 
+static DWORD WINAPI dummy_thread( void *dummy )
+{
+    return 0;
+}
+
 static void test_thread_context(void)
 {
-    CONTEXT context;
+    CONTEXT context, orig_context;
+    HANDLE thread;
     NTSTATUS status;
     struct expected
     {
@@ -7731,6 +7793,8 @@ static void test_thread_context(void)
         ULONG Cpsr, Fpcr, Fpsr;
     } expect;
     NTSTATUS (*func_ptr)( void *arg1, void *arg2, struct expected *res, void *func ) = code_mem;
+
+    static const ULONG64 fill = 0xccccccccccccccccllu;
 
     static const DWORD call_func[] =
     {
@@ -7882,6 +7946,86 @@ static void test_thread_context(void)
         (char *)context.Pc <= (char *)pNtGetContextThread + 32,
         "wrong Pc %p/%p\n", (void *)context.Pc, pNtGetContextThread );
 #undef COMPARE
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_FULL;
+    status = pNtGetContextThread( GetCurrentThread(), &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[18] == fill, "unexpected x18 = %Ix\n", context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_X18;
+    status = pNtGetContextThread( GetCurrentThread(), &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[18] == (DWORD_PTR)NtCurrentTeb(), "unexpected x18 = %Ix\n", context.X[18] );
+
+    thread = CreateThread( NULL, 0, dummy_thread, NULL, CREATE_SUSPENDED, NULL );
+    ok( thread != INVALID_HANDLE_VALUE, "CreateThread failed with %ld\n", GetLastError() );
+
+    memset( &orig_context, 0xcc, sizeof(orig_context) );
+    orig_context.ContextFlags = CONTEXT_ARM64_ALL;
+    status = pNtGetContextThread( thread, &orig_context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( orig_context.X[0] && orig_context.X[0] != fill, "unexpected x0 = %Ix\n", orig_context.X[0] );
+    ok( orig_context.X[18] && orig_context.X[18] != fill, "unexpected x18 = %Ix\n", orig_context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_FULL;
+    status = pNtGetContextThread( thread, &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[0] == orig_context.X[0], "unexpected x0 = %Ix\n", context.X[0] );
+    ok( context.X[18] == fill, "unexpected x18 = %Ix\n", context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_X18;
+    status = pNtGetContextThread( thread, &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[0] == fill, "unexpected x0 = %Ix\n", context.X[0] );
+    ok( context.X[18] == orig_context.X[18], "unexpected x18 = %Ix\n", context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_X18;
+    context.X[18] = 1;
+    status = pNtSetContextThread( thread, &context );
+    ok( !status, "NtSetContextThread failed %08lx\n", status );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_ALL;
+    status = pNtGetContextThread( thread, &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[0] == orig_context.X[0], "unexpected x0 = %Ix\n", context.X[0] );
+    ok( context.X[18] == 1, "unexpected x18 = %Ix\n", context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_FULL;
+    status = pNtSetContextThread( thread, &context );
+    ok( !status, "NtSetContextThread failed %08lx\n", status );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_ALL;
+    status = pNtGetContextThread( thread, &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[0] == fill, "unexpected x0 = %Ix\n", context.X[0] );
+    ok( context.X[18] == 1, "unexpected x18 = %Ix\n", context.X[18] );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_ALL;
+    status = pNtSetContextThread( thread, &context );
+    ok( !status, "NtSetContextThread failed %08lx\n", status );
+
+    memset( &context, 0xcc, sizeof(context) );
+    context.ContextFlags = CONTEXT_ARM64_ALL;
+    status = pNtGetContextThread( thread, &context );
+    ok( !status, "NtGetContextThread failed %08lx\n", status );
+    ok( context.X[0] == fill, "unexpected x0 = %Ix\n", context.X[0] );
+    ok( context.X[18] == fill, "unexpected x18 = %Ix\n", context.X[18] );
+
+    status = pNtSetContextThread( thread, &orig_context );
+    ok( !status, "NtSetContextThread failed %08lx\n", status );
+
+    ResumeThread( thread );
+    WaitForSingleObject( thread, INFINITE );
+    CloseHandle( thread );
 }
 
 static void test_debugger(DWORD cont_status, BOOL with_WaitForDebugEventEx)
