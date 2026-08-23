@@ -751,6 +751,7 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawRectangle(ID2D1DeviceContex
     if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, rect, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
@@ -781,6 +782,7 @@ static void STDMETHODCALLTYPE d2d_device_context_FillRectangle(ID2D1DeviceContex
     if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, rect, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
@@ -983,12 +985,14 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
@@ -1008,6 +1012,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1018,6 +1023,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1034,6 +1040,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, FALSE)))
         {
             WARN("Failed to update curve ps constant buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1044,6 +1051,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create curves index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1054,6 +1062,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1075,6 +1084,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create arcs index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1085,11 +1095,14 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create arcs vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
+        if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
+            d2d_device_context_set_error(render_target, hr);
+        else
             d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_ARC_OUTLINE, ib,
                     3 * geometry->outline.arc_face_count, vb,
                     sizeof(*geometry->outline.arcs), brush, NULL);
@@ -1199,20 +1212,20 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     D2D1_DRAWING_STATE_DESCRIPTION1 previous_state = context->drawing_state;
     float previous_dpi_x = context->desc.dpiX, previous_dpi_y = context->desc.dpiY;
     D2D1_SIZE_U previous_size = context->pixel_size, output_size, size;
-    ID2D1Bitmap1 *target = NULL, *readback = NULL, *resolved = NULL;
+    ID2D1Bitmap1 *target = NULL, *downsample[3] = {NULL};
     ID2D1Image *previous_target = NULL;
-    D2D1_MAPPED_RECT mapped;
     D2D1_MATRIX_3X2_F join_transform, shifted_transform;
     D2D1_RECT_F bounds, dst_rect;
     D2D1_COLOR_F clear = {0};
-    BYTE *pixels = NULL;
     UINT32 origin_x, origin_y, right, bottom;
     BOOL have_bounds = FALSE;
-    size_t clip_count;
-    unsigned int x, y, channel, i;
+    size_t clip_count = context->clip_stack.count;
+    unsigned int i, pass, scale;
     unsigned int aa_scale = 8;
-    unsigned int sample_count = aa_scale * aa_scale;
     HRESULT hr;
+
+    if (context->drawing_state.primitiveBlend != D2D1_PRIMITIVE_BLEND_SOURCE_OVER)
+        return FALSE;
 
     if (fill)
     {
@@ -1249,8 +1262,7 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     output_size.width = right - origin_x;
     output_size.height = bottom - origin_y;
     if (!output_size.width || !output_size.height || output_size.width > UINT_MAX / aa_scale
-            || output_size.height > UINT_MAX / aa_scale
-            || (size_t)output_size.width * 4 > SIZE_MAX / output_size.height)
+            || output_size.height > UINT_MAX / aa_scale)
         return FALSE;
 
     properties.pixelFormat = context->desc.pixelFormat;
@@ -1269,15 +1281,14 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     if (FAILED(hr))
         goto done;
 
-    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
-    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
-            size, NULL, 0, &properties, &readback);
-    if (FAILED(hr))
-        goto done;
-
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)target);
     context->desc.dpiX = previous_dpi_x * aa_scale;
     context->desc.dpiY = previous_dpi_y * aa_scale;
+    context->clip_stack.count = 0;
+    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+    context->clip_stack.count = clip_count;
+    if (FAILED(hr = context->error.code))
+        goto restore;
     shifted_transform = previous_state.transform;
     shifted_transform._31 -= origin_x * 96.0f / previous_dpi_x;
     shifted_transform._32 -= origin_y * 96.0f / previous_dpi_y;
@@ -1290,7 +1301,6 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         context->clip_stack.stack[i].right = (context->clip_stack.stack[i].right - origin_x) * aa_scale;
         context->clip_stack.stack[i].bottom = (context->clip_stack.stack[i].bottom - origin_y) * aa_scale;
     }
-    ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
     if (fill)
         d2d_device_context_fill_geometry(context, geometry, brush, opacity_brush);
     else
@@ -1304,7 +1314,6 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
         context->drawing_state.transform = shifted_transform;
     }
-    d2d_device_context_flush_gpu(context);
     hr = context->error.code;
     for (i = 0; i < context->clip_stack.count; ++i)
     {
@@ -1316,56 +1325,51 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     if (FAILED(hr))
         goto restore;
 
-    hr = ID2D1Bitmap1_CopyFromBitmap(readback, NULL, (ID2D1Bitmap *)target, NULL);
-    if (FAILED(hr) || FAILED(hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped)))
-        goto restore;
-    if (!(pixels = malloc((size_t)output_size.width * output_size.height * 4)))
-    {
-        ID2D1Bitmap1_Unmap(readback);
-        hr = E_OUTOFMEMORY;
-        goto restore;
-    }
+    context->clip_stack.count = 0;
+    context->drawing_state.transform = identity;
 
-    for (y = 0; y < output_size.height; ++y)
+    /* Three bilinear 2x reductions produce the same 8x8 box filter as the
+     * previous CPU averaging path, without synchronously reading the render
+     * target back from the GPU on the application's drawing thread. */
+    for (pass = 0, scale = aa_scale / 2; pass < ARRAY_SIZE(downsample); ++pass, scale /= 2)
     {
-        for (x = 0; x < output_size.width; ++x)
-        {
-            for (channel = 0; channel < 4; ++channel)
-            {
-                unsigned int sx, sy, value = 0;
-                for (sy = 0; sy < aa_scale; ++sy)
-                    for (sx = 0; sx < aa_scale; ++sx)
-                        value += mapped.bits[(size_t)(y * aa_scale + sy) * mapped.pitch
-                                + (x * aa_scale + sx) * 4 + channel];
-                pixels[((size_t)y * output_size.width + x) * 4 + channel]
-                        = (value + sample_count / 2) / sample_count;
-            }
-        }
+        properties.dpiX = previous_dpi_x * scale;
+        properties.dpiY = previous_dpi_y * scale;
+        properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        size.width = output_size.width * scale;
+        size.height = output_size.height * scale;
+        hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+                size, NULL, 0, &properties, &downsample[pass]);
+        if (FAILED(hr))
+            goto restore;
+
+        ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface,
+                (ID2D1Image *)downsample[pass]);
+        context->desc.dpiX = properties.dpiX;
+        context->desc.dpiY = properties.dpiY;
+        /* Bitmap contents are undefined without initial data, and the draw
+         * uses source-over blending.  Start each reduction from transparent. */
+        ID2D1DeviceContext6_Clear(&context->ID2D1DeviceContext6_iface, &clear);
+        if (FAILED(hr = context->error.code))
+            goto restore;
+        ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
+                (ID2D1Bitmap *)(pass ? downsample[pass - 1] : target), NULL, 1.0f,
+                D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
+        if (FAILED(hr = context->error.code))
+            goto restore;
     }
-    ID2D1Bitmap1_Unmap(readback);
 
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
     context->desc.dpiX = previous_dpi_x;
     context->desc.dpiY = previous_dpi_y;
-    context->drawing_state = previous_state;
-    properties.dpiX = previous_dpi_x;
-    properties.dpiY = previous_dpi_y;
-    properties.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
-    size = output_size;
-    hr = ID2D1DeviceContext6_CreateBitmap(&context->ID2D1DeviceContext6_iface,
-            size, pixels, output_size.width * 4, &properties, &resolved);
-    if (FAILED(hr))
-        goto done;
-
-    clip_count = context->clip_stack.count;
-    context->clip_stack.count = 0;
-    context->drawing_state.transform = identity;
     d2d_rect_set(&dst_rect, origin_x * 96.0f / previous_dpi_x,
             origin_y * 96.0f / previous_dpi_y,
             right * 96.0f / previous_dpi_x, bottom * 96.0f / previous_dpi_y);
     ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
-            (ID2D1Bitmap *)resolved, &dst_rect, 1.0f,
+            (ID2D1Bitmap *)downsample[ARRAY_SIZE(downsample) - 1], &dst_rect, 1.0f,
             D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+    if (FAILED(hr = context->error.code))
+        goto restore;
     context->drawing_state = previous_state;
     context->clip_stack.count = clip_count;
     goto done;
@@ -1375,11 +1379,11 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     context->desc.dpiX = previous_dpi_x;
     context->desc.dpiY = previous_dpi_y;
     context->drawing_state = previous_state;
+    context->clip_stack.count = clip_count;
 
  done:
-    free(pixels);
-    if (resolved) ID2D1Bitmap1_Release(resolved);
-    if (readback) ID2D1Bitmap1_Release(readback);
+    for (i = 0; i < ARRAY_SIZE(downsample); ++i)
+        if (downsample[i]) ID2D1Bitmap1_Release(downsample[i]);
     if (target) ID2D1Bitmap1_Release(target);
     if (previous_target) ID2D1Image_Release(previous_target);
     return SUCCEEDED(hr);
@@ -1422,10 +1426,14 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
     }
 
     if (stroke_width < 1.0f
-            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE
-            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl, NULL,
-                    stroke_width, stroke_style_impl, FALSE))
-        return;
+            && context->drawing_state.antialiasMode == D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+    {
+        if (d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl, NULL,
+                stroke_width, stroke_style_impl, FALSE))
+            return;
+        if (FAILED(context->error.code))
+            return;
+    }
 
     d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
 }
@@ -1448,12 +1456,14 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, 0.0f)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
         return;
     }
 
@@ -1466,6 +1476,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1476,6 +1487,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
             return;
         }
@@ -1496,6 +1508,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
@@ -1514,12 +1527,17 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create arc vertex buffer, hr %#lx.\n", hr);
+            d2d_device_context_set_error(render_target, hr);
             return;
         }
 
-        if (SUCCEEDED(d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, TRUE, TRUE)))
-            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.arc_vertex_count, vb,
-                    sizeof(*geometry->fill.arc_vertices), brush, opacity_brush);
+        if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush,
+                opacity_brush, FALSE, TRUE, TRUE)))
+            d2d_device_context_set_error(render_target, hr);
+        else
+            d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL,
+                    geometry->fill.arc_vertex_count, vb, sizeof(*geometry->fill.arc_vertices),
+                    brush, opacity_brush);
 
         ID3D11Buffer_Release(vb);
     }
@@ -1559,10 +1577,15 @@ static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext
                     || brush_impl->type == D2D_BRUSH_TYPE_LINEAR)
             && geometry_impl->fill.face_count >= 16
             && (geometry_impl->fill.bezier_vertex_count >= 24
-                    || geometry_impl->fill.arc_vertex_count >= 12)
-            && d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl,
-                    opacity_brush_impl, 0.0f, NULL, TRUE))
-        return;
+                    || geometry_impl->fill.arc_vertex_count >= 12))
+    {
+        if (d2d_device_context_render_geometry_aa(context, geometry_impl, brush_impl,
+                opacity_brush_impl, 0.0f, NULL, TRUE))
+            return;
+        if (FAILED(context->error.code))
+            return;
+        d2d_device_context_fill_geometry(context, geometry_impl, brush_impl, opacity_brush_impl);
+    }
     else
         d2d_device_context_fill_geometry(context, geometry_impl, brush_impl, opacity_brush_impl);
 }
@@ -1667,6 +1690,7 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
     if (FAILED(hr = d2d_bitmap_brush_create(context->factory, bitmap, &bitmap_brush_desc, &brush_desc, &brush)))
     {
         ERR("Failed to create bitmap brush, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         return;
     }
 
@@ -2603,6 +2627,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
             0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
     {
         WARN("Failed to map vs constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
         return;
     }
@@ -2631,6 +2656,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
             0, D3D11_MAP_WRITE_DISCARD, 0, &map_desc)))
     {
         WARN("Failed to map ps constant buffer, hr %#lx.\n", hr);
+        d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
         return;
     }
