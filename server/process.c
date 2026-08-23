@@ -2029,8 +2029,8 @@ DECL_HANDLER(register_appcore_lifecycle)
         reply->request = alloc_handle( process, process->appcore_request, SYNCHRONIZE, 0 );
         return;
     }
-    if (!(request = create_event( NULL, NULL, 0, 1, 0, NULL )) ||
-        !(complete = create_event( NULL, NULL, 0, 1, 0, NULL ))) goto done;
+    if (!(request = create_event( NULL, empty_str, 0, 1, 0, NULL )) ||
+        !(complete = create_event( NULL, empty_str, 0, 1, 0, NULL ))) goto done;
     if (!(reply->request = alloc_handle( process, request, SYNCHRONIZE, 0 ))) goto done;
     process->appcore_request = request;
     process->appcore_complete = complete;

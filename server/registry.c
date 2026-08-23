@@ -793,48 +793,6 @@ static void key_value_query_destroy( struct object *obj )
     free( query->data );
 }
 
-/* allocate a key object */
-static struct key *create_key_object( struct object *parent, const struct unicode_str *name,
-                                      unsigned int attributes, unsigned int options, timeout_t modif,
-                                      const struct security_descriptor *sd )
-{
-    struct key *key;
-
-    if (!name->len) return open_named_object( parent, &key_ops, name, attributes );
-
-    if ((key = create_named_object( parent, &key_ops, name, attributes, sd )))
-    {
-        if (get_error() != STATUS_OBJECT_NAME_EXISTS)
-        {
-            /* initialize it if it didn't already exist */
-            key->class       = NULL;
-            key->classlen    = 0;
-            key->flags       = 0;
-            key->last_subkey = -1;
-            key->nb_subkeys  = 0;
-            key->subkeys     = NULL;
-            key->wow6432node = NULL;
-            key->nb_values   = 0;
-            key->last_value  = -1;
-            key->values      = NULL;
-            key->modif       = modif;
-            list_init( &key->notify_list );
-
-            if (options & REG_OPTION_CREATE_LINK) key->flags |= KEY_SYMLINK;
-            if (options & REG_OPTION_VOLATILE) key->flags |= KEY_VOLATILE;
-            else if (parent && (get_parent( key )->flags & KEY_VOLATILE))
-            {
-                set_error( STATUS_CHILD_MUST_BE_VOLATILE );
-                unlink_named_object( &key->obj );
-                release_object( key );
-                return NULL;
-            }
-            else key->flags |= KEY_DIRTY;
-        }
-    }
-    return key;
-}
-
 /* mark a key and all its parents as dirty (modified) */
 static void make_dirty( struct key *key )
 {
@@ -1420,7 +1378,7 @@ static int execute_key_value_query( struct key_value_query *query, unsigned int 
 
         used = (used + sizeof(ULONG) - 1) & ~(file_pos_t)(sizeof(ULONG) - 1);
         required = (required + sizeof(ULONG) - 1) & ~(file_pos_t)(sizeof(ULONG) - 1);
-        if (!(value = find_value( query->key, &value_name, &index )))
+        if (!(value = find_value( query->key, value_name, &index )))
         {
             status = STATUS_OBJECT_NAME_NOT_FOUND;
             break;

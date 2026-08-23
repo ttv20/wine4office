@@ -66,7 +66,7 @@ struct reply_header
 /* this is used to construct the generic_request union */
 struct request_max_size
 {
-    int pad[16]; /* the max request size is 16 ints */
+    int pad[18]; /* the max request size is 18 ints */
 };
 
 #define FIRST_USER_HANDLE 0x0020  /* first possible value for low word of user handle */
@@ -2711,6 +2711,8 @@ enum message_type
     unsigned int   ex_style;    /* window extended style */
     unsigned int   ansi;        /* window created as ansi */
     user_handle_t  broadcast_owner; /* helper owning broadcast exclusion */
+    struct ratio   dpi;         /* initial monitor DPI */
+    struct ratio   raw_dpi;     /* initial monitor raw DPI */
     VARARG(class,unicode_str);  /* class name */
 @REPLY
     user_handle_t  handle;      /* created window */

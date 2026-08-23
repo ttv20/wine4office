@@ -86,7 +86,7 @@ my @asserts = ();
 my @protocol_lines = ();
 my @trace_lines = ();
 
-my $max_req_size = 64;
+my $max_req_size = 72;
 
 my $warnings = scalar(@ARGV) && $ARGV[0] eq "-w";
 

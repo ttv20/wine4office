@@ -50,7 +50,7 @@ struct reply_header
 
 struct request_max_size
 {
-    int pad[16];
+    int pad[18];
 };
 
 #define FIRST_USER_HANDLE 0x0020
@@ -3601,8 +3601,10 @@ struct create_window_request
     unsigned int   ex_style;
     unsigned int   ansi;
     user_handle_t  broadcast_owner;
+    struct ratio   dpi;
+    struct ratio   raw_dpi;
     /* VARARG(class,unicode_str); */
-    char __pad_60[4];
+    char __pad_68[4];
 };
 struct create_window_reply
 {
@@ -7426,6 +7428,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 964
+#define SERVER_PROTOCOL_VERSION 965
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
