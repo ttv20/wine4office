@@ -1334,6 +1334,8 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
         ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
                 (ID2D1Bitmap *)(pass ? downsample[pass - 1] : target), NULL, 1.0f,
                 D2D1_INTERPOLATION_MODE_LINEAR, NULL, NULL);
+        if (FAILED(hr = context->error.code))
+            goto restore;
     }
 
     ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, previous_target);
@@ -1345,6 +1347,8 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     ID2D1DeviceContext6_DrawBitmap(&context->ID2D1DeviceContext6_iface,
             (ID2D1Bitmap *)downsample[ARRAY_SIZE(downsample) - 1], &dst_rect, 1.0f,
             D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+    if (FAILED(hr = context->error.code))
+        goto restore;
     context->drawing_state = previous_state;
     context->clip_stack.count = clip_count;
     goto done;
