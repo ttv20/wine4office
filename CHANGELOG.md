@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1-beta.1 — 2026-08-23
+
 - Update the Wine base to WineHQ 11.16.
 - Open Microsoft 365 sign-in pages correctly in Word.
 - Allow 60 seconds for the Office installer to open and report startup timeouts clearly.
@@ -12,6 +14,8 @@
 - Install exact tagged releases and safely close active Wine4Office sessions
   before updating.
 - Let opted-in prerelease updates pass verification and installation.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/0.2.0-beta.1...0.2.1-beta.1)
 
 ## 0.2.0-beta.1 — 2026-08-19
 
