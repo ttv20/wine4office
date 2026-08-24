@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Wine avstängning avbröts.",
   "Wine tools": "Wine-verktyg",
   "Wine4Office Manager": "Wine4Office-hanterare",
-  "Working folder:": "Arbetsmapp:"
+  "Working folder:": "Arbetsmapp:",
+"Applying Office compatibility settings…": "Tillämpar kompatibilitetsinställningar för Office…",
+"Applying Office privacy settings…": "Tillämpar sekretessinställningar för Office…",
+"Configuring Wine graphics…": "Konfigurerar Wine-grafik…",
+"Creating Wine environment": "Skapa Wine-miljö",
+"Creating Wine environment…": "Skapar Wine-miljö…",
+"Initializing the Wine environment…": "Initierar Wine-miljö…",
+"Installing Wine Gecko…": "Installerar Wine Gecko…",
+"Installing Wine Mono…": "Installerar Wine Mono…",
+"Recreating Wine environment": "Skapa om Wine-miljö",
+"Recreating Wine environment…": "Skapar om Wine-miljö…",
+"Removing the previous Wine environment…": "Tar bort den tidigare Wine-miljön…",
+"Restoring the previous Wine environment…": "Återställer den tidigare Wine-miljön…",
+"Stopping the existing Wine environment…": "Stoppar den befintliga Wine-miljön…",
+"Wine environment is ready": "Wine-miljön är klar",
+"Wine environment is ready.": "Wine-miljön är klar.",
+"Wine environment operation was cancelled.": "Åtgärden för Wine-miljön avbröts.",
+"Wine environment operation failed. Review the details below.": "Åtgärden för Wine-miljön misslyckades. Läs informationen nedan."
 }

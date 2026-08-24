@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine షట్‌డౌన్ ముగుస్తోంది; అది పూర్తయినప్పుడు మేనేజర్ మూసివేస్తారు.",
   "Wine shutdown was interrupted.": "Wine షట్‌డౌన్‌కు అంతరాయం కలిగింది.",
   "Wine tools": "Wine సాధనాలు",
-  "Wine4Office Manager": "Wine4Office నిర్వాహకం"
+  "Wine4Office Manager": "Wine4Office నిర్వాహకం",
+"Applying Office compatibility settings…": "Office అనుకూలత సెట్టింగ్‌లు వర్తింపజేయబడుతున్నాయి…",
+"Applying Office privacy settings…": "Office గోప్యతా సెట్టింగ్‌లు వర్తింపజేయబడుతున్నాయి…",
+"Configuring Wine graphics…": "Wine గ్రాఫిక్స్ కాన్ఫిగర్ చేయబడుతున్నాయి…",
+"Creating Wine environment": "Wine వాతావరణాన్ని సృష్టించండి",
+"Creating Wine environment…": "Wine వాతావరణం సృష్టించబడుతోంది…",
+"Initializing the Wine environment…": "Wine వాతావరణం ప్రారంభించబడుతోంది…",
+"Installing Wine Gecko…": "Wine Gecko ఇన్‌స్టాల్ చేయబడుతోంది…",
+"Installing Wine Mono…": "Wine Mono ఇన్‌స్టాల్ చేయబడుతోంది…",
+"Recreating Wine environment": "Wine వాతావరణాన్ని మళ్లీ సృష్టించండి",
+"Recreating Wine environment…": "Wine వాతావరణం మళ్లీ సృష్టించబడుతోంది…",
+"Removing the previous Wine environment…": "మునుపటి Wine వాతావరణం తొలగించబడుతోంది…",
+"Restoring the previous Wine environment…": "మునుపటి Wine వాతావరణం పునరుద్ధరించబడుతోంది…",
+"Stopping the existing Wine environment…": "ఇప్పటికే ఉన్న Wine వాతావరణం ఆపబడుతోంది…",
+"Wine environment is ready": "Wine వాతావరణం సిద్ధంగా ఉంది",
+"Wine environment is ready.": "Wine వాతావరణం సిద్ధంగా ఉంది.",
+"Wine environment operation was cancelled.": "Wine వాతావరణం ఆపరేషన్ రద్దు చేయబడింది.",
+"Wine environment operation failed. Review the details below.": "Wine వాతావరణం ఆపరేషన్ విఫలమైంది. దిగువ వివరాలను చూడండి."
 }

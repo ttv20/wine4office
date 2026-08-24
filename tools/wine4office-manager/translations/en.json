@@ -161,5 +161,22 @@
   "Wine4Office Manager": "Wine4Office Manager",
   "Wine4Office update available": "Wine4Office update available",
   "Working folder:": "Working folder:",
-  "running": "running"
+  "running": "running",
+"Applying Office compatibility settings…": "Applying Office compatibility settings…",
+"Applying Office privacy settings…": "Applying Office privacy settings…",
+"Configuring Wine graphics…": "Configuring Wine graphics…",
+"Creating Wine environment": "Creating Wine environment",
+"Creating Wine environment…": "Creating Wine environment…",
+"Initializing the Wine environment…": "Initializing the Wine environment…",
+"Installing Wine Gecko…": "Installing Wine Gecko…",
+"Installing Wine Mono…": "Installing Wine Mono…",
+"Recreating Wine environment": "Recreating Wine environment",
+"Recreating Wine environment…": "Recreating Wine environment…",
+"Removing the previous Wine environment…": "Removing the previous Wine environment…",
+"Restoring the previous Wine environment…": "Restoring the previous Wine environment…",
+"Stopping the existing Wine environment…": "Stopping the existing Wine environment…",
+"Wine environment is ready": "Wine environment is ready",
+"Wine environment is ready.": "Wine environment is ready.",
+"Wine environment operation was cancelled.": "Wine environment operation was cancelled.",
+"Wine environment operation failed. Review the details below.": "Wine environment operation failed. Review the details below."
 }

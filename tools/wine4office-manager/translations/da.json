@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Wine nedlukning blev afbrudt.",
   "Wine tools": "Wine-værktøjer",
   "Wine4Office Manager": "Wine4Office-administration",
-  "Working folder:": "Arbejdsmappe:"
+  "Working folder:": "Arbejdsmappe:",
+"Applying Office compatibility settings…": "Anvender Office-kompatibilitetsindstillinger…",
+"Applying Office privacy settings…": "Anvender Office-privatlivsindstillinger…",
+"Configuring Wine graphics…": "Konfigurerer Wine-grafik…",
+"Creating Wine environment": "Opret Wine-miljø",
+"Creating Wine environment…": "Opretter Wine-miljø…",
+"Initializing the Wine environment…": "Initialiserer Wine-miljø…",
+"Installing Wine Gecko…": "Installerer Wine Gecko…",
+"Installing Wine Mono…": "Installerer Wine Mono…",
+"Recreating Wine environment": "Opret Wine-miljø igen",
+"Recreating Wine environment…": "Opretter Wine-miljø igen…",
+"Removing the previous Wine environment…": "Fjerner det tidligere Wine-miljø…",
+"Restoring the previous Wine environment…": "Gendanner det tidligere Wine-miljø…",
+"Stopping the existing Wine environment…": "Stopper det eksisterende Wine-miljø…",
+"Wine environment is ready": "Wine-miljøet er klar",
+"Wine environment is ready.": "Wine-miljøet er klar.",
+"Wine environment operation was cancelled.": "Handlingen for Wine-miljøet blev annulleret.",
+"Wine environment operation failed. Review the details below.": "Handlingen for Wine-miljøet mislykkedes. Se detaljerne nedenfor."
 }

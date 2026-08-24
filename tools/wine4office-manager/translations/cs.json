@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Vypínání Wine bylo přerušeno.",
   "Wine tools": "Nástroje Wine",
   "Wine4Office Manager": "Správce Wine4Office",
-  "Working folder:": "Pracovní složka:"
+  "Working folder:": "Pracovní složka:",
+"Applying Office compatibility settings…": "Používání nastavení kompatibility Office…",
+"Applying Office privacy settings…": "Používání nastavení soukromí Office…",
+"Configuring Wine graphics…": "Konfigurace grafiky Wine…",
+"Creating Wine environment": "Vytvořit prostředí Wine",
+"Creating Wine environment…": "Vytváření prostředí Wine…",
+"Initializing the Wine environment…": "Inicializace prostředí Wine…",
+"Installing Wine Gecko…": "Instalace Wine Gecko…",
+"Installing Wine Mono…": "Instalace Wine Mono…",
+"Recreating Wine environment": "Znovu vytvořit prostředí Wine",
+"Recreating Wine environment…": "Opětovné vytváření prostředí Wine…",
+"Removing the previous Wine environment…": "Odebírání předchozího prostředí Wine…",
+"Restoring the previous Wine environment…": "Obnovování předchozího prostředí Wine…",
+"Stopping the existing Wine environment…": "Zastavování existujícího prostředí Wine…",
+"Wine environment is ready": "Prostředí Wine je připravené",
+"Wine environment is ready.": "Prostředí Wine je připravené.",
+"Wine environment operation was cancelled.": "Operace prostředí Wine byla zrušena.",
+"Wine environment operation failed. Review the details below.": "Operace prostředí Wine se nezdařila. Prohlédněte si podrobnosti níže."
 }

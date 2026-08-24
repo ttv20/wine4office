@@ -160,5 +160,22 @@
   "Wine4Office Manager": "מנהל Wine4Office",
   "Wine4Office update available": "עדכון Wine4Office זמין",
   "Working folder:": "תיקיית עבודה:",
-  "running": "פועל"
+  "running": "פועל",
+"Applying Office compatibility settings…": "החלת הגדרות התאימות של Office…",
+"Applying Office privacy settings…": "החלת הגדרות הפרטיות של Office…",
+"Configuring Wine graphics…": "מגדיר גרפיקה של Wine…",
+"Creating Wine environment": "יצירת סביבת Wine",
+"Creating Wine environment…": "יוצר סביבת Wine…",
+"Initializing the Wine environment…": "מאתחל את סביבת Wine…",
+"Installing Wine Gecko…": "מתקין את Wine Gecko…",
+"Installing Wine Mono…": "מתקין את Wine Mono…",
+"Recreating Wine environment": "יצירה מחדש של סביבת Wine",
+"Recreating Wine environment…": "יוצר מחדש את סביבת Wine…",
+"Removing the previous Wine environment…": "מסיר את סביבת Wine הקודמת…",
+"Restoring the previous Wine environment…": "משחזר את סביבת Wine הקודמת…",
+"Stopping the existing Wine environment…": "עוצר את סביבת Wine הקיימת…",
+"Wine environment is ready": "סביבת Wine מוכנה",
+"Wine environment is ready.": "סביבת Wine מוכנה.",
+"Wine environment operation was cancelled.": "פעולת סביבת Wine בוטלה.",
+"Wine environment operation failed. Review the details below.": "פעולת סביבת Wine נכשלה. יש לעיין בפרטים שלהלן."
 }

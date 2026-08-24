@@ -72,11 +72,17 @@ OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR = (
 
 def _create_environment_worker(state, config: dict, recreate: bool) -> str:
     """Create a prefix and apply its policies without a Qt object reference."""
+    def environment_progress(label: str, value: int | None = None) -> None:
+        """Forward setup phases while reserving final readiness for this worker."""
+        if label == "Wine environment is ready" and value == 100:
+            return
+        state.set_progress(label, value)
+
     result = backend.create_environment(
         config["prefix"], config["wine"], recreate, state.output,
         cancel_event=state.cancel_event,
         process_callback=state.set_process,
-        progress_callback=state.set_progress,
+        progress_callback=environment_progress,
     )
     if state.cancel_event.is_set():
         raise RuntimeError("Operation cancelled.")
@@ -1557,6 +1563,7 @@ class ManagerWindow(QMainWindow):
         return _create_environment_worker(self.state, config, recreate)
 
     def _show_environment_progress(self, config: dict, recreate: bool) -> None:
+        """Show the shared task dialog for environment create or recreate work."""
         action = "Recreating" if recreate else "Creating"
         self._show_task_progress(
             "environment",
@@ -1572,6 +1579,7 @@ class ManagerWindow(QMainWindow):
 
 
     def environment_action(self, recreate: bool) -> None:
+        """Start environment creation or replacement without blocking Qt."""
         if not self.ensure_idle():
             return
         values = self.config_values()

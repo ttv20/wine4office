@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Wine 关闭被中断。",
   "Wine tools": "Wine 工具",
   "Wine4Office Manager": "Wine4Office 管理器",
-  "Working folder:": "工作文件夹："
+  "Working folder:": "工作文件夹：",
+"Applying Office compatibility settings…": "正在应用 Office 兼容性设置…",
+"Applying Office privacy settings…": "正在应用 Office 隐私设置…",
+"Configuring Wine graphics…": "正在配置 Wine 图形…",
+"Creating Wine environment": "创建 Wine 环境",
+"Creating Wine environment…": "正在创建 Wine 环境…",
+"Initializing the Wine environment…": "正在初始化 Wine 环境…",
+"Installing Wine Gecko…": "正在安装 Wine Gecko…",
+"Installing Wine Mono…": "正在安装 Wine Mono…",
+"Recreating Wine environment": "重新创建 Wine 环境",
+"Recreating Wine environment…": "正在重新创建 Wine 环境…",
+"Removing the previous Wine environment…": "正在移除之前的 Wine 环境…",
+"Restoring the previous Wine environment…": "正在恢复之前的 Wine 环境…",
+"Stopping the existing Wine environment…": "正在停止现有的 Wine 环境…",
+"Wine environment is ready": "Wine 环境已准备就绪",
+"Wine environment is ready.": "Wine 环境已准备就绪。",
+"Wine environment operation was cancelled.": "Wine 环境操作已取消。",
+"Wine environment operation failed. Review the details below.": "Wine 环境操作失败。请查看下面的详细信息。"
 }

@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Isključivanje Wine se završava; Menadžer će se zatvoriti kada završi.",
   "Wine shutdown was interrupted.": "Isključivanje Wine je prekinuto.",
   "Wine tools": "Wine alati",
-  "Wine4Office Manager": "Wine4Office upravljač"
+  "Wine4Office Manager": "Wine4Office upravljač",
+"Applying Office compatibility settings…": "Primena postavki kompatibilnosti sistema Office…",
+"Applying Office privacy settings…": "Primena postavki privatnosti sistema Office…",
+"Configuring Wine graphics…": "Konfigurisanje Wine grafike…",
+"Creating Wine environment": "Kreiraj Wine okruženje",
+"Creating Wine environment…": "Kreiranje Wine okruženja…",
+"Initializing the Wine environment…": "Pokretanje Wine okruženja…",
+"Installing Wine Gecko…": "Instaliranje Wine Gecko…",
+"Installing Wine Mono…": "Instaliranje Wine Mono…",
+"Recreating Wine environment": "Ponovo kreiraj Wine okruženje",
+"Recreating Wine environment…": "Ponovno kreiranje Wine okruženja…",
+"Removing the previous Wine environment…": "Uklanjanje prethodnog Wine okruženja…",
+"Restoring the previous Wine environment…": "Vraćanje prethodnog Wine okruženja…",
+"Stopping the existing Wine environment…": "Zaustavljanje postojećeg Wine okruženja…",
+"Wine environment is ready": "Wine okruženje je spremno",
+"Wine environment is ready.": "Wine okruženje je spremno.",
+"Wine environment operation was cancelled.": "Operacija Wine okruženja je otkazana.",
+"Wine environment operation failed. Review the details below.": "Operacija Wine okruženja nije uspela. Pogledajte detalje u nastavku."
 }

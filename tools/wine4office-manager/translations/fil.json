@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine shutdown ay nagtatapos; ang Manager ay magsasara kapag ito ay nakumpleto.",
   "Wine shutdown was interrupted.": "Naantala ang Wine shutdown.",
   "Wine tools": "Mga tool ng Wine",
-  "Wine4Office Manager": "Tagapamahala ng Wine4Office"
+  "Wine4Office Manager": "Tagapamahala ng Wine4Office",
+"Applying Office compatibility settings…": "Inilalapat ang mga setting ng compatibility ng Office…",
+"Applying Office privacy settings…": "Inilalapat ang mga setting ng privacy ng Office…",
+"Configuring Wine graphics…": "Kino-configure ang graphics ng Wine…",
+"Creating Wine environment": "Lumikha ng environment ng Wine",
+"Creating Wine environment…": "Lumilikha ng environment ng Wine…",
+"Initializing the Wine environment…": "Sinisimulan ang environment ng Wine…",
+"Installing Wine Gecko…": "Ini-install ang Wine Gecko…",
+"Installing Wine Mono…": "Ini-install ang Wine Mono…",
+"Recreating Wine environment": "Lumikha muli ng environment ng Wine",
+"Recreating Wine environment…": "Muling nililikha ang environment ng Wine…",
+"Removing the previous Wine environment…": "Inaalis ang dating environment ng Wine…",
+"Restoring the previous Wine environment…": "Ibinabalik ang dating environment ng Wine…",
+"Stopping the existing Wine environment…": "Itinitigil ang kasalukuyang environment ng Wine…",
+"Wine environment is ready": "Handa na ang environment ng Wine",
+"Wine environment is ready.": "Handa na ang environment ng Wine.",
+"Wine environment operation was cancelled.": "Kinansela ang operasyon ng environment ng Wine.",
+"Wine environment operation failed. Review the details below.": "Nabigo ang operasyon ng environment ng Wine. Suriin ang mga detalye sa ibaba."
 }

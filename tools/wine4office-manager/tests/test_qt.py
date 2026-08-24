@@ -945,6 +945,7 @@ class QtManagerTests(unittest.TestCase):
         )
 
     def test_environment_creation_reapplies_checked_telemetry_policy(self):
+        """Environment creation reapplies the saved privacy policy."""
         prefix = Path(self.config["prefix"])
         config = backend.set_office_telemetry_disabled(self.config, prefix, True)
         with mock.patch.object(
@@ -955,19 +956,47 @@ class QtManagerTests(unittest.TestCase):
             result = self.window._create_environment(config, True)
 
         self.assertEqual(result, "environment ready")
-        create.assert_called_once_with(
-            config["prefix"], config["wine"], True, self.state.output,
-            cancel_event=self.state.cancel_event,
-            process_callback=self.state.set_process,
-            progress_callback=self.state.set_progress,
+        create.assert_called_once()
+        self.assertEqual(
+            create.call_args.args,
+            (config["prefix"], config["wine"], True, self.state.output),
         )
+        self.assertIs(create.call_args.kwargs["cancel_event"], self.state.cancel_event)
+        self.assertEqual(create.call_args.kwargs["process_callback"], self.state.set_process)
+        self.assertTrue(callable(create.call_args.kwargs["progress_callback"]))
         apply.assert_called_once_with(
             config["prefix"], config["wine"], True, use_x11=True,
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
         )
 
+    def test_environment_creation_withholds_ready_until_policy_work_finishes(self):
+        """Policy work keeps the progress state below 100% until it completes."""
+        config = backend.set_office_telemetry_disabled(
+            self.config, self.config["prefix"], True
+        )
+        observed_progress = []
+
+        def create_environment(*args, **kwargs):
+            kwargs["progress_callback"]("Wine environment is ready", 100)
+            return "environment ready"
+
+        def apply_policy(*args, **kwargs):
+            observed_progress.append(self.state.snapshot()["task"]["progress_value"])
+
+        with mock.patch.object(
+            backend, "create_environment", side_effect=create_environment
+        ), mock.patch.object(
+            backend, "apply_office_telemetry_policy", side_effect=apply_policy
+        ):
+            result = qt_module._create_environment_worker(self.state, config, True)
+
+        self.assertEqual(result, "environment ready")
+        self.assertEqual(observed_progress, [None])
+        self.assertEqual(self.state.snapshot()["task"]["progress_value"], 100)
+
     def test_environment_creation_queues_policy_work_and_keeps_qt_responsive(self):
+        """Policy application runs off the Qt thread."""
         with self.state.lock:
             self.state.config = backend.set_office_telemetry_disabled(
                 self.state.config, self.config["prefix"], True
@@ -1000,6 +1029,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(self.state.snapshot()["task"]["status"], "completed")
 
     def test_environment_recreation_shows_progress_popup_with_live_logs(self):
+        """Recreation displays live task logs and a completed progress state."""
         with mock.patch.object(
             self.window, "save_config", return_value=dict(self.config)
         ), mock.patch.object(

@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine penutupan sedang tamat; Pengurus akan ditutup apabila ia selesai.",
   "Wine shutdown was interrupted.": "Wine penutupan telah terganggu.",
   "Wine tools": "Alat Wine",
-  "Wine4Office Manager": "Pengurus Wine4Office"
+  "Wine4Office Manager": "Pengurus Wine4Office",
+"Applying Office compatibility settings…": "Sedang menggunakan tetapan keserasian Office…",
+"Applying Office privacy settings…": "Sedang menggunakan tetapan privasi Office…",
+"Configuring Wine graphics…": "Sedang mengkonfigurasi grafik Wine…",
+"Creating Wine environment": "Cipta persekitaran Wine",
+"Creating Wine environment…": "Sedang mencipta persekitaran Wine…",
+"Initializing the Wine environment…": "Sedang memulakan persekitaran Wine…",
+"Installing Wine Gecko…": "Sedang memasang Wine Gecko…",
+"Installing Wine Mono…": "Sedang memasang Wine Mono…",
+"Recreating Wine environment": "Cipta semula persekitaran Wine",
+"Recreating Wine environment…": "Sedang mencipta semula persekitaran Wine…",
+"Removing the previous Wine environment…": "Sedang mengalih keluar persekitaran Wine sebelumnya…",
+"Restoring the previous Wine environment…": "Sedang memulihkan persekitaran Wine sebelumnya…",
+"Stopping the existing Wine environment…": "Sedang menghentikan persekitaran Wine sedia ada…",
+"Wine environment is ready": "Persekitaran Wine sudah sedia",
+"Wine environment is ready.": "Persekitaran Wine sudah sedia.",
+"Wine environment operation was cancelled.": "Operasi persekitaran Wine dibatalkan.",
+"Wine environment operation failed. Review the details below.": "Operasi persekitaran Wine gagal. Semak butiran di bawah."
 }

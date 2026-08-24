@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine išjungimas baigiamas; vadybininkas užsidarys, kai jis bus baigtas.",
   "Wine shutdown was interrupted.": "Wine išjungimas buvo nutrauktas.",
   "Wine tools": "Wine įrankiai",
-  "Wine4Office Manager": "Wine4Office tvarkytuvė"
+  "Wine4Office Manager": "Wine4Office tvarkytuvė",
+"Applying Office compatibility settings…": "Taikomi Office suderinamumo nustatymai…",
+"Applying Office privacy settings…": "Taikomi Office privatumo nustatymai…",
+"Configuring Wine graphics…": "Konfigūruojama Wine grafika…",
+"Creating Wine environment": "Sukurti Wine aplinką",
+"Creating Wine environment…": "Kuriama Wine aplinka…",
+"Initializing the Wine environment…": "Inicializuojama Wine aplinka…",
+"Installing Wine Gecko…": "Diegiamas Wine Gecko…",
+"Installing Wine Mono…": "Diegiamas Wine Mono…",
+"Recreating Wine environment": "Kurti Wine aplinką iš naujo",
+"Recreating Wine environment…": "Iš naujo kuriama Wine aplinka…",
+"Removing the previous Wine environment…": "Šalinama ankstesnė Wine aplinka…",
+"Restoring the previous Wine environment…": "Atkuriama ankstesnė Wine aplinka…",
+"Stopping the existing Wine environment…": "Stabdoma esama Wine aplinka…",
+"Wine environment is ready": "Wine aplinka paruošta",
+"Wine environment is ready.": "Wine aplinka paruošta.",
+"Wine environment operation was cancelled.": "Wine aplinkos operacija atšaukta.",
+"Wine environment operation failed. Review the details below.": "Wine aplinkos operacija nepavyko. Peržiūrėkite toliau pateiktą informaciją."
 }

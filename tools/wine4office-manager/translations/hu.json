@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "A Wine leállítása megszakadt.",
   "Wine tools": "Wine-eszközök",
   "Wine4Office Manager": "Wine4Office-kezelő",
-  "Working folder:": "Munkamappa:"
+  "Working folder:": "Munkamappa:",
+"Applying Office compatibility settings…": "Az Office kompatibilitási beállításainak alkalmazása…",
+"Applying Office privacy settings…": "Az Office adatvédelmi beállításainak alkalmazása…",
+"Configuring Wine graphics…": "A Wine grafika beállítása…",
+"Creating Wine environment": "Wine-környezet létrehozása",
+"Creating Wine environment…": "Wine-környezet létrehozása…",
+"Initializing the Wine environment…": "Wine-környezet inicializálása…",
+"Installing Wine Gecko…": "Wine Gecko telepítése…",
+"Installing Wine Mono…": "Wine Mono telepítése…",
+"Recreating Wine environment": "Wine-környezet újbóli létrehozása",
+"Recreating Wine environment…": "Wine-környezet újbóli létrehozása…",
+"Removing the previous Wine environment…": "Az előző Wine-környezet eltávolítása…",
+"Restoring the previous Wine environment…": "Az előző Wine-környezet visszaállítása…",
+"Stopping the existing Wine environment…": "A meglévő Wine-környezet leállítása…",
+"Wine environment is ready": "A Wine-környezet kész",
+"Wine environment is ready.": "A Wine-környezet kész.",
+"Wine environment operation was cancelled.": "A Wine-környezet művelete megszakítva.",
+"Wine environment operation failed. Review the details below.": "A Wine-környezet művelete sikertelen. Tekintse meg az alábbi részleteket."
 }

@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Wine 종료가 중단되었습니다.",
   "Wine tools": "Wine 도구",
   "Wine4Office Manager": "Wine4Office 관리자",
-  "Working folder:": "작업 폴더:"
+  "Working folder:": "작업 폴더:",
+"Applying Office compatibility settings…": "Office 호환성 설정 적용 중…",
+"Applying Office privacy settings…": "Office 개인정보 설정 적용 중…",
+"Configuring Wine graphics…": "Wine 그래픽 구성 중…",
+"Creating Wine environment": "Wine 환경 만들기",
+"Creating Wine environment…": "Wine 환경 만드는 중…",
+"Initializing the Wine environment…": "Wine 환경 초기화 중…",
+"Installing Wine Gecko…": "Wine Gecko 설치 중…",
+"Installing Wine Mono…": "Wine Mono 설치 중…",
+"Recreating Wine environment": "Wine 환경 다시 만들기",
+"Recreating Wine environment…": "Wine 환경 다시 만드는 중…",
+"Removing the previous Wine environment…": "이전 Wine 환경 제거 중…",
+"Restoring the previous Wine environment…": "이전 Wine 환경 복원 중…",
+"Stopping the existing Wine environment…": "기존 Wine 환경 중지 중…",
+"Wine environment is ready": "Wine 환경이 준비되었습니다",
+"Wine environment is ready.": "Wine 환경이 준비되었습니다.",
+"Wine environment operation was cancelled.": "Wine 환경 작업이 취소되었습니다.",
+"Wine environment operation failed. Review the details below.": "Wine 환경 작업에 실패했습니다. 아래 세부 정보를 확인하세요."
 }

@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Ο τερματισμός λειτουργίας Wine διακόπηκε.",
   "Wine tools": "Εργαλεία Wine",
   "Wine4Office Manager": "Διαχείριση Wine4Office",
-  "Working folder:": "Φάκελος εργασίας:"
+  "Working folder:": "Φάκελος εργασίας:",
+"Applying Office compatibility settings…": "Εφαρμογή ρυθμίσεων συμβατότητας του Office…",
+"Applying Office privacy settings…": "Εφαρμογή ρυθμίσεων απορρήτου του Office…",
+"Configuring Wine graphics…": "Διαμόρφωση γραφικών του Wine…",
+"Creating Wine environment": "Δημιουργία περιβάλλοντος Wine",
+"Creating Wine environment…": "Δημιουργία περιβάλλοντος Wine…",
+"Initializing the Wine environment…": "Αρχικοποίηση περιβάλλοντος Wine…",
+"Installing Wine Gecko…": "Εγκατάσταση Wine Gecko…",
+"Installing Wine Mono…": "Εγκατάσταση Wine Mono…",
+"Recreating Wine environment": "Επαναδημιουργία περιβάλλοντος Wine",
+"Recreating Wine environment…": "Επαναδημιουργία περιβάλλοντος Wine…",
+"Removing the previous Wine environment…": "Αφαίρεση του προηγούμενου περιβάλλοντος Wine…",
+"Restoring the previous Wine environment…": "Επαναφορά του προηγούμενου περιβάλλοντος Wine…",
+"Stopping the existing Wine environment…": "Διακοπή του υπάρχοντος περιβάλλοντος Wine…",
+"Wine environment is ready": "Το περιβάλλον Wine είναι έτοιμο",
+"Wine environment is ready.": "Το περιβάλλον Wine είναι έτοιμο.",
+"Wine environment operation was cancelled.": "Η λειτουργία του περιβάλλοντος Wine ακυρώθηκε.",
+"Wine environment operation failed. Review the details below.": "Η λειτουργία του περιβάλλοντος Wine απέτυχε. Δείτε τις λεπτομέρειες παρακάτω."
 }
