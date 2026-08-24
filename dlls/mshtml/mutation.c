@@ -1149,6 +1149,7 @@ struct mutation_observer_target {
     nsINode *native_node;
     BOOL native_registered;
     BOOL transient;
+    BOOL attributes;
     BOOL character_data;
     BOOL child_list;
     BOOL subtree;
@@ -1157,7 +1158,9 @@ struct mutation_observer_target {
 struct mutation_observer_record {
     struct list entry;
     HTMLDOMNode *target;
+    BOOL attributes;
     BOOL child_list;
+    BSTR attribute_name;
     nsIDOMNode *previous_sibling;
     nsIDOMNode *next_sibling;
     UINT32 added_count;
@@ -1362,6 +1365,7 @@ static void mutation_observer_free_record(struct mutation_observer_record *recor
 
     if(record->target)
         node_release(record->target);
+    SysFreeString(record->attribute_name);
     if(record->previous_sibling)
         nsIDOMNode_Release(record->previous_sibling);
     if(record->next_sibling)
@@ -1530,7 +1534,7 @@ static HRESULT mutation_observer_create_record(struct mutation_observer *This,
     if(FAILED(hres))
         return hres;
 
-    hres = mutation_observer_define_string(object, L"type",
+    hres = mutation_observer_define_string(object, L"type", record->attributes ? L"attributes" :
             record->child_list ? L"childList" : L"characterData");
     if(SUCCEEDED(hres)) {
         VariantInit(&value);
@@ -1544,7 +1548,12 @@ static HRESULT mutation_observer_create_record(struct mutation_observer *This,
         hres = mutation_observer_define_node(object, L"previousSibling", record->previous_sibling);
     if(SUCCEEDED(hres))
         hres = mutation_observer_define_node(object, L"nextSibling", record->next_sibling);
-    if(SUCCEEDED(hres)) hres = mutation_observer_define_null(object, L"attributeName");
+    if(SUCCEEDED(hres)) {
+        if(record->attribute_name)
+            hres = mutation_observer_define_string(object, L"attributeName", record->attribute_name);
+        else
+            hres = mutation_observer_define_null(object, L"attributeName");
+    }
     if(SUCCEEDED(hres)) hres = mutation_observer_define_null(object, L"attributeNamespace");
     if(SUCCEEDED(hres)) hres = mutation_observer_define_null(object, L"oldValue");
     if(SUCCEEDED(hres))
@@ -1668,30 +1677,39 @@ static BOOL mutation_observer_target_matches(struct mutation_observer_target *ta
     return ret;
 }
 
+enum mutation_observer_kind {
+    MUTATION_ATTRIBUTES,
+    MUTATION_CHARACTER_DATA,
+    MUTATION_CHILD_LIST
+};
+
 static BOOL mutation_observer_matches(struct mutation_observer *This, nsIDOMNode *content,
-        BOOL child_list)
+        enum mutation_observer_kind kind)
 {
     struct mutation_observer_target *target;
 
     LIST_FOR_EACH_ENTRY(target, &This->targets, struct mutation_observer_target, entry) {
-        if((child_list ? target->child_list : target->character_data)
-                && mutation_observer_target_matches(target, content))
+        BOOL enabled = kind == MUTATION_ATTRIBUTES ? target->attributes :
+                kind == MUTATION_CHILD_LIST ? target->child_list : target->character_data;
+
+        if(enabled && mutation_observer_target_matches(target, content))
             return TRUE;
     }
     return FALSE;
 }
 
 static BOOL mutation_observer_transient_options(struct mutation_observer *This, nsIDOMNode *content,
-        BOOL *character_data, BOOL *child_list)
+        BOOL *attributes, BOOL *character_data, BOOL *child_list)
 {
     struct mutation_observer_target *target;
     BOOL matched = FALSE;
 
-    *character_data = *child_list = FALSE;
+    *attributes = *character_data = *child_list = FALSE;
     LIST_FOR_EACH_ENTRY(target, &This->targets, struct mutation_observer_target, entry) {
         if(!target->subtree || !mutation_observer_target_matches(target, content))
             continue;
         matched = TRUE;
+        *attributes |= target->attributes;
         *character_data |= target->character_data;
         *child_list |= target->child_list;
     }
@@ -1739,7 +1757,7 @@ static void mutation_observer_clear_transients(struct mutation_observer *This)
 }
 
 static HRESULT mutation_observer_add_transient(struct mutation_observer *This,
-        nsIDOMNode *node, BOOL character_data, BOOL child_list)
+        nsIDOMNode *node, BOOL attributes, BOOL character_data, BOOL child_list)
 {
     struct mutation_observer_target *target, *entry;
     HTMLDOMNode *html_node;
@@ -1762,6 +1780,7 @@ static HRESULT mutation_observer_add_transient(struct mutation_observer *This,
             continue;
         native_registered = TRUE;
         if(target->transient) {
+            target->attributes |= attributes;
             target->character_data |= character_data;
             target->child_list |= child_list;
             nsISupports_Release((nsISupports *)native_node);
@@ -1791,6 +1810,7 @@ static HRESULT mutation_observer_add_transient(struct mutation_observer *This,
     entry->node = html_node;
     entry->native_node = native_node;
     entry->transient = TRUE;
+    entry->attributes = attributes;
     entry->character_data = character_data;
     entry->child_list = child_list;
     entry->subtree = TRUE;
@@ -2005,7 +2025,7 @@ static void NSAPI mutation_observer_CharacterDataChanged(nsIMutationObserver *if
     if(!content)
         return;
     nsres = nsISupports_QueryInterface((nsISupports *)content, &IID_nsIDOMNode, (void **)&nsnode);
-    if(NS_FAILED(nsres) || !mutation_observer_matches(This, nsnode, FALSE)) {
+    if(NS_FAILED(nsres) || !mutation_observer_matches(This, nsnode, MUTATION_CHARACTER_DATA)) {
         if(NS_SUCCEEDED(nsres))
             nsIDOMNode_Release(nsnode);
         return;
@@ -2031,9 +2051,60 @@ static void NSAPI mutation_observer_AttributeWillChange(nsIMutationObserver *ifa
 {
 }
 
+static void mutation_observer_attribute_changed(struct mutation_observer *This, void *element,
+        nsIAtom *attribute)
+{
+    struct mutation_observer_record *record;
+    nsIDOMNode *nsnode;
+    HTMLDOMNode *node;
+    nsAString name_str;
+    const WCHAR *name;
+    nsresult nsres;
+    HRESULT hres;
+
+    if(!element || !attribute)
+        return;
+    nsres = nsISupports_QueryInterface((nsISupports *)element, &IID_nsIDOMNode, (void **)&nsnode);
+    if(NS_FAILED(nsres) || !mutation_observer_matches(This, nsnode, MUTATION_ATTRIBUTES)) {
+        if(NS_SUCCEEDED(nsres))
+            nsIDOMNode_Release(nsnode);
+        return;
+    }
+
+    hres = get_node(nsnode, TRUE, &node);
+    nsIDOMNode_Release(nsnode);
+    if(FAILED(hres))
+        return;
+
+    nsAString_Init(&name_str, NULL);
+    nsres = nsIAtom_ScriptableToString(attribute, &name_str);
+    if(NS_FAILED(nsres)) {
+        nsAString_Finish(&name_str);
+        node_release(node);
+        return;
+    }
+    nsAString_GetData(&name_str, &name);
+
+    record = calloc(1, sizeof(*record));
+    if(record)
+        record->attribute_name = SysAllocString(name);
+    nsAString_Finish(&name_str);
+    if(!record || !record->attribute_name) {
+        free(record);
+        node_release(node);
+        return;
+    }
+
+    record->target = node;
+    record->attributes = TRUE;
+    list_add_tail(&This->records, &record->entry);
+    mutation_observer_schedule(This);
+}
+
 static void NSAPI mutation_observer_AttributeChanged(nsIMutationObserver *iface, nsIDocument *document,
         void *element, LONG namespace_id, nsIAtom *attribute, LONG mod_type, const nsAttrValue *old_value)
 {
+    mutation_observer_attribute_changed(impl_from_nsIMutationObserver(iface), element, attribute);
 }
 
 static void NSAPI mutation_observer_NativeAnonymousChildListChange(nsIMutationObserver *iface,
@@ -2044,6 +2115,7 @@ static void NSAPI mutation_observer_NativeAnonymousChildListChange(nsIMutationOb
 static void NSAPI mutation_observer_AttributeSetToCurrentValue(nsIMutationObserver *iface,
         nsIDocument *document, void *element, LONG namespace_id, nsIAtom *attribute)
 {
+    mutation_observer_attribute_changed(impl_from_nsIMutationObserver(iface), element, attribute);
 }
 
 static void NSAPI mutation_observer_ContentAppended(nsIMutationObserver *iface, nsIDocument *document,
@@ -2059,7 +2131,7 @@ static void NSAPI mutation_observer_ContentAppended(nsIMutationObserver *iface, 
         return;
     if(NS_FAILED(nsIContent_QueryInterface(container, &IID_nsIDOMNode, (void **)&container_node)))
         return;
-    if(!mutation_observer_matches(This, container_node, TRUE)) {
+    if(!mutation_observer_matches(This, container_node, MUTATION_CHILD_LIST)) {
         nsIDOMNode_Release(container_node);
         return;
     }
@@ -2114,7 +2186,7 @@ static void NSAPI mutation_observer_ContentInserted(nsIMutationObserver *iface, 
         return;
     if(NS_FAILED(nsIContent_QueryInterface(container, &IID_nsIDOMNode, (void **)&container_node)))
         return;
-    if(!mutation_observer_matches(This, container_node, TRUE))
+    if(!mutation_observer_matches(This, container_node, MUTATION_CHILD_LIST))
         goto done;
     if(NS_FAILED(nsIContent_QueryInterface(child, &IID_nsIDOMNode, (void **)&child_node)))
         goto done;
@@ -2139,16 +2211,16 @@ static void NSAPI mutation_observer_ContentRemoved(nsIMutationObserver *iface, n
 {
     struct mutation_observer *This = impl_from_nsIMutationObserver(iface);
     nsIDOMNode *container_node, *child_node, *previous = NULL, *next = NULL;
-    BOOL character_data, child_list, queue_child_list;
+    BOOL attributes, character_data, child_list, queue_child_list;
     nsresult nsres;
 
     if(!container || !child)
         return;
     if(NS_FAILED(nsIContent_QueryInterface(container, &IID_nsIDOMNode, (void **)&container_node)))
         return;
-    queue_child_list = mutation_observer_matches(This, container_node, TRUE);
-    mutation_observer_transient_options(This, container_node, &character_data, &child_list);
-    if(!queue_child_list && !character_data && !child_list)
+    queue_child_list = mutation_observer_matches(This, container_node, MUTATION_CHILD_LIST);
+    mutation_observer_transient_options(This, container_node, &attributes, &character_data, &child_list);
+    if(!queue_child_list && !attributes && !character_data && !child_list)
         goto done;
     if(NS_FAILED(nsIContent_QueryInterface(child, &IID_nsIDOMNode, (void **)&child_node)))
         goto done;
@@ -2164,8 +2236,8 @@ static void NSAPI mutation_observer_ContentRemoved(nsIMutationObserver *iface, n
             mutation_observer_queue(This, TRUE, container_node, NULL, 0,
                     &child_node, 1, previous, next);
     }
-    if((character_data || child_list) &&
-            SUCCEEDED(mutation_observer_add_transient(This, child_node, character_data, child_list)))
+    if((attributes || character_data || child_list) && SUCCEEDED(mutation_observer_add_transient(This,
+            child_node, attributes, character_data, child_list)))
         mutation_observer_schedule(This);
     nsIDOMNode_Release(child_node);
     if(previous)
@@ -2427,14 +2499,15 @@ static HRESULT WINAPI MutationObserver_observe(IWineMSHTMLMutationObserver *ifac
         attributes = TRUE;
     if(!character_data_present && character_data_old_present)
         character_data = TRUE;
-    if(attributes || attribute_old || character_data_old || filter_present)
+    if(attribute_old || character_data_old || filter_present)
         return E_NOTIMPL;
-    if(!character_data && !child_list)
+    if(!attributes && !character_data && !child_list)
         return E_INVALIDARG;
 
     LIST_FOR_EACH_ENTRY(entry, &This->targets, struct mutation_observer_target, entry) {
         if(entry->node == node) {
             entry->transient = FALSE;
+            entry->attributes = attributes;
             entry->character_data = character_data;
             entry->child_list = child_list;
             entry->subtree = subtree;
@@ -2465,6 +2538,7 @@ static HRESULT WINAPI MutationObserver_observe(IWineMSHTMLMutationObserver *ifac
     entry->node = node;
     entry->native_node = native_node;
     entry->native_registered = TRUE;
+    entry->attributes = attributes;
     entry->character_data = character_data;
     entry->child_list = child_list;
     entry->subtree = subtree;

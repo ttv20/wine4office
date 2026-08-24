@@ -5,7 +5,7 @@
 - Activate Microsoft 365 licenses after signing in to Office.
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
 - Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
-- Let modern Office web views observe text and child-node changes reliably.
+- Let modern Office web views observe DOM changes reliably.
 
 ## 0.2.1-beta.1 — 2026-08-23
 

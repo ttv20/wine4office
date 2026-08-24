@@ -55,9 +55,12 @@ function test_constructor_and_observe_validation() {
     expect_throw(function() { observer.observe(null, {}); }, "null target rejected");
     expect_throw(function() { observer.observe(text, null); }, "null options rejected");
     expect_throw(function() { observer.observe(text, {}); }, "empty options rejected");
-    expect_throw(function() { observer.observe(text, {attributes: true}); }, "attributes rejected honestly");
+    expect_no_throw(function() { observer.observe(text, {attributes: true}); }, "attributes accepted");
+    observer.disconnect();
     expect_throw(function() { observer.observe(text, {attributeOldValue: true}); }, "attributeOldValue true implies unsupported attributes");
-    expect_throw(function() { observer.observe(text, {attributeOldValue: false}); }, "present attributeOldValue implies unsupported attributes");
+    expect_no_throw(function() { observer.observe(text, {attributeOldValue: false}); },
+                    "false attributeOldValue implies supported attributes");
+    observer.disconnect();
     expect_throw(function() { observer.observe(text, {attributeFilter: []}); }, "attributeFilter implies unsupported attributes");
     observer.observe(text, {childList: true});
     observer.disconnect();
@@ -76,6 +79,40 @@ function test_constructor_and_observe_validation() {
                            characterDataOldValue: false, childList: false});
     observer.disconnect();
     next_test();
+}
+
+function test_attribute_delivery() {
+    var element = document.createElement("div"), callback_count = 0, finished = false;
+    var timeout = window.setTimeout(function() {
+        if (finished)
+            return;
+        finished = true;
+        ok(false, "attribute MutationObserver callback timed out");
+        next_test();
+    }, 5000);
+    var observer = new MutationObserver(function(records, callback_observer) {
+        var record;
+
+        callback_count++;
+        ok(callback_count === 1, "attribute mutation delivered once");
+        ok(callback_observer === observer, "attribute callback observer identity");
+        ok(records.length === 1, "attribute callback received one record");
+        record = records[0];
+        ok(record.type === "attributes", "attribute record type");
+        ok(record.target === element, "attribute record target");
+        ok(record.attributeName === "class", "attribute record name");
+        ok(record.attributeNamespace === null, "attribute namespace is null");
+        ok(record.oldValue === null, "attribute old value is null");
+        ok(record.addedNodes.length === 0, "attribute addedNodes is empty");
+        ok(record.removedNodes.length === 0, "attribute removedNodes is empty");
+        finished = true;
+        window.clearTimeout(timeout);
+        observer.disconnect();
+        next_test();
+    });
+
+    observer.observe(element, {attributes: true});
+    element.className = "scheduled";
 }
 
 function test_take_records_and_fields() {
@@ -362,6 +399,7 @@ function test_reentrant_delivery_and_lifetime() {
 }
 
 var tests = [test_constructor_and_observe_validation,
+             test_attribute_delivery,
              test_take_records_and_fields,
              test_reobserve_replaces_options,
              test_childlist_records_and_snapshots,
