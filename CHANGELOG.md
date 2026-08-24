@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Activate Microsoft 365 licenses after signing in to Office.
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
 - Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
 

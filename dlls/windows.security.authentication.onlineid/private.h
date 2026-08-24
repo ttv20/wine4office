@@ -21,6 +21,7 @@
 #define __WINE_ONLINEID_PRIVATE_H
 
 #include <stdarg.h>
+#include <wchar.h>
 
 #define COBJMACROS
 #include "windef.h"
@@ -39,6 +40,32 @@
 
 extern IActivationFactory *authenticator_factory;
 extern IActivationFactory *ticket_factory;
+
+static inline BOOL is_office_licensing_scope( const WCHAR *scopes )
+{
+    static const WCHAR legacy[] = L"service::officeapps.live.com";
+    static const WCHAR uri[] = L"https://officeapps.live.com";
+    const WCHAR *start, *end;
+    SIZE_T len;
+
+    if (!scopes) return FALSE;
+    for (start = scopes; *start; start = end)
+    {
+        while (*start && *start <= ' ') ++start;
+        for (end = start; *end && *end > ' '; ++end);
+        len = end - start;
+        if (len >= ARRAY_SIZE(legacy) - 1 &&
+            !wcsnicmp( start, legacy, ARRAY_SIZE(legacy) - 1 ) &&
+            (len == ARRAY_SIZE(legacy) - 1 ||
+             (start[ARRAY_SIZE(legacy) - 1] == ':' && start[ARRAY_SIZE(legacy)] == ':')))
+            return TRUE;
+        if (len >= ARRAY_SIZE(uri) - 1 &&
+            !wcsnicmp( start, uri, ARRAY_SIZE(uri) - 1 ) &&
+            (len == ARRAY_SIZE(uri) - 1 || start[ARRAY_SIZE(uri) - 1] == '/'))
+            return TRUE;
+    }
+    return FALSE;
+}
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

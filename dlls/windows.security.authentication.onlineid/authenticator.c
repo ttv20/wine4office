@@ -2797,7 +2797,7 @@ static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scope
     impl->status = status;
     if (!status)
     {
-        const WCHAR *path = scopes && wcsstr( scopes, L"service::officeapps.live.com" ) ?
+        const WCHAR *path = is_office_licensing_scope( scopes ) ?
                             L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
         WCHAR *token = load_wam_token_file( path );
         if (!token) { token_result_Release( impl ); return HRESULT_FROM_WIN32( ERROR_NOT_FOUND ); }
@@ -3431,7 +3431,7 @@ static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id
     ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
     DWORD exit_code;
 
-    if (scopes && *scopes && !wcsstr( scopes, L"service::officeapps.live.com" ))
+    if (scopes && *scopes && !is_office_licensing_scope( scopes ))
     {
         if (!run_wine365_resource_refresh( scopes, client_id )) goto done;
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
