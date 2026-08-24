@@ -9,6 +9,7 @@ import signal
 import stat
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -543,6 +544,34 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             0o600,
         )
         self.assertIn(str(prefix), message)
+
+    def test_stream_command_does_not_wait_for_wine_child_stdout(self):
+        command = self.root / "holds-stdout"
+        command.write_text("#!/bin/sh\n(sleep 5) &\nprintf 'ready\\n'\n")
+        command.chmod(command.stat().st_mode | stat.S_IXUSR)
+        output = []
+
+        started = time.monotonic()
+        backend._stream_command(
+            [str(command)], os.environ.copy(), output.append
+        )
+
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(output, [f"$ {command}", "ready"])
+
+    def test_create_environment_reports_recreate_phases(self):
+        prefix = self._make_prefix(self.home / ".wine4office", "old")
+        progress = []
+        backend.create_environment(
+            str(prefix), str(self.wine), True, lambda _line: None,
+            progress_callback=lambda label, value: progress.append((label, value)),
+        )
+
+        labels = [label for label, _value in progress]
+        self.assertIn("Stopping the existing Wine environment…", labels)
+        self.assertIn("Initializing the Wine environment…", labels)
+        self.assertIn("Removing the previous Wine environment…", labels)
+        self.assertEqual(progress[-1], ("Wine environment is ready", 100))
 
     def test_create_environment_installs_both_bundled_gecko_architectures(self):
         prefix = self.home / ".wine4office"

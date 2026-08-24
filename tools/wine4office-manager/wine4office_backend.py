@@ -1109,13 +1109,6 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     assert process.stdout is not None
     try:
         while True:
-            line = process.stdout.readline()
-            if line:
-                output(line.rstrip())
-            if process.poll() is not None:
-                for remaining in process.stdout:
-                    output(remaining.rstrip())
-                break
             if cancel_event is not None and cancel_event.is_set():
                 os.killpg(process.pid, signal.SIGTERM)
                 try:
@@ -1124,6 +1117,18 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
                 raise RuntimeError("Operation cancelled.")
+            readable, _writable, _exceptional = select.select(
+                [process.stdout], [], [], 0.1
+            )
+            if readable:
+                line = process.stdout.readline()
+                if line:
+                    output(line.rstrip())
+                elif process.poll() is not None:
+                    break
+                continue
+            if process.poll() is not None:
+                break
     finally:
         if process.stdout:
             process.stdout.close()
@@ -1340,7 +1345,8 @@ def install_bundled_wine_mono(prefix: Path, wine: Path, output: Output,
 
 
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
-                       cancel_event=None, process_callback=None) -> str:
+                       cancel_event=None, process_callback=None,
+                       progress_callback: Callable[[str, int | None], None] | None = None) -> str:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     kind = classify_prefix(str(prefix))
@@ -1353,7 +1359,9 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
 
     backup: Path | None = None
     if recreate and prefix.exists():
-        stop_wine(str(prefix), str(wine))
+        if progress_callback is not None:
+            progress_callback("Stopping the existing Wine environment…", None)
+        stop_wine(str(prefix), str(wine), progress_callback=progress_callback)
         backup = prefix.with_name(f".{prefix.name}.wine4office-backup-{int(time.time())}")
         if backup.exists():
             raise FileExistsError(f"Backup path already exists: {backup}")
@@ -1366,18 +1374,26 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         prefix.parent.mkdir(parents=True, exist_ok=True)
         wineboot = sibling_tool(wine, "wineboot")
         command = [str(wineboot), "-u"] if wineboot else [str(wine), "wineboot.exe", "-u"]
+        if progress_callback is not None:
+            progress_callback("Initializing the Wine environment…", None)
         _stream_command(
             command, wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
+        if progress_callback is not None:
+            progress_callback("Installing Wine Gecko…", None)
         install_bundled_wine_gecko(
             prefix, wine, output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
+        if progress_callback is not None:
+            progress_callback("Installing Wine Mono…", None)
         install_bundled_wine_mono(
             prefix, wine, output,
             cancel_event=cancel_event, process_callback=process_callback,
         )
+        if progress_callback is not None:
+            progress_callback("Configuring Wine graphics…", None)
         _stream_command([
             str(wine), "reg", "add", r"HKCU\Software\Wine\Drivers", "/v", "Graphics",
             "/d", "x11,wayland", "/f",
@@ -1390,6 +1406,8 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         )
         mark_prefix_owned(prefix)
     except Exception:
+        if progress_callback is not None and backup and backup.exists():
+            progress_callback("Restoring the previous Wine environment…", None)
         if prefix.exists():
             shutil.rmtree(prefix, ignore_errors=True)
         if backup and backup.exists():
@@ -1398,8 +1416,12 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
         raise
 
     if backup and backup.exists():
+        if progress_callback is not None:
+            progress_callback("Removing the previous Wine environment…", None)
         output("Initialization succeeded; removing the temporary backup.")
         shutil.rmtree(backup)
+    if progress_callback is not None:
+        progress_callback("Wine environment is ready", 100)
     return f"Wine environment is ready at {prefix}"
 
 

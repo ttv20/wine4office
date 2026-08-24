@@ -76,10 +76,12 @@ def _create_environment_worker(state, config: dict, recreate: bool) -> str:
         config["prefix"], config["wine"], recreate, state.output,
         cancel_event=state.cancel_event,
         process_callback=state.set_process,
+        progress_callback=state.set_progress,
     )
     if state.cancel_event.is_set():
         raise RuntimeError("Operation cancelled.")
     if backend.office_telemetry_disabled(config):
+        state.set_progress("Applying Office privacy settings…")
         backend.apply_office_telemetry_policy(
             config["prefix"], config["wine"], True,
             use_x11=config.get("use_x11", True),
@@ -90,6 +92,7 @@ def _create_environment_worker(state, config: dict, recreate: bool) -> str:
         raise RuntimeError("Operation cancelled.")
     compatibility = backend.office_compatibility_settings(config)
     if any(compatibility.values()):
+        state.set_progress("Applying Office compatibility settings…")
         backend.apply_office_compatibility_policies(
             config["prefix"], config["wine"], compatibility,
             {policy_id: False for policy_id in compatibility},
@@ -99,6 +102,7 @@ def _create_environment_worker(state, config: dict, recreate: bool) -> str:
         )
     if state.cancel_event.is_set():
         raise RuntimeError("Operation cancelled.")
+    state.set_progress("Wine environment is ready", 100)
     return result
 
 
@@ -1552,6 +1556,20 @@ class ManagerWindow(QMainWindow):
         """Compatibility wrapper for tests and non-Qt callers."""
         return _create_environment_worker(self.state, config, recreate)
 
+    def _show_environment_progress(self, config: dict, recreate: bool) -> None:
+        action = "Recreating" if recreate else "Creating"
+        self._show_task_progress(
+            "environment",
+            f"{action} Wine environment",
+            str(config["prefix"]),
+            f"{action} Wine environment…",
+            {
+                "completed": "Wine environment is ready.",
+                "cancelled": "Wine environment operation was cancelled.",
+                "failed": "Wine environment operation failed. Review the details below.",
+            },
+        )
+
 
     def environment_action(self, recreate: bool) -> None:
         if not self.ensure_idle():
@@ -1582,8 +1600,10 @@ class ManagerWindow(QMainWindow):
                     self.state, self.state.update_config(values), recreate
                 ),
             )
+            self.last_task_state = "True:running"
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
+            self._show_environment_progress(values, recreate)
             self.notify("Environment operation started.")
             self.refresh_state()
         except Exception as error:

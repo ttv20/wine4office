@@ -959,6 +959,7 @@ class QtManagerTests(unittest.TestCase):
             config["prefix"], config["wine"], True, self.state.output,
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
+            progress_callback=self.state.set_progress,
         )
         apply.assert_called_once_with(
             config["prefix"], config["wine"], True, use_x11=True,
@@ -997,6 +998,59 @@ class QtManagerTests(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertEqual(self.state.snapshot()["task"]["status"], "completed")
+
+    def test_environment_recreation_shows_progress_popup_with_live_logs(self):
+        with mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            qt_module.QMessageBox, "warning",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(
+            self.state, "start_task"
+        ) as start_task, mock.patch.object(
+            qt_module, "_create_environment_worker", return_value="environment ready"
+        ) as create:
+            self.window.environment_action(True)
+            operation = start_task.call_args.args[1]
+            operation()
+
+        self.assertEqual(start_task.call_args.args[0], "environment")
+        create.assert_called_once()
+        self.assertEqual(self.window.update_progress_task_kind, "environment")
+        self.assertEqual(
+            self.window.update_progress_dialog.windowTitle(),
+            "Recreating Wine environment",
+        )
+        self.assertTrue(self.window.update_progress_dialog.isVisible())
+
+        self.window._refresh_update_progress({
+            "kind": "environment",
+            "running": True,
+            "status": "running",
+            "log": "$ wineboot -u\nCreating registry files\n",
+            "progress_label": "Initializing the Wine environment…",
+            "progress_value": None,
+        })
+        self.assertIn(
+            "Creating registry files",
+            self.window.update_progress_log.toPlainText(),
+        )
+        self.assertIn(
+            "Initializing",
+            self.window.update_progress_status.text(),
+        )
+
+        self.window._refresh_update_progress({
+            "kind": "environment",
+            "running": False,
+            "status": "completed",
+            "log": "Wine environment is ready at /tmp/prefix\n",
+            "progress_label": "Wine environment is ready",
+            "progress_value": 100,
+        })
+        self.assertEqual(self.window.update_progress_bar.value(), 100)
+        self.assertEqual(self.window.update_progress_button.text(), "Close")
+        self.window.update_progress_dialog.accept()
 
     def test_cancel_environment_reaps_active_helper(self):
         helper = mock.Mock()
