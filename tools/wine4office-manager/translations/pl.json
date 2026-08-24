@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Zamknięcie Wine zostało przerwane.",
   "Wine tools": "Narzędzia Wine",
   "Wine4Office Manager": "Menedżer Wine4Office",
-  "Working folder:": "Folder roboczy:"
+  "Working folder:": "Folder roboczy:",
+"Applying Office compatibility settings…": "Stosowanie ustawień zgodności pakietu Office…",
+"Applying Office privacy settings…": "Stosowanie ustawień prywatności pakietu Office…",
+"Configuring Wine graphics…": "Konfigurowanie grafiki Wine…",
+"Creating Wine environment": "Utwórz środowisko Wine",
+"Creating Wine environment…": "Tworzenie środowiska Wine…",
+"Initializing the Wine environment…": "Inicjowanie środowiska Wine…",
+"Installing Wine Gecko…": "Instalowanie Wine Gecko…",
+"Installing Wine Mono…": "Instalowanie Wine Mono…",
+"Recreating Wine environment": "Utwórz ponownie środowisko Wine",
+"Recreating Wine environment…": "Ponowne tworzenie środowiska Wine…",
+"Removing the previous Wine environment…": "Usuwanie poprzedniego środowiska Wine…",
+"Restoring the previous Wine environment…": "Przywracanie poprzedniego środowiska Wine…",
+"Stopping the existing Wine environment…": "Zatrzymywanie istniejącego środowiska Wine…",
+"Wine environment is ready": "Środowisko Wine jest gotowe",
+"Wine environment is ready.": "Środowisko Wine jest gotowe.",
+"Wine environment operation was cancelled.": "Operacja środowiska Wine została anulowana.",
+"Wine environment operation failed. Review the details below.": "Operacja środowiska Wine nie powiodła się. Zapoznaj się ze szczegółami poniżej."
 }

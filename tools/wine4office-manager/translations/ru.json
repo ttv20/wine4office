@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Выключение Wine было прервано.",
   "Wine tools": "Инструменты Wine",
   "Wine4Office Manager": "Менеджер Wine4Office",
-  "Working folder:": "Рабочая папка:"
+  "Working folder:": "Рабочая папка:",
+"Applying Office compatibility settings…": "Применяются параметры совместимости Office…",
+"Applying Office privacy settings…": "Применяются параметры конфиденциальности Office…",
+"Configuring Wine graphics…": "Настраивается графика Wine…",
+"Creating Wine environment": "Создание среды Wine",
+"Creating Wine environment…": "Создаётся среда Wine…",
+"Initializing the Wine environment…": "Инициализируется среда Wine…",
+"Installing Wine Gecko…": "Устанавливается Wine Gecko…",
+"Installing Wine Mono…": "Устанавливается Wine Mono…",
+"Recreating Wine environment": "Пересоздание среды Wine",
+"Recreating Wine environment…": "Пересоздаётся среда Wine…",
+"Removing the previous Wine environment…": "Удаляется предыдущая среда Wine…",
+"Restoring the previous Wine environment…": "Восстанавливается предыдущая среда Wine…",
+"Stopping the existing Wine environment…": "Останавливается существующая среда Wine…",
+"Wine environment is ready": "Среда Wine готова",
+"Wine environment is ready.": "Среда Wine готова.",
+"Wine environment operation was cancelled.": "Операция со средой Wine отменена.",
+"Wine environment operation failed. Review the details below.": "Операция со средой Wine завершилась ошибкой. См. подробности ниже."
 }

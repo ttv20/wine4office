@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Închiderea Wine a fost întreruptă.",
   "Wine tools": "Instrumente Wine",
   "Wine4Office Manager": "Manager Wine4Office",
-  "Working folder:": "Dosar de lucru:"
+  "Working folder:": "Dosar de lucru:",
+"Applying Office compatibility settings…": "Se aplică setările de compatibilitate Office…",
+"Applying Office privacy settings…": "Se aplică setările de confidențialitate Office…",
+"Configuring Wine graphics…": "Se configurează grafica Wine…",
+"Creating Wine environment": "Creează mediul Wine",
+"Creating Wine environment…": "Se creează mediul Wine…",
+"Initializing the Wine environment…": "Se inițializează mediul Wine…",
+"Installing Wine Gecko…": "Se instalează Wine Gecko…",
+"Installing Wine Mono…": "Se instalează Wine Mono…",
+"Recreating Wine environment": "Recreează mediul Wine",
+"Recreating Wine environment…": "Se recreează mediul Wine…",
+"Removing the previous Wine environment…": "Se elimină mediul Wine anterior…",
+"Restoring the previous Wine environment…": "Se restaurează mediul Wine anterior…",
+"Stopping the existing Wine environment…": "Se oprește mediul Wine existent…",
+"Wine environment is ready": "Mediul Wine este gata",
+"Wine environment is ready.": "Mediul Wine este gata.",
+"Wine environment operation was cancelled.": "Operația mediului Wine a fost anulată.",
+"Wine environment operation failed. Review the details below.": "Operația mediului Wine a eșuat. Consultați detaliile de mai jos."
 }

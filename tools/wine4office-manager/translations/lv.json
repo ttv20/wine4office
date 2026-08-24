@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine izslēgšana tiek pabeigta; pārvaldnieks tiks aizvērts, kad tas būs pabeigts.",
   "Wine shutdown was interrupted.": "Wine izslēgšana tika pārtraukta.",
   "Wine tools": "Wine rīki",
-  "Wine4Office Manager": "Wine4Office pārvaldnieks"
+  "Wine4Office Manager": "Wine4Office pārvaldnieks",
+"Applying Office compatibility settings…": "Tiek lietoti Office saderības iestatījumi…",
+"Applying Office privacy settings…": "Tiek lietoti Office konfidencialitātes iestatījumi…",
+"Configuring Wine graphics…": "Tiek konfigurēta Wine grafika…",
+"Creating Wine environment": "Izveidot Wine vidi",
+"Creating Wine environment…": "Wine vide tiek izveidota…",
+"Initializing the Wine environment…": "Wine vide tiek inicializēta…",
+"Installing Wine Gecko…": "Wine Gecko tiek instalēts…",
+"Installing Wine Mono…": "Wine Mono tiek instalēts…",
+"Recreating Wine environment": "Atkārtoti izveidot Wine vidi",
+"Recreating Wine environment…": "Wine vide tiek izveidota atkārtoti…",
+"Removing the previous Wine environment…": "Iepriekšējā Wine vide tiek noņemta…",
+"Restoring the previous Wine environment…": "Iepriekšējā Wine vide tiek atjaunota…",
+"Stopping the existing Wine environment…": "Esošā Wine vide tiek apturēta…",
+"Wine environment is ready": "Wine vide ir gatava",
+"Wine environment is ready.": "Wine vide ir gatava.",
+"Wine environment operation was cancelled.": "Wine vides darbība tika atcelta.",
+"Wine environment operation failed. Review the details below.": "Wine vides darbība neizdevās. Skatiet tālāk sniegto informāciju."
 }

@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Penonaktifan Wine terhenti.",
   "Wine tools": "Alat Wine",
   "Wine4Office Manager": "Pengelola Wine4Office",
-  "Working folder:": "Folder kerja:"
+  "Working folder:": "Folder kerja:",
+"Applying Office compatibility settings…": "Menerapkan pengaturan kompatibilitas Office…",
+"Applying Office privacy settings…": "Menerapkan pengaturan privasi Office…",
+"Configuring Wine graphics…": "Mengonfigurasi grafis Wine…",
+"Creating Wine environment": "Buat lingkungan Wine",
+"Creating Wine environment…": "Membuat lingkungan Wine…",
+"Initializing the Wine environment…": "Menginisialisasi lingkungan Wine…",
+"Installing Wine Gecko…": "Menginstal Wine Gecko…",
+"Installing Wine Mono…": "Menginstal Wine Mono…",
+"Recreating Wine environment": "Buat ulang lingkungan Wine",
+"Recreating Wine environment…": "Membuat ulang lingkungan Wine…",
+"Removing the previous Wine environment…": "Menghapus lingkungan Wine sebelumnya…",
+"Restoring the previous Wine environment…": "Memulihkan lingkungan Wine sebelumnya…",
+"Stopping the existing Wine environment…": "Menghentikan lingkungan Wine yang ada…",
+"Wine environment is ready": "Lingkungan Wine siap",
+"Wine environment is ready.": "Lingkungan Wine siap.",
+"Wine environment operation was cancelled.": "Operasi lingkungan Wine dibatalkan.",
+"Wine environment operation failed. Review the details below.": "Operasi lingkungan Wine gagal. Lihat detail di bawah."
 }

@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Het afsluiten van Wine is onderbroken.",
   "Wine tools": "Wine-hulpmiddelen",
   "Wine4Office Manager": "Wine4Office-beheer",
-  "Working folder:": "Werkmap:"
+  "Working folder:": "Werkmap:",
+"Applying Office compatibility settings…": "Office-compatibiliteitsinstellingen worden toegepast…",
+"Applying Office privacy settings…": "Office-privacy-instellingen worden toegepast…",
+"Configuring Wine graphics…": "Wine-graphics worden geconfigureerd…",
+"Creating Wine environment": "Wine-omgeving maken",
+"Creating Wine environment…": "Wine-omgeving wordt gemaakt…",
+"Initializing the Wine environment…": "Wine-omgeving wordt geïnitialiseerd…",
+"Installing Wine Gecko…": "Wine Gecko wordt geïnstalleerd…",
+"Installing Wine Mono…": "Wine Mono wordt geïnstalleerd…",
+"Recreating Wine environment": "Wine-omgeving opnieuw maken",
+"Recreating Wine environment…": "Wine-omgeving wordt opnieuw gemaakt…",
+"Removing the previous Wine environment…": "Vorige Wine-omgeving wordt verwijderd…",
+"Restoring the previous Wine environment…": "Vorige Wine-omgeving wordt hersteld…",
+"Stopping the existing Wine environment…": "Bestaande Wine-omgeving wordt gestopt…",
+"Wine environment is ready": "Wine-omgeving is gereed",
+"Wine environment is ready.": "Wine-omgeving is gereed.",
+"Wine environment operation was cancelled.": "De bewerking van de Wine-omgeving is geannuleerd.",
+"Wine environment operation failed. Review the details below.": "De bewerking van de Wine-omgeving is mislukt. Bekijk de details hieronder."
 }

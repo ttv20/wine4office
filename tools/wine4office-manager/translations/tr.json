@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Wine'ın kapatılması kesintiye uğradı.",
   "Wine tools": "Wine araçları",
   "Wine4Office Manager": "Wine4Office Yöneticisi",
-  "Working folder:": "Çalışma klasörü:"
+  "Working folder:": "Çalışma klasörü:",
+"Applying Office compatibility settings…": "Office uyumluluk ayarları uygulanıyor…",
+"Applying Office privacy settings…": "Office gizlilik ayarları uygulanıyor…",
+"Configuring Wine graphics…": "Wine grafikleri yapılandırılıyor…",
+"Creating Wine environment": "Wine ortamı oluştur",
+"Creating Wine environment…": "Wine ortamı oluşturuluyor…",
+"Initializing the Wine environment…": "Wine ortamı başlatılıyor…",
+"Installing Wine Gecko…": "Wine Gecko kuruluyor…",
+"Installing Wine Mono…": "Wine Mono kuruluyor…",
+"Recreating Wine environment": "Wine ortamını yeniden oluştur",
+"Recreating Wine environment…": "Wine ortamı yeniden oluşturuluyor…",
+"Removing the previous Wine environment…": "Önceki Wine ortamı kaldırılıyor…",
+"Restoring the previous Wine environment…": "Önceki Wine ortamı geri yükleniyor…",
+"Stopping the existing Wine environment…": "Mevcut Wine ortamı durduruluyor…",
+"Wine environment is ready": "Wine ortamı hazır",
+"Wine environment is ready.": "Wine ortamı hazır.",
+"Wine environment operation was cancelled.": "Wine ortamı işlemi iptal edildi.",
+"Wine environment operation failed. Review the details below.": "Wine ortamı işlemi başarısız oldu. Aşağıdaki ayrıntıları inceleyin."
 }

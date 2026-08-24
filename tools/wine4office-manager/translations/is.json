@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Lokun Wine er að ljúka; framkvæmdastjórinn mun loka þegar því er lokið.",
   "Wine shutdown was interrupted.": "Lokun Wine var rofin.",
   "Wine tools": "Wine-verkfæri",
-  "Wine4Office Manager": "Wine4Office-stjóri"
+  "Wine4Office Manager": "Wine4Office-stjóri",
+"Applying Office compatibility settings…": "Samhæfnisstillingar Office eru notaðar…",
+"Applying Office privacy settings…": "Persónuverndarstillingar Office eru notaðar…",
+"Configuring Wine graphics…": "Myndgæði Wine eru stillt…",
+"Creating Wine environment": "Búa til Wine-umhverfi",
+"Creating Wine environment…": "Wine-umhverfi er búið til…",
+"Initializing the Wine environment…": "Wine-umhverfi er frumstillt…",
+"Installing Wine Gecko…": "Wine Gecko er sett upp…",
+"Installing Wine Mono…": "Wine Mono er sett upp…",
+"Recreating Wine environment": "Búa til Wine-umhverfi aftur",
+"Recreating Wine environment…": "Wine-umhverfi er búið til aftur…",
+"Removing the previous Wine environment…": "Fyrra Wine-umhverfi er fjarlægt…",
+"Restoring the previous Wine environment…": "Fyrra Wine-umhverfi er endurheimt…",
+"Stopping the existing Wine environment…": "Núverandi Wine-umhverfi er stöðvað…",
+"Wine environment is ready": "Wine-umhverfið er tilbúið",
+"Wine environment is ready.": "Wine-umhverfið er tilbúið.",
+"Wine environment operation was cancelled.": "Hætt var við aðgerð Wine-umhverfis.",
+"Wine environment operation failed. Review the details below.": "Aðgerð Wine-umhverfis mistókst. Skoðaðu upplýsingarnar hér að neðan."
 }

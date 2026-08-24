@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "خاموش شدن Wine قطع شد.",
   "Wine tools": "ابزارهای Wine",
   "Wine4Office Manager": "مدیر Wine4Office",
-  "Working folder:": "پوشه کاری:"
+  "Working folder:": "پوشه کاری:",
+"Applying Office compatibility settings…": "اعمال تنظیمات سازگاری Office…",
+"Applying Office privacy settings…": "اعمال تنظیمات حریم خصوصی Office…",
+"Configuring Wine graphics…": "پیکربندی گرافیک Wine…",
+"Creating Wine environment": "ایجاد محیط Wine",
+"Creating Wine environment…": "در حال ایجاد محیط Wine…",
+"Initializing the Wine environment…": "در حال آماده‌سازی محیط Wine…",
+"Installing Wine Gecko…": "در حال نصب Wine Gecko…",
+"Installing Wine Mono…": "در حال نصب Wine Mono…",
+"Recreating Wine environment": "ایجاد دوباره محیط Wine",
+"Recreating Wine environment…": "در حال ایجاد دوباره محیط Wine…",
+"Removing the previous Wine environment…": "در حال حذف محیط قبلی Wine…",
+"Restoring the previous Wine environment…": "در حال بازیابی محیط قبلی Wine…",
+"Stopping the existing Wine environment…": "در حال توقف محیط موجود Wine…",
+"Wine environment is ready": "محیط Wine آماده است",
+"Wine environment is ready.": "محیط Wine آماده است.",
+"Wine environment operation was cancelled.": "عملیات محیط Wine لغو شد.",
+"Wine environment operation failed. Review the details below.": "عملیات محیط Wine ناموفق بود. جزئیات زیر را بررسی کنید."
 }

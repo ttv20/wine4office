@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine seiskamine on lõppemas; haldur sulgub, kui see on lõpetatud.",
   "Wine shutdown was interrupted.": "Wine seiskamine katkestati.",
   "Wine tools": "Wine'i tööriistad",
-  "Wine4Office Manager": "Wine4Office haldur"
+  "Wine4Office Manager": "Wine4Office haldur",
+"Applying Office compatibility settings…": "Office'i ühilduvusseadeid rakendatakse…",
+"Applying Office privacy settings…": "Office'i privaatsusseadeid rakendatakse…",
+"Configuring Wine graphics…": "Wine'i graafikat konfigureeritakse…",
+"Creating Wine environment": "Loo Wine'i keskkond",
+"Creating Wine environment…": "Wine'i keskkonda luuakse…",
+"Initializing the Wine environment…": "Wine'i keskkonda lähtestatakse…",
+"Installing Wine Gecko…": "Wine Gecko paigaldatakse…",
+"Installing Wine Mono…": "Wine Mono paigaldatakse…",
+"Recreating Wine environment": "Loo Wine'i keskkond uuesti",
+"Recreating Wine environment…": "Wine'i keskkonda luuakse uuesti…",
+"Removing the previous Wine environment…": "Eelmine Wine'i keskkond eemaldatakse…",
+"Restoring the previous Wine environment…": "Eelmine Wine'i keskkond taastatakse…",
+"Stopping the existing Wine environment…": "Olemasolev Wine'i keskkond peatatakse…",
+"Wine environment is ready": "Wine'i keskkond on valmis",
+"Wine environment is ready.": "Wine'i keskkond on valmis.",
+"Wine environment operation was cancelled.": "Wine'i keskkonna toiming tühistati.",
+"Wine environment operation failed. Review the details below.": "Wine'i keskkonna toiming nurjus. Vaadake allolevaid üksikasju."
 }

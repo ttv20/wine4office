@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Wine शटडाउन बाधित हुआ.",
   "Wine tools": "Wine उपकरण",
   "Wine4Office Manager": "Wine4Office प्रबंधक",
-  "Working folder:": "कार्य फ़ोल्डर:"
+  "Working folder:": "कार्य फ़ोल्डर:",
+"Applying Office compatibility settings…": "Office संगतता सेटिंग लागू की जा रही हैं…",
+"Applying Office privacy settings…": "Office गोपनीयता सेटिंग लागू की जा रही हैं…",
+"Configuring Wine graphics…": "Wine ग्राफ़िक्स कॉन्फ़िगर किए जा रहे हैं…",
+"Creating Wine environment": "Wine वातावरण बनाएँ",
+"Creating Wine environment…": "Wine वातावरण बनाया जा रहा है…",
+"Initializing the Wine environment…": "Wine वातावरण आरंभ किया जा रहा है…",
+"Installing Wine Gecko…": "Wine Gecko इंस्टॉल किया जा रहा है…",
+"Installing Wine Mono…": "Wine Mono इंस्टॉल किया जा रहा है…",
+"Recreating Wine environment": "Wine वातावरण फिर से बनाएँ",
+"Recreating Wine environment…": "Wine वातावरण फिर से बनाया जा रहा है…",
+"Removing the previous Wine environment…": "पिछला Wine वातावरण हटाया जा रहा है…",
+"Restoring the previous Wine environment…": "पिछला Wine वातावरण पुनर्स्थापित किया जा रहा है…",
+"Stopping the existing Wine environment…": "मौजूदा Wine वातावरण रोका जा रहा है…",
+"Wine environment is ready": "Wine वातावरण तैयार है",
+"Wine environment is ready.": "Wine वातावरण तैयार है।",
+"Wine environment operation was cancelled.": "Wine वातावरण का ऑपरेशन रद्द कर दिया गया।",
+"Wine environment operation failed. Review the details below.": "Wine वातावरण का ऑपरेशन विफल हुआ। नीचे दिए गए विवरण देखें।"
 }

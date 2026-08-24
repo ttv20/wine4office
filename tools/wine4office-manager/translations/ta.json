@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Wine பணிநிறுத்தம் முடிவடைகிறது; அது முடிந்ததும் மேலாளர் மூடுவார்.",
   "Wine shutdown was interrupted.": "Wine பணிநிறுத்தம் தடைபட்டது.",
   "Wine tools": "Wine கருவிகள்",
-  "Wine4Office Manager": "Wine4Office மேலாளர்"
+  "Wine4Office Manager": "Wine4Office மேலாளர்",
+"Applying Office compatibility settings…": "Office இணக்க அமைப்புகள் பயன்படுத்தப்படுகின்றன…",
+"Applying Office privacy settings…": "Office தனியுரிமை அமைப்புகள் பயன்படுத்தப்படுகின்றன…",
+"Configuring Wine graphics…": "Wine வரைகலை அமைக்கப்படுகிறது…",
+"Creating Wine environment": "Wine சூழலை உருவாக்கு",
+"Creating Wine environment…": "Wine சூழல் உருவாக்கப்படுகிறது…",
+"Initializing the Wine environment…": "Wine சூழல் தொடங்கப்படுகிறது…",
+"Installing Wine Gecko…": "Wine Gecko நிறுவப்படுகிறது…",
+"Installing Wine Mono…": "Wine Mono நிறுவப்படுகிறது…",
+"Recreating Wine environment": "Wine சூழலை மீண்டும் உருவாக்கு",
+"Recreating Wine environment…": "Wine சூழல் மீண்டும் உருவாக்கப்படுகிறது…",
+"Removing the previous Wine environment…": "முந்தைய Wine சூழல் அகற்றப்படுகிறது…",
+"Restoring the previous Wine environment…": "முந்தைய Wine சூழல் மீட்டமைக்கப்படுகிறது…",
+"Stopping the existing Wine environment…": "ஏற்கனவே உள்ள Wine சூழல் நிறுத்தப்படுகிறது…",
+"Wine environment is ready": "Wine சூழல் தயாராக உள்ளது",
+"Wine environment is ready.": "Wine சூழல் தயாராக உள்ளது.",
+"Wine environment operation was cancelled.": "Wine சூழல் செயல்பாடு ரத்து செய்யப்பட்டது.",
+"Wine environment operation failed. Review the details below.": "Wine சூழல் செயல்பாடு தோல்வியடைந்தது. கீழே உள்ள விவரங்களைப் பார்க்கவும்."
 }

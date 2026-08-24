@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Việc tắt máy Wine bị gián đoạn.",
   "Wine tools": "Công cụ Wine",
   "Wine4Office Manager": "Trình quản lý Wine4Office",
-  "Working folder:": "Thư mục làm việc:"
+  "Working folder:": "Thư mục làm việc:",
+"Applying Office compatibility settings…": "Đang áp dụng cài đặt tương thích Office…",
+"Applying Office privacy settings…": "Đang áp dụng cài đặt quyền riêng tư Office…",
+"Configuring Wine graphics…": "Đang cấu hình đồ họa Wine…",
+"Creating Wine environment": "Tạo môi trường Wine",
+"Creating Wine environment…": "Đang tạo môi trường Wine…",
+"Initializing the Wine environment…": "Đang khởi tạo môi trường Wine…",
+"Installing Wine Gecko…": "Đang cài đặt Wine Gecko…",
+"Installing Wine Mono…": "Đang cài đặt Wine Mono…",
+"Recreating Wine environment": "Tạo lại môi trường Wine",
+"Recreating Wine environment…": "Đang tạo lại môi trường Wine…",
+"Removing the previous Wine environment…": "Đang xóa môi trường Wine trước đó…",
+"Restoring the previous Wine environment…": "Đang khôi phục môi trường Wine trước đó…",
+"Stopping the existing Wine environment…": "Đang dừng môi trường Wine hiện có…",
+"Wine environment is ready": "Môi trường Wine đã sẵn sàng",
+"Wine environment is ready.": "Môi trường Wine đã sẵn sàng.",
+"Wine environment operation was cancelled.": "Thao tác môi trường Wine đã bị hủy.",
+"Wine environment operation failed. Review the details below.": "Thao tác môi trường Wine thất bại. Xem chi tiết bên dưới."
 }

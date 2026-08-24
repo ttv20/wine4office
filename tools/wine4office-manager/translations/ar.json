@@ -160,5 +160,22 @@
   "Wine4Office Manager": "مدير Wine4Office",
   "Wine4Office update available": "يتوفر تحديث لـWine4Office",
   "Working folder:": "مجلد العمل:",
-  "running": "قيد التشغيل"
+  "running": "قيد التشغيل",
+"Applying Office compatibility settings…": "جارٍ تطبيق إعدادات توافق Office…",
+"Applying Office privacy settings…": "جارٍ تطبيق إعدادات خصوصية Office…",
+"Configuring Wine graphics…": "جارٍ ضبط رسومات Wine…",
+"Creating Wine environment": "إنشاء بيئة Wine",
+"Creating Wine environment…": "جارٍ إنشاء بيئة Wine…",
+"Initializing the Wine environment…": "جارٍ تهيئة بيئة Wine…",
+"Installing Wine Gecko…": "جارٍ تثبيت Wine Gecko…",
+"Installing Wine Mono…": "جارٍ تثبيت Wine Mono…",
+"Recreating Wine environment": "إعادة إنشاء بيئة Wine",
+"Recreating Wine environment…": "جارٍ إعادة إنشاء بيئة Wine…",
+"Removing the previous Wine environment…": "جارٍ إزالة بيئة Wine السابقة…",
+"Restoring the previous Wine environment…": "جارٍ استعادة بيئة Wine السابقة…",
+"Stopping the existing Wine environment…": "جارٍ إيقاف بيئة Wine الحالية…",
+"Wine environment is ready": "بيئة Wine جاهزة",
+"Wine environment is ready.": "بيئة Wine جاهزة.",
+"Wine environment operation was cancelled.": "أُلغيت عملية بيئة Wine.",
+"Wine environment operation failed. Review the details below.": "فشلت عملية بيئة Wine. راجع التفاصيل أدناه."
 }

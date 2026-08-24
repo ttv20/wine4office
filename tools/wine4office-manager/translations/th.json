@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "การปิดระบบ Wine ถูกขัดจังหวะ",
   "Wine tools": "เครื่องมือ Wine",
   "Wine4Office Manager": "ตัวจัดการ Wine4Office",
-  "Working folder:": "โฟลเดอร์ทำงาน:"
+  "Working folder:": "โฟลเดอร์ทำงาน:",
+"Applying Office compatibility settings…": "กำลังใช้การตั้งค่าความเข้ากันได้ของ Office…",
+"Applying Office privacy settings…": "กำลังใช้การตั้งค่าความเป็นส่วนตัวของ Office…",
+"Configuring Wine graphics…": "กำลังกำหนดค่ากราฟิกของ Wine…",
+"Creating Wine environment": "สร้างสภาพแวดล้อม Wine",
+"Creating Wine environment…": "กำลังสร้างสภาพแวดล้อม Wine…",
+"Initializing the Wine environment…": "กำลังเริ่มต้นสภาพแวดล้อม Wine…",
+"Installing Wine Gecko…": "กำลังติดตั้ง Wine Gecko…",
+"Installing Wine Mono…": "กำลังติดตั้ง Wine Mono…",
+"Recreating Wine environment": "สร้างสภาพแวดล้อม Wine ใหม่",
+"Recreating Wine environment…": "กำลังสร้างสภาพแวดล้อม Wine ใหม่…",
+"Removing the previous Wine environment…": "กำลังลบสภาพแวดล้อม Wine ก่อนหน้า…",
+"Restoring the previous Wine environment…": "กำลังกู้คืนสภาพแวดล้อม Wine ก่อนหน้า…",
+"Stopping the existing Wine environment…": "กำลังหยุดสภาพแวดล้อม Wine ที่มีอยู่…",
+"Wine environment is ready": "สภาพแวดล้อม Wine พร้อมแล้ว",
+"Wine environment is ready.": "สภาพแวดล้อม Wine พร้อมแล้ว",
+"Wine environment operation was cancelled.": "ยกเลิกการดำเนินการสภาพแวดล้อม Wine แล้ว",
+"Wine environment operation failed. Review the details below.": "การดำเนินการสภาพแวดล้อม Wine ล้มเหลว โปรดดูรายละเอียดด้านล่าง"
 }

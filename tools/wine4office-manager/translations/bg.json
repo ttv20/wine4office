@@ -61,5 +61,22 @@
   "Wine shutdown is finishing; the Manager will close when it completes.": "Изключването на Wine завършва; мениджърът ще затвори, когато приключи.",
   "Wine shutdown was interrupted.": "Изключването на Wine бе прекъснато.",
   "Wine tools": "Инструменти на Wine",
-  "Wine4Office Manager": "Мениджър на Wine4Office"
+  "Wine4Office Manager": "Мениджър на Wine4Office",
+"Applying Office compatibility settings…": "Прилагат се настройките за съвместимост на Office…",
+"Applying Office privacy settings…": "Прилагат се настройките за поверителност на Office…",
+"Configuring Wine graphics…": "Графиката на Wine се конфигурира…",
+"Creating Wine environment": "Създаване на среда Wine",
+"Creating Wine environment…": "Средата Wine се създава…",
+"Initializing the Wine environment…": "Средата Wine се инициализира…",
+"Installing Wine Gecko…": "Wine Gecko се инсталира…",
+"Installing Wine Mono…": "Wine Mono се инсталира…",
+"Recreating Wine environment": "Повторно създаване на среда Wine",
+"Recreating Wine environment…": "Средата Wine се създава повторно…",
+"Removing the previous Wine environment…": "Предишната среда Wine се премахва…",
+"Restoring the previous Wine environment…": "Предишната среда Wine се възстановява…",
+"Stopping the existing Wine environment…": "Съществуващата среда Wine се спира…",
+"Wine environment is ready": "Средата Wine е готова",
+"Wine environment is ready.": "Средата Wine е готова.",
+"Wine environment operation was cancelled.": "Операцията със средата Wine е отменена.",
+"Wine environment operation failed. Review the details below.": "Операцията със средата Wine се провали. Вижте подробностите по-долу."
 }

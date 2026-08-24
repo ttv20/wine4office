@@ -945,6 +945,7 @@ class QtManagerTests(unittest.TestCase):
         )
 
     def test_environment_creation_reapplies_checked_telemetry_policy(self):
+        """Environment creation reapplies the saved privacy policy."""
         prefix = Path(self.config["prefix"])
         config = backend.set_office_telemetry_disabled(self.config, prefix, True)
         with mock.patch.object(
@@ -955,18 +956,47 @@ class QtManagerTests(unittest.TestCase):
             result = self.window._create_environment(config, True)
 
         self.assertEqual(result, "environment ready")
-        create.assert_called_once_with(
-            config["prefix"], config["wine"], True, self.state.output,
-            cancel_event=self.state.cancel_event,
-            process_callback=self.state.set_process,
+        create.assert_called_once()
+        self.assertEqual(
+            create.call_args.args,
+            (config["prefix"], config["wine"], True, self.state.output),
         )
+        self.assertIs(create.call_args.kwargs["cancel_event"], self.state.cancel_event)
+        self.assertEqual(create.call_args.kwargs["process_callback"], self.state.set_process)
+        self.assertTrue(callable(create.call_args.kwargs["progress_callback"]))
         apply.assert_called_once_with(
             config["prefix"], config["wine"], True, use_x11=True,
             cancel_event=self.state.cancel_event,
             process_callback=self.state.set_process,
         )
 
+    def test_environment_creation_withholds_ready_until_policy_work_finishes(self):
+        """Policy work keeps the progress state below 100% until it completes."""
+        config = backend.set_office_telemetry_disabled(
+            self.config, self.config["prefix"], True
+        )
+        observed_progress = []
+
+        def create_environment(*args, **kwargs):
+            kwargs["progress_callback"]("Wine environment is ready", 100)
+            return "environment ready"
+
+        def apply_policy(*args, **kwargs):
+            observed_progress.append(self.state.snapshot()["task"]["progress_value"])
+
+        with mock.patch.object(
+            backend, "create_environment", side_effect=create_environment
+        ), mock.patch.object(
+            backend, "apply_office_telemetry_policy", side_effect=apply_policy
+        ):
+            result = qt_module._create_environment_worker(self.state, config, True)
+
+        self.assertEqual(result, "environment ready")
+        self.assertEqual(observed_progress, [None])
+        self.assertEqual(self.state.snapshot()["task"]["progress_value"], 100)
+
     def test_environment_creation_queues_policy_work_and_keeps_qt_responsive(self):
+        """Policy application runs off the Qt thread."""
         with self.state.lock:
             self.state.config = backend.set_office_telemetry_disabled(
                 self.state.config, self.config["prefix"], True
@@ -997,6 +1027,60 @@ class QtManagerTests(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertEqual(self.state.snapshot()["task"]["status"], "completed")
+
+    def test_environment_recreation_shows_progress_popup_with_live_logs(self):
+        """Recreation displays live task logs and a completed progress state."""
+        with mock.patch.object(
+            self.window, "save_config", return_value=dict(self.config)
+        ), mock.patch.object(
+            qt_module.QMessageBox, "warning",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), mock.patch.object(
+            self.state, "start_task"
+        ) as start_task, mock.patch.object(
+            qt_module, "_create_environment_worker", return_value="environment ready"
+        ) as create:
+            self.window.environment_action(True)
+            operation = start_task.call_args.args[1]
+            operation()
+
+        self.assertEqual(start_task.call_args.args[0], "environment")
+        create.assert_called_once()
+        self.assertEqual(self.window.update_progress_task_kind, "environment")
+        self.assertEqual(
+            self.window.update_progress_dialog.windowTitle(),
+            "Recreating Wine environment",
+        )
+        self.assertTrue(self.window.update_progress_dialog.isVisible())
+
+        self.window._refresh_update_progress({
+            "kind": "environment",
+            "running": True,
+            "status": "running",
+            "log": "$ wineboot -u\nCreating registry files\n",
+            "progress_label": "Initializing the Wine environment…",
+            "progress_value": None,
+        })
+        self.assertIn(
+            "Creating registry files",
+            self.window.update_progress_log.toPlainText(),
+        )
+        self.assertIn(
+            "Initializing",
+            self.window.update_progress_status.text(),
+        )
+
+        self.window._refresh_update_progress({
+            "kind": "environment",
+            "running": False,
+            "status": "completed",
+            "log": "Wine environment is ready at /tmp/prefix\n",
+            "progress_label": "Wine environment is ready",
+            "progress_value": 100,
+        })
+        self.assertEqual(self.window.update_progress_bar.value(), 100)
+        self.assertEqual(self.window.update_progress_button.text(), "Close")
+        self.window.update_progress_dialog.accept()
 
     def test_cancel_environment_reaps_active_helper(self):
         helper = mock.Mock()

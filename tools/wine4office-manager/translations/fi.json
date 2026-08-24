@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "Wine:n sammutus keskeytettiin.",
   "Wine tools": "Wine-työkalut",
   "Wine4Office Manager": "Wine4Office-hallinta",
-  "Working folder:": "Työkansio:"
+  "Working folder:": "Työkansio:",
+"Applying Office compatibility settings…": "Käytetään Officen yhteensopivuusasetuksia…",
+"Applying Office privacy settings…": "Käytetään Officen yksityisyysasetuksia…",
+"Configuring Wine graphics…": "Määritetään Winen grafiikkaa…",
+"Creating Wine environment": "Luo Wine-ympäristö",
+"Creating Wine environment…": "Wine-ympäristöä luodaan…",
+"Initializing the Wine environment…": "Wine-ympäristöä alustetaan…",
+"Installing Wine Gecko…": "Wine Geckoa asennetaan…",
+"Installing Wine Mono…": "Wine Monoa asennetaan…",
+"Recreating Wine environment": "Luo Wine-ympäristö uudelleen",
+"Recreating Wine environment…": "Wine-ympäristöä luodaan uudelleen…",
+"Removing the previous Wine environment…": "Edellistä Wine-ympäristöä poistetaan…",
+"Restoring the previous Wine environment…": "Edellistä Wine-ympäristöä palautetaan…",
+"Stopping the existing Wine environment…": "Nykyistä Wine-ympäristöä pysäytetään…",
+"Wine environment is ready": "Wine-ympäristö on valmis",
+"Wine environment is ready.": "Wine-ympäristö on valmis.",
+"Wine environment operation was cancelled.": "Wine-ympäristön toiminto peruutettiin.",
+"Wine environment operation failed. Review the details below.": "Wine-ympäristön toiminto epäonnistui. Katso lisätiedot alta."
 }

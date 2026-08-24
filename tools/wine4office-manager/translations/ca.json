@@ -65,5 +65,22 @@
   "Wine shutdown was interrupted.": "L'aturada de Wine s'ha interromput.",
   "Wine tools": "Eines del Wine",
   "Wine4Office Manager": "Gestor del Wine4Office",
-  "Working folder:": "Carpeta de treball:"
+  "Working folder:": "Carpeta de treball:",
+"Applying Office compatibility settings…": "S'apliquen els paràmetres de compatibilitat de l'Office…",
+"Applying Office privacy settings…": "S'apliquen els paràmetres de privadesa de l'Office…",
+"Configuring Wine graphics…": "Es configuren els gràfics del Wine…",
+"Creating Wine environment": "Crea l'entorn del Wine",
+"Creating Wine environment…": "S'està creant l'entorn del Wine…",
+"Initializing the Wine environment…": "S'està inicialitzant l'entorn del Wine…",
+"Installing Wine Gecko…": "S'està instal·lant el Wine Gecko…",
+"Installing Wine Mono…": "S'està instal·lant el Wine Mono…",
+"Recreating Wine environment": "Recrea l'entorn del Wine",
+"Recreating Wine environment…": "S'està recreant l'entorn del Wine…",
+"Removing the previous Wine environment…": "S'està eliminant l'entorn del Wine anterior…",
+"Restoring the previous Wine environment…": "S'està restaurant l'entorn del Wine anterior…",
+"Stopping the existing Wine environment…": "S'està aturant l'entorn del Wine existent…",
+"Wine environment is ready": "L'entorn del Wine està a punt",
+"Wine environment is ready.": "L'entorn del Wine està a punt.",
+"Wine environment operation was cancelled.": "L'operació de l'entorn del Wine s'ha cancel·lat.",
+"Wine environment operation failed. Review the details below.": "L'operació de l'entorn del Wine ha fallat. Consulteu els detalls següents."
 }

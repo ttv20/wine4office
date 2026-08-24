@@ -185,6 +185,39 @@ class TranslationTests(unittest.TestCase):
                     if "Office" in source:
                         self.assertIn("Office", translated)
 
+    def test_environment_progress_is_localized_in_every_language(self):
+        """Every supported locale translates the environment progress UI."""
+        texts = (
+            "Applying Office compatibility settings…",
+            "Applying Office privacy settings…",
+            "Configuring Wine graphics…",
+            "Creating Wine environment",
+            "Creating Wine environment…",
+            "Initializing the Wine environment…",
+            "Installing Wine Gecko…",
+            "Installing Wine Mono…",
+            "Recreating Wine environment",
+            "Recreating Wine environment…",
+            "Removing the previous Wine environment…",
+            "Restoring the previous Wine environment…",
+            "Stopping the existing Wine environment…",
+            "Wine environment is ready",
+            "Wine environment is ready.",
+            "Wine environment operation was cancelled.",
+            "Wine environment operation failed. Review the details below.",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            for source in texts:
+                with self.subTest(language=language, source=source):
+                    translated = i18n.CATALOGS[language].get(source)
+                    self.assertIsNotNone(translated)
+                    if language != "en":
+                        self.assertNotEqual(translated, source)
+                    if "Wine" in source:
+                        self.assertIn("Wine", translated)
+                    if "Office" in source:
+                        self.assertIn("Office", translated)
+
     def test_additional_language_catalogs_are_complete_and_ltr(self):
         expected = {
             "de", "es", "fr", "it", "pt", "nl", "ru", "uk", "pl", "tr",

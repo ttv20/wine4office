@@ -99,5 +99,22 @@
   "Wine shutdown was interrupted.": "Wine のシャットダウンが中断されました。",
   "Wine tools": "Wine ツール",
   "Wine4Office Manager": "Wine4Office マネージャー",
-  "Working folder:": "作業フォルダー:"
+  "Working folder:": "作業フォルダー:",
+"Applying Office compatibility settings…": "Office の互換性設定を適用中…",
+"Applying Office privacy settings…": "Office のプライバシー設定を適用中…",
+"Configuring Wine graphics…": "Wine のグラフィックを設定中…",
+"Creating Wine environment": "Wine 環境を作成",
+"Creating Wine environment…": "Wine 環境を作成中…",
+"Initializing the Wine environment…": "Wine 環境を初期化中…",
+"Installing Wine Gecko…": "Wine Gecko をインストール中…",
+"Installing Wine Mono…": "Wine Mono をインストール中…",
+"Recreating Wine environment": "Wine 環境を再作成",
+"Recreating Wine environment…": "Wine 環境を再作成中…",
+"Removing the previous Wine environment…": "以前の Wine 環境を削除中…",
+"Restoring the previous Wine environment…": "以前の Wine 環境を復元中…",
+"Stopping the existing Wine environment…": "既存の Wine 環境を停止中…",
+"Wine environment is ready": "Wine 環境の準備が完了しました",
+"Wine environment is ready.": "Wine 環境の準備が完了しました。",
+"Wine environment operation was cancelled.": "Wine 環境の操作はキャンセルされました。",
+"Wine environment operation failed. Review the details below.": "Wine 環境の操作に失敗しました。以下の詳細を確認してください。"
 }
