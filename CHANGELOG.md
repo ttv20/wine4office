@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
+
 ## 0.2.1-beta.1 — 2026-08-23
 
 - Update the Wine base to WineHQ 11.16.
