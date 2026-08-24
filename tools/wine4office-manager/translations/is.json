@@ -74,9 +74,9 @@
 "Recreating Wine environment…": "Wine-umhverfi er búið til aftur…",
 "Removing the previous Wine environment…": "Fyrra Wine-umhverfi er fjarlægt…",
 "Restoring the previous Wine environment…": "Fyrra Wine-umhverfi er endurheimt…",
-"Stopping the existing Wine environment…": "Virkjað Wine-umhverfi er stöðvað…",
+"Stopping the existing Wine environment…": "Núverandi Wine-umhverfi er stöðvað…",
 "Wine environment is ready": "Wine-umhverfið er tilbúið",
 "Wine environment is ready.": "Wine-umhverfið er tilbúið.",
-"Wine environment operation was cancelled.": "Stöðvun Wine-umhverfis var hætt við.",
+"Wine environment operation was cancelled.": "Hætt var við aðgerð Wine-umhverfis.",
 "Wine environment operation failed. Review the details below.": "Aðgerð Wine-umhverfis mistókst. Skoðaðu upplýsingarnar hér að neðan."
 }
