@@ -1661,6 +1661,17 @@ NTSTATUS WINAPI wow64_NtUserBuildPropList( UINT *args )
     return NtUserBuildPropList( hwnd, count, props, ret_count );
 }
 
+NTSTATUS WINAPI wow64_NtUserCalculatePopupWindowPosition( UINT *args )
+{
+    const POINT *anchor = get_ptr( &args );
+    const SIZE *size = get_ptr( &args );
+    UINT flags = get_ulong( &args );
+    RECT *exclude = get_ptr( &args );
+    RECT *position = get_ptr( &args );
+
+    return NtUserCalculatePopupWindowPosition( anchor, size, flags, exclude, position );
+}
+
 NTSTATUS WINAPI wow64_NtUserCallHwnd( UINT *args )
 {
     HWND hwnd = get_handle( &args );

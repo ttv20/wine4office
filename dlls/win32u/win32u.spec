@@ -816,7 +816,7 @@
 @ stdcall -syscall NtUserBuildNameList(long long ptr ptr)
 @ stdcall -syscall NtUserBuildPropList(long long ptr ptr)
 @ stub -syscall NtUserCalcMenuBar
-@ stub -syscall NtUserCalculatePopupWindowPosition
+@ stdcall -syscall NtUserCalculatePopupWindowPosition(ptr ptr long ptr ptr)
 @ stdcall -syscall NtUserCallHwnd(long long)
 @ stub -syscall NtUserCallHwndLock
 @ stub -syscall NtUserCallHwndLockSafe

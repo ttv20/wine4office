@@ -758,6 +758,8 @@ W32KAPI NTSTATUS WINAPI NtUserBuildHwndList( HDESK desktop, HWND hwnd, BOOL chil
                                              ULONG thread_id, ULONG count, HWND *buffer, ULONG *size );
 W32KAPI NTSTATUS WINAPI NtUserBuildNameList( HWINSTA winsta, ULONG size, struct ntuser_name_list *buffer, ULONG *ret_size );
 W32KAPI NTSTATUS WINAPI NtUserBuildPropList( HWND hwnd, ULONG count, struct ntuser_property_list *buffer, ULONG *ret_count );
+W32KAPI BOOL    WINAPI NtUserCalculatePopupWindowPosition( const POINT *anchor, const SIZE *size,
+                                                           UINT flags, RECT *exclude, RECT *position );
 W32KAPI ULONG_PTR WINAPI NtUserCallHwnd( HWND hwnd, DWORD code );
 W32KAPI ULONG_PTR WINAPI NtUserCallHwndParam( HWND hwnd, DWORD_PTR param, DWORD code );
 W32KAPI LRESULT WINAPI NtUserCallNextHookEx( HHOOK hhook, INT code, WPARAM wparam, LPARAM lparam );

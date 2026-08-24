@@ -1652,6 +1652,7 @@ typedef struct tagACCEL
 #define TPM_VERNEGANIMATION 0x2000
 #define TPM_NOANIMATION     0x4000
 #define TPM_LAYOUTRTL       0x8000
+#define TPM_WORKAREA       0x10000
 
 typedef struct tagTPMPARAMS
 {
@@ -3915,6 +3916,7 @@ WINUSERAPI LONG        WINAPI BroadcastSystemMessageExA(DWORD,LPDWORD,UINT,WPARA
 WINUSERAPI LONG        WINAPI BroadcastSystemMessageExW(DWORD,LPDWORD,UINT,WPARAM,LPARAM,PBSMINFO);
 #define                       BroadcastSystemMessageEx WINELIB_NAME_AW(BroadcastSystemMessageEx)
 WINUSERAPI void        WINAPI CalcChildScroll(HWND, INT);
+WINUSERAPI BOOL        WINAPI CalculatePopupWindowPosition(const POINT*,const SIZE*,UINT,RECT*,RECT*);
 WINUSERAPI BOOL        WINAPI CallMsgFilterA(LPMSG,INT);
 WINUSERAPI BOOL        WINAPI CallMsgFilterW(LPMSG,INT);
 #define                       CallMsgFilter WINELIB_NAME_AW(CallMsgFilter)
