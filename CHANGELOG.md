@@ -8,6 +8,7 @@
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
 - Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
+- Keep Hebrew input synchronized when returning to Wine Wayland windows.
 
 ## 0.2.1-beta.1 — 2026-08-23
 

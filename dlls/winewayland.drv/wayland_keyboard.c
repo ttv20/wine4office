@@ -832,22 +832,24 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     keyboard->focused_hwnd = hwnd;
     pthread_mutex_unlock(&keyboard->mutex);
 
-    NtUserPostMessage(keyboard->focused_hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, 0,
-                      (LPARAM)keyboard_hkl);
-
-    if (!(data = wayland_win_data_get(hwnd))) return;
-
-    if ((surface = data->wayland_surface))
+    if ((data = wayland_win_data_get(hwnd)))
     {
-        /* TODO: Drop the internal message and call NtUserSetForegroundWindow
-         * directly once it's updated to not explicitly deactivate the old
-         * foreground window when both the old and new foreground windows
-         * are in the same non-current thread. */
-        if (surface->window.managed)
-            NtUserPostMessage(hwnd, WM_WAYLAND_SET_FOREGROUND, 0, 0);
+        if ((surface = data->wayland_surface))
+        {
+            /* TODO: Drop the internal message and call NtUserSetForegroundWindow
+             * directly once it's updated to not explicitly deactivate the old
+             * foreground window when both the old and new foreground windows
+             * are in the same non-current thread. */
+            if (surface->window.managed)
+                NtUserPostMessage(hwnd, WM_WAYLAND_SET_FOREGROUND, 0, 0);
+        }
+
+        wayland_win_data_release(data);
     }
 
-    wayland_win_data_release(data);
+    /* Activate the host layout after the window becomes foreground so the
+     * input-language notification reaches the newly focused control. */
+    NtUserPostMessage(hwnd, WM_WAYLAND_SET_KEYBOARD_LAYOUT, TRUE, (LPARAM)keyboard_hkl);
 }
 
 struct foreground_sync
