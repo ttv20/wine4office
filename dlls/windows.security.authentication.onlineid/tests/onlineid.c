@@ -31,9 +31,29 @@
 #define WIDL_using_Windows_Security_Authentication_OnlineId
 #include "windows.security.authentication.onlineid.h"
 
+#include "../private.h"
 #include "wine/test.h"
 
 #define check_interface( obj, iid ) check_interface_( __LINE__, obj, iid )
+
+static void test_office_licensing_scopes(void)
+{
+    ok(is_office_licensing_scope(L"service::officeapps.live.com"), "legacy licensing scope not recognized.\n");
+    ok(is_office_licensing_scope(L"SERVICE::OFFICEAPPS.LIVE.COM::MBI_SSL"),
+       "legacy licensing scope with policy not recognized.\n");
+    ok(is_office_licensing_scope(L"https://officeapps.live.com/.default offline_access openid profile"),
+       "normalized licensing scope not recognized.\n");
+    ok(is_office_licensing_scope(L"offline_access HTTPS://OFFICEAPPS.LIVE.COM/.DEFAULT"),
+       "normalized mixed-case licensing scope not recognized.\n");
+    ok(!is_office_licensing_scope(NULL), "NULL scope recognized.\n");
+    ok(!is_office_licensing_scope(L""), "empty scope recognized.\n");
+    ok(!is_office_licensing_scope(L"https://graph.microsoft.com/.default"), "Graph scope recognized.\n");
+    ok(!is_office_licensing_scope(L"https://officeapps.live.com.evil/.default"),
+       "lookalike URI licensing scope recognized.\n");
+    ok(!is_office_licensing_scope(L"xservice::officeapps.live.com"),
+       "embedded legacy licensing scope recognized.\n");
+}
+
 static void check_interface_( unsigned int line, void *obj, const IID *iid )
 {
     IUnknown *iface = obj;
@@ -715,6 +735,8 @@ done:
 START_TEST(onlineid)
 {
     HRESULT hr;
+
+    test_office_licensing_scopes();
 
     hr = RoInitialize( RO_INIT_MULTITHREADED );
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
