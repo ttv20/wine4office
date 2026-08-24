@@ -4050,6 +4050,7 @@ _PRELOAD_VOIP_TIMEOUT = 15
 _PRELOAD_VOIP_STOP_TIMEOUT = 5
 _PRELOAD_HEARTBEAT_MAX_AGE = 20
 _PRELOAD_UNIT_MARKER = "# Managed by Wine4OfficeManager: preload-service-v1"
+_CGROUP2_ROOT = Path("/sys/fs/cgroup")
 _AUTOMATIC_UPDATE_UNIT_MARKER = (
     "# Managed by Wine4OfficeManager: automatic-update-check-v1"
 )
@@ -4239,20 +4240,44 @@ def _systemctl_property(command: str) -> tuple[bool, str]:
     return value in {"active", "reloading", "activating", "deactivating"}, detail
 
 
-def preload_service_memory_bytes() -> int | None:
-    """Return current cgroup memory without refreshing service state."""
+def _preload_service_cgroup_path() -> Path | None:
     result = _systemctl_user(
-        ["show", PRELOAD_UNIT, "--property=MemoryCurrent", "--value"],
+        ["show", PRELOAD_UNIT, "--property=ControlGroup", "--value"],
         check=False,
     )
     value = result.stdout.strip()
-    if result.returncode or not value or value in {"[not set]", "infinity"}:
+    if result.returncode or not value or value in {"-", "[not set]"}:
+        return None
+    if not value.startswith("/") or "\0" in value:
+        raise RuntimeError("Cannot determine the background-service cgroup.")
+    parts = value.split("/")
+    if any(not part or part in {".", ".."} for part in parts[1:]):
+        raise RuntimeError("The background-service cgroup path is invalid.")
+    if value == "/":
+        raise RuntimeError("The background-service cgroup path is invalid.")
+    return _CGROUP2_ROOT.joinpath(*parts[1:])
+
+
+def preload_service_memory_bytes() -> int | None:
+    """Return service memory excluding inactive cached filesystem data."""
+    cgroup = _preload_service_cgroup_path()
+    if cgroup is None:
         return None
     try:
-        memory = int(value)
-    except ValueError as error:
+        memory = int(
+            (cgroup / "memory.current").read_text(encoding="ascii").strip()
+        )
+        inactive_file_cache = None
+        for line in (cgroup / "memory.stat").read_text(encoding="ascii").splitlines():
+            key, separator, raw_value = line.partition(" ")
+            if key == "inactive_file" and separator:
+                inactive_file_cache = int(raw_value.strip())
+                break
+    except (OSError, UnicodeError, ValueError) as error:
         raise RuntimeError("Cannot determine background-service RAM usage.") from error
-    return memory if memory >= 0 else None
+    if memory < 0 or inactive_file_cache is None or inactive_file_cache < 0:
+        raise RuntimeError("Cannot determine background-service RAM usage.")
+    return max(0, memory - inactive_file_cache)
 
 
 def _preload_stop_identity_matches(binding: dict) -> bool:

@@ -157,8 +157,8 @@ class QtManagerTests(unittest.TestCase):
                 self.assertTrue(button.toolTip())
         self.assertFalse(hasattr(self.window, "preload_disable_button"))
         self.assertFalse(hasattr(self.window, "preload_start_button"))
-        self.assertTrue(self.window.preload_selected_label.accessibleName())
-        self.assertTrue(self.window.preload_binding_label.accessibleName())
+        self.assertFalse(hasattr(self.window, "preload_selected_label"))
+        self.assertFalse(hasattr(self.window, "preload_binding_label"))
         self.assertFalse(hasattr(self.window, "preload_state_label"))
         self.assertFalse(any(
             "immediate" in checkbox.text().lower()
@@ -230,7 +230,7 @@ class QtManagerTests(unittest.TestCase):
                     enabled,
                 )
 
-    def test_background_preload_binding_mismatch_shows_both_environments(self):
+    def test_background_preload_binding_mismatch_explains_both_environments(self):
         bound = str(self.home / "other-office")
         self._refresh_preload(
             state="binding_mismatch",
@@ -241,8 +241,6 @@ class QtManagerTests(unittest.TestCase):
             selected_matches=False,
         )
 
-        self.assertEqual(self.window.preload_selected_label.text(), self.config["prefix"])
-        self.assertEqual(self.window.preload_binding_label.text(), bound)
         self.assertIn(self.config["prefix"], self.window.preload_detail_label.text())
         self.assertIn(bound, self.window.preload_detail_label.text())
         self.assertIn("Stop & disable", self.window.preload_detail_label.text())
@@ -366,6 +364,7 @@ class QtManagerTests(unittest.TestCase):
         }
         self._refresh_preload(memory_bytes=600 * 1024 * 1024, **values)
         stop_enabled = self.window.preload_stop_button.isEnabled()
+        self.assertTrue(self.window.preload_form.isRowVisible(self.window.preload_memory_label))
 
         self._refresh_preload(
             checking=True, memory_bytes=612 * 1024 * 1024, **values
@@ -373,6 +372,17 @@ class QtManagerTests(unittest.TestCase):
 
         self.assertEqual(self.window.preload_memory_label.text(), "612 MB")
         self.assertEqual(self.window.preload_stop_button.isEnabled(), stop_enabled)
+
+    def test_background_preload_hides_ram_row_when_service_is_inactive(self):
+        self._refresh_preload(
+            installed=True,
+            enabled=True,
+            active=False,
+            state="inactive",
+            memory_bytes=600 * 1024 * 1024,
+        )
+
+        self.assertFalse(self.window.preload_form.isRowVisible(self.window.preload_memory_label))
 
     def test_background_preload_buttons_dispatch_exact_manager_actions(self):
         controls = (

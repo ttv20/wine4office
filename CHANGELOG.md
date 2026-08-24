@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Display background-service RAM without reclaimable inactive file cache and hide it when the service is stopped.
 - Activate Microsoft 365 licenses after signing in to Office.
 - Keep Wine environment recreation responsive and show live progress and logs in the Manager.
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
