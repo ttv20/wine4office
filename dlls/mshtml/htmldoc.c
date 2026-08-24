@@ -4551,7 +4551,7 @@ static HRESULT WINAPI DocumentSelector_querySelectorAll(IDocumentSelector *iface
         return map_nsresult(nsres);
     }
 
-    hres = create_child_collection(node_list, &This->node.event_target.dispex, pel);
+    hres = create_child_collection(node_list, &This->node.event_target.dispex, FALSE, pel);
     nsIDOMNodeList_Release(node_list);
     return hres;
 }
