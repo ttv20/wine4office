@@ -2557,16 +2557,32 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertNotIn("shell", run.call_args.kwargs)
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
 
-    def test_preload_memory_reads_only_systemd_memory_property(self):
-        completed = mock.Mock(returncode=0, stdout="637788160\n", stderr="")
+    def test_preload_memory_excludes_only_inactive_cgroup_file_cache(self):
+        """Subtract only inactive file cache from the service cgroup usage."""
+        cgroup = self.root / "sys/fs/cgroup/user.slice/wine4office-preload.service"
+        cgroup.mkdir(parents=True)
+        (cgroup / "memory.current").write_text(str(700 * 1024 * 1024) + "\n")
+        (cgroup / "memory.stat").write_text(
+            f"anon {500 * 1024 * 1024}\n"
+            f"file {180 * 1024 * 1024}\n"
+            f"active_file {120 * 1024 * 1024}\n"
+            f"inactive_file {60 * 1024 * 1024}\n"
+        )
+        completed = mock.Mock(
+            returncode=0,
+            stdout="/user.slice/wine4office-preload.service\n",
+            stderr="",
+        )
         with mock.patch.object(
+            backend, "_CGROUP2_ROOT", self.root / "sys/fs/cgroup"
+        ), mock.patch.object(
             backend, "_systemctl_user", return_value=completed
         ) as systemctl:
             memory = backend.preload_service_memory_bytes()
 
-        self.assertEqual(memory, 637788160)
+        self.assertEqual(memory, 640 * 1024 * 1024)
         systemctl.assert_called_once_with(
-            ["show", backend.PRELOAD_UNIT, "--property=MemoryCurrent", "--value"],
+            ["show", backend.PRELOAD_UNIT, "--property=ControlGroup", "--value"],
             check=False,
         )
 

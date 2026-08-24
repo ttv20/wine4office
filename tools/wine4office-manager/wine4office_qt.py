@@ -275,6 +275,7 @@ class ManagerWindow(QMainWindow):
             self.statusBar().showMessage(self._tr(self.statusBar().currentMessage()))
 
     def _build_ui(self) -> None:
+        """Construct the Manager pages and background-service controls."""
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
@@ -427,24 +428,13 @@ class ManagerWindow(QMainWindow):
         self.preload_notice_label.setAccessibleName("Background services memory notice")
         self.preload_notice_label.setWordWrap(True)
         preload_layout.addWidget(self.preload_notice_label)
-        preload_form = self._form()
-        preload_form.setVerticalSpacing(2)
-        self.preload_selected_label = QLabel("Checking…")
-        self.preload_selected_label.setAccessibleName("Selected preload environment")
-        self.preload_selected_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.preload_binding_label = QLabel("Checking…")
-        self.preload_binding_label.setAccessibleName("Bound preload environment")
-        self.preload_binding_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        preload_form.addRow("Selected environment:", self.preload_selected_label)
-        preload_form.addRow("Bound environment:", self.preload_binding_label)
+        self.preload_form = self._form()
+        self.preload_form.setVerticalSpacing(2)
         self.preload_memory_label = QLabel("—")
         self.preload_memory_label.setAccessibleName("Background services RAM usage")
-        preload_form.addRow("RAM usage:", self.preload_memory_label)
-        preload_layout.addLayout(preload_form)
+        self.preload_form.addRow("RAM usage:", self.preload_memory_label)
+        self.preload_form.setRowVisible(self.preload_memory_label, False)
+        preload_layout.addLayout(self.preload_form)
 
         self.preload_detail_label = QLabel()
         self.preload_detail_label.setAccessibleName("Background services details")
@@ -544,7 +534,10 @@ class ManagerWindow(QMainWindow):
             self.show_error(detail)
 
     def _update_preload_status(self, snapshot: dict) -> None:
+        """Refresh background-service labels, controls, and RAM visibility."""
         preload = snapshot["preload"]
+        active = bool(preload.get("active"))
+        self.preload_form.setRowVisible(self.preload_memory_label, active)
         memory = preload.get("memory_bytes")
         memory_text = (
             f"{max(1, round(int(memory) / (1024 * 1024)))} MB"
@@ -556,13 +549,10 @@ class ManagerWindow(QMainWindow):
         binding = preload.get("binding")
         bound = binding.get("prefix") if isinstance(binding, dict) else binding
         bound_text = str(bound) if bound else self._tr("Not configured")
-        self.preload_selected_label.setText(selected)
-        self.preload_binding_label.setText(bound_text)
 
         supported = bool(preload.get("supported"))
         installed = bool(preload.get("installed"))
         enabled = bool(preload.get("enabled"))
-        active = bool(preload.get("active"))
         selected_matches = bool(preload.get("selected_matches"))
         mismatch = bool(binding) and not selected_matches
         detail = str(preload.get("detail") or "").strip()
