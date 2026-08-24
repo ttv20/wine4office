@@ -138,6 +138,7 @@ class QtManagerTests(unittest.TestCase):
         self.application.processEvents()
 
     def test_background_preload_controls_are_explicit_and_accessible(self):
+        """Expose only the supported background-service controls and labels."""
         self.assertEqual(self.window.preload_group.title(), "Background services")
         notice = self.window.preload_notice_label.text()
         self.assertEqual(
@@ -231,6 +232,7 @@ class QtManagerTests(unittest.TestCase):
                 )
 
     def test_background_preload_binding_mismatch_explains_both_environments(self):
+        """Explain the selected and bound environments without duplicate rows."""
         bound = str(self.home / "other-office")
         self._refresh_preload(
             state="binding_mismatch",
@@ -351,6 +353,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertTrue(all(not button.isEnabled() for button in buttons))
 
     def test_background_preload_refresh_changes_only_ram_number(self):
+        """Refresh the visible RAM value without changing service controls."""
         values = {
             "state": "active",
             "installed": True,
@@ -374,6 +377,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(self.window.preload_stop_button.isEnabled(), stop_enabled)
 
     def test_background_preload_hides_ram_row_when_service_is_inactive(self):
+        """Hide the RAM row when the preload service is inactive."""
         self._refresh_preload(
             installed=True,
             enabled=True,

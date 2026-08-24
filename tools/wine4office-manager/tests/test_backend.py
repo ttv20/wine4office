@@ -2558,6 +2558,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
 
     def test_preload_memory_excludes_only_inactive_cgroup_file_cache(self):
+        """Subtract only inactive file cache from the service cgroup usage."""
         cgroup = self.root / "sys/fs/cgroup/user.slice/wine4office-preload.service"
         cgroup.mkdir(parents=True)
         (cgroup / "memory.current").write_text(str(700 * 1024 * 1024) + "\n")

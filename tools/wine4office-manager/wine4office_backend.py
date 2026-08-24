@@ -4241,6 +4241,7 @@ def _systemctl_property(command: str) -> tuple[bool, str]:
 
 
 def _preload_service_cgroup_path() -> Path | None:
+    """Return the validated cgroup v2 path for the preload service."""
     result = _systemctl_user(
         ["show", PRELOAD_UNIT, "--property=ControlGroup", "--value"],
         check=False,

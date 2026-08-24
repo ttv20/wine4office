@@ -275,6 +275,7 @@ class ManagerWindow(QMainWindow):
             self.statusBar().showMessage(self._tr(self.statusBar().currentMessage()))
 
     def _build_ui(self) -> None:
+        """Construct the Manager pages and background-service controls."""
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(28, 28))
@@ -533,6 +534,7 @@ class ManagerWindow(QMainWindow):
             self.show_error(detail)
 
     def _update_preload_status(self, snapshot: dict) -> None:
+        """Refresh background-service labels, controls, and RAM visibility."""
         preload = snapshot["preload"]
         active = bool(preload.get("active"))
         self.preload_form.setRowVisible(self.preload_memory_label, active)
