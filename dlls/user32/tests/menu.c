@@ -4230,6 +4230,75 @@ if (0) /* FIXME: uncomment once Wine is fixed */ {
     DeleteObject(hbmp);
 }
 
+static void test_CalculatePopupWindowPosition(void)
+{
+    BOOL (WINAPI *calculate_popup_position)(const POINT *, const SIZE *, UINT, RECT *, RECT *);
+    MONITORINFO info = {sizeof(info)};
+    POINT anchor;
+    SIZE size;
+    RECT position, exclude, intersection;
+    HMONITOR monitor;
+    BOOL ret;
+
+    calculate_popup_position = (void *)GetProcAddress( GetModuleHandleA("user32.dll"),
+                                                       "CalculatePopupWindowPosition" );
+    if (!calculate_popup_position)
+    {
+        win_skip("CalculatePopupWindowPosition is not available\n");
+        return;
+    }
+
+    monitor = MonitorFromPoint( (POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY );
+    ok( !!monitor, "MonitorFromPoint failed, error %lu\n", GetLastError() );
+    ret = GetMonitorInfoW( monitor, &info );
+    ok( ret, "GetMonitorInfoW failed, error %lu\n", GetLastError() );
+    if (!ret) return;
+
+    anchor.x = (info.rcWork.left + info.rcWork.right) / 2;
+    anchor.y = (info.rcWork.top + info.rcWork.bottom) / 2;
+    size.cx = min( 100, (info.rcWork.right - info.rcWork.left) / 4 );
+    size.cy = min( 80, (info.rcWork.bottom - info.rcWork.top) / 4 );
+
+    ret = calculate_popup_position( &anchor, &size, TPM_LEFTALIGN | TPM_TOPALIGN,
+                                    NULL, &position );
+    ok( ret, "CalculatePopupWindowPosition failed, error %lu\n", GetLastError() );
+    ok( position.left == anchor.x && position.top == anchor.y &&
+        position.right == anchor.x + size.cx && position.bottom == anchor.y + size.cy,
+        "unexpected left/top aligned position %s\n", wine_dbgstr_rect( &position ) );
+
+    ret = calculate_popup_position( &anchor, &size, TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
+                                    NULL, &position );
+    ok( ret, "CalculatePopupWindowPosition failed, error %lu\n", GetLastError() );
+    ok( position.left == anchor.x - size.cx && position.top == anchor.y - size.cy &&
+        position.right == anchor.x && position.bottom == anchor.y,
+        "unexpected right/bottom aligned position %s\n", wine_dbgstr_rect( &position ) );
+
+    ret = calculate_popup_position( &anchor, &size, TPM_CENTERALIGN | TPM_VCENTERALIGN,
+                                    NULL, &position );
+    ok( ret, "CalculatePopupWindowPosition failed, error %lu\n", GetLastError() );
+    ok( position.left == anchor.x - size.cx / 2 && position.top == anchor.y - size.cy / 2 &&
+        position.right == position.left + size.cx && position.bottom == position.top + size.cy,
+        "unexpected centered position %s\n", wine_dbgstr_rect( &position ) );
+
+    anchor.x = info.rcWork.right - 1;
+    anchor.y = info.rcWork.bottom - 1;
+    ret = calculate_popup_position( &anchor, &size, TPM_WORKAREA, NULL, &position );
+    ok( ret, "CalculatePopupWindowPosition failed, error %lu\n", GetLastError() );
+    ok( position.right == info.rcWork.right && position.bottom == info.rcWork.bottom,
+        "popup was not clamped to work area, got %s work area %s\n",
+        wine_dbgstr_rect( &position ), wine_dbgstr_rect( &info.rcWork ) );
+
+    anchor.x = (info.rcWork.left + info.rcWork.right) / 2;
+    anchor.y = (info.rcWork.top + info.rcWork.bottom) / 2;
+    SetRect( &exclude, anchor.x - 10, anchor.y - 10, anchor.x + 10, anchor.y + 10 );
+    ret = calculate_popup_position( &anchor, &size, TPM_HORIZONTAL | TPM_WORKAREA,
+                                    &exclude, &position );
+    ok( ret, "CalculatePopupWindowPosition failed, error %lu\n", GetLastError() );
+    ok( !IntersectRect( &intersection, &exclude, &position ),
+        "popup %s overlaps exclude rect %s\n",
+        wine_dbgstr_rect( &position ), wine_dbgstr_rect( &exclude ) );
+}
+
 START_TEST(menu)
 {
     register_menu_check_class();
@@ -4262,4 +4331,5 @@ START_TEST(menu)
     test_menu_circref();
     test_emptypopup();
     test_AppendMenu();
+    test_CalculatePopupWindowPosition();
 }

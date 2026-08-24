@@ -244,7 +244,7 @@
 # @ stub BuildReasonArray
 @ stdcall CalcChildScroll(long long)
 @ stdcall CalcMenuBar(long long long long ptr) CalcMenuBar
-# @ stub CalculatePopupWindowPosition
+@ stdcall CalculatePopupWindowPosition(ptr ptr long ptr ptr) NtUserCalculatePopupWindowPosition
 @ stdcall CallMsgFilter(ptr long) NtUserCallMsgFilter
 @ stdcall CallMsgFilterA(ptr long) NtUserCallMsgFilter
 @ stdcall CallMsgFilterW(ptr long) NtUserCallMsgFilter

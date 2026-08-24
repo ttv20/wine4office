@@ -3133,6 +3133,123 @@ static BOOL show_popup( HWND owner, HMENU hmenu, UINT id, UINT flags,
     return TRUE;
 }
 
+static BOOL popup_position_overlaps( const RECT *exclude, int x, int y, int width, int height )
+{
+    return exclude && x + width > exclude->left && x < exclude->right &&
+           y + height > exclude->top && y < exclude->bottom;
+}
+
+static BOOL popup_position_fits( const RECT *bounds, const RECT *exclude,
+                                 int x, int y, int width, int height )
+{
+    if (x < bounds->left || y < bounds->top ||
+        x + width > bounds->right || y + height > bounds->bottom)
+        return FALSE;
+
+    return !popup_position_overlaps( exclude, x, y, width, height );
+}
+
+static BOOL try_popup_position( const RECT *bounds, const RECT *exclude, RECT *position,
+                                int x, int y, int width, int height )
+{
+    if (!popup_position_fits( bounds, exclude, x, y, width, height )) return FALSE;
+    SetRect( position, x, y, x + width, y + height );
+    return TRUE;
+}
+
+static BOOL try_popup_horizontal( const RECT *bounds, const RECT *exclude, RECT *position,
+                                  int y, int width, int height, UINT flags )
+{
+    int left = exclude->left - width, right = exclude->right;
+
+    if (flags & TPM_RIGHTALIGN)
+    {
+        if (try_popup_position( bounds, exclude, position, left, y, width, height )) return TRUE;
+        return try_popup_position( bounds, exclude, position, right, y, width, height );
+    }
+
+    if (try_popup_position( bounds, exclude, position, right, y, width, height )) return TRUE;
+    return try_popup_position( bounds, exclude, position, left, y, width, height );
+}
+
+static BOOL try_popup_vertical( const RECT *bounds, const RECT *exclude, RECT *position,
+                                int x, int width, int height, UINT flags )
+{
+    int top = exclude->top - height, bottom = exclude->bottom;
+
+    if (flags & TPM_BOTTOMALIGN)
+    {
+        if (try_popup_position( bounds, exclude, position, x, top, width, height )) return TRUE;
+        return try_popup_position( bounds, exclude, position, x, bottom, width, height );
+    }
+
+    if (try_popup_position( bounds, exclude, position, x, bottom, width, height )) return TRUE;
+    return try_popup_position( bounds, exclude, position, x, top, width, height );
+}
+
+/**********************************************************************
+ *           NtUserCalculatePopupWindowPosition   (win32u.@)
+ */
+BOOL WINAPI NtUserCalculatePopupWindowPosition( const POINT *anchor, const SIZE *size,
+                                                UINT flags, RECT *exclude, RECT *position )
+{
+    MONITORINFO info;
+    RECT anchor_rect, bounds, normalized_exclude;
+    int x, y;
+
+    if (!anchor || !size || !position)
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    SetRect( &anchor_rect, anchor->x, anchor->y, anchor->x, anchor->y );
+    info = monitor_info_from_rect( anchor_rect, get_thread_dpi() );
+    bounds = ((flags & TPM_WORKAREA) || PtInRect( &info.rcWork, *anchor ))
+             ? info.rcWork : info.rcMonitor;
+
+    if (flags & TPM_LAYOUTRTL) flags ^= TPM_RIGHTALIGN;
+    x = anchor->x;
+    y = anchor->y;
+    if (flags & TPM_RIGHTALIGN) x -= size->cx;
+    else if (flags & TPM_CENTERALIGN) x -= size->cx / 2;
+    if (flags & TPM_BOTTOMALIGN) y -= size->cy;
+    else if (flags & TPM_VCENTERALIGN) y -= size->cy / 2;
+
+    if (exclude)
+    {
+        normalized_exclude.left = min( exclude->left, exclude->right );
+        normalized_exclude.top = min( exclude->top, exclude->bottom );
+        normalized_exclude.right = max( exclude->left, exclude->right );
+        normalized_exclude.bottom = max( exclude->top, exclude->bottom );
+
+        if (popup_position_overlaps( &normalized_exclude, x, y, size->cx, size->cy ))
+        {
+            if (flags & TPM_VERTICAL)
+            {
+                if (try_popup_vertical( &bounds, &normalized_exclude, position,
+                                        x, size->cx, size->cy, flags ) ||
+                    try_popup_horizontal( &bounds, &normalized_exclude, position,
+                                          y, size->cx, size->cy, flags ))
+                    return TRUE;
+            }
+            else if (try_popup_horizontal( &bounds, &normalized_exclude, position,
+                                           y, size->cx, size->cy, flags ) ||
+                     try_popup_vertical( &bounds, &normalized_exclude, position,
+                                         x, size->cx, size->cy, flags ))
+                return TRUE;
+        }
+    }
+
+    if (x + size->cx > bounds.right) x = bounds.right - size->cx;
+    if (x < bounds.left) x = bounds.left;
+    if (y + size->cy > bounds.bottom) y = bounds.bottom - size->cy;
+    if (y < bounds.top) y = bounds.top;
+
+    SetRect( position, x, y, x + size->cx, y + size->cy );
+    return TRUE;
+}
+
 static void ensure_menu_item_visible( struct menu *menu, UINT index, HDC hdc )
 {
     if (menu->bScrolling)

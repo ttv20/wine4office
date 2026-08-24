@@ -818,7 +818,7 @@
     SYSCALL_ENTRY( 0x132e, NtUserBuildNameList, 16 ) \
     SYSCALL_ENTRY( 0x132f, NtUserBuildPropList, 16 ) \
     SYSCALL_ENTRY( 0x1330, NtUserCalcMenuBar, 0 ) \
-    SYSCALL_ENTRY( 0x1331, NtUserCalculatePopupWindowPosition, 0 ) \
+    SYSCALL_ENTRY( 0x1331, NtUserCalculatePopupWindowPosition, 20 ) \
     SYSCALL_ENTRY( 0x1332, NtUserCallHwnd, 8 ) \
     SYSCALL_ENTRY( 0x1333, NtUserCallHwndLock, 0 ) \
     SYSCALL_ENTRY( 0x1334, NtUserCallHwndLockSafe, 0 ) \
@@ -2360,7 +2360,7 @@
     SYSCALL_ENTRY( 0x132e, NtUserBuildNameList, 32 ) \
     SYSCALL_ENTRY( 0x132f, NtUserBuildPropList, 32 ) \
     SYSCALL_ENTRY( 0x1330, NtUserCalcMenuBar, 0 ) \
-    SYSCALL_ENTRY( 0x1331, NtUserCalculatePopupWindowPosition, 0 ) \
+    SYSCALL_ENTRY( 0x1331, NtUserCalculatePopupWindowPosition, 40 ) \
     SYSCALL_ENTRY( 0x1332, NtUserCallHwnd, 16 ) \
     SYSCALL_ENTRY( 0x1333, NtUserCallHwndLock, 0 ) \
     SYSCALL_ENTRY( 0x1334, NtUserCallHwndLockSafe, 0 ) \
@@ -3682,7 +3682,6 @@
     SYSCALL_STUB( NtUserBroadcastImeShowStatusChange ) \
     SYSCALL_STUB( NtUserBroadcastThemeChangeEvent ) \
     SYSCALL_STUB( NtUserCalcMenuBar ) \
-    SYSCALL_STUB( NtUserCalculatePopupWindowPosition ) \
     SYSCALL_STUB( NtUserCallHwndLock ) \
     SYSCALL_STUB( NtUserCallHwndLockSafe ) \
     SYSCALL_STUB( NtUserCallHwndOpt ) \
