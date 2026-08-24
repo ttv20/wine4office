@@ -42,6 +42,7 @@ typedef struct {
     IHTMLDOMChildrenCollection IHTMLDOMChildrenCollection_iface;
 
     nsIDOMNodeList *nslist;
+    BOOL null_on_oob;
 } HTMLDOMChildrenCollection;
 
 static inline HTMLDOMChildrenCollection *impl_from_IHTMLDOMChildrenCollection(IHTMLDOMChildrenCollection *iface)
@@ -87,7 +88,7 @@ static HRESULT WINAPI HTMLDOMChildrenCollection_item(IHTMLDOMChildrenCollection 
 
     nsIDOMNodeList_GetLength(This->nslist, &length);
     if(index < 0 || index >= length)
-        return S_OK;
+        return This->null_on_oob ? S_OK : E_INVALIDARG;
 
     return HTMLDOMChildrenCollection_collection_item(&This->dispex, index, ppItem);
 }
@@ -247,7 +248,8 @@ dispex_static_data_t NodeList_dispex = {
     .js_flags   = HOSTOBJ_VOLATILE_PROPS
 };
 
-HRESULT create_child_collection(nsIDOMNodeList *nslist, DispatchEx *owner, IHTMLDOMChildrenCollection **ret)
+HRESULT create_child_collection(nsIDOMNodeList *nslist, DispatchEx *owner, BOOL null_on_oob,
+        IHTMLDOMChildrenCollection **ret)
 {
     HTMLDOMChildrenCollection *collection;
 
@@ -258,6 +260,7 @@ HRESULT create_child_collection(nsIDOMNodeList *nslist, DispatchEx *owner, IHTML
 
     nsIDOMNodeList_AddRef(nslist);
     collection->nslist = nslist;
+    collection->null_on_oob = null_on_oob;
 
     init_dispatch_with_owner(&collection->dispex, &NodeList_dispex, owner);
 
@@ -371,7 +374,7 @@ static HRESULT WINAPI HTMLDOMNode_get_childNodes(IHTMLDOMNode *iface, IDispatch 
         return hres;
     }
 
-    hres = create_child_collection(nslist, &This->event_target.dispex,
+    hres = create_child_collection(nslist, &This->event_target.dispex, FALSE,
                                    (IHTMLDOMChildrenCollection**)p);
     nsIDOMNodeList_Release(nslist);
     return hres;

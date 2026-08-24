@@ -88,11 +88,14 @@ function test_attribute_delivery() {
             return;
         finished = true;
         ok(false, "attribute MutationObserver callback timed out");
+        observer.disconnect();
         next_test();
     }, 5000);
     var observer = new MutationObserver(function(records, callback_observer) {
         var record;
 
+        if (finished)
+            return;
         callback_count++;
         ok(callback_count === 1, "attribute mutation delivered once");
         ok(callback_observer === observer, "attribute callback observer identity");
@@ -339,10 +342,13 @@ function test_childlist_reentrant_delivery() {
             return;
         finished = true;
         ok(false, "childList MutationObserver callback timed out");
+        observer.disconnect();
         next_test();
     }, 5000);
 
     observer = new MutationObserver(function(records, callback_observer) {
+        if (finished)
+            return;
         callback_count++;
         ok(this === observer, "childList callback this is observer");
         ok(callback_observer === observer, "childList callback observer identity");
@@ -373,9 +379,12 @@ function test_reentrant_delivery_and_lifetime() {
             return;
         finished = true;
         ok(false, "MutationObserver callback timed out");
+        observer.disconnect();
         next_test();
     }, 5000);
     var observer = new MutationObserver(function(records, callback_observer) {
+        if (finished)
+            return;
         callback_count++;
         ok(this === observer, "callback this is observer");
         ok(records instanceof Array, "callback records is an Array");

@@ -1509,7 +1509,7 @@ static HRESULT mutation_observer_define_nodes(IWineJSDispatch *object, const WCH
     hres = mutation_node_list_create(count, nodes, &node_list);
     if(FAILED(hres))
         return hres;
-    hres = create_child_collection(node_list, owner, &collection);
+    hres = create_child_collection(node_list, owner, TRUE, &collection);
     nsIDOMNodeList_Release(node_list);
     if(FAILED(hres))
         return hres;
@@ -2562,7 +2562,7 @@ static HRESULT WINAPI MutationObserver_takeRecords(IWineMSHTMLMutationObserver *
     ++This->delivery_generation;
     This->delivery_pending = FALSE;
     hres = mutation_observer_create_records(This, ret);
-    if(mutation_observer_has_transients(This))
+    if(FAILED(hres) || mutation_observer_has_transients(This))
         mutation_observer_schedule(This);
     return hres;
 }
