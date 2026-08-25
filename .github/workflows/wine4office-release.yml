@@ -44,45 +44,11 @@ jobs:
       - name: Check out Wine4Office
         uses: actions/checkout@v4
 
-      - name: Install build dependencies when permitted
+      - name: Verify release orchestration environment
         shell: bash
         run: |
           set -euo pipefail
-          if [[ $(id -u) -eq 0 ]]; then
-            elevate=()
-          elif command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
-            elevate=(sudo)
-          else
-            echo "Runner has no root/package-manager access; using preinstalled build dependencies."
-            exit 0
-          fi
-          command -v apt-get >/dev/null || {
-            echo "This automatic dependency step supports apt-based runner containers only." >&2
-            exit 1
-          }
-          "${elevate[@]}" dpkg --add-architecture i386
-          "${elevate[@]}" apt-get update
-          "${elevate[@]}" apt-get install -y --no-install-recommends \
-            autoconf bison build-essential ca-certificates flex gh python3-pip python3-venv zstd \
-            gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
-            g++-mingw-w64-i686 g++-mingw-w64-x86-64 \
-            libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
-            libcups2-dev libdbus-1-dev libfontconfig-dev \
-            libegl1 libfreetype-dev libgl1-mesa-dev libgnutls28-dev libgphoto2-dev \
-            libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev libkrb5-dev libpython3-dev \
-            libpcap-dev libpcsclite-dev libpulse-dev libsane-dev libsdl2-dev \
-            libswresample-dev libswscale-dev libudev-dev libunwind-dev libva-dev \
-            libusb-1.0-0-dev libv4l-dev libvulkan-dev libwayland-dev \
-            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev \
-            libxinerama-dev libxkbcommon-dev libxkbregistry-dev libxrandr-dev libxrender-dev \
-            libxxf86vm-dev ocl-icd-opencl-dev samba-dev unixodbc-dev \
-            wayland-protocols
-
-      - name: Verify self-hosted build environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          required=(make gcc g++ bison flex i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc python3 tar zstd gh)
+          required=(curl docker gh python3 tar zstd)
           missing=()
           for command in "${required[@]}"; do
             command -v "$command" >/dev/null || missing+=("$command")
@@ -92,7 +58,7 @@ jobs:
             exit 1
           fi
           echo "Runner: $(uname -a)"
-          echo "Available build cores: $(nproc)"
+          docker version
           df -h .
 
       - name: Select release version
@@ -141,39 +107,11 @@ jobs:
         run: tools/wine4office-manager/tests/test_release_artifacts.sh
       - name: Test OAuth helper source contracts
         run: python3 programs/wine4officeauth/tests/test_authorize_url.py
+      - name: Test canonical Wine build contract
+        run: tools/wine-build-env/tests/test_build_contract.sh
 
       - name: Configure and build Wine4Office
-        run: |
-          set -euo pipefail
-          mkdir -p build stage
-          cd build
-          CPPFLAGS="-I$GITHUB_WORKSPACE/tools/wine4office-manager/packaging/linux-uapi" \
-            ../configure \
-            --prefix=/opt/wine4office \
-            --enable-archs=i386,x86_64 \
-            --disable-tests
-          grep -q '^#define HAVE_LINUX_NTSYNC_H 1$' include/config.h || {
-            echo "Wine configure did not enable NTSYNC support." >&2
-            exit 1
-          }
-          for feature in SONAME_LIBFREETYPE SONAME_LIBFONTCONFIG SONAME_LIBGNUTLS SONAME_LIBDBUS_1 \
-              SONAME_LIBVA SONAME_LIBVA_DRM; do
-            grep -q "^#define $feature " include/config.h || {
-              echo "Wine configure did not enable $feature; Office web content requires fonts, TLS, and desktop integration." >&2
-              exit 1
-            }
-          done
-          echo "Building with $(nproc) parallel jobs"
-          make -j"$(nproc)"
-          make DESTDIR="$GITHUB_WORKSPACE/stage" install
-          grep -aq '/dev/ntsync' "$GITHUB_WORKSPACE/stage/opt/wine4office/bin/wineserver" || {
-            echo "Built wineserver does not contain NTSYNC support." >&2
-            exit 1
-          }
-          test -f "$GITHUB_WORKSPACE/stage/opt/wine4office/lib/wine/x86_64-unix/winewayland.so" || {
-            echo "Wine Wayland driver was not built; check libwayland, libxkbcommon, libxkbregistry, and protocol dependencies." >&2
-            exit 1
-          }
+        run: tools/wine-build-env/run-build-container.sh full "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/build" "$GITHUB_WORKSPACE/stage"
 
       - name: Bundle Wine Gecko and Mono
         shell: bash
