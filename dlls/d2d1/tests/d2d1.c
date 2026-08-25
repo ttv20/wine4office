@@ -878,6 +878,19 @@ static DWORD get_readback_colour(struct resource_readback *rb, unsigned int x, u
     return ((DWORD *)((BYTE *)rb->data + y * rb->pitch))[x];
 }
 
+static unsigned int count_nonzero_pixels(struct resource_readback *rb,
+        unsigned int left, unsigned int top, unsigned int right, unsigned int bottom)
+{
+    unsigned int x, y, count = 0;
+
+    for (y = top; y < bottom; ++y)
+        for (x = left; x < right; ++x)
+            if (get_readback_colour(rb, x, y))
+                ++count;
+
+    return count;
+}
+
 static float clamp_float(float f, float lower, float upper)
 {
     return f < lower ? lower : f > upper ? upper : f;
@@ -18368,21 +18381,107 @@ static void test_no_target(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static HRESULT create_geometry_aa_compound(ID2D1Factory *factory, ID2D1PathGeometry **geometry)
+{
+    const unsigned int segment_count = 32;
+    const float cx = 32.0f, cy = 32.0f;
+    ID2D1GeometrySink *sink;
+    D2D1_BEZIER_SEGMENT bezier;
+    D2D1_POINT_2F point;
+    unsigned int i;
+    HRESULT hr;
+
+    if (FAILED(hr = ID2D1Factory_CreatePathGeometry(factory, geometry)))
+        return hr;
+    if (FAILED(hr = ID2D1PathGeometry_Open(*geometry, &sink)))
+    {
+        ID2D1PathGeometry_Release(*geometry);
+        *geometry = NULL;
+        return hr;
+    }
+
+    ID2D1GeometrySink_SetFillMode(sink, D2D1_FILL_MODE_ALTERNATE);
+    set_point(&point, cx + 26.0f, cy);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_FILLED);
+    for (i = 0; i < segment_count; ++i)
+    {
+        float a0 = 2.0f * M_PI * i / segment_count;
+        float a1 = 2.0f * M_PI * (i + 1) / segment_count;
+        float amid = (a0 + a1) * 0.5f;
+        float radius = i & 1 ? 14.0f : 26.0f;
+        float next_radius = (i + 1) & 1 ? 14.0f : 26.0f;
+
+        set_point(&bezier.point1, cx + radius * cosf(a0) - 4.5f * sinf(amid),
+                cy + radius * sinf(a0) + 4.5f * cosf(amid));
+        set_point(&bezier.point2, cx + next_radius * cosf(a1) + 4.5f * sinf(amid),
+                cy + next_radius * sinf(a1) - 4.5f * cosf(amid));
+        set_point(&bezier.point3, cx + next_radius * cosf(a1),
+                cy + next_radius * sinf(a1));
+        ID2D1GeometrySink_AddBezier(sink, &bezier);
+    }
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+
+    set_point(&point, cx + 7.0f, cy);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_FILLED);
+    for (i = 1; i <= 24; ++i)
+    {
+        float angle = 2.0f * M_PI * i / 24.0f;
+
+        set_point(&point, cx + 7.0f * cosf(angle), cy + 7.0f * sinf(angle));
+        ID2D1GeometrySink_AddLine(sink, point);
+    }
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    hr = ID2D1GeometrySink_Close(sink);
+    ID2D1GeometrySink_Release(sink);
+    return hr;
+}
+
 static void test_geometry_aa_guardrails(BOOL d3d11)
 {
+    static const struct
+    {
+        DXGI_FORMAT format;
+        D2D1_ALPHA_MODE alpha_mode;
+    }
+    aa_formats[] =
+    {
+        {DXGI_FORMAT_R32G32B32A32_FLOAT, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R16G16B16A16_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_B8G8R8X8_UNORM, D2D1_ALPHA_MODE_IGNORE},
+        {DXGI_FORMAT_B8G8R8A8_UNORM_SRGB, D2D1_ALPHA_MODE_PREMULTIPLIED},
+    };
+    static const D2D1_GRADIENT_STOP coverage_stops[] =
+    {
+        {0.0f, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {1.0f, {0.0f, 0.0f, 1.0f, 1.0f}},
+    };
     D2D1_SIZE_U small_size = {64, 64}, large_size = {2048, 1024};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES gradient_desc;
     D2D1_RECT_F small_rect, large_rect, clip_rect;
+    D2D1_POINT_2F point;
     D2D1_MATRIX_3X2_F transform, current_transform;
     D2D1_PIXEL_FORMAT pixel_format;
+    D2D1_PIXEL_FORMAT current_format;
     ID2D1RectangleGeometry *small_geometry, *large_geometry;
+    ID2D1PathGeometry *clip_geometry, *compound_geometry;
+    ID2D1GradientStopCollection *gradient = NULL;
+    ID2D1LinearGradientBrush *gradient_brush = NULL;
+    ID2D1GeometrySink *sink;
     ID2D1SolidColorBrush *brush;
     ID2D1Image *original_target, *current_target;
-    ID2D1Bitmap1 *small_bitmap, *large_bitmap;
+    ID2D1Bitmap1 *small_bitmap, *large_bitmap, *format_bitmap;
     struct d2d1_test_context ctx;
     struct resource_readback rb;
     float dpi_x, dpi_y;
     D2D1_COLOR_F colour;
+    D2D1_TAG tag1, tag2;
+    unsigned int covered, total, i;
     DWORD pixel;
     HRESULT hr;
     BOOL readback;
@@ -18429,12 +18528,46 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         return;
     }
 
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &clip_geometry);
+    ok(hr == S_OK, "Failed to create clip geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = ID2D1PathGeometry_Open(clip_geometry, &sink);
+    ok(hr == S_OK, "Failed to open clip geometry, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        set_point(&point, 8.0f, 8.0f);
+        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+        set_point(&point, 56.0f, 56.0f);
+        ID2D1GeometrySink_AddLine(sink, point);
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+        hr = ID2D1GeometrySink_Close(sink);
+        ok(hr == S_OK, "Failed to close clip geometry, hr %#lx.\n", hr);
+        ID2D1GeometrySink_Release(sink);
+    }
+    if (FAILED(hr))
+    {
+        ID2D1PathGeometry_Release(clip_geometry);
+        ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
     set_rect(&large_rect, 0.0f, 0.0f, large_size.width, large_size.height);
     hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &large_rect, &large_geometry);
     ok(hr == S_OK, "Failed to create large geometry, hr %#lx.\n", hr);
     if (FAILED(hr))
     {
         ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1PathGeometry_Release(clip_geometry);
         ID2D1Bitmap1_Release(large_bitmap);
         ID2D1Bitmap1_Release(small_bitmap);
         release_test_context(&ctx);
@@ -18448,10 +18581,38 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     {
         ID2D1RectangleGeometry_Release(large_geometry);
         ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1PathGeometry_Release(clip_geometry);
         ID2D1Bitmap1_Release(large_bitmap);
         ID2D1Bitmap1_Release(small_bitmap);
         release_test_context(&ctx);
         return;
+    }
+
+    hr = create_geometry_aa_compound(ctx.factory, &compound_geometry);
+    ok(hr == S_OK, "Failed to create compound AA geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1SolidColorBrush_Release(brush);
+        ID2D1RectangleGeometry_Release(large_geometry);
+        ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1PathGeometry_Release(clip_geometry);
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = ID2D1RenderTarget_CreateGradientStopCollection((ID2D1RenderTarget *)ctx.context,
+            coverage_stops, ARRAY_SIZE(coverage_stops), D2D1_GAMMA_2_2,
+            D2D1_EXTEND_MODE_CLAMP, &gradient);
+    ok(hr == S_OK, "Failed to create coverage gradient, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        set_point(&gradient_desc.startPoint, 8.0f, 32.0f);
+        set_point(&gradient_desc.endPoint, 56.0f, 32.0f);
+        hr = ID2D1RenderTarget_CreateLinearGradientBrush((ID2D1RenderTarget *)ctx.context,
+                &gradient_desc, NULL, gradient, &gradient_brush);
+        ok(hr == S_OK, "Failed to create coverage gradient brush, hr %#lx.\n", hr);
     }
 
     ID2D1DeviceContext_GetTarget(ctx.context, &original_target);
@@ -18461,8 +18622,9 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
      * when it renders a bounded source-over subpixel stroke. */
     set_matrix_identity(&transform);
     translate_matrix(&transform, 1.0f, 1.0f);
-    set_rect(&clip_rect, 4.0f, 4.0f, 20.0f, 60.0f);
+    set_rect(&clip_rect, 0.0f, 0.0f, 64.0f, 64.0f);
     ID2D1SolidColorBrush_SetOpacity(brush, 0.5f);
+    ID2D1DeviceContext_SetTags(ctx.context, 0x1234, 0x5678);
     ID2D1DeviceContext_BeginDraw(ctx.context);
     ID2D1DeviceContext_Clear(ctx.context, NULL);
     ID2D1DeviceContext_SetDpi(ctx.context, 120.0f, 120.0f);
@@ -18472,30 +18634,13 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
     ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)small_geometry,
             (ID2D1Brush *)brush, 0.5f, NULL);
-    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
-    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
-    ok(hr == S_OK, "Source-over antialias draw failed, hr %#lx.\n", hr);
-
-    readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
-    ok(readback, "Failed to read back the antialiased bitmap.\n");
-    if (readback)
-    {
-        /* The translated stroke lies on x/y 9. The aliased clip ends before
-         * x 20, so both its coverage and its transparent edges are visible
-         * in the destination rather than only in an internal scratch target. */
-        pixel = get_readback_colour(&rb, 11, 30);
-        ok(pixel != 0, "Covered geometry edge was unexpectedly transparent: 0x%08lx.\n", pixel);
-        pixel = get_readback_colour(&rb, 20, 30);
-        ok(compare_colour(pixel, 0x00000000, 0),
-                "Aliased clip edge was not transparent: 0x%08lx.\n", pixel);
-        pixel = get_readback_colour(&rb, 8, 30);
-        ok(compare_colour(pixel, 0x00000000, 0),
-                "Translated geometry edge was not transparent: 0x%08lx.\n", pixel);
-        pixel = get_readback_colour(&rb, 10, 7);
-        ok(compare_colour(pixel, 0x00000000, 0),
-                "Transparent edge above geometry was contaminated: 0x%08lx.\n", pixel);
-        release_resource_readback(&rb);
-    }
+    /* Leave the caller's clip on the stack until after the helper returns.
+     * This makes a lost or duplicated clip entry observable through the
+     * public PopAxisAlignedClip call below. */
+    ID2D1DeviceContext_GetTags(ctx.context, &tag1, &tag2);
+    ok(tag1 == 0x1234 && tag2 == 0x5678,
+            "Antialias draw changed the drawing tags: %s:%s.\n",
+            wine_dbgstr_longlong(tag1), wine_dbgstr_longlong(tag2));
 
     ID2D1DeviceContext_GetDpi(ctx.context, &dpi_x, &dpi_y);
     ok(dpi_x == 120.0f && dpi_y == 120.0f,
@@ -18505,6 +18650,185 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
             "Antialias draw changed the drawing transform.\n");
     ok(ID2D1DeviceContext_GetPrimitiveBlend(ctx.context) == D2D1_PRIMITIVE_BLEND_SOURCE_OVER,
             "Antialias draw changed the primitive blend mode.\n");
+
+    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Source-over antialias draw failed, hr %#lx.\n", hr);
+
+    /* Repeat at identity/96 DPI so the pixel oracle can derive its region
+     * directly from the public clip rectangle. The transformed/DPI case
+     * above remains a state-restoration check and deliberately has no pixel
+     * coordinate assumptions. */
+    set_matrix_identity(&transform);
+    set_rect(&clip_rect, 20.0f, 20.0f, 44.0f, 44.0f);
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_Clear(ctx.context, NULL);
+    ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+    ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+    ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)clip_geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
+    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Identity antialias draw failed, hr %#lx.\n", hr);
+
+    readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+    ok(readback, "Failed to read back the antialiased bitmap.\n");
+    if (readback)
+    {
+        /* The geometry intersects the caller's aliased clip. Assert the
+         * region invariant rather than selecting Wine-specific edge pixels:
+         * coverage must exist inside the clip and nowhere outside it. */
+        covered = count_nonzero_pixels(&rb, 20, 20, 44, 44);
+        total = count_nonzero_pixels(&rb, 0, 0, small_size.width, small_size.height);
+        ok(covered, "Clipped antialias draw produced no covered pixels.\n");
+        ok(total == covered, "Antialias draw contaminated pixels outside its clip (%u/%u).\n",
+                total - covered, total);
+        release_resource_readback(&rb);
+    }
+
+    if (gradient_brush)
+    {
+        DWORD left_pixel, right_pixel;
+
+        set_rect(&clip_rect, 4.0f, 4.0f, 50.0f, 60.0f);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect,
+                D2D1_ANTIALIAS_MODE_ALIASED);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)gradient_brush, NULL);
+        ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Gradient coverage draw failed, hr %#lx.\n", hr);
+
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back the gradient coverage bitmap.\n");
+        if (readback)
+        {
+            left_pixel = get_readback_colour(&rb, 20, 32);
+            right_pixel = get_readback_colour(&rb, 44, 32);
+            ok(left_pixel && right_pixel, "Gradient coverage omitted path interior pixels.\n");
+            ok(left_pixel != right_pixel, "Gradient coverage did not sample the brush (%#lx).\n",
+                    left_pixel);
+            pixel = get_readback_colour(&rb, 32, 32);
+            ok(!pixel, "Gradient coverage filled alternate-mode hole with %#lx.\n", pixel);
+            release_resource_readback(&rb);
+        }
+
+        set_matrix_identity(&transform);
+        translate_matrix(&transform, 4.0f, 2.0f);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_SetDpi(ctx.context, 120.0f, 120.0f);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)gradient_brush, NULL);
+        ID2D1DeviceContext_GetDpi(ctx.context, &dpi_x, &dpi_y);
+        ok(dpi_x == 120.0f && dpi_y == 120.0f,
+                "Gradient coverage changed DPI to %.8e,%.8e.\n", dpi_x, dpi_y);
+        ID2D1DeviceContext_GetTransform(ctx.context, &current_transform);
+        ok(!memcmp(&current_transform, &transform, sizeof(transform)),
+                "Gradient coverage changed the drawing transform.\n");
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Transformed gradient coverage draw failed, hr %#lx.\n", hr);
+
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back transformed gradient coverage.\n");
+        if (readback)
+        {
+            left_pixel = get_readback_colour(&rb, 30, 42);
+            right_pixel = get_readback_colour(&rb, 60, 42);
+            ok(left_pixel && right_pixel,
+                    "Transformed gradient coverage omitted path interior pixels.\n");
+            ok(left_pixel != right_pixel,
+                    "Transformed gradient used incorrect brush coordinates (%#lx).\n", left_pixel);
+            pixel = get_readback_colour(&rb, 45, 42);
+            ok(!pixel, "Transformed coverage filled alternate-mode hole with %#lx.\n", pixel);
+            release_resource_readback(&rb);
+        }
+
+        ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+        set_matrix_identity(&transform);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    }
+
+    /* Exercise every format admitted by the scratch-size calculation. A
+     * backend may reject a format before the AA helper is reached; that is a
+     * capability fallback, not a pixel oracle. Formats that can be targets
+     * must complete the public geometry transaction successfully. */
+    for (i = 0; i < ARRAY_SIZE(aa_formats); ++i)
+    {
+        bitmap_desc.pixelFormat.format = aa_formats[i].format;
+        bitmap_desc.pixelFormat.alphaMode = aa_formats[i].alpha_mode;
+        hr = ID2D1DeviceContext_CreateBitmap(ctx.context, small_size, NULL, 0,
+                &bitmap_desc, &format_bitmap);
+        if (hr == D2DERR_UNSUPPORTED_PIXEL_FORMAT)
+        {
+            skip("AA format %#x is unavailable on this adapter.\n", aa_formats[i].format);
+            continue;
+        }
+        ok(hr == S_OK, "Failed to create AA format %#x target, hr %#lx.\n",
+                aa_formats[i].format, hr);
+        if (FAILED(hr))
+            continue;
+
+        current_format = ID2D1Bitmap1_GetPixelFormat(format_bitmap);
+        ok(current_format.format == aa_formats[i].format,
+                "AA format %#x resolved to %#x.\n", aa_formats[i].format, current_format.format);
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)format_bitmap);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+        set_matrix_identity(&transform);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+        ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)small_geometry,
+                (ID2D1Brush *)brush, 0.5f, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "AA format %#x geometry draw failed, hr %#lx.\n",
+                aa_formats[i].format, hr);
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
+        ID2D1Bitmap1_Release(format_bitmap);
+    }
+
+    /* This compound fill satisfies the production complexity heuristic. It
+     * has many cubic segments plus an alternate-fill hole, so the coverage
+     * candidate must combine the complete path before compositing the brush. */
+    set_rect(&clip_rect, 4.0f, 4.0f, 50.0f, 60.0f);
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_Clear(ctx.context, NULL);
+    ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+    set_matrix_identity(&transform);
+    ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+    ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+            (ID2D1Brush *)brush, NULL);
+    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Compound coverage draw failed, hr %#lx.\n", hr);
+
+    readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+    ok(readback, "Failed to read back the compound coverage bitmap.\n");
+    if (readback)
+    {
+        covered = count_nonzero_pixels(&rb, 4, 4, 50, 60);
+        total = count_nonzero_pixels(&rb, 0, 0, small_size.width, small_size.height);
+        ok(covered > 200, "Compound coverage produced only %u covered pixels.\n", covered);
+        ok(total == covered, "Compound coverage escaped the aliased clip (%u/%u).\n",
+                total - covered, total);
+        pixel = get_readback_colour(&rb, 32, 32);
+        ok(!pixel, "Alternate-fill hole contains pixel %#lx.\n", pixel);
+        pixel = get_readback_colour(&rb, 44, 32);
+        ok(pixel, "Compound path interior was not filled.\n");
+        release_resource_readback(&rb);
+    }
 
     /* COPY is not implemented by immediate bitmap targets yet. It must take
      * the ordinary geometry fallback without poisoning the draw transaction. */
@@ -18525,8 +18849,9 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ok((size_t)large_size.width * large_size.height * 85 > (size_t)128 * 1024 * 1024,
             "Large test target does not exceed the minimum scratch budget.\n");
 
-    /* The public operation must fall back before allocation and leave the
-     * context usable. */
+    /* A subpixel stroke unconditionally selects the custom AA helper. The
+     * full-size rectangle then exceeds the scratch budget, so the helper
+     * must fall back before allocation and leave the context usable. */
     ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)large_bitmap);
     set_matrix_identity(&transform);
     ID2D1DeviceContext_BeginDraw(ctx.context);
@@ -18535,16 +18860,16 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_SetTransform(ctx.context, &transform);
     ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
-    ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)large_geometry,
-            (ID2D1Brush *)brush, NULL);
+    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)large_geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
     hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
     ok(hr == S_OK, "Over-budget antialias fallback failed, hr %#lx.\n", hr);
     readback = get_d3d11_bitmap_readback(large_bitmap, &rb);
     ok(readback, "Failed to read back the over-budget fallback bitmap.\n");
     if (readback)
     {
-        pixel = get_readback_colour(&rb, 1024, 512);
-        ok(pixel != 0, "Over-budget fallback did not render pixels: 0x%08lx.\n", pixel);
+        covered = count_nonzero_pixels(&rb, 0, 0, large_size.width, large_size.height);
+        ok(covered, "Over-budget fallback did not render any pixels.\n");
         release_resource_readback(&rb);
     }
     ID2D1DeviceContext_GetTarget(ctx.context, &current_target);
@@ -18555,8 +18880,12 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_SetTarget(ctx.context, original_target);
     ID2D1Image_Release(original_target);
     ID2D1SolidColorBrush_Release(brush);
+    if (gradient_brush) ID2D1LinearGradientBrush_Release(gradient_brush);
+    if (gradient) ID2D1GradientStopCollection_Release(gradient);
+    ID2D1PathGeometry_Release(compound_geometry);
     ID2D1RectangleGeometry_Release(large_geometry);
     ID2D1RectangleGeometry_Release(small_geometry);
+    ID2D1PathGeometry_Release(clip_geometry);
     ID2D1Bitmap1_Release(large_bitmap);
     ID2D1Bitmap1_Release(small_bitmap);
     release_test_context(&ctx);
