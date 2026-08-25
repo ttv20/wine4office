@@ -421,12 +421,16 @@ public:
 
     bool rollback()
     {
+        WCHAR fault[64];
         bool success = true;
         if (!active) return false;
         DeleteFileW(temporary.c_str());
         if (replaced)
         {
-            if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+            bool had_backup = GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES;
+            if (!write_marker(had_backup ? "rolling-back-existing" : "rolling-back-new"))
+                return false;
+            if (had_backup)
             {
                 success = DeleteFileW(target.c_str()) &&
                           MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
@@ -434,8 +438,19 @@ public:
             else success = DeleteFileW(target.c_str()) ||
                            GetLastError() == ERROR_FILE_NOT_FOUND;
         }
-        if (success && !DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
-            success = false;
+        if (success)
+        {
+            DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE",
+                                                    fault, ARRAY_SIZE(fault));
+            if (length && length < ARRAY_SIZE(fault) && !wcscmp(fault, L"marker-delete"))
+            {
+                SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", NULL);
+                SetLastError(ERROR_ACCESS_DENIED);
+                success = false;
+            }
+            else if (!DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
+                success = false;
+        }
         if (success)
         {
             DeleteFileW(backup.c_str());
@@ -553,9 +568,11 @@ bool cache_transaction::replace_bundle(const std::string &value)
     DATA_BLOB input, output = {};
     HANDLE file;
     DWORD written;
-    bool success = false;
+    bool target_existed, success = false;
 
     if (!valid()) return false;
+    target_existed = GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!write_marker(target_existed ? "replacing-existing" : "replacing-new")) return false;
     input.cbData = value.size();
     input.pbData = (BYTE *)value.data();
     if (!CryptProtectData(&input, L"Wine4Office WAM bundle", NULL, NULL, NULL,
@@ -1000,9 +1017,9 @@ static bool recover_cache_transaction_locked(void)
     LARGE_INTEGER size;
     HANDLE file;
     DWORD read;
-    std::string content, name;
+    std::string content, name, state;
     std::wstring target, backup, temporary;
-    bool success = true, transaction_replaced = false;
+    bool success = true, transaction_removes_target = false, transaction_rolling_back = false;
 
     if (marker.empty() || GetFileAttributesW(marker.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
     file = CreateFileW(marker.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
@@ -1021,11 +1038,19 @@ static bool recover_cache_transaction_locked(void)
         return true;
     }
     {
-        size_t prefix_len = strlen("Wine4OfficeWamBundle=1\n"), name_end;
+        size_t prefix_len = strlen("Wine4OfficeWamBundle=1\n"), name_end, state_end;
         name_end = content.find('\n', prefix_len);
         if (name_end == std::string::npos) return false;
         name = content.substr(prefix_len, name_end - prefix_len);
-        transaction_replaced = content.compare(name_end + 1, strlen("replaced"), "replaced") == 0;
+        state_end = content.find('\n', name_end + 1);
+        if (state_end == std::string::npos) return false;
+        state = content.substr(name_end + 1, state_end - name_end - 1);
+        if (state != "prepared" && state != "replacing-existing" && state != "replacing-new" &&
+            state != "replaced" && state != "rolling-back-existing" && state != "rolling-back-new")
+            return false;
+        transaction_removes_target = state == "replacing-new" || state == "replaced" ||
+                                     state == "rolling-back-new";
+        transaction_rolling_back = state == "rolling-back-existing" || state == "rolling-back-new";
         if (name.compare(0, 11, "wam-bundle-") || name.size() != 11 + 32 + 4 ||
             name.compare(name.size() - 4, 4, ".dat"))
             return false;
@@ -1039,11 +1064,14 @@ static bool recover_cache_transaction_locked(void)
             DeleteFileW(target.c_str());
             success = MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
         }
-        else if (transaction_replaced) DeleteFileW(target.c_str());
+        else if (transaction_removes_target) DeleteFileW(target.c_str());
         DeleteFileW(temporary.c_str());
     }
     DeleteFileW(temporary.c_str());
-    if (success)
+    /* A rolling-back marker is written only after the prior projection was
+     * restored successfully.  Recover the target bundle, but do not replace
+     * that prior active projection with the target account. */
+    if (success && !transaction_rolling_back)
     {
         std::string json;
         cache_record record;
@@ -2073,7 +2101,16 @@ static bool self_test_publication_failures(const cache_record &first, const cach
                   cache_record_matches(second, loaded) && self_test_projection(second);
         secure_clear(loaded);
     }
+    if (success)
+    {
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", L"final-read");
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", L"marker-delete");
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
     SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+    SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", NULL);
     DeleteFileW(cache_file(first_bundle.c_str()).c_str());
     secure_clear(loaded);
     return success;

@@ -2994,20 +2994,7 @@ static enum helper_result onlineid_run_test_helper( HANDLE cancel_event, DWORD t
         return HELPER_COMPLETED;
     }
     if (wcscmp( mode, L"block" ) && wcscmp( mode, L"gated-block" ) &&
-        wcscmp( mode, L"timeout" ) && wcscmp( mode, L"missing" ) &&
-        wcscmp( mode, L"shutdown" ))
-    {
-        onlineid_signal_test_event( completed_name );
-        return HELPER_FAILED;
-    }
-
-    if (!wcscmp( mode, L"missing" ))
-    {
-        onlineid_signal_test_event( completed_name );
-        return HELPER_FAILED;
-    }
-
-    if (!wcscmp( mode, L"shutdown" ))
+        wcscmp( mode, L"timeout" ))
     {
         onlineid_signal_test_event( completed_name );
         return HELPER_FAILED;
