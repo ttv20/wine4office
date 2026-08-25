@@ -2317,6 +2317,21 @@ struct wined3d_swapchain_state_parent_ops
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY  0x00000001u
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS 0x00000002u
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT 0x00000004u
+#define WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT 16
+
+struct wined3d_swapchain_present_result
+{
+    uint64_t present_id;
+    HRESULT result;
+    uint32_t capabilities;
+    uint64_t presented_physical_identity;
+    uint64_t current_physical_identity;
+    uint64_t identity_generation;
+    uint64_t presentation_engine_identity;
+    uint64_t presentation_engine_generation;
+    unsigned int physical_identity_count;
+    uint64_t physical_identities[WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT];
+};
 
 struct wined3d_private_store
 {
@@ -2922,7 +2937,10 @@ struct wined3d_texture * __cdecl wined3d_swapchain_get_back_buffer(const struct 
  * describe the queued physical state and the eventual present result must
  * leave the capability set clear. */
 HRESULT __cdecl wined3d_swapchain_get_present_capabilities(const struct wined3d_swapchain *swapchain,
-        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity);
+        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity,
+        uint64_t *identity_generation);
+HRESULT __cdecl wined3d_swapchain_get_present_result(const struct wined3d_swapchain *swapchain,
+        uint64_t present_id, struct wined3d_swapchain_present_result *result);
 struct wined3d_device * __cdecl wined3d_swapchain_get_device(const struct wined3d_swapchain *swapchain);
 HRESULT __cdecl wined3d_swapchain_get_display_mode(const struct wined3d_swapchain *swapchain,
         struct wined3d_display_mode *mode, enum wined3d_display_rotation *rotation);
@@ -2940,8 +2958,12 @@ HRESULT __cdecl wined3d_swapchain_get_raster_status(const struct wined3d_swapcha
         struct wined3d_raster_status *raster_status);
 struct wined3d_swapchain_state * __cdecl wined3d_swapchain_get_state(struct wined3d_swapchain *swapchain);
 ULONG __cdecl wined3d_swapchain_incref(struct wined3d_swapchain *swapchain);
+void __cdecl wined3d_swapchain_invalidate_present_results(struct wined3d_swapchain *swapchain);
 HRESULT __cdecl wined3d_swapchain_present(struct wined3d_swapchain *swapchain, const RECT *src_rect,
         const RECT *dst_rect, HWND dst_window_override, unsigned int swap_interval, uint32_t flags);
+HRESULT __cdecl wined3d_swapchain_present_with_token(struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
+        unsigned int swap_interval, uint32_t flags, uint64_t *present_id);
 HRESULT __cdecl wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapchain, unsigned int buffer_count,
         unsigned int width, unsigned int height, enum wined3d_format_id format_id,
         enum wined3d_multisample_type multisample_type, unsigned int multisample_quality,

@@ -128,6 +128,11 @@ static void wined3d_swapchain_vk_destroy_vulkan_swapchain(struct wined3d_swapcha
     free(swapchain_vk->vk_semaphores);
     VK_CALL(vkDestroySwapchainKHR(device_vk->vk_device, swapchain_vk->vk_swapchain, NULL));
     VK_CALL(vkDestroySurfaceKHR(vk_info->instance, swapchain_vk->vk_surface, NULL));
+    swapchain_vk->vk_images = NULL;
+    swapchain_vk->vk_semaphores = NULL;
+    swapchain_vk->image_count = 0;
+    swapchain_vk->vk_swapchain = VK_NULL_HANDLE;
+    swapchain_vk->vk_surface = VK_NULL_HANDLE;
 }
 
 static void wined3d_swapchain_vk_destroy_object(void *object)
@@ -229,16 +234,22 @@ void CDECL wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swap
 }
 
 
-HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
+HRESULT CDECL wined3d_swapchain_present_with_token(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
-        unsigned int swap_interval, uint32_t flags)
+        unsigned int swap_interval, uint32_t flags, uint64_t *present_id)
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
+    struct wined3d_swapchain_present_record *record;
+    uint64_t id;
     RECT s, d;
 
-    TRACE("swapchain %p, src_rect %s, dst_rect %s, dst_window_override %p, swap_interval %u, flags %#x.\n",
+    TRACE("swapchain %p, src_rect %s, dst_rect %s, dst_window_override %p, swap_interval %u, "
+            "flags %#x, present_id %p.\n",
             swapchain, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect),
-            dst_window_override, swap_interval, flags);
+            dst_window_override, swap_interval, flags, present_id);
+
+    if (present_id)
+        *present_id = 0;
 
     if (flags)
         FIXME("Ignoring flags %#x.\n", flags);
@@ -285,23 +296,45 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         dst_rect = &d;
     }
 
+    AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    if (!(id = ++swapchain->next_present_id))
+        id = ++swapchain->next_present_id;
+    record = &swapchain->present_results[id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    memset(record, 0, sizeof(*record));
+    record->result.present_id = id;
+    record->result.result = E_PENDING;
+    record->result.identity_generation = swapchain->present_identity_generation;
+    swapchain->last_submitted_present_id = id;
+    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+
     wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
-            dst_rect, dst_window_override, swap_interval, flags);
+            dst_rect, dst_window_override, swap_interval, flags, id);
+
+    if (present_id)
+        *present_id = id;
 
     wined3d_mutex_unlock();
 
     return WINED3D_OK;
 }
 
-HRESULT CDECL wined3d_swapchain_get_present_capabilities(const struct wined3d_swapchain *swapchain,
-        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity)
+HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
+        unsigned int swap_interval, uint32_t flags)
 {
-    uint32_t backend_capabilities;
-    uint64_t backend_identity;
-    HRESULT hr;
+    return wined3d_swapchain_present_with_token(swapchain, src_rect, dst_rect,
+            dst_window_override, swap_interval, flags, NULL);
+}
 
-    TRACE("swapchain %p, backbuffer_idx %u, capabilities %p, physical_identity %p.\n",
-            swapchain, backbuffer_idx, capabilities, physical_identity);
+HRESULT CDECL wined3d_swapchain_get_present_capabilities(const struct wined3d_swapchain *swapchain,
+        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity,
+        uint64_t *identity_generation)
+{
+    const struct wined3d_swapchain_present_record *record;
+
+    TRACE("swapchain %p, backbuffer_idx %u, capabilities %p, physical_identity %p, "
+            "identity_generation %p.\n", swapchain, backbuffer_idx, capabilities,
+            physical_identity, identity_generation);
 
     /* Initialize every caller-owned output that is available before any
      * validation can fail.  In particular, invalid swapchain/backbuffer
@@ -310,35 +343,91 @@ HRESULT CDECL wined3d_swapchain_get_present_capabilities(const struct wined3d_sw
         *capabilities = 0;
     if (physical_identity)
         *physical_identity = 0;
+    if (identity_generation)
+        *identity_generation = 0;
 
-    if (!swapchain || !capabilities || !physical_identity)
+    if (!swapchain || !capabilities || !physical_identity || !identity_generation)
         return E_INVALIDARG;
     if (!swapchain->back_buffers || backbuffer_idx >= swapchain->state.desc.backbuffer_count)
         return WINED3DERR_INVALIDCALL;
 
-    if (!swapchain->swapchain_ops || !swapchain->swapchain_ops->swapchain_get_present_capabilities)
+    /* Completion records describe the physical storage currently exposed as
+     * back buffer 0. Other logical indices have no authoritative mapping. */
+    if (backbuffer_idx)
+        return WINED3D_OK;
+
+    AcquireSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+    if (!swapchain->last_completed_present_id
+            || swapchain->last_completed_present_id != swapchain->last_submitted_present_id)
     {
-        TRACE("Swapchain %p has no authoritative present capability callback.\n", swapchain);
+        ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
         return WINED3D_OK;
     }
 
-    backend_capabilities = 0;
-    backend_identity = 0;
-    if (FAILED(hr = swapchain->swapchain_ops->swapchain_get_present_capabilities(swapchain,
-            backbuffer_idx, &backend_capabilities, &backend_identity)))
-        return hr;
-
-    /* A capability bit without its required identity is not usable. */
-    if (!(backend_capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY)
-            || !backend_identity)
+    record = &swapchain->present_results[swapchain->last_completed_present_id
+            % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    if (!record->completed || record->result.present_id != swapchain->last_completed_present_id
+            || FAILED(record->result.result))
     {
-        backend_capabilities &= ~WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY;
-        backend_identity = 0;
+        ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+        return WINED3D_OK;
     }
 
-    *capabilities = backend_capabilities;
-    *physical_identity = backend_identity;
+    /* A capability bit without its required identity is not usable. */
+    if ((record->result.capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY)
+            && record->result.current_physical_identity)
+    {
+        *capabilities = record->result.capabilities;
+        *physical_identity = record->result.current_physical_identity;
+        *identity_generation = record->result.identity_generation;
+    }
+    ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+
     return S_OK;
+}
+
+HRESULT CDECL wined3d_swapchain_get_present_result(const struct wined3d_swapchain *swapchain,
+        uint64_t present_id, struct wined3d_swapchain_present_result *result)
+{
+    const struct wined3d_swapchain_present_record *record;
+
+    TRACE("swapchain %p, present_id %s, result %p.\n",
+            swapchain, wine_dbgstr_longlong(present_id), result);
+
+    if (result)
+        memset(result, 0, sizeof(*result));
+    if (!swapchain || !present_id || !result)
+        return E_INVALIDARG;
+
+    AcquireSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+    record = &swapchain->present_results[present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    if (record->result.present_id != present_id)
+    {
+        ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+        return WINED3DERR_NOTAVAILABLE;
+    }
+    if (!record->completed)
+    {
+        ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+        return S_FALSE;
+    }
+
+    *result = record->result;
+    ReleaseSRWLockShared((SRWLOCK *)&swapchain->present_result_lock);
+    return S_OK;
+}
+
+void CDECL wined3d_swapchain_invalidate_present_results(struct wined3d_swapchain *swapchain)
+{
+    TRACE("swapchain %p.\n", swapchain);
+
+    AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    memset(swapchain->present_results, 0, sizeof(swapchain->present_results));
+    swapchain->last_submitted_present_id = 0;
+    swapchain->last_completed_present_id = 0;
+    if (!++swapchain->present_identity_generation)
+        ++swapchain->present_identity_generation;
+    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
 }
 
 HRESULT CDECL wined3d_swapchain_get_front_buffer_data(const struct wined3d_swapchain *swapchain,
@@ -505,7 +594,7 @@ HRESULT CDECL wined3d_swapchain_get_gamma_ramp(const struct wined3d_swapchain *s
 
 /* The is a fallback for cases where we e.g. can't create a GL context or
  * Vulkan swapchain for the swapchain window. */
-static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
+static HRESULT swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
         struct wined3d_context *context, const RECT *src_rect, const RECT *dst_rect)
 {
     struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
@@ -514,6 +603,7 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
     const struct wined3d_format *format;
     unsigned int row_pitch, slice_pitch;
     NTSTATUS status;
+    BOOL blit_succeeded;
     HBITMAP bitmap;
     HDC src_dc;
 
@@ -529,7 +619,7 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
     if (!format->ddi_format)
     {
         WARN("Cannot create a DC for format %s.\n", debug_d3dformat(format->id));
-        return;
+        return WINED3DERR_NOTAVAILABLE;
     }
 
     wined3d_texture_load_location(back_buffer, 0, context, WINED3D_LOCATION_SYSMEM);
@@ -548,7 +638,7 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
     if (status)
     {
         WARN("Failed to create DC, status %#lx.\n", status);
-        return;
+        return E_FAIL;
     }
 
     src_dc = create_desc.hDc;
@@ -556,15 +646,18 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
 
     TRACE("Created source DC %p, bitmap %p for backbuffer %p.\n", src_dc, bitmap, back_buffer);
 
-    if (!StretchBlt(swapchain->dc, dst_rect->left, dst_rect->top, dst_rect->right - dst_rect->left,
+    if (!(blit_succeeded = StretchBlt(swapchain->dc, dst_rect->left, dst_rect->top,
+            dst_rect->right - dst_rect->left,
             dst_rect->bottom - dst_rect->top, src_dc, src_rect->left, src_rect->top,
-            src_rect->right - src_rect->left, src_rect->bottom - src_rect->top, SRCCOPY))
+            src_rect->right - src_rect->left, src_rect->bottom - src_rect->top, SRCCOPY)))
         ERR("Failed to blit.\n");
 
     destroy_desc.hDc = src_dc;
     destroy_desc.hBitmap = bitmap;
     if ((status = D3DKMTDestroyDCFromMemory(&destroy_desc)))
         ERR("Failed to destroy src dc, status %#lx.\n", status);
+
+    return blit_succeeded ? WINED3D_OK : E_FAIL;
 }
 
 /* A GL context is provided by the caller */
@@ -694,14 +787,32 @@ static bool swapchain_present_is_partial_copy(struct wined3d_swapchain *swapchai
     return false;
 }
 
-static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
-        const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags)
+static uint64_t wined3d_swapchain_gl_get_physical_identity(struct wined3d_swapchain *swapchain,
+        unsigned int backbuffer_idx)
+{
+    const struct wined3d_texture_gl *texture_gl =
+            wined3d_texture_gl(swapchain->back_buffers[backbuffer_idx]);
+
+    if (texture_gl->texture_rgb.name)
+        return texture_gl->texture_rgb.name;
+    if (texture_gl->rb_multisample)
+        return (1ULL << 32) | texture_gl->rb_multisample;
+    return 0;
+}
+
+static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags,
+        struct wined3d_swapchain_present_result *result)
 {
     struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
     const struct wined3d_pixel_format *pixel_format;
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
     struct wined3d_context *context;
+    uint64_t presented_identity = 0;
+    bool native_swap = false;
+    HRESULT hr = WINED3D_OK;
+    unsigned int i;
 
     context = context_acquire(swapchain->device, swapchain->front_buffer, 0);
     context_gl = wined3d_context_gl(context);
@@ -709,7 +820,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
     {
         context_release(context);
         WARN("Invalid context, skipping present.\n");
-        return;
+        return E_FAIL;
     }
 
     TRACE("Presenting DC %p.\n", context_gl->dc);
@@ -719,7 +830,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
             || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
             && swapchain_present_is_partial_copy(swapchain, dst_rect)))
     {
-        swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
+        hr = swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
     }
     else
     {
@@ -728,6 +839,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
 
         wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
+        presented_identity = wined3d_swapchain_gl_get_physical_identity(swapchain, 0);
 
         swapchain_blit(swapchain, context, src_rect, dst_rect);
 
@@ -738,20 +850,58 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         }
 
         /* call wglSwapBuffers through the gl table to avoid confusing the Steam overlay */
-        gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+        if (!gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc))
+        {
+            DWORD error = GetLastError();
+
+            ERR("Failed to swap buffers, error %lu.\n", error);
+            hr = error ? HRESULT_FROM_WIN32(error) : E_FAIL;
+        }
+        else
+        {
+            native_swap = true;
+        }
     }
 
-    if (context->d3d_info->fences)
+    if (SUCCEEDED(hr) && context->d3d_info->fences)
         wined3d_context_gl_submit_command_fence(context_gl);
 
-    wined3d_swapchain_gl_rotate(swapchain, context);
+    if (SUCCEEDED(hr))
+        wined3d_swapchain_gl_rotate(swapchain, context);
 
-    TRACE("SwapBuffers called, Starting new frame\n");
+    if (SUCCEEDED(hr))
+        TRACE("SwapBuffers called, starting new frame.\n");
 
-    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
-    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+    if (SUCCEEDED(hr))
+    {
+        wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
 
+        if (native_swap && swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+                && presented_identity
+                && swapchain->state.desc.backbuffer_count <= WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT)
+        {
+            for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)
+            {
+                if (!(result->physical_identities[i] =
+                        wined3d_swapchain_gl_get_physical_identity(swapchain, i)))
+                    break;
+            }
+            if (i != swapchain->state.desc.backbuffer_count)
+                goto done;
+
+            result->physical_identity_count = i;
+            result->current_physical_identity = result->physical_identities[0];
+            result->presented_physical_identity = presented_identity;
+            /* A GL context-loss generation is not exposed yet. Keep the
+             * identity record diagnostic-only until that lifecycle is wired. */
+            result->capabilities = 0;
+        }
+    }
+
+done:
     context_release(context);
+    return hr;
 }
 
 static void swapchain_frontbuffer_updated(struct wined3d_swapchain *swapchain)
@@ -769,7 +919,6 @@ static const struct wined3d_swapchain_ops swapchain_gl_ops =
 {
     swapchain_gl_present,
     swapchain_frontbuffer_updated,
-    NULL, /* Physical identity and preservation are not yet proven. */
 };
 
 static bool wined3d_swapchain_vk_present_mode_supported(struct wined3d_swapchain_vk *swapchain_vk,
@@ -975,6 +1124,8 @@ fail:
     }
     free(swapchain_vk->vk_semaphores);
     free(swapchain_vk->vk_images);
+    swapchain_vk->vk_semaphores = NULL;
+    swapchain_vk->vk_images = NULL;
     return false;
 }
 
@@ -1122,6 +1273,7 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     if (!wined3d_swapchain_vk_create_vulkan_swapchain_images(swapchain_vk, vk_swapchain))
     {
         VK_CALL(vkDestroySwapchainKHR(device_vk->vk_device, vk_swapchain, NULL));
+        swapchain_vk->vk_swapchain = VK_NULL_HANDLE;
         goto fail;
     }
 
@@ -1129,6 +1281,8 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     swapchain_vk->height = height;
     swapchain_vk->client_width = client_rect.right - client_rect.left;
     swapchain_vk->client_height = client_rect.bottom - client_rect.top;
+    if (!++swapchain_vk->vk_swapchain_generation)
+        ++swapchain_vk->vk_swapchain_generation;
 
     return WINED3D_OK;
 
@@ -1147,7 +1301,7 @@ static HRESULT wined3d_swapchain_vk_recreate(struct wined3d_swapchain_vk *swapch
     return wined3d_swapchain_vk_create_vulkan_swapchain(swapchain_vk);
 }
 
-static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *swapchain_vk,
+static HRESULT wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *swapchain_vk,
         unsigned int swap_interval)
 {
     if (swap_interval > 1)
@@ -1158,10 +1312,10 @@ static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *
     }
 
     if (swapchain_vk->s.swap_interval == swap_interval)
-        return;
+        return WINED3D_OK;
 
     swapchain_vk->s.swap_interval = swap_interval;
-    wined3d_swapchain_vk_recreate(swapchain_vk);
+    return wined3d_swapchain_vk_recreate(swapchain_vk);
 }
 
 static BYTE dcomp_sample_byte( const BYTE *data, UINT width, UINT height, UINT row_pitch,
@@ -1426,7 +1580,9 @@ static void wined3d_swapchain_vk_restore_composition(struct wined3d_swapchain_vk
 }
 
 static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain_vk,
-        struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval)
+        struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect,
+        unsigned int swap_interval, uint64_t *presentation_identity,
+        uint64_t *presentation_generation)
 {
     struct wined3d_texture_vk *back_buffer_vk = wined3d_texture_vk(swapchain_vk->s.back_buffers[0]);
     struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
@@ -1442,6 +1598,7 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     VkImageBlit blit;
     VkFilter filter;
     VkResult vr;
+    HRESULT hr;
 
     static const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
@@ -1460,7 +1617,11 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     if (swapchain_vk->composition_source)
         swapchain_vk->composition_image = back_buffer_vk->image.vk_image;
 
-    wined3d_swapchain_vk_set_swap_interval(swapchain_vk, swap_interval);
+    if (FAILED(hr = wined3d_swapchain_vk_set_swap_interval(swapchain_vk, swap_interval)))
+    {
+        ERR("Failed to update the Vulkan present interval, hr %#lx.\n", hr);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
 
     present_idx = swapchain_vk->current++ % swapchain_vk->image_count;
     wined3d_context_vk_wait_command_buffer(context_vk, swapchain_vk->vk_semaphores[present_idx].command_buffer_id);
@@ -1470,6 +1631,9 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
         WARN("Failed to acquire image, vr %s.\n", wined3d_debug_vkresult(vr));
         return vr;
     }
+
+    *presentation_identity = (uint64_t)swapchain_vk->vk_images[image_idx];
+    *presentation_generation = swapchain_vk->vk_swapchain_generation;
 
     if (dst_rect->right > swapchain_vk->width || dst_rect->bottom > swapchain_vk->height)
     {
@@ -1622,16 +1786,38 @@ static void wined3d_swapchain_vk_rotate(struct wined3d_swapchain *swapchain, str
     device_invalidate_state(swapchain->device, STATE_FRAMEBUFFER);
 }
 
-static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT *src_rect,
-        const RECT *dst_rect, unsigned int swap_interval, uint32_t flags)
+static HRESULT hresult_from_vk_present_result(VkResult vr)
+{
+    switch (vr)
+    {
+        case VK_SUCCESS:
+        case VK_SUBOPTIMAL_KHR:
+            return WINED3D_OK;
+        case VK_ERROR_OUT_OF_HOST_MEMORY:
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+            return E_OUTOFMEMORY;
+        case VK_ERROR_DEVICE_LOST:
+            return E_FAIL;
+        default:
+            return E_FAIL;
+    }
+}
+
+static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT *src_rect,
+        const RECT *dst_rect, unsigned int swap_interval, uint32_t flags,
+        struct wined3d_swapchain_present_result *result)
 {
     struct wined3d_swapchain_vk *swapchain_vk = wined3d_swapchain_vk(swapchain);
     struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
     struct wined3d_context_vk *context_vk;
     unsigned int client_width, client_height;
+    uint64_t presentation_identity = 0, presentation_generation = 0;
+    uint64_t presented_identity = 0;
+    bool native_present = false;
     RECT client_rect;
     VkResult vr;
     HRESULT hr;
+    unsigned int i;
 
     GetClientRect(swapchain->win_handle, &client_rect);
     client_width = client_rect.right - client_rect.left;
@@ -1644,7 +1830,7 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
         if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
         {
             ERR("Failed to recreate resized swapchain, hr %#lx.\n", hr);
-            return;
+            return hr;
         }
     }
 
@@ -1652,47 +1838,92 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
 
     if (!swapchain_vk->vk_swapchain || swapchain_present_is_partial_copy(swapchain, dst_rect))
     {
-        swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
+        hr = swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
     }
     else
     {
         wined3d_texture_load_location(back_buffer, 0, &context_vk->c, back_buffer->resource.draw_binding);
+        presented_identity = (uint64_t)wined3d_texture_vk(back_buffer)->image.vk_image;
 
-        if ((vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval)))
+        vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval,
+                &presentation_identity, &presentation_generation);
+        if (vr == VK_ERROR_OUT_OF_DATE_KHR)
         {
-            if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_SUBOPTIMAL_KHR)
-            {
-                if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
-                    ERR("Failed to recreate swapchain, hr %#lx.\n", hr);
-                else if (vr == VK_ERROR_OUT_OF_DATE_KHR && (vr = wined3d_swapchain_vk_blit(
-                        swapchain_vk, context_vk, src_rect, dst_rect, swap_interval)))
-                    ERR("Failed to blit image, vr %s.\n", wined3d_debug_vkresult(vr));
-            }
+            if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
+                ERR("Failed to recreate swapchain, hr %#lx.\n", hr);
             else
             {
-                ERR("Failed to blit image, vr %s.\n", wined3d_debug_vkresult(vr));
+                presentation_identity = 0;
+                presentation_generation = 0;
+                vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect,
+                        swap_interval, &presentation_identity, &presentation_generation);
+                hr = hresult_from_vk_present_result(vr);
+                if (FAILED(hr))
+                    ERR("Failed to blit image, vr %s.\n", wined3d_debug_vkresult(vr));
             }
+        }
+        else
+        {
+            hr = hresult_from_vk_present_result(vr);
+            if (FAILED(hr))
+                ERR("Failed to blit image, vr %s.\n", wined3d_debug_vkresult(vr));
+            else if (vr == VK_SUBOPTIMAL_KHR)
+            {
+                WARN("Presented through a suboptimal swapchain; recreating it.\n");
+                if (FAILED(wined3d_swapchain_vk_recreate(swapchain_vk)))
+                    WARN("Failed to recreate a suboptimal swapchain.\n");
+            }
+        }
+        native_present = SUCCEEDED(hr);
+    }
+
+    if (SUCCEEDED(hr))
+        wined3d_swapchain_vk_rotate(swapchain, context_vk);
+
+    if (SUCCEEDED(hr))
+    {
+        wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+
+        if (native_present && swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+                && presented_identity
+                && swapchain->state.desc.backbuffer_count <= WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT)
+        {
+            for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)
+            {
+                if (!(result->physical_identities[i] = (uint64_t)
+                        wined3d_texture_vk(swapchain->back_buffers[i])->image.vk_image))
+                    break;
+            }
+            if (i != swapchain->state.desc.backbuffer_count)
+                goto done;
+
+            result->physical_identity_count = i;
+            result->current_physical_identity = result->physical_identities[0];
+            result->presented_physical_identity = presented_identity;
+            result->presentation_engine_identity = presentation_identity;
+            result->presentation_engine_generation = presentation_generation;
+            result->capabilities = WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                    | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                    | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT;
         }
     }
 
-    wined3d_swapchain_vk_rotate(swapchain, context_vk);
+    if (SUCCEEDED(hr))
+        TRACE("Starting new frame.\n");
 
-    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
-    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
-
-    TRACE("Starting new frame.\n");
-
+done:
     context_release(&context_vk->c);
+    return hr;
 }
 
 static const struct wined3d_swapchain_ops swapchain_vk_ops =
 {
     swapchain_vk_present,
     swapchain_frontbuffer_updated,
-    NULL, /* Physical identity and preservation are not yet proven. */
 };
 
-static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchain)
+static HRESULT swapchain_gdi_frontbuffer_updated_result(struct wined3d_swapchain *swapchain)
 {
     struct wined3d_dc_info *front;
     POINT offset = {0, 0};
@@ -1725,15 +1956,26 @@ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchai
             swapchain->front_buffer->resource.height);
     IntersectRect(&draw_rect, &draw_rect, &swapchain->front_buffer_update);
 
-    BitBlt(swapchain->dc, draw_rect.left - offset.x, draw_rect.top - offset.y,
+    if (!BitBlt(swapchain->dc, draw_rect.left - offset.x, draw_rect.top - offset.y,
             draw_rect.right - draw_rect.left, draw_rect.bottom - draw_rect.top,
-            src_dc, draw_rect.left, draw_rect.top, SRCCOPY);
+            src_dc, draw_rect.left, draw_rect.top, SRCCOPY))
+    {
+        DWORD error = GetLastError();
+
+        ERR("Failed to update the front buffer, error %lu.\n", error);
+        return error ? HRESULT_FROM_WIN32(error) : E_FAIL;
+    }
 
     SetRectEmpty(&swapchain->front_buffer_update);
+    return WINED3D_OK;
 }
 
-static void swapchain_gdi_present(struct wined3d_swapchain *swapchain,
-        const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags)
+static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchain)
+{
+    swapchain_gdi_frontbuffer_updated_result(swapchain);
+}
+
+static void wined3d_swapchain_gdi_rotate(struct wined3d_swapchain *swapchain)
 {
     struct wined3d_dc_info *front, *back;
     HBITMAP bitmap;
@@ -1759,18 +2001,67 @@ static void swapchain_gdi_present(struct wined3d_swapchain *swapchain,
     back->bitmap = bitmap;
     swapchain->back_buffers[0]->resource.heap_pointer = heap_pointer;
     swapchain->back_buffers[0]->resource.heap_memory = heap_memory;
+}
+
+static uint64_t wined3d_swapchain_gdi_get_physical_identity(struct wined3d_swapchain *swapchain,
+        unsigned int backbuffer_idx)
+{
+    const struct wined3d_resource *resource = &swapchain->back_buffers[backbuffer_idx]->resource;
+    const void *storage = resource->heap_memory ? resource->heap_memory : resource->heap_pointer;
+
+    return (uint64_t)(ULONG_PTR)storage;
+}
+
+static HRESULT swapchain_gdi_present(struct wined3d_swapchain *swapchain,
+        const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags,
+        struct wined3d_swapchain_present_result *result)
+{
+    uint64_t presented_identity;
+    HRESULT hr;
+    unsigned int i;
+
+    presented_identity = wined3d_swapchain_gdi_get_physical_identity(swapchain, 0);
+    wined3d_swapchain_gdi_rotate(swapchain);
 
     SetRect(&swapchain->front_buffer_update, 0, 0,
             swapchain->front_buffer->resource.width,
             swapchain->front_buffer->resource.height);
-    swapchain_gdi_frontbuffer_updated(swapchain);
+    if (FAILED(hr = swapchain_gdi_frontbuffer_updated_result(swapchain)))
+    {
+        wined3d_swapchain_gdi_rotate(swapchain);
+        SetRectEmpty(&swapchain->front_buffer_update);
+        return hr;
+    }
+
+    if (swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+            && swapchain->state.desc.backbuffer_count == 1
+            && presented_identity
+            && swapchain->state.desc.backbuffer_count <= WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT)
+    {
+        for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)
+        {
+            if (!(result->physical_identities[i] =
+                    wined3d_swapchain_gdi_get_physical_identity(swapchain, i)))
+                break;
+        }
+        if (i != swapchain->state.desc.backbuffer_count)
+            return WINED3D_OK;
+
+        result->physical_identity_count = i;
+        result->current_physical_identity = result->physical_identities[0];
+        result->presented_physical_identity = presented_identity;
+        result->capabilities = WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT;
+    }
+
+    return WINED3D_OK;
 }
 
 static const struct wined3d_swapchain_ops swapchain_no3d_ops =
 {
     swapchain_gdi_present,
     swapchain_gdi_frontbuffer_updated,
-    NULL, /* No-3D behavior is not a preservation proof. */
 };
 
 static void wined3d_swapchain_apply_sample_count_override(const struct wined3d_swapchain *swapchain,
@@ -2021,6 +2312,8 @@ static HRESULT wined3d_swapchain_init(struct wined3d_swapchain *swapchain, struc
     swapchain->ref = 1;
     swapchain->win_handle = window;
     swapchain->swap_interval = WINED3D_SWAP_INTERVAL_DEFAULT;
+    InitializeSRWLock(&swapchain->present_result_lock);
+    swapchain->present_identity_generation = 1;
     if (desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT)
         swapchain->max_frame_latency = 1;
     else
@@ -2500,6 +2793,7 @@ HRESULT CDECL wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapcha
         UINT i;
 
         TRACE("Recreating swapchain textures.\n");
+        wined3d_swapchain_invalidate_present_results(swapchain);
 
         if (FAILED(hr = swapchain_create_texture(swapchain, true, false, &new_texture)))
             return hr;

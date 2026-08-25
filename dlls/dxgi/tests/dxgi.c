@@ -5673,6 +5673,194 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
     ok(refcount == !is_d3d12, "Got unexpected refcount %lu.\n", refcount);
 }
 
+static BOOL check_present1_texture(ID3D10Device *device, IDXGISwapChain *swapchain,
+        ID3D10Texture2D *staging, UINT buffer_idx, DWORD background,
+        DWORD first_update, DWORD second_update)
+{
+    D3D10_MAPPED_TEXTURE2D map;
+    ID3D10Texture2D *texture;
+    const DWORD *row;
+    HRESULT hr;
+
+    if (FAILED(hr = IDXGISwapChain_GetBuffer(swapchain, buffer_idx,
+            &IID_ID3D10Texture2D, (void **)&texture)))
+    {
+        ok(0, "Failed to get presented buffer %u, hr %#lx.\n", buffer_idx, hr);
+        return FALSE;
+    }
+
+    ID3D10Device_CopyResource(device, (ID3D10Resource *)staging, (ID3D10Resource *)texture);
+    ID3D10Texture2D_Release(texture);
+    if (FAILED(hr = ID3D10Texture2D_Map(staging, 0, D3D10_MAP_READ, 0, &map)))
+    {
+        ok(0, "Failed to map the Present1 staging texture, hr %#lx.\n", hr);
+        return FALSE;
+    }
+
+    row = (const DWORD *)((const BYTE *)map.pData + map.RowPitch);
+    ok(row[1] == background, "Got background pixel %#lx, expected %#lx.\n", row[1], background);
+    row = (const DWORD *)((const BYTE *)map.pData + 10 * map.RowPitch);
+    ok(row[10] == first_update, "Got first update pixel %#lx, expected %#lx.\n", row[10], first_update);
+    row = (const DWORD *)((const BYTE *)map.pData + 40 * map.RowPitch);
+    ok(row[40] == second_update, "Got second update pixel %#lx, expected %#lx.\n", row[40], second_update);
+    ID3D10Texture2D_Unmap(staging, 0);
+    return TRUE;
+}
+
+static void test_swapchain_present1_history(IUnknown *device, BOOL is_d3d12)
+{
+    static const DWORD red = 0xff0000ff, green = 0xff00ff00, blue = 0xffff0000;
+    DWORD full_data[64 * 64], update_data[16 * 16];
+    DXGI_PRESENT_PARAMETERS present_parameters = {0};
+    D3D10_TEXTURE2D_DESC texture_desc = {0};
+    DXGI_SWAP_CHAIN_DESC swapchain_desc = {0};
+    ID3D10Texture2D *texture, *staging;
+    IDXGISwapChain1 *swapchain1;
+    IDXGISwapChain *swapchain;
+    IDXGIFactory *factory;
+    RECT dirty_rect;
+    D3D10_BOX box;
+    unsigned int buffer_count, i;
+    ID3D10Device *d3d10_device;
+    HWND window;
+    HRESULT hr;
+
+    if (is_d3d12)
+        return;
+    if (FAILED(IUnknown_QueryInterface(device, &IID_ID3D10Device, (void **)&d3d10_device)))
+    {
+        skip("ID3D10Device is unavailable.\n");
+        return;
+    }
+
+    get_factory(device, FALSE, &factory);
+    window = create_window();
+    for (i = 0; i < ARRAY_SIZE(full_data); ++i)
+        full_data[i] = red;
+    for (i = 0; i < ARRAY_SIZE(update_data); ++i)
+        update_data[i] = green;
+
+    texture_desc.Width = 64;
+    texture_desc.Height = 64;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Usage = D3D10_USAGE_STAGING;
+    texture_desc.CPUAccessFlags = D3D10_CPU_ACCESS_READ;
+    hr = ID3D10Device_CreateTexture2D(d3d10_device, &texture_desc, NULL, &staging);
+    ok(hr == S_OK, "Failed to create staging texture, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    swapchain_desc.BufferDesc.Width = 64;
+    swapchain_desc.BufferDesc.Height = 64;
+    swapchain_desc.BufferDesc.RefreshRate.Numerator = 60;
+    swapchain_desc.BufferDesc.RefreshRate.Denominator = 1;
+    swapchain_desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.OutputWindow = window;
+    swapchain_desc.Windowed = TRUE;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+
+    for (buffer_count = 2; buffer_count <= 4; ++buffer_count)
+    {
+        swapchain_desc.BufferCount = buffer_count;
+        hr = IDXGIFactory_CreateSwapChain(factory, device, &swapchain_desc, &swapchain);
+        if (hr == DXGI_ERROR_INVALID_CALL || hr == DXGI_ERROR_UNSUPPORTED)
+        {
+            win_skip("A %u-buffer flip-sequential swapchain is unavailable.\n", buffer_count);
+            continue;
+        }
+        ok(hr == S_OK, "Failed to create %u-buffer swapchain, hr %#lx.\n", buffer_count, hr);
+        if (FAILED(hr))
+            continue;
+        hr = IDXGISwapChain_QueryInterface(swapchain, &IID_IDXGISwapChain1, (void **)&swapchain1);
+        ok(hr == S_OK, "Failed to get IDXGISwapChain1, hr %#lx.\n", hr);
+        if (FAILED(hr))
+        {
+            IDXGISwapChain_Release(swapchain);
+            continue;
+        }
+
+        hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D10Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get initial back buffer, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            ID3D10Device_UpdateSubresource(d3d10_device, (ID3D10Resource *)texture,
+                    0, NULL, full_data, 64 * sizeof(*full_data), 0);
+            ID3D10Texture2D_Release(texture);
+        }
+        hr = IDXGISwapChain_Present(swapchain, 0, 0);
+        ok(hr == S_OK, "Initial Present returned %#lx.\n", hr);
+        if (SUCCEEDED(hr) && !check_present1_texture(d3d10_device, swapchain, staging,
+                buffer_count - 1, red, red, red))
+            goto release_swapchain;
+
+        SetRect(&dirty_rect, 8, 8, 24, 24);
+        box.left = dirty_rect.left;
+        box.top = dirty_rect.top;
+        box.front = 0;
+        box.right = dirty_rect.right;
+        box.bottom = dirty_rect.bottom;
+        box.back = 1;
+        present_parameters.DirtyRectsCount = 1;
+        present_parameters.pDirtyRects = &dirty_rect;
+        for (i = 1; i < buffer_count; ++i)
+        {
+            hr = IDXGISwapChain_GetBuffer(swapchain, 0,
+                    &IID_ID3D10Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get seed back buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                break;
+            ID3D10Device_UpdateSubresource(d3d10_device, (ID3D10Resource *)texture,
+                    0, &box, update_data, 16 * sizeof(*update_data), 0);
+            ID3D10Texture2D_Release(texture);
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == S_OK, "Seed Present1 %u returned %#lx.\n", i, hr);
+            if (FAILED(hr) || !check_present1_texture(d3d10_device, swapchain, staging,
+                    buffer_count - 1, red, green, red))
+                break;
+        }
+        if (i != buffer_count)
+            goto release_swapchain;
+
+        for (i = 0; i < ARRAY_SIZE(update_data); ++i)
+            update_data[i] = blue;
+        SetRect(&dirty_rect, 32, 32, 48, 48);
+        box.left = dirty_rect.left;
+        box.top = dirty_rect.top;
+        box.right = dirty_rect.right;
+        box.bottom = dirty_rect.bottom;
+        hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D10Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get sparse-repair back buffer, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            ID3D10Device_UpdateSubresource(d3d10_device, (ID3D10Resource *)texture,
+                    0, &box, update_data, 16 * sizeof(*update_data), 0);
+            ID3D10Texture2D_Release(texture);
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == S_OK, "Sparse-repair Present1 returned %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+                check_present1_texture(d3d10_device, swapchain, staging,
+                        buffer_count - 1, red, green, blue);
+        }
+        for (i = 0; i < ARRAY_SIZE(update_data); ++i)
+            update_data[i] = green;
+
+release_swapchain:
+        IDXGISwapChain1_Release(swapchain1);
+        IDXGISwapChain_Release(swapchain);
+    }
+
+    ID3D10Texture2D_Release(staging);
+done:
+    DestroyWindow(window);
+    IDXGIFactory_Release(factory);
+    ID3D10Device_Release(d3d10_device);
+}
+
 static void test_swapchain_backbuffer_index(IUnknown *device, BOOL is_d3d12)
 {
     DXGI_SWAP_CHAIN_DESC swapchain_desc;
@@ -9240,6 +9428,7 @@ START_TEST(dxgi)
 {
     HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module;
     BOOL enable_debug_layer = FALSE;
+    BOOL present1_history_only = FALSE;
     unsigned int argc, i;
     ID3D12Debug *debug;
     char **argv;
@@ -9277,6 +9466,14 @@ START_TEST(dxgi)
             use_adapter_idx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--single"))
             use_mt = FALSE;
+        else if (!strcmp(argv[i], "--present1-history-only"))
+            present1_history_only = TRUE;
+    }
+
+    if (present1_history_only)
+    {
+        run_on_d3d10(test_swapchain_present1_history);
+        return;
     }
 
     queue_test(test_adapter_desc);
@@ -9312,6 +9509,7 @@ START_TEST(dxgi)
     run_on_d3d10(test_resize_fullscreen);
     run_on_d3d10(test_swapchain_resize);
     run_on_d3d10(test_swapchain_present);
+    run_on_d3d10(test_swapchain_present1_history);
     run_on_d3d10(test_swapchain_backbuffer_index);
     run_on_d3d10(test_swapchain_formats);
     run_on_d3d10(test_output_ownership);
