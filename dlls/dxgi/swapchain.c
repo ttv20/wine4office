@@ -212,6 +212,22 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+static void d3d11_swapchain_invalidate_present1_shadow(struct d3d11_swapchain *swapchain,
+        BOOL release_resources)
+{
+    if (release_resources)
+    {
+        if (swapchain->present1_shadow)
+            ID3D11Texture2D_Release(swapchain->present1_shadow);
+        if (swapchain->present1_scratch)
+            ID3D11Texture2D_Release(swapchain->present1_scratch);
+        swapchain->present1_shadow = NULL;
+        swapchain->present1_scratch = NULL;
+    }
+
+    swapchain->present1_shadow_valid = FALSE;
+}
+
 void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
@@ -294,10 +310,7 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     {
         IWineDXGIDevice *device = swapchain->device;
         HWND composition_window = swapchain->composition_window;
-        if (swapchain->present1_shadow)
-            ID3D11Texture2D_Release(swapchain->present1_shadow);
-        if (swapchain->present1_scratch)
-            ID3D11Texture2D_Release(swapchain->present1_scratch);
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -369,7 +382,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 /* IDXGISwapChain1 methods */
 
-static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
+static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
 
 static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
@@ -537,14 +550,14 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
 
     /* Applications may follow a complete Present() with sparse Present1()
      * updates.  Keep the complete frame available for those dirty updates. */
-    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, NULL)))
+    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents_full(swapchain, NULL)))
     {
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
         WARN("Failed to update presentation shadow, hr %#lx.\n", hr);
     }
     hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
     if (FAILED(hr))
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
     return hr;
 }
 
@@ -583,6 +596,7 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_SetFullscreen
     struct dxgi_output *dxgi_output;
     LONG in_set_fullscreen_state;
     BOOL old_fs;
+    BOOL invalidate_present1 = FALSE;
     HRESULT hr;
 
     TRACE("iface %p, fullscreen %#x, target %p.\n", iface, fullscreen, target);
@@ -647,9 +661,12 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_SetFullscreen
     if (swapchain->target)
         IDXGIOutput_Release(swapchain->target);
     swapchain->target = target;
+    invalidate_present1 = TRUE;
 
 done:
     wined3d_mutex_unlock();
+    if (invalidate_present1)
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
     InterlockedExchange(&swapchain->in_set_fullscreen_state, 0);
     return hr;
 }
@@ -754,15 +771,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
     if (flags & ~supported_flags)
         FIXME("Ignoring flags %#x.\n", flags & ~supported_flags);
 
-    if (swapchain->present1_shadow)
-    {
-        ID3D11Texture2D_Release(swapchain->present1_shadow);
-        ID3D11Texture2D_Release(swapchain->present1_scratch);
-        swapchain->present1_shadow = NULL;
-        swapchain->present1_scratch = NULL;
-        swapchain->present1_shadow_valid = FALSE;
-    }
-
     wined3d_mutex_lock();
     wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
     if (!(wined3d_desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT)
@@ -793,8 +801,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
      * old d3d11 textures: we just validated above that they have 0 references,
      * and therefore they are not actually holding a reference to the wined3d
      * swapchain, and will not do anything with it when they are destroyed. */
-    d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
+    if (SUCCEEDED(hr))
+        d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
     wined3d_mutex_unlock();
+
+    if (SUCCEEDED(hr))
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
 
     return hr;
 }
@@ -987,7 +999,10 @@ static void d3d11_present1_apply_scroll(ID3D11DeviceContext *context,
             dst_rect.left, dst_rect.top, 0, (ID3D11Resource *)src, 0, &box);
 }
 
-static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
+/* Region history stays disabled until WineD3D exposes backend-owned physical
+ * identity and preservation guarantees.  Keep the full-copy path as the
+ * correctness fallback for every backend and presentation flag. */
+static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters)
 {
     struct wined3d_device_context *wined3d_context;
@@ -999,6 +1014,8 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
     D3D11_BOX box;
     HRESULT hr;
     unsigned int i;
+
+    TRACE("Using the full-copy Present1 fallback; no backend preservation contract is available.\n");
 
     if (parameters && parameters->DirtyRectsCount && !parameters->pDirtyRects)
         return E_INVALIDARG;
@@ -1106,11 +1123,14 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
         return E_INVALIDARG;
     if (sync_interval > 4 || (flags & DXGI_PRESENT_TEST))
         return d3d11_swapchain_present(swapchain, sync_interval, flags);
-    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, present_parameters)))
+    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents_full(swapchain, present_parameters)))
+    {
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
         return hr;
+    }
     hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
     if (FAILED(hr))
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
     return hr;
 }
 

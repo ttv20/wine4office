@@ -5437,6 +5437,10 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
             present_parameters.DirtyRectsCount = 1;
             hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
             ok(hr == E_INVALIDARG, "Present1 with a NULL dirty rectangle array returned %#lx.\n", hr);
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, DXGI_PRESENT_DO_NOT_SEQUENCE,
+                    &present_parameters);
+            ok(hr == E_INVALIDARG, "Present1 with DO_NOT_SEQUENCE and a NULL dirty rectangle "
+                    "array returned %#lx.\n", hr);
             present_parameters.DirtyRectsCount = 0;
             present_parameters.pScrollRect = &scroll_rect;
             hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
