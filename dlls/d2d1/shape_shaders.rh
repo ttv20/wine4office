@@ -6,3 +6,7 @@ IDR_D2D_SHAPE_VS_ARC_OUTLINE    RCDATA "shape_vs_code_arc_outline.dxbc"
 IDR_D2D_SHAPE_VS_TRIANGLE       RCDATA "shape_vs_code_triangle.dxbc"
 IDR_D2D_SHAPE_VS_CURVE          RCDATA "shape_vs_code_curve.dxbc"
 IDR_D2D_SHAPE_PS                RCDATA "shape_ps_code.dxbc"
+IDR_D2D_COVERAGE_PS             RCDATA "coverage_ps_code.dxbc"
+IDR_D2D_COVERAGE_MSAA_PS        RCDATA "coverage_msaa_ps_code.dxbc"
+/* The resolve shader reserves t0-t3 for the ordinary brush resources. */
+IDR_D2D_COVERAGE_RESOLVE_PS     RCDATA "coverage_resolve_ps_code.dxbc"

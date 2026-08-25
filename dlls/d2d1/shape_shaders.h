@@ -4,3 +4,6 @@
 #define IDR_D2D_SHAPE_VS_TRIANGLE        103
 #define IDR_D2D_SHAPE_VS_CURVE           104
 #define IDR_D2D_SHAPE_PS                  105
+#define IDR_D2D_COVERAGE_PS               106
+#define IDR_D2D_COVERAGE_MSAA_PS          107
+#define IDR_D2D_COVERAGE_RESOLVE_PS       108
