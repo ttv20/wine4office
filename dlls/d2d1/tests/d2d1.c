@@ -18352,6 +18352,162 @@ static void test_no_target(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static void test_geometry_aa_guardrails(BOOL d3d11)
+{
+    D2D1_SIZE_U small_size = {64, 64}, large_size = {1024, 512};
+    D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
+    D2D1_RECT_F small_rect, large_rect, clip_rect;
+    D2D1_MATRIX_3X2_F transform, current_transform;
+    D2D1_PIXEL_FORMAT pixel_format;
+    ID2D1RectangleGeometry *small_geometry, *large_geometry;
+    ID2D1SolidColorBrush *brush;
+    ID2D1Image *original_target, *current_target;
+    ID2D1Bitmap1 *small_bitmap, *large_bitmap;
+    struct d2d1_test_context ctx;
+    float dpi_x, dpi_y;
+    D2D1_COLOR_F colour;
+    HRESULT hr;
+
+    if (!d3d11)
+        return;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    pixel_format = ID2D1DeviceContext_GetPixelFormat(ctx.context);
+    bitmap_desc.pixelFormat = pixel_format;
+    bitmap_desc.dpiX = 96.0f;
+    bitmap_desc.dpiY = 96.0f;
+    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+
+    hr = ID2D1DeviceContext_CreateBitmap(ctx.context, small_size, NULL, 0,
+            &bitmap_desc, &small_bitmap);
+    ok(hr == S_OK, "Failed to create small target, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = ID2D1DeviceContext_CreateBitmap(ctx.context, large_size, NULL, 0,
+            &bitmap_desc, &large_bitmap);
+    ok(hr == S_OK, "Failed to create large target, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_rect(&small_rect, 8.0f, 8.0f, 56.0f, 56.0f);
+    hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &small_rect, &small_geometry);
+    ok(hr == S_OK, "Failed to create small geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_rect(&large_rect, 0.0f, 0.0f, large_size.width, large_size.height);
+    hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &large_rect, &large_geometry);
+    ok(hr == S_OK, "Failed to create large geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_color(&colour, 1.0f, 1.0f, 1.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &brush);
+    ok(hr == S_OK, "Failed to create brush, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1RectangleGeometry_Release(large_geometry);
+        ID2D1RectangleGeometry_Release(small_geometry);
+        ID2D1Bitmap1_Release(large_bitmap);
+        ID2D1Bitmap1_Release(small_bitmap);
+        release_test_context(&ctx);
+        return;
+    }
+
+    ID2D1DeviceContext_GetTarget(ctx.context, &original_target);
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
+
+    /* The custom path must restore caller state and preserve an aliased clip
+     * when it renders a bounded source-over stroke. */
+    set_matrix_identity(&transform);
+    translate_matrix(&transform, 1.0f, 1.0f);
+    set_rect(&clip_rect, 4.0f, 4.0f, 20.0f, 60.0f);
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_Clear(ctx.context, NULL);
+    ID2D1DeviceContext_SetDpi(ctx.context, 120.0f, 120.0f);
+    ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+    ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)small_geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
+    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Source-over antialias draw failed, hr %#lx.\n", hr);
+
+    ID2D1DeviceContext_GetDpi(ctx.context, &dpi_x, &dpi_y);
+    ok(dpi_x == 120.0f && dpi_y == 120.0f,
+            "Antialias draw changed DPI to %.8e,%.8e.\n", dpi_x, dpi_y);
+    ID2D1DeviceContext_GetTransform(ctx.context, &current_transform);
+    ok(!memcmp(&current_transform, &transform, sizeof(transform)),
+            "Antialias draw changed the drawing transform.\n");
+    ok(ID2D1DeviceContext_GetPrimitiveBlend(ctx.context) == D2D1_PRIMITIVE_BLEND_SOURCE_OVER,
+            "Antialias draw changed the primitive blend mode.\n");
+
+    /* COPY is not implemented by immediate bitmap targets yet. It must take
+     * the ordinary geometry fallback without poisoning the draw transaction. */
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_COPY);
+    ID2D1DeviceContext_PushAxisAlignedClip(ctx.context, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)small_geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
+    ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Non-source-over fallback failed, hr %#lx.\n", hr);
+    ok(ID2D1DeviceContext_GetPrimitiveBlend(ctx.context) == D2D1_PRIMITIVE_BLEND_COPY,
+            "Non-source-over fallback changed the primitive blend mode.\n");
+
+    /* This region would require more than the bounded 8x-plus-reductions
+     * scratch budget. The public operation must fall back before allocation
+     * and leave the context usable. */
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)large_bitmap);
+    set_matrix_identity(&transform);
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_Clear(ctx.context, NULL);
+    ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+    ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)large_geometry,
+            (ID2D1Brush *)brush, 0.5f, NULL);
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Over-budget antialias fallback failed, hr %#lx.\n", hr);
+    ID2D1DeviceContext_GetTarget(ctx.context, &current_target);
+    ok(current_target == (ID2D1Image *)large_bitmap,
+            "Over-budget fallback changed the target.\n");
+    ID2D1Image_Release(current_target);
+
+    ID2D1DeviceContext_SetTarget(ctx.context, original_target);
+    ID2D1Image_Release(original_target);
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1RectangleGeometry_Release(large_geometry);
+    ID2D1RectangleGeometry_Release(small_geometry);
+    ID2D1Bitmap1_Release(large_bitmap);
+    ID2D1Bitmap1_Release(small_bitmap);
+    release_test_context(&ctx);
+}
+
 static void test_mesh(BOOL d3d11)
 {
     ID2D1TessellationSink *sink, *sink2;
@@ -19378,6 +19534,7 @@ START_TEST(d2d1)
     queue_d3d10_test(test_effect_blob_property);
     queue_test(test_get_dxgi_device);
     queue_test(test_no_target);
+    queue_d3d1x_test(test_geometry_aa_guardrails, TRUE);
     queue_test(test_mesh);
     queue_test(test_geometry_realization);
     queue_d3d10_test(test_path_geometry_stream);
