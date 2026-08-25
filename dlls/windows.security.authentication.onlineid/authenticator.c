@@ -3045,13 +3045,19 @@ static enum helper_result onlineid_wait_for_helper( HANDLE process, HANDLE cance
     if (cancel_event && wait == WAIT_OBJECT_0 + 1)
     {
         TerminateProcess( process, ERROR_CANCELLED );
-        WaitForSingleObject( process, 5000 );
+        /* Do not release the refresh mutex while a canceled helper may still
+         * be writing the shared token generation.  The async operation has
+         * already transitioned to Canceled, so this wait does not block its
+         * caller or completion callback. */
+        WaitForSingleObject( process, INFINITE );
         return HELPER_CANCELED;
     }
     if (wait == WAIT_TIMEOUT)
     {
         TerminateProcess( process, WAIT_TIMEOUT );
-        WaitForSingleObject( process, 5000 );
+        /* The next waiter may start another helper as soon as this function
+         * returns.  Keep serialization until the timed-out process is gone. */
+        WaitForSingleObject( process, INFINITE );
         return HELPER_TIMED_OUT;
     }
     if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess( process, exit_code )) return HELPER_FAILED;
