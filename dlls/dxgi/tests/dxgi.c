@@ -7380,6 +7380,188 @@ static void test_maximum_frame_latency(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_enqueue_set_event(void)
+{
+    enum { completion_queue_limit = 64 };
+    IDXGIDevice2 *device2;
+    IDXGIDevice *device;
+    HANDLE event, wait_handle, before, marker, later;
+    HANDLE queue_events[completion_queue_limit + 1];
+    unsigned int queue_count, i;
+    DWORD ret;
+    BOOL success, saturated;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(device = create_device(0)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = IDXGIDevice_QueryInterface(device, &IID_IDXGIDevice2, (void **)&device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        IDXGIDevice_Release(device);
+        return;
+    }
+
+    hr = IDXGIDevice2_EnqueueSetEvent(device2, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected null-event result %#lx.\n", hr);
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create invalid-handle test event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        CloseHandle(event);
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == E_INVALIDARG, "Got unexpected invalid-event result %#lx.\n", hr);
+    }
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == S_OK, "Got unexpected enqueue result %#lx.\n", hr);
+        ret = WaitForSingleObject(event, 5000);
+        ok(ret == WAIT_OBJECT_0, "Completion event was not signalled, ret %#lx.\n", ret);
+        CloseHandle(event);
+    }
+
+    event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(!!event, "Failed to create manual-reset event, last error %lu.\n", GetLastError());
+    wait_handle = NULL;
+    if (event)
+    {
+        success = DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &wait_handle,
+                SYNCHRONIZE, FALSE, 0);
+        ok(success, "Failed to create wait-only event handle, last error %lu.\n", GetLastError());
+        if (success)
+        {
+            hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+            ok(hr == S_OK, "Got unexpected close-original enqueue result %#lx.\n", hr);
+            CloseHandle(event);
+            if (SUCCEEDED(hr))
+            {
+                ret = WaitForSingleObject(wait_handle, 5000);
+                ok(ret == WAIT_OBJECT_0, "Duplicated event was not signalled, ret %#lx.\n", ret);
+            }
+            CloseHandle(wait_handle);
+        }
+        else
+            CloseHandle(event);
+    }
+
+    before = CreateEventW(NULL, TRUE, FALSE, NULL);
+    marker = CreateEventW(NULL, TRUE, FALSE, NULL);
+    later = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(!!before && !!marker && !!later, "Failed to create ordering events, last error %lu.\n", GetLastError());
+    if (before && marker && later)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, before);
+        ok(hr == S_OK, "Got unexpected pre-marker enqueue result %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDXGIDevice2_EnqueueSetEvent(device2, marker);
+            ok(hr == S_OK, "Got unexpected marker enqueue result %#lx.\n", hr);
+        }
+        if (SUCCEEDED(hr))
+        {
+            ret = WaitForSingleObject(marker, 5000);
+            ok(ret == WAIT_OBJECT_0, "Marker event was not signalled, ret %#lx.\n", ret);
+            ok(WaitForSingleObject(before, 0) == WAIT_OBJECT_0,
+                    "Marker completed before the earlier entry.\n");
+            ok(WaitForSingleObject(later, 0) == WAIT_TIMEOUT,
+                    "Later entry was included before it was submitted.\n");
+
+            hr = IDXGIDevice2_EnqueueSetEvent(device2, later);
+            ok(hr == S_OK, "Got unexpected post-marker enqueue result %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                ret = WaitForSingleObject(later, 5000);
+                ok(ret == WAIT_OBJECT_0, "Later event was not signalled, ret %#lx.\n", ret);
+            }
+        }
+    }
+    if (before)
+        CloseHandle(before);
+    if (marker)
+        CloseHandle(marker);
+    if (later)
+        CloseHandle(later);
+
+    memset(queue_events, 0, sizeof(queue_events));
+    queue_count = 0;
+    saturated = FALSE;
+    for (i = 0; i < ARRAY_SIZE(queue_events); ++i)
+    {
+        queue_events[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!queue_events[i])
+        {
+            skip("Could not create the queue saturation event, last error %lu.\n", GetLastError());
+            break;
+        }
+
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, queue_events[i]);
+        if (SUCCEEDED(hr))
+        {
+            ++queue_count;
+            continue;
+        }
+
+        if (i == completion_queue_limit && hr == E_OUTOFMEMORY)
+        {
+            saturated = TRUE;
+            CloseHandle(queue_events[i]);
+            queue_events[i] = NULL;
+            break;
+        }
+
+        ok(FALSE, "Queue submission %u failed unexpectedly, hr %#lx.\n", i, hr);
+        CloseHandle(queue_events[i]);
+        queue_events[i] = NULL;
+        break;
+    }
+
+    for (i = 0; i < queue_count; ++i)
+    {
+        ret = WaitForSingleObject(queue_events[i], 5000);
+        ok(ret == WAIT_OBJECT_0, "Queue event %u was not signalled, ret %#lx.\n", i, ret);
+        CloseHandle(queue_events[i]);
+    }
+    if (saturated)
+        ok(queue_count == completion_queue_limit, "Got %u queued entries at saturation.\n", queue_count);
+    else
+        skip("Queue drained before the saturation gate was reached; saturation was not proven.\n");
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create destruction event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == S_OK, "Got unexpected destruction enqueue result %#lx.\n", hr);
+        IDXGIDevice2_Release(device2);
+        device2 = NULL;
+        /* Release is terminal: it waits for the worker and its drain before
+         * destroying the device, so this zero-timeout check is deterministic. */
+        refcount = IDXGIDevice_Release(device);
+        device = NULL;
+        ok(!refcount, "Device has %lu references left after terminal shutdown.\n", refcount);
+        if (SUCCEEDED(hr))
+        {
+            ret = WaitForSingleObject(event, 0);
+            ok(ret == WAIT_OBJECT_0, "Completion event was not signalled at device destruction, ret %#lx.\n", ret);
+        }
+        CloseHandle(event);
+    }
+
+    if (device2)
+        IDXGIDevice2_Release(device2);
+    if (device)
+        IDXGIDevice_Release(device);
+}
+
 static void test_output_desc(void)
 {
     IDXGIAdapter *adapter, *adapter2;
@@ -10691,6 +10873,7 @@ START_TEST(dxgi)
     queue_test(test_create_factory);
     queue_test(test_private_data);
     queue_test(test_maximum_frame_latency);
+    queue_test(test_enqueue_set_event);
     queue_test(test_output_desc);
     queue_test(test_output_duplication);
     queue_test(test_object_wrapping);

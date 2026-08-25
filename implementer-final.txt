@@ -1,0 +1,42 @@
+Plan03 async DXGI implementer handoff
+
+Files changed
+- dlls/dxgi/device.c
+- dlls/dxgi/dxgi_private.h
+- dlls/dxgi/tests/dxgi.c
+- implementer-final.txt
+
+Implementation
+- Kept the completion worker's queue lock and waits outside query polling,
+  and now holds wined3d_mutex across every worker wined3d_query_get_data call.
+- Audited the new wined3d_query_decref paths and routed them through a helper
+  that holds wined3d_mutex, matching the existing DXGI convention.
+- Added a terminal completion-state contract: stopping rejects new reserve and
+  publish operations with DXGI_ERROR_DEVICE_REMOVED; shutdown waits for the
+  worker and active submitters; the worker drains accepted entries, signals
+  their copied events, and releases their queries before device teardown.
+- Removed the SYNCHRONIZE-only enqueue assertion and the elapsed wall-clock
+  assertion from the regression test.
+- Added event-wait coverage for pre-marker ordering and post-marker exclusion,
+  a no-sleep queue-saturation gate, and event delivery across final device
+  destruction.
+
+Validation
+- PASS: `git diff --check`.
+- PASS: focused object compile under
+  `flock /tmp/wine365-plans-build.lock make -j2 -C /home/ttv20/Projects/wine-365/build-plan03-async-dxgi-20260825-x86_64 dlls/dxgi/x86_64-windows/device.o dlls/dxgi/tests/x86_64-windows/dxgi.o`.
+- Not run: the DXGI DLL/test executable link and runtime test. The configured
+  build tree was missing prerequisite generated tools/import libraries, and
+  the link target began rebuilding unrelated runtime and wined3d components;
+  that build was stopped to preserve the focused-build requirement.
+
+Limitations
+- The saturation test is deliberately gated: if the live worker drains before
+  the 65th submission, it skips instead of using timing or sleeps as an oracle.
+  This run therefore does not claim runtime proof of E_OUTOFMEMORY saturation.
+- The DXGI_ERROR_DEVICE_REMOVED reserve/publish branch is protected by the
+  terminal contract but is not directly callable through the public API after
+  final COM destruction. The source contract and destruction drain path are
+  covered; no runtime claim is made for a post-shutdown removal enqueue.
+- No focused runtime test result is claimed because the test executable was
+  not linked in this build tree.
