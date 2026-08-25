@@ -829,6 +829,22 @@ static void get_surface_readback(struct d2d1_test_context *ctx, struct resource_
         get_d3d10_surface_readback(ctx->surface, rb);
 }
 
+static BOOL get_d3d11_bitmap_readback(ID2D1Bitmap1 *bitmap, struct resource_readback *rb)
+{
+    IDXGISurface *surface;
+    HRESULT hr;
+
+    hr = ID2D1Bitmap1_GetSurface(bitmap, &surface);
+    ok(hr == S_OK, "Failed to get bitmap surface, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return FALSE;
+
+    rb->d3d11 = TRUE;
+    get_d3d11_surface_readback(surface, rb);
+    IDXGISurface_Release(surface);
+    return TRUE;
+}
+
 static void release_d3d10_resource_readback(struct resource_readback *rb)
 {
     ID3D10Texture2D_Unmap((ID3D10Texture2D *)rb->u.d3d10_resource, 0);
@@ -18354,7 +18370,7 @@ static void test_no_target(BOOL d3d11)
 
 static void test_geometry_aa_guardrails(BOOL d3d11)
 {
-    D2D1_SIZE_U small_size = {64, 64}, large_size = {1024, 512};
+    D2D1_SIZE_U small_size = {64, 64}, large_size = {2048, 1024};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
     D2D1_RECT_F small_rect, large_rect, clip_rect;
     D2D1_MATRIX_3X2_F transform, current_transform;
@@ -18364,9 +18380,12 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1Image *original_target, *current_target;
     ID2D1Bitmap1 *small_bitmap, *large_bitmap;
     struct d2d1_test_context ctx;
+    struct resource_readback rb;
     float dpi_x, dpi_y;
     D2D1_COLOR_F colour;
+    DWORD pixel;
     HRESULT hr;
+    BOOL readback;
 
     if (!d3d11)
         return;
@@ -18439,10 +18458,11 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
 
     /* The custom path must restore caller state and preserve an aliased clip
-     * when it renders a bounded source-over stroke. */
+     * when it renders a bounded source-over subpixel stroke. */
     set_matrix_identity(&transform);
     translate_matrix(&transform, 1.0f, 1.0f);
     set_rect(&clip_rect, 4.0f, 4.0f, 20.0f, 60.0f);
+    ID2D1SolidColorBrush_SetOpacity(brush, 0.5f);
     ID2D1DeviceContext_BeginDraw(ctx.context);
     ID2D1DeviceContext_Clear(ctx.context, NULL);
     ID2D1DeviceContext_SetDpi(ctx.context, 120.0f, 120.0f);
@@ -18455,6 +18475,30 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_PopAxisAlignedClip(ctx.context);
     hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
     ok(hr == S_OK, "Source-over antialias draw failed, hr %#lx.\n", hr);
+
+    readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+    ok(readback, "Failed to read back the antialiased bitmap.\n");
+    if (readback)
+    {
+        /* The translated stroke lies on x/y 9. The aliased clip ends before
+         * x 20, so both its coverage and its transparent edges are visible
+         * in the destination rather than only in an internal scratch target. */
+        pixel = get_readback_colour(&rb, 10, 30);
+        ok(pixel != 0, "Covered geometry edge was unexpectedly transparent: 0x%08lx.\n", pixel);
+        pixel = get_readback_colour(&rb, 19, 30);
+        ok(compare_colour(pixel, 0x00000000, 0),
+                "Unexpected transparent pixel inside the clip 0x%08lx.\n", pixel);
+        pixel = get_readback_colour(&rb, 20, 30);
+        ok(compare_colour(pixel, 0x00000000, 0),
+                "Aliased clip edge was not transparent: 0x%08lx.\n", pixel);
+        pixel = get_readback_colour(&rb, 8, 30);
+        ok(compare_colour(pixel, 0x00000000, 0),
+                "Translated geometry edge was not transparent: 0x%08lx.\n", pixel);
+        pixel = get_readback_colour(&rb, 10, 7);
+        ok(compare_colour(pixel, 0x00000000, 0),
+                "Transparent edge above geometry was contaminated: 0x%08lx.\n", pixel);
+        release_resource_readback(&rb);
+    }
 
     ID2D1DeviceContext_GetDpi(ctx.context, &dpi_x, &dpi_y);
     ok(dpi_x == 120.0f && dpi_y == 120.0f,
@@ -18478,9 +18522,14 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ok(ID2D1DeviceContext_GetPrimitiveBlend(ctx.context) == D2D1_PRIMITIVE_BLEND_COPY,
             "Non-source-over fallback changed the primitive blend mode.\n");
 
-    /* This region would require more than the bounded 8x-plus-reductions
-     * scratch budget. The public operation must fall back before allocation
-     * and leave the context usable. */
+    /* 8*8 + 4*4 + 2*2 + 1*1 = 85 samples per output pixel. This dimensions
+     * choice exceeds 128 MiB even for the supported 1-byte A8 format, rather
+     * than relying on the usual 4-byte BGRA target format. */
+    ok((size_t)large_size.width * large_size.height * 85 > (size_t)128 * 1024 * 1024,
+            "Large test target does not exceed the minimum scratch budget.\n");
+
+    /* The public operation must fall back before allocation and leave the
+     * context usable. */
     ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)large_bitmap);
     set_matrix_identity(&transform);
     ID2D1DeviceContext_BeginDraw(ctx.context);
@@ -18489,10 +18538,18 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_SetTransform(ctx.context, &transform);
     ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
-    ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)large_geometry,
-            (ID2D1Brush *)brush, 0.5f, NULL);
+    ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)large_geometry,
+            (ID2D1Brush *)brush, NULL);
     hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
     ok(hr == S_OK, "Over-budget antialias fallback failed, hr %#lx.\n", hr);
+    readback = get_d3d11_bitmap_readback(large_bitmap, &rb);
+    ok(readback, "Failed to read back the over-budget fallback bitmap.\n");
+    if (readback)
+    {
+        pixel = get_readback_colour(&rb, 1024, 512);
+        ok(pixel != 0, "Over-budget fallback did not render pixels: 0x%08lx.\n", pixel);
+        release_resource_readback(&rb);
+    }
     ID2D1DeviceContext_GetTarget(ctx.context, &current_target);
     ok(current_target == (ID2D1Image *)large_bitmap,
             "Over-budget fallback changed the target.\n");
