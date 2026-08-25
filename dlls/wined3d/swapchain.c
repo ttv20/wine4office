@@ -240,6 +240,7 @@ HRESULT CDECL wined3d_swapchain_present_with_token(struct wined3d_swapchain *swa
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
     struct wined3d_swapchain_present_record *record;
+    char fail_present[2];
     uint64_t id;
     RECT s, d;
 
@@ -306,6 +307,28 @@ HRESULT CDECL wined3d_swapchain_present_with_token(struct wined3d_swapchain *swa
     record->result.identity_generation = swapchain->present_identity_generation;
     swapchain->last_submitted_present_id = id;
     ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+
+    if (GetEnvironmentVariableA("WINE_WINED3D_PRESENT_FAIL_ONCE",
+            fail_present, sizeof(fail_present)) == 1 && fail_present[0] == '1')
+    {
+        SetEnvironmentVariableA("WINE_WINED3D_PRESENT_FAIL_ONCE", "0");
+        WARN("Injecting a one-shot failed Present completion for token %s.\n",
+                wine_dbgstr_longlong(id));
+        AcquireSRWLockExclusive(&swapchain->present_result_lock);
+        record = &swapchain->present_results[id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+        if (record->result.present_id == id)
+        {
+            record->result.result = E_FAIL;
+            record->completed = true;
+            swapchain->last_completed_present_id = id;
+        }
+        ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+        ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+        if (present_id)
+            *present_id = id;
+        wined3d_mutex_unlock();
+        return WINED3D_OK;
+    }
 
     wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
             dst_rect, dst_window_override, swap_interval, flags, id);

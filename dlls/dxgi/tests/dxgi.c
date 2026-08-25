@@ -5707,6 +5707,48 @@ static BOOL check_present1_texture(ID3D10Device *device, IDXGISwapChain *swapcha
     return TRUE;
 }
 
+#define PRESENT1_HISTORY_TEST_WIDTH 64
+#define PRESENT1_HISTORY_TEST_HEIGHT 64
+
+static void fill_present1_test_rect(DWORD *frame, const RECT *rect, DWORD colour)
+{
+    LONG left = max(rect->left, 0), top = max(rect->top, 0);
+    LONG right = min(rect->right, PRESENT1_HISTORY_TEST_WIDTH);
+    LONG bottom = min(rect->bottom, PRESENT1_HISTORY_TEST_HEIGHT);
+    unsigned int x, y;
+
+    for (y = top; y < bottom; ++y)
+    {
+        for (x = left; x < right; ++x)
+            frame[y * PRESENT1_HISTORY_TEST_WIDTH + x] = colour;
+    }
+}
+
+static void scroll_present1_test_frame(DWORD *frame, const RECT *scroll_rect,
+        const POINT *scroll_offset)
+{
+    DWORD previous[PRESENT1_HISTORY_TEST_WIDTH * PRESENT1_HISTORY_TEST_HEIGHT];
+    LONG left = max(scroll_rect->left, 0), top = max(scroll_rect->top, 0);
+    LONG right = min(scroll_rect->right, PRESENT1_HISTORY_TEST_WIDTH);
+    LONG bottom = min(scroll_rect->bottom, PRESENT1_HISTORY_TEST_HEIGHT);
+    LONG source_x, source_y;
+    unsigned int x, y;
+
+    memcpy(previous, frame, sizeof(previous));
+    for (y = top; y < bottom; ++y)
+    {
+        for (x = left; x < right; ++x)
+        {
+            source_x = x - scroll_offset->x;
+            source_y = y - scroll_offset->y;
+            if (source_x >= 0 && source_x < PRESENT1_HISTORY_TEST_WIDTH
+                    && source_y >= 0 && source_y < PRESENT1_HISTORY_TEST_HEIGHT)
+                frame[y * PRESENT1_HISTORY_TEST_WIDTH + x]
+                        = previous[source_y * PRESENT1_HISTORY_TEST_WIDTH + source_x];
+        }
+    }
+}
+
 static void test_swapchain_present1_history(IUnknown *device, BOOL is_d3d12)
 {
     static const DWORD red = 0xff0000ff, green = 0xff00ff00, blue = 0xffff0000;
@@ -5735,6 +5777,8 @@ static void test_swapchain_present1_history(IUnknown *device, BOOL is_d3d12)
 
     get_factory(device, FALSE, &factory);
     window = create_window();
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
     for (i = 0; i < ARRAY_SIZE(full_data); ++i)
         full_data[i] = red;
     for (i = 0; i < ARRAY_SIZE(update_data); ++i)
@@ -5846,6 +5890,7 @@ static void test_swapchain_present1_history(IUnknown *device, BOOL is_d3d12)
                 check_present1_texture(d3d10_device, swapchain, staging,
                         buffer_count - 1, red, green, blue);
         }
+
         for (i = 0; i < ARRAY_SIZE(update_data); ++i)
             update_data[i] = green;
 
@@ -5859,6 +5904,551 @@ done:
     DestroyWindow(window);
     IDXGIFactory_Release(factory);
     ID3D10Device_Release(d3d10_device);
+}
+
+static BOOL check_present1_d3d11_frame(ID3D11DeviceContext *context,
+        ID3D11Texture2D *presented, ID3D11Texture2D *staging,
+        const DWORD *expected, const char *label)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    DWORD actual_hash = 2166136261u, expected_hash = 2166136261u;
+    DWORD first_actual = 0, first_expected = 0;
+    unsigned int first_x = 0, first_y = 0;
+    unsigned int mismatch_count = 0;
+    const DWORD *row;
+    unsigned int x, y;
+    HRESULT hr;
+
+    ID3D11DeviceContext_CopyResource(context,
+            (ID3D11Resource *)staging, (ID3D11Resource *)presented);
+    if (FAILED(hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging,
+            0, D3D11_MAP_READ, 0, &map)))
+    {
+        ok(0, "%s: Failed to map the Present1 staging texture, hr %#lx.\n", label, hr);
+        return FALSE;
+    }
+
+    for (y = 0; y < PRESENT1_HISTORY_TEST_HEIGHT; ++y)
+    {
+        row = (const DWORD *)((const BYTE *)map.pData + y * map.RowPitch);
+        for (x = 0; x < PRESENT1_HISTORY_TEST_WIDTH; ++x)
+        {
+            actual_hash = (actual_hash ^ row[x]) * 16777619u;
+            expected_hash = (expected_hash
+                    ^ expected[y * PRESENT1_HISTORY_TEST_WIDTH + x]) * 16777619u;
+            if (row[x] != expected[y * PRESENT1_HISTORY_TEST_WIDTH + x])
+            {
+                if (!mismatch_count)
+                {
+                    first_x = x;
+                    first_y = y;
+                    first_actual = row[x];
+                    first_expected = expected[y * PRESENT1_HISTORY_TEST_WIDTH + x];
+                }
+                ++mismatch_count;
+            }
+        }
+    }
+    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+    ok(!mismatch_count, "%s: %u pixels differ; first at (%u,%u) is %#lx, expected %#lx; "
+            "hash %#lx, expected %#lx.\n", label, mismatch_count, first_x, first_y,
+            first_actual, first_expected, actual_hash, expected_hash);
+    return !mismatch_count;
+}
+
+static void update_present1_d3d11_rect(ID3D11DeviceContext *context,
+        ID3D11Texture2D *texture, const RECT *rect, DWORD colour, DWORD *data)
+{
+    UINT width = rect->right - rect->left;
+    UINT height = rect->bottom - rect->top;
+    D3D11_BOX box;
+    unsigned int i;
+
+    for (i = 0; i < width * height; ++i)
+        data[i] = colour;
+    box.left = rect->left;
+    box.top = rect->top;
+    box.front = 0;
+    box.right = rect->right;
+    box.bottom = rect->bottom;
+    box.back = 1;
+    ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+            0, &box, data, width * sizeof(*data), 0);
+}
+
+static void test_swapchain_present1_scroll(void)
+{
+    static struct
+    {
+        const char *name;
+        RECT scroll_rect;
+        POINT scroll_offset;
+        UINT dirty_count;
+        RECT dirty_rects[2];
+        DWORD colour;
+    }
+    scroll_cases[] =
+    {
+        {"down-overlap", {0, 8, 64, 64}, {0, 8}, 2,
+                {{0, 0, 64, 8}, {8, 16, 24, 24}}, 0xff00ffff},
+        {"up-overlap", {0, 0, 64, 56}, {0, -8}, 2,
+                {{0, 56, 64, 64}, {32, 40, 48, 48}}, 0xffff00ff},
+        {"right-overlap", {8, 0, 64, 64}, {8, 0}, 2,
+                {{0, 0, 8, 64}, {16, 8, 24, 24}}, 0xffffff00},
+        {"left-overlap", {0, 0, 56, 64}, {-8, 0}, 2,
+                {{56, 0, 64, 64}, {40, 32, 48, 48}}, 0xff808080},
+        {"diagonal-empty-dirty", {7, 0, 64, 59}, {7, -5}, 0,
+                {{0, 0, 0, 0}, {0, 0, 0, 0}}, 0},
+    };
+    static const DWORD red = 0xff0000ff, green = 0xff00ff00, blue = 0xffff0000;
+    DWORD data[PRESENT1_HISTORY_TEST_WIDTH * PRESENT1_HISTORY_TEST_HEIGHT];
+    DWORD expected[PRESENT1_HISTORY_TEST_WIDTH * PRESENT1_HISTORY_TEST_HEIGHT];
+    DXGI_PRESENT_PARAMETERS parameters = {0};
+    D3D11_TEXTURE2D_DESC texture_desc = {0};
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
+    ID3D11Texture2D *texture, *staging;
+    ID3D11DeviceContext *context;
+    IDXGISwapChain1 *swapchain;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *device;
+    unsigned int buffer_count, i, j;
+    RECT dirty_rect, duplicate_rects[2], excessive_rects[65], clipped_rect, oob_rect;
+    RECT invalid_scroll_rect;
+    POINT invalid_scroll_offset;
+    HWND window;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_d3d11_device()))
+    {
+        skip("D3D11 device is unavailable for Present1 scroll tests.\n");
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Failed to get ID3D11Device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        IDXGIDevice_Release(dxgi_device);
+        return;
+    }
+    ID3D11Device_GetImmediateContext(device, &context);
+    get_factory((IUnknown *)dxgi_device, FALSE, &factory);
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIFactory2 is unavailable, hr %#lx.\n", hr);
+        goto done_device;
+    }
+
+    window = create_window();
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+
+    texture_desc.Width = PRESENT1_HISTORY_TEST_WIDTH;
+    texture_desc.Height = PRESENT1_HISTORY_TEST_HEIGHT;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Usage = D3D11_USAGE_STAGING;
+    texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(device, &texture_desc, NULL, &staging);
+    ok(hr == S_OK, "Failed to create D3D11 staging texture, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_factory;
+
+    swapchain_desc.Width = PRESENT1_HISTORY_TEST_WIDTH;
+    swapchain_desc.Height = PRESENT1_HISTORY_TEST_HEIGHT;
+    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+
+    for (buffer_count = 2; buffer_count <= 4; ++buffer_count)
+    {
+        swapchain_desc.BufferCount = buffer_count;
+        hr = IDXGIFactory2_CreateSwapChainForHwnd(factory2, (IUnknown *)device,
+                window, &swapchain_desc, NULL, NULL, &swapchain);
+        if (hr == DXGI_ERROR_INVALID_CALL || hr == DXGI_ERROR_UNSUPPORTED)
+        {
+            win_skip("A %u-buffer D3D11 flip-sequential swapchain is unavailable.\n", buffer_count);
+            continue;
+        }
+        ok(hr == S_OK, "Failed to create %u-buffer D3D11 swapchain, hr %#lx.\n",
+                buffer_count, hr);
+        if (FAILED(hr))
+            continue;
+
+        for (i = 0; i < ARRAY_SIZE(expected); ++i)
+            expected[i] = data[i] = red;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get initial D3D11 back buffer, hr %#lx.\n", hr);
+        if (FAILED(hr))
+            goto release_swapchain;
+        ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                0, NULL, data, PRESENT1_HISTORY_TEST_WIDTH * sizeof(*data), 0);
+        if (!check_present1_d3d11_frame(context,
+                texture, staging, expected, "initial-before-present"))
+        {
+            ID3D11Texture2D_Release(texture);
+            goto release_swapchain;
+        }
+        hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+        ok(hr == S_OK, "Initial D3D11 Present returned %#lx.\n", hr);
+        ID3D11Texture2D_Release(texture);
+        if (FAILED(hr))
+            goto release_swapchain;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get initial presented D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                texture, staging, expected, "initial-full"))
+        {
+            if (SUCCEEDED(hr))
+                ID3D11Texture2D_Release(texture);
+            goto release_swapchain;
+        }
+        ID3D11Texture2D_Release(texture);
+
+        SetRect(&dirty_rect, 8, 8, 24, 24);
+        parameters.DirtyRectsCount = 1;
+        parameters.pDirtyRects = &dirty_rect;
+        fill_present1_test_rect(expected, &dirty_rect, green);
+        for (i = 1; i < buffer_count; ++i)
+        {
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get D3D11 seed buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                break;
+            update_present1_d3d11_rect(context, texture, &dirty_rect, green, data);
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "D3D11 seed Present1 %u returned %#lx.\n", i, hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                break;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get presented D3D11 seed buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "dirty-seed"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                break;
+            }
+            ID3D11Texture2D_Release(texture);
+        }
+        if (i != buffer_count)
+            goto release_swapchain;
+
+        SetRect(&dirty_rect, 32, 32, 48, 48);
+        parameters.pDirtyRects = &dirty_rect;
+        fill_present1_test_rect(expected, &dirty_rect, blue);
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get D3D11 sparse buffer, hr %#lx.\n", hr);
+        if (FAILED(hr))
+            goto release_swapchain;
+        update_present1_d3d11_rect(context, texture, &dirty_rect, blue, data);
+        hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+        ok(hr == S_OK, "D3D11 sparse Present1 returned %#lx.\n", hr);
+        ID3D11Texture2D_Release(texture);
+        if (FAILED(hr))
+            goto release_swapchain;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get presented D3D11 sparse buffer, hr %#lx.\n", hr);
+        if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                texture, staging, expected, "dirty-repair"))
+        {
+            if (SUCCEEDED(hr))
+                ID3D11Texture2D_Release(texture);
+            goto release_swapchain;
+        }
+        ID3D11Texture2D_Release(texture);
+
+        for (i = 0; i < ARRAY_SIZE(scroll_cases); ++i)
+        {
+            parameters.DirtyRectsCount = scroll_cases[i].dirty_count;
+            parameters.pDirtyRects = scroll_cases[i].dirty_count
+                    ? scroll_cases[i].dirty_rects : NULL;
+            parameters.pScrollRect = &scroll_cases[i].scroll_rect;
+            parameters.pScrollOffset = &scroll_cases[i].scroll_offset;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "%s: Failed to get D3D11 scroll buffer, hr %#lx.\n",
+                    scroll_cases[i].name, hr);
+            if (FAILED(hr))
+                break;
+            for (j = 0; j < scroll_cases[i].dirty_count; ++j)
+                update_present1_d3d11_rect(context, texture,
+                        &scroll_cases[i].dirty_rects[j], scroll_cases[i].colour, data);
+
+            scroll_present1_test_frame(expected, &scroll_cases[i].scroll_rect,
+                    &scroll_cases[i].scroll_offset);
+            for (j = 0; j < scroll_cases[i].dirty_count; ++j)
+                fill_present1_test_rect(expected, &scroll_cases[i].dirty_rects[j],
+                        scroll_cases[i].colour);
+
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "%s: D3D11 Present1 returned %#lx.\n",
+                    scroll_cases[i].name, hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                break;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "%s: Failed to get presented D3D11 scroll buffer, hr %#lx.\n",
+                    scroll_cases[i].name, hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, scroll_cases[i].name))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                break;
+            }
+            ID3D11Texture2D_Release(texture);
+        }
+
+        if (i == ARRAY_SIZE(scroll_cases))
+        {
+            SetRect(&duplicate_rects[0], 4, 4, 12, 12);
+            duplicate_rects[1] = duplicate_rects[0];
+            parameters.DirtyRectsCount = ARRAY_SIZE(duplicate_rects);
+            parameters.pDirtyRects = duplicate_rects;
+            parameters.pScrollRect = NULL;
+            parameters.pScrollOffset = NULL;
+            fill_present1_test_rect(expected, &duplicate_rects[0], 0xff4080ff);
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get duplicate-dirty buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            update_present1_d3d11_rect(context, texture,
+                    &duplicate_rects[0], 0xff4080ff, data);
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "Duplicate-dirty Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get duplicate-dirty presented buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "duplicate-dirty"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                goto release_swapchain;
+            }
+            ID3D11Texture2D_Release(texture);
+
+            SetRect(&dirty_rect, 52, 52, 60, 60);
+            for (j = 0; j < ARRAY_SIZE(excessive_rects); ++j)
+                excessive_rects[j] = dirty_rect;
+            parameters.DirtyRectsCount = ARRAY_SIZE(excessive_rects);
+            parameters.pDirtyRects = excessive_rects;
+            fill_present1_test_rect(expected, &dirty_rect, 0xffff8040);
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get excessive-dirty buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            update_present1_d3d11_rect(context, texture, &dirty_rect, 0xffff8040, data);
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "Excessive-dirty Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get excessive-dirty presented buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "excessive-dirty"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                goto release_swapchain;
+            }
+            ID3D11Texture2D_Release(texture);
+
+            SetRect(&oob_rect, -4, -4, 8, 8);
+            SetRect(&clipped_rect, 0, 0, 8, 8);
+            parameters.DirtyRectsCount = 1;
+            parameters.pDirtyRects = &oob_rect;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get out-of-bounds dirty buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            update_present1_d3d11_rect(context, texture, &clipped_rect, 0xff204060, data);
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == DXGI_ERROR_INVALID_CALL,
+                    "Out-of-bounds dirty Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (SUCCEEDED(hr))
+            {
+                fill_present1_test_rect(expected, &clipped_rect, 0xff204060);
+                hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                        &IID_ID3D11Texture2D, (void **)&texture);
+                ok(hr == S_OK, "Failed to get out-of-bounds presented buffer, hr %#lx.\n", hr);
+                if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                        texture, staging, expected, "out-of-bounds-dirty"))
+                {
+                    if (SUCCEEDED(hr))
+                        ID3D11Texture2D_Release(texture);
+                    goto release_swapchain;
+                }
+                ID3D11Texture2D_Release(texture);
+            }
+
+            SetRect(&invalid_scroll_rect, 0, 0,
+                    PRESENT1_HISTORY_TEST_WIDTH, PRESENT1_HISTORY_TEST_HEIGHT);
+            invalid_scroll_offset.x = 1;
+            invalid_scroll_offset.y = 0;
+            parameters.DirtyRectsCount = 0;
+            parameters.pDirtyRects = NULL;
+            parameters.pScrollRect = &invalid_scroll_rect;
+            parameters.pScrollOffset = &invalid_scroll_offset;
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == DXGI_ERROR_INVALID_CALL,
+                    "Out-of-bounds scroll source Present1 returned %#lx.\n", hr);
+
+            for (j = 0; j < ARRAY_SIZE(data); ++j)
+                expected[j] = data[j] = 0xff602040;
+            parameters.pScrollRect = NULL;
+            parameters.pScrollOffset = NULL;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get sparse-to-full buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                    0, NULL, data, PRESENT1_HISTORY_TEST_WIDTH * sizeof(*data), 0);
+            hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+            ok(hr == S_OK, "Sparse-to-full Present returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get sparse-to-full presented buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "sparse-to-full"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                goto release_swapchain;
+            }
+            ID3D11Texture2D_Release(texture);
+
+            hr = IDXGISwapChain1_ResizeBuffers(swapchain, buffer_count,
+                    PRESENT1_HISTORY_TEST_WIDTH, PRESENT1_HISTORY_TEST_HEIGHT,
+                    DXGI_FORMAT_UNKNOWN, 0);
+            ok(hr == S_OK, "ResizeBuffers returned %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            for (j = 0; j < ARRAY_SIZE(data); ++j)
+                expected[j] = data[j] = 0xff406020;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get post-resize buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                    0, NULL, data, PRESENT1_HISTORY_TEST_WIDTH * sizeof(*data), 0);
+            parameters.DirtyRectsCount = 0;
+            parameters.pDirtyRects = NULL;
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "Post-resize Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get post-resize presented buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "post-resize"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                goto release_swapchain;
+            }
+            ID3D11Texture2D_Release(texture);
+        }
+
+        if (i == ARRAY_SIZE(scroll_cases) && !strcmp(winetest_platform, "wine"))
+        {
+            parameters.DirtyRectsCount = 0;
+            parameters.pDirtyRects = NULL;
+            parameters.pScrollRect = NULL;
+            parameters.pScrollOffset = NULL;
+            for (j = 0; j < ARRAY_SIZE(data); ++j)
+                data[j] = 0xff000000;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get injected-failure buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                    0, NULL, data, PRESENT1_HISTORY_TEST_WIDTH * sizeof(*data), 0);
+            SetEnvironmentVariableA("WINE_WINED3D_PRESENT_FAIL_ONCE", "1");
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            SetEnvironmentVariableA("WINE_WINED3D_PRESENT_FAIL_ONCE", NULL);
+            ok(hr == S_OK, "Injected asynchronous Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+
+            for (j = 0; j < ARRAY_SIZE(data); ++j)
+                expected[j] = data[j] = 0xffffffff;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get recovery buffer, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto release_swapchain;
+            ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                    0, NULL, data, PRESENT1_HISTORY_TEST_WIDTH * sizeof(*data), 0);
+            hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+            ok(hr == S_OK, "Recovery Present1 returned %#lx.\n", hr);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr))
+                goto release_swapchain;
+            hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                    &IID_ID3D11Texture2D, (void **)&texture);
+            ok(hr == S_OK, "Failed to get recovered presented buffer, hr %#lx.\n", hr);
+            if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                    texture, staging, expected, "failed-present-recovery"))
+            {
+                if (SUCCEEDED(hr))
+                    ID3D11Texture2D_Release(texture);
+                goto release_swapchain;
+            }
+            ID3D11Texture2D_Release(texture);
+        }
+
+release_swapchain:
+        parameters.DirtyRectsCount = 0;
+        parameters.pDirtyRects = NULL;
+        parameters.pScrollRect = NULL;
+        parameters.pScrollOffset = NULL;
+        IDXGISwapChain1_Release(swapchain);
+    }
+
+    ID3D11Texture2D_Release(staging);
+done_factory:
+    DestroyWindow(window);
+    IDXGIFactory2_Release(factory2);
+done_device:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+    IDXGIDevice_Release(dxgi_device);
 }
 
 static void test_swapchain_backbuffer_index(IUnknown *device, BOOL is_d3d12)
@@ -9473,6 +10063,7 @@ START_TEST(dxgi)
     if (present1_history_only)
     {
         run_on_d3d10(test_swapchain_present1_history);
+        test_swapchain_present1_scroll();
         return;
     }
 
@@ -9510,6 +10101,7 @@ START_TEST(dxgi)
     run_on_d3d10(test_swapchain_resize);
     run_on_d3d10(test_swapchain_present);
     run_on_d3d10(test_swapchain_present1_history);
+    test_swapchain_present1_scroll();
     run_on_d3d10(test_swapchain_backbuffer_index);
     run_on_d3d10(test_swapchain_formats);
     run_on_d3d10(test_output_ownership);
