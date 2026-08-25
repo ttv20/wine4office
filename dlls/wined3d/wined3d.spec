@@ -298,6 +298,7 @@
 @ cdecl wined3d_swapchain_create(ptr ptr ptr ptr ptr ptr)
 @ cdecl wined3d_swapchain_decref(ptr)
 @ cdecl wined3d_swapchain_get_back_buffer(ptr long)
+@ cdecl wined3d_swapchain_get_present_capabilities(ptr long ptr ptr)
 @ cdecl wined3d_swapchain_get_desc(ptr ptr)
 @ cdecl wined3d_swapchain_get_device(ptr)
 @ cdecl wined3d_swapchain_get_display_mode(ptr ptr ptr)

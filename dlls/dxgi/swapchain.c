@@ -999,6 +999,60 @@ static void d3d11_present1_apply_scroll(ID3D11DeviceContext *context,
             dst_rect.left, dst_rect.top, 0, (ID3D11Resource *)src, 0, &box);
 }
 
+enum d3d11_present1_fallback_reason
+{
+    D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED,
+    D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE,
+};
+
+static const char *d3d11_present1_fallback_reason_name(enum d3d11_present1_fallback_reason reason)
+{
+    switch (reason)
+    {
+        case D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED:
+            return "backend-capability-query-failed";
+        case D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE:
+            return "physical-back-buffer-identity-unavailable";
+        case D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE:
+            return "back-buffer-preservation-contract-unavailable";
+        case D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE:
+            return "transactional-present-result-unavailable";
+        case D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE:
+            return "region-history-not-active";
+    }
+
+    return "unknown";
+}
+
+static enum d3d11_present1_fallback_reason d3d11_swapchain_get_present1_fallback_reason(
+        struct d3d11_swapchain *swapchain, uint32_t *capabilities, uint64_t *physical_identity)
+{
+    HRESULT hr;
+
+    *capabilities = 0;
+    *physical_identity = 0;
+
+    wined3d_mutex_lock();
+    hr = wined3d_swapchain_get_present_capabilities(swapchain->wined3d_swapchain, 0,
+            capabilities, physical_identity);
+    wined3d_mutex_unlock();
+
+    if (FAILED(hr))
+        return D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY)
+            || !*physical_identity)
+        return D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS))
+        return D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT))
+        return D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE;
+
+    return D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE;
+}
+
 /* Region history stays disabled until WineD3D exposes backend-owned physical
  * identity and preservation guarantees.  Keep the full-copy path as the
  * correctness fallback for every backend and presentation flag. */
@@ -1012,15 +1066,24 @@ static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swap
     ID3D11Device *device = NULL;
     D3D11_TEXTURE2D_DESC desc;
     D3D11_BOX box;
+    enum d3d11_present1_fallback_reason fallback_reason;
+    uint32_t capabilities;
+    uint64_t physical_identity;
     HRESULT hr;
     unsigned int i;
-
-    TRACE("Using the full-copy Present1 fallback; no backend preservation contract is available.\n");
 
     if (parameters && parameters->DirtyRectsCount && !parameters->pDirtyRects)
         return E_INVALIDARG;
     if (parameters && (!!parameters->pScrollRect != !!parameters->pScrollOffset))
         return E_INVALIDARG;
+
+    fallback_reason = d3d11_swapchain_get_present1_fallback_reason(swapchain,
+            &capabilities, &physical_identity);
+    TRACE("Using the full-copy Present1 fallback: reason %s, backend capabilities %#x, "
+            "authoritative physical identity %#I64x.\n",
+            d3d11_present1_fallback_reason_name(fallback_reason), capabilities,
+            (unsigned long long)physical_identity);
+
     if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
             0, &IID_ID3D11Texture2D, (void **)&back)))
         return hr;

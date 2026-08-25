@@ -4138,6 +4138,8 @@ struct wined3d_swapchain_ops
     void (*swapchain_present)(struct wined3d_swapchain *swapchain,
             const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags);
     void (*swapchain_frontbuffer_updated)(struct wined3d_swapchain *swapchain);
+    HRESULT (*swapchain_get_present_capabilities)(const struct wined3d_swapchain *swapchain,
+            UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity);
 };
 
 struct wined3d_swapchain

@@ -5449,6 +5449,9 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
             present_parameters.pScrollOffset = &scroll_offset;
             hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
             ok(hr == E_INVALIDARG, "Present1 with a missing scroll rectangle returned %#lx.\n", hr);
+            present_parameters.pScrollOffset = NULL;
+            hr = IDXGISwapChain1_Present1(swapchain1, 0, 0, &present_parameters);
+            ok(hr == S_OK, "Present1 with an empty update returned %#lx.\n", hr);
             IDXGISwapChain1_Release(swapchain1);
         }
         else

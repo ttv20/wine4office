@@ -2310,6 +2310,14 @@ struct wined3d_swapchain_state_parent_ops
             BOOL windowed);
 };
 
+/* A backend must report all of these facts before a caller may use bounded
+ * Present1 history.  A zero capability set is an authoritative statement
+ * that the backend cannot prove the contract.  In particular, these values
+ * must not be synthesized from a logical buffer index or presentation count. */
+#define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY  0x00000001u
+#define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS 0x00000002u
+#define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT 0x00000004u
+
 struct wined3d_private_store
 {
     struct list content;
@@ -2910,6 +2918,11 @@ HRESULT __cdecl wined3d_swapchain_create(struct wined3d_device *device,
 ULONG __cdecl wined3d_swapchain_decref(struct wined3d_swapchain *swapchain);
 struct wined3d_texture * __cdecl wined3d_swapchain_get_back_buffer(const struct wined3d_swapchain *swapchain,
         UINT backbuffer_idx);
+/* This read-only query must not flush queued work.  A backend that cannot
+ * describe the queued physical state and the eventual present result must
+ * leave the capability set clear. */
+HRESULT __cdecl wined3d_swapchain_get_present_capabilities(const struct wined3d_swapchain *swapchain,
+        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity);
 struct wined3d_device * __cdecl wined3d_swapchain_get_device(const struct wined3d_swapchain *swapchain);
 HRESULT __cdecl wined3d_swapchain_get_display_mode(const struct wined3d_swapchain *swapchain,
         struct wined3d_display_mode *mode, enum wined3d_display_rotation *rotation);

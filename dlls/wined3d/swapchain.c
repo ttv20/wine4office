@@ -293,6 +293,50 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
     return WINED3D_OK;
 }
 
+HRESULT CDECL wined3d_swapchain_get_present_capabilities(const struct wined3d_swapchain *swapchain,
+        UINT backbuffer_idx, uint32_t *capabilities, uint64_t *physical_identity)
+{
+    uint32_t backend_capabilities;
+    uint64_t backend_identity;
+    HRESULT hr;
+
+    TRACE("swapchain %p, backbuffer_idx %u, capabilities %p, physical_identity %p.\n",
+            swapchain, backbuffer_idx, capabilities, physical_identity);
+
+    if (!swapchain || !capabilities || !physical_identity)
+        return E_INVALIDARG;
+    if (!swapchain->back_buffers || backbuffer_idx >= swapchain->state.desc.backbuffer_count)
+        return WINED3DERR_INVALIDCALL;
+
+    /* Keep outputs transactional even when a backend rejects the query. */
+    *capabilities = 0;
+    *physical_identity = 0;
+
+    if (!swapchain->swapchain_ops->swapchain_get_present_capabilities)
+    {
+        TRACE("Swapchain %p has no authoritative present capability callback.\n", swapchain);
+        return WINED3D_OK;
+    }
+
+    backend_capabilities = 0;
+    backend_identity = 0;
+    if (FAILED(hr = swapchain->swapchain_ops->swapchain_get_present_capabilities(swapchain,
+            backbuffer_idx, &backend_capabilities, &backend_identity)))
+        return hr;
+
+    /* A capability bit without its required identity is not usable. */
+    if (!(backend_capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY)
+            || !backend_identity)
+    {
+        backend_capabilities &= ~WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY;
+        backend_identity = 0;
+    }
+
+    *capabilities = backend_capabilities;
+    *physical_identity = backend_identity;
+    return S_OK;
+}
+
 HRESULT CDECL wined3d_swapchain_get_front_buffer_data(const struct wined3d_swapchain *swapchain,
         struct wined3d_texture *dst_texture, unsigned int sub_resource_idx)
 {
@@ -721,6 +765,7 @@ static const struct wined3d_swapchain_ops swapchain_gl_ops =
 {
     swapchain_gl_present,
     swapchain_frontbuffer_updated,
+    NULL, /* Physical identity and preservation are not yet proven. */
 };
 
 static bool wined3d_swapchain_vk_present_mode_supported(struct wined3d_swapchain_vk *swapchain_vk,
@@ -1640,6 +1685,7 @@ static const struct wined3d_swapchain_ops swapchain_vk_ops =
 {
     swapchain_vk_present,
     swapchain_frontbuffer_updated,
+    NULL, /* Physical identity and preservation are not yet proven. */
 };
 
 static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchain)
@@ -1720,6 +1766,7 @@ static const struct wined3d_swapchain_ops swapchain_no3d_ops =
 {
     swapchain_gdi_present,
     swapchain_gdi_frontbuffer_updated,
+    NULL, /* No-3D behavior is not a preservation proof. */
 };
 
 static void wined3d_swapchain_apply_sample_count_override(const struct wined3d_swapchain *swapchain,
