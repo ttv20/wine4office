@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Build Wine4Office releases and agent runners from the same reproducible 18-job environment.
 - Display background-service RAM without reclaimable inactive file cache and hide it when the service is stopped.
 - Activate Microsoft 365 licenses after signing in to Office.
 - Keep Wine environment recreation responsive and show live progress and logs in the Manager.
