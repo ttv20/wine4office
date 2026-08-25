@@ -361,6 +361,9 @@ public:
     bool valid() const { return locked; }
 };
 
+struct cache_record;
+static bool cache_record_load_locked(const std::string &login_hint, cache_record &record);
+
 class cache_transaction
 {
     cache_lock lock;
@@ -441,6 +444,11 @@ public:
         return success;
     }
 
+    bool load_previous(cache_record &record) const
+    {
+        return valid() && cache_record_load_locked({}, record);
+    }
+
     bool replace_bundle(const std::string &value);
 };
 
@@ -448,6 +456,7 @@ static bool protected_write(const WCHAR *name, const std::string &value)
 {
     DATA_BLOB input, output = {};
     std::wstring path = cache_file(name), temporary;
+    WCHAR fault[128], expected[128];
     HANDLE file;
     DWORD written;
     bool success = false;
@@ -461,11 +470,32 @@ static bool protected_write(const WCHAR *name, const std::string &value)
                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
     if (file != INVALID_HANDLE_VALUE)
     {
+        DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                                fault, ARRAY_SIZE(fault));
         success = WriteFile(file, output.pbData, output.cbData, &written, NULL) &&
-                  written == output.cbData && FlushFileBuffers(file);
+                  written == output.cbData;
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:write", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:flush", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else if (success) success = FlushFileBuffers(file);
         CloseHandle(file);
-        if (success) success = MoveFileExW(temporary.c_str(), path.c_str(),
-                                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:rename", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else if (success) success = MoveFileExW(temporary.c_str(), path.c_str(),
+                                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
         if (!success) DeleteFileW(temporary.c_str());
     }
     LocalFree(output.pbData);
@@ -948,6 +978,22 @@ static bool cache_record_identity_valid(const cache_record &record, const std::s
     return success;
 }
 
+static bool cache_record_matches(const cache_record &left, const cache_record &right)
+{
+    return left.office.access_token == right.office.access_token &&
+           left.office.refresh_token == right.office.refresh_token &&
+           left.office.id_token == right.office.id_token &&
+           left.licensing.access_token == right.licensing.access_token &&
+           left.licensing.refresh_token == right.licensing.refresh_token &&
+           left.licensing.id_token == right.licensing.id_token &&
+           left.licensing.expires_in == right.licensing.expires_in &&
+           left.username == right.username && left.oid == right.oid && left.tid == right.tid &&
+           left.first_name == right.first_name && left.last_name == right.last_name &&
+           left.display_name == right.display_name && left.account_id == right.account_id &&
+           left.authority == right.authority && left.client_info == right.client_info &&
+           left.expires == right.expires;
+}
+
 static bool recover_cache_transaction_locked(void)
 {
     std::wstring marker = cache_file(L"wam-transaction.pending");
@@ -1096,27 +1142,62 @@ static bool cache_record_save(const cache_record &record)
 {
     std::wstring bundle_name = cache_bundle_name(record.username);
     std::wstring bundle = cache_file(bundle_name.c_str());
+    cache_record previous;
     cache_transaction transaction;
     std::string bundle_json;
-    bool success;
+    bool previous_valid, success;
 
     if (bundle_name.empty() || bundle.empty() ||
         !cache_record_identity_valid(record, {}) || !transaction.begin(bundle))
         return false;
+    /* Snapshot the old generation only after the transaction owns the cache
+     * mutex.  Otherwise a second writer could publish between the snapshot
+     * and begin(), leaving rollback projections from the wrong generation. */
+    previous_valid = transaction.load_previous(previous);
     bundle_json = cache_record_json(record);
     success = transaction.replace_bundle(bundle_json);
     secure_clear(bundle_json);
     if (!success)
     {
         transaction.rollback();
+        secure_clear(previous);
         return false;
     }
-    if (!publish_projection(record)) return false;
+    if (!publish_projection(record))
+    {
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
+    {
+        WCHAR fault[64];
+        cache_record verified;
+        DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                                fault, ARRAY_SIZE(fault));
+        if (length && length < ARRAY_SIZE(fault) && !wcscmp(fault, L"final-read"))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else success = cache_record_load_locked({}, verified) && cache_record_matches(record, verified);
+        secure_clear(verified);
+    }
+    if (!success)
+    {
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
     if (!transaction.commit())
     {
-        transaction.rollback();
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
         return false;
     }
+    secure_clear(previous);
     return true;
 }
 
@@ -1920,6 +2001,84 @@ static void self_test_record(cache_record &record, const char *username, const c
     record.expires = unix_time() + 3600;
 }
 
+static bool self_test_projection_value(const WCHAR *name, const std::string &expected)
+{
+    std::string value;
+    bool success = protected_read(name, value) && value == expected;
+    secure_clear(value);
+    return success;
+}
+
+static bool self_test_projection(const cache_record &record)
+{
+    std::string expires = std::to_string(record.expires);
+    bool success =
+        self_test_projection_value(L"wam-access-token.dat", record.office.access_token) &&
+        self_test_projection_value(L"wam-id-token.dat", record.office.id_token) &&
+        self_test_projection_value(L"wam-refresh-token.dat", record.office.refresh_token) &&
+        self_test_projection_value(L"wam-licensing-token.dat", record.licensing.access_token) &&
+        self_test_projection_value(L"wam-token-expires-on.dat", expires) &&
+        self_test_projection_value(L"wam-account-username.dat", record.username) &&
+        self_test_projection_value(L"wam-account-id.dat", record.account_id) &&
+        self_test_projection_value(L"wam-account-oid.dat", record.oid) &&
+        self_test_projection_value(L"wam-account-tenant-id.dat", record.tid) &&
+        self_test_projection_value(L"wam-account-authority.dat", record.authority) &&
+        self_test_projection_value(L"wam-client-info.dat", record.client_info) &&
+        self_test_projection_value(L"wam-active-account.dat", record.username);
+    secure_clear(expires);
+    return success;
+}
+
+static bool self_test_publication_failures(const cache_record &first, const cache_record &second,
+                                           const std::wstring &first_bundle)
+{
+    static const WCHAR *const fields[] =
+    {
+        L"wam-access-token.dat", L"wam-id-token.dat", L"wam-refresh-token.dat",
+        L"wam-licensing-token.dat", L"wam-token-expires-on.dat", L"wam-account-username.dat",
+        L"wam-account-id.dat", L"wam-account-oid.dat", L"wam-account-tenant-id.dat",
+        L"wam-account-authority.dat", L"wam-client-info.dat", L"wam-active-account.dat"
+    };
+    unsigned int i;
+    WCHAR fault[128];
+    cache_record loaded;
+    bool success = true;
+
+    for (i = 0; i < ARRAY_SIZE(fields) && success; ++i)
+    {
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:write", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+        if (!success) break;
+
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:flush", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+        if (!success) break;
+
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:rename", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
+    if (success)
+    {
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", L"final-read");
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
+    SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+    DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+    secure_clear(loaded);
+    return success;
+}
+
 struct cache_lock_probe
 {
     HANDLE started;
@@ -1954,6 +2113,38 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     bool success;
     (void)previous; (void)command_line; (void)show;
     if (!argv) return 3;
+    if (argc >= 3 && !wcscmp(argv[1], L"--self-test-helper"))
+    {
+        if (!wcscmp(argv[2], L"fail"))
+        {
+            LocalFree(argv);
+            return 7;
+        }
+        if (!wcscmp(argv[2], L"crash"))
+        {
+            TerminateProcess(GetCurrentProcess(), 0xc0000005);
+            LocalFree(argv);
+            return 3;
+        }
+        if (!wcscmp(argv[2], L"timeout"))
+        {
+            HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (event)
+            {
+                WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+            LocalFree(argv);
+            return 3;
+        }
+        if (!wcscmp(argv[2], L"shutdown"))
+        {
+            LocalFree(argv);
+            return 3;
+        }
+        LocalFree(argv);
+        return 0;
+    }
     if (argc >= 2 && !wcscmp(argv[1], L"--self-test-cache"))
     {
         bool recovered = recover_cache_transaction();
@@ -1974,6 +2165,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
                                loaded.office.refresh_token == first.office.refresh_token;
         if (success) success = cache_record_load(second.username, loaded) &&
                                loaded.office.refresh_token == second.office.refresh_token;
+        if (success) success = self_test_projection(second);
+        if (success) success = self_test_publication_failures(first, second, first_bundle);
         mismatch = "third@example.invalid";
         if (success) success = !cache_record_load(mismatch, loaded);
         if (success)
