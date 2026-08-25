@@ -1138,7 +1138,9 @@ static bool recover_cache_transaction_locked(void)
         }
         else if (target_is_new)
             success = DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
-        else if (target_existed && restore_previous_projection) success = false;
+        else if (target_existed && restore_previous_projection &&
+                 GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES)
+            success = false;
         if (!DeleteFileW(temporary.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) success = false;
 
         if (!legacy_marker && previous_name != "-")
@@ -1156,12 +1158,14 @@ static bool recover_cache_transaction_locked(void)
              * created a new target that recovery removed. */
             if (GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES)
                 success = clear_projection();
-            else success = cache_record_load_bundle_locked(utf8_to_wide(name), previous) &&
-                           publish_projection(previous);
+            else if (!cache_record_load_bundle_locked(utf8_to_wide(name), previous))
+                success = clear_projection();
+            else success = publish_projection(previous);
         }
         else if (previous_name == "-") success = clear_projection();
-        else success = cache_record_load_bundle_locked(previous_bundle, previous) &&
-                       publish_projection(previous);
+        else if (!cache_record_load_bundle_locked(previous_bundle, previous))
+            success = clear_projection();
+        else success = publish_projection(previous);
         secure_clear(previous);
     }
     /* Prepared, replacing, and rolling-back states have not changed the
@@ -2408,6 +2412,38 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
             if (success) success = cache_record_load(first.username, loaded) &&
                                    cache_record_matches(first, loaded) && self_test_projection(first) &&
                                    cache_record_save(second);
+        }
+        if (success)
+        {
+            /* Recovery may consume an existing target's backup before a
+             * transient projection failure.  The retained marker must make
+             * the next recovery attempt idempotent. */
+            success = self_test_run_cache_state_child(L"replaced");
+            if (success)
+            {
+                SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                        L"wam-access-token.dat:write");
+                success = !cache_record_load(second.username, loaded) &&
+                          cache_transaction_pending() &&
+                          cache_record_load(second.username, loaded) &&
+                          cache_record_matches(second, loaded) && self_test_projection(second) &&
+                          !cache_transaction_pending();
+            }
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+        }
+        if (success)
+        {
+            /* A permanently unreadable previous bundle cannot be republished.
+             * Clear the projection and retire the marker so a later sign-in
+             * can replace the damaged cache instead of wedging forever. */
+            DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+            success = self_test_run_cache_state_child(L"replaced") &&
+                      protected_write(second_bundle.c_str(), "corrupt bundle") &&
+                      !cache_record_load(second.username, loaded) &&
+                      !cache_transaction_pending() &&
+                      GetFileAttributesW(cache_file(L"wam-active-account.dat").c_str()) ==
+                          INVALID_FILE_ATTRIBUTES &&
+                      cache_record_save(second);
         }
         if (success)
         {

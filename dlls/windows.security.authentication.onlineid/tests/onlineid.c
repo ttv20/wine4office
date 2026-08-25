@@ -1448,6 +1448,44 @@ static void test_silent_helper_outcomes( struct test_manager_statics *manager, I
     }
 }
 
+static void test_silent_resource_refresh_failure( struct test_manager_statics *manager,
+                                                  IInspectable *resource_request,
+                                                  struct test_silent_events *events )
+{
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    AsyncStatus status = Started;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"fail" );
+    ok( test_write_success_fixture(), "failed to write cached resource-failure fixture.\n" );
+    hr = test_silent_start( manager, resource_request, NULL, &operation );
+    ok( hr == S_OK && operation, "resource-failure start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    ok( test_wait_event( events->helper_completed, "resource failure helper" ),
+        "resource failure helper did not finish.\n" );
+    ok( test_wait_event( events->operation_completed, "resource failure operation" ),
+        "resource failure operation did not finish.\n" );
+    ok( test_wait_event( events->worker_finished, "resource failure worker" ),
+        "resource failure worker did not finish.\n" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "resource failure ABI setup failed.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Completed, "resource failure status got %#lx, %u.\n",
+            hr, status );
+    }
+    if (typed) test_silent_check_response_status( typed, 3 );
+    if (typed && info) test_silent_postclose( typed, info );
+
+done:
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
 static void test_silent_token_operations(void)
 {
     static const WCHAR class_name[] =
@@ -1537,6 +1575,7 @@ static void test_silent_token_operations(void)
     provider = NULL;
     if (resource_request) test_silent_completion_before_handler( manager, resource_request, &events );
     test_silent_helper_outcomes( manager, request, &events );
+    if (resource_request) test_silent_resource_refresh_failure( manager, resource_request, &events );
     test_silent_blocked_case( manager, request, NULL, &events, TRUE, FALSE, FALSE );
     test_silent_blocked_case( manager, request, NULL, &events, FALSE, FALSE, TRUE );
     test_silent_blocked_case( manager, request, NULL, &events, FALSE, TRUE, FALSE );

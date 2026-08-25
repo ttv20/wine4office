@@ -3674,6 +3674,7 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
          * produced its access token.  A fresh token therefore cannot prove
          * that it is usable for this request; preserve the resource refresh
          * until that identity is published transactionally with the token. */
+        have_token = FALSE;
         helper = run_wine365_resource_refresh( scopes, client_id, cancel_event, timeout, &exit_code );
         if (helper == HELPER_CANCELED)
         {
@@ -4157,15 +4158,15 @@ static DWORD WINAPI silent_token_worker( void *parameter )
         }
     }
 finish_refresh:
-    if (owns_mutex)
-    {
-        ReleaseMutex( refresh_mutex );
-        owns_mutex = FALSE;
-    }
-    if (refresh_mutex) CloseHandle( refresh_mutex );
-    refresh_mutex = NULL;
     if (canceled || silent_cancel_requested( impl->cancel_event ))
     {
+        if (owns_mutex)
+        {
+            ReleaseMutex( refresh_mutex );
+            owns_mutex = FALSE;
+        }
+        if (refresh_mutex) CloseHandle( refresh_mutex );
+        refresh_mutex = NULL;
         silent_operation_complete( impl, NULL, Canceled, E_ABORT );
         goto done;
     }
@@ -4173,6 +4174,15 @@ finish_refresh:
     response_status = supported && have_token ? 0 : 3;
     hr = web_token_request_result_create( response_status,
             WindowsGetStringRawBuffer( impl->scopes, NULL ), impl->account, &result );
+    /* Keep projection reads in the same serialized generation as refresh.
+     * A second helper may publish as soon as this mutex is released. */
+    if (owns_mutex)
+    {
+        ReleaseMutex( refresh_mutex );
+        owns_mutex = FALSE;
+    }
+    if (refresh_mutex) CloseHandle( refresh_mutex );
+    refresh_mutex = NULL;
     if (SUCCEEDED(hr)) silent_operation_complete( impl, result, Completed, S_OK );
     else silent_operation_complete( impl, NULL, Error, hr );
     if (result) IInspectable_Release( result );
