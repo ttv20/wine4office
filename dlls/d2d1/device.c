@@ -23,6 +23,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
 #define INITIAL_CLIP_STACK_SIZE 4
+#define D2D_AA_MAX_SCRATCH_BYTES ((size_t)128 * 1024 * 1024)
 
 static const D2D1_MATRIX_3X2_F identity =
 {{{
@@ -161,6 +162,60 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     if (!stack->count)
         return;
     --stack->count;
+}
+
+static unsigned int d2d_aa_format_bytes_per_pixel(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+            return 16;
+
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            return 8;
+
+        case DXGI_FORMAT_A8_UNORM:
+            return 1;
+
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return 4;
+
+        default:
+            return 0;
+    }
+}
+
+static BOOL d2d_device_context_aa_size_is_supported(const D2D1_SIZE_U *size,
+        unsigned int aa_scale, DXGI_FORMAT format)
+{
+    size_t scratch_scale, pixel_count;
+    unsigned int bytes_per_pixel, scale;
+
+    if (!aa_scale || !size->width || !size->height
+            || size->width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / aa_scale
+            || size->height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / aa_scale)
+        return FALSE;
+
+    if (!(bytes_per_pixel = d2d_aa_format_bytes_per_pixel(format)))
+        return FALSE;
+
+    /* Account for the 8x target and all three 2x reductions before creating
+     * any bitmap. The safe non-AA geometry path remains available when the
+     * bounded scratch budget is exceeded. */
+    scratch_scale = (size_t)aa_scale * aa_scale;
+    for (scale = aa_scale / 2; scale; scale /= 2)
+        scratch_scale += (size_t)scale * scale;
+
+    if ((size_t)size->width > SIZE_MAX / size->height)
+        return FALSE;
+    pixel_count = (size_t)size->width * size->height;
+
+    return pixel_count <= D2D_AA_MAX_SCRATCH_BYTES / bytes_per_pixel / scratch_scale;
 }
 
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
@@ -1361,6 +1416,9 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     properties.dpiX = previous_dpi_x * aa_scale;
     properties.dpiY = previous_dpi_y * aa_scale;
     properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    if (!d2d_device_context_aa_size_is_supported(&output_size, aa_scale,
+            properties.pixelFormat.format))
+        return FALSE;
     size.width = output_size.width * aa_scale;
     size.height = output_size.height * aa_scale;
 
