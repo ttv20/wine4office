@@ -303,16 +303,20 @@ HRESULT CDECL wined3d_swapchain_get_present_capabilities(const struct wined3d_sw
     TRACE("swapchain %p, backbuffer_idx %u, capabilities %p, physical_identity %p.\n",
             swapchain, backbuffer_idx, capabilities, physical_identity);
 
+    /* Initialize every caller-owned output that is available before any
+     * validation can fail.  In particular, invalid swapchain/backbuffer
+     * state must not leave stale capability or identity values behind. */
+    if (capabilities)
+        *capabilities = 0;
+    if (physical_identity)
+        *physical_identity = 0;
+
     if (!swapchain || !capabilities || !physical_identity)
         return E_INVALIDARG;
     if (!swapchain->back_buffers || backbuffer_idx >= swapchain->state.desc.backbuffer_count)
         return WINED3DERR_INVALIDCALL;
 
-    /* Keep outputs transactional even when a backend rejects the query. */
-    *capabilities = 0;
-    *physical_identity = 0;
-
-    if (!swapchain->swapchain_ops->swapchain_get_present_capabilities)
+    if (!swapchain->swapchain_ops || !swapchain->swapchain_ops->swapchain_get_present_capabilities)
     {
         TRACE("Swapchain %p has no authoritative present capability callback.\n", swapchain);
         return WINED3D_OK;
