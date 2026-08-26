@@ -25,6 +25,7 @@
 #include "d2d1_3.h"
 #include "d2d1effectauthor.h"
 #include "d3d11.h"
+#include "dxgi1_2.h"
 #include "wincrypt.h"
 #include "wine/test.h"
 #include "initguid.h"
@@ -18436,6 +18437,103 @@ static HRESULT create_geometry_aa_compound(ID2D1Factory *factory, ID2D1PathGeome
     return hr;
 }
 
+static int compare_geometry_aa_timings(const void *a, const void *b)
+{
+    const double *value_a = a, *value_b = b;
+
+    return (*value_a > *value_b) - (*value_a < *value_b);
+}
+
+static void test_geometry_aa_benchmark(BOOL d3d11)
+{
+    enum {warmup_count = 20, sample_count = 100};
+    double samples[sample_count];
+    IDXGIDevice2 *dxgi_device;
+    ID2D1PathGeometry *geometry;
+    ID2D1SolidColorBrush *brush;
+    struct d2d1_test_context ctx;
+    LARGE_INTEGER frequency, start, end;
+    D2D1_MATRIX_3X2_F transform;
+    D2D1_COLOR_F colour;
+    unsigned int i;
+    HANDLE completion_event;
+    DWORD wait_result;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, d3d11))
+        return;
+    hr = create_geometry_aa_compound(ctx.factory, &geometry);
+    ok(hr == S_OK, "Failed to create benchmark geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+    set_color(&colour, 0.25f, 0.5f, 1.0f, 0.75f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &brush);
+    ok(hr == S_OK, "Failed to create benchmark brush, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1PathGeometry_Release(geometry);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_IDXGIDevice2, (void **)&dxgi_device);
+    ok(hr == S_OK, "Failed to get IDXGIDevice2, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1SolidColorBrush_Release(brush);
+        ID2D1PathGeometry_Release(geometry);
+        release_test_context(&ctx);
+        return;
+    }
+    completion_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!completion_event, "Failed to create completion event, error %lu.\n", GetLastError());
+    if (!completion_event)
+    {
+        IDXGIDevice2_Release(dxgi_device);
+        ID2D1SolidColorBrush_Release(brush);
+        ID2D1PathGeometry_Release(geometry);
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_matrix_identity(&transform);
+    scale_matrix(&transform, 6.0f, 6.0f);
+    ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+    QueryPerformanceFrequency(&frequency);
+
+    for (i = 0; i < warmup_count + sample_count; ++i)
+    {
+        QueryPerformanceCounter(&start);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        if (SUCCEEDED(hr))
+            hr = IDXGIDevice2_EnqueueSetEvent(dxgi_device, completion_event);
+        wait_result = SUCCEEDED(hr) ? WaitForSingleObject(completion_event, 10000) : WAIT_FAILED;
+        QueryPerformanceCounter(&end);
+        ok(hr == S_OK, "Benchmark draw %u failed, hr %#lx.\n", i, hr);
+        ok(wait_result == WAIT_OBJECT_0, "GPU completion wait returned %#lx.\n", wait_result);
+        if (i >= warmup_count)
+            samples[i - warmup_count] = (end.QuadPart - start.QuadPart)
+                    * 1000000.0 / frequency.QuadPart;
+    }
+    qsort(samples, ARRAY_SIZE(samples), sizeof(*samples), compare_geometry_aa_timings);
+    trace("geometry-aa-benchmark-us p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u\n",
+            samples[49], samples[94], samples[98], samples[99], sample_count);
+
+    CloseHandle(completion_event);
+    IDXGIDevice2_Release(dxgi_device);
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1PathGeometry_Release(geometry);
+    release_test_context(&ctx);
+}
+
 static void test_geometry_aa_guardrails(BOOL d3d11)
 {
     static const struct
@@ -18461,8 +18559,11 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         {1.0f, {0.0f, 0.0f, 1.0f, 1.0f}},
     };
     D2D1_SIZE_U small_size = {64, 64}, large_size = {2048, 1024};
+    D2D1_SIZE_U brush_size = {64, 64};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES gradient_desc;
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES radial_desc;
+    D2D1_STROKE_STYLE_PROPERTIES stroke_desc;
     D2D1_RECT_F small_rect, large_rect, clip_rect;
     D2D1_POINT_2F point;
     D2D1_MATRIX_3X2_F transform, current_transform;
@@ -18472,16 +18573,21 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1PathGeometry *clip_geometry, *compound_geometry;
     ID2D1GradientStopCollection *gradient = NULL;
     ID2D1LinearGradientBrush *gradient_brush = NULL;
+    ID2D1RadialGradientBrush *radial_brush = NULL;
+    ID2D1BitmapBrush *bitmap_brush = NULL;
+    ID2D1SolidColorBrush *opacity_brush = NULL;
+    ID2D1StrokeStyle *round_style = NULL;
     ID2D1GeometrySink *sink;
     ID2D1SolidColorBrush *brush;
     ID2D1Image *original_target, *current_target;
-    ID2D1Bitmap1 *small_bitmap, *large_bitmap, *format_bitmap;
+    ID2D1Bitmap1 *small_bitmap, *large_bitmap, *format_bitmap, *brush_bitmap = NULL;
     struct d2d1_test_context ctx;
     struct resource_readback rb;
     float dpi_x, dpi_y;
     D2D1_COLOR_F colour;
     D2D1_TAG tag1, tag2;
     unsigned int covered, total, i;
+    DWORD brush_pixels[64 * 64];
     DWORD pixel;
     HRESULT hr;
     BOOL readback;
@@ -18614,6 +18720,46 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
                 &gradient_desc, NULL, gradient, &gradient_brush);
         ok(hr == S_OK, "Failed to create coverage gradient brush, hr %#lx.\n", hr);
     }
+
+    if (gradient)
+    {
+        set_point(&radial_desc.center, 32.0f, 32.0f);
+        set_point(&radial_desc.gradientOriginOffset, 0.0f, 0.0f);
+        radial_desc.radiusX = 32.0f;
+        radial_desc.radiusY = 32.0f;
+        hr = ID2D1RenderTarget_CreateRadialGradientBrush((ID2D1RenderTarget *)ctx.context,
+                &radial_desc, NULL, gradient, &radial_brush);
+        ok(hr == S_OK, "Failed to create coverage radial brush, hr %#lx.\n", hr);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(brush_pixels); ++i)
+        brush_pixels[i] = i % brush_size.width < brush_size.width / 2
+                ? 0xffff0000 : 0xff0000ff;
+    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+    hr = ID2D1DeviceContext_CreateBitmap(ctx.context, brush_size, brush_pixels,
+            brush_size.width * sizeof(*brush_pixels), &bitmap_desc, &brush_bitmap);
+    ok(hr == S_OK, "Failed to create coverage brush bitmap, hr %#lx.\n", hr);
+    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    if (SUCCEEDED(hr))
+    {
+        hr = ID2D1RenderTarget_CreateBitmapBrush((ID2D1RenderTarget *)ctx.context,
+                (ID2D1Bitmap *)brush_bitmap, NULL, NULL, &bitmap_brush);
+        ok(hr == S_OK, "Failed to create coverage bitmap brush, hr %#lx.\n", hr);
+    }
+
+    set_color(&colour, 1.0f, 1.0f, 1.0f, 0.25f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &opacity_brush);
+    ok(hr == S_OK, "Failed to create coverage opacity brush, hr %#lx.\n", hr);
+
+    stroke_desc.startCap = D2D1_CAP_STYLE_FLAT;
+    stroke_desc.endCap = D2D1_CAP_STYLE_FLAT;
+    stroke_desc.dashCap = D2D1_CAP_STYLE_FLAT;
+    stroke_desc.lineJoin = D2D1_LINE_JOIN_ROUND;
+    stroke_desc.miterLimit = 10.0f;
+    stroke_desc.dashStyle = D2D1_DASH_STYLE_SOLID;
+    stroke_desc.dashOffset = 0.0f;
+    hr = ID2D1Factory_CreateStrokeStyle(ctx.factory, &stroke_desc, NULL, 0, &round_style);
+    ok(hr == S_OK, "Failed to create round coverage stroke style, hr %#lx.\n", hr);
 
     ID2D1DeviceContext_GetTarget(ctx.context, &original_target);
     ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
@@ -18755,6 +18901,92 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         ID2D1DeviceContext_SetTransform(ctx.context, &transform);
     }
 
+    ID2D1SolidColorBrush_SetOpacity(brush, 1.0f);
+    if (radial_brush)
+    {
+        DWORD inner_pixel, outer_pixel;
+
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)radial_brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Radial coverage draw failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back radial coverage.\n");
+        if (readback)
+        {
+            inner_pixel = get_readback_colour(&rb, 44, 32);
+            outer_pixel = get_readback_colour(&rb, 52, 32);
+            ok(inner_pixel && outer_pixel, "Radial coverage omitted interior pixels.\n");
+            ok(inner_pixel != outer_pixel,
+                    "Radial coverage did not sample the brush (%#lx).\n", inner_pixel);
+            release_resource_readback(&rb);
+        }
+    }
+
+    if (bitmap_brush)
+    {
+        DWORD left_pixel, right_pixel;
+
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)bitmap_brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Bitmap coverage draw failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back bitmap coverage.\n");
+        if (readback)
+        {
+            left_pixel = get_readback_colour(&rb, 20, 32);
+            right_pixel = get_readback_colour(&rb, 44, 32);
+            ok(left_pixel && right_pixel, "Bitmap coverage omitted interior pixels.\n");
+            ok(left_pixel != right_pixel,
+                    "Bitmap coverage did not sample the brush (%#lx).\n", left_pixel);
+            release_resource_readback(&rb);
+        }
+    }
+
+    if (opacity_brush && bitmap_brush)
+    {
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)bitmap_brush, (ID2D1Brush *)opacity_brush);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Opacity coverage draw failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back opacity coverage.\n");
+        if (readback)
+        {
+            pixel = get_readback_colour(&rb, 44, 32);
+            ok(compare_colour(pixel, 0x40000040, 8),
+                    "Opacity coverage returned unexpected colour %#lx.\n", pixel);
+            release_resource_readback(&rb);
+        }
+    }
+
+    if (round_style)
+    {
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)compound_geometry,
+                (ID2D1Brush *)brush, 0.5f, round_style);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Round-join coverage stroke failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back round-join coverage stroke.\n");
+        if (readback)
+        {
+            covered = count_nonzero_pixels(&rb, 0, 0, small_size.width, small_size.height);
+            ok(covered > 100, "Round-join coverage stroke produced only %u pixels.\n", covered);
+            pixel = get_readback_colour(&rb, 32, 32);
+            ok(!pixel, "Round-join coverage stroke filled path hole with %#lx.\n", pixel);
+            release_resource_readback(&rb);
+        }
+    }
+
     /* Exercise every format admitted by the scratch-size calculation. A
      * backend may reject a format before the AA helper is reached; that is a
      * capability fallback, not a pixel oracle. Formats that can be targets
@@ -18880,6 +19112,11 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1DeviceContext_SetTarget(ctx.context, original_target);
     ID2D1Image_Release(original_target);
     ID2D1SolidColorBrush_Release(brush);
+    if (round_style) ID2D1StrokeStyle_Release(round_style);
+    if (opacity_brush) ID2D1SolidColorBrush_Release(opacity_brush);
+    if (bitmap_brush) ID2D1BitmapBrush_Release(bitmap_brush);
+    if (brush_bitmap) ID2D1Bitmap1_Release(brush_bitmap);
+    if (radial_brush) ID2D1RadialGradientBrush_Release(radial_brush);
     if (gradient_brush) ID2D1LinearGradientBrush_Release(gradient_brush);
     if (gradient) ID2D1GradientStopCollection_Release(gradient);
     ID2D1PathGeometry_Release(compound_geometry);
@@ -19815,6 +20052,18 @@ START_TEST(d2d1)
     if (getenv("WINETEST_ONLY_GEOMETRY_AA"))
     {
         test_geometry_aa_guardrails(TRUE);
+        return;
+    }
+
+    if (getenv("WINETEST_ONLY_SUBPIXEL_STROKE"))
+    {
+        test_subpixel_stroke_continuity(TRUE);
+        return;
+    }
+
+    if (getenv("WINETEST_ONLY_GEOMETRY_AA_BENCHMARK"))
+    {
+        test_geometry_aa_benchmark(TRUE);
         return;
     }
 
