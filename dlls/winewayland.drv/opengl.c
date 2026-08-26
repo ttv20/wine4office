@@ -51,6 +51,7 @@ struct wayland_gl_drawable
     struct wl_egl_window *wl_egl_window;
     struct wl_event_queue *frame_queue;
     struct wl_callback *frame_callback;
+    unsigned int frame_callbacks_left;
 };
 
 static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
@@ -58,15 +59,38 @@ static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawa
     return CONTAINING_RECORD(base, struct wayland_gl_drawable, base);
 }
 
+static BOOL wayland_drawable_request_frame_callback(struct wayland_gl_drawable *gl,
+        struct wl_surface *surface);
+
 static void wayland_drawable_frame_done(void *data, struct wl_callback *callback, uint32_t time)
 {
     struct wayland_gl_drawable *gl = data;
+    struct wayland_client_surface *surface = impl_from_client_surface(gl->base.client);
 
-    TRACE("drawable %p callback %p time %u\n", gl, callback, time);
+    TRACE("drawable %p callback %p time %u, callbacks left %u\n",
+            gl, callback, time, gl->frame_callbacks_left);
 
     assert(gl->frame_callback == callback);
     gl->frame_callback = NULL;
     wl_callback_destroy(callback);
+
+    /* A swap interval greater than one needs one compositor notification per
+     * refresh period.  Recommit the current front buffer as damaged to keep it
+     * on screen for another period and arm the next frame request. */
+    if (gl->frame_callbacks_left > 1 && surface->wl_subsurface)
+    {
+        --gl->frame_callbacks_left;
+        if (wayland_drawable_request_frame_callback(gl, surface->wl_surface))
+        {
+            wl_surface_damage_buffer(surface->wl_surface, 0, 0,
+                    gl->base.virtual_size.cx, gl->base.virtual_size.cy);
+            wl_surface_commit(surface->wl_surface);
+            wl_display_flush(process_wayland.wl_display);
+            return;
+        }
+    }
+
+    gl->frame_callbacks_left = 0;
 }
 
 static const struct wl_callback_listener wayland_drawable_frame_listener =
@@ -76,24 +100,34 @@ static const struct wl_callback_listener wayland_drawable_frame_listener =
 
 static void wayland_drawable_cancel_frame_callback(struct wayland_gl_drawable *gl)
 {
-    if (!gl->frame_callback) return;
+    if (gl->frame_callback)
+    {
+        wl_callback_destroy(gl->frame_callback);
+        gl->frame_callback = NULL;
+    }
 
-    wl_callback_destroy(gl->frame_callback);
-    gl->frame_callback = NULL;
+    gl->frame_callbacks_left = 0;
 }
 
-static void wayland_drawable_request_frame_callback(struct wayland_gl_drawable *gl,
+static BOOL wayland_drawable_request_frame_callback(struct wayland_gl_drawable *gl,
         struct wl_surface *surface)
 {
     struct wl_surface *wrapper;
 
-    if (!(wrapper = wl_proxy_create_wrapper(surface))) return;
+    if (!(wrapper = wl_proxy_create_wrapper(surface))) return FALSE;
     wl_proxy_set_queue((struct wl_proxy *)wrapper, gl->frame_queue);
     gl->frame_callback = wl_surface_frame(wrapper);
     wl_proxy_wrapper_destroy(wrapper);
 
-    if (gl->frame_callback)
-        wl_callback_add_listener(gl->frame_callback, &wayland_drawable_frame_listener, gl);
+    if (!gl->frame_callback) return FALSE;
+    if (wl_callback_add_listener(gl->frame_callback, &wayland_drawable_frame_listener, gl) < 0)
+    {
+        wl_callback_destroy(gl->frame_callback);
+        gl->frame_callback = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static void wayland_drawable_destroy(struct opengl_drawable *base)
@@ -189,7 +223,11 @@ static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
      * signal, coalescing intermediate swaps into the current back buffer.
      * Keep EGL itself unthrottled so that it cannot wait forever for a
      * compositor frame callback after the surface becomes occluded. */
-    if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval(egl->display, 0);
+    if (flags & GL_FLUSH_INTERVAL)
+    {
+        funcs->p_eglSwapInterval(egl->display, 0);
+        wayland_drawable_cancel_frame_callback(gl);
+    }
 
     /* Since context_flush is called from operations that may latch the native size,
      * perform any pending resizes before calling them. */
@@ -200,6 +238,7 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(base->client);
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
+    unsigned int interval = base->interval < 0 ? -(unsigned int)base->interval : base->interval;
     GLint old_pack_alignment, old_read_buffer, old_read_fbo;
     RECT rect;
     size_t size;
@@ -248,7 +287,8 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
      * occluded surfaces.  Do not let libwayland-egl exhaust its buffer pool
      * and block the render thread in that case.  Keep rendering into the
      * current back buffer until the compositor is ready for another commit;
-     * the next swap will then present the most recent frame. */
+     * the next swap will then present the most recent frame.  Interval zero
+     * remains unthrottled and does not use the frame-callback gate. */
     wl_display_dispatch_queue_pending(process_wayland.wl_display, gl->frame_queue);
     if (!surface->wl_subsurface)
     {
@@ -256,16 +296,22 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
         funcs->p_glFlush();
         return TRUE;
     }
-    else if (gl->frame_callback)
+    else if (interval && gl->frame_callback)
     {
         TRACE("drawable %p still waiting for callback %p, deferring swap\n",
                 gl, gl->frame_callback);
         funcs->p_glFlush();
         return TRUE;
     }
+    else if (interval)
+    {
+        if (wayland_drawable_request_frame_callback(gl, surface->wl_surface))
+            gl->frame_callbacks_left = interval;
+    }
     else
-        wayland_drawable_request_frame_callback(gl, surface->wl_surface);
+        wayland_drawable_cancel_frame_callback(gl);
 
+    TRACE("drawable %p presenting at interval %u\n", gl, interval);
     if (!funcs->p_eglSwapBuffers(egl->display, gl->base.surface))
         wayland_drawable_cancel_frame_callback(gl);
 
