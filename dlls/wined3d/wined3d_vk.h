@@ -472,6 +472,8 @@ struct wined3d_query_vk
     uint8_t flags;
     uint64_t command_buffer_id;
     uint64_t completion_value;
+    VkSemaphore completion_cancel;
+    LONG completion_cancelled;
     HRESULT completion_result;
     uint32_t control_flags;
     VkEvent vk_event;
@@ -1020,7 +1022,10 @@ void wined3d_device_vk_destroy_null_views(struct wined3d_device_vk *device_vk,
 
 void wined3d_device_vk_uav_clear_state_init(struct wined3d_device_vk *device_vk);
 void wined3d_device_vk_uav_clear_state_cleanup(struct wined3d_device_vk *device_vk);
-HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value);
+HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value,
+        VkSemaphore cancel_semaphore, LONG *cancelled);
+void wined3d_device_vk_cancel_completion_wait(struct wined3d_device_vk *device_vk,
+        VkSemaphore cancel_semaphore, LONG *cancelled);
 void wined3d_device_vk_cancel_completion_waits(struct wined3d_device_vk *device_vk);
 
 struct wined3d_texture_vk

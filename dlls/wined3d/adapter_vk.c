@@ -427,10 +427,16 @@ static void wined3d_device_vk_cleanup_completion(struct wined3d_device_vk *devic
     device_vk->completion_timeline = VK_NULL_HANDLE;
 }
 
-HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value)
+HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value,
+        VkSemaphore cancel_semaphore, LONG *cancelled)
 {
-    const VkSemaphore semaphores[] = {device_vk->completion_timeline, device_vk->completion_cancel};
-    const uint64_t values[] = {value, 1};
+    const VkSemaphore semaphores[] =
+    {
+        device_vk->completion_timeline,
+        cancel_semaphore,
+        device_vk->completion_cancel,
+    };
+    const uint64_t values[] = {value, 1, 1};
     VkSemaphoreWaitInfo wait_info =
     {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
@@ -441,9 +447,10 @@ HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, u
     };
     VkResult vr;
 
-    if (!device_vk->completion_timeline || !device_vk->completion_cancel)
+    if (!device_vk->completion_timeline || !cancel_semaphore || !device_vk->completion_cancel)
         return WINED3DERR_NOTAVAILABLE;
-    if (InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
+    if (InterlockedCompareExchange(cancelled, FALSE, FALSE)
+            || InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
         return HRESULT_FROM_WIN32(ERROR_CANCELLED);
 
     if ((vr = wined3d_device_vk_wait_semaphores(device_vk, &wait_info, UINT64_MAX)) != VK_SUCCESS)
@@ -451,10 +458,31 @@ HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, u
         WARN("Failed to wait for completion value %I64u, vr %s.\n", value, wined3d_debug_vkresult(vr));
         return E_FAIL;
     }
-    if (InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
+    if (InterlockedCompareExchange(cancelled, FALSE, FALSE)
+            || InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
         return HRESULT_FROM_WIN32(ERROR_CANCELLED);
 
     return S_OK;
+}
+
+void wined3d_device_vk_cancel_completion_wait(struct wined3d_device_vk *device_vk,
+        VkSemaphore cancel_semaphore, LONG *cancelled)
+{
+    VkSemaphoreSignalInfo signal_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+        .semaphore = cancel_semaphore,
+        .value = 1,
+    };
+    VkResult vr;
+
+    if (!cancel_semaphore || InterlockedExchange(cancelled, TRUE))
+        return;
+    if ((vr = wined3d_device_vk_signal_semaphore(device_vk, &signal_info)) != VK_SUCCESS)
+    {
+        WARN("Failed to signal per-query completion cancellation, vr %s.\n", wined3d_debug_vkresult(vr));
+        wined3d_device_vk_cancel_completion_waits(device_vk);
+    }
 }
 
 void wined3d_device_vk_cancel_completion_waits(struct wined3d_device_vk *device_vk)
