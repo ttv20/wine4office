@@ -588,6 +588,22 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
     if (flags & DXGI_PRESENT_TEST)
         return d3d11_swapchain_present(swapchain, sync_interval, flags);
 
+    if (!swapchain->present1_shadow)
+    {
+        hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
+        if (FAILED(hr))
+            d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
+        else if (hr == S_OK)
+        {
+            wined3d_mutex_lock();
+            wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+            wined3d_mutex_unlock();
+            d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
+                    desc.backbuffer_width, desc.backbuffer_height);
+        }
+        return hr;
+    }
+
     d3d11_swapchain_reap_present1_result(swapchain);
 
     /* Applications may follow a complete Present() with sparse Present1()
@@ -1477,8 +1493,9 @@ static enum d3d11_present1_fallback_reason d3d11_swapchain_get_present1_fallback
 static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters)
 {
+    struct wined3d_swapchain_present_result present_result;
     struct wined3d_device_context *wined3d_context;
-    struct wined3d_texture *front, *wined3d_back;
+    struct wined3d_texture *front, *seed, *wined3d_back;
     ID3D11DeviceContext *context = NULL;
     ID3D11Texture2D *dirty_source, *back = NULL;
     ID3D11Device *device = NULL;
@@ -1488,7 +1505,7 @@ static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swap
     uint32_t capabilities;
     uint64_t physical_identity, identity_generation;
     HRESULT hr;
-    unsigned int i;
+    unsigned int i, seed_idx;
 
     if (parameters && parameters->DirtyRectsCount && !parameters->pDirtyRects)
         return E_INVALIDARG;
@@ -1548,10 +1565,32 @@ static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swap
         dirty_source = swapchain->present1_scratch;
         front = wined3d_swapchain_get_front_buffer(swapchain->wined3d_swapchain);
         wined3d_back = wined3d_swapchain_get_back_buffer(swapchain->wined3d_swapchain, 0);
+        seed = front;
+        if (swapchain->present1_pending.valid
+                && SUCCEEDED(hr = wined3d_swapchain_wait_present_result(
+                        swapchain->wined3d_swapchain,
+                        swapchain->present1_pending.present_id, &present_result))
+                && SUCCEEDED(present_result.result)
+                && present_result.presented_physical_identity)
+        {
+            for (seed_idx = 0; seed_idx < min(present_result.physical_identity_count,
+                    (UINT)ARRAY_SIZE(present_result.physical_identities)); ++seed_idx)
+            {
+                if (present_result.physical_identities[seed_idx]
+                        == present_result.presented_physical_identity)
+                {
+                    if (seed_idx && (seed = wined3d_swapchain_get_back_buffer(
+                            swapchain->wined3d_swapchain, seed_idx)))
+                        TRACE("Seeding the first Present1 shadow from completed physical "
+                                "back buffer %u.\n", seed_idx);
+                    break;
+                }
+            }
+        }
         wined3d_context = wined3d_device_get_immediate_context(
                 wined3d_swapchain_get_device(swapchain->wined3d_swapchain));
         wined3d_device_context_copy_resource(wined3d_context,
-                wined3d_texture_get_resource(wined3d_back), wined3d_texture_get_resource(front));
+                wined3d_texture_get_resource(wined3d_back), wined3d_texture_get_resource(seed));
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
         swapchain->present1_shadow_valid = TRUE;
@@ -1618,6 +1657,8 @@ static HRESULT d3d11_swapchain_update_present1_shadow_sparse(struct d3d11_swapch
     {
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
+        /* This pixel-identical copy-back preserves the Present1 resource-state
+         * ordering expected by WineD3D and must not be optimized away. */
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)back, (ID3D11Resource *)swapchain->present1_shadow);
         goto done;

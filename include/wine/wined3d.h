@@ -2941,6 +2941,8 @@ HRESULT __cdecl wined3d_swapchain_get_present_capabilities(const struct wined3d_
         uint64_t *identity_generation);
 HRESULT __cdecl wined3d_swapchain_get_present_result(const struct wined3d_swapchain *swapchain,
         uint64_t present_id, struct wined3d_swapchain_present_result *result);
+HRESULT __cdecl wined3d_swapchain_wait_present_result(const struct wined3d_swapchain *swapchain,
+        uint64_t present_id, struct wined3d_swapchain_present_result *result);
 struct wined3d_device * __cdecl wined3d_swapchain_get_device(const struct wined3d_swapchain *swapchain);
 HRESULT __cdecl wined3d_swapchain_get_display_mode(const struct wined3d_swapchain *swapchain,
         struct wined3d_display_mode *mode, enum wined3d_display_rotation *rotation);

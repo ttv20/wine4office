@@ -447,6 +447,19 @@ HRESULT CDECL wined3d_swapchain_get_present_result(const struct wined3d_swapchai
     return S_OK;
 }
 
+HRESULT CDECL wined3d_swapchain_wait_present_result(const struct wined3d_swapchain *swapchain,
+        uint64_t present_id, struct wined3d_swapchain_present_result *result)
+{
+    TRACE("swapchain %p, present_id %s, result %p.\n",
+            swapchain, wine_dbgstr_longlong(present_id), result);
+
+    if (!swapchain || !present_id || !result)
+        return E_INVALIDARG;
+
+    wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    return wined3d_swapchain_get_present_result(swapchain, present_id, result);
+}
+
 void CDECL wined3d_swapchain_invalidate_present_results(struct wined3d_swapchain *swapchain)
 {
     TRACE("swapchain %p.\n", swapchain);
@@ -840,6 +853,7 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
     struct wined3d_context_gl *context_gl;
     struct wined3d_context *context;
     uint64_t presented_identity = 0;
+    bool advance_frame;
     bool native_swap = false;
     HRESULT hr = WINED3D_OK;
     unsigned int i;
@@ -893,16 +907,21 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
         }
     }
 
-    if (SUCCEEDED(hr) && context->d3d_info->fences)
+    /* Historically an unsupported GDI format still advanced WineD3D's frame
+     * state. Keep that compatibility behavior while reporting the missing
+     * presentation to the transactional Present1 completion record. */
+    advance_frame = SUCCEEDED(hr) || hr == WINED3DERR_NOTAVAILABLE;
+
+    if (advance_frame && context->d3d_info->fences)
         wined3d_context_gl_submit_command_fence(context_gl);
 
-    if (SUCCEEDED(hr))
+    if (advance_frame)
         wined3d_swapchain_gl_rotate(swapchain, context);
 
-    if (SUCCEEDED(hr))
+    if (advance_frame)
         TRACE("SwapBuffers called, starting new frame.\n");
 
-    if (SUCCEEDED(hr))
+    if (advance_frame)
     {
         wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
         wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
@@ -1843,6 +1862,7 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
     unsigned int client_width, client_height;
     uint64_t presentation_identity = 0, presentation_generation = 0;
     uint64_t presented_identity = 0;
+    bool advance_frame;
     bool native_present = false;
     RECT client_rect;
     VkResult vr;
@@ -1900,6 +1920,8 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
             else if (vr == VK_SUBOPTIMAL_KHR)
             {
                 WARN("Presented through a suboptimal swapchain; recreating it.\n");
+                presentation_identity = 0;
+                presentation_generation = 0;
                 if (FAILED(wined3d_swapchain_vk_recreate(swapchain_vk)))
                     WARN("Failed to recreate a suboptimal swapchain.\n");
             }
@@ -1907,10 +1929,15 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
         native_present = SUCCEEDED(hr);
     }
 
-    if (SUCCEEDED(hr))
+    /* Match the legacy GDI fallback's frame rotation for formats without a
+     * DDI mapping, but keep the completion failed so sparse Present1 repairs
+     * cannot treat an unpresented frame as authoritative. */
+    advance_frame = SUCCEEDED(hr) || hr == WINED3DERR_NOTAVAILABLE;
+
+    if (advance_frame)
         wined3d_swapchain_vk_rotate(swapchain, context_vk);
 
-    if (SUCCEEDED(hr))
+    if (advance_frame)
     {
         wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
         wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
@@ -1940,7 +1967,7 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
         }
     }
 
-    if (SUCCEEDED(hr))
+    if (advance_frame)
         TRACE("Starting new frame.\n");
 
 done:
