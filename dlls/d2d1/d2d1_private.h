@@ -266,10 +266,14 @@ struct d2d_device_context
     ID3D11PixelShader *coverage_resolve_ps;
     ID3D11RasterizerState1 *coverage_rs;
     ID3D11BlendState1 *coverage_bs;
+    ID3D11Texture2D *coverage_texture;
+    ID3D11RenderTargetView *coverage_rtv;
+    ID3D11ShaderResourceView *coverage_resource_srv;
     ID3D11ShaderResourceView *coverage_srv;
     enum d2d_geometry_aa_backend coverage_backend;
     DXGI_FORMAT coverage_format;
     unsigned int coverage_sample_count;
+    D2D1_SIZE_U coverage_resource_size;
     unsigned int coverage_origin_x, coverage_origin_y;
     D2D1_MATRIX_3X2_F coverage_inverse_transform;
     float coverage_dpi_x, coverage_dpi_y;
