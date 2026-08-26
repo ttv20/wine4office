@@ -743,6 +743,7 @@ struct test_async_handler
     AsyncStatus status;
     HRESULT status_hr;
     HRESULT result_hr;
+    HRESULT invoke_hr;
 };
 
 static inline struct test_async_handler *impl_from_test_handler(
@@ -798,7 +799,7 @@ static HRESULT WINAPI test_handler_Invoke( IAsyncOperationCompletedHandler_IInsp
     if (impl->entered) SetEvent( impl->entered );
     if (impl->release) WaitForSingleObject( impl->release, 5000 );
     if (impl->finished) SetEvent( impl->finished );
-    return S_OK;
+    return impl->invoke_hr;
 }
 
 static const IAsyncOperationCompletedHandler_IInspectableVtbl test_handler_vtbl =
@@ -812,6 +813,7 @@ static struct test_async_handler *test_handler_create( HANDLE entered, HANDLE re
     if (!handler) return NULL;
     handler->iface.lpVtbl = &test_handler_vtbl;
     handler->ref = 1;
+    handler->invoke_hr = S_OK;
     handler->entered = entered;
     handler->release = release;
     handler->finished = finished;
@@ -829,6 +831,7 @@ struct test_silent_events
     HANDLE callback_entered;
     HANDLE callback_release;
     HANDLE callback_finished;
+    HANDLE projection_waiting;
 };
 
 static BOOL test_wait_event( HANDLE event, const char *name )
@@ -853,6 +856,7 @@ static BOOL test_silent_events_create( struct test_silent_events *events )
     static const WCHAR operation_completed_name[] = L"Local\\WineOnlineIdTestOperationCompleted";
     static const WCHAR worker_gate_name[] = L"Local\\WineOnlineIdTestWorkerGate";
     static const WCHAR worker_finished_name[] = L"Local\\WineOnlineIdTestWorkerFinished";
+    static const WCHAR projection_waiting_name[] = L"Local\\WineOnlineIdTestProjectionWaiting";
 
     memset( events, 0, sizeof(*events) );
     events->started = CreateEventW( NULL, TRUE, FALSE, started_name );
@@ -864,9 +868,11 @@ static BOOL test_silent_events_create( struct test_silent_events *events )
     events->callback_entered = CreateEventW( NULL, TRUE, FALSE, NULL );
     events->callback_release = CreateEventW( NULL, TRUE, FALSE, NULL );
     events->callback_finished = CreateEventW( NULL, TRUE, FALSE, NULL );
+    events->projection_waiting = CreateEventW( NULL, TRUE, FALSE, projection_waiting_name );
     return events->started && events->helper_release && events->helper_completed &&
            events->operation_completed && events->worker_gate && events->worker_finished &&
-           events->callback_entered && events->callback_release && events->callback_finished;
+           events->callback_entered && events->callback_release && events->callback_finished &&
+           events->projection_waiting;
 }
 
 static void test_silent_events_reset( struct test_silent_events *events )
@@ -880,6 +886,7 @@ static void test_silent_events_reset( struct test_silent_events *events )
     ResetEvent( events->callback_entered );
     ResetEvent( events->callback_release );
     ResetEvent( events->callback_finished );
+    ResetEvent( events->projection_waiting );
 }
 
 static void test_silent_events_close( struct test_silent_events *events )
@@ -893,6 +900,7 @@ static void test_silent_events_close( struct test_silent_events *events )
     if (events->callback_entered) CloseHandle( events->callback_entered );
     if (events->callback_release) CloseHandle( events->callback_release );
     if (events->callback_finished) CloseHandle( events->callback_finished );
+    if (events->projection_waiting) CloseHandle( events->projection_waiting );
 }
 
 static BOOL test_write_file( const WCHAR *path, const char *value )
@@ -1335,8 +1343,9 @@ static void test_silent_completion_before_handler( struct test_manager_statics *
     handler = test_handler_create( events->callback_entered, NULL, events->callback_finished );
     ok( !!handler, "failed to create completion-before-handler callback.\n" );
     if (!handler) goto done;
+    handler->invoke_hr = E_FAIL;
     hr = IAsyncOperation_IInspectable_put_Completed( typed, &handler->iface );
-    ok( hr == S_OK, "completion-before-handler put got %#lx.\n", hr );
+    ok( hr == S_OK, "completion-before-handler put propagated callback hr %#lx.\n", hr );
     ok( test_wait_event( events->callback_entered, "late callback" ), "late callback missing.\n" );
     ok( handler->status == Completed && handler->status_hr == S_OK && handler->result_hr == S_OK,
         "late callback status %u, status hr %#lx, results hr %#lx.\n",
@@ -1353,6 +1362,66 @@ done:
     SetEvent( events->helper_release );
     test_silent_wait_worker_finished( events, worker_exists, &worker_finished, "completion cleanup worker" );
     if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( &handler->iface );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_projection_snapshot( struct test_manager_statics *manager, IInspectable *request,
+                                             struct test_silent_events *events )
+{
+    static const WCHAR cache_mutex_name[] = L"Local\\Wine4OfficeWamCache";
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    HANDLE cache_mutex = NULL;
+    BOOL owns_mutex = FALSE;
+    AsyncStatus status = Completed;
+    DWORD wait;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"success" );
+    ok( test_write_success_fixture(), "failed to write projection snapshot fixture.\n" );
+    cache_mutex = CreateMutexW( NULL, FALSE, cache_mutex_name );
+    ok( !!cache_mutex, "failed to create projection cache mutex, error %lu.\n", GetLastError() );
+    if (!cache_mutex) goto done;
+    wait = WaitForSingleObject( cache_mutex, 5000 );
+    owns_mutex = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    ok( owns_mutex, "projection cache mutex wait returned %#lx.\n", wait );
+    if (!owns_mutex) goto done;
+
+    hr = test_silent_start( manager, request, NULL, &operation );
+    ok( hr == S_OK && operation, "projection snapshot start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    ok( test_wait_event( events->projection_waiting, "projection snapshot wait" ),
+        "silent reader did not participate in the cache mutex.\n" );
+    wait = WaitForSingleObject( events->operation_completed, 0 );
+    ok( wait == WAIT_TIMEOUT, "projection operation completed while the writer mutex was held, wait %#lx.\n", wait );
+    ok( test_silent_get_abi( operation, &typed, &info ), "projection snapshot ABI setup failed.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Started, "projection snapshot status got %#lx, %u.\n", hr, status );
+    }
+
+    ReleaseMutex( cache_mutex );
+    owns_mutex = FALSE;
+    ok( test_wait_event( events->operation_completed, "projection snapshot completion" ),
+        "projection operation did not complete after cache mutex release.\n" );
+    ok( test_wait_event( events->worker_finished, "projection snapshot worker" ),
+        "projection worker did not finish after cache mutex release.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Completed, "projection snapshot final status got %#lx, %u.\n", hr, status );
+    }
+    if (typed) test_silent_check_response_status( typed, 0 );
+    if (typed && info) test_silent_postclose( typed, info );
+
+done:
+    if (owns_mutex) ReleaseMutex( cache_mutex );
+    if (cache_mutex) CloseHandle( cache_mutex );
     if (typed) IAsyncOperation_IInspectable_Release( typed );
     if (info) IAsyncInfo_Release( info );
     if (operation) IInspectable_Release( operation );
@@ -1571,6 +1640,7 @@ static void test_silent_token_operations(void)
         account = NULL;
     }
     test_silent_cancel_before_mutex( manager, request, &events );
+    test_silent_projection_snapshot( manager, request, &events );
     IInspectable_Release( provider );
     provider = NULL;
     if (resource_request) test_silent_completion_before_handler( manager, resource_request, &events );

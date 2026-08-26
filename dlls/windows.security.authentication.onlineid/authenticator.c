@@ -3605,6 +3605,33 @@ static BOOL silent_cancel_requested( HANDLE cancel_event )
     return cancel_event && WaitForSingleObject( cancel_event, 0 ) == WAIT_OBJECT_0;
 }
 
+static HANDLE silent_acquire_cache_mutex( HANDLE cancel_event, BOOL *canceled )
+{
+    static const WCHAR mutex_name[] = L"Local\\Wine4OfficeWamCache";
+    WCHAR mode[64];
+    HANDLE mutex, handles[2];
+    DWORD count = 1, wait;
+
+    *canceled = FALSE;
+    if (!(mutex = CreateMutexW( NULL, FALSE, mutex_name ))) return NULL;
+    handles[0] = mutex;
+    if (cancel_event) handles[count++] = cancel_event;
+    if (onlineid_get_test_helper_mode( mode ))
+        onlineid_signal_test_event( L"Local\\WineOnlineIdTestProjectionWaiting" );
+    wait = WaitForMultipleObjects( count, handles, FALSE, INFINITE );
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED_0) return mutex;
+    if (cancel_event && wait == WAIT_OBJECT_0 + 1) *canceled = TRUE;
+    CloseHandle( mutex );
+    return NULL;
+}
+
+static void silent_release_cache_mutex( HANDLE mutex )
+{
+    if (!mutex) return;
+    ReleaseMutex( mutex );
+    CloseHandle( mutex );
+}
+
 static BOOL silent_token_is_usable( const WCHAR *token, const WCHAR *expires )
 {
     ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
@@ -3655,14 +3682,20 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
 {
     const WCHAR *token_path = scopes && is_office_licensing_scope( scopes ) ?
                               L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
-    WCHAR *token = load_wam_token_file( token_path );
-    WCHAR *expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
-    WCHAR *refresh = NULL;
-    BOOL have_token = silent_token_is_usable( token, expires );
+    HANDLE cache_mutex = NULL;
+    WCHAR *token = NULL, *expires = NULL, *refresh = NULL;
+    BOOL have_token = FALSE;
     DWORD exit_code = 3, timeout = onlineid_helper_timeout();
     enum helper_result helper;
 
     *canceled = FALSE;
+    if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+    token = load_wam_token_file( token_path );
+    expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+    refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
+    silent_release_cache_mutex( cache_mutex );
+    cache_mutex = NULL;
+    have_token = silent_token_is_usable( token, expires );
     if (silent_cancel_requested( cancel_event ))
     {
         *canceled = TRUE;
@@ -3688,14 +3721,18 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
             goto done;
         }
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
-        token = load_wam_token_file( token_path );
+        token = NULL;
         free( expires );
+        expires = NULL;
+        if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+        token = load_wam_token_file( token_path );
         expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+        silent_release_cache_mutex( cache_mutex );
+        cache_mutex = NULL;
         have_token = silent_token_is_usable( token, expires );
         goto done;
     }
     if (have_token) goto done;
-    refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
     if (refresh)
     {
         helper = run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL,
@@ -3713,13 +3750,19 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
                 goto done;
             }
             if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
-            token = load_wam_token_file( token_path );
+            token = NULL;
             free( expires );
+            expires = NULL;
+            if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+            token = load_wam_token_file( token_path );
             expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+            silent_release_cache_mutex( cache_mutex );
+            cache_mutex = NULL;
             have_token = silent_token_is_usable( token, expires );
         }
     }
 done:
+    silent_release_cache_mutex( cache_mutex );
     if (refresh) { SecureZeroMemory( refresh, wcslen( refresh ) * sizeof(*refresh) ); free( refresh ); }
     if (token) { SecureZeroMemory( token, wcslen( token ) * sizeof(*token) ); free( token ); }
     free( expires );
@@ -3890,7 +3933,7 @@ static HRESULT WINAPI silent_async_put_Completed( IAsyncOperation_IInspectable *
             callback = silent_operation_claim_handler_locked( impl );
     }
     LeaveCriticalSection( &impl->cs );
-    if (callback) hr = silent_operation_invoke( impl, callback, status );
+    if (callback) silent_operation_invoke( impl, callback, status );
     return hr;
 }
 
@@ -4112,7 +4155,7 @@ static const IAsyncInfoVtbl silent_info_vtbl =
 static DWORD WINAPI silent_token_worker( void *parameter )
 {
     struct silent_token_operation *impl = parameter;
-    HANDLE refresh_mutex = NULL, handles[2];
+    HANDLE refresh_mutex = NULL, cache_mutex = NULL, handles[2];
     IInspectable *result = NULL;
     DWORD wait;
     BOOL owns_mutex = FALSE, canceled = FALSE, gate_canceled = FALSE;
@@ -4172,10 +4215,15 @@ finish_refresh:
     }
 
     response_status = supported && have_token ? 0 : 3;
-    hr = web_token_request_result_create( response_status,
-            WindowsGetStringRawBuffer( impl->scopes, NULL ), impl->account, &result );
-    /* Keep projection reads in the same serialized generation as refresh.
-     * A second helper may publish as soon as this mutex is released. */
+    if (!(cache_mutex = silent_acquire_cache_mutex( impl->cancel_event, &canceled )))
+        hr = canceled ? E_ABORT : E_FAIL;
+    else
+    {
+        hr = web_token_request_result_create( response_status,
+                WindowsGetStringRawBuffer( impl->scopes, NULL ), impl->account, &result );
+        silent_release_cache_mutex( cache_mutex );
+        cache_mutex = NULL;
+    }
     if (owns_mutex)
     {
         ReleaseMutex( refresh_mutex );
@@ -4183,10 +4231,12 @@ finish_refresh:
     }
     if (refresh_mutex) CloseHandle( refresh_mutex );
     refresh_mutex = NULL;
-    if (SUCCEEDED(hr)) silent_operation_complete( impl, result, Completed, S_OK );
+    if (canceled) silent_operation_complete( impl, NULL, Canceled, E_ABORT );
+    else if (SUCCEEDED(hr)) silent_operation_complete( impl, result, Completed, S_OK );
     else silent_operation_complete( impl, NULL, Error, hr );
     if (result) IInspectable_Release( result );
 done:
+    silent_release_cache_mutex( cache_mutex );
     if (owns_mutex) ReleaseMutex( refresh_mutex );
     if (refresh_mutex) CloseHandle( refresh_mutex );
     silent_signal_test_worker_finished();
