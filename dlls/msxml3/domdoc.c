@@ -283,11 +283,30 @@ static HRESULT domdoc_load_from_stream(domdoc *doc, ISequentialStream *stream)
     if (FAILED(hr))
         return hr;
 
-    do
+    for (;;)
     {
-        ISequentialStream_Read(stream, buf, sizeof(buf), &read);
+        read = 0;
+        hr = ISequentialStream_Read(stream, buf, sizeof(buf), &read);
+        if (FAILED(hr))
+            break;
+        if (read > sizeof(buf))
+        {
+            hr = E_FAIL;
+            break;
+        }
+        if (!read)
+            break;
+
+        written = 0;
         hr = IStream_Write(hstream, buf, read, &written);
-    } while (SUCCEEDED(hr) && written != 0 && read != 0);
+        if (FAILED(hr))
+            break;
+        if (written != read)
+        {
+            hr = STG_E_MEDIUMFULL;
+            break;
+        }
+    }
 
     if (FAILED(hr))
     {
