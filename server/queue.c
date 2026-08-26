@@ -1602,8 +1602,8 @@ static struct timer *set_timer( struct msg_queue *queue, unsigned int rate, unsi
         timer->tolerance = tolerance;
         timer->when = -monotonic_time - (timeout_t)timer->rate * 10000;
         link_timer( queue, timer );
-        /* check if we replaced the next timer */
-        if (list_head( &queue->pending_timers ) == &timer->entry) set_next_timer( queue );
+        /* A new timer can limit how far the current head may be coalesced. */
+        set_next_timer( queue );
     }
     return timer;
 }
