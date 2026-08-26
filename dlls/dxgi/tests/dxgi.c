@@ -6039,6 +6039,7 @@ static void test_swapchain_present1_scroll(void)
     RECT dirty_rect, duplicate_rects[2], excessive_rects[65], clipped_rect, oob_rect;
     RECT invalid_scroll_rect;
     POINT invalid_scroll_offset;
+    LONG_PTR window_style;
     HWND window;
     HRESULT hr;
 
@@ -6188,6 +6189,100 @@ static void test_swapchain_present1_scroll(void)
         ok(hr == S_OK, "Failed to get presented D3D11 sparse buffer, hr %#lx.\n", hr);
         if (FAILED(hr) || !check_present1_d3d11_frame(context,
                 texture, staging, expected, "dirty-repair"))
+        {
+            if (SUCCEEDED(hr))
+                ID3D11Texture2D_Release(texture);
+            goto release_swapchain;
+        }
+        ID3D11Texture2D_Release(texture);
+
+        /* Put this update inside the most recent history rectangle. If an
+         * occluded Present1 leaves that history live, the next sparse repair
+         * copies the old contents over this authoritative update. */
+        SetRect(&dirty_rect, 36, 36, 40, 40);
+        parameters.DirtyRectsCount = 1;
+        parameters.pDirtyRects = &dirty_rect;
+        parameters.pScrollRect = NULL;
+        parameters.pScrollOffset = NULL;
+        fill_present1_test_rect(expected, &dirty_rect, 0xff204080);
+        window_style = GetWindowLongPtrA(window, GWL_STYLE);
+        ShowWindow(window, SW_MINIMIZE);
+        flush_events();
+        if (!IsIconic(window))
+            SetWindowLongPtrA(window, GWL_STYLE, window_style | WS_MINIMIZE);
+        ok(IsIconic(window), "Expected the Present1 test window to be minimized.\n");
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get minimized D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr))
+        {
+            ShowWindow(window, SW_RESTORE);
+            SetWindowLongPtrA(window, GWL_STYLE, window_style);
+            flush_events();
+            goto release_swapchain;
+        }
+        update_present1_d3d11_rect(context, texture, &dirty_rect, 0xff204080, data);
+        hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+        ID3D11Texture2D_Release(texture);
+        ShowWindow(window, SW_RESTORE);
+        SetWindowLongPtrA(window, GWL_STYLE, window_style);
+        UpdateWindow(window);
+        flush_events();
+        ok(!IsIconic(window), "Expected the Present1 test window to be restored.\n");
+        if (!strcmp(winetest_platform, "wine"))
+            ok(hr == DXGI_STATUS_OCCLUDED,
+                    "Minimized D3D11 Present1 returned %#lx.\n", hr);
+        else
+            ok(hr == S_OK || hr == DXGI_STATUS_OCCLUDED,
+                    "Minimized D3D11 Present1 returned %#lx.\n", hr);
+        if (FAILED(hr))
+            goto release_swapchain;
+
+        SetRect(&dirty_rect, 58, 58, 62, 62);
+        parameters.pDirtyRects = &dirty_rect;
+        fill_present1_test_rect(expected, &dirty_rect, 0xff80c020);
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get restored D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr))
+            goto release_swapchain;
+        update_present1_d3d11_rect(context, texture, &dirty_rect, 0xff80c020, data);
+        hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+        ok(hr == S_OK, "Restored D3D11 Present1 returned %#lx.\n", hr);
+        ID3D11Texture2D_Release(texture);
+        if (FAILED(hr))
+            goto release_swapchain;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get restored presented D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                texture, staging, expected, "occluded-recovery"))
+        {
+            if (SUCCEEDED(hr))
+                ID3D11Texture2D_Release(texture);
+            goto release_swapchain;
+        }
+        ID3D11Texture2D_Release(texture);
+
+        SetRect(&dirty_rect, 50, 2, 54, 6);
+        parameters.pDirtyRects = &dirty_rect;
+        fill_present1_test_rect(expected, &dirty_rect, 0xffc04080);
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get post-occlusion D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr))
+            goto release_swapchain;
+        update_present1_d3d11_rect(context, texture, &dirty_rect, 0xffc04080, data);
+        hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+        ok(hr == S_OK, "Post-occlusion D3D11 Present1 returned %#lx.\n", hr);
+        ID3D11Texture2D_Release(texture);
+        if (FAILED(hr))
+            goto release_swapchain;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, buffer_count - 1,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get post-occlusion presented D3D11 buffer, hr %#lx.\n", hr);
+        if (FAILED(hr) || !check_present1_d3d11_frame(context,
+                texture, staging, expected, "occluded-history-recovery"))
         {
             if (SUCCEEDED(hr))
                 ID3D11Texture2D_Release(texture);

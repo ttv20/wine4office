@@ -601,6 +601,8 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
             d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
                     desc.backbuffer_width, desc.backbuffer_height);
         }
+        else
+            d3d11_swapchain_invalidate_present1_history(swapchain);
         return hr;
     }
 
@@ -624,6 +626,8 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
         d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
                 desc.backbuffer_width, desc.backbuffer_height);
     }
+    else
+        d3d11_swapchain_invalidate_present1_history(swapchain);
     return hr;
 }
 
@@ -1853,6 +1857,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
         d3d11_swapchain_stage_present1_result(swapchain, full_frame_change, physical_identity,
                 identity_generation, change_rects, change_count,
                 desc.backbuffer_width, desc.backbuffer_height);
+    }
+    else
+    {
+        /* The shadow already contains the application update, but a successful
+         * status such as OCCLUDED did not rotate or identify a physical buffer. */
+        d3d11_swapchain_invalidate_present1_history(swapchain);
     }
     return hr;
 }
