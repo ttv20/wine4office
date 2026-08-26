@@ -212,6 +212,53 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+static int d3d11_swapchain_find_present1_buffer(struct d3d11_swapchain *swapchain,
+        uint64_t identity, uint64_t identity_generation);
+
+static void d3d11_swapchain_invalidate_present1_history(struct d3d11_swapchain *swapchain)
+{
+    memset(swapchain->present1_buffers, 0, sizeof(swapchain->present1_buffers));
+    memset(swapchain->present1_frames, 0, sizeof(swapchain->present1_frames));
+    memset(&swapchain->present1_pending, 0, sizeof(swapchain->present1_pending));
+    memset(&swapchain->present1_last_result, 0, sizeof(swapchain->present1_last_result));
+    swapchain->present1_generation = 0;
+}
+
+static void d3d11_swapchain_invalidate_present1_shadow(struct d3d11_swapchain *swapchain,
+        BOOL release_resources)
+{
+    if (release_resources)
+    {
+        if (swapchain->present1_shadow)
+            ID3D11Texture2D_Release(swapchain->present1_shadow);
+        if (swapchain->present1_scratch)
+            ID3D11Texture2D_Release(swapchain->present1_scratch);
+        swapchain->present1_shadow = NULL;
+        swapchain->present1_scratch = NULL;
+    }
+
+    swapchain->present1_shadow_valid = FALSE;
+    d3d11_swapchain_invalidate_present1_history(swapchain);
+}
+
+static void d3d11_swapchain_invalidate_failed_present1(struct d3d11_swapchain *swapchain)
+{
+    int buffer_idx;
+
+    swapchain->present1_shadow_valid = FALSE;
+    if (!swapchain->present1_pending.expected_identity
+            || (buffer_idx = d3d11_swapchain_find_present1_buffer(swapchain,
+                    swapchain->present1_pending.expected_identity,
+                    swapchain->present1_pending.identity_generation)) < 0)
+    {
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        return;
+    }
+
+    swapchain->present1_buffers[buffer_idx].valid = FALSE;
+    memset(&swapchain->present1_pending, 0, sizeof(swapchain->present1_pending));
+}
+
 void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
@@ -294,10 +341,7 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     {
         IWineDXGIDevice *device = swapchain->device;
         HWND composition_window = swapchain->composition_window;
-        if (swapchain->present1_shadow)
-            ID3D11Texture2D_Release(swapchain->present1_shadow);
-        if (swapchain->present1_scratch)
-            ID3D11Texture2D_Release(swapchain->present1_scratch);
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -369,8 +413,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 /* IDXGISwapChain1 methods */
 
-static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
+static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters);
+static BOOL d3d11_swapchain_reap_present1_result(struct d3d11_swapchain *swapchain);
+static void d3d11_swapchain_stage_present1_result(struct d3d11_swapchain *swapchain,
+        BOOL full_frame_change, uint64_t expected_identity, uint64_t identity_generation,
+        const RECT *rects, UINT rect_count, UINT width, UINT height);
 
 static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *rect)
 {
@@ -477,6 +525,7 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     const RECT *source = NULL;
     HWND window;
     HRESULT hr;
+    uint64_t present_id;
 
     d3d11_swapchain_update_composition_window(swapchain);
 
@@ -517,9 +566,12 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     /* The shadow is merged into the current back buffer before Present.  Do not
      * restore it afterward: flip-model presentation has already rotated to the
      * next back buffer, which the application is then free to start rendering. */
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
-            source, NULL, NULL, sync_interval, 0)))
+    if (SUCCEEDED(hr = wined3d_swapchain_present_with_token(swapchain->wined3d_swapchain,
+            source, NULL, NULL, sync_interval, 0, &present_id)))
+    {
+        swapchain->last_present_id = present_id;
         InterlockedIncrement(&swapchain->present_count);
+    }
     return hr;
 }
 
@@ -529,22 +581,51 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *ifac
 static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGISwapChain4 *iface, UINT sync_interval, UINT flags)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    struct wined3d_swapchain_desc desc;
     HRESULT hr;
 
     TRACE("iface %p, sync_interval %u, flags %#x.\n", iface, sync_interval, flags);
     if (flags & DXGI_PRESENT_TEST)
         return d3d11_swapchain_present(swapchain, sync_interval, flags);
 
+    if (!swapchain->present1_shadow)
+    {
+        hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
+        if (FAILED(hr))
+            d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
+        else if (hr == S_OK)
+        {
+            wined3d_mutex_lock();
+            wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+            wined3d_mutex_unlock();
+            d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
+                    desc.backbuffer_width, desc.backbuffer_height);
+        }
+        return hr;
+    }
+
+    d3d11_swapchain_reap_present1_result(swapchain);
+
     /* Applications may follow a complete Present() with sparse Present1()
      * updates.  Keep the complete frame available for those dirty updates. */
-    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, NULL)))
+    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents_full(swapchain, NULL)))
     {
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
         WARN("Failed to update presentation shadow, hr %#lx.\n", hr);
     }
     hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
     if (FAILED(hr))
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
+    else if (hr == S_OK)
+    {
+        wined3d_mutex_lock();
+        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+        wined3d_mutex_unlock();
+        d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
+                desc.backbuffer_width, desc.backbuffer_height);
+    }
+    else
+        d3d11_swapchain_invalidate_present1_history(swapchain);
     return hr;
 }
 
@@ -583,6 +664,7 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_SetFullscreen
     struct dxgi_output *dxgi_output;
     LONG in_set_fullscreen_state;
     BOOL old_fs;
+    BOOL invalidate_present1 = FALSE;
     HRESULT hr;
 
     TRACE("iface %p, fullscreen %#x, target %p.\n", iface, fullscreen, target);
@@ -647,9 +729,15 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_SetFullscreen
     if (swapchain->target)
         IDXGIOutput_Release(swapchain->target);
     swapchain->target = target;
+    invalidate_present1 = TRUE;
 
 done:
     wined3d_mutex_unlock();
+    if (invalidate_present1)
+    {
+        wined3d_swapchain_invalidate_present_results(swapchain->wined3d_swapchain);
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
+    }
     InterlockedExchange(&swapchain->in_set_fullscreen_state, 0);
     return hr;
 }
@@ -754,15 +842,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
     if (flags & ~supported_flags)
         FIXME("Ignoring flags %#x.\n", flags & ~supported_flags);
 
-    if (swapchain->present1_shadow)
-    {
-        ID3D11Texture2D_Release(swapchain->present1_shadow);
-        ID3D11Texture2D_Release(swapchain->present1_scratch);
-        swapchain->present1_shadow = NULL;
-        swapchain->present1_scratch = NULL;
-        swapchain->present1_shadow_valid = FALSE;
-    }
-
     wined3d_mutex_lock();
     wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
     if (!(wined3d_desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT)
@@ -793,8 +872,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
      * old d3d11 textures: we just validated above that they have 0 references,
      * and therefore they are not actually holding a reference to the wined3d
      * swapchain, and will not do anything with it when they are destroyed. */
-    d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
+    if (SUCCEEDED(hr))
+        d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
     wined3d_mutex_unlock();
+
+    if (SUCCEEDED(hr))
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, TRUE);
 
     return hr;
 }
@@ -955,55 +1038,489 @@ static BOOL d3d11_present_box_from_rect(D3D11_BOX *box, const RECT *rect, UINT w
     return TRUE;
 }
 
+static BOOL d3d11_present1_get_scroll_rects(RECT *src_rect, RECT *dst_rect,
+        UINT width, UINT height, const RECT *scroll_rect, const POINT *scroll_offset)
+{
+    const POINT zero = {0, 0};
+    const POINT *offset = scroll_offset ? scroll_offset : &zero;
+    RECT full = {0, 0, width, height};
+
+    if (!scroll_rect || !IntersectRect(dst_rect, scroll_rect, &full))
+        return FALSE;
+
+    src_rect->left = dst_rect->left - offset->x;
+    src_rect->top = dst_rect->top - offset->y;
+    src_rect->right = dst_rect->right - offset->x;
+    src_rect->bottom = dst_rect->bottom - offset->y;
+
+    if (src_rect->left < 0) dst_rect->left -= src_rect->left, src_rect->left = 0;
+    if (src_rect->top < 0) dst_rect->top -= src_rect->top, src_rect->top = 0;
+    if (src_rect->right > (LONG)width)
+        dst_rect->right -= src_rect->right - width, src_rect->right = width;
+    if (src_rect->bottom > (LONG)height)
+        dst_rect->bottom -= src_rect->bottom - height, src_rect->bottom = height;
+    return !IsRectEmpty(src_rect) && !IsRectEmpty(dst_rect);
+}
+
 static void d3d11_present1_apply_scroll(ID3D11DeviceContext *context,
         ID3D11Texture2D *dst, ID3D11Texture2D *src, const D3D11_TEXTURE2D_DESC *desc,
         const RECT *scroll_rect, const POINT *scroll_offset)
 {
-    const POINT zero = {0, 0};
-    const POINT *offset = scroll_offset ? scroll_offset : &zero;
-    RECT full = {0, 0, desc->Width, desc->Height};
     RECT dst_rect, src_rect;
     D3D11_BOX box;
 
-    if (!scroll_rect || !IntersectRect(&dst_rect, scroll_rect, &full))
-        return;
-
-    src_rect.left = dst_rect.left - offset->x;
-    src_rect.top = dst_rect.top - offset->y;
-    src_rect.right = dst_rect.right - offset->x;
-    src_rect.bottom = dst_rect.bottom - offset->y;
-
-    if (src_rect.left < 0) dst_rect.left -= src_rect.left, src_rect.left = 0;
-    if (src_rect.top < 0) dst_rect.top -= src_rect.top, src_rect.top = 0;
-    if (src_rect.right > (LONG)desc->Width)
-        dst_rect.right -= src_rect.right - desc->Width, src_rect.right = desc->Width;
-    if (src_rect.bottom > (LONG)desc->Height)
-        dst_rect.bottom -= src_rect.bottom - desc->Height, src_rect.bottom = desc->Height;
-    if (!d3d11_present_box_from_rect(&box, &src_rect, desc->Width, desc->Height)
-            || IsRectEmpty(&dst_rect))
+    if (!d3d11_present1_get_scroll_rects(&src_rect, &dst_rect,
+            desc->Width, desc->Height, scroll_rect, scroll_offset)
+            || !d3d11_present_box_from_rect(&box, &src_rect, desc->Width, desc->Height))
         return;
 
     ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)dst, 0,
             dst_rect.left, dst_rect.top, 0, (ID3D11Resource *)src, 0, &box);
 }
 
-static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain *swapchain,
+static int d3d11_swapchain_find_present1_buffer(struct d3d11_swapchain *swapchain,
+        uint64_t identity, uint64_t identity_generation)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain->present1_buffers); ++i)
+    {
+        if (swapchain->present1_buffers[i].identity == identity
+                && swapchain->present1_buffers[i].identity_generation == identity_generation)
+            return i;
+    }
+    return -1;
+}
+
+static BOOL d3d11_swapchain_reap_present1_result(struct d3d11_swapchain *swapchain)
+{
+    struct wined3d_swapchain_present_result result;
+    typeof(swapchain->present1_buffers) old_buffers;
+    unsigned int i;
+    unsigned int j;
+    int buffer_idx;
+    HRESULT hr;
+
+    if (!swapchain->present1_pending.valid)
+        return TRUE;
+
+    hr = wined3d_swapchain_get_present_result(swapchain->wined3d_swapchain,
+            swapchain->present1_pending.present_id, &result);
+    if (hr == S_FALSE)
+    {
+        /* A queued Present has not failed, so the complete shadow is still
+         * the authoritative source for a full-copy fallback.  Discard the
+         * sparse history that cannot be advanced without completion, but do
+         * not seed the shadow from a front buffer that is still stale. */
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        return FALSE;
+    }
+    if (hr == WINED3DERR_NOTAVAILABLE)
+    {
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        swapchain->present1_shadow_valid = FALSE;
+        return FALSE;
+    }
+    if (FAILED(hr) || FAILED(result.result))
+    {
+        d3d11_swapchain_invalidate_failed_present1(swapchain);
+        return FALSE;
+    }
+    if ((swapchain->present1_pending.expected_identity
+            && result.presented_physical_identity != swapchain->present1_pending.expected_identity)
+            || (swapchain->present1_pending.identity_generation
+            && result.identity_generation != swapchain->present1_pending.identity_generation)
+            || !result.presented_physical_identity || !result.physical_identity_count
+            || result.physical_identity_count > ARRAY_SIZE(swapchain->present1_buffers))
+    {
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        return FALSE;
+    }
+
+    memcpy(old_buffers, swapchain->present1_buffers, sizeof(old_buffers));
+    memset(swapchain->present1_buffers, 0, sizeof(swapchain->present1_buffers));
+    for (i = 0; i < result.physical_identity_count; ++i)
+    {
+        for (j = 0; j < ARRAY_SIZE(old_buffers); ++j)
+        {
+            if (old_buffers[j].identity == result.physical_identities[i]
+                    && old_buffers[j].identity_generation == result.identity_generation)
+            {
+                swapchain->present1_buffers[i] = old_buffers[j];
+                break;
+            }
+        }
+        if (j == ARRAY_SIZE(old_buffers))
+        {
+            swapchain->present1_buffers[i].identity = result.physical_identities[i];
+            swapchain->present1_buffers[i].identity_generation = result.identity_generation;
+        }
+    }
+
+    if ((buffer_idx = d3d11_swapchain_find_present1_buffer(swapchain,
+            result.presented_physical_identity, result.identity_generation)) < 0)
+    {
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        return FALSE;
+    }
+
+    if (!++swapchain->present1_generation)
+        ++swapchain->present1_generation;
+    swapchain->present1_buffers[buffer_idx].valid = TRUE;
+    swapchain->present1_buffers[buffer_idx].coherent_generation = swapchain->present1_generation;
+    swapchain->present1_frames[swapchain->present1_generation
+            % D3D11_PRESENT1_MAX_HISTORY_FRAMES].generation = swapchain->present1_generation;
+    swapchain->present1_frames[swapchain->present1_generation
+            % D3D11_PRESENT1_MAX_HISTORY_FRAMES].rect_count = swapchain->present1_pending.rect_count;
+    memcpy(swapchain->present1_frames[swapchain->present1_generation
+                    % D3D11_PRESENT1_MAX_HISTORY_FRAMES].rects,
+            swapchain->present1_pending.rects,
+            swapchain->present1_pending.rect_count * sizeof(*swapchain->present1_pending.rects));
+    swapchain->present1_last_result = result;
+    memset(&swapchain->present1_pending, 0, sizeof(swapchain->present1_pending));
+    return TRUE;
+}
+
+static void d3d11_swapchain_stage_present1_result(struct d3d11_swapchain *swapchain,
+        BOOL full_frame_change, uint64_t expected_identity, uint64_t identity_generation,
+        const RECT *rects, UINT rect_count, UINT width, UINT height)
+{
+    RECT full = {0, 0, width, height};
+
+    memset(&swapchain->present1_pending, 0, sizeof(swapchain->present1_pending));
+    swapchain->present1_pending.present_id = swapchain->last_present_id;
+    swapchain->present1_pending.expected_identity = expected_identity;
+    swapchain->present1_pending.identity_generation = identity_generation;
+    swapchain->present1_pending.valid = !!swapchain->last_present_id;
+
+    if (full_frame_change || !rect_count)
+    {
+        swapchain->present1_pending.rect_count = 1;
+        swapchain->present1_pending.rects[0] = full;
+    }
+    else
+    {
+        swapchain->present1_pending.rect_count = rect_count;
+        memcpy(swapchain->present1_pending.rects, rects, rect_count * sizeof(*rects));
+    }
+}
+
+#define D3D11_PRESENT1_MAX_REPAIR_RECTS 256
+
+static UINT d3d11_present1_subtract_rect(const RECT *rect, const RECT *cut, RECT *out)
+{
+    RECT intersection;
+    UINT count = 0;
+
+    if (!IntersectRect(&intersection, rect, cut))
+    {
+        out[0] = *rect;
+        return 1;
+    }
+
+    if (rect->top < intersection.top)
+        out[count++] = (RECT){rect->left, rect->top, rect->right, intersection.top};
+    if (intersection.bottom < rect->bottom)
+        out[count++] = (RECT){rect->left, intersection.bottom, rect->right, rect->bottom};
+    if (rect->left < intersection.left)
+        out[count++] = (RECT){rect->left, intersection.top, intersection.left, intersection.bottom};
+    if (intersection.right < rect->right)
+        out[count++] = (RECT){intersection.right, intersection.top, rect->right, intersection.bottom};
+    return count;
+}
+
+static BOOL d3d11_present1_append_repair_rect(RECT *repairs, UINT *repair_count,
+        const RECT *change, const RECT *dirty_rects, UINT dirty_count)
+{
+    RECT current[D3D11_PRESENT1_MAX_REPAIR_RECTS];
+    RECT next[D3D11_PRESENT1_MAX_REPAIR_RECTS];
+    UINT current_count = 1;
+    RECT fragments[4];
+    UINT fragment_count;
+    unsigned int cut_count;
+    const RECT *cuts;
+    unsigned int i, j, k, next_count;
+
+    current[0] = *change;
+    for (k = 0; k < 2; ++k)
+    {
+        cuts = k ? repairs : dirty_rects;
+        cut_count = k ? *repair_count : dirty_count;
+        for (i = 0; i < cut_count; ++i)
+        {
+            next_count = 0;
+            for (j = 0; j < current_count; ++j)
+            {
+                fragment_count = d3d11_present1_subtract_rect(&current[j], &cuts[i], fragments);
+                if (next_count + fragment_count > ARRAY_SIZE(next))
+                    return FALSE;
+                memcpy(&next[next_count], fragments, fragment_count * sizeof(*fragments));
+                next_count += fragment_count;
+            }
+            memcpy(current, next, next_count * sizeof(*current));
+            current_count = next_count;
+        }
+    }
+
+    if (*repair_count + current_count > D3D11_PRESENT1_MAX_REPAIR_RECTS)
+        return FALSE;
+    memcpy(&repairs[*repair_count], current, current_count * sizeof(*current));
+    *repair_count += current_count;
+    return TRUE;
+}
+
+static HRESULT d3d11_swapchain_preserve_present1_contents_sparse(struct d3d11_swapchain *swapchain,
+        const RECT *dirty_rects, UINT dirty_count, const RECT *scroll_rect,
+        const POINT *scroll_offset, UINT width, UINT height,
+        uint64_t physical_identity, uint64_t identity_generation)
+{
+    RECT repairs[D3D11_PRESENT1_MAX_REPAIR_RECTS];
+    RECT scroll_copies[D3D11_PRESENT1_MAX_REPAIR_RECTS];
+    RECT exclusions[D3D11_PRESENT1_MAX_HISTORY_RECTS + 1];
+    RECT scroll_src, scroll_dst, copy_src;
+    ID3D11DeviceContext *context = NULL;
+    ID3D11Texture2D *source = NULL, *back = NULL;
+    ID3D11Device *device = NULL;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_BOX box;
+    uint64_t generation;
+    UINT exclusion_count = dirty_count, repair_count = 0, scroll_copy_count = 0;
+    int current_idx, source_idx;
+    unsigned int i, j;
+    HRESULT hr = S_FALSE;
+
+    if (!dirty_count && !scroll_rect)
+    {
+        TRACE("Present1 sparse repair is a complete application update; no history copy is needed.\n");
+        return S_OK;
+    }
+    if (dirty_count)
+        memcpy(exclusions, dirty_rects, dirty_count * sizeof(*dirty_rects));
+    if (scroll_rect)
+    {
+        if (exclusion_count >= ARRAY_SIZE(exclusions)
+                || !d3d11_present1_get_scroll_rects(&scroll_src, &scroll_dst,
+                        width, height, scroll_rect, scroll_offset))
+        {
+            TRACE("Present1 sparse scroll repair unavailable: invalid or excessive scroll metadata.\n");
+            return S_FALSE;
+        }
+        exclusions[exclusion_count++] = scroll_dst;
+        if (!d3d11_present1_append_repair_rect(scroll_copies, &scroll_copy_count,
+                &scroll_dst, dirty_rects, dirty_count))
+        {
+            TRACE("Present1 sparse scroll repair unavailable: rectangle complexity exceeded %u.\n",
+                    D3D11_PRESENT1_MAX_REPAIR_RECTS);
+            return S_FALSE;
+        }
+    }
+    if ((current_idx = d3d11_swapchain_find_present1_buffer(swapchain,
+            physical_identity, identity_generation)) < 0
+            || !swapchain->present1_buffers[current_idx].valid)
+    {
+        TRACE("Present1 sparse repair unavailable: current physical buffer %#I64x generation %s "
+                "has no coherent history.\n", (unsigned long long)physical_identity,
+                wine_dbgstr_longlong(identity_generation));
+        return S_FALSE;
+    }
+    if ((source_idx = d3d11_swapchain_find_present1_buffer(swapchain,
+            swapchain->present1_last_result.presented_physical_identity,
+            identity_generation)) < 0
+            || !swapchain->present1_buffers[source_idx].valid)
+    {
+        TRACE("Present1 sparse repair unavailable: last presented physical buffer %#I64x "
+                "has no coherent history.\n",
+                (unsigned long long)swapchain->present1_last_result.presented_physical_identity);
+        return S_FALSE;
+    }
+
+    for (generation = swapchain->present1_buffers[current_idx].coherent_generation + 1;
+            generation <= swapchain->present1_generation; ++generation)
+    {
+        const typeof(*swapchain->present1_frames) *frame =
+                &swapchain->present1_frames[generation % D3D11_PRESENT1_MAX_HISTORY_FRAMES];
+
+        if (frame->generation != generation)
+        {
+            TRACE("Present1 sparse repair unavailable: generation %s has retired from bounded history.\n",
+                    wine_dbgstr_longlong(generation));
+            return S_FALSE;
+        }
+        for (i = 0; i < frame->rect_count; ++i)
+        {
+            if (!d3d11_present1_append_repair_rect(repairs, &repair_count,
+                    &frame->rects[i], exclusions, exclusion_count))
+            {
+                TRACE("Present1 sparse repair unavailable: rectangle complexity exceeded %u.\n",
+                        D3D11_PRESENT1_MAX_REPAIR_RECTS);
+                return S_FALSE;
+            }
+        }
+    }
+
+    if (!repair_count && !scroll_copy_count)
+    {
+        TRACE("Present1 sparse repair found no stale pixels outside %u authoritative rectangles.\n",
+                exclusion_count);
+        return S_OK;
+    }
+    if (current_idx == source_idx)
+    {
+        TRACE("Present1 sparse repair unavailable: source and destination are physical buffer %u.\n",
+                current_idx);
+        return S_FALSE;
+    }
+
+    TRACE("Present1 sparse repair: destination buffer %u at generation %s, source buffer %u at "
+            "generation %s, %u application dirty rectangles, %u repair rectangles, "
+            "%u scroll rectangles.\n",
+            current_idx, wine_dbgstr_longlong(swapchain->present1_buffers[current_idx].coherent_generation),
+            source_idx, wine_dbgstr_longlong(swapchain->present1_generation), dirty_count,
+            repair_count, scroll_copy_count);
+
+    if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
+            0, &IID_ID3D11Texture2D, (void **)&back)))
+        return hr;
+    if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
+            source_idx, &IID_ID3D11Texture2D, (void **)&source)))
+        goto done;
+    ID3D11Texture2D_GetDesc(back, &desc);
+    ID3D11Texture2D_GetDevice(back, &device);
+    ID3D11Device_GetImmediateContext(device, &context);
+
+    for (j = 0; j < repair_count; ++j)
+    {
+        if (!d3d11_present_box_from_rect(&box, &repairs[j], desc.Width, desc.Height))
+            continue;
+        TRACE("Present1 sparse copy %u/%u: %s (%llu pixels).\n", j + 1, repair_count,
+                wine_dbgstr_rect(&repairs[j]),
+                (unsigned long long)(box.right - box.left) * (box.bottom - box.top));
+        ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)back, 0,
+                box.left, box.top, 0, (ID3D11Resource *)source, 0, &box);
+    }
+    for (j = 0; j < scroll_copy_count; ++j)
+    {
+        copy_src.left = scroll_copies[j].left - scroll_offset->x;
+        copy_src.top = scroll_copies[j].top - scroll_offset->y;
+        copy_src.right = scroll_copies[j].right - scroll_offset->x;
+        copy_src.bottom = scroll_copies[j].bottom - scroll_offset->y;
+        if (!d3d11_present_box_from_rect(&box, &copy_src, desc.Width, desc.Height))
+            continue;
+        TRACE("Present1 sparse scroll copy %u/%u: %s -> %s (%llu pixels).\n",
+                j + 1, scroll_copy_count, wine_dbgstr_rect(&copy_src),
+                wine_dbgstr_rect(&scroll_copies[j]),
+                (unsigned long long)(box.right - box.left) * (box.bottom - box.top));
+        ID3D11DeviceContext_CopySubresourceRegion(context, (ID3D11Resource *)back, 0,
+                scroll_copies[j].left, scroll_copies[j].top, 0,
+                (ID3D11Resource *)source, 0, &box);
+    }
+    hr = S_OK;
+
+done:
+    if (context)
+        ID3D11DeviceContext_Release(context);
+    if (device)
+        ID3D11Device_Release(device);
+    if (source)
+        ID3D11Texture2D_Release(source);
+    ID3D11Texture2D_Release(back);
+    return hr;
+}
+
+enum d3d11_present1_fallback_reason
+{
+    D3D11_PRESENT1_FALLBACK_FORCED,
+    D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED,
+    D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE,
+    D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE,
+};
+
+static const char *d3d11_present1_fallback_reason_name(enum d3d11_present1_fallback_reason reason)
+{
+    switch (reason)
+    {
+        case D3D11_PRESENT1_FALLBACK_FORCED:
+            return "forced-by-WINE_DXGI_PRESENT1_FORCE_FULL";
+        case D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED:
+            return "backend-capability-query-failed";
+        case D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE:
+            return "physical-back-buffer-identity-unavailable";
+        case D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE:
+            return "back-buffer-preservation-contract-unavailable";
+        case D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE:
+            return "transactional-present-result-unavailable";
+        case D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE:
+            return "region-history-not-active";
+    }
+
+    return "unknown";
+}
+
+static enum d3d11_present1_fallback_reason d3d11_swapchain_get_present1_fallback_reason(
+        struct d3d11_swapchain *swapchain, uint32_t *capabilities, uint64_t *physical_identity,
+        uint64_t *identity_generation)
+{
+    HRESULT hr;
+
+    *capabilities = 0;
+    *physical_identity = 0;
+    *identity_generation = 0;
+
+    if (getenv("WINE_DXGI_PRESENT1_FORCE_FULL"))
+        return D3D11_PRESENT1_FALLBACK_FORCED;
+
+    wined3d_mutex_lock();
+    hr = wined3d_swapchain_get_present_capabilities(swapchain->wined3d_swapchain, 0,
+            capabilities, physical_identity, identity_generation);
+    wined3d_mutex_unlock();
+
+    if (FAILED(hr))
+        return D3D11_PRESENT1_FALLBACK_BACKEND_QUERY_FAILED;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY)
+            || !*physical_identity)
+        return D3D11_PRESENT1_FALLBACK_PHYSICAL_IDENTITY_UNAVAILABLE;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS))
+        return D3D11_PRESENT1_FALLBACK_CONTENT_PRESERVATION_UNAVAILABLE;
+    if (!(*capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT))
+        return D3D11_PRESENT1_FALLBACK_TRANSACTIONAL_PRESENT_UNAVAILABLE;
+
+    return D3D11_PRESENT1_FALLBACK_REGION_HISTORY_NOT_ACTIVE;
+}
+
+/* Keep the full-copy path as the correctness fallback whenever the active
+ * backend cannot prove physical identity, preservation, and transactional
+ * completion, or when the bounded sparse history cannot satisfy a repair. */
+static HRESULT d3d11_swapchain_preserve_present1_contents_full(struct d3d11_swapchain *swapchain,
         const DXGI_PRESENT_PARAMETERS *parameters)
 {
+    struct wined3d_swapchain_present_result present_result;
     struct wined3d_device_context *wined3d_context;
-    struct wined3d_texture *front, *wined3d_back;
+    struct wined3d_texture *front, *seed, *wined3d_back;
     ID3D11DeviceContext *context = NULL;
     ID3D11Texture2D *dirty_source, *back = NULL;
     ID3D11Device *device = NULL;
     D3D11_TEXTURE2D_DESC desc;
     D3D11_BOX box;
+    enum d3d11_present1_fallback_reason fallback_reason;
+    uint32_t capabilities;
+    uint64_t physical_identity, identity_generation;
     HRESULT hr;
-    unsigned int i;
+    unsigned int i, seed_idx;
 
     if (parameters && parameters->DirtyRectsCount && !parameters->pDirtyRects)
         return E_INVALIDARG;
     if (parameters && (!!parameters->pScrollRect != !!parameters->pScrollOffset))
         return E_INVALIDARG;
+
+    fallback_reason = d3d11_swapchain_get_present1_fallback_reason(swapchain,
+            &capabilities, &physical_identity, &identity_generation);
+    TRACE("Using the full-copy Present1 fallback: reason %s, backend capabilities %#x, "
+            "authoritative physical identity %#I64x, generation %s.\n",
+            d3d11_present1_fallback_reason_name(fallback_reason), capabilities,
+            (unsigned long long)physical_identity, wine_dbgstr_longlong(identity_generation));
+
     if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
             0, &IID_ID3D11Texture2D, (void **)&back)))
         return hr;
@@ -1028,8 +1545,11 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
 
     ID3D11Device_GetImmediateContext(device, &context);
 
-    if (!parameters || !parameters->DirtyRectsCount)
+    if (!parameters || (!parameters->DirtyRectsCount && !parameters->pScrollRect))
     {
+        /* Preserve the original Present1 round-trip for the authoritative
+         * application update. Besides keeping the shadow coherent, restoring
+         * the copied pixels leaves the active back buffer ready for Present. */
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
         swapchain->present1_shadow_valid = TRUE;
@@ -1047,10 +1567,32 @@ static HRESULT d3d11_swapchain_preserve_present1_contents(struct d3d11_swapchain
         dirty_source = swapchain->present1_scratch;
         front = wined3d_swapchain_get_front_buffer(swapchain->wined3d_swapchain);
         wined3d_back = wined3d_swapchain_get_back_buffer(swapchain->wined3d_swapchain, 0);
+        seed = front;
+        if (swapchain->present1_pending.valid
+                && SUCCEEDED(hr = wined3d_swapchain_wait_present_result(
+                        swapchain->wined3d_swapchain,
+                        swapchain->present1_pending.present_id, &present_result))
+                && SUCCEEDED(present_result.result)
+                && present_result.presented_physical_identity)
+        {
+            for (seed_idx = 0; seed_idx < min(present_result.physical_identity_count,
+                    (UINT)ARRAY_SIZE(present_result.physical_identities)); ++seed_idx)
+            {
+                if (present_result.physical_identities[seed_idx]
+                        == present_result.presented_physical_identity)
+                {
+                    if (seed_idx && (seed = wined3d_swapchain_get_back_buffer(
+                            swapchain->wined3d_swapchain, seed_idx)))
+                        TRACE("Seeding the first Present1 shadow from completed physical "
+                                "back buffer %u.\n", seed_idx);
+                    break;
+                }
+            }
+        }
         wined3d_context = wined3d_device_get_immediate_context(
                 wined3d_swapchain_get_device(swapchain->wined3d_swapchain));
         wined3d_device_context_copy_resource(wined3d_context,
-                wined3d_texture_get_resource(wined3d_back), wined3d_texture_get_resource(front));
+                wined3d_texture_get_resource(wined3d_back), wined3d_texture_get_resource(seed));
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
         swapchain->present1_shadow_valid = TRUE;
@@ -1091,11 +1633,88 @@ done:
     return hr;
 }
 
+static HRESULT d3d11_swapchain_update_present1_shadow_sparse(struct d3d11_swapchain *swapchain,
+        const DXGI_PRESENT_PARAMETERS *parameters)
+{
+    ID3D11DeviceContext *context = NULL;
+    ID3D11Texture2D *back = NULL;
+    ID3D11Device *device = NULL;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_BOX box;
+    HRESULT hr;
+    unsigned int i;
+
+    if (!swapchain->present1_shadow_valid || !swapchain->present1_shadow
+            || !swapchain->present1_scratch)
+        return S_FALSE;
+    if (FAILED(hr = d3d11_swapchain_GetBuffer(&swapchain->IDXGISwapChain4_iface,
+            0, &IID_ID3D11Texture2D, (void **)&back)))
+        return hr;
+
+    ID3D11Texture2D_GetDesc(back, &desc);
+    ID3D11Texture2D_GetDevice(back, &device);
+    ID3D11Device_GetImmediateContext(device, &context);
+
+    if (!parameters || (!parameters->DirtyRectsCount && !parameters->pScrollRect))
+    {
+        ID3D11DeviceContext_CopyResource(context,
+                (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
+        /* This pixel-identical copy-back preserves the Present1 resource-state
+         * ordering expected by WineD3D and must not be optimized away. */
+        ID3D11DeviceContext_CopyResource(context,
+                (ID3D11Resource *)back, (ID3D11Resource *)swapchain->present1_shadow);
+        goto done;
+    }
+
+    if (parameters->pScrollRect)
+    {
+        ID3D11DeviceContext_CopyResource(context,
+                (ID3D11Resource *)swapchain->present1_scratch,
+                (ID3D11Resource *)swapchain->present1_shadow);
+        d3d11_present1_apply_scroll(context, swapchain->present1_shadow,
+                swapchain->present1_scratch, &desc,
+                parameters->pScrollRect, parameters->pScrollOffset);
+    }
+    for (i = 0; i < parameters->DirtyRectsCount; ++i)
+    {
+        if (!d3d11_present_box_from_rect(&box, &parameters->pDirtyRects[i],
+                desc.Width, desc.Height))
+            continue;
+        ID3D11DeviceContext_CopySubresourceRegion(context,
+                (ID3D11Resource *)swapchain->present1_shadow, 0,
+                box.left, box.top, 0, (ID3D11Resource *)back, 0, &box);
+        /* Restore only the application-owned region, rather than the full
+         * frame restored by the fallback. This is required for the active
+         * back buffer to retain the original Present1 resource-state ordering. */
+        ID3D11DeviceContext_CopySubresourceRegion(context,
+                (ID3D11Resource *)back, 0, box.left, box.top, 0,
+                (ID3D11Resource *)swapchain->present1_shadow, 0, &box);
+    }
+
+done:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+    ID3D11Texture2D_Release(back);
+    return S_OK;
+}
+
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface,
         UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS *present_parameters)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    RECT dirty_rects[D3D11_PRESENT1_MAX_HISTORY_RECTS];
+    RECT change_rects[D3D11_PRESENT1_MAX_HISTORY_RECTS];
+    RECT scroll_src, scroll_dst;
+    struct wined3d_swapchain_desc desc;
+    uint64_t physical_identity = 0, identity_generation = 0;
+    uint32_t capabilities = 0;
+    UINT change_count = 0, dirty_count = 0;
+    BOOL bounded_change_history = TRUE;
+    BOOL scroll_valid = TRUE;
+    BOOL sparse = FALSE;
+    D3D11_BOX box;
+    unsigned int i;
     HRESULT hr;
 
     TRACE("iface %p, sync_interval %u, flags %#x, present_parameters %p.\n",
@@ -1106,11 +1725,143 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
         return E_INVALIDARG;
     if (sync_interval > 4 || (flags & DXGI_PRESENT_TEST))
         return d3d11_swapchain_present(swapchain, sync_interval, flags);
-    if (FAILED(hr = d3d11_swapchain_preserve_present1_contents(swapchain, present_parameters)))
-        return hr;
+
+    wined3d_mutex_lock();
+    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+    wined3d_mutex_unlock();
+
+    TRACE("Present1 surface %ux%u, dirty rectangle count %u, scroll rectangle %s, "
+            "scroll offset %s.\n", desc.backbuffer_width, desc.backbuffer_height,
+            present_parameters ? present_parameters->DirtyRectsCount : 0,
+            present_parameters ? wine_dbgstr_rect(present_parameters->pScrollRect) : "(null)",
+            present_parameters ? wine_dbgstr_point(present_parameters->pScrollOffset) : "(null)");
+    if (present_parameters)
+    {
+        for (i = 0; i < present_parameters->DirtyRectsCount; ++i)
+            TRACE("Present1 application dirty rectangle %u/%u: %s.\n", i + 1,
+                    present_parameters->DirtyRectsCount,
+                    wine_dbgstr_rect(&present_parameters->pDirtyRects[i]));
+    }
+
+    if (present_parameters)
+    {
+        for (i = 0; i < present_parameters->DirtyRectsCount; ++i)
+        {
+            const RECT *rect = &present_parameters->pDirtyRects[i];
+
+            if (rect->right <= rect->left || rect->bottom <= rect->top)
+                return E_INVALIDARG;
+            if (rect->left < 0 || rect->top < 0
+                    || rect->right > (LONG)desc.backbuffer_width
+                    || rect->bottom > (LONG)desc.backbuffer_height)
+                return DXGI_ERROR_INVALID_CALL;
+        }
+        if (present_parameters->pScrollRect)
+        {
+            const RECT *rect = present_parameters->pScrollRect;
+            int64_t source_left = (int64_t)rect->left - present_parameters->pScrollOffset->x;
+            int64_t source_top = (int64_t)rect->top - present_parameters->pScrollOffset->y;
+            int64_t source_right = (int64_t)rect->right - present_parameters->pScrollOffset->x;
+            int64_t source_bottom = (int64_t)rect->bottom - present_parameters->pScrollOffset->y;
+
+            if (rect->right <= rect->left || rect->bottom <= rect->top)
+                return E_INVALIDARG;
+            if (rect->left < 0 || rect->top < 0
+                    || rect->right > (LONG)desc.backbuffer_width
+                    || rect->bottom > (LONG)desc.backbuffer_height
+                    || source_left < 0 || source_top < 0
+                    || source_right > desc.backbuffer_width
+                    || source_bottom > desc.backbuffer_height)
+                return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+
+    if (present_parameters && present_parameters->DirtyRectsCount <= ARRAY_SIZE(dirty_rects))
+    {
+        for (i = 0; i < present_parameters->DirtyRectsCount; ++i)
+        {
+            if (!d3d11_present_box_from_rect(&box, &present_parameters->pDirtyRects[i],
+                    desc.backbuffer_width, desc.backbuffer_height))
+                continue;
+            dirty_rects[dirty_count++] = (RECT){box.left, box.top, box.right, box.bottom};
+        }
+    }
+    else if (present_parameters)
+    {
+        bounded_change_history = FALSE;
+    }
+
+    if (dirty_count)
+    {
+        memcpy(change_rects, dirty_rects, dirty_count * sizeof(*dirty_rects));
+        change_count = dirty_count;
+    }
+    if (present_parameters && present_parameters->pScrollRect)
+    {
+        scroll_valid = d3d11_present1_get_scroll_rects(&scroll_src, &scroll_dst,
+                desc.backbuffer_width, desc.backbuffer_height,
+                present_parameters->pScrollRect, present_parameters->pScrollOffset);
+        if (!scroll_valid || change_count >= ARRAY_SIZE(change_rects))
+            bounded_change_history = FALSE;
+        else
+            change_rects[change_count++] = scroll_dst;
+    }
+
+    if (!getenv("WINE_DXGI_PRESENT1_FORCE_FULL")
+            && bounded_change_history && scroll_valid
+            && swapchain->present1_shadow_valid
+            && swapchain->present1_shadow && swapchain->present1_scratch
+            && d3d11_swapchain_reap_present1_result(swapchain))
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_swapchain_get_present_capabilities(swapchain->wined3d_swapchain, 0,
+                &capabilities, &physical_identity, &identity_generation);
+        wined3d_mutex_unlock();
+        if (SUCCEEDED(hr) && physical_identity && identity_generation
+                && (capabilities & (WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                    | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                    | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT))
+                        == (WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                            | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                            | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT)
+                && d3d11_swapchain_preserve_present1_contents_sparse(swapchain,
+                        dirty_rects, dirty_count,
+                        present_parameters ? present_parameters->pScrollRect : NULL,
+                        present_parameters ? present_parameters->pScrollOffset : NULL,
+                        desc.backbuffer_width, desc.backbuffer_height,
+                        physical_identity, identity_generation) == S_OK
+                && d3d11_swapchain_update_present1_shadow_sparse(
+                        swapchain, present_parameters) == S_OK)
+            sparse = TRUE;
+    }
+
+    if (!sparse)
+    {
+        if (FAILED(hr = d3d11_swapchain_preserve_present1_contents_full(swapchain, present_parameters)))
+        {
+            d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
+            return hr;
+        }
+    }
     hr = d3d11_swapchain_present(swapchain, sync_interval, flags);
     if (FAILED(hr))
-        swapchain->present1_shadow_valid = FALSE;
+        d3d11_swapchain_invalidate_present1_shadow(swapchain, FALSE);
+    else if (hr == S_OK)
+    {
+        BOOL full_frame_change = !present_parameters
+                || (!present_parameters->DirtyRectsCount && !present_parameters->pScrollRect)
+                || !bounded_change_history;
+
+        d3d11_swapchain_stage_present1_result(swapchain, full_frame_change, physical_identity,
+                identity_generation, change_rects, change_count,
+                desc.backbuffer_width, desc.backbuffer_height);
+    }
+    else
+    {
+        /* The shadow already contains the application update, but a successful
+         * status such as OCCLUDED did not rotate or identify a physical buffer. */
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+    }
     return hr;
 }
 

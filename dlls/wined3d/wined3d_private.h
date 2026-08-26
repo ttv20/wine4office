@@ -3770,7 +3770,8 @@ void wined3d_device_context_emit_clear_uav(struct wined3d_device_context *contex
         struct wined3d_unordered_access_view *view, const struct wined3d_uvec4 *clear_value, bool fp);
 void wined3d_cs_emit_preload_resource(struct wined3d_cs *cs, struct wined3d_resource *resource);
 void wined3d_cs_emit_present(struct wined3d_cs *cs, struct wined3d_swapchain *swapchain, const RECT *src_rect,
-        const RECT *dst_rect, HWND dst_window_override, unsigned int swap_interval, uint32_t flags);
+        const RECT *dst_rect, HWND dst_window_override, unsigned int swap_interval, uint32_t flags,
+        uint64_t present_id);
 void wined3d_cs_emit_set_color_key(struct wined3d_cs *cs, struct wined3d_texture *texture,
         WORD flags, const struct wined3d_color_key *color_key);
 void wined3d_cs_emit_set_render_state(struct wined3d_cs *cs,
@@ -4135,9 +4136,18 @@ HRESULT wined3d_swapchain_state_setup_fullscreen(struct wined3d_swapchain_state 
 
 struct wined3d_swapchain_ops
 {
-    void (*swapchain_present)(struct wined3d_swapchain *swapchain,
-            const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags);
+    HRESULT (*swapchain_present)(struct wined3d_swapchain *swapchain,
+            const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags,
+            struct wined3d_swapchain_present_result *result);
     void (*swapchain_frontbuffer_updated)(struct wined3d_swapchain *swapchain);
+};
+
+#define WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT 32
+
+struct wined3d_swapchain_present_record
+{
+    struct wined3d_swapchain_present_result result;
+    bool completed;
 };
 
 struct wined3d_swapchain
@@ -4158,6 +4168,13 @@ struct wined3d_swapchain
     unsigned int swap_interval;
     unsigned int max_frame_latency;
     HANDLE frame_latency_semaphore;
+
+    SRWLOCK present_result_lock;
+    uint64_t next_present_id;
+    uint64_t last_submitted_present_id;
+    uint64_t last_completed_present_id;
+    uint64_t present_identity_generation;
+    struct wined3d_swapchain_present_record present_results[WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
 
     /* Performance tracking */
     LARGE_INTEGER last_present_time;

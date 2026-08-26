@@ -171,6 +171,9 @@ HRESULT dxgi_adapter_create(struct dxgi_factory *factory, UINT ordinal,
         struct dxgi_adapter **adapter);
 struct dxgi_adapter *unsafe_impl_from_IDXGIAdapter(IDXGIAdapter *iface);
 
+#define D3D11_PRESENT1_MAX_HISTORY_FRAMES 16
+#define D3D11_PRESENT1_MAX_HISTORY_RECTS 64
+
 /* IDXGISwapChain */
 struct d3d11_swapchain
 {
@@ -190,6 +193,32 @@ struct d3d11_swapchain
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
+    uint64_t last_present_id;
+
+    struct
+    {
+        uint64_t identity;
+        uint64_t identity_generation;
+        uint64_t coherent_generation;
+        BOOL valid;
+    } present1_buffers[WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT];
+    struct
+    {
+        uint64_t generation;
+        UINT rect_count;
+        RECT rects[D3D11_PRESENT1_MAX_HISTORY_RECTS];
+    } present1_frames[D3D11_PRESENT1_MAX_HISTORY_FRAMES];
+    struct
+    {
+        uint64_t present_id;
+        uint64_t expected_identity;
+        uint64_t identity_generation;
+        UINT rect_count;
+        RECT rects[D3D11_PRESENT1_MAX_HISTORY_RECTS];
+        BOOL valid;
+    } present1_pending;
+    struct wined3d_swapchain_present_result present1_last_result;
+    uint64_t present1_generation;
 };
 
 void d3d11_swapchain_set_composition_window(IDXGISwapChain1 *iface, HWND window);
