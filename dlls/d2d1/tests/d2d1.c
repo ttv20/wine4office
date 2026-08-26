@@ -18574,7 +18574,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         {0.0f, {1.0f, 0.0f, 0.0f, 1.0f}},
         {1.0f, {0.0f, 0.0f, 1.0f, 1.0f}},
     };
-    D2D1_SIZE_U small_size = {64, 64}, large_size = {2048, 1024};
+    D2D1_SIZE_U small_size = {64, 64}, large_size = {4097, 4096};
     D2D1_SIZE_U brush_size = {64, 64};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES gradient_desc;
@@ -19091,11 +19091,13 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ok(ID2D1DeviceContext_GetPrimitiveBlend(ctx.context) == D2D1_PRIMITIVE_BLEND_COPY,
             "Non-source-over fallback changed the primitive blend mode.\n");
 
-    /* 8*8 + 4*4 + 2*2 + 1*1 = 85 samples per output pixel. This dimensions
-     * choice exceeds 128 MiB even for the supported 1-byte A8 format, rather
-     * than relying on the usual 4-byte BGRA target format. */
+    /* 8*8 + 4*4 + 2*2 + 1*1 = 85 samples per output pixel. These dimensions
+     * exceed 128 MiB both for the legacy one-byte A8 calculation and for an
+     * 8-sample one-byte compatibility coverage target. */
     ok((size_t)large_size.width * large_size.height * 85 > (size_t)128 * 1024 * 1024,
             "Large test target does not exceed the minimum scratch budget.\n");
+    ok((size_t)large_size.width * large_size.height * 8 > (size_t)128 * 1024 * 1024,
+            "Large test target does not exceed the compatibility coverage budget.\n");
 
     /* A subpixel stroke unconditionally selects the custom AA helper. The
      * full-size rectangle then exceeds the scratch budget, so the helper
@@ -19116,7 +19118,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ok(readback, "Failed to read back the over-budget fallback bitmap.\n");
     if (readback)
     {
-        covered = count_nonzero_pixels(&rb, 0, 0, large_size.width, large_size.height);
+        covered = count_nonzero_pixels(&rb, 0, 0, large_size.width, 4);
         ok(covered, "Over-budget fallback did not render any pixels.\n");
         release_resource_readback(&rb);
     }
