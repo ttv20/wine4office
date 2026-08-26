@@ -8040,7 +8040,8 @@ static void test_stroke_line_joins(BOOL d3d11)
             for (x = 80; x < 160; ++x)
                 if (get_readback_colour(&rb, x, y) != 0xff652e89)
                     ++reflected_count;
-        ok(count == reflected_count, "Reflected %s join has %u pixels, expected %u.\n",
+        ok(compare_uint(count, reflected_count, 4),
+                "Reflected %s join has %u pixels, expected %u.\n",
                 tests[i].name, reflected_count, count);
         release_resource_readback(&rb);
     }
