@@ -52,6 +52,9 @@ static const char teams_client_id[] = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 static const char teams_nested_client_id[] = "f4060917-6abe-40d7-baa6-f634c0eda4ac";
 static const char office_scope[] = "https://officeapps.live.com/.default offline_access openid profile";
 static const char licensing_scope[] = "https://licensing.m365.svc.cloud.microsoft/.default";
+/* A consumer subscription is licensed through Live ID, which cannot serve the
+ * AAD licensing scope above. */
+static const char consumer_licensing_scope[] = "service::officeapps.live.com::MBI_SSL";
 static const char redirect_uri[] =
     "ms-appx-web://Microsoft.AAD.BrokerPlugin/d3590ed6-52b3-4102-aeff-aad2292ab01c";
 static const WCHAR redirect_prefix[] = L"ms-appx-web://Microsoft.AAD.BrokerPlugin/";
@@ -67,15 +70,34 @@ static bool oauth_consumer = false;
 
 static std::string oauth_consumer_client_id, oauth_consumer_scope;
 
-/* Consumer Microsoft accounts are served by Live ID, not by the AAD endpoints.
- * Office asks for them with the legacy 16 hex digit app id and an RPS scope
- * ("service::<host>::MBI_SSL*"); the AAD endpoints refuse both outright. */
+/* Consumer Microsoft accounts are served by Live ID, not by the AAD endpoints,
+ * which refuse them outright. Office requests them with this Live ID
+ * application; matching the exact id keeps unrelated clients on the AAD path. */
+static const char consumer_client_id[] = "00000000480728C5";
+
+/* Live ID serves RPS scopes ("service::<host>::MBI_SSL*") plus the OpenID
+ * scopes. An AAD resource scope such as
+ * https://consentservice.microsoft.com/... has no Live ID equivalent, and
+ * asking for one renders a Microsoft error page inside the sign-in window. */
+static bool consumer_scope_supported(const std::string &scope)
+{
+    size_t pos = 0;
+
+    while (pos < scope.size())
+    {
+        size_t end = scope.find(' ', pos);
+        if (end == std::string::npos) end = scope.size();
+        if (scope.compare(pos, 8, "https://") == 0 || scope.compare(pos, 7, "http://") == 0)
+            return false;
+        pos = end + 1;
+    }
+    return true;
+}
+
 static bool is_consumer_identity(const std::string &client_id, const std::string &scope)
 {
-    if (scope.compare(0, 9, "service::") == 0) return true;
-    return client_id.size() == 16 &&
-           std::all_of(client_id.begin(), client_id.end(), [](unsigned char ch)
-               { return std::isxdigit(ch) != 0; });
+    (void)scope;
+    return client_id == consumer_client_id;
 }
 static std::vector<BYTE> pending_auth_post;
 static std::wstring pending_auth_path;
@@ -918,11 +940,20 @@ static void secure_clear(cache_record &record)
 /* Office requests several scopes and the projection stores a single access
  * token, so each refresh overwrote the previous scope's token and Office kept
  * rejecting the mismatched result. Key each token by its scope instead. */
-static std::wstring scope_projection_name(const std::string &scope)
+static std::wstring scope_projection_name(const std::string &scope, const std::string &account_id)
 {
     unsigned long long hash = 1469598103934665603ULL;
-    WCHAR name[40];
+    WCHAR name[48];
 
+    /* Key on the account as well as the scope: a token minted for one account
+     * must never be handed to another that later asks for the same scope. */
+    for (unsigned char ch : account_id)
+    {
+        hash ^= ch;
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
     for (unsigned char ch : scope)
     {
         hash ^= ch;
@@ -930,6 +961,22 @@ static std::wstring scope_projection_name(const std::string &scope)
     }
     swprintf(name, ARRAYSIZE(name), L"wam-scope-%016llx.dat", hash);
     return name;
+}
+
+/* Refresh runs in a separate helper invocation that is given no identity, so
+ * the account's own client id has to survive in the projection. Without it a
+ * consumer refresh token would be replayed against the AAD endpoint and every
+ * silent refresh would fail back to interactive sign-in. */
+static bool remember_consumer_identity(const std::string &client_id, const std::string &scope)
+{
+    return protected_write(L"wam-consumer-client.dat", client_id) &&
+           protected_write(L"wam-consumer-scope.dat", scope);
+}
+
+static bool load_consumer_identity(std::string &client_id, std::string &scope)
+{
+    return protected_read(L"wam-consumer-client.dat", client_id) &&
+           protected_read(L"wam-consumer-scope.dat", scope) && !client_id.empty();
 }
 
 static bool publish_projection(const cache_record &record);
@@ -1298,10 +1345,29 @@ static bool clear_projection(void)
         L"wam-account-username.dat", L"wam-account-id.dat", L"wam-account-oid.dat",
         L"wam-account-tenant-id.dat", L"wam-account-authority.dat", L"wam-client-info.dat",
         L"wam-account-first-name.dat", L"wam-account-last-name.dat",
-        L"wam-account-display-name.dat", L"wam-active-account.dat"
+        L"wam-account-display-name.dat", L"wam-active-account.dat",
+        L"wam-consumer-client.dat", L"wam-consumer-scope.dat"
     };
+    WIN32_FIND_DATAW found;
+    HANDLE search;
+
     for (const WCHAR *name : names)
         if (!delete_cache_file(name)) success = false;
+
+    /* Scope-keyed tokens are named after the scope that produced them, so they
+     * have to be enumerated. Leaving them behind would hand the next account a
+     * live access token belonging to the previous one. */
+    search = FindFirstFileW(cache_file(L"wam-scope-*.dat").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !delete_cache_file(found.cFileName))
+                success = false;
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
     return success;
 }
 
@@ -1461,10 +1527,22 @@ static bool exchange_and_save(const std::string &code, const std::string &verifi
         "&code_verifier=" + url_encode(verifier) +
         "&scope=" + url_encode(office_scope);
     bool success = token_request(body, response, oauth_tenant) && parse_token_set(response, office);
-    if (success && !oauth_consumer)
-        success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
+    if (success)
+    {
+        if (oauth_consumer)
+        {
+            /* Office reads the licensing ticket from its own projection slot, so
+             * a consumer sign-in must mint it here or Office stays in trial. */
+            if (!refresh_scope(office.refresh_token, consumer_licensing_scope, licensing, &office,
+                               oauth_consumer_client_id.c_str()))
+                licensing = token_set();
+        }
+        else success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
+    }
     if (success && !licensing.refresh_token.empty()) office.refresh_token = licensing.refresh_token;
     if (success) success = save_tokens(office, licensing, login_hint);
+    if (success && oauth_consumer)
+        remember_consumer_identity(oauth_consumer_client_id, oauth_consumer_scope);
     secure_clear(body);
     secure_clear(response);
     secure_clear(office);
@@ -1482,9 +1560,23 @@ static bool refresh_and_save(const std::string &login_hint)
     {
         office.refresh_token = previous_record.office.refresh_token;
         office.id_token = previous_record.office.id_token;
-        success = refresh_scope(office.refresh_token, office_scope, office, &office);
+        success = oauth_consumer ?
+            refresh_scope(office.refresh_token, oauth_consumer_scope.c_str(), office, &office,
+                          oauth_consumer_client_id.c_str()) :
+            refresh_scope(office.refresh_token, office_scope, office, &office);
     }
-    if (success) success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
+    if (success)
+    {
+        if (oauth_consumer)
+        {
+            /* Live ID cannot serve the AAD licensing scope, and a missing
+             * licensing ticket must not fail the whole refresh. */
+            if (!refresh_scope(office.refresh_token, consumer_licensing_scope, licensing, &office,
+                               oauth_consumer_client_id.c_str()))
+                licensing = token_set();
+        }
+        else success = refresh_scope(office.refresh_token, licensing_scope, licensing, &office);
+    }
     if (success && !licensing.refresh_token.empty()) office.refresh_token = licensing.refresh_token;
     if (success) success = save_tokens(office, licensing, login_hint.empty() ?
                                        previous_record.username : login_hint);
@@ -1526,6 +1618,7 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     /* An RPS scope is already in its final form; the /.default normalisation
      * only applies to AAD resource scopes. */
     bool consumer = is_consumer_identity(requested_client_id, requested_scope);
+    if (consumer && !consumer_scope_supported(requested_scope)) return false;
     std::string scope = consumer ? requested_scope : normalize_resource_scope(requested_scope);
     bool success = !scope.empty() &&
         (consumer || requested_client_id == client_id || requested_client_id == teams_client_id ||
@@ -1560,8 +1653,12 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     {
         std::string scoped = std::to_string(unix_time() + resource.expires_in) + "|" +
                              resource.access_token;
-        protected_write(scope_projection_name(requested_scope).c_str(), scoped);
+        success = protected_write(scope_projection_name(requested_scope, account.account_id).c_str(),
+                                  scoped);
         secure_clear(scoped);
+    }
+    if (success)
+    {
         account.office.access_token = resource.access_token;
         account.office.id_token = resource.id_token;
         if (!resource.refresh_token.empty()) account.office.refresh_token = resource.refresh_token;
@@ -2553,6 +2650,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     }
     if (argc >= 2 && !wcscmp(argv[1], L"--refresh"))
     {
+        std::string cached_client, cached_scope;
+        if (load_consumer_identity(cached_client, cached_scope) &&
+            is_consumer_identity(cached_client, cached_scope))
+        {
+            oauth_consumer = true;
+            oauth_consumer_client_id = cached_client;
+            oauth_consumer_scope = cached_scope;
+        }
         success = refresh_and_save({});
         LocalFree(argv);
         return success ? 0 : 3;
@@ -2594,6 +2699,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     oauth_consumer = !resource_mode && is_consumer_identity(request_client_id, request_scope);
     if (oauth_consumer)
     {
+        if (!consumer_scope_supported(request_scope))
+        {
+            /* Report "no token" rather than opening a browser that can only
+             * render a Microsoft error page for this scope. */
+            OleUninitialize();
+            CoUninitialize();
+            return 3;
+        }
         oauth_consumer_client_id = request_client_id;
         oauth_consumer_scope = request_scope;
     }
