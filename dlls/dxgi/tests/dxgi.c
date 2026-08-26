@@ -48,6 +48,7 @@ static NTSTATUS (WINAPI *pD3DKMTOpenAdapterFromGdiDisplayName)(D3DKMT_OPENADAPTE
 static HRESULT (WINAPI *pD3D11CreateDevice)(IDXGIAdapter *adapter, D3D_DRIVER_TYPE driver_type, HMODULE swrast, UINT flags,
         const D3D_FEATURE_LEVEL *feature_levels, UINT levels, UINT sdk_version, ID3D11Device **device_out,
         D3D_FEATURE_LEVEL *obtained_feature_level, ID3D11DeviceContext **immediate_context);
+static HRESULT (WINAPI *pGetThreadDescription)(HANDLE thread, WCHAR **description);
 
 static PFN_D3D12_CREATE_DEVICE pD3D12CreateDevice;
 static PFN_D3D12_GET_DEBUG_INTERFACE pD3D12GetDebugInterface;
@@ -7405,6 +7406,8 @@ static void snapshot_wined3d_cs_threads(struct cs_thread_snapshot *snapshot)
     WCHAR *description;
 
     snapshot->count = 0;
+    if (!pGetThreadDescription)
+        return;
     thread_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (thread_snapshot == INVALID_HANDLE_VALUE)
         return;
@@ -7418,7 +7421,7 @@ static void snapshot_wined3d_cs_threads(struct cs_thread_snapshot *snapshot)
             if (!(thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID)))
                 continue;
             description = NULL;
-            if (SUCCEEDED(GetThreadDescription(thread, &description)))
+            if (SUCCEEDED(pGetThreadDescription(thread, &description)))
             {
                 if (!lstrcmpW(description, L"wined3d_cs") && snapshot->count < ARRAY_SIZE(snapshot->ids))
                     snapshot->ids[snapshot->count++] = entry.th32ThreadID;
@@ -11186,7 +11189,7 @@ done_device:
 
 START_TEST(dxgi)
 {
-    HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module;
+    HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module, kernelbase_module;
     BOOL enable_debug_layer = FALSE;
     BOOL present1_history_only = FALSE;
     BOOL present1_benchmark = FALSE;
@@ -11202,6 +11205,9 @@ START_TEST(dxgi)
     pD3DKMTCheckVidPnExclusiveOwnership = (void *)GetProcAddress(gdi32_module, "D3DKMTCheckVidPnExclusiveOwnership");
     pD3DKMTCloseAdapter = (void *)GetProcAddress(gdi32_module, "D3DKMTCloseAdapter");
     pD3DKMTOpenAdapterFromGdiDisplayName = (void *)GetProcAddress(gdi32_module, "D3DKMTOpenAdapterFromGdiDisplayName");
+
+    if ((kernelbase_module = GetModuleHandleA("kernelbase.dll")))
+        pGetThreadDescription = (void *)GetProcAddress(kernelbase_module, "GetThreadDescription");
 
     d3d11_module = LoadLibraryA("d3d11.dll");
     pD3D11CreateDevice = (void *)GetProcAddress(d3d11_module, "D3D11CreateDevice");
