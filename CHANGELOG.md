@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Respect Direct2D stroke join styles while keeping sharp WordArt corners bounded.
 - Keep Word responsive while Microsoft 365 tokens are checked or refreshed in the background.
 - Keep Microsoft 365 account and token data consistent when sign-in and background refresh overlap.
 - Build Wine4Office releases and agent runners from the same reproducible 18-job environment.
@@ -14,6 +15,7 @@
 - Prevent Word from crashing when opening the References tab.
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
 - Keep Office responsive while DirectX completion events are pending or OpenGL windows are covered on Wayland.
+- Keep keyboard input synchronized with the active host layout when returning to Wine Wayland windows.
 
 ## 0.2.1-beta.1 — 2026-08-23
 

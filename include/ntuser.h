@@ -394,6 +394,9 @@ C_ASSERT( sizeof(struct drag_drop_post_params) == offsetof(struct drag_drop_post
 #define DF_WINE_ROOT_DESKTOP      0x40000000
 #define DF_WINE_VIRTUAL_DESKTOP   0x80000000
 
+/* Internal NtUserActivateKeyboardLayout flag used by display drivers. */
+#define KLF_WINE_NOTIFY           0x80000000
+
 /* NtUserMessageCall codes */
 enum
 {

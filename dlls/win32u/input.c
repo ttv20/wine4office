@@ -1430,12 +1430,14 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
 {
     struct user_thread_info *info = get_user_thread_info();
     const KBDTABLES *kbd_tables;
+    BOOL notify = flags & KLF_WINE_NOTIFY;
     HKL old_layout;
     LCID locale;
     HWND focus;
 
     TRACE_(keyboard)( "layout %p, flags %x\n", layout, flags );
 
+    flags &= ~KLF_WINE_NOTIFY;
     if (flags) FIXME_(keyboard)( "flags %x not supported\n", flags );
 
     if (layout == (HKL)HKL_NEXT || layout == (HKL)HKL_PREV)
@@ -1463,12 +1465,13 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
         return 0;
 
     old_layout = info->kbd_layout;
-    if (old_layout != layout)
+    if (old_layout != layout || notify)
     {
-        HWND ime_hwnd = get_default_ime_window( 0 );
+        HWND ime_hwnd = old_layout != layout ? get_default_ime_window( 0 ) : 0;
         CHARSETINFO cs = {0};
 
-        if (ime_hwnd) send_message( ime_hwnd, WM_IME_INTERNAL, IME_INTERNAL_HKL_DEACTIVATE, HandleToUlong(old_layout) );
+        if (old_layout != layout && ime_hwnd)
+            send_message( ime_hwnd, WM_IME_INTERNAL, IME_INTERNAL_HKL_DEACTIVATE, HandleToUlong(old_layout) );
 
         if (HIWORD(layout) == 0xe001)
             get_input_language_charset( LOWORD(layout), &cs );
@@ -1477,10 +1480,14 @@ HKL WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags )
         else
             get_input_language_charset( HIWORD(layout), &cs );
 
-        info->kbd_layout = layout;
-        info->kbd_layout_id = 0;
+        if (old_layout != layout)
+        {
+            info->kbd_layout = layout;
+            info->kbd_layout_id = 0;
 
-        if (ime_hwnd) send_message( ime_hwnd, WM_IME_INTERNAL, IME_INTERNAL_HKL_ACTIVATE, HandleToUlong(layout) );
+            if (ime_hwnd)
+                send_message( ime_hwnd, WM_IME_INTERNAL, IME_INTERNAL_HKL_ACTIVATE, HandleToUlong(layout) );
+        }
 
         if ((focus = get_focus()) && get_window_thread( focus, NULL ) == GetCurrentThreadId())
             send_message( focus, WM_INPUTLANGCHANGE, cs.ciCharset, (LPARAM)layout );

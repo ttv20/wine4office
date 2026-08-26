@@ -695,6 +695,19 @@ struct d2d_geometry
     } u;
 };
 
+struct d2d_outline_mesh
+{
+    struct d2d_outline_vertex *vertices;
+    size_t vertex_count;
+    struct d2d_face *faces;
+    size_t face_count;
+    BOOL allocated;
+};
+
+HRESULT d2d_geometry_build_outline_mesh(const struct d2d_geometry *geometry,
+        float stroke_width, const struct d2d_stroke_style *stroke_style, struct d2d_outline_mesh *mesh);
+void d2d_outline_mesh_cleanup(struct d2d_outline_mesh *mesh);
+
 HRESULT d2d_ellipse_geometry_init(struct d2d_geometry *geometry,
         ID2D1Factory *factory, const D2D1_ELLIPSE *ellipse);
 void d2d_path_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *factory);
@@ -722,7 +735,7 @@ struct d2d_geometry_realization
 };
 
 HRESULT d2d_geometry_realization_init(struct d2d_geometry_realization *realization,
-        ID2D1Factory *factory, ID2D1Geometry *geometry);
+        ID2D1Factory *factory, ID2D1Geometry *geometry, float tolerance);
 struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1GeometryRealization *iface);
 
 struct d2d_shader_blob
