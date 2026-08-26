@@ -13,6 +13,7 @@
 - Reduce Office redraw work for partial document and ribbon updates.
 - Prevent Word from crashing when opening the References tab.
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
+- Keep Office responsive while DirectX completion events are pending or OpenGL windows are covered on Wayland.
 
 ## 0.2.1-beta.1 — 2026-08-23
 

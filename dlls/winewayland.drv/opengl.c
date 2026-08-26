@@ -49,6 +49,8 @@ struct wayland_gl_drawable
 {
     struct opengl_drawable base;
     struct wl_egl_window *wl_egl_window;
+    struct wl_event_queue *frame_queue;
+    struct wl_callback *frame_callback;
 };
 
 static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
@@ -56,9 +58,54 @@ static struct wayland_gl_drawable *impl_from_opengl_drawable(struct opengl_drawa
     return CONTAINING_RECORD(base, struct wayland_gl_drawable, base);
 }
 
+static void wayland_drawable_frame_done(void *data, struct wl_callback *callback, uint32_t time)
+{
+    struct wayland_gl_drawable *gl = data;
+
+    TRACE("drawable %p callback %p time %u\n", gl, callback, time);
+
+    assert(gl->frame_callback == callback);
+    gl->frame_callback = NULL;
+    wl_callback_destroy(callback);
+}
+
+static const struct wl_callback_listener wayland_drawable_frame_listener =
+{
+    wayland_drawable_frame_done,
+};
+
+static void wayland_drawable_cancel_frame_callback(struct wayland_gl_drawable *gl)
+{
+    if (!gl->frame_callback) return;
+
+    wl_callback_destroy(gl->frame_callback);
+    gl->frame_callback = NULL;
+}
+
+static void wayland_drawable_request_frame_callback(struct wayland_gl_drawable *gl,
+        struct wl_surface *surface)
+{
+    struct wl_surface *wrapper;
+
+    if (!(wrapper = wl_proxy_create_wrapper(surface))) return;
+    wl_proxy_set_queue((struct wl_proxy *)wrapper, gl->frame_queue);
+    gl->frame_callback = wl_surface_frame(wrapper);
+    wl_proxy_wrapper_destroy(wrapper);
+
+    if (gl->frame_callback)
+        wl_callback_add_listener(gl->frame_callback, &wayland_drawable_frame_listener, gl);
+}
+
 static void wayland_drawable_destroy(struct opengl_drawable *base)
 {
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
+
+    if (gl->frame_queue)
+    {
+        wl_display_dispatch_queue_pending(process_wayland.wl_display, gl->frame_queue);
+        wayland_drawable_cancel_frame_callback(gl);
+        wl_event_queue_destroy(gl->frame_queue);
+    }
     if (gl->wl_egl_window) wl_egl_window_destroy(gl->wl_egl_window);
 }
 
@@ -109,6 +156,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     opengl_drawable_map_buffer(&gl->base, GL_FRONT_AND_BACK, GL_BACK);
     if (gl->base.stereo) opengl_drawable_map_buffer(&gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT);
 
+    if (!(gl->frame_queue = wl_display_create_queue(process_wayland.wl_display))) goto err;
     if (!(gl->wl_egl_window = wl_egl_window_create(surface->wl_surface, gl->base.virtual_size.cx, gl->base.virtual_size.cy))) goto err;
     if (!(gl->base.surface = funcs->p_eglCreateWindowSurface(egl->display, config, gl->wl_egl_window, attribs))) goto err;
     set_client_surface(hwnd, surface);
@@ -137,7 +185,11 @@ static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
 
     TRACE("drawable %s, flags %#x\n", debugstr_opengl_drawable(base), flags);
 
-    if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval(egl->display, abs(base->interval));
+    /* Wine uses wl_surface.frame below as the presentation flow-control
+     * signal, coalescing intermediate swaps into the current back buffer.
+     * Keep EGL itself unthrottled so that it cannot wait forever for a
+     * compositor frame callback after the surface becomes occluded. */
+    if (flags & GL_FLUSH_INTERVAL) funcs->p_eglSwapInterval(egl->display, 0);
 
     /* Since context_flush is called from operations that may latch the native size,
      * perform any pending resizes before calling them. */
@@ -191,7 +243,31 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
     }
 
     client_surface_present(base->client);
-    funcs->p_eglSwapBuffers(egl->display, gl->base.surface);
+
+    /* Wayland compositors are allowed to stop frame callbacks for fully
+     * occluded surfaces.  Do not let libwayland-egl exhaust its buffer pool
+     * and block the render thread in that case.  Keep rendering into the
+     * current back buffer until the compositor is ready for another commit;
+     * the next swap will then present the most recent frame. */
+    wl_display_dispatch_queue_pending(process_wayland.wl_display, gl->frame_queue);
+    if (!surface->wl_subsurface)
+    {
+        wayland_drawable_cancel_frame_callback(gl);
+        funcs->p_glFlush();
+        return TRUE;
+    }
+    else if (gl->frame_callback)
+    {
+        TRACE("drawable %p still waiting for callback %p, deferring swap\n",
+                gl, gl->frame_callback);
+        funcs->p_glFlush();
+        return TRUE;
+    }
+    else
+        wayland_drawable_request_frame_callback(gl, surface->wl_surface);
+
+    if (!funcs->p_eglSwapBuffers(egl->display, gl->base.surface))
+        wayland_drawable_cancel_frame_callback(gl);
 
     return TRUE;
 }
