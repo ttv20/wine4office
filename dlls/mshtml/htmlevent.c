@@ -3590,6 +3590,17 @@ dispex_static_data_t Event_dispex = {
     .iface_tids = Event_iface_tids,
 };
 
+/* Scripts only need the ErrorEvent constructor to exist and to inherit from
+ * Event; the message/filename/lineno/colno properties are not implemented. */
+dispex_static_data_t ErrorEvent_dispex = {
+    .id              = OBJID_ErrorEvent,
+    .prototype_id    = OBJID_Event,
+    .vtbl            = &DOMEvent_dispex_vtbl,
+    .disp_tid        = DispDOMEvent_tid,
+    .iface_tids      = Event_iface_tids,
+    .min_compat_mode = COMPAT_MODE_IE10,
+};
+
 static const dispex_static_data_vtbl_t DOMUIEvent_dispex_vtbl = {
     .query_interface  = DOMUIEvent_query_interface,
     .destructor       = DOMEvent_destructor,
