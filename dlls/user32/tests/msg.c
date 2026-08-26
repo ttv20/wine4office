@@ -12046,6 +12046,28 @@ static void test_timers_no_wnd(void)
             DispatchMessageA(&msg);
         ok(count > 1, "expected count > 1, got %d.\n", count);
         KillTimer(NULL, id);
+
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MINIMUM, callback_count,
+                                  TIMERV_COALESCING_MAX);
+        ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
+        KillTimer(NULL, id);
+
+        SetLastError(0xdeadbeef);
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MINIMUM, callback_count,
+                                  TIMERV_COALESCING_MAX + 1);
+        ok(!id, "SetCoalescableTimer succeeded with invalid tolerance.\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu.\n", GetLastError());
+
+        SetLastError(0xdeadbeef);
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MAXIMUM, callback_count,
+                                  TIMERV_COALESCING_MIN);
+        ok(!id, "SetCoalescableTimer succeeded with overflowing timer range.\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu.\n", GetLastError());
+
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MAXIMUM, callback_count,
+                                  TIMERV_NO_COALESCING);
+        ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
+        KillTimer(NULL, id);
     }
     else
         win_skip("SetCoalescableTimer not available.\n");

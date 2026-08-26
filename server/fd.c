@@ -371,14 +371,64 @@ void set_current_time(void)
     if (user_shared_data) set_user_shared_data_time();
 }
 
-/* add a timeout user */
-struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, void *private )
+/* choose an existing server wakeup within the allowed timeout range */
+static abstime_t coalesce_timeout( abstime_t when, timeout_t tolerance )
+{
+    struct timeout_user *timeout;
+    abstime_t candidate = 0, latest;
+
+    if (!tolerance) return when;
+
+    if (when > 0)
+    {
+        if (when <= current_time) return current_time;
+        latest = when + tolerance;
+
+        if (user_shared_data && current_time + user_shared_data_timeout >= when &&
+            current_time + user_shared_data_timeout <= latest)
+            candidate = current_time + user_shared_data_timeout;
+
+        LIST_FOR_EACH_ENTRY( timeout, &abs_timeout_list, struct timeout_user, entry )
+        {
+            if (timeout->when < when) continue;
+            if (timeout->when > latest) break;
+            if (!candidate || timeout->when < candidate) candidate = timeout->when;
+            break;
+        }
+    }
+    else
+    {
+        timeout_t due = -when, candidate_due = 0, latest_due;
+
+        if (due <= monotonic_time) return -monotonic_time;
+        latest_due = due + tolerance;
+
+        if (user_shared_data && monotonic_time + user_shared_data_timeout >= due &&
+            monotonic_time + user_shared_data_timeout <= latest_due)
+            candidate_due = monotonic_time + user_shared_data_timeout;
+
+        LIST_FOR_EACH_ENTRY( timeout, &rel_timeout_list, struct timeout_user, entry )
+        {
+            timeout_t timeout_due = -timeout->when;
+
+            if (timeout_due < due) continue;
+            if (timeout_due > latest_due) break;
+            if (!candidate_due || timeout_due < candidate_due) candidate_due = timeout_due;
+            break;
+        }
+        if (candidate_due) candidate = -candidate_due;
+    }
+    return candidate ? candidate : when;
+}
+
+static struct timeout_user *add_timeout_user_abstime( abstime_t when, timeout_callback func,
+                                                      void *private )
 {
     struct timeout_user *user;
     struct list *ptr;
 
     if (!(user = mem_alloc( sizeof(*user) ))) return NULL;
-    user->when     = timeout_to_abstime( when );
+    user->when     = when;
     user->callback = func;
     user->private  = private;
 
@@ -402,6 +452,19 @@ struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, vo
     }
     list_add_before( ptr, &user->entry );
     return user;
+}
+
+/* add an exact timeout user */
+struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, void *private )
+{
+    return add_timeout_user_abstime( timeout_to_abstime( when ), func, private );
+}
+
+/* add a timeout user at an existing server wakeup within its allowed range */
+struct timeout_user *add_timeout_user_coalesced( abstime_t when, timeout_t tolerance,
+                                                timeout_callback func, void *private )
+{
+    return add_timeout_user_abstime( coalesce_timeout( when, tolerance ), func, private );
 }
 
 /* remove a timeout user */
