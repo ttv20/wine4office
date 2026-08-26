@@ -18,6 +18,7 @@
 
 #include "d2d1_private.h"
 #include "shape_shaders.h"
+#include <float.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
@@ -975,25 +976,34 @@ static HRESULT d2d_device_context_update_vs_cb(struct d2d_device_context *contex
 }
 
 static void d2d_device_context_draw_geometry(struct d2d_device_context *render_target,
-        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width,
+        const struct d2d_stroke_style *stroke_style)
 {
+    struct d2d_outline_mesh mesh;
     D3D11_SUBRESOURCE_DATA buffer_data;
     D3D11_BUFFER_DESC buffer_desc;
     ID3D11Buffer *ib, *vb;
     HRESULT hr;
 
+    if (FAILED(hr = d2d_geometry_build_outline_mesh(geometry, stroke_width, stroke_style, &mesh)))
+    {
+        WARN("Failed to build outline mesh, hr %#lx.\n", hr);
+        d2d_device_context_set_error(render_target, hr);
+        return;
+    }
+
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(render_target, hr);
-        return;
+        goto done;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(render_target, hr);
-        return;
+        goto done;
     }
 
     buffer_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -1003,33 +1013,33 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     buffer_data.SysMemPitch = 0;
     buffer_data.SysMemSlicePitch = 0;
 
-    if (geometry->outline.face_count)
+    if (mesh.face_count)
     {
-        buffer_desc.ByteWidth = geometry->outline.face_count * sizeof(*geometry->outline.faces);
+        buffer_desc.ByteWidth = mesh.face_count * sizeof(*mesh.faces);
         buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        buffer_data.pSysMem = geometry->outline.faces;
+        buffer_data.pSysMem = mesh.faces;
 
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &ib)))
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
-        buffer_desc.ByteWidth = geometry->outline.vertex_count * sizeof(*geometry->outline.vertices);
+        buffer_desc.ByteWidth = mesh.vertex_count * sizeof(*mesh.vertices);
         buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        buffer_data.pSysMem = geometry->outline.vertices;
+        buffer_data.pSysMem = mesh.vertices;
 
         if (FAILED(hr = ID3D11Device1_CreateBuffer(render_target->d3d_device, &buffer_desc, &buffer_data, &vb)))
         {
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
-            return;
+            goto done;
         }
 
-        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_OUTLINE, ib, 3 * geometry->outline.face_count, vb,
-                sizeof(*geometry->outline.vertices), brush, NULL);
+        d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_OUTLINE, ib, 3 * mesh.face_count, vb,
+                sizeof(*mesh.vertices), brush, NULL);
 
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
@@ -1041,7 +1051,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         {
             WARN("Failed to update curve ps constant buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         buffer_desc.ByteWidth = geometry->outline.bezier_face_count * sizeof(*geometry->outline.bezier_faces);
@@ -1052,7 +1062,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         {
             WARN("Failed to create curves index buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         buffer_desc.ByteWidth = geometry->outline.bezier_count * sizeof(*geometry->outline.beziers);
@@ -1064,7 +1074,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
-            return;
+            goto done;
         }
 
         d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_BEZIER_OUTLINE, ib,
@@ -1085,7 +1095,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         {
             WARN("Failed to create arcs index buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         buffer_desc.ByteWidth = geometry->outline.arc_count * sizeof(*geometry->outline.arcs);
@@ -1097,7 +1107,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
             ERR("Failed to create arcs vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
-            return;
+            goto done;
         }
 
         if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, NULL, TRUE, TRUE, TRUE)))
@@ -1110,6 +1120,9 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         ID3D11Buffer_Release(vb);
         ID3D11Buffer_Release(ib);
     }
+
+done:
+    d2d_outline_mesh_cleanup(&mesh);
 }
 
 static void d2d_device_context_add_geometry_aa_bound(struct d2d_device_context *context,
@@ -1131,43 +1144,98 @@ static void d2d_device_context_add_geometry_aa_bound(struct d2d_device_context *
         d2d_rect_expand(bounds, &p);
 }
 
-static void d2d_device_context_fill_round_joins(struct d2d_device_context *context,
+static BOOL d2d_device_context_get_stroke_aa_padding(const struct d2d_device_context *context,
+        float stroke_width, const struct d2d_stroke_style *stroke_style, float *padding)
+{
+    const D2D1_MATRIX_3X2_F *transform = &context->drawing_state.transform;
+    float dpi_x = context->desc.dpiX / 96.0f, dpi_y = context->desc.dpiY / 96.0f;
+    float miter_limit = 10.0f, scale;
+
+    if (stroke_style)
+    {
+        if (stroke_style->desc.lineJoin == D2D1_LINE_JOIN_BEVEL
+                || stroke_style->desc.lineJoin == D2D1_LINE_JOIN_ROUND)
+            miter_limit = 1.0f;
+        else
+            miter_limit = stroke_style->desc.miterLimit;
+        if (!isfinite(miter_limit) || miter_limit < 1.0f)
+            miter_limit = 1.0f;
+    }
+
+    scale = sqrtf(transform->_11 * transform->_11 * dpi_x * dpi_x
+            + transform->_21 * transform->_21 * dpi_x * dpi_x
+            + transform->_12 * transform->_12 * dpi_y * dpi_y
+            + transform->_22 * transform->_22 * dpi_y * dpi_y);
+    *padding = fabsf(stroke_width) * 0.5f * miter_limit * scale + 4.0f;
+    return isfinite(*padding);
+}
+
+static HRESULT d2d_device_context_fill_round_joins(struct d2d_device_context *context,
         const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
 {
     ID2D1PathGeometry *join_geometry;
     ID2D1GeometrySink *sink;
-    D2D1_POINT_2F point, n0, n1;
+    D2D1_POINT_2F point, center, prev, next, n0, n1;
     unsigned int i, k, segment_count;
-    float a0, a1, delta, a, radius;
+    float a0, a1, delta, a, radius, prev_length, next_length, cross, determinant;
+    BOOL negative_turn;
     HRESULT hr;
 
     if (FAILED(hr = ID2D1Factory_CreatePathGeometry(context->factory, &join_geometry)))
-        return;
+        return hr;
     if (FAILED(hr = ID2D1PathGeometry_Open(join_geometry, &sink)))
     {
         ID2D1PathGeometry_Release(join_geometry);
-        return;
+        return hr;
     }
 
-    radius = stroke_width * 0.5f;
+    radius = fabsf(stroke_width) * 0.5f;
+    if (!isfinite(radius))
+    {
+        ID2D1GeometrySink_Release(sink);
+        ID2D1PathGeometry_Release(join_geometry);
+        return E_INVALIDARG;
+    }
+    determinant = geometry->transform._11 * geometry->transform._22
+            - geometry->transform._12 * geometry->transform._21;
     for (i = 0; i < geometry->outline.join_count; ++i)
     {
         const struct d2d_outline_join *join = &geometry->outline.joins[i];
 
-        if (join->ccw < 0.0f)
+        d2d_point_set(&prev, join->prev.x * geometry->transform._11
+                + join->prev.y * geometry->transform._21,
+                join->prev.x * geometry->transform._12
+                + join->prev.y * geometry->transform._22);
+        d2d_point_set(&next, join->next.x * geometry->transform._11
+                + join->next.y * geometry->transform._21,
+                join->next.x * geometry->transform._12
+                + join->next.y * geometry->transform._22);
+        prev_length = hypotf(prev.x, prev.y);
+        next_length = hypotf(next.x, next.y);
+        if (!isfinite(prev_length) || !isfinite(next_length)
+                || prev_length <= FLT_EPSILON || next_length <= FLT_EPSILON)
+            continue;
+        prev.x /= prev_length;
+        prev.y /= prev_length;
+        next.x /= next_length;
+        next.y /= next_length;
+        cross = prev.x * next.y - prev.y * next.x;
+        negative_turn = fabsf(cross) <= 16.0f * FLT_EPSILON
+                ? determinant < 0.0f : cross < 0.0f;
+        if (negative_turn)
         {
-            d2d_point_set(&n0, -join->prev.y, join->prev.x);
-            d2d_point_set(&n1, join->next.y, -join->next.x);
+            d2d_point_set(&n0, -prev.y, prev.x);
+            d2d_point_set(&n1, next.y, -next.x);
         }
         else
         {
-            d2d_point_set(&n0, join->prev.y, -join->prev.x);
-            d2d_point_set(&n1, -join->next.y, join->next.x);
+            d2d_point_set(&n0, prev.y, -prev.x);
+            d2d_point_set(&n1, -next.y, next.x);
         }
         a0 = atan2f(n0.y, n0.x);
         a1 = atan2f(n1.y, n1.x);
         delta = a1 - a0;
-        if (join->ccw < 0.0f)
+        if (negative_turn)
         {
             while (delta < 0.0f) delta += 2.0f * M_PI;
             if (delta > M_PI) delta -= 2.0f * M_PI;
@@ -1179,15 +1247,17 @@ static void d2d_device_context_fill_round_joins(struct d2d_device_context *conte
         }
         segment_count = max(1, (unsigned int)ceilf(fabsf(delta) * 8.0f / M_PI));
 
-        ID2D1GeometrySink_BeginFigure(sink, join->position, D2D1_FIGURE_BEGIN_FILLED);
-        d2d_point_set(&point, join->position.x + radius * n0.x,
-                join->position.y + radius * n0.y);
+        d2d_point_transform(&center, &geometry->transform, join->position.x, join->position.y);
+        if (!isfinite(center.x) || !isfinite(center.y)
+                || fabsf(center.x) > FLT_MAX - radius || fabsf(center.y) > FLT_MAX - radius)
+            continue;
+        ID2D1GeometrySink_BeginFigure(sink, center, D2D1_FIGURE_BEGIN_FILLED);
+        d2d_point_set(&point, center.x + radius * n0.x, center.y + radius * n0.y);
         ID2D1GeometrySink_AddLine(sink, point);
         for (k = 1; k <= segment_count; ++k)
         {
             a = a0 + delta * k / segment_count;
-            d2d_point_set(&point, join->position.x + radius * cosf(a),
-                    join->position.y + radius * sinf(a));
+            d2d_point_set(&point, center.x + radius * cosf(a), center.y + radius * sinf(a));
             ID2D1GeometrySink_AddLine(sink, point);
         }
         ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
@@ -1196,9 +1266,24 @@ static void d2d_device_context_fill_round_joins(struct d2d_device_context *conte
     hr = ID2D1GeometrySink_Close(sink);
     ID2D1GeometrySink_Release(sink);
     if (SUCCEEDED(hr))
+    {
         ID2D1DeviceContext6_FillGeometry(&context->ID2D1DeviceContext6_iface,
                 (ID2D1Geometry *)join_geometry, &brush->ID2D1Brush_iface, NULL);
+        hr = context->error.code;
+    }
     ID2D1PathGeometry_Release(join_geometry);
+
+    return hr;
+}
+
+static void d2d_device_context_draw_round_joins(struct d2d_device_context *context,
+        const struct d2d_geometry *geometry, struct d2d_brush *brush, float stroke_width)
+{
+    HRESULT hr;
+
+    hr = d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
+    if (FAILED(hr))
+        d2d_device_context_set_error(context, hr);
 }
 
 static void d2d_device_context_fill_geometry(struct d2d_device_context *render_target,
@@ -1214,7 +1299,7 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     D2D1_SIZE_U previous_size = context->pixel_size, output_size, size;
     ID2D1Bitmap1 *target = NULL, *downsample[3] = {NULL};
     ID2D1Image *previous_target = NULL;
-    D2D1_MATRIX_3X2_F join_transform, shifted_transform;
+    D2D1_MATRIX_3X2_F shifted_transform;
     D2D1_RECT_F bounds, dst_rect;
     D2D1_COLOR_F clear = {0};
     UINT32 origin_x, origin_y, right, bottom;
@@ -1222,6 +1307,7 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     size_t clip_count = context->clip_stack.count;
     unsigned int i, pass, scale;
     unsigned int aa_scale = 8;
+    float padding = 4.0f;
     HRESULT hr;
 
     if (context->drawing_state.primitiveBlend != D2D1_PRIMITIVE_BLEND_SOURCE_OVER)
@@ -1251,14 +1337,17 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
             d2d_device_context_add_geometry_aa_bound(context, geometry,
                     &geometry->outline.arcs[i].position, &bounds, &have_bounds);
     }
-    if (!have_bounds || bounds.right < 0.0f || bounds.bottom < 0.0f
-            || bounds.left >= previous_size.width || bounds.top >= previous_size.height)
+    if (!fill && !d2d_device_context_get_stroke_aa_padding(context,
+            stroke_width, stroke_style, &padding))
+        return FALSE;
+    if (!have_bounds || bounds.right + padding < 0.0f || bounds.bottom + padding < 0.0f
+            || bounds.left - padding >= previous_size.width || bounds.top - padding >= previous_size.height)
         return FALSE;
 
-    origin_x = max(0.0f, floorf(bounds.left - 4.0f));
-    origin_y = max(0.0f, floorf(bounds.top - 4.0f));
-    right = min((float)previous_size.width, ceilf(bounds.right + 4.0f));
-    bottom = min((float)previous_size.height, ceilf(bounds.bottom + 4.0f));
+    origin_x = max(0.0f, floorf(bounds.left - padding));
+    origin_y = max(0.0f, floorf(bounds.top - padding));
+    right = min((float)previous_size.width, ceilf(bounds.right + padding));
+    bottom = min((float)previous_size.height, ceilf(bounds.bottom + padding));
     output_size.width = right - origin_x;
     output_size.height = bottom - origin_y;
     if (!output_size.width || !output_size.height || output_size.width > UINT_MAX / aa_scale
@@ -1304,15 +1393,11 @@ static BOOL d2d_device_context_render_geometry_aa(struct d2d_device_context *con
     if (fill)
         d2d_device_context_fill_geometry(context, geometry, brush, opacity_brush);
     else
-        d2d_device_context_draw_geometry(context, geometry, brush, stroke_width);
+        d2d_device_context_draw_geometry(context, geometry, brush, stroke_width, stroke_style);
     if (!fill && stroke_style && stroke_style->desc.lineJoin == D2D1_LINE_JOIN_ROUND
             && geometry->outline.join_count)
     {
-        join_transform = geometry->transform;
-        d2d_matrix_multiply(&join_transform, &shifted_transform);
-        context->drawing_state.transform = join_transform;
-        d2d_device_context_fill_round_joins(context, geometry, brush, stroke_width);
-        context->drawing_state.transform = shifted_transform;
+        d2d_device_context_draw_round_joins(context, geometry, brush, stroke_width);
     }
     hr = context->error.code;
     for (i = 0; i < context->clip_stack.count; ++i)
@@ -1416,8 +1501,10 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
         return;
     }
 
-    if (stroke_style)
-        FIXME("Ignoring stroke style %p.\n", stroke_style);
+    if (stroke_style_impl && (stroke_style_impl->desc.startCap != D2D1_CAP_STYLE_FLAT
+            || stroke_style_impl->desc.endCap != D2D1_CAP_STYLE_FLAT
+            || stroke_style_impl->desc.dashStyle != D2D1_DASH_STYLE_SOLID))
+        FIXME("Ignoring stroke caps or dash style %p.\n", stroke_style);
 
     if (stroke_style_impl)
     {
@@ -1435,7 +1522,11 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometry(ID2D1DeviceContext
             return;
     }
 
-    d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width);
+    d2d_device_context_draw_geometry(context, geometry_impl, brush_impl, stroke_width, stroke_style_impl);
+    if (SUCCEEDED(context->error.code) && stroke_style_impl
+            && stroke_style_impl->desc.lineJoin == D2D1_LINE_JOIN_ROUND
+            && geometry_impl->outline.join_count)
+        d2d_device_context_draw_round_joins(context, geometry_impl, brush_impl, stroke_width);
 }
 
 static void d2d_device_context_fill_geometry(struct d2d_device_context *render_target,
@@ -4501,6 +4592,16 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawGeometryRealization(ID2D1De
                     r->stroke_width, r->stroke_style);
         }
         return;
+    }
+
+    if (r->filled)
+    {
+        ID2D1DeviceContext6_FillGeometry(iface, r->geometry, brush, NULL);
+    }
+    else
+    {
+        ID2D1DeviceContext6_DrawGeometry(iface, r->geometry, brush,
+                r->stroke_width, r->stroke_style);
     }
 }
 

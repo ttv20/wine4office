@@ -2930,13 +2930,15 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
         const D2D1_POINT_2F *prev, const D2D1_POINT_2F *p0, const D2D1_POINT_2F *next)
 {
     static const D2D1_POINT_2F origin = {0.0f, 0.0f};
-    struct d2d_outline_vertex *v;
-    struct d2d_face *f;
-    size_t base_idx;
-    float ccw;
+    float ccw, dot;
 
     ccw = d2d_point_ccw(&origin, prev, next);
-    if (ccw == 0.0f)
+    dot = d2d_point_dot(prev, next);
+    if (!isfinite(ccw) || !isfinite(dot))
+        return TRUE;
+    if (fabsf(ccw) <= 16.0f * FLT_EPSILON)
+        ccw = 0.0f;
+    if (ccw == 0.0f && dot <= 0.0f)
         return TRUE;
 
     if (!d2d_array_reserve((void **)&geometry->outline.joins, &geometry->outline.joins_size,
@@ -2951,44 +2953,328 @@ static BOOL d2d_geometry_outline_add_join(struct d2d_geometry *geometry,
     geometry->outline.joins[geometry->outline.join_count].ccw = ccw;
     ++geometry->outline.join_count;
 
-    if (!d2d_array_reserve((void **)&geometry->outline.vertices, &geometry->outline.vertices_size,
-            geometry->outline.vertex_count + 3, sizeof(*geometry->outline.vertices)))
-    {
-        ERR("Failed to grow outline vertices array.\n");
-        return FALSE;
-    }
-    base_idx = geometry->outline.vertex_count;
-    v = &geometry->outline.vertices[base_idx];
+    return TRUE;
+}
 
-    if (!d2d_array_reserve((void **)&geometry->outline.faces, &geometry->outline.faces_size,
-            geometry->outline.face_count + 1, sizeof(*geometry->outline.faces)))
-    {
-        ERR("Failed to grow outline faces array.\n");
-        return FALSE;
-    }
-    f = &geometry->outline.faces[geometry->outline.face_count];
+static void d2d_outline_mesh_add_bevel(const struct d2d_outline_join *join,
+        struct d2d_outline_vertex *vertices, struct d2d_face *faces,
+        size_t *vertex_count, size_t *face_count)
+{
+    const D2D1_POINT_2F *p = &join->position, *prev = &join->prev, *next = &join->next;
+    struct d2d_outline_vertex *v = &vertices[*vertex_count];
 
-    /* Join the outer edges with a bevel triangle. The segment rectangles
-     * overlap on the inner side, so using one inner endpoint as the third
-     * vertex closes the outer gap without producing an unbounded miter. */
-    if (ccw < 0.0f)
+    if (join->ccw < 0.0f)
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y, -next->x, -next->y, -next->x, -next->y, -1.0f);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
+        d2d_outline_vertex_set(&v[0], p->x, p->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
+        d2d_outline_vertex_set(&v[1], p->x, p->y, -next->x, -next->y, -next->x, -next->y, -1.0f);
+        d2d_outline_vertex_set(&v[2], p->x, p->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
     }
     else
     {
-        d2d_outline_vertex_set(&v[0], p0->x, p0->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
-        d2d_outline_vertex_set(&v[1], p0->x, p0->y,  next->x,  next->y,  next->x,  next->y,  1.0f);
-        d2d_outline_vertex_set(&v[2], p0->x, p0->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
+        d2d_outline_vertex_set(&v[0], p->x, p->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
+        d2d_outline_vertex_set(&v[1], p->x, p->y,  next->x,  next->y,  next->x,  next->y,  1.0f);
+        d2d_outline_vertex_set(&v[2], p->x, p->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
     }
-    geometry->outline.vertex_count += 3;
 
-    d2d_face_set(&f[0], base_idx + 0, base_idx + 1, base_idx + 2);
-    geometry->outline.face_count += 1;
+    d2d_face_set(&faces[*face_count], *vertex_count, *vertex_count + 1, *vertex_count + 2);
+    *vertex_count += 3;
+    *face_count += 1;
+}
+
+static void d2d_outline_mesh_add_miter(const struct d2d_outline_join *join,
+        struct d2d_outline_vertex *vertices, struct d2d_face *faces,
+        size_t *vertex_count, size_t *face_count)
+{
+    const D2D1_POINT_2F *p = &join->position, *prev = &join->prev, *next = &join->next;
+    struct d2d_outline_vertex *v = &vertices[*vertex_count];
+
+    if (join->ccw < 0.0f)
+    {
+        d2d_outline_vertex_set(&v[0], p->x, p->y,  next->x,  next->y, -prev->x, -prev->y,  1.0f);
+        d2d_outline_vertex_set(&v[1], p->x, p->y, -next->x, -next->y, -next->x, -next->y, -1.0f);
+        d2d_outline_vertex_set(&v[2], p->x, p->y, -next->x, -next->y,  prev->x,  prev->y, -1.0f);
+        d2d_outline_vertex_set(&v[3], p->x, p->y,  prev->x,  prev->y,  prev->x,  prev->y,  1.0f);
+    }
+    else
+    {
+        d2d_outline_vertex_set(&v[0], p->x, p->y,  prev->x,  prev->y, -next->x, -next->y, -1.0f);
+        d2d_outline_vertex_set(&v[1], p->x, p->y, -prev->x, -prev->y, -prev->x, -prev->y, -1.0f);
+        d2d_outline_vertex_set(&v[2], p->x, p->y, -prev->x, -prev->y,  next->x,  next->y,  1.0f);
+        d2d_outline_vertex_set(&v[3], p->x, p->y,  next->x,  next->y,  next->x,  next->y,  1.0f);
+    }
+
+    d2d_face_set(&faces[*face_count], *vertex_count + 1, *vertex_count, *vertex_count + 2);
+    d2d_face_set(&faces[*face_count + 1], *vertex_count + 2, *vertex_count, *vertex_count + 3);
+    *vertex_count += 4;
+    *face_count += 2;
+}
+
+static BOOL d2d_outline_mesh_add_reversal(const struct d2d_geometry *geometry,
+        const struct d2d_outline_join *join, float stroke_width, float miter_limit,
+        struct d2d_outline_vertex *vertices, struct d2d_face *faces,
+        size_t *vertex_count, size_t *face_count)
+{
+    D2D_MATRIX_3X2_F inverse;
+    D2D1_POINT_2F p, prev, end;
+    struct d2d_outline_vertex *v;
+    float length, extension;
+
+    d2d_point_set(&prev, join->prev.x * geometry->transform._11 + join->prev.y * geometry->transform._21,
+            join->prev.x * geometry->transform._12 + join->prev.y * geometry->transform._22);
+    length = d2d_point_length(&prev);
+    extension = fabsf(stroke_width) * 0.5f * miter_limit;
+    if (!isfinite(length) || !isfinite(extension) || length <= FLT_EPSILON
+            || !d2d_matrix_invert(&inverse, &geometry->transform))
+        return FALSE;
+    d2d_point_scale(&prev, 1.0f / length);
+    d2d_point_transform(&p, &geometry->transform, join->position.x, join->position.y);
+    d2d_point_set(&end, p.x - extension * prev.x, p.y - extension * prev.y);
+    d2d_point_transform(&end, &inverse, end.x, end.y);
+    if (!isfinite(end.x) || !isfinite(end.y))
+        return FALSE;
+
+    v = &vertices[*vertex_count];
+    d2d_outline_vertex_set(&v[0], join->position.x, join->position.y,
+            -join->prev.x, -join->prev.y, -join->prev.x, -join->prev.y, -1.0f);
+    d2d_outline_vertex_set(&v[1], join->position.x, join->position.y,
+            join->prev.x, join->prev.y, join->prev.x, join->prev.y, 1.0f);
+    d2d_outline_vertex_set(&v[2], end.x, end.y,
+            join->prev.x, join->prev.y, join->prev.x, join->prev.y, 1.0f);
+    d2d_outline_vertex_set(&v[3], end.x, end.y,
+            -join->prev.x, -join->prev.y, -join->prev.x, -join->prev.y, -1.0f);
+    d2d_face_set(&faces[*face_count], *vertex_count, *vertex_count + 1, *vertex_count + 2);
+    d2d_face_set(&faces[*face_count + 1], *vertex_count, *vertex_count + 2, *vertex_count + 3);
+    *vertex_count += 4;
+    *face_count += 2;
 
     return TRUE;
+}
+
+static BOOL d2d_outline_join_get_miter(const struct d2d_geometry *geometry,
+        const struct d2d_outline_join *join, D2D1_POINT_2F *prev, D2D1_POINT_2F *next,
+        D2D1_POINT_2F *n0, D2D1_POINT_2F *n1, D2D1_POINT_2F *miter, float *ratio)
+{
+    D2D1_POINT_2F a, b, delta;
+    float prev_length, next_length, cross, t;
+
+    d2d_point_set(prev, join->prev.x * geometry->transform._11 + join->prev.y * geometry->transform._21,
+            join->prev.x * geometry->transform._12 + join->prev.y * geometry->transform._22);
+    d2d_point_set(next, join->next.x * geometry->transform._11 + join->next.y * geometry->transform._21,
+            join->next.x * geometry->transform._12 + join->next.y * geometry->transform._22);
+    prev_length = d2d_point_length(prev);
+    next_length = d2d_point_length(next);
+    if (!isfinite(prev_length) || !isfinite(next_length) || prev_length <= FLT_EPSILON
+            || next_length <= FLT_EPSILON)
+        return FALSE;
+    d2d_point_scale(prev, 1.0f / prev_length);
+    d2d_point_scale(next, 1.0f / next_length);
+
+    cross = prev->x * next->y - prev->y * next->x;
+    if (!isfinite(cross) || fabsf(cross) <= 16.0f * FLT_EPSILON)
+        return FALSE;
+    if (cross < 0.0f)
+    {
+        d2d_point_set(n0, -prev->y, prev->x);
+        d2d_point_set(n1, next->y, -next->x);
+    }
+    else
+    {
+        d2d_point_set(n0, prev->y, -prev->x);
+        d2d_point_set(n1, -next->y, next->x);
+    }
+
+    a = *n0;
+    b = *n1;
+    d2d_point_subtract(&delta, &b, &a);
+    t = (delta.x * next->y - delta.y * next->x) / cross;
+    d2d_point_set(miter, a.x + t * prev->x, a.y + t * prev->y);
+    *ratio = d2d_point_length(miter);
+
+    return isfinite(miter->x) && isfinite(miter->y) && isfinite(*ratio);
+}
+
+static BOOL d2d_outline_mesh_add_clipped_miter(const struct d2d_geometry *geometry,
+        const struct d2d_outline_join *join, float stroke_width, float miter_limit,
+        struct d2d_outline_vertex *vertices, struct d2d_face *faces,
+        size_t *vertex_count, size_t *face_count)
+{
+    D2D1_POINT_2F prev, next, n0, n1, miter, p, a, b, c, d, base_c, base_d;
+    D2D1_POINT_2F attr0, attr1, inner;
+    D2D_MATRIX_3X2_F inverse;
+    struct d2d_outline_vertex *v;
+    float ratio, radius, denominator, t;
+    float side0, side1, inner_side;
+
+    if (!d2d_outline_join_get_miter(geometry, join, &prev, &next, &n0, &n1, &miter, &ratio)
+            || !d2d_matrix_invert(&inverse, &geometry->transform))
+        return FALSE;
+
+    radius = fabsf(stroke_width) * 0.5f;
+    if (!isfinite(radius))
+        return FALSE;
+    d2d_point_scale(&miter, 1.0f / ratio);
+    d2d_point_transform(&p, &geometry->transform, join->position.x, join->position.y);
+    d2d_point_set(&a, p.x + radius * n0.x, p.y + radius * n0.y);
+    d2d_point_set(&b, p.x + radius * n1.x, p.y + radius * n1.y);
+
+    denominator = d2d_point_dot(&prev, &miter);
+    if (fabsf(denominator) <= 16.0f * FLT_EPSILON)
+        return FALSE;
+    t = (radius * miter_limit - radius * d2d_point_dot(&n0, &miter)) / denominator;
+    d2d_point_set(&c, a.x + t * prev.x, a.y + t * prev.y);
+
+    denominator = d2d_point_dot(&next, &miter);
+    if (fabsf(denominator) <= 16.0f * FLT_EPSILON)
+        return FALSE;
+    t = (radius * miter_limit - radius * d2d_point_dot(&n1, &miter)) / denominator;
+    d2d_point_set(&d, b.x + t * next.x, b.y + t * next.y);
+    d2d_point_set(&base_c, c.x - radius * n0.x, c.y - radius * n0.y);
+    d2d_point_set(&base_d, d.x - radius * n1.x, d.y - radius * n1.y);
+    d2d_point_transform(&base_c, &inverse, base_c.x, base_c.y);
+    d2d_point_transform(&base_d, &inverse, base_d.x, base_d.y);
+    if (!isfinite(base_c.x) || !isfinite(base_c.y) || !isfinite(base_d.x) || !isfinite(base_d.y))
+        return FALSE;
+
+    if (join->ccw < 0.0f)
+    {
+        attr0 = join->prev;
+        d2d_point_set(&attr1, -join->next.x, -join->next.y);
+        d2d_point_set(&inner, -join->prev.x, -join->prev.y);
+        side0 = 1.0f;
+        side1 = inner_side = -1.0f;
+    }
+    else
+    {
+        d2d_point_set(&attr0, -join->prev.x, -join->prev.y);
+        attr1 = join->next;
+        inner = join->prev;
+        side0 = inner_side = -1.0f;
+        side1 = 1.0f;
+    }
+
+    v = &vertices[*vertex_count];
+    d2d_outline_vertex_set(&v[0], join->position.x, join->position.y,
+            attr0.x, attr0.y, attr0.x, attr0.y, side0);
+    d2d_outline_vertex_set(&v[1], join->position.x, join->position.y,
+            attr1.x, attr1.y, attr1.x, attr1.y, side1);
+    d2d_outline_vertex_set(&v[2], join->position.x, join->position.y,
+            inner.x, inner.y, inner.x, inner.y, inner_side);
+    d2d_outline_vertex_set(&v[3], base_c.x, base_c.y,
+            attr0.x, attr0.y, attr0.x, attr0.y, side0);
+    d2d_outline_vertex_set(&v[4], base_d.x, base_d.y,
+            attr1.x, attr1.y, attr1.x, attr1.y, side1);
+
+    d2d_face_set(&faces[*face_count], *vertex_count, *vertex_count + 1, *vertex_count + 2);
+    d2d_face_set(&faces[*face_count + 1], *vertex_count, *vertex_count + 3, *vertex_count + 4);
+    d2d_face_set(&faces[*face_count + 2], *vertex_count, *vertex_count + 4, *vertex_count + 1);
+    *vertex_count += 5;
+    *face_count += 3;
+
+    return TRUE;
+}
+
+HRESULT d2d_geometry_build_outline_mesh(const struct d2d_geometry *geometry,
+        float stroke_width, const struct d2d_stroke_style *stroke_style, struct d2d_outline_mesh *mesh)
+{
+    D2D1_LINE_JOIN line_join = D2D1_LINE_JOIN_MITER;
+    float miter_limit = 10.0f, ratio;
+    D2D1_POINT_2F prev, next, n0, n1, miter;
+    size_t max_vertex_count, max_face_count, i;
+
+    memset(mesh, 0, sizeof(*mesh));
+    mesh->vertices = geometry->outline.vertices;
+    mesh->vertex_count = geometry->outline.vertex_count;
+    mesh->faces = geometry->outline.faces;
+    mesh->face_count = geometry->outline.face_count;
+
+    if (stroke_style)
+    {
+        line_join = stroke_style->desc.lineJoin;
+        miter_limit = stroke_style->desc.miterLimit;
+        if (!isfinite(miter_limit) || miter_limit < 1.0f)
+            miter_limit = 1.0f;
+        if (line_join != D2D1_LINE_JOIN_MITER && line_join != D2D1_LINE_JOIN_BEVEL
+                && line_join != D2D1_LINE_JOIN_ROUND
+                && line_join != D2D1_LINE_JOIN_MITER_OR_BEVEL)
+            line_join = D2D1_LINE_JOIN_BEVEL;
+    }
+    if (!geometry->outline.join_count || line_join == D2D1_LINE_JOIN_ROUND)
+        return S_OK;
+
+    if (geometry->outline.join_count > (SIZE_MAX - mesh->vertex_count) / 5
+            || geometry->outline.join_count > (SIZE_MAX - mesh->face_count) / 3)
+        return E_OUTOFMEMORY;
+    max_vertex_count = mesh->vertex_count + geometry->outline.join_count * 5;
+    max_face_count = mesh->face_count + geometry->outline.join_count * 3;
+    if (max_vertex_count > UINT16_MAX + 1u
+            || max_vertex_count > SIZE_MAX / sizeof(*mesh->vertices)
+            || max_face_count > SIZE_MAX / sizeof(*mesh->faces))
+        return E_OUTOFMEMORY;
+
+    if (!(mesh->vertices = malloc(max_vertex_count * sizeof(*mesh->vertices))))
+        return E_OUTOFMEMORY;
+    if (!(mesh->faces = malloc(max_face_count * sizeof(*mesh->faces))))
+    {
+        free(mesh->vertices);
+        memset(mesh, 0, sizeof(*mesh));
+        return E_OUTOFMEMORY;
+    }
+    mesh->allocated = TRUE;
+    memcpy(mesh->vertices, geometry->outline.vertices,
+            geometry->outline.vertex_count * sizeof(*mesh->vertices));
+    memcpy(mesh->faces, geometry->outline.faces,
+            geometry->outline.face_count * sizeof(*mesh->faces));
+    mesh->vertex_count = geometry->outline.vertex_count;
+    mesh->face_count = geometry->outline.face_count;
+
+    for (i = 0; i < geometry->outline.join_count; ++i)
+    {
+        const struct d2d_outline_join *join = &geometry->outline.joins[i];
+
+        if (join->ccw == 0.0f)
+        {
+            if (line_join == D2D1_LINE_JOIN_MITER)
+                d2d_outline_mesh_add_reversal(geometry, join, stroke_width, miter_limit,
+                        mesh->vertices, mesh->faces, &mesh->vertex_count, &mesh->face_count);
+        }
+        else if (line_join == D2D1_LINE_JOIN_BEVEL
+                || !d2d_outline_join_get_miter(geometry, join,
+                &prev, &next, &n0, &n1, &miter, &ratio))
+        {
+            d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
+                    &mesh->vertex_count, &mesh->face_count);
+        }
+        else if (line_join == D2D1_LINE_JOIN_MITER_OR_BEVEL && ratio >= miter_limit)
+        {
+            d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
+                    &mesh->vertex_count, &mesh->face_count);
+        }
+        else if (line_join == D2D1_LINE_JOIN_MITER && ratio > miter_limit)
+        {
+            if (!d2d_outline_mesh_add_clipped_miter(geometry, join, stroke_width, miter_limit,
+                    mesh->vertices, mesh->faces, &mesh->vertex_count, &mesh->face_count))
+                d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
+                        &mesh->vertex_count, &mesh->face_count);
+            continue;
+        }
+        else
+        {
+            d2d_outline_mesh_add_miter(join, mesh->vertices, mesh->faces,
+                    &mesh->vertex_count, &mesh->face_count);
+        }
+    }
+
+    return S_OK;
+}
+
+void d2d_outline_mesh_cleanup(struct d2d_outline_mesh *mesh)
+{
+    if (mesh->allocated)
+    {
+        free(mesh->faces);
+        free(mesh->vertices);
+    }
+    memset(mesh, 0, sizeof(*mesh));
 }
 
 static BOOL d2d_geometry_outline_add_line_segment(struct d2d_geometry *geometry,
@@ -3017,6 +3303,8 @@ static BOOL d2d_geometry_outline_add_line_segment(struct d2d_geometry *geometry,
     f = &geometry->outline.faces[geometry->outline.face_count];
 
     d2d_point_subtract(&q_next, next, p0);
+    if (q_next.x == 0.0f && q_next.y == 0.0f)
+        return TRUE;
     d2d_point_normalise(&q_next);
 
     d2d_outline_vertex_set(&v[0], p0->x, p0->y,  q_next.x,  q_next.y,  q_next.x,  q_next.y,  1.0f);
