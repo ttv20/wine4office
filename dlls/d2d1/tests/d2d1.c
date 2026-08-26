@@ -7815,6 +7815,314 @@ static void test_stroke_style(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static void test_stroke_line_joins(BOOL d3d11)
+{
+    static const struct
+    {
+        const char *name;
+        BOOL create_style;
+        D2D1_LINE_JOIN line_join;
+        float miter_limit;
+        unsigned int rectangle_pixels;
+        DWORD rectangle_outer;
+        unsigned int acute_pixels;
+        DWORD acute_tip;
+    }
+    tests[] =
+    {
+        {"default", FALSE, D2D1_LINE_JOIN_MITER, 10.0f, 3204, 0xffe3d999, 2786, 0xffe3d999},
+        {"miter-1", TRUE, D2D1_LINE_JOIN_MITER, 1.0f, 3140, 0xff652e89, 2666, 0xff652e89},
+        {"miter-10", TRUE, D2D1_LINE_JOIN_MITER, 10.0f, 3204, 0xffe3d999, 2786, 0xffe3d999},
+        {"bevel", TRUE, D2D1_LINE_JOIN_BEVEL, 10.0f, 3000, 0xff652e89, 2570, 0xff652e89},
+        {"round", TRUE, D2D1_LINE_JOIN_ROUND, 10.0f, 3108, 0xff652e89, 2648, 0xff652e89},
+        {"miter-or-bevel-1", TRUE, D2D1_LINE_JOIN_MITER_OR_BEVEL, 1.0f, 3000, 0xff652e89, 2570, 0xff652e89},
+        {"miter-or-bevel-sqrt2", TRUE, D2D1_LINE_JOIN_MITER_OR_BEVEL, 1.41421356f,
+                3000, 0xff652e89, 2570, 0xff652e89},
+        {"miter-or-bevel-2", TRUE, D2D1_LINE_JOIN_MITER_OR_BEVEL, 2.0f,
+                3200, 0xffe3d999, 2570, 0xff652e89},
+    };
+    ID2D1StrokeStyle *styles[ARRAY_SIZE(tests)] = {0};
+    D2D1_STROKE_STYLE_PROPERTIES desc = {0};
+    struct d2d1_test_context ctx;
+    struct resource_readback rb;
+    ID2D1GeometryRealization *realizations[2];
+    ID2D1TransformedGeometry *transformed_geometry;
+    ID2D1RectangleGeometry *rectangle_geometry;
+    ID2D1DeviceContext1 *context1;
+    ID2D1CommandList *commands;
+    ID2D1Image *target;
+    ID2D1SolidColorBrush *brush;
+    ID2D1PathGeometry *geometry;
+    ID2D1GeometrySink *sink;
+    D2D1_MATRIX_3X2_F matrix;
+    D2D1_COLOR_F color;
+    D2D1_POINT_2F point;
+    D2D1_RECT_F rect;
+    unsigned int i, x, y, count;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    desc.startCap = D2D1_CAP_STYLE_FLAT;
+    desc.endCap = D2D1_CAP_STYLE_FLAT;
+    desc.dashCap = D2D1_CAP_STYLE_FLAT;
+    desc.dashStyle = D2D1_DASH_STYLE_SOLID;
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        if (!tests[i].create_style)
+            continue;
+        desc.lineJoin = tests[i].line_join;
+        desc.miterLimit = tests[i].miter_limit;
+        hr = ID2D1Factory_CreateStrokeStyle(ctx.factory, &desc, NULL, 0, &styles[i]);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+    }
+
+    ID2D1RenderTarget_SetDpi(ctx.rt, 96.0f, 96.0f);
+    ID2D1RenderTarget_SetAntialiasMode(ctx.rt, D2D1_ANTIALIAS_MODE_ALIASED);
+    set_color(&color, 0.890f, 0.851f, 0.600f, 1.0f);
+    hr = ID2D1RenderTarget_CreateSolidColorBrush(ctx.rt, &color, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID2D1RenderTarget_BeginDraw(ctx.rt);
+    set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+    ID2D1RenderTarget_Clear(ctx.rt, &color);
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        set_rect(&rect, i * 80.0f + 25.0f, 25.0f, i * 80.0f + 55.0f, 75.0f);
+        ID2D1RenderTarget_DrawRectangle(ctx.rt, &rect, (ID2D1Brush *)brush, 20.0f, styles[i]);
+
+        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        hr = ID2D1PathGeometry_Open(geometry, &sink);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        set_point(&point, i * 80.0f + 15.0f, 190.0f);
+        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+        line_to(sink, i * 80.0f + 40.0f, 125.0f);
+        line_to(sink, i * 80.0f + 65.0f, 190.0f);
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+        hr = ID2D1GeometrySink_Close(sink);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        ID2D1GeometrySink_Release(sink);
+        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, 20.0f, styles[i]);
+        ID2D1PathGeometry_Release(geometry);
+    }
+    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        count = 0;
+        for (y = 0; y < 100; ++y)
+            for (x = i * 80; x < (i + 1) * 80; ++x)
+                if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                    ++count;
+        ok(compare_uint(count, tests[i].rectangle_pixels, 4),
+                "%s: got %u rectangle pixels, expected %u.\n",
+                tests[i].name, count, tests[i].rectangle_pixels);
+        ok(get_readback_colour(&rb, i * 80 + 15, 15) == tests[i].rectangle_outer,
+                "%s: got unexpected rectangle outer pixel %#lx.\n", tests[i].name,
+                get_readback_colour(&rb, i * 80 + 15, 15));
+
+        count = 0;
+        for (y = 100; y < 220; ++y)
+            for (x = i * 80; x < (i + 1) * 80; ++x)
+                if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                    ++count;
+        ok(compare_uint(count, tests[i].acute_pixels, 4),
+                "%s: got %u acute pixels, expected %u.\n",
+                tests[i].name, count, tests[i].acute_pixels);
+        ok(get_readback_colour(&rb, i * 80 + 40, 105) == tests[i].acute_tip,
+                "%s: got unexpected acute tip pixel %#lx.\n", tests[i].name,
+                get_readback_colour(&rb, i * 80 + 40, 105));
+    }
+    release_resource_readback(&rb);
+
+    ID2D1RenderTarget_SetAntialiasMode(ctx.rt, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1RenderTarget_BeginDraw(ctx.rt);
+    set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+    ID2D1RenderTarget_Clear(ctx.rt, &color);
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        set_rect(&rect, i * 80.0f + 25.0f, 25.0f, i * 80.0f + 55.0f, 75.0f);
+        ID2D1RenderTarget_DrawRectangle(ctx.rt, &rect, (ID2D1Brush *)brush, 20.0f, styles[i]);
+
+        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        hr = ID2D1PathGeometry_Open(geometry, &sink);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        set_point(&point, i * 80.0f + 15.0f, 190.0f);
+        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+        line_to(sink, i * 80.0f + 40.0f, 125.0f);
+        line_to(sink, i * 80.0f + 65.0f, 190.0f);
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+        hr = ID2D1GeometrySink_Close(sink);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        ID2D1GeometrySink_Release(sink);
+        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, 20.0f, styles[i]);
+        ID2D1PathGeometry_Release(geometry);
+    }
+    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    get_surface_readback(&ctx, &rb);
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        if (tests[i].rectangle_outer == 0xffe3d999)
+            ok(get_readback_colour(&rb, i * 80 + 16, 16) != 0xff652e89,
+                    "%s: antialiased rectangle miter is missing.\n", tests[i].name);
+        else
+            ok(get_readback_colour(&rb, i * 80 + 16, 16) == 0xff652e89,
+                    "%s: antialiased rectangle join is unexpectedly present.\n", tests[i].name);
+        ok(get_readback_colour(&rb, i * 80 + 40, 105) == tests[i].acute_tip,
+                "%s: got unexpected antialiased acute tip pixel %#lx.\n", tests[i].name,
+                get_readback_colour(&rb, i * 80 + 40, 105));
+    }
+    release_resource_readback(&rb);
+    ID2D1RenderTarget_SetAntialiasMode(ctx.rt, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_Open(geometry, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_point(&point, 20.0f, 100.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+    line_to(sink, 40.0f, 40.0f);
+    line_to(sink, 60.0f, 100.0f);
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+    set_matrix_identity(&matrix);
+    matrix._11 = 2.0f;
+    hr = ID2D1Factory_CreateTransformedGeometry(ctx.factory,
+            (ID2D1Geometry *)geometry, &matrix, &transformed_geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1PathGeometry_Release(geometry);
+
+    ID2D1RenderTarget_BeginDraw(ctx.rt);
+    set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+    ID2D1RenderTarget_Clear(ctx.rt, &color);
+    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)transformed_geometry,
+            (ID2D1Brush *)brush, 20.0f, styles[4]);
+    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1TransformedGeometry_Release(transformed_geometry);
+
+    get_surface_readback(&ctx, &rb);
+    count = 0;
+    for (y = 0; y < 130; ++y)
+        for (x = 0; x < 160; ++x)
+            if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                ++count;
+    ok(compare_uint(count, 2828, 4), "transformed round: got %u pixels.\n", count);
+    release_resource_readback(&rb);
+
+    if (ctx.factory1)
+    {
+        hr = ID2D1DeviceContext_CreateCommandList(ctx.context, &commands);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(ctx.context, &target);
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)commands);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        set_rect(&rect, 25.0f, 25.0f, 55.0f, 75.0f);
+        ID2D1DeviceContext_DrawRectangle(ctx.context, &rect, (ID2D1Brush *)brush, 20.0f, NULL);
+        set_rect(&rect, 105.0f, 25.0f, 135.0f, 75.0f);
+        ID2D1DeviceContext_DrawRectangle(ctx.context, &rect,
+                (ID2D1Brush *)brush, 20.0f, styles[3]);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1CommandList_Close(commands);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        ID2D1DeviceContext_SetTarget(ctx.context, target);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+        ID2D1DeviceContext_Clear(ctx.context, &color);
+        ID2D1DeviceContext_DrawImage(ctx.context, (ID2D1Image *)commands, NULL, NULL,
+                D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1Image_Release(target);
+        ID2D1CommandList_Release(commands);
+
+        get_surface_readback(&ctx, &rb);
+        for (i = 0; i < 2; ++i)
+        {
+            count = 0;
+            for (y = 0; y < 100; ++y)
+                for (x = i * 80; x < (i + 1) * 80; ++x)
+                    if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                        ++count;
+            ok(compare_uint(count, i ? 3000 : 3204, 4),
+                    "command list %u: got %u pixels.\n", i, count);
+        }
+        release_resource_readback(&rb);
+    }
+    else
+        win_skip("Command lists are not supported.\n");
+
+    if (ctx.factory2)
+    {
+        hr = ID2D1DeviceContext_QueryInterface(ctx.context,
+                &IID_ID2D1DeviceContext1, (void **)&context1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        set_rect(&rect, 25.0f, 25.0f, 55.0f, 75.0f);
+        hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &rect, &rectangle_geometry);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1DeviceContext1_CreateStrokedGeometryRealization(context1,
+                (ID2D1Geometry *)rectangle_geometry, 0.25f, 20.0f, NULL, &realizations[0]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1DeviceContext1_CreateStrokedGeometryRealization(context1,
+                (ID2D1Geometry *)rectangle_geometry, 0.25f, 20.0f, styles[3], &realizations[1]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1RectangleGeometry_Release(rectangle_geometry);
+        ID2D1StrokeStyle_Release(styles[3]);
+        styles[3] = NULL;
+
+        ID2D1DeviceContext1_BeginDraw(context1);
+        set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+        ID2D1DeviceContext1_Clear(context1, &color);
+        ID2D1DeviceContext1_DrawGeometryRealization(context1,
+                realizations[0], (ID2D1Brush *)brush);
+        set_matrix_identity(&matrix);
+        matrix._31 = 80.0f;
+        ID2D1DeviceContext1_SetTransform(context1, &matrix);
+        ID2D1DeviceContext1_DrawGeometryRealization(context1,
+                realizations[1], (ID2D1Brush *)brush);
+        set_matrix_identity(&matrix);
+        ID2D1DeviceContext1_SetTransform(context1, &matrix);
+        hr = ID2D1DeviceContext1_EndDraw(context1, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1GeometryRealization_Release(realizations[1]);
+        ID2D1GeometryRealization_Release(realizations[0]);
+        ID2D1DeviceContext1_Release(context1);
+
+        get_surface_readback(&ctx, &rb);
+        for (i = 0; i < 2; ++i)
+        {
+            count = 0;
+            for (y = 0; y < 100; ++y)
+                for (x = i * 80; x < (i + 1) * 80; ++x)
+                    if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                        ++count;
+            ok(compare_uint(count, i ? 3000 : 3204, 4),
+                    "realization %u: got %u pixels.\n", i, count);
+        }
+        release_resource_readback(&rb);
+    }
+    else
+        win_skip("Geometry realizations are not supported.\n");
+
+    ID2D1SolidColorBrush_Release(brush);
+    for (i = 0; i < ARRAY_SIZE(styles); ++i)
+        if (styles[i]) ID2D1StrokeStyle_Release(styles[i]);
+    release_test_context(&ctx);
+}
+
 static void test_gradient(BOOL d3d11)
 {
     ID2D1GradientStopCollection *gradient;
@@ -18870,6 +19178,19 @@ START_TEST(d2d1)
 
     print_adapter_info();
 
+    if (getenv("WINE_D2D1_STROKE_JOIN_ONLY"))
+    {
+        test_stroke_line_joins(FALSE);
+        test_stroke_line_joins(TRUE);
+        return;
+    }
+    if (getenv("WINE_D2D1_DRAW_GEOMETRY_ONLY"))
+    {
+        test_draw_geometry(FALSE);
+        test_draw_geometry(TRUE);
+        return;
+    }
+
     queue_test(test_clip);
     queue_test(test_state_block);
     queue_test(test_color_brush);
@@ -18898,6 +19219,7 @@ START_TEST(d2d1)
     queue_test(test_bitmap_target);
     queue_d3d10_test(test_desktop_dpi);
     queue_d3d10_test(test_stroke_style);
+    queue_test(test_stroke_line_joins);
     queue_test(test_gradient);
     queue_test(test_draw_geometry);
     queue_test(test_fill_geometry);
