@@ -7815,6 +7815,35 @@ static void test_stroke_style(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static void draw_stroke_line_join_case(struct d2d1_test_context *ctx,
+        ID2D1SolidColorBrush *brush, ID2D1StrokeStyle *style, unsigned int index)
+{
+    ID2D1PathGeometry *geometry;
+    ID2D1GeometrySink *sink;
+    D2D1_POINT_2F point;
+    D2D1_RECT_F rect;
+    HRESULT hr;
+
+    set_rect(&rect, index * 80.0f + 25.0f, 25.0f, index * 80.0f + 55.0f, 75.0f);
+    ID2D1RenderTarget_DrawRectangle(ctx->rt, &rect, (ID2D1Brush *)brush, 20.0f, style);
+
+    hr = ID2D1Factory_CreatePathGeometry(ctx->factory, &geometry);
+    ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", index, hr);
+    hr = ID2D1PathGeometry_Open(geometry, &sink);
+    ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", index, hr);
+    set_point(&point, index * 80.0f + 15.0f, 190.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+    line_to(sink, index * 80.0f + 40.0f, 125.0f);
+    line_to(sink, index * 80.0f + 65.0f, 190.0f);
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", index, hr);
+    ID2D1GeometrySink_Release(sink);
+    ID2D1RenderTarget_DrawGeometry(ctx->rt, (ID2D1Geometry *)geometry,
+            (ID2D1Brush *)brush, 20.0f, style);
+    ID2D1PathGeometry_Release(geometry);
+}
+
 static void test_stroke_line_joins(BOOL d3d11)
 {
     static const struct
@@ -7889,26 +7918,7 @@ static void test_stroke_line_joins(BOOL d3d11)
     set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
     ID2D1RenderTarget_Clear(ctx.rt, &color);
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
-    {
-        set_rect(&rect, i * 80.0f + 25.0f, 25.0f, i * 80.0f + 55.0f, 75.0f);
-        ID2D1RenderTarget_DrawRectangle(ctx.rt, &rect, (ID2D1Brush *)brush, 20.0f, styles[i]);
-
-        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        hr = ID2D1PathGeometry_Open(geometry, &sink);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        set_point(&point, i * 80.0f + 15.0f, 190.0f);
-        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
-        line_to(sink, i * 80.0f + 40.0f, 125.0f);
-        line_to(sink, i * 80.0f + 65.0f, 190.0f);
-        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
-        hr = ID2D1GeometrySink_Close(sink);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        ID2D1GeometrySink_Release(sink);
-        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
-                (ID2D1Brush *)brush, 20.0f, styles[i]);
-        ID2D1PathGeometry_Release(geometry);
-    }
+        draw_stroke_line_join_case(&ctx, brush, styles[i], i);
     hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
@@ -7946,26 +7956,7 @@ static void test_stroke_line_joins(BOOL d3d11)
     set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
     ID2D1RenderTarget_Clear(ctx.rt, &color);
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
-    {
-        set_rect(&rect, i * 80.0f + 25.0f, 25.0f, i * 80.0f + 55.0f, 75.0f);
-        ID2D1RenderTarget_DrawRectangle(ctx.rt, &rect, (ID2D1Brush *)brush, 20.0f, styles[i]);
-
-        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        hr = ID2D1PathGeometry_Open(geometry, &sink);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        set_point(&point, i * 80.0f + 15.0f, 190.0f);
-        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
-        line_to(sink, i * 80.0f + 40.0f, 125.0f);
-        line_to(sink, i * 80.0f + 65.0f, 190.0f);
-        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
-        hr = ID2D1GeometrySink_Close(sink);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
-        ID2D1GeometrySink_Release(sink);
-        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
-                (ID2D1Brush *)brush, 20.0f, styles[i]);
-        ID2D1PathGeometry_Release(geometry);
-    }
+        draw_stroke_line_join_case(&ctx, brush, styles[i], i);
     hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
@@ -19277,6 +19268,7 @@ START_TEST(d2d1)
 
     print_adapter_info();
 
+    /* These modes isolate internal cases for native Direct2D oracle and Wine regression runs. */
     if (getenv("WINE_D2D1_STROKE_JOIN_ONLY"))
     {
         test_stroke_line_joins(FALSE);
