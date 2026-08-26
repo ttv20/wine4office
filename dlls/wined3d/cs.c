@@ -165,6 +165,7 @@ struct wined3d_cs_present
     RECT dst_rect;
     unsigned int swap_interval;
     uint32_t flags;
+    uint64_t present_id;
 };
 
 struct wined3d_cs_clear
@@ -670,13 +671,22 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
     const struct wined3d_cs_present *op = data;
     const struct wined3d_swapchain_desc *desc;
     struct wined3d_swapchain *swapchain;
+    struct wined3d_swapchain_present_record *record;
+    struct wined3d_swapchain_present_result result;
     LONGLONG elapsed_time;
     LARGE_INTEGER time;
+    HRESULT hr;
 
     if (!freq.QuadPart)
         QueryPerformanceFrequency(&freq);
 
     swapchain = op->swapchain;
+    memset(&result, 0, sizeof(result));
+    result.present_id = op->present_id;
+    result.result = E_FAIL;
+    AcquireSRWLockShared(&swapchain->present_result_lock);
+    result.identity_generation = swapchain->present_identity_generation;
+    ReleaseSRWLockShared(&swapchain->present_result_lock);
     desc = &swapchain->state.desc;
     back_buffer = swapchain->back_buffers[0];
     wined3d_swapchain_set_window(swapchain, op->dst_window_override);
@@ -715,14 +725,20 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
                     &src_rect, WINED3D_BLT_ALPHA_TEST, NULL, WINED3D_TEXF_POINT);
     }
 
-    swapchain->swapchain_ops->swapchain_present(swapchain, &op->src_rect, &op->dst_rect, op->swap_interval, op->flags);
+    hr = swapchain->swapchain_ops->swapchain_present(swapchain, &op->src_rect, &op->dst_rect,
+            op->swap_interval, op->flags, &result);
+    result.result = hr;
 
     /* Discard buffers if the swap effect allows it. */
-    back_buffer = swapchain->back_buffers[desc->backbuffer_count - 1];
-    if (desc->swap_effect == WINED3D_SWAP_EFFECT_DISCARD || desc->swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
-        wined3d_texture_validate_location(back_buffer, 0, WINED3D_LOCATION_DISCARDED);
+    if (SUCCEEDED(hr))
+    {
+        back_buffer = swapchain->back_buffers[desc->backbuffer_count - 1];
+        if (desc->swap_effect == WINED3D_SWAP_EFFECT_DISCARD
+                || desc->swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
+            wined3d_texture_validate_location(back_buffer, 0, WINED3D_LOCATION_DISCARDED);
+    }
 
-    if (dsv && dsv->resource->type != WINED3D_RTYPE_BUFFER)
+    if (SUCCEEDED(hr) && dsv && dsv->resource->type != WINED3D_RTYPE_BUFFER)
     {
         struct wined3d_texture *ds = texture_from_resource(dsv->resource);
 
@@ -755,12 +771,22 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
         }
     }
 
+    AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    record = &swapchain->present_results[result.present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    if (record->result.present_id == result.present_id)
+    {
+        record->result = result;
+        record->completed = true;
+        swapchain->last_completed_present_id = result.present_id;
+    }
+    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+
     ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
 }
 
 void wined3d_cs_emit_present(struct wined3d_cs *cs, struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
-        unsigned int swap_interval, uint32_t flags)
+        unsigned int swap_interval, uint32_t flags, uint64_t present_id)
 {
     struct wined3d_cs_present *op;
     unsigned int i;
@@ -775,6 +801,7 @@ void wined3d_cs_emit_present(struct wined3d_cs *cs, struct wined3d_swapchain *sw
     op->dst_rect = *dst_rect;
     op->swap_interval = swap_interval;
     op->flags = flags;
+    op->present_id = present_id;
 
     wined3d_resource_reference(&swapchain->front_buffer->resource);
     for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)

@@ -3,12 +3,16 @@
 ## Unreleased
 
 - Respect Direct2D stroke join styles while keeping sharp WordArt corners bounded.
+- Keep Word responsive while Microsoft 365 tokens are checked or refreshed in the background.
+- Keep Microsoft 365 account and token data consistent when sign-in and background refresh overlap.
 - Build Wine4Office releases and agent runners from the same reproducible 18-job environment.
 - Display background-service RAM without reclaimable inactive file cache and hide it when the service is stopped.
 - Activate Microsoft 365 licenses after signing in to Office.
 - Keep Wine environment recreation responsive and show live progress and logs in the Manager.
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
 - Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
+- Reduce Office redraw work for partial document and ribbon updates.
+- Prevent Word from crashing when opening the References tab.
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
 
 ## 0.2.1-beta.1 — 2026-08-23

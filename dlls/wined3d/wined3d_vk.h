@@ -1214,6 +1214,7 @@ struct wined3d_swapchain_vk
         uint64_t command_buffer_id;
     } *vk_semaphores;
     unsigned int current, image_count;
+    uint64_t vk_swapchain_generation;
     unsigned int width, height;
     unsigned int client_width, client_height;
     struct wined3d_texture *composition_source;
