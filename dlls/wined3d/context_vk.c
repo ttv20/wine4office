@@ -1376,6 +1376,102 @@ static void wined3d_context_vk_remove_command_buffer(struct wined3d_context_vk *
     *buffer = context_vk->submitted.buffers[--context_vk->submitted.buffer_count];
 }
 
+static void wined3d_context_vk_wait_submitted_command_buffers(struct wined3d_context_vk *context_vk)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
+    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+    struct wined3d_command_buffer_vk *buffer;
+
+    while (context_vk->submitted.buffer_count)
+    {
+        buffer = &context_vk->submitted.buffers[0];
+        VK_CALL(vkWaitForFences(device_vk->vk_device, 1, &buffer->vk_fence, VK_TRUE, UINT64_MAX));
+        wined3d_context_vk_remove_command_buffer(context_vk, 0);
+    }
+}
+
+static void wined3d_context_vk_recover_failed_command_buffer(struct wined3d_context_vk *context_vk,
+        uint64_t command_buffer_id)
+{
+    VkSemaphoreCreateInfo semaphore_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
+    struct wined3d_retired_objects_vk *retired = &context_vk->retired;
+    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+    struct wined3d_retired_object_vk *o;
+    bool wait_decode_queue = false;
+    VkSemaphore vk_semaphore;
+    unsigned int j;
+    SIZE_T i;
+    VkResult vr;
+
+    for (i = 0; i < retired->count; ++i)
+    {
+        o = &retired->objects[i];
+        if (o->command_buffer_id != command_buffer_id)
+            continue;
+
+        if (o->type == WINED3D_RETIRED_QUERY_POOL_VK)
+        {
+            /* The reset commands in the failed command buffer did not execute. Queue the ranges
+             * for reset again instead of making them available for immediate reuse. */
+            for (j = 0; j < o->u.queries.count; ++j)
+                wined3d_bitmap_set(o->u.queries.pool_vk->completed, o->u.queries.start + j);
+            if (list_empty(&o->u.queries.pool_vk->completed_entry))
+                list_add_tail(&context_vk->completed_query_pools, &o->u.queries.pool_vk->completed_entry);
+            o->type = WINED3D_RETIRED_FREE_VK;
+        }
+        else if (o->type == WINED3D_RETIRED_AUX_COMMAND_BUFFER_VK)
+        {
+            wait_decode_queue = true;
+        }
+    }
+
+    /* Auxiliary decode command buffers normally become reusable after the failed graphics submit
+     * waits on their semaphores. Wait for the decode queue directly and replace their still-signaled
+     * binary semaphores before retiring them instead. */
+    if (!wait_decode_queue)
+        return;
+    if ((vr = VK_CALL(vkQueueWaitIdle(device_vk->decode_queue.vk_queue))) < 0)
+    {
+        ERR("Failed to wait for the decode queue, vr %s.\n", wined3d_debug_vkresult(vr));
+        for (i = 0; i < retired->count; ++i)
+        {
+            o = &retired->objects[i];
+            /* Keep anything the decode queue may still reference alive. The device owns the
+             * leaked Vulkan handles until it is destroyed. */
+            if (o->command_buffer_id == command_buffer_id)
+                o->type = WINED3D_RETIRED_FREE_VK;
+        }
+        return;
+    }
+
+    for (i = 0; i < retired->count; ++i)
+    {
+        o = &retired->objects[i];
+        if (o->type != WINED3D_RETIRED_AUX_COMMAND_BUFFER_VK
+                || o->command_buffer_id != command_buffer_id)
+            continue;
+
+        if ((vr = VK_CALL(vkCreateSemaphore(device_vk->vk_device,
+                &semaphore_info, NULL, &vk_semaphore))) < 0)
+        {
+            ERR("Failed to replace decode signal semaphore, vr %s.\n", wined3d_debug_vkresult(vr));
+            VK_CALL(vkDestroySemaphore(device_vk->vk_device,
+                    o->u.aux_command_buffer.buffer.signal_semaphore, NULL));
+            VK_CALL(vkDestroySemaphore(device_vk->vk_device,
+                    o->u.aux_command_buffer.buffer.wait_semaphore, NULL));
+            VK_CALL(vkFreeCommandBuffers(device_vk->vk_device, o->u.aux_command_buffer.pool->vk_pool,
+                    1, &o->u.aux_command_buffer.buffer.vk_command_buffer));
+            o->type = WINED3D_RETIRED_FREE_VK;
+            continue;
+        }
+
+        VK_CALL(vkDestroySemaphore(device_vk->vk_device,
+                o->u.aux_command_buffer.buffer.signal_semaphore, NULL));
+        o->u.aux_command_buffer.buffer.signal_semaphore = vk_semaphore;
+    }
+}
+
 bool wined3d_aux_command_pool_vk_get_buffer(struct wined3d_context_vk *context_vk,
         struct wined3d_aux_command_pool_vk *pool, struct wined3d_aux_command_buffer_vk *buffer)
 {
@@ -2069,7 +2165,7 @@ void wined3d_context_vk_cleanup(struct wined3d_context_vk *context_vk)
         buffer->vk_command_buffer = VK_NULL_HANDLE;
     }
 
-    wined3d_context_vk_wait_command_buffer(context_vk, buffer->id - 1);
+    wined3d_context_vk_wait_submitted_command_buffers(context_vk);
     context_vk->completed_command_buffer_id = buffer->id;
     for (i = 0; i < context_vk->completed.buffer_count; ++i)
         free_command_buffer(context_vk, &context_vk->completed.buffers[i]);
@@ -2362,11 +2458,22 @@ static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_con
     if (!buffer->vk_command_buffer)
         return vr;
 
-    if (!wined3d_array_reserve((void **)&context_vk->submitted.buffers, &context_vk->submitted.buffers_size,
-            context_vk->submitted.buffer_count + 1, sizeof(*context_vk->submitted.buffers)))
-        ERR("Failed to grow submitted command buffer array.\n");
+    if (vr < 0)
+    {
+        wined3d_context_vk_wait_submitted_command_buffers(context_vk);
+        wined3d_context_vk_recover_failed_command_buffer(context_vk, buffer->id);
+        if (buffer->id > context_vk->completed_command_buffer_id)
+            context_vk->completed_command_buffer_id = buffer->id;
+        free_command_buffer(context_vk, buffer);
+    }
+    else
+    {
+        if (!wined3d_array_reserve((void **)&context_vk->submitted.buffers, &context_vk->submitted.buffers_size,
+                context_vk->submitted.buffer_count + 1, sizeof(*context_vk->submitted.buffers)))
+            ERR("Failed to grow submitted command buffer array.\n");
 
-    context_vk->submitted.buffers[context_vk->submitted.buffer_count++] = *buffer;
+        context_vk->submitted.buffers[context_vk->submitted.buffer_count++] = *buffer;
+    }
 
     buffer->vk_command_buffer = VK_NULL_HANDLE;
     /* We don't expect this to ever happen, but handle it anyway. */
