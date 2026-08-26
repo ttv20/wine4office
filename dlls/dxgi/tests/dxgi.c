@@ -5906,9 +5906,9 @@ done:
     ID3D10Device_Release(d3d10_device);
 }
 
-static BOOL check_present1_d3d11_frame(ID3D11DeviceContext *context,
+static BOOL check_present1_d3d11_frame_size(ID3D11DeviceContext *context,
         ID3D11Texture2D *presented, ID3D11Texture2D *staging,
-        const DWORD *expected, const char *label)
+        const DWORD *expected, UINT width, UINT height, const char *label)
 {
     D3D11_MAPPED_SUBRESOURCE map;
     DWORD actual_hash = 2166136261u, expected_hash = 2166136261u;
@@ -5928,22 +5928,22 @@ static BOOL check_present1_d3d11_frame(ID3D11DeviceContext *context,
         return FALSE;
     }
 
-    for (y = 0; y < PRESENT1_HISTORY_TEST_HEIGHT; ++y)
+    for (y = 0; y < height; ++y)
     {
         row = (const DWORD *)((const BYTE *)map.pData + y * map.RowPitch);
-        for (x = 0; x < PRESENT1_HISTORY_TEST_WIDTH; ++x)
+        for (x = 0; x < width; ++x)
         {
             actual_hash = (actual_hash ^ row[x]) * 16777619u;
             expected_hash = (expected_hash
-                    ^ expected[y * PRESENT1_HISTORY_TEST_WIDTH + x]) * 16777619u;
-            if (row[x] != expected[y * PRESENT1_HISTORY_TEST_WIDTH + x])
+                    ^ expected[y * width + x]) * 16777619u;
+            if (row[x] != expected[y * width + x])
             {
                 if (!mismatch_count)
                 {
                     first_x = x;
                     first_y = y;
                     first_actual = row[x];
-                    first_expected = expected[y * PRESENT1_HISTORY_TEST_WIDTH + x];
+                    first_expected = expected[y * width + x];
                 }
                 ++mismatch_count;
             }
@@ -5954,6 +5954,28 @@ static BOOL check_present1_d3d11_frame(ID3D11DeviceContext *context,
             "hash %#lx, expected %#lx.\n", label, mismatch_count, first_x, first_y,
             first_actual, first_expected, actual_hash, expected_hash);
     return !mismatch_count;
+}
+
+static BOOL check_present1_d3d11_frame(ID3D11DeviceContext *context,
+        ID3D11Texture2D *presented, ID3D11Texture2D *staging,
+        const DWORD *expected, const char *label)
+{
+    return check_present1_d3d11_frame_size(context, presented, staging, expected,
+            PRESENT1_HISTORY_TEST_WIDTH, PRESENT1_HISTORY_TEST_HEIGHT, label);
+}
+
+static void fill_present1_test_rect_size(DWORD *frame, UINT width, UINT height,
+        const RECT *rect, DWORD colour)
+{
+    LONG left = max(rect->left, 0), top = max(rect->top, 0);
+    LONG right = min(rect->right, width), bottom = min(rect->bottom, height);
+    unsigned int x, y;
+
+    for (y = top; y < bottom; ++y)
+    {
+        for (x = left; x < right; ++x)
+            frame[y * width + x] = colour;
+    }
 }
 
 static void update_present1_d3d11_rect(ID3D11DeviceContext *context,
@@ -6448,6 +6470,268 @@ done_factory:
 done_device:
     ID3D11DeviceContext_Release(context);
     ID3D11Device_Release(device);
+    IDXGIDevice_Release(dxgi_device);
+}
+
+struct present1_lifetime_swapchain
+{
+    IDXGISwapChain1 *swapchain;
+    ID3D11Texture2D *staging;
+    HWND window;
+    UINT width;
+    UINT height;
+    UINT buffer_count;
+    DXGI_FORMAT format;
+    DWORD *expected;
+    const char *name;
+};
+
+static BOOL init_present1_lifetime_swapchain(ID3D11Device *device, IDXGIFactory2 *factory,
+        struct present1_lifetime_swapchain *state)
+{
+    D3D11_TEXTURE2D_DESC texture_desc = {0};
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
+    HRESULT hr;
+
+    state->window = create_window();
+    ShowWindow(state->window, SW_SHOW);
+    UpdateWindow(state->window);
+
+    swapchain_desc.Width = state->width;
+    swapchain_desc.Height = state->height;
+    swapchain_desc.Format = state->format;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.BufferCount = state->buffer_count;
+    swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)device,
+            state->window, &swapchain_desc, NULL, NULL, &state->swapchain);
+    ok(hr == S_OK, "%s: Failed to create swapchain, hr %#lx.\n", state->name, hr);
+    if (FAILED(hr))
+        return FALSE;
+
+    texture_desc.Width = state->width;
+    texture_desc.Height = state->height;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = state->format;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.Usage = D3D11_USAGE_STAGING;
+    texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    hr = ID3D11Device_CreateTexture2D(device, &texture_desc, NULL, &state->staging);
+    ok(hr == S_OK, "%s: Failed to create staging texture, hr %#lx.\n", state->name, hr);
+    return SUCCEEDED(hr);
+}
+
+static void cleanup_present1_lifetime_swapchain(struct present1_lifetime_swapchain *state)
+{
+    if (state->staging)
+        ID3D11Texture2D_Release(state->staging);
+    if (state->swapchain)
+        IDXGISwapChain1_Release(state->swapchain);
+    if (state->window)
+        DestroyWindow(state->window);
+}
+
+static BOOL check_present1_lifetime_swapchain(ID3D11DeviceContext *context,
+        struct present1_lifetime_swapchain *state, const char *label)
+{
+    ID3D11Texture2D *texture;
+    HRESULT hr;
+    BOOL ret;
+
+    hr = IDXGISwapChain1_GetBuffer(state->swapchain, state->buffer_count - 1,
+            &IID_ID3D11Texture2D, (void **)&texture);
+    ok(hr == S_OK, "%s: Failed to get presented buffer, hr %#lx.\n", label, hr);
+    if (FAILED(hr))
+        return FALSE;
+    ret = check_present1_d3d11_frame_size(context, texture, state->staging,
+            state->expected, state->width, state->height, label);
+    ID3D11Texture2D_Release(texture);
+    return ret;
+}
+
+static BOOL seed_present1_lifetime_swapchain(ID3D11DeviceContext *context,
+        struct present1_lifetime_swapchain *state, DWORD colour, DWORD *data)
+{
+    ID3D11Texture2D *texture;
+    unsigned int i;
+    HRESULT hr;
+
+    for (i = 0; i < state->width * state->height; ++i)
+        state->expected[i] = data[i] = colour;
+    for (i = 0; i < state->buffer_count; ++i)
+    {
+        hr = IDXGISwapChain1_GetBuffer(state->swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "%s: Failed to get seed buffer %u, hr %#lx.\n",
+                state->name, i, hr);
+        if (FAILED(hr))
+            return FALSE;
+        ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                0, NULL, data, state->width * sizeof(*data), 0);
+        ID3D11Texture2D_Release(texture);
+        hr = IDXGISwapChain1_Present(state->swapchain, 0, 0);
+        ok(hr == S_OK, "%s: Seed Present %u returned %#lx.\n", state->name, i, hr);
+        if (FAILED(hr) || !check_present1_lifetime_swapchain(context, state, state->name))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL update_present1_lifetime_swapchain(ID3D11DeviceContext *context,
+        struct present1_lifetime_swapchain *state, RECT *dirty_rect,
+        DWORD colour, DWORD *data, const char *label, BOOL check_frame)
+{
+    DXGI_PRESENT_PARAMETERS parameters = {0};
+    ID3D11Texture2D *texture;
+    HRESULT hr;
+
+    hr = IDXGISwapChain1_GetBuffer(state->swapchain, 0,
+            &IID_ID3D11Texture2D, (void **)&texture);
+    ok(hr == S_OK, "%s: Failed to get dirty buffer, hr %#lx.\n", label, hr);
+    if (FAILED(hr))
+        return FALSE;
+    update_present1_d3d11_rect(context, texture, dirty_rect, colour, data);
+    fill_present1_test_rect_size(state->expected, state->width, state->height,
+            dirty_rect, colour);
+    parameters.DirtyRectsCount = 1;
+    parameters.pDirtyRects = dirty_rect;
+    hr = IDXGISwapChain1_Present1(state->swapchain, 0, 0, &parameters);
+    ID3D11Texture2D_Release(texture);
+    ok(hr == S_OK, "%s: Present1 returned %#lx.\n", label, hr);
+    if (FAILED(hr))
+        return FALSE;
+    return !check_frame || check_present1_lifetime_swapchain(context, state, label);
+}
+
+static void test_swapchain_present1_lifetime(void)
+{
+    enum
+    {
+        swapchain_a_width = 48,
+        swapchain_a_height = 40,
+        swapchain_b_width = 64,
+        swapchain_b_height = 48,
+        maximum_pixels = swapchain_b_width * swapchain_b_height,
+    };
+    struct present1_lifetime_swapchain a = {0}, b = {0};
+    DWORD expected_a[swapchain_a_width * swapchain_a_height];
+    DWORD expected_b[swapchain_b_width * swapchain_b_height];
+    DWORD data[maximum_pixels];
+    D3D11_TEXTURE2D_DESC work_desc = {0};
+    ID3D11Texture2D *work_texture[2] = {0};
+    ID3D11DeviceContext *context;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *device;
+    RECT dirty_rect;
+    unsigned int i;
+    HRESULT hr;
+
+    a.width = swapchain_a_width;
+    a.height = swapchain_a_height;
+    a.buffer_count = 2;
+    a.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    a.expected = expected_a;
+    a.name = "lifetime-a-rgba-48x40";
+    b.width = swapchain_b_width;
+    b.height = swapchain_b_height;
+    b.buffer_count = 3;
+    b.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    b.expected = expected_b;
+    b.name = "lifetime-b-bgra-64x48";
+
+    if (!(dxgi_device = create_d3d11_device()))
+    {
+        skip("D3D11 device is unavailable for Present1 lifetime tests.\n");
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Failed to get ID3D11Device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_dxgi_device;
+    ID3D11Device_GetImmediateContext(device, &context);
+    get_factory((IUnknown *)dxgi_device, FALSE, &factory);
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIFactory2 is unavailable for Present1 lifetime tests, hr %#lx.\n", hr);
+        goto done_context;
+    }
+
+    if (!init_present1_lifetime_swapchain(device, factory2, &a)
+            || !init_present1_lifetime_swapchain(device, factory2, &b))
+        goto done_swapchains;
+    if (!seed_present1_lifetime_swapchain(context, &a, 0xff102030, data)
+            || !seed_present1_lifetime_swapchain(context, &b, 0xffc0a080, data))
+        goto done_swapchains;
+
+    SetRect(&dirty_rect, 4, 5, 19, 17);
+    if (!update_present1_lifetime_swapchain(context, &a, &dirty_rect,
+            0xff00ff00, data, "lifetime-a-first", TRUE))
+        goto done_swapchains;
+    SetRect(&dirty_rect, 21, 9, 39, 25);
+    if (!update_present1_lifetime_swapchain(context, &b, &dirty_rect,
+            0xffff0000, data, "lifetime-b-first", TRUE))
+        goto done_swapchains;
+    SetRect(&dirty_rect, 27, 23, 44, 36);
+    if (!update_present1_lifetime_swapchain(context, &a, &dirty_rect,
+            0xff00ffff, data, "lifetime-a-second", TRUE))
+        goto done_swapchains;
+    SetRect(&dirty_rect, 3, 31, 24, 45);
+    if (!update_present1_lifetime_swapchain(context, &b, &dirty_rect,
+            0xffff00ff, data, "lifetime-b-second", TRUE))
+        goto done_swapchains;
+
+    work_desc.Width = 256;
+    work_desc.Height = 256;
+    work_desc.MipLevels = 1;
+    work_desc.ArraySize = 1;
+    work_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    work_desc.SampleDesc.Count = 1;
+    work_desc.Usage = D3D11_USAGE_DEFAULT;
+    hr = ID3D11Device_CreateTexture2D(device, &work_desc, NULL, &work_texture[0]);
+    ok(hr == S_OK, "Failed to create first queued-work texture, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_swapchains;
+    hr = ID3D11Device_CreateTexture2D(device, &work_desc, NULL, &work_texture[1]);
+    ok(hr == S_OK, "Failed to create second queued-work texture, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_work;
+    for (i = 0; i < 128; ++i)
+        ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)work_texture[i & 1],
+                (ID3D11Resource *)work_texture[(i + 1) & 1]);
+
+    SetRect(&dirty_rect, 1, 35, 47, 39);
+    if (!update_present1_lifetime_swapchain(context, &a, &dirty_rect,
+            0xff204080, data, "lifetime-a-before-release", FALSE))
+        goto done_work;
+    IDXGISwapChain1_Release(a.swapchain);
+    a.swapchain = NULL;
+    DestroyWindow(a.window);
+    a.window = NULL;
+
+    SetRect(&dirty_rect, 42, 2, 61, 14);
+    update_present1_lifetime_swapchain(context, &b, &dirty_rect,
+            0xff804020, data, "lifetime-b-after-a-release", TRUE);
+
+done_work:
+    if (work_texture[1])
+        ID3D11Texture2D_Release(work_texture[1]);
+    ID3D11Texture2D_Release(work_texture[0]);
+done_swapchains:
+    cleanup_present1_lifetime_swapchain(&b);
+    cleanup_present1_lifetime_swapchain(&a);
+    IDXGIFactory2_Release(factory2);
+done_context:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+done_dxgi_device:
     IDXGIDevice_Release(dxgi_device);
 }
 
@@ -10064,6 +10348,7 @@ START_TEST(dxgi)
     {
         run_on_d3d10(test_swapchain_present1_history);
         test_swapchain_present1_scroll();
+        test_swapchain_present1_lifetime();
         return;
     }
 
@@ -10102,6 +10387,7 @@ START_TEST(dxgi)
     run_on_d3d10(test_swapchain_present);
     run_on_d3d10(test_swapchain_present1_history);
     test_swapchain_present1_scroll();
+    test_swapchain_present1_lifetime();
     run_on_d3d10(test_swapchain_backbuffer_index);
     run_on_d3d10(test_swapchain_formats);
     run_on_d3d10(test_output_ownership);
