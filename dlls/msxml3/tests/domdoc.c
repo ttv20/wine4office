@@ -358,6 +358,39 @@ static const IStreamVtbl StreamVtbl = {
 
 static IStream savestream = { &StreamVtbl };
 
+static unsigned int failing_stream_read_calls;
+
+static HRESULT WINAPI failing_istream_Read(IStream *iface, void *ptr, ULONG len, ULONG *read)
+{
+    ++failing_stream_read_calls;
+
+    if (read)
+        *read = failing_stream_read_calls == 1 && len ? 1 : 0;
+    if (failing_stream_read_calls == 1 && len)
+        *(BYTE *)ptr = '<';
+
+    return E_ABORT;
+}
+
+static const IStreamVtbl FailingStreamVtbl = {
+    istream_QueryInterface,
+    istream_AddRef,
+    istream_Release,
+    failing_istream_Read,
+    istream_Write,
+    istream_Seek,
+    istream_SetSize,
+    istream_CopyTo,
+    istream_Commit,
+    istream_Revert,
+    istream_LockRegion,
+    istream_UnlockRegion,
+    istream_Stat,
+    istream_Clone
+};
+
+static IStream failing_stream = { &FailingStreamVtbl };
+
 static HRESULT WINAPI response_QI(IResponse *iface, REFIID riid, void **obj)
 {
     if (IsEqualIID(&IID_IResponse, riid) ||
@@ -11750,6 +11783,17 @@ static void test_load(void)
     todo_wine ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_FALSE, "got %d\n", b);
     EXPECT_PARSE_ERROR(doc, XML_E_INVALIDATROOTLEVEL, TRUE);
+    VariantClear(&src);
+
+    /* A failed read must not be retried or parsed as partial input. */
+    failing_stream_read_calls = 0;
+    V_VT(&src) = VT_UNKNOWN;
+    V_UNKNOWN(&src) = (IUnknown *)&failing_stream;
+    b = VARIANT_TRUE;
+    hr = IXMLDOMDocument_load(doc, src, &b);
+    ok(hr == E_ABORT, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_FALSE, "got %d\n", b);
+    ok(failing_stream_read_calls == 1, "Unexpected read call count %u.\n", failing_stream_read_calls);
     VariantClear(&src);
 
     /* test istream with valid xml */
