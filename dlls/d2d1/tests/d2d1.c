@@ -18587,6 +18587,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     D2D1_PIXEL_FORMAT current_format;
     ID2D1RectangleGeometry *small_geometry, *large_geometry;
     ID2D1PathGeometry *clip_geometry, *compound_geometry;
+    ID2D1TransformedGeometry *empty_geometry = NULL;
     ID2D1GradientStopCollection *gradient = NULL;
     ID2D1LinearGradientBrush *gradient_brush = NULL;
     ID2D1RadialGradientBrush *radial_brush = NULL;
@@ -19078,6 +19079,35 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         release_resource_readback(&rb);
     }
 
+    /* Collapsing one axis preserves the source geometry's production selector
+     * inputs, but flattening produces an empty fill mesh. Reusing the cached
+     * coverage target must not composite mask rows left by the preceding draw. */
+    set_matrix_identity(&transform);
+    transform._22 = 0.0f;
+    transform._32 = 32.0f;
+    hr = ID2D1Factory_CreateTransformedGeometry(ctx.factory,
+            (ID2D1Geometry *)compound_geometry, &transform, &empty_geometry);
+    ok(hr == S_OK, "Failed to create empty coverage geometry, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        set_matrix_identity(&transform);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)empty_geometry,
+                (ID2D1Brush *)brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Empty coverage draw failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back empty coverage draw.\n");
+        if (readback)
+        {
+            total = count_nonzero_pixels(&rb, 0, 0, small_size.width, small_size.height);
+            ok(!total, "Empty coverage draw reused %u stale mask pixels.\n", total);
+            release_resource_readback(&rb);
+        }
+    }
+
     /* COPY is not implemented by immediate bitmap targets yet. It must take
      * the ordinary geometry fallback without poisoning the draw transaction. */
     ID2D1DeviceContext_BeginDraw(ctx.context);
@@ -19137,6 +19167,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     if (radial_brush) ID2D1RadialGradientBrush_Release(radial_brush);
     if (gradient_brush) ID2D1LinearGradientBrush_Release(gradient_brush);
     if (gradient) ID2D1GradientStopCollection_Release(gradient);
+    if (empty_geometry) ID2D1TransformedGeometry_Release(empty_geometry);
     ID2D1PathGeometry_Release(compound_geometry);
     ID2D1RectangleGeometry_Release(large_geometry);
     ID2D1RectangleGeometry_Release(small_geometry);

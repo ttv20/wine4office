@@ -1564,6 +1564,29 @@ static BOOL d2d_device_context_ensure_coverage_aa_resources(struct d2d_device_co
     return FALSE;
 }
 
+static void d2d_device_context_clear_coverage_target(struct d2d_device_context *context,
+        ID3D11RenderTargetView *rtv)
+{
+    ID3D11DeviceContext1 *d3d_context;
+    float clear[4] = {0};
+
+    if (context->cs && !context->batched_draw)
+        EnterCriticalSection(context->cs);
+    if (context->batched_draw)
+        d3d_context = context->batched_context;
+    else
+        ID3D11Device1_GetImmediateContext1(context->d3d_device, &d3d_context);
+
+    ID3D11DeviceContext1_ClearRenderTargetView(d3d_context, rtv, clear);
+
+    if (!context->batched_draw)
+    {
+        ID3D11DeviceContext1_Release(d3d_context);
+        if (context->cs)
+            LeaveCriticalSection(context->cs);
+    }
+}
+
 static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *context,
         const struct d2d_geometry *geometry, float stroke_width,
         const struct d2d_stroke_style *stroke_style, BOOL fill, BOOL clear_target,
@@ -1613,6 +1636,8 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
 
     if (!face_count)
     {
+        if (clear_target)
+            d2d_device_context_clear_coverage_target(context, rtv);
         hr = S_OK;
         goto done;
     }
