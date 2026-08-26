@@ -1750,7 +1750,7 @@ static HRESULT d2d_device_context_ensure_coverage_target(struct d2d_device_conte
     D3D11_TEXTURE2D_DESC texture_desc;
     D2D1_SIZE_U allocation_size;
     size_t pixel_count;
-    unsigned int bytes_per_pixel;
+    unsigned int bytes_per_pixel, storage_sample_count;
     HRESULT hr;
 
     if (context->coverage_texture
@@ -1763,16 +1763,18 @@ static HRESULT d2d_device_context_ensure_coverage_target(struct d2d_device_conte
         return E_INVALIDARG;
 
     bytes_per_pixel = context->coverage_format == DXGI_FORMAT_R8_UINT ? 1 : 2;
+    storage_sample_count = context->coverage_backend
+            == D2D_GEOMETRY_AA_BACKEND_FORCED_COVERAGE ? 1 : context->coverage_sample_count;
     pixel_count = (size_t)allocation_size.width * allocation_size.height;
     if (pixel_count > D2D_AA_MAX_SCRATCH_BYTES / bytes_per_pixel
-            / context->coverage_sample_count)
+            / storage_sample_count)
     {
         allocation_size = *output_size;
         if ((size_t)allocation_size.width > SIZE_MAX / allocation_size.height)
             return E_OUTOFMEMORY;
         pixel_count = (size_t)allocation_size.width * allocation_size.height;
         if (pixel_count > D2D_AA_MAX_SCRATCH_BYTES / bytes_per_pixel
-                / context->coverage_sample_count)
+                / storage_sample_count)
             return E_OUTOFMEMORY;
     }
 
