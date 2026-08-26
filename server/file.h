@@ -149,6 +149,8 @@ extern void set_current_time( void );
 extern struct timeout_user *add_timeout_user( timeout_t when, timeout_callback func, void *private );
 extern struct timeout_user *add_timeout_user_coalesced( abstime_t when, timeout_t tolerance,
                                                        timeout_callback func, void *private );
+extern void reschedule_timeout_user_coalesced( struct timeout_user *user, abstime_t when,
+                                               timeout_t tolerance );
 extern void remove_timeout_user( struct timeout_user *user );
 extern const char *get_timeout_str( timeout_t timeout );
 

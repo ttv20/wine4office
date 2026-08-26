@@ -421,18 +421,9 @@ static abstime_t coalesce_timeout( abstime_t when, timeout_t tolerance )
     return candidate ? candidate : when;
 }
 
-static struct timeout_user *add_timeout_user_abstime( abstime_t when, timeout_callback func,
-                                                      void *private )
+static void link_timeout_user( struct timeout_user *user )
 {
-    struct timeout_user *user;
     struct list *ptr;
-
-    if (!(user = mem_alloc( sizeof(*user) ))) return NULL;
-    user->when     = when;
-    user->callback = func;
-    user->private  = private;
-
-    /* Now insert it in the linked list */
 
     if (user->when > 0)
     {
@@ -451,6 +442,18 @@ static struct timeout_user *add_timeout_user_abstime( abstime_t when, timeout_ca
         }
     }
     list_add_before( ptr, &user->entry );
+}
+
+static struct timeout_user *add_timeout_user_abstime( abstime_t when, timeout_callback func,
+                                                      void *private )
+{
+    struct timeout_user *user;
+
+    if (!(user = mem_alloc( sizeof(*user) ))) return NULL;
+    user->when     = when;
+    user->callback = func;
+    user->private  = private;
+    link_timeout_user( user );
     return user;
 }
 
@@ -465,6 +468,15 @@ struct timeout_user *add_timeout_user_coalesced( abstime_t when, timeout_t toler
                                                 timeout_callback func, void *private )
 {
     return add_timeout_user_abstime( coalesce_timeout( when, tolerance ), func, private );
+}
+
+/* reschedule an existing timeout user without allocating a replacement */
+void reschedule_timeout_user_coalesced( struct timeout_user *user, abstime_t when,
+                                        timeout_t tolerance )
+{
+    list_remove( &user->entry );
+    user->when = coalesce_timeout( when, tolerance );
+    link_timeout_user( user );
 }
 
 /* remove a timeout user */

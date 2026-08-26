@@ -1489,11 +1489,6 @@ static void set_next_timer( struct msg_queue *queue )
 {
     struct list *ptr;
 
-    if (queue->timeout)
-    {
-        remove_timeout_user( queue->timeout );
-        queue->timeout = NULL;
-    }
     if ((ptr = list_head( &queue->pending_timers )))
     {
         struct timer *timer = LIST_ENTRY( ptr, struct timer, entry );
@@ -1504,8 +1499,16 @@ static void set_next_timer( struct msg_queue *queue )
             struct timer *next = LIST_ENTRY( ptr->next, struct timer, entry );
             tolerance = min( tolerance, timer->when - next->when );
         }
-        queue->timeout = add_timeout_user_coalesced( timer->when, tolerance,
-                                                    timer_callback, queue );
+        if (queue->timeout)
+            reschedule_timeout_user_coalesced( queue->timeout, timer->when, tolerance );
+        else
+            queue->timeout = add_timeout_user_coalesced( timer->when, tolerance,
+                                                        timer_callback, queue );
+    }
+    else if (queue->timeout)
+    {
+        remove_timeout_user( queue->timeout );
+        queue->timeout = NULL;
     }
     /* set/clear QS_TIMER bit */
     if (list_empty( &queue->expired_timers ))
