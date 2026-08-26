@@ -183,15 +183,19 @@ static void install_intl_shim(ScriptHost *script_host)
     if(script_host->intl_installed || !script_host->parse
        || !IsEqualGUID(&script_host->guid, &CLSID_JScript))
         return;
-    script_host->intl_installed = TRUE;
 
     V_VT(&res) = VT_EMPTY;
     hres = IActiveScriptParse_ParseScriptText(script_host->parse, intl_shim, L"window", NULL,
                                               NULL, 0, 0, 0, &res, &ei);
-    if(FAILED(hres))
+    if(FAILED(hres)) {
         WARN("could not install the Intl shim: %08lx\n", hres);
-    else
-        VariantClear(&res);
+        SysFreeString(ei.bstrSource);
+        SysFreeString(ei.bstrDescription);
+        SysFreeString(ei.bstrHelpFile);
+        return;
+    }
+    script_host->intl_installed = TRUE;
+    VariantClear(&res);
 }
 
 static BOOL init_script_engine(ScriptHost *script_host, IActiveScript *script)

@@ -2811,11 +2811,26 @@ static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
     unsigned long long hash = 1469598103934665603ULL;
     char utf8[2048];
     WCHAR name[64];
-    WCHAR *stored, *separator;
+    WCHAR *stored, *separator, *account_id;
     int length;
 
     if (expires) *expires = 0;
     if (!scopes || !*scopes) return NULL;
+
+    /* Must match scope_projection_name() in wine4officeauth: the token is keyed
+     * by account as well as scope so one account never receives another's. */
+    if (!(account_id = load_wam_token_file( L"C:\\wam-account-id.txt" ))) return NULL;
+    length = WideCharToMultiByte( CP_UTF8, 0, account_id, -1, utf8, sizeof(utf8), NULL, NULL );
+    free( account_id );
+    if (!length) return NULL;
+    for (int i = 0; i < length - 1; i++)
+    {
+        hash ^= (unsigned char)utf8[i];
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
+
     if (!(length = WideCharToMultiByte( CP_UTF8, 0, scopes, -1, utf8, sizeof(utf8), NULL, NULL )))
         return NULL;
     for (int i = 0; i < length - 1; i++)
@@ -3668,12 +3683,13 @@ static ULONGLONG get_unix_time(void)
     return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
 }
 
-/* Consumer Microsoft accounts authenticate with the legacy 16 hex digit Live ID
- * app id rather than an AAD GUID. */
+/* Consumer Microsoft accounts authenticate with this Live ID application rather
+ * than an AAD GUID. Match it exactly so unrelated clients keep the AAD path. */
+static const WCHAR consumer_client_id[] = L"00000000480728C5";
+
 static BOOL is_consumer_wam_client( const WCHAR *client_id )
 {
-    return client_id && wcslen( client_id ) == 16 &&
-           wcsspn( client_id, L"0123456789abcdefABCDEF" ) == 16;
+    return client_id && !wcsicmp( client_id, consumer_client_id );
 }
 
 static BOOL is_supported_wam_client( const WCHAR *client_id )
@@ -4747,8 +4763,13 @@ static HRESULT WINAPI web_manager_FindAllAccountsWithClientIdAsync(
         /* Consumer Microsoft accounts use the legacy 16 hex digit app id and
          * are not homed in the work/school authority, so the AAD test above
          * would hide a signed-in personal account from Office. */
-        BOOL consumer = id && wcslen( id ) == 16 &&
-                        wcsspn( id, L"0123456789abcdefABCDEF" ) == 16;
+        /* Only report a consumer account to the consumer provider; otherwise a
+         * work/school provider could be handed an account it never asked for. */
+        const WCHAR *provider_id = WindowsGetStringRawBuffer(
+                ((struct web_account_provider *)provider)->id, NULL );
+        BOOL consumer = id && !wcsicmp( id, consumer_client_id ) &&
+                        ((provider_id && !wcsicmp( provider_id, L"https://login.windows.local" )) ||
+                         (authority && wcsstr( authority, L"consumers" ) != NULL));
         BOOL work = (!wcsicmp( id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
                      !wcsicmp( id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
                     authority && wcsstr( authority, L"organizations" ) != NULL;
