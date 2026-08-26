@@ -1854,8 +1854,12 @@ static BOOL d2d_device_context_render_geometry_coverage(struct d2d_device_contex
     if (!fill && context->coverage_backend == D2D_GEOMETRY_AA_BACKEND_MSAA_MASK
             && context->coverage_sample_count < 16)
         return FALSE;
-    if (FAILED(d2d_device_context_ensure_coverage_target(context, output_size)))
+    if (FAILED(hr = d2d_device_context_ensure_coverage_target(context, output_size)))
+    {
+        TRACE("Coverage target is unavailable for %ux%u output, hr %#lx.\n",
+                output_size->width, output_size->height, hr);
         return FALSE;
+    }
 
     transform = geometry->transform;
     d2d_matrix_multiply(&transform, &previous_state.transform);
