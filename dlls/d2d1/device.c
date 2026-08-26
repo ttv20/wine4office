@@ -4527,7 +4527,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateFilledGeometryRealizat
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    if (FAILED(hr = d2d_geometry_realization_init(object, context->factory, geometry)))
+    if (FAILED(hr = d2d_geometry_realization_init(object, context->factory, geometry, tolerance)))
     {
         WARN("Failed to initialise geometry realization, hr %#lx.\n", hr);
         free(object);
@@ -4555,7 +4555,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateStrokedGeometryRealiza
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    if (FAILED(hr = d2d_geometry_realization_init(object, context->factory, geometry)))
+    if (FAILED(hr = d2d_geometry_realization_init(object, context->factory, geometry, tolerance)))
     {
         WARN("Failed to initialise geometry realization, hr %#lx.\n", hr);
         free(object);

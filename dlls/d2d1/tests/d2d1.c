@@ -7845,8 +7845,8 @@ static void test_stroke_line_joins(BOOL d3d11)
     D2D1_STROKE_STYLE_PROPERTIES desc = {0};
     struct d2d1_test_context ctx;
     struct resource_readback rb;
-    ID2D1GeometryRealization *realizations[2];
-    ID2D1TransformedGeometry *transformed_geometry;
+    ID2D1GeometryRealization *realizations[2], *filled_realizations[2];
+    ID2D1TransformedGeometry *transformed_geometry, *reflected_geometry;
     ID2D1RectangleGeometry *rectangle_geometry;
     ID2D1DeviceContext1 *context1;
     ID2D1CommandList *commands;
@@ -7854,6 +7854,7 @@ static void test_stroke_line_joins(BOOL d3d11)
     ID2D1SolidColorBrush *brush;
     ID2D1PathGeometry *geometry;
     ID2D1GeometrySink *sink;
+    D2D1_BEZIER_SEGMENT bezier;
     D2D1_MATRIX_3X2_F matrix;
     D2D1_COLOR_F color;
     D2D1_POINT_2F point;
@@ -8001,7 +8002,12 @@ static void test_stroke_line_joins(BOOL d3d11)
     hr = ID2D1Factory_CreateTransformedGeometry(ctx.factory,
             (ID2D1Geometry *)geometry, &matrix, &transformed_geometry);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ID2D1PathGeometry_Release(geometry);
+    set_matrix_identity(&matrix);
+    matrix._11 = -1.0f;
+    matrix._31 = 160.0f;
+    hr = ID2D1Factory_CreateTransformedGeometry(ctx.factory,
+            (ID2D1Geometry *)geometry, &matrix, &reflected_geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     ID2D1RenderTarget_BeginDraw(ctx.rt);
     set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
@@ -8020,6 +8026,52 @@ static void test_stroke_line_joins(BOOL d3d11)
                 ++count;
     ok(compare_uint(count, 2828, 4), "transformed round: got %u pixels.\n", count);
     release_resource_readback(&rb);
+
+    ID2D1RenderTarget_BeginDraw(ctx.rt);
+    set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+    ID2D1RenderTarget_Clear(ctx.rt, &color);
+    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
+            (ID2D1Brush *)brush, 20.0f, styles[1]);
+    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)reflected_geometry,
+            (ID2D1Brush *)brush, 20.0f, styles[1]);
+    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1TransformedGeometry_Release(reflected_geometry);
+    ID2D1PathGeometry_Release(geometry);
+
+    get_surface_readback(&ctx, &rb);
+    count = 0;
+    for (y = 0; y < 130; ++y)
+        for (x = 0; x < 80; ++x)
+            if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                ++count;
+    i = 0;
+    for (y = 0; y < 130; ++y)
+        for (x = 80; x < 160; ++x)
+            if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                ++i;
+    ok(count == i, "Reflected clipped miter has %u pixels, expected %u.\n", i, count);
+    release_resource_readback(&rb);
+
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_Open(geometry, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_point(&point, 10.0f, 10.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+    for (i = 0; i < 7500; ++i)
+        line_to(sink, i & 1 ? 10.0f : 20.0f, i & 1 ? 10.0f : 20.0f);
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+
+    ID2D1RenderTarget_BeginDraw(ctx.rt);
+    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
+            (ID2D1Brush *)brush, 1.0f, styles[3]);
+    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+    ok(hr == S_OK, "Large representable bevel mesh failed, hr %#lx.\n", hr);
+    ID2D1PathGeometry_Release(geometry);
 
     if (ctx.factory1)
     {
@@ -8099,7 +8151,6 @@ static void test_stroke_line_joins(BOOL d3d11)
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
         ID2D1GeometryRealization_Release(realizations[1]);
         ID2D1GeometryRealization_Release(realizations[0]);
-        ID2D1DeviceContext1_Release(context1);
 
         get_surface_readback(&ctx, &rb);
         for (i = 0; i < 2; ++i)
@@ -8112,6 +8163,54 @@ static void test_stroke_line_joins(BOOL d3d11)
             ok(compare_uint(count, i ? 3000 : 3204, 4),
                     "realization %u: got %u pixels.\n", i, count);
         }
+        release_resource_readback(&rb);
+
+        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1PathGeometry_Open(geometry, &sink);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        set_point(&point, 20.0f, 100.0f);
+        ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_FILLED);
+        set_point(&bezier.point1, 20.0f, 20.0f);
+        set_point(&bezier.point2, 100.0f, 20.0f);
+        set_point(&bezier.point3, 100.0f, 100.0f);
+        ID2D1GeometrySink_AddBezier(sink, &bezier);
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+        hr = ID2D1GeometrySink_Close(sink);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1GeometrySink_Release(sink);
+
+        hr = ID2D1DeviceContext1_CreateFilledGeometryRealization(context1,
+                (ID2D1Geometry *)geometry, 0.25f, &filled_realizations[0]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1DeviceContext1_CreateFilledGeometryRealization(context1,
+                (ID2D1Geometry *)geometry, 200.0f, &filled_realizations[1]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1PathGeometry_Release(geometry);
+
+        ID2D1DeviceContext1_BeginDraw(context1);
+        set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+        ID2D1DeviceContext1_Clear(context1, &color);
+        ID2D1DeviceContext1_DrawGeometryRealization(context1,
+                filled_realizations[0], (ID2D1Brush *)brush);
+        set_matrix_identity(&matrix);
+        matrix._31 = 150.0f;
+        ID2D1DeviceContext1_SetTransform(context1, &matrix);
+        ID2D1DeviceContext1_DrawGeometryRealization(context1,
+                filled_realizations[1], (ID2D1Brush *)brush);
+        set_matrix_identity(&matrix);
+        ID2D1DeviceContext1_SetTransform(context1, &matrix);
+        hr = ID2D1DeviceContext1_EndDraw(context1, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1GeometryRealization_Release(filled_realizations[1]);
+        ID2D1GeometryRealization_Release(filled_realizations[0]);
+        ID2D1DeviceContext1_Release(context1);
+
+        get_surface_readback(&ctx, &rb);
+        ok(get_readback_colour(&rb, 60, 70) != 0xff652e89,
+                "Fine realization omitted the curved interior.\n");
+        ok(get_readback_colour(&rb, 210, 70) == 0xff652e89,
+                "Coarse realization ignored its flattening tolerance.\n");
         release_resource_readback(&rb);
     }
     else

@@ -735,7 +735,7 @@ struct d2d_geometry_realization
 };
 
 HRESULT d2d_geometry_realization_init(struct d2d_geometry_realization *realization,
-        ID2D1Factory *factory, ID2D1Geometry *geometry);
+        ID2D1Factory *factory, ID2D1Geometry *geometry, float tolerance);
 struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1GeometryRealization *iface);
 
 struct d2d_shader_blob

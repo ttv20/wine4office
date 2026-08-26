@@ -3135,7 +3135,7 @@ static BOOL d2d_outline_mesh_add_clipped_miter(const struct d2d_geometry *geomet
     if (!isfinite(base_c.x) || !isfinite(base_c.y) || !isfinite(base_d.x) || !isfinite(base_d.y))
         return FALSE;
 
-    if (join->ccw < 0.0f)
+    if (prev.x * next.y - prev.y * next.x < 0.0f)
     {
         attr0 = join->prev;
         d2d_point_set(&attr1, -join->next.x, -join->next.y);
@@ -3173,6 +3173,29 @@ static BOOL d2d_outline_mesh_add_clipped_miter(const struct d2d_geometry *geomet
     return TRUE;
 }
 
+static BOOL d2d_outline_mesh_append_join(struct d2d_outline_mesh *mesh,
+        const struct d2d_outline_vertex *vertices, size_t vertex_count,
+        const struct d2d_face *faces, size_t face_count)
+{
+    size_t base_vertex = mesh->vertex_count;
+    size_t i;
+
+    if (base_vertex > (size_t)UINT16_MAX + 1
+            || vertex_count > (size_t)UINT16_MAX + 1 - base_vertex)
+        return FALSE;
+
+    memcpy(&mesh->vertices[mesh->vertex_count], vertices, vertex_count * sizeof(*vertices));
+    for (i = 0; i < face_count; ++i)
+    {
+        d2d_face_set(&mesh->faces[mesh->face_count + i], base_vertex + faces[i].v[0],
+                base_vertex + faces[i].v[1], base_vertex + faces[i].v[2]);
+    }
+    mesh->vertex_count += vertex_count;
+    mesh->face_count += face_count;
+
+    return TRUE;
+}
+
 HRESULT d2d_geometry_build_outline_mesh(const struct d2d_geometry *geometry,
         float stroke_width, const struct d2d_stroke_style *stroke_style, struct d2d_outline_mesh *mesh)
 {
@@ -3201,14 +3224,14 @@ HRESULT d2d_geometry_build_outline_mesh(const struct d2d_geometry *geometry,
     if (!geometry->outline.join_count || line_join == D2D1_LINE_JOIN_ROUND)
         return S_OK;
 
-    if (geometry->outline.join_count > (SIZE_MAX - mesh->vertex_count) / 5
+    if (mesh->vertex_count > (size_t)UINT16_MAX + 1
+            || geometry->outline.join_count > (SIZE_MAX - mesh->vertex_count) / 5
             || geometry->outline.join_count > (SIZE_MAX - mesh->face_count) / 3)
         return E_OUTOFMEMORY;
     max_vertex_count = mesh->vertex_count + geometry->outline.join_count * 5;
     max_face_count = mesh->face_count + geometry->outline.join_count * 3;
-    if (max_vertex_count > UINT16_MAX + 1u
-            || max_vertex_count > SIZE_MAX / sizeof(*mesh->vertices)
-            || max_face_count > SIZE_MAX / sizeof(*mesh->faces))
+    if (max_vertex_count > UINT_MAX / sizeof(*mesh->vertices)
+            || max_face_count > UINT_MAX / sizeof(*mesh->faces))
         return E_OUTOFMEMORY;
 
     if (!(mesh->vertices = malloc(max_vertex_count * sizeof(*mesh->vertices))))
@@ -3230,37 +3253,46 @@ HRESULT d2d_geometry_build_outline_mesh(const struct d2d_geometry *geometry,
     for (i = 0; i < geometry->outline.join_count; ++i)
     {
         const struct d2d_outline_join *join = &geometry->outline.joins[i];
+        struct d2d_outline_vertex join_vertices[5];
+        struct d2d_face join_faces[3];
+        size_t join_vertex_count = 0, join_face_count = 0;
 
         if (join->ccw == 0.0f)
         {
             if (line_join == D2D1_LINE_JOIN_MITER)
                 d2d_outline_mesh_add_reversal(geometry, join, stroke_width, miter_limit,
-                        mesh->vertices, mesh->faces, &mesh->vertex_count, &mesh->face_count);
+                        join_vertices, join_faces, &join_vertex_count, &join_face_count);
         }
         else if (line_join == D2D1_LINE_JOIN_BEVEL
                 || !d2d_outline_join_get_miter(geometry, join,
                 &prev, &next, &n0, &n1, &miter, &ratio))
         {
-            d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
-                    &mesh->vertex_count, &mesh->face_count);
+            d2d_outline_mesh_add_bevel(join, join_vertices, join_faces,
+                    &join_vertex_count, &join_face_count);
         }
         else if (line_join == D2D1_LINE_JOIN_MITER_OR_BEVEL && ratio >= miter_limit)
         {
-            d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
-                    &mesh->vertex_count, &mesh->face_count);
+            d2d_outline_mesh_add_bevel(join, join_vertices, join_faces,
+                    &join_vertex_count, &join_face_count);
         }
         else if (line_join == D2D1_LINE_JOIN_MITER && ratio > miter_limit)
         {
             if (!d2d_outline_mesh_add_clipped_miter(geometry, join, stroke_width, miter_limit,
-                    mesh->vertices, mesh->faces, &mesh->vertex_count, &mesh->face_count))
-                d2d_outline_mesh_add_bevel(join, mesh->vertices, mesh->faces,
-                        &mesh->vertex_count, &mesh->face_count);
-            continue;
+                    join_vertices, join_faces, &join_vertex_count, &join_face_count))
+                d2d_outline_mesh_add_bevel(join, join_vertices, join_faces,
+                        &join_vertex_count, &join_face_count);
         }
         else
         {
-            d2d_outline_mesh_add_miter(join, mesh->vertices, mesh->faces,
-                    &mesh->vertex_count, &mesh->face_count);
+            d2d_outline_mesh_add_miter(join, join_vertices, join_faces,
+                    &join_vertex_count, &join_face_count);
+        }
+
+        if (!d2d_outline_mesh_append_join(mesh, join_vertices, join_vertex_count,
+                join_faces, join_face_count))
+        {
+            d2d_outline_mesh_cleanup(mesh);
+            return E_OUTOFMEMORY;
         }
     }
 
@@ -4609,6 +4641,9 @@ static HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_M
     HRESULT hr;
 
     *ret = NULL;
+
+    if (!(tolerance > 0.0f) || !isfinite(tolerance))
+        tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
 
     ID2D1Geometry_GetFactory(geometry, &factory);
 
@@ -7066,12 +7101,18 @@ static const ID2D1GeometryRealizationVtbl d2d_geometry_realization_vtbl =
 };
 
 HRESULT d2d_geometry_realization_init(struct d2d_geometry_realization *realization,
-        ID2D1Factory *factory, ID2D1Geometry *geometry)
+        ID2D1Factory *factory, ID2D1Geometry *geometry, float tolerance)
 {
+    ID2D1PathGeometry *simplified_geometry;
+    HRESULT hr;
+
+    if (FAILED(hr = d2d_geometry_get_simplified(geometry, NULL, tolerance, &simplified_geometry)))
+        return hr;
+
     realization->ID2D1GeometryRealization_iface.lpVtbl = &d2d_geometry_realization_vtbl;
     realization->refcount = 1;
     ID2D1Factory_AddRef(realization->factory = factory);
-    ID2D1Geometry_AddRef(realization->geometry = geometry);
+    realization->geometry = (ID2D1Geometry *)simplified_geometry;
 
     return S_OK;
 }
