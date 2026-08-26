@@ -8,6 +8,7 @@
 - Keep Wine environment recreation responsive and show live progress and logs in the Manager.
 - Prevent Word from crashing when opening Microsoft 365 sign-in.
 - Keep Word responsive and fully render its welcome screen after updating to WineHQ 11.16.
+- Reduce Office redraw work for partial document and ribbon updates.
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
 
 ## 0.2.1-beta.1 — 2026-08-23
