@@ -495,8 +495,9 @@ void wined3d_device_vk_cancel_completion_waits(struct wined3d_device_vk *device_
     };
     VkResult vr;
 
-    if (!device_vk->completion_cancel
-            || InterlockedExchange(&device_vk->completion_cancelled, TRUE))
+    if (InterlockedExchange(&device_vk->completion_cancelled, TRUE))
+        return;
+    if (!device_vk->completion_cancel)
         return;
     if ((vr = wined3d_device_vk_signal_semaphore(device_vk, &signal_info)) != VK_SUCCESS)
         WARN("Failed to signal completion cancellation, vr %s.\n", wined3d_debug_vkresult(vr));
