@@ -18,6 +18,7 @@
 #define COBJMACROS
 #include "initguid.h"
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -655,11 +656,11 @@ static void test_parameterized_iids(void)
                 if (find_iface)
                 {
                     void *out = (void *)0xdeadbeef;
+                    IID *result_iids = NULL;
+                    ULONG result_count = 0;
                     hr = find_iface->lpVtbl->QueryInterface(find_iface,
                                                             &test_iid_IAsyncOperation_WebAccount, &out);
                     ok(hr == E_NOINTERFACE && !out, "FindAllAccountsResult unrelated QI got %#lx, %p.\n", hr, out);
-                    IID *result_iids = NULL;
-                    ULONG result_count = 0;
                     hr = find_iface->lpVtbl->GetIids(find_iface, &result_count, &result_iids);
                     ok(hr == S_OK && result_count == 1 && result_iids &&
                        IsEqualGUID(&result_iids[0], &test_iid_IFindAllAccountsResult),
@@ -732,6 +733,943 @@ done:
     WindowsDeleteString(scope);
 }
 
+struct test_async_handler
+{
+    IAsyncOperationCompletedHandler_IInspectable iface;
+    LONG ref;
+    HANDLE entered;
+    HANDLE release;
+    HANDLE finished;
+    AsyncStatus status;
+    HRESULT status_hr;
+    HRESULT result_hr;
+    HRESULT invoke_hr;
+};
+
+static inline struct test_async_handler *impl_from_test_handler(
+        IAsyncOperationCompletedHandler_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct test_async_handler, iface );
+}
+
+static HRESULT WINAPI test_handler_QueryInterface( IAsyncOperationCompletedHandler_IInspectable *iface,
+                                                    REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperationCompletedHandler_IInspectable ))
+        *out = iface;
+    else return E_NOINTERFACE;
+    IAsyncOperationCompletedHandler_IInspectable_AddRef( iface );
+    return S_OK;
+}
+
+static ULONG WINAPI test_handler_AddRef( IAsyncOperationCompletedHandler_IInspectable *iface )
+{
+    return InterlockedIncrement( &impl_from_test_handler( iface )->ref );
+}
+
+static ULONG WINAPI test_handler_Release( IAsyncOperationCompletedHandler_IInspectable *iface )
+{
+    struct test_async_handler *impl = impl_from_test_handler( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI test_handler_Invoke( IAsyncOperationCompletedHandler_IInspectable *iface,
+                                            IAsyncOperation_IInspectable *operation, AsyncStatus status )
+{
+    struct test_async_handler *impl = impl_from_test_handler( iface );
+    IAsyncInfo *info = NULL;
+    IInspectable *result = NULL;
+
+    impl->status = status;
+    impl->status_hr = IAsyncOperation_IInspectable_QueryInterface( operation, &IID_IAsyncInfo,
+                                                                    (void **)&info );
+    if (SUCCEEDED( impl->status_hr ))
+    {
+        impl->status_hr = IAsyncInfo_get_Status( info, &impl->status );
+        IAsyncInfo_Release( info );
+    }
+    impl->result_hr = IAsyncOperation_IInspectable_GetResults( operation, &result );
+    if (result) IInspectable_Release( result );
+    if (impl->entered) SetEvent( impl->entered );
+    if (impl->release) WaitForSingleObject( impl->release, 5000 );
+    if (impl->finished) SetEvent( impl->finished );
+    return impl->invoke_hr;
+}
+
+static const IAsyncOperationCompletedHandler_IInspectableVtbl test_handler_vtbl =
+{
+    test_handler_QueryInterface, test_handler_AddRef, test_handler_Release, test_handler_Invoke,
+};
+
+static struct test_async_handler *test_handler_create( HANDLE entered, HANDLE release, HANDLE finished )
+{
+    struct test_async_handler *handler = calloc( 1, sizeof(*handler) );
+    if (!handler) return NULL;
+    handler->iface.lpVtbl = &test_handler_vtbl;
+    handler->ref = 1;
+    handler->invoke_hr = S_OK;
+    handler->entered = entered;
+    handler->release = release;
+    handler->finished = finished;
+    return handler;
+}
+
+struct test_silent_events
+{
+    HANDLE started;
+    HANDLE helper_release;
+    HANDLE helper_completed;
+    HANDLE operation_completed;
+    HANDLE worker_gate;
+    HANDLE worker_finished;
+    HANDLE callback_entered;
+    HANDLE callback_release;
+    HANDLE callback_finished;
+    HANDLE projection_waiting;
+};
+
+static BOOL test_wait_event( HANDLE event, const char *name )
+{
+    DWORD wait = WaitForSingleObject( event, 5000 );
+    ok( wait == WAIT_OBJECT_0, "%s wait returned %#lx.\n", name, wait );
+    return wait == WAIT_OBJECT_0;
+}
+
+static void test_silent_wait_worker_finished( struct test_silent_events *events, BOOL worker_exists,
+                                              BOOL *worker_finished, const char *name )
+{
+    if (worker_exists && !*worker_finished)
+        *worker_finished = test_wait_event( events->worker_finished, name );
+}
+
+static BOOL test_silent_events_create( struct test_silent_events *events )
+{
+    static const WCHAR started_name[] = L"Local\\WineOnlineIdTestHelperStarted";
+    static const WCHAR release_name[] = L"Local\\WineOnlineIdTestHelperRelease";
+    static const WCHAR helper_completed_name[] = L"Local\\WineOnlineIdTestHelperCompleted";
+    static const WCHAR operation_completed_name[] = L"Local\\WineOnlineIdTestOperationCompleted";
+    static const WCHAR worker_gate_name[] = L"Local\\WineOnlineIdTestWorkerGate";
+    static const WCHAR worker_finished_name[] = L"Local\\WineOnlineIdTestWorkerFinished";
+    static const WCHAR projection_waiting_name[] = L"Local\\WineOnlineIdTestProjectionWaiting";
+
+    memset( events, 0, sizeof(*events) );
+    events->started = CreateEventW( NULL, TRUE, FALSE, started_name );
+    events->helper_release = CreateEventW( NULL, TRUE, FALSE, release_name );
+    events->helper_completed = CreateEventW( NULL, TRUE, FALSE, helper_completed_name );
+    events->operation_completed = CreateEventW( NULL, TRUE, FALSE, operation_completed_name );
+    events->worker_gate = CreateEventW( NULL, TRUE, FALSE, worker_gate_name );
+    events->worker_finished = CreateEventW( NULL, TRUE, FALSE, worker_finished_name );
+    events->callback_entered = CreateEventW( NULL, TRUE, FALSE, NULL );
+    events->callback_release = CreateEventW( NULL, TRUE, FALSE, NULL );
+    events->callback_finished = CreateEventW( NULL, TRUE, FALSE, NULL );
+    events->projection_waiting = CreateEventW( NULL, TRUE, FALSE, projection_waiting_name );
+    return events->started && events->helper_release && events->helper_completed &&
+           events->operation_completed && events->worker_gate && events->worker_finished &&
+           events->callback_entered && events->callback_release && events->callback_finished &&
+           events->projection_waiting;
+}
+
+static void test_silent_events_reset( struct test_silent_events *events )
+{
+    ResetEvent( events->started );
+    ResetEvent( events->helper_release );
+    ResetEvent( events->helper_completed );
+    ResetEvent( events->operation_completed );
+    ResetEvent( events->worker_gate );
+    ResetEvent( events->worker_finished );
+    ResetEvent( events->callback_entered );
+    ResetEvent( events->callback_release );
+    ResetEvent( events->callback_finished );
+    ResetEvent( events->projection_waiting );
+}
+
+static void test_silent_events_close( struct test_silent_events *events )
+{
+    if (events->started) CloseHandle( events->started );
+    if (events->helper_release) CloseHandle( events->helper_release );
+    if (events->helper_completed) CloseHandle( events->helper_completed );
+    if (events->operation_completed) CloseHandle( events->operation_completed );
+    if (events->worker_gate) CloseHandle( events->worker_gate );
+    if (events->worker_finished) CloseHandle( events->worker_finished );
+    if (events->callback_entered) CloseHandle( events->callback_entered );
+    if (events->callback_release) CloseHandle( events->callback_release );
+    if (events->callback_finished) CloseHandle( events->callback_finished );
+    if (events->projection_waiting) CloseHandle( events->projection_waiting );
+}
+
+static BOOL test_write_file( const WCHAR *path, const char *value )
+{
+    HANDLE file;
+    DWORD written;
+    DWORD size = strlen( value );
+
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (!WriteFile( file, value, size, &written, NULL ) || written != size)
+    {
+        CloseHandle( file );
+        return FALSE;
+    }
+    CloseHandle( file );
+    return TRUE;
+}
+
+static void test_delete_token_files(void)
+{
+    DeleteFileW( L"C:\\wam-refresh-token.txt" );
+    DeleteFileW( L"C:\\wam-access-token.txt" );
+    DeleteFileW( L"C:\\wam-licensing-token.txt" );
+    DeleteFileW( L"C:\\wam-token-expires-on.txt" );
+    DeleteFileW( L"C:\\wam-account-username.txt" );
+    DeleteFileW( L"C:\\wam-account-id.txt" );
+    DeleteFileW( L"C:\\wam-account-oid.txt" );
+    DeleteFileW( L"C:\\wam-account-tenant-id.txt" );
+    DeleteFileW( L"C:\\wam-account-authority.txt" );
+    DeleteFileW( L"C:\\wam-account-first-name.txt" );
+    DeleteFileW( L"C:\\wam-account-last-name.txt" );
+    DeleteFileW( L"C:\\wam-account-display-name.txt" );
+    DeleteFileW( L"C:\\wam-client-info.txt" );
+    DeleteFileW( L"C:\\wam-id-token.txt" );
+}
+
+static BOOL test_write_refresh_token(void)
+{
+    test_delete_token_files();
+    return test_write_file( L"C:\\wam-refresh-token.txt", "plan01-refresh-token" );
+}
+
+static BOOL test_write_account_fixture(void);
+
+static BOOL test_write_success_fixture(void)
+{
+    test_delete_token_files();
+    return test_write_file( L"C:\\wam-access-token.txt", "plan01-access-token" ) &&
+           test_write_file( L"C:\\wam-licensing-token.txt", "plan01-licensing-token" ) &&
+           test_write_file( L"C:\\wam-token-expires-on.txt", "4102444800" ) &&
+           test_write_file( L"C:\\wam-account-authority.txt", "https://login.microsoftonline.com/organizations/" ) &&
+           test_write_file( L"C:\\wam-client-info.txt", "plan01-client-info" ) &&
+           test_write_file( L"C:\\wam-id-token.txt", "plan01-id-token" ) &&
+           test_write_account_fixture();
+}
+
+static BOOL test_write_account_fixture(void)
+{
+    return test_write_file( L"C:\\wam-account-username.txt", "plan01@example.invalid" ) &&
+           test_write_file( L"C:\\wam-account-id.txt", "plan01-account-id" ) &&
+           test_write_file( L"C:\\wam-account-oid.txt", "11111111-1111-1111-1111-111111111111" ) &&
+           test_write_file( L"C:\\wam-account-tenant-id.txt", "22222222-2222-2222-2222-222222222222" ) &&
+           test_write_file( L"C:\\wam-account-authority.txt", "https://login.microsoftonline.com/organizations/" );
+}
+
+static void test_silent_environment( const WCHAR *mode )
+{
+    SetEnvironmentVariableW( L"LOCALAPPDATA", L"C:\\users\\plan01\\AppData\\Local" );
+    SetEnvironmentVariableW( L"WINE_ONLINEID_TEST_HELPER_MODE", mode );
+    SetEnvironmentVariableW( L"WINE_ONLINEID_HELPER_TIMEOUT_MS", L"5000" );
+}
+
+static void test_silent_environment_clear(void)
+{
+    SetEnvironmentVariableW( L"WINE_ONLINEID_TEST_HELPER_MODE", NULL );
+    SetEnvironmentVariableW( L"WINE_ONLINEID_HELPER_TIMEOUT_MS", NULL );
+    SetEnvironmentVariableW( L"LOCALAPPDATA", NULL );
+    test_delete_token_files();
+}
+
+static BOOL test_silent_get_abi( IInspectable *operation, IAsyncOperation_IInspectable **typed_out,
+                                 IAsyncInfo **info_out )
+{
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncOperation_IInspectable *from_info = NULL;
+    IAsyncInfo *info = NULL;
+    IUnknown *identity1 = NULL, *identity2 = NULL;
+    HSTRING class_name = NULL;
+    IID *iids = NULL, *info_iids = NULL;
+    ULONG count = 0, info_count = 0;
+    void *out = (void *)0xdeadbeef;
+    HRESULT hr;
+
+    *typed_out = NULL;
+    *info_out = NULL;
+    hr = IInspectable_QueryInterface( operation, &test_iid_IAsyncOperation_WebTokenRequestResult,
+                                      (void **)&typed );
+    ok( hr == S_OK && typed, "silent typed IID got %#lx, iface %p.\n", hr, typed );
+    hr = IInspectable_QueryInterface( operation, &test_iid_IAsyncOperation_WebAccount, &out );
+    ok( hr == E_NOINTERFACE && !out, "silent unrelated IID got %#lx, iface %p.\n", hr, out );
+    if (!typed) return FALSE;
+    hr = IAsyncOperation_IInspectable_GetIids( typed, &count, &iids );
+    ok( hr == S_OK && count == 2 && iids &&
+        test_iid_in_list( iids, count, &test_iid_IAsyncOperation_WebTokenRequestResult ) &&
+        test_iid_in_list( iids, count, &IID_IAsyncInfo ), "silent GetIids got %#lx, count %lu.\n", hr, count );
+    CoTaskMemFree( iids );
+    hr = IAsyncOperation_IInspectable_GetRuntimeClassName( typed, &class_name );
+    ok( hr == S_OK && class_name &&
+        !wcscmp( WindowsGetStringRawBuffer( class_name, NULL ),
+                 L"Windows.Foundation.IAsyncOperation`1<Windows.Security.Authentication.Web.Core.WebTokenRequestResult>" ),
+        "silent class name got %#lx, %s.\n", hr, wine_dbgstr_hstring( class_name ) );
+    WindowsDeleteString( class_name );
+    hr = IAsyncOperation_IInspectable_QueryInterface( typed, &IID_IAsyncInfo, (void **)&info );
+    ok( hr == S_OK && info, "silent IAsyncInfo QI got %#lx, iface %p.\n", hr, info );
+    if (info)
+    {
+        hr = IAsyncInfo_QueryInterface( info, &test_iid_IAsyncOperation_WebTokenRequestResult,
+                                        (void **)&from_info );
+        ok( hr == S_OK && from_info, "silent IAsyncInfo typed QI got %#lx, iface %p.\n", hr, from_info );
+        if (from_info) IAsyncOperation_IInspectable_Release( from_info );
+        hr = IAsyncInfo_GetIids( info, &info_count, &info_iids );
+        ok( hr == S_OK && info_count == 2 && info_iids &&
+            test_iid_in_list( info_iids, info_count, &test_iid_IAsyncOperation_WebTokenRequestResult ) &&
+            test_iid_in_list( info_iids, info_count, &IID_IAsyncInfo ),
+            "silent IAsyncInfo GetIids got %#lx, count %lu.\n", hr, info_count );
+        CoTaskMemFree( info_iids );
+    }
+    hr = IAsyncOperation_IInspectable_QueryInterface( typed, &IID_IUnknown, (void **)&identity1 );
+    ok( hr == S_OK && identity1, "silent identity QI got %#lx.\n", hr );
+    if (info)
+    {
+        hr = IAsyncInfo_QueryInterface( info, &IID_IUnknown, (void **)&identity2 );
+        ok( hr == S_OK && identity2 == identity1, "silent identity mismatch, hr %#lx.\n", hr );
+    }
+    if (identity2) IUnknown_Release( identity2 );
+    if (identity1) IUnknown_Release( identity1 );
+    if (!info)
+    {
+        IAsyncOperation_IInspectable_Release( typed );
+        return FALSE;
+    }
+    *typed_out = typed;
+    *info_out = info;
+    return TRUE;
+}
+
+static void test_silent_check_response_status( IAsyncOperation_IInspectable *typed, INT32 expected )
+{
+    struct test_token_result *token_result = NULL;
+    IInspectable *result = NULL;
+    INT32 status = -1;
+    HRESULT hr;
+
+    hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+    ok( hr == S_OK && result, "silent response result got %#lx, %p.\n", hr, result );
+    if (!result) return;
+    hr = IInspectable_QueryInterface( result, &test_iid_IWebTokenRequestResult, (void **)&token_result );
+    ok( hr == S_OK && token_result, "silent response result QI got %#lx, %p.\n", hr, token_result );
+    if (token_result)
+    {
+        hr = token_result->lpVtbl->get_ResponseStatus( token_result, &status );
+        ok( hr == S_OK && status == expected, "silent response status got %#lx, %d, expected %d.\n",
+            hr, status, expected );
+        token_result->lpVtbl->Release( token_result );
+    }
+    IInspectable_Release( result );
+}
+
+static void test_silent_postclose( IAsyncOperation_IInspectable *typed, IAsyncInfo *info )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler = (void *)0xdeadbeef;
+    IInspectable *result = (void *)0xdeadbeef;
+    AsyncStatus status = Completed;
+    HRESULT hr;
+
+    hr = IAsyncInfo_Close( info );
+    ok( hr == S_OK, "silent Close got %#lx.\n", hr );
+    hr = IAsyncInfo_Close( info );
+    ok( hr == S_OK, "silent second Close got %#lx.\n", hr );
+    hr = IAsyncInfo_get_Status( info, &status );
+    ok( hr == E_ILLEGAL_METHOD_CALL && status == Started, "silent closed status got %#lx, %u.\n", hr, status );
+    hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+    ok( hr == E_ILLEGAL_METHOD_CALL && !result, "silent closed results got %#lx, %p.\n", hr, result );
+    hr = IAsyncOperation_IInspectable_get_Completed( typed, &handler );
+    ok( hr == E_ILLEGAL_METHOD_CALL && !handler, "silent closed handler got %#lx, %p.\n", hr, handler );
+}
+
+static HRESULT test_silent_start( struct test_manager_statics *manager, IInspectable *request,
+                                  IInspectable *account, IInspectable **operation )
+{
+    if (account) return manager->lpVtbl->GetTokenSilentlyWithWebAccountAsync( manager, request, account, operation );
+    return manager->lpVtbl->GetTokenSilentlyAsync( manager, request, operation );
+}
+
+struct test_silent_call_context
+{
+    struct test_manager_statics *manager;
+    IInspectable *request;
+    IInspectable *account;
+    IInspectable *operation;
+    HANDLE returned;
+    HRESULT hr;
+};
+
+static DWORD WINAPI test_silent_call_thread( void *parameter )
+{
+    struct test_silent_call_context *context = parameter;
+
+    context->hr = test_silent_start( context->manager, context->request, context->account,
+                                      &context->operation );
+    if (context->account) IInspectable_Release( context->account );
+    SetEvent( context->returned );
+    return 0;
+}
+
+static BOOL test_silent_start_thread( struct test_manager_statics *manager, IInspectable *request,
+                                      IInspectable *account, struct test_silent_events *events,
+                                      BOOL release_worker_gate, IInspectable **operation )
+{
+    struct test_silent_call_context context = {manager, request, account, NULL, NULL, E_FAIL};
+    HANDLE thread;
+    BOOL returned;
+
+    *operation = NULL;
+    if (!(context.returned = CreateEventW( NULL, TRUE, FALSE, NULL ))) return FALSE;
+    if (account) IInspectable_AddRef( account );
+    if (!(thread = CreateThread( NULL, 0, test_silent_call_thread, &context, 0, NULL )))
+    {
+        if (account) IInspectable_Release( account );
+        CloseHandle( context.returned );
+        return FALSE;
+    }
+
+    returned = WaitForSingleObject( context.returned, 5000 ) == WAIT_OBJECT_0;
+    ok( returned, "silent caller did not return before the worker gate.\n" );
+    /* This is the ordering handoff: the worker cannot reach mutex, token, or
+     * helper work until the caller thread has signaled its return. */
+    if (release_worker_gate || !returned) SetEvent( events->worker_gate );
+    if (!returned) SetEvent( events->helper_release );
+    ok( WaitForSingleObject( thread, 5000 ) == WAIT_OBJECT_0, "silent caller thread did not finish.\n" );
+    CloseHandle( thread );
+    CloseHandle( context.returned );
+    *operation = context.operation;
+    return returned && context.hr == S_OK && !!context.operation;
+}
+
+static void test_silent_cancel_before_mutex( struct test_manager_statics *manager, IInspectable *request,
+                                             struct test_silent_events *events )
+{
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    struct test_async_handler *handler = NULL;
+    BOOL worker_exists = FALSE, worker_finished = FALSE;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"gated-block" );
+    ok( test_write_refresh_token(), "failed to write cancel-before-mutex fixture.\n" );
+    ok( test_silent_start_thread( manager, request, NULL, events, FALSE, &operation ),
+        "cancel-before-mutex start failed.\n" );
+    if (!operation) goto done;
+    worker_exists = TRUE;
+    ok( test_silent_get_abi( operation, &typed, &info ), "cancel-before-mutex ABI setup failed.\n" );
+    if (!typed || !info) goto done;
+    handler = test_handler_create( events->callback_entered, NULL, events->callback_finished );
+    ok( !!handler, "cancel-before-mutex handler allocation failed.\n" );
+    if (!handler) goto done;
+    hr = IAsyncOperation_IInspectable_put_Completed( typed, &handler->iface );
+    ok( hr == S_OK, "cancel-before-mutex put Completed got %#lx.\n", hr );
+    hr = IAsyncInfo_Cancel( info );
+    ok( hr == S_OK, "cancel-before-mutex Cancel got %#lx.\n", hr );
+    ok( test_wait_event( events->callback_entered, "cancel-before-mutex callback" ),
+        "cancel-before-mutex callback missing.\n" );
+    worker_finished = test_wait_event( events->worker_finished, "cancel-before-mutex worker" );
+    ok( WaitForSingleObject( events->started, 0 ) == WAIT_TIMEOUT,
+        "cancel-before-mutex reached helper work.\n" );
+    test_silent_postclose( typed, info );
+
+done:
+    SetEvent( events->worker_gate );
+    SetEvent( events->helper_release );
+    test_silent_wait_worker_finished( events, worker_exists, &worker_finished, "cancel-before-mutex cleanup worker" );
+    if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( &handler->iface );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_blocked_case( struct test_manager_statics *manager, IInspectable *request,
+                                      IInspectable *account, struct test_silent_events *events,
+                                      BOOL cancel, BOOL close_race, BOOL close_before_callback )
+{
+    IInspectable *operation = NULL, *result = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    struct test_async_handler *handler = NULL;
+    BOOL worker_exists = FALSE, worker_finished = FALSE;
+    AsyncStatus status = Completed;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"gated-block" );
+    ok( test_write_refresh_token(), "failed to write silent refresh fixture.\n" );
+    ok( test_silent_start_thread( manager, request, account, events, TRUE, &operation ),
+        "silent start did not return a pending operation.\n" );
+    if (account) IInspectable_Release( account );
+    if (!operation) goto done;
+    worker_exists = TRUE;
+    ok( test_wait_event( events->started, "helper started" ), "helper did not start.\n" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "silent ABI setup failed.\n" );
+    if (!typed || !info) goto done;
+    hr = IAsyncInfo_get_Status( info, &status );
+    ok( hr == S_OK && status == Started, "pending silent status got %#lx, %u.\n", hr, status );
+
+    handler = test_handler_create( events->callback_entered, close_race ? events->callback_release : NULL,
+                                   events->callback_finished );
+    ok( !!handler, "failed to create silent handler.\n" );
+    if (!handler) goto done;
+    hr = IAsyncOperation_IInspectable_put_Completed( typed, &handler->iface );
+    ok( hr == S_OK, "silent put Completed got %#lx.\n", hr );
+    hr = IAsyncOperation_IInspectable_put_Completed( typed, &handler->iface );
+    ok( hr == E_ILLEGAL_DELEGATE_ASSIGNMENT, "silent second put Completed got %#lx.\n", hr );
+    ok( WaitForSingleObject( events->callback_entered, 0 ) == WAIT_TIMEOUT,
+        "silent callback ran before helper release.\n" );
+
+    if (cancel)
+    {
+        hr = IAsyncInfo_Cancel( info );
+        ok( hr == S_OK, "silent Cancel got %#lx.\n", hr );
+        ok( test_wait_event( events->callback_entered, "canceled callback" ), "canceled callback missing.\n" );
+        ok( handler->status == Canceled && handler->status_hr == S_OK &&
+            handler->result_hr == E_ILLEGAL_METHOD_CALL,
+            "canceled callback status %u, status hr %#lx, results hr %#lx.\n",
+            handler->status, handler->status_hr, handler->result_hr );
+        SetEvent( events->helper_release );
+        test_wait_event( events->helper_completed, "canceled helper" );
+        worker_finished = test_wait_event( events->worker_finished, "canceled worker" );
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Canceled, "canceled status got %#lx, %u.\n", hr, status );
+        {
+            HRESULT error = S_OK;
+            hr = IAsyncInfo_get_ErrorCode( info, &error );
+            ok( hr == S_OK && error == E_ABORT, "canceled error got %#lx, %#lx.\n", hr, error );
+        }
+        result = (void *)0xdeadbeef;
+        hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+        ok( hr == E_ILLEGAL_METHOD_CALL && !result, "canceled results got %#lx, %p.\n", hr, result );
+        test_silent_postclose( typed, info );
+    }
+    else if (close_before_callback)
+    {
+        hr = IAsyncInfo_Close( info );
+        ok( hr == S_OK, "close-before-callback Close got %#lx.\n", hr );
+        test_silent_postclose( typed, info );
+        SetEvent( events->helper_release );
+        ok( test_wait_event( events->helper_completed, "closed helper" ), "closed helper missing.\n" );
+        worker_finished = test_wait_event( events->worker_finished, "closed worker" );
+        ok( WaitForSingleObject( events->callback_entered, 0 ) == WAIT_TIMEOUT,
+            "callback ran after Close won the terminal race.\n" );
+    }
+    else if (close_race)
+    {
+        SetEvent( events->helper_release );
+        ok( test_wait_event( events->callback_entered, "in-flight callback" ), "in-flight callback missing.\n" );
+        hr = IAsyncInfo_Close( info );
+        ok( hr == S_OK, "in-flight Close got %#lx.\n", hr );
+        test_silent_postclose( typed, info );
+        IAsyncOperation_IInspectable_Release( typed );
+        typed = NULL;
+        IAsyncInfo_Release( info );
+        info = NULL;
+        IInspectable_Release( operation );
+        operation = NULL;
+        IAsyncOperationCompletedHandler_IInspectable_Release( &handler->iface );
+        handler = NULL;
+        SetEvent( events->callback_release );
+        test_wait_event( events->callback_finished, "finished in-flight callback" );
+        worker_finished = test_wait_event( events->worker_finished, "in-flight worker" );
+    }
+    else
+    {
+        SetEvent( events->helper_release );
+        ok( test_wait_event( events->helper_completed, "completed helper" ), "helper completion missing.\n" );
+        ok( test_wait_event( events->callback_entered, "completed callback" ), "completed callback missing.\n" );
+        worker_finished = test_wait_event( events->worker_finished, "completed worker" );
+        ok( handler->status == Completed && handler->status_hr == S_OK && handler->result_hr == S_OK,
+            "completed callback status %u, status hr %#lx, results hr %#lx.\n",
+            handler->status, handler->status_hr, handler->result_hr );
+        result = NULL;
+        hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+        ok( hr == S_OK && result, "completed results got %#lx, %p.\n", hr, result );
+        if (result) IInspectable_Release( result );
+        test_silent_check_response_status( typed, 3 );
+        test_silent_postclose( typed, info );
+    }
+
+done:
+    SetEvent( events->worker_gate );
+    SetEvent( events->helper_release );
+    SetEvent( events->callback_release );
+    test_silent_wait_worker_finished( events, worker_exists, &worker_finished, "silent cleanup worker" );
+    if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( &handler->iface );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_completion_before_handler( struct test_manager_statics *manager, IInspectable *request,
+                                                   struct test_silent_events *events )
+{
+    IInspectable *operation = NULL, *result = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    struct test_async_handler *handler = NULL;
+    BOOL worker_exists = FALSE, worker_finished = FALSE;
+    AsyncStatus status = Started;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"success" );
+    ok( test_write_success_fixture(), "failed to write silent completion fixture.\n" );
+    hr = test_silent_start( manager, request, NULL, &operation );
+    ok( hr == S_OK && operation, "completion-before-handler start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    worker_exists = TRUE;
+    ok( test_wait_event( events->started, "fresh resource helper start" ),
+        "fresh resource token was reused without proving its scope and client.\n" );
+    ok( test_wait_event( events->helper_completed, "fresh resource helper completion" ),
+        "fresh resource helper did not complete.\n" );
+    ok( test_wait_event( events->operation_completed, "operation completion" ),
+        "operation did not reach terminal state.\n" );
+    worker_finished = test_wait_event( events->worker_finished, "completion worker" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "completion-before-handler ABI failed.\n" );
+    if (!typed || !info) goto done;
+    hr = IAsyncInfo_get_Status( info, &status );
+    ok( hr == S_OK && status == Completed, "completion-before-handler status got %#lx, %u.\n", hr, status );
+    handler = test_handler_create( events->callback_entered, NULL, events->callback_finished );
+    ok( !!handler, "failed to create completion-before-handler callback.\n" );
+    if (!handler) goto done;
+    handler->invoke_hr = E_FAIL;
+    hr = IAsyncOperation_IInspectable_put_Completed( typed, &handler->iface );
+    ok( hr == S_OK, "completion-before-handler put propagated callback hr %#lx.\n", hr );
+    ok( test_wait_event( events->callback_entered, "late callback" ), "late callback missing.\n" );
+    ok( handler->status == Completed && handler->status_hr == S_OK && handler->result_hr == S_OK,
+        "late callback status %u, status hr %#lx, results hr %#lx.\n",
+        handler->status, handler->status_hr, handler->result_hr );
+    test_silent_check_response_status( typed, 0 );
+    result = NULL;
+    hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+    ok( hr == S_OK && result, "late results got %#lx, %p.\n", hr, result );
+    if (result) IInspectable_Release( result );
+    test_silent_postclose( typed, info );
+
+done:
+    SetEvent( events->worker_gate );
+    SetEvent( events->helper_release );
+    test_silent_wait_worker_finished( events, worker_exists, &worker_finished, "completion cleanup worker" );
+    if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( &handler->iface );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_projection_snapshot( struct test_manager_statics *manager, IInspectable *request,
+                                             struct test_silent_events *events )
+{
+    static const WCHAR cache_mutex_name[] = L"Local\\Wine4OfficeWamCache";
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    HANDLE cache_mutex = NULL;
+    BOOL owns_mutex = FALSE;
+    AsyncStatus status = Completed;
+    DWORD wait;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"success" );
+    ok( test_write_success_fixture(), "failed to write projection snapshot fixture.\n" );
+    cache_mutex = CreateMutexW( NULL, FALSE, cache_mutex_name );
+    ok( !!cache_mutex, "failed to create projection cache mutex, error %lu.\n", GetLastError() );
+    if (!cache_mutex) goto done;
+    wait = WaitForSingleObject( cache_mutex, 5000 );
+    owns_mutex = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    ok( owns_mutex, "projection cache mutex wait returned %#lx.\n", wait );
+    if (!owns_mutex) goto done;
+
+    hr = test_silent_start( manager, request, NULL, &operation );
+    ok( hr == S_OK && operation, "projection snapshot start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    ok( test_wait_event( events->projection_waiting, "projection snapshot wait" ),
+        "silent reader did not participate in the cache mutex.\n" );
+    wait = WaitForSingleObject( events->operation_completed, 0 );
+    ok( wait == WAIT_TIMEOUT, "projection operation completed while the writer mutex was held, wait %#lx.\n", wait );
+    ok( test_silent_get_abi( operation, &typed, &info ), "projection snapshot ABI setup failed.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Started, "projection snapshot status got %#lx, %u.\n", hr, status );
+    }
+
+    ReleaseMutex( cache_mutex );
+    owns_mutex = FALSE;
+    ok( test_wait_event( events->operation_completed, "projection snapshot completion" ),
+        "projection operation did not complete after cache mutex release.\n" );
+    ok( test_wait_event( events->worker_finished, "projection snapshot worker" ),
+        "projection worker did not finish after cache mutex release.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Completed, "projection snapshot final status got %#lx, %u.\n", hr, status );
+    }
+    if (typed) test_silent_check_response_status( typed, 0 );
+    if (typed && info) test_silent_postclose( typed, info );
+
+done:
+    if (owns_mutex) ReleaseMutex( cache_mutex );
+    if (cache_mutex) CloseHandle( cache_mutex );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_account_completion( struct test_manager_statics *manager, IInspectable *request,
+                                            IInspectable *account, struct test_silent_events *events )
+{
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    BOOL worker_exists = FALSE, worker_finished = FALSE;
+    AsyncStatus status = Started;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"success" );
+    ok( test_write_success_fixture(), "failed to write account completion fixture.\n" );
+    ok( test_silent_start_thread( manager, request, account, events, TRUE, &operation ),
+        "account silent start did not return a pending operation.\n" );
+    IInspectable_Release( account );
+    if (!operation) goto done;
+    worker_exists = TRUE;
+    ok( test_wait_event( events->operation_completed, "account operation completion" ),
+        "account operation did not complete.\n" );
+    worker_finished = test_wait_event( events->worker_finished, "account completion worker" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "account completion ABI setup failed.\n" );
+    if (!typed || !info) goto done;
+    hr = IAsyncInfo_get_Status( info, &status );
+    ok( hr == S_OK && status == Completed, "account completion status got %#lx, %u.\n", hr, status );
+    test_silent_check_response_status( typed, 0 );
+    test_silent_postclose( typed, info );
+
+done:
+    SetEvent( events->worker_gate );
+    SetEvent( events->helper_release );
+    test_silent_wait_worker_finished( events, worker_exists, &worker_finished, "account cleanup worker" );
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_helper_outcomes( struct test_manager_statics *manager, IInspectable *request,
+                                         struct test_silent_events *events )
+{
+    static const WCHAR *const modes[] =
+    {
+        L"fail", L"timeout", L"crash", L"missing", L"shutdown",
+        L"real-fail", L"real-timeout", L"real-crash", L"real-missing", L"real-shutdown"
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE( modes ); ++i)
+    {
+        IInspectable *operation = NULL;
+        IAsyncOperation_IInspectable *typed = NULL;
+        IAsyncInfo *info = NULL;
+        AsyncStatus status = Started;
+        HRESULT hr;
+
+        test_silent_events_reset( events );
+        test_silent_environment( modes[i] );
+        if (!wcscmp( modes[i], L"real-timeout" ))
+            SetEnvironmentVariableW( L"WINE_ONLINEID_HELPER_TIMEOUT_MS", L"100" );
+        ok( test_write_refresh_token(), "failed to write %s fixture.\n", wine_dbgstr_w( modes[i] ) );
+        hr = test_silent_start( manager, request, NULL, &operation );
+        ok( hr == S_OK && operation, "%s start got %#lx, %p.\n", wine_dbgstr_w( modes[i] ), hr, operation );
+        if (!operation) continue;
+        ok( test_wait_event( events->helper_completed, "helper outcome" ), "%s helper did not finish.\n",
+                             wine_dbgstr_w( modes[i] ) );
+        ok( test_wait_event( events->operation_completed, "operation outcome" ),
+            "%s operation did not finish.\n", wine_dbgstr_w( modes[i] ) );
+        ok( test_wait_event( events->worker_finished, "outcome worker" ),
+            "%s worker did not finish.\n", wine_dbgstr_w( modes[i] ) );
+        ok( test_silent_get_abi( operation, &typed, &info ), "%s ABI setup failed.\n", wine_dbgstr_w( modes[i] ) );
+        if (info)
+        {
+            hr = IAsyncInfo_get_Status( info, &status );
+            ok( hr == S_OK && status == Completed, "%s status got %#lx, %u.\n",
+                wine_dbgstr_w( modes[i] ), hr, status );
+            {
+                HRESULT error = E_FAIL;
+                hr = IAsyncInfo_get_ErrorCode( info, &error );
+                ok( hr == S_OK && error == S_OK, "%s error got %#lx, %#lx.\n",
+                    wine_dbgstr_w( modes[i] ), hr, error );
+            }
+        }
+        if (typed) test_silent_check_response_status( typed, 3 );
+        if (typed && info) test_silent_postclose( typed, info );
+        if (typed) IAsyncOperation_IInspectable_Release( typed );
+        if (info) IAsyncInfo_Release( info );
+        IInspectable_Release( operation );
+    }
+}
+
+static void test_silent_resource_refresh_failure( struct test_manager_statics *manager,
+                                                  IInspectable *resource_request,
+                                                  struct test_silent_events *events )
+{
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    AsyncStatus status = Started;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"fail" );
+    ok( test_write_success_fixture(), "failed to write cached resource-failure fixture.\n" );
+    hr = test_silent_start( manager, resource_request, NULL, &operation );
+    ok( hr == S_OK && operation, "resource-failure start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    ok( test_wait_event( events->helper_completed, "resource failure helper" ),
+        "resource failure helper did not finish.\n" );
+    ok( test_wait_event( events->operation_completed, "resource failure operation" ),
+        "resource failure operation did not finish.\n" );
+    ok( test_wait_event( events->worker_finished, "resource failure worker" ),
+        "resource failure worker did not finish.\n" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "resource failure ABI setup failed.\n" );
+    if (info)
+    {
+        hr = IAsyncInfo_get_Status( info, &status );
+        ok( hr == S_OK && status == Completed, "resource failure status got %#lx, %u.\n",
+            hr, status );
+    }
+    if (typed) test_silent_check_response_status( typed, 3 );
+    if (typed && info) test_silent_postclose( typed, info );
+
+done:
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
+static void test_silent_token_operations(void)
+{
+    static const WCHAR class_name[] =
+        L"Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator";
+    static const WCHAR resource_scope_name[] = L"https://graph.microsoft.com/.default";
+    struct test_manager_statics *manager = NULL;
+    struct test_token_request_factory *request_factory = NULL;
+    struct test_silent_events events;
+    IActivationFactory *factory = NULL;
+    IInspectable *provider = NULL, *request = NULL, *resource_request = NULL;
+    IInspectable *account = NULL, *operation = NULL;
+    HSTRING class = NULL, id = NULL, authority = NULL, client_id = NULL, scope = NULL;
+    HSTRING resource_scope = NULL, account_id = NULL;
+    HRESULT hr;
+
+    if (!test_silent_events_create( &events ))
+    {
+        win_skip( "silent async event setup failed.\n" );
+        test_silent_events_close( &events );
+        return;
+    }
+    WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class );
+    hr = RoGetActivationFactory( class, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( class );
+    class = NULL;
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "OnlineId runtime classes are unavailable for silent async tests.\n" );
+        goto done;
+    }
+    ok( hr == S_OK, "silent RoGetActivationFactory got %#lx.\n", hr );
+    if (FAILED(hr)) goto done;
+    hr = IActivationFactory_QueryInterface( factory, &test_iid_IWebAuthenticationCoreManagerStatics,
+                                            (void **)&manager );
+    ok( hr == S_OK && manager, "silent manager QI got %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &test_iid_IWebTokenRequestFactory,
+                                            (void **)&request_factory );
+    ok( hr == S_OK && request_factory, "silent request factory QI got %#lx.\n", hr );
+    if (!manager || !request_factory) goto done;
+
+    WindowsCreateString( L"https://login.microsoft.com", 26, &id );
+    WindowsCreateString( L"organizations", 13, &authority );
+    WindowsCreateString( L"d3590ed6-52b3-4102-aeff-aad2292ab01c", 36, &client_id );
+    WindowsCreateString( L"service::officeapps.live.com", 28, &scope );
+    hr = manager->lpVtbl->FindAccountProviderWithAuthorityAsync( manager, id, authority, &operation );
+    ok( hr == S_OK && operation, "silent provider start got %#lx, %p.\n", hr, operation );
+    if (operation)
+    {
+        test_async_operation( operation, &test_iid_IAsyncOperation_WebAccountProvider,
+                              &test_iid_IAsyncOperation_WebAccount, &provider );
+        operation = NULL;
+    }
+    if (!provider) goto done;
+    hr = request_factory->lpVtbl->Create( request_factory, provider, scope, client_id, &request );
+    ok( hr == S_OK && request, "silent request create got %#lx, %p.\n", hr, request );
+    if (!request) goto done;
+    WindowsCreateString( resource_scope_name, ARRAY_SIZE(resource_scope_name) - 1, &resource_scope );
+    hr = request_factory->lpVtbl->Create( request_factory, provider, resource_scope, client_id,
+                                          &resource_request );
+    ok( hr == S_OK && resource_request, "silent resource request create got %#lx, %p.\n",
+        hr, resource_request );
+
+    test_silent_environment( L"success" );
+    ok( test_write_account_fixture(), "failed to write account fixture.\n" );
+    WindowsCreateString( L"plan01-account-id", 17, &account_id );
+    hr = manager->lpVtbl->FindAccountAsync( manager, provider, account_id, &operation );
+    ok( hr == S_OK && operation, "silent account start got %#lx, %p.\n", hr, operation );
+    if (operation)
+    {
+        test_async_operation( operation, &test_iid_IAsyncOperation_WebAccount,
+                              &test_iid_IAsyncOperation_WebAccountProvider, &account );
+        operation = NULL;
+    }
+    ok( !!account, "silent account fixture did not produce a WebAccount.\n" );
+
+    /* Both public entry points use the same pending operation and helper
+     * handshake. The account overload is completed after its caller-owned
+     * account reference is released, proving the operation copied it. */
+    test_silent_blocked_case( manager, request, NULL, &events, FALSE, FALSE, FALSE );
+    if (account)
+    {
+        test_silent_account_completion( manager, request, account, &events );
+        account = NULL;
+    }
+    test_silent_cancel_before_mutex( manager, request, &events );
+    test_silent_projection_snapshot( manager, request, &events );
+    IInspectable_Release( provider );
+    provider = NULL;
+    if (resource_request) test_silent_completion_before_handler( manager, resource_request, &events );
+    test_silent_helper_outcomes( manager, request, &events );
+    if (resource_request) test_silent_resource_refresh_failure( manager, resource_request, &events );
+    test_silent_blocked_case( manager, request, NULL, &events, TRUE, FALSE, FALSE );
+    test_silent_blocked_case( manager, request, NULL, &events, FALSE, FALSE, TRUE );
+    test_silent_blocked_case( manager, request, NULL, &events, FALSE, TRUE, FALSE );
+
+done:
+    test_silent_environment_clear();
+    if (operation) IInspectable_Release( operation );
+    if (resource_request) IInspectable_Release( resource_request );
+    if (request) IInspectable_Release( request );
+    if (account) IInspectable_Release( account );
+    if (provider) IInspectable_Release( provider );
+    if (request_factory) request_factory->lpVtbl->Release( request_factory );
+    if (manager) manager->lpVtbl->Release( manager );
+    if (factory) IActivationFactory_Release( factory );
+    WindowsDeleteString( class );
+    WindowsDeleteString( id );
+    WindowsDeleteString( authority );
+    WindowsDeleteString( client_id );
+    WindowsDeleteString( scope );
+    WindowsDeleteString( resource_scope );
+    WindowsDeleteString( account_id );
+    test_silent_events_close( &events );
+}
+
 START_TEST(onlineid)
 {
     HRESULT hr;
@@ -745,6 +1683,7 @@ START_TEST(onlineid)
     test_TicketStatics();
     test_async_close();
     test_parameterized_iids();
+    test_silent_token_operations();
 
     RoUninitialize();
 }

@@ -2882,18 +2882,208 @@ done:
     return ret;
 }
 
-static BOOL run_wine4office_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
-                                  HSTRING scopes, HSTRING resource_client_id, HSTRING resource_redirect_uri )
+enum helper_result
+{
+    HELPER_NOT_CONTROLLED,
+    HELPER_COMPLETED,
+    HELPER_CANCELED,
+    HELPER_TIMED_OUT,
+    HELPER_FAILED,
+};
+
+static DWORD onlineid_helper_timeout(void)
+{
+    WCHAR value[32];
+    WCHAR *end;
+    DWORD length;
+    ULONGLONG timeout;
+
+    length = GetEnvironmentVariableW( L"WINE_ONLINEID_HELPER_TIMEOUT_MS", value, ARRAY_SIZE(value) );
+    if (!length || length >= ARRAY_SIZE(value)) return 60000;
+    timeout = wcstoull( value, &end, 10 );
+    if (end == value || *end) return 60000;
+    return timeout < INFINITE ? (DWORD)timeout : 60000;
+}
+
+static BOOL onlineid_get_test_helper_mode( WCHAR mode[64] )
+{
+    DWORD length = GetEnvironmentVariableW( L"WINE_ONLINEID_TEST_HELPER_MODE", mode, 64 );
+    return length && length < 64;
+}
+
+static HANDLE onlineid_open_test_event( const WCHAR *name, DWORD access )
+{
+    HANDLE event = OpenEventW( access, FALSE, name );
+    if (!event) event = CreateEventW( NULL, TRUE, FALSE, name );
+    return event;
+}
+
+static void onlineid_signal_test_event( const WCHAR *name )
+{
+    HANDLE event = onlineid_open_test_event( name, EVENT_MODIFY_STATE );
+    if (event)
+    {
+        SetEvent( event );
+        CloseHandle( event );
+    }
+}
+
+static enum helper_result onlineid_wait_for_helper( HANDLE process, HANDLE cancel_event, DWORD timeout,
+                                                    DWORD *exit_code );
+
+static enum helper_result onlineid_run_real_test_helper( const WCHAR *mode, HANDLE cancel_event,
+                                                         DWORD timeout, DWORD *exit_code )
+{
+    WCHAR command[2 * MAX_PATH];
+    PROCESS_INFORMATION process = {0};
+    STARTUPINFOW startup = {sizeof(startup)};
+    enum helper_result result;
+
+    if (wcscmp(mode, L"fail") && wcscmp(mode, L"timeout") &&
+        wcscmp(mode, L"crash") && wcscmp(mode, L"shutdown"))
+        lstrcpyW(command, L"C:\\windows\\system32\\wine4officeauth-missing.exe --self-test-helper fail");
+    else if (swprintf(command, ARRAY_SIZE(command),
+                      L"\"C:\\windows\\system32\\wine4officeauth.exe\" --self-test-helper %s",
+                      mode) < 0)
+        return HELPER_FAILED;
+
+    if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process))
+    {
+        onlineid_signal_test_event(L"Local\\WineOnlineIdTestHelperCompleted");
+        return HELPER_FAILED;
+    }
+    result = onlineid_wait_for_helper(process.hProcess, cancel_event, timeout, exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    onlineid_signal_test_event(L"Local\\WineOnlineIdTestHelperCompleted");
+    return result;
+}
+
+/* This control is intentionally opt-in and developer-only.  It makes helper
+ * supervision testable without changing the production helper protocol. */
+static enum helper_result onlineid_run_test_helper( HANDLE cancel_event, DWORD timeout, DWORD *exit_code )
+{
+    static const WCHAR started_name[] = L"Local\\WineOnlineIdTestHelperStarted";
+    static const WCHAR release_name[] = L"Local\\WineOnlineIdTestHelperRelease";
+    static const WCHAR completed_name[] = L"Local\\WineOnlineIdTestHelperCompleted";
+    WCHAR mode[64];
+    HANDLE release, handles[2];
+    DWORD count, wait;
+
+    if (!onlineid_get_test_helper_mode( mode )) return HELPER_NOT_CONTROLLED;
+    *exit_code = 3;
+    onlineid_signal_test_event( started_name );
+    if (!wcsncmp( mode, L"real-", 5 ))
+        return onlineid_run_real_test_helper( mode + 5, cancel_event, timeout, exit_code );
+    if (!wcscmp( mode, L"success" ))
+    {
+        *exit_code = 0;
+        onlineid_signal_test_event( completed_name );
+        return HELPER_COMPLETED;
+    }
+    if (!wcscmp( mode, L"fail" ))
+    {
+        *exit_code = 7;
+        onlineid_signal_test_event( completed_name );
+        return HELPER_COMPLETED;
+    }
+    if (!wcscmp( mode, L"crash" ))
+    {
+        *exit_code = 0xc0000005;
+        onlineid_signal_test_event( completed_name );
+        return HELPER_COMPLETED;
+    }
+    if (wcscmp( mode, L"block" ) && wcscmp( mode, L"gated-block" ) &&
+        wcscmp( mode, L"timeout" ))
+    {
+        onlineid_signal_test_event( completed_name );
+        return HELPER_FAILED;
+    }
+
+    /* The real helper path below supervises a process with the configured
+     * deadline.  This explicit branch keeps the public mapping test
+     * deterministic and sleep-free. */
+    if (!wcscmp( mode, L"timeout" ))
+    {
+        onlineid_signal_test_event( completed_name );
+        return HELPER_TIMED_OUT;
+    }
+
+    release = onlineid_open_test_event( release_name, SYNCHRONIZE );
+    if (!release)
+    {
+        onlineid_signal_test_event( completed_name );
+        return HELPER_FAILED;
+    }
+    handles[0] = release;
+    count = 1;
+    if (cancel_event) handles[count++] = cancel_event;
+    wait = WaitForMultipleObjects( count, handles, FALSE, timeout );
+    CloseHandle( release );
+    if (wait == WAIT_OBJECT_0)
+    {
+        *exit_code = 0;
+        onlineid_signal_test_event( completed_name );
+        return HELPER_COMPLETED;
+    }
+    onlineid_signal_test_event( completed_name );
+    if (cancel_event && wait == WAIT_OBJECT_0 + 1) return HELPER_CANCELED;
+    if (wait == WAIT_TIMEOUT) return HELPER_TIMED_OUT;
+    return HELPER_FAILED;
+}
+
+static enum helper_result onlineid_wait_for_helper( HANDLE process, HANDLE cancel_event, DWORD timeout,
+                                                    DWORD *exit_code )
+{
+    HANDLE handles[2];
+    DWORD count = 1, wait;
+
+    handles[0] = process;
+    if (cancel_event) handles[count++] = cancel_event;
+    wait = cancel_event ? WaitForMultipleObjects( count, handles, FALSE, timeout ) :
+                          WaitForSingleObject( process, timeout );
+    if (cancel_event && wait == WAIT_OBJECT_0 + 1)
+    {
+        TerminateProcess( process, ERROR_CANCELLED );
+        /* Do not release the refresh mutex while a canceled helper may still
+         * be writing the shared token generation.  The async operation has
+         * already transitioned to Canceled, so this wait does not block its
+         * caller or completion callback. */
+        WaitForSingleObject( process, INFINITE );
+        return HELPER_CANCELED;
+    }
+    if (wait == WAIT_TIMEOUT)
+    {
+        TerminateProcess( process, WAIT_TIMEOUT );
+        /* The next waiter may start another helper as soon as this function
+         * returns.  Keep serialization until the timed-out process is gone. */
+        WaitForSingleObject( process, INFINITE );
+        return HELPER_TIMED_OUT;
+    }
+    if (wait != WAIT_OBJECT_0 || !GetExitCodeProcess( process, exit_code )) return HELPER_FAILED;
+    return HELPER_COMPLETED;
+}
+
+static enum helper_result run_wine4office_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
+                                                HSTRING scopes, HSTRING resource_client_id,
+                                                HSTRING resource_redirect_uri, HANDLE cancel_event, DWORD timeout )
 {
     WCHAR command[6 * MAX_PATH], hint_path[MAX_PATH];
     PROCESS_INFORMATION process = {0};
     STARTUPINFOW startup = {sizeof(startup)};
+    enum helper_result result;
     BOOL ret;
 
+    *exit_code = 3;
+    if (!interactive)
+    {
+        result = onlineid_run_test_helper( cancel_event, timeout, exit_code );
+        if (result != HELPER_NOT_CONTROLLED) return result;
+    }
     if (!write_login_hint_file( login_hint, hint_path ))
     {
         TRACE( "failed to create the auth helper login-hint file, error %lu.\n", GetLastError() );
-        return FALSE;
+        return HELPER_FAILED;
     }
     if (interactive)
     {
@@ -2925,38 +3115,38 @@ static BOOL run_wine4office_auth( HWND owner, HSTRING login_hint, BOOL interacti
     {
         TRACE( "failed to start the auth helper, error %lu.\n", GetLastError() );
         if (hint_path[0]) DeleteFileW( hint_path );
-        return FALSE;
+        return HELPER_FAILED;
     }
     TRACE( "started the auth helper for %s acquisition.\n", interactive ? "interactive" : "silent" );
-    WaitForSingleObject( process.hProcess, INFINITE );
-    ret = GetExitCodeProcess( process.hProcess, exit_code );
-    TRACE( "auth helper completed, query success %d, exit code %lu.\n", ret, ret ? *exit_code : 0 );
+    result = onlineid_wait_for_helper( process.hProcess, cancel_event, timeout, exit_code );
+    TRACE( "auth helper completed with result %u, exit code %lu.\n", result, *exit_code );
     CloseHandle( process.hThread );
     CloseHandle( process.hProcess );
     if (hint_path[0]) DeleteFileW( hint_path );
-    return ret;
+    return result;
 }
 
-static BOOL run_wine365_resource_refresh( const WCHAR *scope, const WCHAR *client_id )
+static enum helper_result run_wine365_resource_refresh( const WCHAR *scope, const WCHAR *client_id,
+                                                        HANDLE cancel_event, DWORD timeout, DWORD *exit_code )
 {
     WCHAR command[4 * MAX_PATH];
     PROCESS_INFORMATION process = {0};
     STARTUPINFOW startup = {sizeof(startup)};
-    DWORD exit_code = 3;
-    BOOL ret;
+    enum helper_result result;
 
+    *exit_code = 3;
     if (!scope || !*scope || wcschr( scope, '"' ) || !client_id || !*client_id ||
-        wcschr( client_id, '"' )) return FALSE;
+        wcschr( client_id, '"' )) return HELPER_FAILED;
+    result = onlineid_run_test_helper( cancel_event, timeout, exit_code );
+    if (result != HELPER_NOT_CONTROLLED) return result;
     if (swprintf( command, ARRAY_SIZE(command),
                   L"\"C:\\windows\\system32\\wine4officeauth.exe\" --refresh-resource \"%s\" \"%s\"",
-                  scope, client_id ) < 0) return FALSE;
-    ret = CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process );
-    if (!ret) return FALSE;
-    WaitForSingleObject( process.hProcess, INFINITE );
-    ret = GetExitCodeProcess( process.hProcess, &exit_code ) && !exit_code;
+                  scope, client_id ) < 0) return HELPER_FAILED;
+    if (!CreateProcessW( NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process )) return HELPER_FAILED;
+    result = onlineid_wait_for_helper( process.hProcess, cancel_event, timeout, exit_code );
     CloseHandle( process.hThread );
     CloseHandle( process.hProcess );
-    return ret;
+    return result;
 }
 
 static DWORD WINAPI interactive_token_worker( void *parameter )
@@ -2968,7 +3158,8 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
     HRESULT hr;
 
     if (run_wine4office_auth( context->owner, context->login_hint, TRUE, &exit_code, context->scopes,
-                              context->resource_client_id, context->resource_redirect_uri ))
+                              context->resource_client_id, context->resource_redirect_uri,
+                              NULL, INFINITE ) == HELPER_COMPLETED)
     {
         if (!exit_code) response_status = 0;
         else if (exit_code == 2) response_status = 1;
@@ -3409,121 +3600,782 @@ static BOOL is_supported_resource_client( const WCHAR *client_id )
            (client_id && !wcsicmp( client_id, L"f4060917-6abe-40d7-baa6-f634c0eda4ac" ));
 }
 
-static const WCHAR *get_resource_client_id( struct web_token_request *request, HSTRING *nested_client_id )
+static BOOL silent_cancel_requested( HANDLE cancel_event )
 {
-    const WCHAR *client_id = WindowsGetStringRawBuffer( request->client_id, NULL );
-    const WCHAR *scopes = WindowsGetStringRawBuffer( request->scope, NULL );
-
-    *nested_client_id = NULL;
-    if (SUCCEEDED(token_request_get_property( request, L"nestedClientId", nested_client_id )))
-        client_id = WindowsGetStringRawBuffer( *nested_client_id, NULL );
-    else if (scopes && wcsstr( scopes, L"engage.cloud.microsoft/teams-branded-exp" ))
-        client_id = L"f4060917-6abe-40d7-baa6-f634c0eda4ac";
-    return client_id;
+    return cancel_event && WaitForSingleObject( cancel_event, 0 ) == WAIT_OBJECT_0;
 }
 
-static BOOL prepare_silent_wam_token(const WCHAR *scopes, const WCHAR *client_id)
+static HANDLE silent_acquire_cache_mutex( HANDLE cancel_event, BOOL *canceled )
 {
-    WCHAR *token = load_wam_token_file( L"C:\\wam-access-token.txt" );
-    WCHAR *expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
-    WCHAR *refresh = NULL;
-    BOOL have_token = token != NULL;
-    ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
-    DWORD exit_code;
+    static const WCHAR mutex_name[] = L"Local\\Wine4OfficeWamCache";
+    WCHAR mode[64];
+    HANDLE mutex, handles[2];
+    DWORD count = 1, wait;
 
-    if (scopes && *scopes && !is_office_licensing_scope( scopes ))
+    *canceled = FALSE;
+    if (!(mutex = CreateMutexW( NULL, FALSE, mutex_name ))) return NULL;
+    handles[0] = mutex;
+    if (cancel_event) handles[count++] = cancel_event;
+    if (onlineid_get_test_helper_mode( mode ))
+        onlineid_signal_test_event( L"Local\\WineOnlineIdTestProjectionWaiting" );
+    wait = WaitForMultipleObjects( count, handles, FALSE, INFINITE );
+    if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED_0) return mutex;
+    if (cancel_event && wait == WAIT_OBJECT_0 + 1) *canceled = TRUE;
+    CloseHandle( mutex );
+    return NULL;
+}
+
+static void silent_release_cache_mutex( HANDLE mutex )
+{
+    if (!mutex) return;
+    ReleaseMutex( mutex );
+    CloseHandle( mutex );
+}
+
+static BOOL silent_token_is_usable( const WCHAR *token, const WCHAR *expires )
+{
+    ULONGLONG expiry = expires ? wcstoull( expires, NULL, 10 ) : 0;
+
+    return token && (!expiry || expiry > get_unix_time() + 300);
+}
+
+static void silent_signal_test_completion(void)
+{
+    WCHAR mode[64];
+
+    if (onlineid_get_test_helper_mode( mode ))
+        onlineid_signal_test_event( L"Local\\WineOnlineIdTestOperationCompleted" );
+}
+
+static BOOL silent_wait_test_worker_gate( HANDLE cancel_event, BOOL *canceled )
+{
+    static const WCHAR gate_name[] = L"Local\\WineOnlineIdTestWorkerGate";
+    WCHAR mode[64];
+    HANDLE gate, handles[2];
+    DWORD count = 1, wait;
+
+    *canceled = FALSE;
+    if (!onlineid_get_test_helper_mode( mode ) || wcscmp( mode, L"gated-block" )) return TRUE;
+    if (!(gate = onlineid_open_test_event( gate_name, SYNCHRONIZE ))) return TRUE;
+    handles[0] = gate;
+    if (cancel_event) handles[count++] = cancel_event;
+    wait = WaitForMultipleObjects( count, handles, FALSE, INFINITE );
+    CloseHandle( gate );
+    if (cancel_event && wait == WAIT_OBJECT_0 + 1)
     {
-        if (!run_wine365_resource_refresh( scopes, client_id )) goto done;
-        if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
-        token = load_wam_token_file( L"C:\\wam-access-token.txt" );
-        have_token = token != NULL;
+        *canceled = TRUE;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void silent_signal_test_worker_finished(void)
+{
+    WCHAR mode[64];
+
+    if (onlineid_get_test_helper_mode( mode ))
+        onlineid_signal_test_event( L"Local\\WineOnlineIdTestWorkerFinished" );
+}
+
+static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_id, HANDLE cancel_event,
+                                      BOOL *canceled )
+{
+    const WCHAR *token_path = scopes && is_office_licensing_scope( scopes ) ?
+                              L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
+    HANDLE cache_mutex = NULL;
+    WCHAR *token = NULL, *expires = NULL, *refresh = NULL;
+    BOOL have_token = FALSE;
+    DWORD exit_code = 3, timeout = onlineid_helper_timeout();
+    enum helper_result helper;
+
+    *canceled = FALSE;
+    if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+    token = load_wam_token_file( token_path );
+    expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+    refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
+    silent_release_cache_mutex( cache_mutex );
+    cache_mutex = NULL;
+    have_token = silent_token_is_usable( token, expires );
+    if (silent_cancel_requested( cancel_event ))
+    {
+        *canceled = TRUE;
         goto done;
     }
-    if (have_token && (!expiry || expiry > get_unix_time() + 300)) goto done;
-    refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
-    if (refresh && run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL ) && !exit_code)
+    if (scopes && *scopes && !is_office_licensing_scope( scopes ))
     {
+        /* The projection does not retain the resource scope or client which
+         * produced its access token.  A fresh token therefore cannot prove
+         * that it is usable for this request; preserve the resource refresh
+         * until that identity is published transactionally with the token. */
+        have_token = FALSE;
+        helper = run_wine365_resource_refresh( scopes, client_id, cancel_event, timeout, &exit_code );
+        if (helper == HELPER_CANCELED)
+        {
+            *canceled = TRUE;
+            goto done;
+        }
+        if (helper != HELPER_COMPLETED || exit_code) goto done;
+        if (silent_cancel_requested( cancel_event ))
+        {
+            *canceled = TRUE;
+            goto done;
+        }
         if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
-        token = load_wam_token_file( L"C:\\wam-access-token.txt" );
-        have_token = token != NULL;
+        token = NULL;
+        free( expires );
+        expires = NULL;
+        if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+        token = load_wam_token_file( token_path );
+        expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+        silent_release_cache_mutex( cache_mutex );
+        cache_mutex = NULL;
+        have_token = silent_token_is_usable( token, expires );
+        goto done;
+    }
+    if (have_token) goto done;
+    if (refresh)
+    {
+        helper = run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL,
+                                       cancel_event, timeout );
+        if (helper == HELPER_CANCELED)
+        {
+            *canceled = TRUE;
+            goto done;
+        }
+        if (helper == HELPER_COMPLETED && !exit_code)
+        {
+            if (silent_cancel_requested( cancel_event ))
+            {
+                *canceled = TRUE;
+                goto done;
+            }
+            if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
+            token = NULL;
+            free( expires );
+            expires = NULL;
+            if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
+            token = load_wam_token_file( token_path );
+            expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+            silent_release_cache_mutex( cache_mutex );
+            cache_mutex = NULL;
+            have_token = silent_token_is_usable( token, expires );
+        }
     }
 done:
-    if (refresh) { SecureZeroMemory( refresh, wcslen(refresh) * sizeof(*refresh) ); free( refresh ); }
-    if (token) { SecureZeroMemory( token, wcslen(token) * sizeof(*token) ); free( token ); }
+    silent_release_cache_mutex( cache_mutex );
+    if (refresh) { SecureZeroMemory( refresh, wcslen( refresh ) * sizeof(*refresh) ); free( refresh ); }
+    if (token) { SecureZeroMemory( token, wcslen( token ) * sizeof(*token) ); free( token ); }
     free( expires );
     return have_token;
+}
+
+enum silent_operation_state
+{
+    SILENT_OPERATION_STARTING,
+    SILENT_OPERATION_RUNNING,
+    SILENT_OPERATION_COMPLETED,
+    SILENT_OPERATION_CANCELED,
+    SILENT_OPERATION_CLOSED,
+};
+
+struct silent_token_operation
+{
+    IAsyncOperation_IInspectable IAsyncOperation_IInspectable_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    CRITICAL_SECTION cs;
+    HSTRING scopes;
+    HSTRING client_id;
+    HSTRING resource_client_id;
+    IInspectable *account;
+    HANDLE cancel_event;
+    HANDLE worker;
+    IInspectable *result;
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    BOOL callback_claimed;
+    enum silent_operation_state state;
+    HRESULT error;
+    const struct async_operation_type *type;
+};
+
+static inline struct silent_token_operation *impl_from_silent_async( IAsyncOperation_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct silent_token_operation, IAsyncOperation_IInspectable_iface );
+}
+
+static inline struct silent_token_operation *impl_from_silent_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct silent_token_operation, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI silent_async_QueryInterface( IAsyncOperation_IInspectable *iface, REFIID iid, void **out )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo )) *out = &impl->IAsyncInfo_iface;
+    else if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+             IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, impl->type->iid )) *out = iface;
+    else return E_NOINTERFACE;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI silent_async_AddRef( IAsyncOperation_IInspectable *iface )
+{
+    return InterlockedIncrement( &impl_from_silent_async( iface )->ref );
+}
+
+static ULONG WINAPI silent_async_Release( IAsyncOperation_IInspectable *iface )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        TRACE( "silent operation %p final release.\n", impl );
+        if (impl->handler) IAsyncOperationCompletedHandler_IInspectable_Release( impl->handler );
+        if (impl->result) IInspectable_Release( impl->result );
+        if (impl->account) IInspectable_Release( impl->account );
+        WindowsDeleteString( impl->scopes );
+        WindowsDeleteString( impl->client_id );
+        WindowsDeleteString( impl->resource_client_id );
+        if (impl->cancel_event) CloseHandle( impl->cancel_event );
+        if (impl->worker) CloseHandle( impl->worker );
+        DeleteCriticalSection( &impl->cs );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI silent_async_GetIids( IAsyncOperation_IInspectable *iface, ULONG *count, IID **iids )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    if (!count || !iids) return E_POINTER;
+    *iids = CoTaskMemAlloc( 2 * sizeof(**iids) );
+    if (!*iids) return E_OUTOFMEMORY;
+    (*iids)[0] = *impl->type->iid;
+    (*iids)[1] = IID_IAsyncInfo;
+    *count = 2;
+    return S_OK;
+}
+
+static HRESULT WINAPI silent_async_GetRuntimeClassName( IAsyncOperation_IInspectable *iface, HSTRING *name )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+
+    if (!name) return E_POINTER;
+    *name = NULL;
+    return WindowsCreateString( impl->type->class_name, wcslen( impl->type->class_name ), name );
+}
+
+static HRESULT WINAPI silent_async_GetTrustLevel( IAsyncOperation_IInspectable *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT silent_operation_invoke( struct silent_token_operation *impl,
+                                        IAsyncOperationCompletedHandler_IInspectable *handler,
+                                        AsyncStatus status )
+{
+    HRESULT hr;
+
+    hr = IAsyncOperationCompletedHandler_IInspectable_Invoke( handler,
+            &impl->IAsyncOperation_IInspectable_iface, status );
+    TRACE( "silent operation %p callback status %u returned %#lx.\n", impl, status, hr );
+    IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+    silent_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+    return hr;
+}
+
+/* The lock-protected claim is the callback linearization point.  Close can
+ * detach the stored handler after this point, but the callback is already
+ * pinned and logically in flight; a close which wins first suppresses it. */
+static IAsyncOperationCompletedHandler_IInspectable *silent_operation_claim_handler_locked(
+        struct silent_token_operation *impl )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+
+    if (impl->state == SILENT_OPERATION_CLOSED || !impl->handler || impl->callback_claimed) return NULL;
+    impl->callback_claimed = TRUE;
+    IAsyncOperationCompletedHandler_IInspectable_AddRef( handler = impl->handler );
+    silent_async_AddRef( &impl->IAsyncOperation_IInspectable_iface );
+    return handler;
+}
+
+static HRESULT WINAPI silent_async_put_Completed( IAsyncOperation_IInspectable *iface,
+        IAsyncOperationCompletedHandler_IInspectable *handler )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+    IAsyncOperationCompletedHandler_IInspectable *callback = NULL;
+    HRESULT hr = S_OK;
+    AsyncStatus status = Started;
+
+    if (!handler) return E_POINTER;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED) hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->handler) hr = E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    else
+    {
+        IAsyncOperationCompletedHandler_IInspectable_AddRef( impl->handler = handler );
+        if (impl->state == SILENT_OPERATION_COMPLETED) status = impl->error == S_OK ? Completed : Error;
+        else if (impl->state == SILENT_OPERATION_CANCELED) status = Canceled;
+        else if (impl->state == SILENT_OPERATION_RUNNING || impl->state == SILENT_OPERATION_STARTING)
+            status = Started;
+        else status = Error;
+        if (status != Started)
+            callback = silent_operation_claim_handler_locked( impl );
+    }
+    LeaveCriticalSection( &impl->cs );
+    if (callback) silent_operation_invoke( impl, callback, status );
+    return hr;
+}
+
+static HRESULT WINAPI silent_async_get_Completed( IAsyncOperation_IInspectable *iface,
+        IAsyncOperationCompletedHandler_IInspectable **handler )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+
+    if (!handler) return E_POINTER;
+    *handler = NULL;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    if ((*handler = impl->handler)) IAsyncOperationCompletedHandler_IInspectable_AddRef( *handler );
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
+}
+
+static HRESULT WINAPI silent_async_GetResults( IAsyncOperation_IInspectable *iface, IInspectable **result )
+{
+    struct silent_token_operation *impl = impl_from_silent_async( iface );
+    HRESULT hr = S_OK;
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED || impl->state == SILENT_OPERATION_STARTING ||
+        impl->state == SILENT_OPERATION_RUNNING || impl->state == SILENT_OPERATION_CANCELED)
+        hr = E_ILLEGAL_METHOD_CALL;
+    else if (impl->state == SILENT_OPERATION_COMPLETED)
+    {
+        if (FAILED(impl->error)) hr = impl->error;
+        else if ((*result = impl->result)) IInspectable_AddRef( *result );
+    }
+    else hr = impl->error;
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static const IAsyncOperation_IInspectableVtbl silent_async_vtbl =
+{
+    silent_async_QueryInterface, silent_async_AddRef, silent_async_Release,
+    silent_async_GetIids, silent_async_GetRuntimeClassName, silent_async_GetTrustLevel,
+    silent_async_put_Completed, silent_async_get_Completed, silent_async_GetResults,
+};
+
+static HRESULT WINAPI silent_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return silent_async_QueryInterface( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface, iid, out );
+}
+
+static ULONG WINAPI silent_info_AddRef( IAsyncInfo *iface )
+{
+    return silent_async_AddRef( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface );
+}
+
+static ULONG WINAPI silent_info_Release( IAsyncInfo *iface )
+{
+    return silent_async_Release( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface );
+}
+
+static HRESULT WINAPI silent_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    return silent_async_GetIids( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface, count, iids );
+}
+
+static HRESULT WINAPI silent_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return silent_async_GetRuntimeClassName( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface, name );
+}
+
+static HRESULT WINAPI silent_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
+{
+    return silent_async_GetTrustLevel( &impl_from_silent_info( iface )->IAsyncOperation_IInspectable_iface, level );
+}
+
+static HRESULT WINAPI silent_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    struct silent_token_operation *impl = impl_from_silent_info( iface );
+    HRESULT hr = S_OK;
+
+    if (!id) return E_POINTER;
+    *id = 0;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED) hr = E_ILLEGAL_METHOD_CALL;
+    else *id = 1;
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI silent_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    struct silent_token_operation *impl = impl_from_silent_info( iface );
+
+    if (!status) return E_POINTER;
+    *status = Started;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    if (impl->state == SILENT_OPERATION_COMPLETED) *status = impl->error == S_OK ? Completed : Error;
+    else if (impl->state == SILENT_OPERATION_CANCELED) *status = Canceled;
+    else if (impl->state != SILENT_OPERATION_STARTING && impl->state != SILENT_OPERATION_RUNNING)
+        *status = Error;
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
+}
+
+static HRESULT WINAPI silent_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
+{
+    struct silent_token_operation *impl = impl_from_silent_info( iface );
+
+    if (!error) return E_POINTER;
+    *error = S_OK;
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    *error = impl->error;
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
+}
+
+static void silent_operation_complete( struct silent_token_operation *impl, IInspectable *result,
+                                       AsyncStatus status, HRESULT error )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler = NULL;
+    enum silent_operation_state state;
+    BOOL transitioned = FALSE;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_RUNNING)
+    {
+        transitioned = TRUE;
+        impl->error = error;
+        if (status == Completed)
+        {
+            impl->state = SILENT_OPERATION_COMPLETED;
+            if ((impl->result = result)) IInspectable_AddRef( result );
+        }
+        else if (status == Canceled) impl->state = SILENT_OPERATION_CANCELED;
+        else impl->state = SILENT_OPERATION_COMPLETED;
+        handler = silent_operation_claim_handler_locked( impl );
+    }
+    state = impl->state;
+    LeaveCriticalSection( &impl->cs );
+    TRACE( "silent operation %p completed state %u, status %u, error %#lx.\n", impl, state, status, error );
+    if (transitioned) silent_signal_test_completion();
+    if (handler) silent_operation_invoke( impl, handler, status );
+}
+
+static HRESULT WINAPI silent_info_Cancel( IAsyncInfo *iface )
+{
+    struct silent_token_operation *impl = impl_from_silent_info( iface );
+    IAsyncOperationCompletedHandler_IInspectable *handler = NULL;
+    BOOL transitioned = FALSE;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_ILLEGAL_METHOD_CALL;
+    }
+    if (impl->state == SILENT_OPERATION_STARTING || impl->state == SILENT_OPERATION_RUNNING)
+    {
+        transitioned = TRUE;
+        impl->state = SILENT_OPERATION_CANCELED;
+        impl->error = E_ABORT;
+        SetEvent( impl->cancel_event );
+        handler = silent_operation_claim_handler_locked( impl );
+    }
+    LeaveCriticalSection( &impl->cs );
+    TRACE( "silent operation %p canceled.\n", impl );
+    if (transitioned) silent_signal_test_completion();
+    if (handler) silent_operation_invoke( impl, handler, Canceled );
+    return S_OK;
+}
+
+static HRESULT WINAPI silent_info_Close( IAsyncInfo *iface )
+{
+    struct silent_token_operation *impl = impl_from_silent_info( iface );
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    IInspectable *result;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_CLOSED)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return S_OK;
+    }
+    impl->state = SILENT_OPERATION_CLOSED;
+    SetEvent( impl->cancel_event );
+    handler = impl->handler;
+    result = impl->result;
+    impl->handler = NULL;
+    impl->result = NULL;
+    LeaveCriticalSection( &impl->cs );
+    TRACE( "silent operation %p closed.\n", impl );
+    if (handler) IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+    if (result) IInspectable_Release( result );
+    return S_OK;
+}
+
+static const IAsyncInfoVtbl silent_info_vtbl =
+{
+    silent_info_QueryInterface, silent_info_AddRef, silent_info_Release,
+    silent_info_GetIids, silent_info_GetRuntimeClassName, silent_info_GetTrustLevel,
+    silent_info_get_Id, silent_info_get_Status, silent_info_get_ErrorCode,
+    silent_info_Cancel, silent_info_Close,
+};
+
+static DWORD WINAPI silent_token_worker( void *parameter )
+{
+    struct silent_token_operation *impl = parameter;
+    HANDLE refresh_mutex = NULL, cache_mutex = NULL, handles[2];
+    IInspectable *result = NULL;
+    DWORD wait;
+    BOOL owns_mutex = FALSE, canceled = FALSE, gate_canceled = FALSE;
+    BOOL have_token = FALSE, supported = FALSE;
+    INT32 response_status;
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->state == SILENT_OPERATION_STARTING) impl->state = SILENT_OPERATION_RUNNING;
+    else canceled = TRUE;
+    LeaveCriticalSection( &impl->cs );
+    TRACE( "silent operation %p worker entered, canceled %d.\n", impl, canceled );
+    if (canceled) goto done;
+
+    /* The gate is developer-only and is placed before mutex or token work so
+     * the regression can prove that the public caller returned first. */
+    if (!silent_wait_test_worker_gate( impl->cancel_event, &gate_canceled ))
+    {
+        canceled = gate_canceled;
+        goto finish_refresh;
+    }
+
+    supported = is_supported_wam_client( WindowsGetStringRawBuffer( impl->client_id, NULL )) &&
+                is_supported_resource_client( WindowsGetStringRawBuffer( impl->resource_client_id, NULL ));
+    if (supported)
+    {
+        refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
+        if (refresh_mutex)
+        {
+            handles[0] = refresh_mutex;
+            handles[1] = impl->cancel_event;
+            wait = WaitForMultipleObjects( 2, handles, FALSE, INFINITE );
+            if (wait == WAIT_OBJECT_0 + 1) canceled = TRUE;
+            else if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED_0) owns_mutex = TRUE;
+            else TRACE( "silent operation %p refresh mutex wait failed, result %#lx.\n", impl, wait );
+        }
+        /* Never refresh without proving that this worker owns the mutex. */
+        if (!canceled && owns_mutex)
+        {
+            have_token = prepare_silent_wam_token( WindowsGetStringRawBuffer( impl->scopes, NULL ),
+                                                    WindowsGetStringRawBuffer( impl->resource_client_id, NULL ),
+                                                    impl->cancel_event, &canceled );
+        }
+    }
+finish_refresh:
+    if (canceled || silent_cancel_requested( impl->cancel_event ))
+    {
+        if (owns_mutex)
+        {
+            ReleaseMutex( refresh_mutex );
+            owns_mutex = FALSE;
+        }
+        if (refresh_mutex) CloseHandle( refresh_mutex );
+        refresh_mutex = NULL;
+        silent_operation_complete( impl, NULL, Canceled, E_ABORT );
+        goto done;
+    }
+
+    response_status = supported && have_token ? 0 : 3;
+    if (!(cache_mutex = silent_acquire_cache_mutex( impl->cancel_event, &canceled )))
+        hr = canceled ? E_ABORT : E_FAIL;
+    else
+    {
+        hr = web_token_request_result_create( response_status,
+                WindowsGetStringRawBuffer( impl->scopes, NULL ), impl->account, &result );
+        silent_release_cache_mutex( cache_mutex );
+        cache_mutex = NULL;
+    }
+    if (owns_mutex)
+    {
+        ReleaseMutex( refresh_mutex );
+        owns_mutex = FALSE;
+    }
+    if (refresh_mutex) CloseHandle( refresh_mutex );
+    refresh_mutex = NULL;
+    if (canceled) silent_operation_complete( impl, NULL, Canceled, E_ABORT );
+    else if (SUCCEEDED(hr)) silent_operation_complete( impl, result, Completed, S_OK );
+    else silent_operation_complete( impl, NULL, Error, hr );
+    if (result) IInspectable_Release( result );
+done:
+    silent_release_cache_mutex( cache_mutex );
+    if (owns_mutex) ReleaseMutex( refresh_mutex );
+    if (refresh_mutex) CloseHandle( refresh_mutex );
+    silent_signal_test_worker_finished();
+    silent_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+    return 0;
+}
+
+static HRESULT silent_get_resource_client_id( HSTRING scopes, HSTRING client_id, IInspectable *properties,
+                                              HSTRING *resource_client_id )
+{
+    IMap_HSTRING_HSTRING *map = NULL;
+    HSTRING key = NULL;
+    const WCHAR *scope_value;
+    HRESULT hr = E_FAIL;
+
+    if (!resource_client_id) return E_POINTER;
+    *resource_client_id = NULL;
+    if (properties && SUCCEEDED(IInspectable_QueryInterface( properties, &IID_IMap_HSTRING_HSTRING,
+                                                              (void **)&map )))
+    {
+        if (FAILED(hr = WindowsCreateString( L"nestedClientId", 14, &key ))) goto done;
+        hr = IMap_HSTRING_HSTRING_Lookup( map, key, resource_client_id );
+        if (SUCCEEDED(hr)) goto done;
+        WindowsDeleteString( *resource_client_id );
+        *resource_client_id = NULL;
+    }
+
+    scope_value = WindowsGetStringRawBuffer( scopes, NULL );
+    if (scope_value && wcsstr( scope_value, L"engage.cloud.microsoft/teams-branded-exp" ))
+        hr = WindowsCreateString( L"f4060917-6abe-40d7-baa6-f634c0eda4ac", 36, resource_client_id );
+    else hr = WindowsDuplicateString( client_id, resource_client_id );
+
+done:
+    WindowsDeleteString( key );
+    if (map) IMap_HSTRING_HSTRING_Release( map );
+    return hr;
+}
+
+static HRESULT silent_token_operation_create( IInspectable *request_object, IInspectable *account,
+                                              IInspectable **out )
+{
+    struct silent_token_operation *impl;
+    struct web_token_request *request = NULL;
+    IInspectable *properties = NULL;
+    HSTRING scopes = NULL, client_id = NULL, resource_client_id = NULL;
+    BOOL worker_reference = FALSE;
+    DWORD last_error;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!request_object) return E_INVALIDARG;
+    if (FAILED(hr = IInspectable_QueryInterface( request_object, &IID_IWebTokenRequest,
+                                                  (void **)&request ))) return hr;
+    if (FAILED(hr = request->lpVtbl->get_Scope( request, &scopes )) ||
+        FAILED(hr = request->lpVtbl->get_ClientId( request, &client_id )) ||
+        FAILED(hr = request->lpVtbl->get_Properties( request, &properties )) ||
+        FAILED(hr = silent_get_resource_client_id( scopes, client_id, properties, &resource_client_id )))
+        goto failed_request;
+    IInspectable_Release( (IInspectable *)request );
+    request = NULL;
+    if (properties) IInspectable_Release( properties );
+    properties = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) )))
+    {
+        hr = E_OUTOFMEMORY;
+        goto failed_request;
+    }
+    impl->IAsyncOperation_IInspectable_iface.lpVtbl = &silent_async_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &silent_info_vtbl;
+    impl->ref = 1;
+    impl->type = &async_web_token_request_result;
+    impl->state = SILENT_OPERATION_STARTING;
+    impl->error = S_OK;
+    InitializeCriticalSection( &impl->cs );
+    impl->scopes = scopes;
+    impl->client_id = client_id;
+    impl->resource_client_id = resource_client_id;
+    scopes = NULL;
+    client_id = NULL;
+    resource_client_id = NULL;
+    if (account) IInspectable_AddRef( impl->account = account );
+    if (!(impl->cancel_event = CreateEventW( NULL, TRUE, FALSE, NULL )))
+    {
+        last_error = GetLastError();
+        hr = HRESULT_FROM_WIN32( last_error ? last_error : ERROR_FUNCTION_FAILED );
+        goto failed;
+    }
+    /* Keep the operation alive independently of the caller until the worker
+     * has released every field and callback reference.  Keep the ownership
+     * bit explicit so CreateThread failure cannot release either reference
+     * twice or leave the allocation alive without a worker. */
+    silent_async_AddRef( &impl->IAsyncOperation_IInspectable_iface );
+    worker_reference = TRUE;
+    impl->worker = CreateThread( NULL, 0, silent_token_worker, impl, 0, NULL );
+    if (!impl->worker)
+    {
+        last_error = GetLastError();
+        hr = HRESULT_FROM_WIN32( last_error ? last_error : ERROR_FUNCTION_FAILED );
+        if (worker_reference)
+        {
+            worker_reference = FALSE;
+            silent_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+        }
+        goto failed;
+    }
+    *out = (IInspectable *)&impl->IAsyncOperation_IInspectable_iface;
+    TRACE( "silent operation %p returned pending.\n", impl );
+    return S_OK;
+
+failed:
+    if (worker_reference) silent_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+    silent_async_Release( &impl->IAsyncOperation_IInspectable_iface );
+failed_request:
+    if (request) IInspectable_Release( (IInspectable *)request );
+    if (properties) IInspectable_Release( properties );
+    WindowsDeleteString( scopes );
+    WindowsDeleteString( client_id );
+    WindowsDeleteString( resource_client_id );
+    return hr;
 }
 
 static HRESULT WINAPI web_manager_GetTokenSilentlyAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )
 {
-    IInspectable *result;
-    HANDLE refresh_mutex;
-    HRESULT hr;
-
     TRACE( "iface %p, request %p, operation %p.\n", iface, request, operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
-    {
-        struct web_token_request *token_request = (struct web_token_request *)request;
-        const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
-        const WCHAR *scopes = WindowsGetStringRawBuffer( token_request->scope, NULL );
-        const WCHAR *resource_client_id;
-        HSTRING nested_client_id;
-        INT32 status;
-        resource_client_id = get_resource_client_id( token_request, &nested_client_id );
-        refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
-        if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
-        status = is_supported_wam_client( client_id ) &&
-                 is_supported_resource_client( resource_client_id ) &&
-                 prepare_silent_wam_token( scopes, resource_client_id ) ? 0 : 3;
-        hr = web_token_request_result_create( status, scopes, NULL, &result );
-        if (refresh_mutex)
-        {
-            ReleaseMutex( refresh_mutex );
-            CloseHandle( refresh_mutex );
-        }
-        WindowsDeleteString( nested_client_id );
-        if (FAILED(hr)) return hr;
-    }
-    hr = completed_provider_operation_create( &async_web_token_request_result, result, operation );
-    IInspectable_Release( result );
-    return hr;
+    return silent_token_operation_create( request, NULL, operation );
 }
+
 static HRESULT WINAPI web_manager_GetTokenSilentlyWithWebAccountAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable *account,
         IInspectable **operation )
 {
-    struct web_token_request *token_request = (struct web_token_request *)request;
-    const WCHAR *client_id = WindowsGetStringRawBuffer( token_request->client_id, NULL );
-    const WCHAR *resource_client_id;
-    HSTRING nested_client_id;
-    IInspectable *result;
-    HANDLE refresh_mutex;
-    HRESULT hr;
-
     TRACE( "iface %p, request %p, account %p, operation %p.\n", iface, request, account, operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
-    resource_client_id = get_resource_client_id( token_request, &nested_client_id );
-    refresh_mutex = CreateMutexW( NULL, FALSE, L"Wine365WamTokenRefresh" );
-    if (refresh_mutex) WaitForSingleObject( refresh_mutex, INFINITE );
-    hr = web_token_request_result_create( is_supported_wam_client( client_id ) &&
-            is_supported_resource_client( resource_client_id ) &&
-            prepare_silent_wam_token(
-            WindowsGetStringRawBuffer( token_request->scope, NULL ),
-            resource_client_id ) ? 0 : 3,
-            WindowsGetStringRawBuffer( token_request->scope, NULL ), account, &result );
-    if (refresh_mutex)
-    {
-        ReleaseMutex( refresh_mutex );
-        CloseHandle( refresh_mutex );
-    }
-    WindowsDeleteString( nested_client_id );
-    if (FAILED(hr)) return hr;
-    hr = completed_provider_operation_create( &async_web_token_request_result, result, operation );
-    IInspectable_Release( result );
-    return hr;
+    return silent_token_operation_create( request, account, operation );
 }
 static HRESULT WINAPI web_manager_RequestTokenAsync(
         struct web_authentication_core_manager_statics *iface, IInspectable *request, IInspectable **operation )

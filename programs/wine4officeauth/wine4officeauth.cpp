@@ -361,34 +361,40 @@ public:
     bool valid() const { return locked; }
 };
 
+struct cache_record;
+static bool cache_record_load_locked(const std::string &login_hint, cache_record &record);
+
 class cache_transaction
 {
     cache_lock lock;
-    std::wstring marker, target, backup, temporary;
-    bool active = false, replaced = false;
-    bool write_marker(const char *state = "prepared")
+    std::wstring marker, target, backup, temporary, previous_projection;
+    std::string marker_state = "prepared";
+    bool active = false, replaced = false, target_existed = false;
+    bool write_marker(const char *new_state = NULL)
     {
         HANDLE file;
         DWORD written;
-        std::string name;
+        std::string name, previous, state = new_state ? new_state : marker_state;
         std::wstring marker_temporary;
 
         if (target.empty()) return false;
         const WCHAR *filename = wcsrchr(target.c_str(), L'\\');
         name = wide_to_utf8(filename ? filename + 1 : target.c_str());
+        previous = previous_projection.empty() ? "-" : wide_to_utf8(previous_projection.c_str());
         marker = cache_file(L"wam-transaction.pending");
         if (marker.empty()) return false;
         marker_temporary = marker + L".new";
         file = CreateFileW(marker_temporary.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
         if (file == INVALID_HANDLE_VALUE) return false;
-        std::string content = "Wine4OfficeWamBundle=1\n" + name + "\n" + state + "\n";
+        std::string content = "Wine4OfficeWamBundle=1\n" + name + "\n" + state + "\n" + previous + "\n";
         bool success = WriteFile(file, content.data(), content.size(), &written, NULL) &&
                        written == content.size() && FlushFileBuffers(file);
         CloseHandle(file);
         if (success) success = MoveFileExW(marker_temporary.c_str(), marker.c_str(),
                                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
         if (!success) DeleteFileW(marker_temporary.c_str());
+        else marker_state = state;
         return success;
     }
 
@@ -409,7 +415,18 @@ public:
 
     bool commit()
     {
-        if (!valid() || !DeleteFileW(marker.c_str())) return false;
+        WCHAR fault[64];
+        DWORD length;
+
+        if (!valid() || marker_state != "verified") return false;
+        length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_COMMIT_FAILURE", fault, ARRAY_SIZE(fault));
+        if (length && length < ARRAY_SIZE(fault) && !wcscmp(fault, L"marker-delete"))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_COMMIT_FAILURE", NULL);
+            SetLastError(ERROR_ACCESS_DENIED);
+            return false;
+        }
+        if (!DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) return false;
         DeleteFileW(backup.c_str());
         DeleteFileW(temporary.c_str());
         active = false;
@@ -418,27 +435,61 @@ public:
 
     bool rollback()
     {
+        WCHAR fault[64];
         bool success = true;
         if (!active) return false;
         DeleteFileW(temporary.c_str());
         if (replaced)
         {
-            if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+            if (!write_marker(target_existed ? "rolling-back-existing" : "rolling-back-new"))
+                return false;
+            if (target_existed)
             {
-                success = DeleteFileW(target.c_str()) &&
+                success = GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES &&
+                          DeleteFileW(target.c_str()) &&
                           MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
             }
             else success = DeleteFileW(target.c_str()) ||
                            GetLastError() == ERROR_FILE_NOT_FOUND;
         }
-        if (success && !DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
-            success = false;
+        if (success)
+        {
+            DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE",
+                                                    fault, ARRAY_SIZE(fault));
+            if (length && length < ARRAY_SIZE(fault) && !wcscmp(fault, L"marker-delete"))
+            {
+                SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", NULL);
+                SetLastError(ERROR_ACCESS_DENIED);
+                success = false;
+            }
+            else if (!DeleteFileW(marker.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)
+                success = false;
+        }
         if (success)
         {
             DeleteFileW(backup.c_str());
             active = false;
         }
         return success;
+    }
+
+    bool load_previous(cache_record &record) const
+    {
+        return valid() && cache_record_load_locked({}, record);
+    }
+
+    bool set_previous_projection(const std::wstring &bundle_name)
+    {
+        std::wstring previous = previous_projection;
+        previous_projection = bundle_name;
+        if (write_marker()) return true;
+        previous_projection = previous;
+        return false;
+    }
+
+    bool mark_verified()
+    {
+        return valid() && replaced && write_marker("verified");
     }
 
     bool replace_bundle(const std::string &value);
@@ -448,6 +499,7 @@ static bool protected_write(const WCHAR *name, const std::string &value)
 {
     DATA_BLOB input, output = {};
     std::wstring path = cache_file(name), temporary;
+    WCHAR fault[128], expected[128];
     HANDLE file;
     DWORD written;
     bool success = false;
@@ -461,11 +513,32 @@ static bool protected_write(const WCHAR *name, const std::string &value)
                        FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
     if (file != INVALID_HANDLE_VALUE)
     {
+        DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                                fault, ARRAY_SIZE(fault));
         success = WriteFile(file, output.pbData, output.cbData, &written, NULL) &&
-                  written == output.cbData && FlushFileBuffers(file);
+                  written == output.cbData;
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:write", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:flush", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else if (success) success = FlushFileBuffers(file);
         CloseHandle(file);
-        if (success) success = MoveFileExW(temporary.c_str(), path.c_str(),
-                                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        swprintf(expected, ARRAY_SIZE(expected), L"%s:rename", name);
+        if (success && length && length < ARRAY_SIZE(fault) && !wcscmp(fault, expected))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else if (success) success = MoveFileExW(temporary.c_str(), path.c_str(),
+                                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
         if (!success) DeleteFileW(temporary.c_str());
     }
     LocalFree(output.pbData);
@@ -526,6 +599,8 @@ bool cache_transaction::replace_bundle(const std::string &value)
     bool success = false;
 
     if (!valid()) return false;
+    target_existed = GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (!write_marker(target_existed ? "replacing-existing" : "replacing-new")) return false;
     input.cbData = value.size();
     input.pbData = (BYTE *)value.data();
     if (!CryptProtectData(&input, L"Wine4Office WAM bundle", NULL, NULL, NULL,
@@ -547,7 +622,7 @@ bool cache_transaction::replace_bundle(const std::string &value)
         if (!success) DeleteFileW(temporary.c_str());
     }
     replaced = success;
-    if (success && !write_marker("replaced")) success = false;
+    if (success && !write_marker(target_existed ? "replaced-existing" : "replaced-new")) success = false;
     return success;
 }
 
@@ -836,6 +911,16 @@ static std::wstring cache_bundle_name(const std::string &username)
     return L"wam-bundle-" + std::wstring(suffix) + L".dat";
 }
 
+static bool cache_bundle_name_valid(const std::string &name)
+{
+    if (name.compare(0, 11, "wam-bundle-") || name.size() != 11 + 32 + 4 ||
+        name.compare(name.size() - 4, 4, ".dat"))
+        return false;
+    for (size_t i = 11; i < 11 + 32; ++i)
+        if (!std::isxdigit((unsigned char)name[i])) return false;
+    return true;
+}
+
 static std::string json_escape(const std::string &value)
 {
     std::string result;
@@ -948,15 +1033,55 @@ static bool cache_record_identity_valid(const cache_record &record, const std::s
     return success;
 }
 
+static bool cache_record_load_bundle_locked(const std::wstring &bundle_name, cache_record &record)
+{
+    std::string json;
+    std::wstring expected;
+
+    record = {};
+    if (bundle_name.empty() || !protected_read_path(cache_file(bundle_name.c_str()), json, false) ||
+        !cache_record_from_json(json, record) || !cache_record_identity_valid(record, {}))
+    {
+        secure_clear(json);
+        secure_clear(record);
+        return false;
+    }
+    expected = cache_bundle_name(record.username);
+    secure_clear(json);
+    if (expected != bundle_name)
+    {
+        secure_clear(record);
+        return false;
+    }
+    return true;
+}
+
+static bool cache_record_matches(const cache_record &left, const cache_record &right)
+{
+    return left.office.access_token == right.office.access_token &&
+           left.office.refresh_token == right.office.refresh_token &&
+           left.office.id_token == right.office.id_token &&
+           left.licensing.access_token == right.licensing.access_token &&
+           left.licensing.refresh_token == right.licensing.refresh_token &&
+           left.licensing.id_token == right.licensing.id_token &&
+           left.licensing.expires_in == right.licensing.expires_in &&
+           left.username == right.username && left.oid == right.oid && left.tid == right.tid &&
+           left.first_name == right.first_name && left.last_name == right.last_name &&
+           left.display_name == right.display_name && left.account_id == right.account_id &&
+           left.authority == right.authority && left.client_info == right.client_info &&
+           left.expires == right.expires;
+}
+
 static bool recover_cache_transaction_locked(void)
 {
     std::wstring marker = cache_file(L"wam-transaction.pending");
     LARGE_INTEGER size;
     HANDLE file;
     DWORD read;
-    std::string content, name;
-    std::wstring target, backup, temporary;
-    bool success = true, transaction_replaced = false;
+    std::string content, name, state, previous_name;
+    std::wstring target, backup, temporary, previous_bundle;
+    bool legacy_marker = false, restore_previous_projection = false;
+    bool success = true, target_existed = false, target_is_new = false, verified = false;
 
     if (marker.empty() || GetFileAttributesW(marker.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
     file = CreateFileW(marker.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
@@ -975,40 +1100,78 @@ static bool recover_cache_transaction_locked(void)
         return true;
     }
     {
-        size_t prefix_len = strlen("Wine4OfficeWamBundle=1\n"), name_end;
+        size_t prefix_len = strlen("Wine4OfficeWamBundle=1\n"), name_end, state_end, previous_end;
         name_end = content.find('\n', prefix_len);
         if (name_end == std::string::npos) return false;
         name = content.substr(prefix_len, name_end - prefix_len);
-        transaction_replaced = content.compare(name_end + 1, strlen("replaced"), "replaced") == 0;
-        if (name.compare(0, 11, "wam-bundle-") || name.size() != 11 + 32 + 4 ||
-            name.compare(name.size() - 4, 4, ".dat"))
+        state_end = content.find('\n', name_end + 1);
+        if (state_end == std::string::npos) return false;
+        state = content.substr(name_end + 1, state_end - name_end - 1);
+        previous_end = content.find('\n', state_end + 1);
+        if (previous_end == std::string::npos) legacy_marker = true;
+        else previous_name = content.substr(state_end + 1, previous_end - state_end - 1);
+        if (state != "prepared" && state != "replacing-existing" && state != "replacing-new" &&
+            state != "replaced" && state != "replaced-existing" && state != "replaced-new" &&
+            state != "rolling-back-existing" && state != "rolling-back-new" && state != "verified")
             return false;
-        for (size_t i = 11; i < 11 + 32; ++i)
-            if (!std::isxdigit((unsigned char)name[i])) return false;
+        if (!cache_bundle_name_valid(name) ||
+            (!legacy_marker && previous_name != "-" && !cache_bundle_name_valid(previous_name)))
+            return false;
+        target_existed = state == "replacing-existing" || state == "replaced-existing" ||
+                         state == "rolling-back-existing";
+        target_is_new = state == "replacing-new" || state == "replaced-new" ||
+                        state == "rolling-back-new" || state == "replaced";
+        restore_previous_projection = state == "replaced-existing" || state == "replaced-new" ||
+                                      state == "replaced";
+        verified = state == "verified";
         target = cache_file(utf8_to_wide(name).c_str());
         backup = target + L".bak";
         temporary = target + L".new";
-        if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+        if (verified)
         {
-            DeleteFileW(target.c_str());
-            success = MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+            if (!DeleteFileW(backup.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) success = false;
         }
-        else if (transaction_replaced) DeleteFileW(target.c_str());
-        DeleteFileW(temporary.c_str());
+        else if (GetFileAttributesW(backup.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            success = (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) &&
+                      MoveFileExW(backup.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH);
+        }
+        else if (target_is_new)
+            success = DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
+        else if (target_existed && restore_previous_projection &&
+                 GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES)
+            success = false;
+        if (!DeleteFileW(temporary.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) success = false;
+
+        if (!legacy_marker && previous_name != "-")
+            previous_bundle = utf8_to_wide(previous_name);
     }
-    DeleteFileW(temporary.c_str());
-    if (success)
+    if (success && restore_previous_projection)
     {
-        std::string json;
-        cache_record record;
-        if (protected_read_path(target, json, false) &&
-            cache_record_from_json(json, record) &&
-            cache_record_identity_valid(record, {}))
-            success = publish_projection(record);
-        else success = clear_projection();
-        secure_clear(json);
-        secure_clear(record);
+        cache_record previous;
+
+        if (legacy_marker)
+        {
+            /* Old markers did not identify the previously projected account.
+             * Preserve their original recovery behavior: publish a restored
+             * target, or clear the projection when the interrupted write had
+             * created a new target that recovery removed. */
+            if (GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES)
+                success = clear_projection();
+            else if (!cache_record_load_bundle_locked(utf8_to_wide(name), previous))
+                success = clear_projection();
+            else success = publish_projection(previous);
+        }
+        else if (previous_name == "-") success = clear_projection();
+        else if (!cache_record_load_bundle_locked(previous_bundle, previous))
+            success = clear_projection();
+        else success = publish_projection(previous);
+        secure_clear(previous);
     }
+    /* Prepared, replacing, and rolling-back states have not changed the
+     * active projection, or have already restored it.  A verified state has
+     * a complete new projection.  Preserve both instead of republishing the
+     * target account. */
     if (success) success = DeleteFileW(marker.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
     return success;
 }
@@ -1021,7 +1184,7 @@ static bool recover_cache_transaction(void)
 
 static bool cache_record_load_locked(const std::string &login_hint, cache_record &record)
 {
-    std::string username = login_hint, active_username, json;
+    std::string username = login_hint, active_username;
     std::wstring bundle;
     record = {};
     if (username.empty())
@@ -1030,16 +1193,13 @@ static bool cache_record_load_locked(const std::string &login_hint, cache_record
             return false;
         username = active_username;
     }
-    bundle = cache_file(cache_bundle_name(username).c_str());
-    if (bundle.empty() || !protected_read_path(bundle, json, false) ||
-        !cache_record_from_json(json, record) ||
-        !cache_record_identity_valid(record, login_hint))
+    bundle = cache_bundle_name(username);
+    if (!cache_record_load_bundle_locked(bundle, record) ||
+        (!login_hint.empty() && !same_account_string(record.username, login_hint)))
     {
-        secure_clear(json);
         secure_clear(record);
         return false;
     }
-    secure_clear(json);
     secure_clear(username);
     return true;
 }
@@ -1096,27 +1256,75 @@ static bool cache_record_save(const cache_record &record)
 {
     std::wstring bundle_name = cache_bundle_name(record.username);
     std::wstring bundle = cache_file(bundle_name.c_str());
+    cache_record previous;
     cache_transaction transaction;
     std::string bundle_json;
-    bool success;
+    bool previous_valid, success;
 
     if (bundle_name.empty() || bundle.empty() ||
         !cache_record_identity_valid(record, {}) || !transaction.begin(bundle))
         return false;
+    /* Snapshot the old generation only after the transaction owns the cache
+     * mutex.  Otherwise a second writer could publish between the snapshot
+     * and begin(), leaving rollback projections from the wrong generation. */
+    previous_valid = transaction.load_previous(previous);
+    if (!transaction.set_previous_projection(previous_valid ? cache_bundle_name(previous.username) : L""))
+    {
+        transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
     bundle_json = cache_record_json(record);
     success = transaction.replace_bundle(bundle_json);
     secure_clear(bundle_json);
     if (!success)
     {
         transaction.rollback();
+        secure_clear(previous);
         return false;
     }
-    if (!publish_projection(record)) return false;
+    if (!publish_projection(record))
+    {
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
+    {
+        WCHAR fault[64];
+        cache_record verified;
+        DWORD length = GetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                                fault, ARRAY_SIZE(fault));
+        if (length && length < ARRAY_SIZE(fault) && !wcscmp(fault, L"final-read"))
+        {
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+            success = false;
+        }
+        else success = cache_record_load_locked({}, verified) && cache_record_matches(record, verified);
+        secure_clear(verified);
+    }
+    if (!success)
+    {
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
+    if (!transaction.mark_verified())
+    {
+        success = previous_valid ? publish_projection(previous) : clear_projection();
+        if (success) transaction.rollback();
+        secure_clear(previous);
+        return false;
+    }
     if (!transaction.commit())
     {
-        transaction.rollback();
+        /* The verified marker makes the complete new generation recoverable.
+         * Do not roll it back merely because marker cleanup failed. */
+        secure_clear(previous);
         return false;
     }
+    secure_clear(previous);
     return true;
 }
 
@@ -1917,7 +2125,161 @@ static void self_test_record(cache_record &record, const char *username, const c
     record.licensing.access_token = std::string("license-") + suffix;
     record.licensing.refresh_token = record.office.refresh_token;
     record.licensing.id_token = record.office.id_token;
-    record.expires = unix_time() + 3600;
+    /* Keep parent and crash-test child records byte-for-byte identical. */
+    record.expires = 4102444800ULL;
+}
+
+static bool self_test_projection_value(const WCHAR *name, const std::string &expected)
+{
+    std::string value;
+    bool success = protected_read(name, value) && value == expected;
+    secure_clear(value);
+    return success;
+}
+
+static bool self_test_projection(const cache_record &record)
+{
+    std::string expires = std::to_string(record.expires);
+    bool success =
+        self_test_projection_value(L"wam-access-token.dat", record.office.access_token) &&
+        self_test_projection_value(L"wam-id-token.dat", record.office.id_token) &&
+        self_test_projection_value(L"wam-refresh-token.dat", record.office.refresh_token) &&
+        self_test_projection_value(L"wam-licensing-token.dat", record.licensing.access_token) &&
+        self_test_projection_value(L"wam-token-expires-on.dat", expires) &&
+        self_test_projection_value(L"wam-account-username.dat", record.username) &&
+        self_test_projection_value(L"wam-account-id.dat", record.account_id) &&
+        self_test_projection_value(L"wam-account-oid.dat", record.oid) &&
+        self_test_projection_value(L"wam-account-tenant-id.dat", record.tid) &&
+        self_test_projection_value(L"wam-account-authority.dat", record.authority) &&
+        self_test_projection_value(L"wam-client-info.dat", record.client_info) &&
+        self_test_projection_value(L"wam-active-account.dat", record.username);
+    secure_clear(expires);
+    return success;
+}
+
+static bool self_test_publication_failures(const cache_record &first, const cache_record &second,
+                                           const std::wstring &first_bundle)
+{
+    static const WCHAR *const fields[] =
+    {
+        L"wam-access-token.dat", L"wam-id-token.dat", L"wam-refresh-token.dat",
+        L"wam-licensing-token.dat", L"wam-token-expires-on.dat", L"wam-account-username.dat",
+        L"wam-account-id.dat", L"wam-account-oid.dat", L"wam-account-tenant-id.dat",
+        L"wam-account-authority.dat", L"wam-client-info.dat", L"wam-active-account.dat"
+    };
+    unsigned int i;
+    WCHAR fault[128];
+    cache_record loaded;
+    bool success = true;
+
+    for (i = 0; i < ARRAY_SIZE(fields) && success; ++i)
+    {
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:write", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+        if (!success) break;
+
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:flush", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+        if (!success) break;
+
+        swprintf(fault, ARRAY_SIZE(fault), L"%s:rename", fields[i]);
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", fault);
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
+    if (success)
+    {
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", L"final-read");
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
+    if (success)
+    {
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", L"final-read");
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", L"marker-delete");
+        success = !cache_record_save(first) && cache_record_load(second.username, loaded) &&
+                  cache_record_matches(second, loaded) && self_test_projection(second);
+        secure_clear(loaded);
+    }
+    if (success)
+    {
+        SetEnvironmentVariableW(L"WINE4OFFICE_TEST_COMMIT_FAILURE", L"marker-delete");
+        success = !cache_record_save(first) && cache_record_load(first.username, loaded) &&
+                  cache_record_matches(first, loaded) && self_test_projection(first) &&
+                  cache_record_save(second);
+        secure_clear(loaded);
+    }
+    SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+    SetEnvironmentVariableW(L"WINE4OFFICE_TEST_ROLLBACK_FAILURE", NULL);
+    SetEnvironmentVariableW(L"WINE4OFFICE_TEST_COMMIT_FAILURE", NULL);
+    DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+    secure_clear(loaded);
+    return success;
+}
+
+static int self_test_cache_state_child(const WCHAR *state)
+{
+    cache_record first, second;
+    std::wstring first_bundle, second_bundle;
+    std::string first_json;
+    bool success = false;
+
+    self_test_record(first, "first@example.invalid", "11111111-1111-1111-1111-111111111111",
+                     "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "first");
+    self_test_record(second, "second@example.invalid", "22222222-2222-2222-2222-222222222222",
+                     "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "second");
+    first_bundle = cache_bundle_name(first.username);
+    second_bundle = cache_bundle_name(second.username);
+    cache_transaction interrupted;
+    success = interrupted.begin(cache_file(first_bundle.c_str())) &&
+              interrupted.set_previous_projection(second_bundle);
+    if (success && !wcscmp(state, L"replaced"))
+        success = interrupted.replace_bundle("partial bundle");
+    else if (success && !wcscmp(state, L"verified"))
+    {
+        first_json = cache_record_json(first);
+        success = interrupted.replace_bundle(first_json) && publish_projection(first) &&
+                  interrupted.mark_verified();
+    }
+    else if (wcscmp(state, L"prepared")) success = false;
+    secure_clear(first_json);
+    secure_clear(first);
+    secure_clear(second);
+    if (success) TerminateProcess(GetCurrentProcess(), 0x365);
+    return 3;
+}
+
+static bool self_test_run_cache_state_child(const WCHAR *state)
+{
+    WCHAR module[MAX_PATH], command[2 * MAX_PATH];
+    PROCESS_INFORMATION process = {};
+    STARTUPINFOW startup = {sizeof(startup)};
+    DWORD exit_code = 3, wait;
+    bool success = false;
+
+    if (!GetModuleFileNameW(NULL, module, ARRAY_SIZE(module)) ||
+        swprintf(command, ARRAY_SIZE(command), L"\"%s\" --self-test-cache-state %s", module, state) < 0 ||
+        !CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process))
+        return false;
+    wait = WaitForSingleObject(process.hProcess, 30000);
+    if (wait == WAIT_TIMEOUT)
+    {
+        TerminateProcess(process.hProcess, WAIT_TIMEOUT);
+        WaitForSingleObject(process.hProcess, 5000);
+    }
+    else success = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exit_code) &&
+                   exit_code == 0x365;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return success;
 }
 
 struct cache_lock_probe
@@ -1954,6 +2316,44 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     bool success;
     (void)previous; (void)command_line; (void)show;
     if (!argv) return 3;
+    if (argc >= 3 && !wcscmp(argv[1], L"--self-test-helper"))
+    {
+        if (!wcscmp(argv[2], L"fail"))
+        {
+            LocalFree(argv);
+            return 7;
+        }
+        if (!wcscmp(argv[2], L"crash"))
+        {
+            TerminateProcess(GetCurrentProcess(), 0xc0000005);
+            LocalFree(argv);
+            return 3;
+        }
+        if (!wcscmp(argv[2], L"timeout"))
+        {
+            HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+            if (event)
+            {
+                WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+            LocalFree(argv);
+            return 3;
+        }
+        if (!wcscmp(argv[2], L"shutdown"))
+        {
+            LocalFree(argv);
+            return 3;
+        }
+        LocalFree(argv);
+        return 0;
+    }
+    if (argc >= 3 && !wcscmp(argv[1], L"--self-test-cache-state"))
+    {
+        int result = self_test_cache_state_child(argv[2]);
+        LocalFree(argv);
+        return result;
+    }
     if (argc >= 2 && !wcscmp(argv[1], L"--self-test-cache"))
     {
         bool recovered = recover_cache_transaction();
@@ -1974,6 +2374,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
                                loaded.office.refresh_token == first.office.refresh_token;
         if (success) success = cache_record_load(second.username, loaded) &&
                                loaded.office.refresh_token == second.office.refresh_token;
+        if (success) success = self_test_projection(second);
+        if (success) success = self_test_publication_failures(first, second, first_bundle);
         mismatch = "third@example.invalid";
         if (success) success = !cache_record_load(mismatch, loaded);
         if (success)
@@ -1994,18 +2396,59 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
         }
         if (success)
         {
-            protected_write(first_bundle.c_str(), "corrupt bundle");
-            success = !cache_record_load(first.username, loaded) && cache_record_save(first);
+            success = self_test_run_cache_state_child(L"prepared");
+            if (success) success = cache_record_load(second.username, loaded) &&
+                                   cache_record_matches(second, loaded) && self_test_projection(second);
         }
         if (success)
         {
-            {
-                cache_transaction interrupted;
-                success = interrupted.begin(cache_file(first_bundle.c_str())) &&
-                          interrupted.replace_bundle("partial bundle");
-            }
+            success = self_test_run_cache_state_child(L"replaced");
+            if (success) success = cache_record_load(second.username, loaded) &&
+                                   cache_record_matches(second, loaded) && self_test_projection(second);
+        }
+        if (success)
+        {
+            success = self_test_run_cache_state_child(L"verified");
             if (success) success = cache_record_load(first.username, loaded) &&
-                                   loaded.office.refresh_token == first.office.refresh_token;
+                                   cache_record_matches(first, loaded) && self_test_projection(first) &&
+                                   cache_record_save(second);
+        }
+        if (success)
+        {
+            /* Recovery may consume an existing target's backup before a
+             * transient projection failure.  The retained marker must make
+             * the next recovery attempt idempotent. */
+            success = self_test_run_cache_state_child(L"replaced");
+            if (success)
+            {
+                SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE",
+                                        L"wam-access-token.dat:write");
+                success = !cache_record_load(second.username, loaded) &&
+                          cache_transaction_pending() &&
+                          cache_record_load(second.username, loaded) &&
+                          cache_record_matches(second, loaded) && self_test_projection(second) &&
+                          !cache_transaction_pending();
+            }
+            SetEnvironmentVariableW(L"WINE4OFFICE_TEST_PUBLICATION_FAILURE", NULL);
+        }
+        if (success)
+        {
+            /* A permanently unreadable previous bundle cannot be republished.
+             * Clear the projection and retire the marker so a later sign-in
+             * can replace the damaged cache instead of wedging forever. */
+            DeleteFileW(cache_file(first_bundle.c_str()).c_str());
+            success = self_test_run_cache_state_child(L"replaced") &&
+                      protected_write(second_bundle.c_str(), "corrupt bundle") &&
+                      !cache_record_load(second.username, loaded) &&
+                      !cache_transaction_pending() &&
+                      GetFileAttributesW(cache_file(L"wam-active-account.dat").c_str()) ==
+                          INVALID_FILE_ATTRIBUTES &&
+                      cache_record_save(second);
+        }
+        if (success)
+        {
+            protected_write(first_bundle.c_str(), "corrupt bundle");
+            success = !cache_record_load(first.username, loaded) && cache_record_save(first);
         }
         DeleteFileW(cache_file(first_bundle.c_str()).c_str());
         DeleteFileW(cache_file(second_bundle.c_str()).c_str());
