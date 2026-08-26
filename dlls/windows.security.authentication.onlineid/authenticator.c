@@ -2206,6 +2206,16 @@ static HRESULT web_account_create( IInspectable **out )
 {
     static const WCHAR provider_id[] = L"https://login.microsoft.com";
     static const WCHAR provider_authority[] = L"organizations";
+    /* A consumer Microsoft account lives in the MSA tenant and is published
+     * under the consumer provider. Describing it as a work/school account
+     * makes Office discard it, so the account never appears as signed in. */
+    static const WCHAR msa_tenant_id[] = L"9188040d-6c67-4c5b-b112-36a304b66dad";
+    static const WCHAR consumer_provider_id[] = L"https://login.windows.local";
+    static const WCHAR consumer_authority[] = L"consumers";
+    const WCHAR *use_provider_id = provider_id;
+    const WCHAR *use_authority = provider_authority;
+    size_t provider_id_length = ARRAY_SIZE(provider_id) - 1;
+    size_t authority_length = ARRAY_SIZE(provider_authority) - 1;
     WCHAR *username = NULL, *account_id = NULL, *oid = NULL, *tid = NULL, *authority = NULL;
     WCHAR *first_name = NULL, *last_name = NULL, *display_name = NULL;
     struct web_account *impl = NULL;
@@ -2223,6 +2233,14 @@ static HRESULT web_account_create( IInspectable **out )
         hr = HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
         goto done;
     }
+    if (!wcsicmp( tid, msa_tenant_id ))
+    {
+        use_provider_id = consumer_provider_id;
+        use_authority = consumer_authority;
+        provider_id_length = ARRAY_SIZE(consumer_provider_id) - 1;
+        authority_length = ARRAY_SIZE(consumer_authority) - 1;
+        TRACE( "publishing a consumer account under %s.\n", debugstr_w( use_provider_id ) );
+    }
     first_name = load_wam_token_file( L"C:\\wam-account-first-name.txt" );
     last_name = load_wam_token_file( L"C:\\wam-account-last-name.txt" );
     display_name = load_wam_token_file( L"C:\\wam-account-display-name.txt" );
@@ -2235,8 +2253,8 @@ static HRESULT web_account_create( IInspectable **out )
     impl->lpVtbl = &web_account_vtbl;
     impl->IWebAccount2_iface.lpVtbl = &web_account2_vtbl;
     impl->ref = 1;
-    if (FAILED(hr = WindowsCreateString( provider_id, ARRAY_SIZE(provider_id) - 1, &id )) ||
-        FAILED(hr = WindowsCreateString( provider_authority, ARRAY_SIZE(provider_authority) - 1, &auth )) ||
+    if (FAILED(hr = WindowsCreateString( use_provider_id, provider_id_length, &id )) ||
+        FAILED(hr = WindowsCreateString( use_authority, authority_length, &auth )) ||
         FAILED(hr = web_account_provider_create( id, auth, &impl->provider )) ||
         FAILED(hr = WindowsCreateString( username, wcslen( username ), &impl->username )) ||
         FAILED(hr = WindowsCreateString( account_id, wcslen( account_id ), &impl->id )) ||
@@ -2784,6 +2802,40 @@ static const struct web_token_request_result_vtbl token_result_vtbl =
     token_result_get_ResponseError, token_result_InvalidateCacheAsync,
 };
 
+
+/* Office requests several scopes and the projection stores a single access
+ * token, so each refresh overwrote the previous scope's token and Office kept
+ * rejecting the mismatched result. Key each token by its scope instead. */
+static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
+{
+    unsigned long long hash = 1469598103934665603ULL;
+    char utf8[2048];
+    WCHAR name[64];
+    WCHAR *stored, *separator;
+    int length;
+
+    if (expires) *expires = 0;
+    if (!scopes || !*scopes) return NULL;
+    if (!(length = WideCharToMultiByte( CP_UTF8, 0, scopes, -1, utf8, sizeof(utf8), NULL, NULL )))
+        return NULL;
+    for (int i = 0; i < length - 1; i++)
+    {
+        hash ^= (unsigned char)utf8[i];
+        hash *= 1099511628211ULL;
+    }
+    swprintf( name, ARRAY_SIZE(name), L"C:\\wam-scope-%016llx.txt", hash );
+    if (!(stored = load_wam_token_file( name ))) return NULL;
+    if (!(separator = wcschr( stored, '|' )))
+    {
+        free( stored );
+        return NULL;
+    }
+    *separator = 0;
+    if (expires) *expires = _wcstoui64( stored, NULL, 10 );
+    memmove( stored, separator + 1, (wcslen( separator + 1 ) + 1) * sizeof(WCHAR) );
+    return stored;
+}
+
 static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scopes,
                                                 IInspectable *account, IInspectable **out )
 {
@@ -2799,7 +2851,8 @@ static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scope
     {
         const WCHAR *path = is_office_licensing_scope( scopes ) ?
                             L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
-        WCHAR *token = load_wam_token_file( path );
+        WCHAR *token = load_scoped_wam_token( scopes, NULL );
+        if (!token) token = load_wam_token_file( path );
         if (!token) { token_result_Release( impl ); return HRESULT_FROM_WIN32( ERROR_NOT_FOUND ); }
         hr = token_response_vector_create( token, scopes, account, &impl->responses );
         free( token );
@@ -2819,6 +2872,7 @@ struct interactive_token_context
 {
     struct completed_provider_operation *operation;
     HSTRING scopes;
+    HSTRING client_id;
     HSTRING login_hint;
     HSTRING resource_client_id;
     HSTRING resource_redirect_uri;
@@ -3066,7 +3120,8 @@ static enum helper_result onlineid_wait_for_helper( HANDLE process, HANDLE cance
 
 static enum helper_result run_wine4office_auth( HWND owner, HSTRING login_hint, BOOL interactive, DWORD *exit_code,
                                                 HSTRING scopes, HSTRING resource_client_id,
-                                                HSTRING resource_redirect_uri, HANDLE cancel_event, DWORD timeout )
+                                                HSTRING resource_redirect_uri, HSTRING request_client_id,
+                                                HANDLE cancel_event, DWORD timeout )
 {
     WCHAR command[6 * MAX_PATH], hint_path[MAX_PATH];
     PROCESS_INFORMATION process = {0};
@@ -3107,6 +3162,28 @@ static enum helper_result run_wine4office_auth( HWND owner, HSTRING login_hint, 
                       (ULONG_PTR)owner, hint_path );
         else
             swprintf( command, ARRAY_SIZE(command), L"\"C:\\windows\\system32\\wine4officeauth.exe\" --owner 0x%Ix", (ULONG_PTR)owner );
+
+        /* The requesting app identity decides which endpoint can serve it: a
+         * consumer Microsoft account uses the Live ID app, which the AAD
+         * endpoints reject outright. Without this the helper falls back to its
+         * hardcoded work/school client and personal accounts can never sign in. */
+        {
+            const WCHAR *request_id = WindowsGetStringRawBuffer( request_client_id, NULL );
+            const WCHAR *request_scope = WindowsGetStringRawBuffer( scopes, NULL );
+            size_t used = wcslen( command );
+
+            if (request_id && *request_id && !wcschr( request_id, '"' ) &&
+                used + wcslen( request_id ) + 20 < ARRAY_SIZE(command))
+            {
+                swprintf( command + used, ARRAY_SIZE(command) - used,
+                          L" --client-id \"%s\"", request_id );
+                used = wcslen( command );
+            }
+            if (!resource && request_scope && *request_scope && !wcschr( request_scope, '"' ) &&
+                used + wcslen( request_scope ) + 20 < ARRAY_SIZE(command))
+                swprintf( command + used, ARRAY_SIZE(command) - used,
+                          L" --scope \"%s\"", request_scope );
+        }
     }
     else lstrcpyW( command, L"\"C:\\windows\\system32\\wine4officeauth.exe\" --refresh" );
 
@@ -3159,7 +3236,7 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
 
     if (run_wine4office_auth( context->owner, context->login_hint, TRUE, &exit_code, context->scopes,
                               context->resource_client_id, context->resource_redirect_uri,
-                              NULL, INFINITE ) == HELPER_COMPLETED)
+                              context->client_id, NULL, INFINITE ) == HELPER_COMPLETED)
     {
         if (!exit_code) response_status = 0;
         else if (exit_code == 2) response_status = 1;
@@ -3174,6 +3251,7 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
     if (result) IInspectable_Release( result );
     if (context->account) IInspectable_Release( context->account );
     WindowsDeleteString( context->scopes );
+    WindowsDeleteString( context->client_id );
     WindowsDeleteString( context->login_hint );
     WindowsDeleteString( context->resource_client_id );
     WindowsDeleteString( context->resource_redirect_uri );
@@ -3203,6 +3281,7 @@ static HRESULT create_pending_interactive_token_operation( HWND owner, struct we
     context->operation = impl;
     context->owner = owner;
     if (FAILED(hr = WindowsDuplicateString( request->scope, &context->scopes ))) goto failed;
+    WindowsDuplicateString( request->client_id, &context->client_id );
     token_request_get_login_hint( request, &context->login_hint );
     token_request_get_property( request, L"nestedClientId", &context->resource_client_id );
     token_request_get_property( request, L"nestedRedirectUri", &context->resource_redirect_uri );
@@ -3231,6 +3310,7 @@ static HRESULT create_pending_interactive_token_operation( HWND owner, struct we
 failed:
     if (context->account) IInspectable_Release( context->account );
     WindowsDeleteString( context->scopes );
+    WindowsDeleteString( context->client_id );
     WindowsDeleteString( context->login_hint );
     WindowsDeleteString( context->resource_client_id );
     WindowsDeleteString( context->resource_redirect_uri );
@@ -3588,10 +3668,19 @@ static ULONGLONG get_unix_time(void)
     return (value.QuadPart - 116444736000000000ULL) / 10000000ULL;
 }
 
+/* Consumer Microsoft accounts authenticate with the legacy 16 hex digit Live ID
+ * app id rather than an AAD GUID. */
+static BOOL is_consumer_wam_client( const WCHAR *client_id )
+{
+    return client_id && wcslen( client_id ) == 16 &&
+           wcsspn( client_id, L"0123456789abcdefABCDEF" ) == 16;
+}
+
 static BOOL is_supported_wam_client( const WCHAR *client_id )
 {
     return client_id && (!wcsicmp( client_id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
-                         !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" ));
+                         !wcsicmp( client_id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" ) ||
+                         is_consumer_wam_client( client_id ));
 }
 
 static BOOL is_supported_resource_client( const WCHAR *client_id )
@@ -3677,38 +3766,55 @@ static void silent_signal_test_worker_finished(void)
         onlineid_signal_test_event( L"Local\\WineOnlineIdTestWorkerFinished" );
 }
 
-static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_id, HANDLE cancel_event,
+static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_id,
+                                      const WCHAR *request_client_id, HANDLE cancel_event,
                                       BOOL *canceled )
 {
     const WCHAR *token_path = scopes && is_office_licensing_scope( scopes ) ?
                               L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
     HANDLE cache_mutex = NULL;
     WCHAR *token = NULL, *expires = NULL, *refresh = NULL;
+    ULONGLONG scoped_expires = 0;
     BOOL have_token = FALSE;
     DWORD exit_code = 3, timeout = onlineid_helper_timeout();
     enum helper_result helper;
 
     *canceled = FALSE;
+    TRACE( "silent request scopes %s resource_client %s request_client %s.\n",
+           debugstr_w( scopes ), debugstr_w( client_id ), debugstr_w( request_client_id ) );
     if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
-    token = load_wam_token_file( token_path );
-    expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+    if ((token = load_scoped_wam_token( scopes, &scoped_expires )))
+    {
+        WCHAR buffer[32];
+        swprintf( buffer, ARRAY_SIZE(buffer), L"%I64u", scoped_expires );
+        expires = wcsdup( buffer );
+    }
+    else
+    {
+        token = load_wam_token_file( token_path );
+        expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+    }
     refresh = load_wam_token_file( L"C:\\wam-refresh-token.txt" );
     silent_release_cache_mutex( cache_mutex );
     cache_mutex = NULL;
     have_token = silent_token_is_usable( token, expires );
+    TRACE( "silent cache: token %s expires %s usable %d.\n", token ? "present" : "absent",
+           expires ? "present" : "absent", have_token );
     if (silent_cancel_requested( cancel_event ))
     {
         *canceled = TRUE;
         goto done;
     }
-    if (scopes && *scopes && !is_office_licensing_scope( scopes ))
+    if (scopes && *scopes && !is_office_licensing_scope( scopes ) && !(have_token && scoped_expires))
     {
         /* The projection does not retain the resource scope or client which
          * produced its access token.  A fresh token therefore cannot prove
          * that it is usable for this request; preserve the resource refresh
          * until that identity is published transactionally with the token. */
         have_token = FALSE;
-        helper = run_wine365_resource_refresh( scopes, client_id, cancel_event, timeout, &exit_code );
+        helper = run_wine365_resource_refresh( scopes,
+                                              is_consumer_wam_client( request_client_id ) ? request_client_id : client_id,
+                                              cancel_event, timeout, &exit_code );
         if (helper == HELPER_CANCELED)
         {
             *canceled = TRUE;
@@ -3735,7 +3841,7 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
     if (have_token) goto done;
     if (refresh)
     {
-        helper = run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL,
+        helper = run_wine4office_auth( NULL, NULL, FALSE, &exit_code, NULL, NULL, NULL, NULL,
                                        cancel_event, timeout );
         if (helper == HELPER_CANCELED)
         {
@@ -4197,6 +4303,7 @@ static DWORD WINAPI silent_token_worker( void *parameter )
         {
             have_token = prepare_silent_wam_token( WindowsGetStringRawBuffer( impl->scopes, NULL ),
                                                     WindowsGetStringRawBuffer( impl->resource_client_id, NULL ),
+                                                    WindowsGetStringRawBuffer( impl->client_id, NULL ),
                                                     impl->cancel_event, &canceled );
         }
     }
@@ -4633,13 +4740,21 @@ static HRESULT WINAPI web_manager_FindAllAccountsWithClientIdAsync(
            debugstr_hstring( client_id ), operation );
     if (!operation) return E_POINTER;
     *operation = NULL;
-    if (FAILED(hr = find_all_accounts_result_create(
-            (!wcsicmp( WindowsGetStringRawBuffer( client_id, NULL ),
-                       L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
-             !wcsicmp( WindowsGetStringRawBuffer( client_id, NULL ),
-                       L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
-            wcsstr( WindowsGetStringRawBuffer( ((struct web_account_provider *)provider)->authority, NULL ),
-                    L"organizations" ) != NULL, &result ))) return hr;
+    {
+        const WCHAR *id = WindowsGetStringRawBuffer( client_id, NULL );
+        const WCHAR *authority = WindowsGetStringRawBuffer(
+                ((struct web_account_provider *)provider)->authority, NULL );
+        /* Consumer Microsoft accounts use the legacy 16 hex digit app id and
+         * are not homed in the work/school authority, so the AAD test above
+         * would hide a signed-in personal account from Office. */
+        BOOL consumer = id && wcslen( id ) == 16 &&
+                        wcsspn( id, L"0123456789abcdefABCDEF" ) == 16;
+        BOOL work = (!wcsicmp( id, L"d3590ed6-52b3-4102-aeff-aad2292ab01c" ) ||
+                     !wcsicmp( id, L"1fec8e78-bce4-4aaf-ab1b-5451cc387264" )) &&
+                    authority && wcsstr( authority, L"organizations" ) != NULL;
+
+        if (FAILED(hr = find_all_accounts_result_create( work || consumer, &result ))) return hr;
+    }
     hr = completed_provider_operation_create( &async_find_all_accounts_result, result, operation );
     IInspectable_Release( result );
     return hr;
