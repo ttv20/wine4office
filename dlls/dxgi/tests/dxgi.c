@@ -6138,6 +6138,28 @@ static void test_swapchain_present1_scroll(void)
         }
         ID3D11Texture2D_Release(texture);
 
+        if (!strcmp(winetest_platform, "wine"))
+        {
+            /* An occluded ordinary Present must not discard the completed
+             * token needed to seed the first dirty Present1 below. */
+            window_style = GetWindowLongPtrA(window, GWL_STYLE);
+            ShowWindow(window, SW_MINIMIZE);
+            flush_events();
+            if (!IsIconic(window))
+                SetWindowLongPtrA(window, GWL_STYLE, window_style | WS_MINIMIZE);
+            ok(IsIconic(window), "Expected the initial Present1 test window to be minimized.\n");
+            hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+            ok(hr == DXGI_STATUS_OCCLUDED,
+                    "Initial minimized D3D11 Present returned %#lx.\n", hr);
+            ShowWindow(window, SW_RESTORE);
+            SetWindowLongPtrA(window, GWL_STYLE, window_style);
+            UpdateWindow(window);
+            flush_events();
+            ok(!IsIconic(window), "Expected the initial Present1 test window to be restored.\n");
+            if (FAILED(hr))
+                goto release_swapchain;
+        }
+
         SetRect(&dirty_rect, 8, 8, 24, 24);
         parameters.DirtyRectsCount = 1;
         parameters.pDirtyRects = &dirty_rect;

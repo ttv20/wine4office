@@ -601,8 +601,6 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
             d3d11_swapchain_stage_present1_result(swapchain, TRUE, 0, 0, NULL, 0,
                     desc.backbuffer_width, desc.backbuffer_height);
         }
-        else
-            d3d11_swapchain_invalidate_present1_history(swapchain);
         return hr;
     }
 
