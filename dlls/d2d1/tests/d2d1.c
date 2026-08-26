@@ -25,7 +25,6 @@
 #include "d2d1_3.h"
 #include "d2d1effectauthor.h"
 #include "d3d11.h"
-#include "dxgi1_2.h"
 #include "wincrypt.h"
 #include "wine/test.h"
 #include "initguid.h"
@@ -18448,7 +18447,12 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
 {
     enum {warmup_count = 20, sample_count = 100};
     double samples[sample_count];
-    IDXGIDevice2 *dxgi_device;
+    D3D11_TEXTURE2D_DESC staging_desc;
+    D3D11_MAPPED_SUBRESOURCE map_desc;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11Texture2D *staging;
+    ID3D11Resource *surface;
+    ID3D11Device *d3d_device;
     ID2D1PathGeometry *geometry;
     ID2D1SolidColorBrush *brush;
     struct d2d1_test_context ctx;
@@ -18456,8 +18460,6 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
     D2D1_MATRIX_3X2_F transform;
     D2D1_COLOR_F colour;
     unsigned int i;
-    HANDLE completion_event;
-    DWORD wait_result;
     HRESULT hr;
 
     if (!d3d11 || !init_test_context(&ctx, d3d11))
@@ -18478,8 +18480,8 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
         release_test_context(&ctx);
         return;
     }
-    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_IDXGIDevice2, (void **)&dxgi_device);
-    ok(hr == S_OK, "Failed to get IDXGIDevice2, hr %#lx.\n", hr);
+    hr = IDXGISurface_QueryInterface(ctx.surface, &IID_ID3D11Resource, (void **)&surface);
+    ok(hr == S_OK, "Failed to get target resource, hr %#lx.\n", hr);
     if (FAILED(hr))
     {
         ID2D1SolidColorBrush_Release(brush);
@@ -18487,11 +18489,20 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
         release_test_context(&ctx);
         return;
     }
-    completion_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!completion_event, "Failed to create completion event, error %lu.\n", GetLastError());
-    if (!completion_event)
+    ID3D11Resource_GetDevice(surface, &d3d_device);
+    ID3D11Device_GetImmediateContext(d3d_device, &d3d_context);
+    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)surface, &staging_desc);
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging_desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(d3d_device, &staging_desc, NULL, &staging);
+    ok(hr == S_OK, "Failed to create staging texture, hr %#lx.\n", hr);
+    ID3D11Device_Release(d3d_device);
+    if (FAILED(hr))
     {
-        IDXGIDevice2_Release(dxgi_device);
+        ID3D11DeviceContext_Release(d3d_context);
+        ID3D11Resource_Release(surface);
         ID2D1SolidColorBrush_Release(brush);
         ID2D1PathGeometry_Release(geometry);
         release_test_context(&ctx);
@@ -18514,11 +18525,15 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
                 (ID2D1Brush *)brush, NULL);
         hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
         if (SUCCEEDED(hr))
-            hr = IDXGIDevice2_EnqueueSetEvent(dxgi_device, completion_event);
-        wait_result = SUCCEEDED(hr) ? WaitForSingleObject(completion_event, 10000) : WAIT_FAILED;
+        {
+            ID3D11DeviceContext_CopyResource(d3d_context, (ID3D11Resource *)staging, surface);
+            hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)staging, 0,
+                    D3D11_MAP_READ, 0, &map_desc);
+            if (SUCCEEDED(hr))
+                ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)staging, 0);
+        }
         QueryPerformanceCounter(&end);
         ok(hr == S_OK, "Benchmark draw %u failed, hr %#lx.\n", i, hr);
-        ok(wait_result == WAIT_OBJECT_0, "GPU completion wait returned %#lx.\n", wait_result);
         if (i >= warmup_count)
             samples[i - warmup_count] = (end.QuadPart - start.QuadPart)
                     * 1000000.0 / frequency.QuadPart;
@@ -18527,8 +18542,9 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
     trace("geometry-aa-benchmark-us p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u\n",
             samples[49], samples[94], samples[98], samples[99], sample_count);
 
-    CloseHandle(completion_event);
-    IDXGIDevice2_Release(dxgi_device);
+    ID3D11Texture2D_Release(staging);
+    ID3D11DeviceContext_Release(d3d_context);
+    ID3D11Resource_Release(surface);
     ID2D1SolidColorBrush_Release(brush);
     ID2D1PathGeometry_Release(geometry);
     release_test_context(&ctx);
