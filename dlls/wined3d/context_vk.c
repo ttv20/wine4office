@@ -2327,7 +2327,7 @@ static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_con
 
     submit_infos[0] = submit_info;
     submit_count = 1;
-    if (buffer->vk_command_buffer && device_vk->completion_timeline
+    if (buffer->vk_command_buffer && device_vk->completion_timeline && context_vk->completion_value_pending
             && context_vk->completion_command_buffer_id == buffer->id)
     {
         completion_value = context_vk->completion_value_pending;
@@ -2344,12 +2344,17 @@ static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_con
     {
         ERR("Failed to submit command buffer %p, vr %s.\n",
                 buffer->vk_command_buffer, wined3d_debug_vkresult(vr));
-        wined3d_device_vk_cancel_completion_waits(device_vk);
+        if (vr == VK_ERROR_DEVICE_LOST)
+            wined3d_device_vk_cancel_completion_waits(device_vk);
+        else if (context_vk->completion_query_pending
+                && context_vk->completion_command_buffer_id == buffer->id)
+            wined3d_query_wait_cancel(&context_vk->completion_query_pending->q);
     }
     if (context_vk->completion_command_buffer_id == buffer->id)
     {
         context_vk->completion_command_buffer_id = 0;
         context_vk->completion_value_pending = 0;
+        context_vk->completion_query_pending = NULL;
     }
 
     context_vk->wait_semaphore_count = 0;

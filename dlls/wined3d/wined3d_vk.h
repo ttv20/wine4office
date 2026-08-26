@@ -740,6 +740,7 @@ struct wined3d_context_vk
     uint64_t completed_command_buffer_id;
     uint64_t completion_command_buffer_id;
     uint64_t completion_value_pending;
+    struct wined3d_query_vk *completion_query_pending;
     VkDeviceSize retired_bo_size;
     /* Number of draw or dispatch calls that have been recorded into the
      * current command buffer. */

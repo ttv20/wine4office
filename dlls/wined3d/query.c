@@ -1917,6 +1917,11 @@ static BOOL wined3d_query_event_vk_issue(struct wined3d_query *query, uint32_t f
             return FALSE;
         }
         wined3d_context_vk_reference_query(context_vk, query_vk);
+        if (query->type == WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+        {
+            context_vk->completion_command_buffer_id = query_vk->command_buffer_id;
+            context_vk->completion_query_pending = query_vk;
+        }
         VK_CALL(vkCmdSetEvent(command_buffer, query_vk->vk_event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
         context_release(&context_vk->c);
 
@@ -1998,6 +2003,7 @@ static BOOL wined3d_query_completion_vk_issue(struct wined3d_query *query, uint3
     query_vk->completion_value = ++device_vk->completion_value_next;
     context_vk->completion_command_buffer_id = query_vk->command_buffer_id;
     context_vk->completion_value_pending = query_vk->completion_value;
+    context_vk->completion_query_pending = query_vk;
     query_vk->completion_result = S_OK;
     context_release(&context_vk->c);
 
