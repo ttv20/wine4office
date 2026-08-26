@@ -6735,6 +6735,194 @@ done_dxgi_device:
     IDXGIDevice_Release(dxgi_device);
 }
 
+static BOOL wait_present1_benchmark_query(ID3D11DeviceContext *context, ID3D11Query *query)
+{
+    DWORD start = GetTickCount();
+    BOOL complete = FALSE;
+    HRESULT hr;
+
+    ID3D11DeviceContext_End(context, (ID3D11Asynchronous *)query);
+    do
+    {
+        hr = ID3D11DeviceContext_GetData(context, (ID3D11Asynchronous *)query,
+                &complete, sizeof(complete), 0);
+        if (hr == S_FALSE || (hr == S_OK && !complete))
+        {
+            if (GetTickCount() - start > 30000)
+            {
+                ok(0, "Event query did not complete within 30 seconds.\n");
+                return FALSE;
+            }
+            Sleep(0);
+        }
+    }
+    while (hr == S_FALSE || (hr == S_OK && !complete));
+    ok(hr == S_OK, "Event query GetData returned %#lx.\n", hr);
+    return hr == S_OK;
+}
+
+static void test_swapchain_present1_benchmark(void)
+{
+    enum
+    {
+        width = 1423,
+        height = 699,
+        buffer_count = 3,
+        dirty_width = 64,
+        dirty_height = 32,
+        warmup_frames = 30,
+        measured_frames = 359,
+    };
+    DXGI_PRESENT_PARAMETERS parameters = {0};
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
+    D3D11_QUERY_DESC query_desc = {0};
+    ID3D11DeviceContext *context;
+    ID3D11Texture2D *texture;
+    IDXGISwapChain1 *swapchain;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *device;
+    ID3D11Query *query;
+    LARGE_INTEGER frequency, frame_start, present_start, present_end, frame_end;
+    const char *mode = getenv("WINE_DXGI_PRESENT1_FORCE_FULL") ? "forced-full" : "sparse";
+    DWORD update_data[dirty_width * dirty_height];
+    DWORD *full_data;
+    RECT dirty_rect;
+    unsigned int frame, i;
+    HWND window;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_d3d11_device()))
+    {
+        skip("D3D11 device is unavailable for the Present1 benchmark.\n");
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Failed to get ID3D11Device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_dxgi_device;
+    ID3D11Device_GetImmediateContext(device, &context);
+    get_factory((IUnknown *)dxgi_device, FALSE, &factory);
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIFactory2 is unavailable for the Present1 benchmark, hr %#lx.\n", hr);
+        goto done_context;
+    }
+
+    query_desc.Query = D3D11_QUERY_EVENT;
+    hr = ID3D11Device_CreateQuery(device, &query_desc, &query);
+    ok(hr == S_OK, "Failed to create benchmark event query, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_factory;
+    if (!(full_data = HeapAlloc(GetProcessHeap(), 0, width * height * sizeof(*full_data))))
+    {
+        ok(0, "Failed to allocate benchmark seed data.\n");
+        goto done_query;
+    }
+    for (i = 0; i < width * height; ++i)
+        full_data[i] = 0xff102030;
+
+    window = create_window();
+    ShowWindow(window, SW_SHOW);
+    UpdateWindow(window);
+    swapchain_desc.Width = width;
+    swapchain_desc.Height = height;
+    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.BufferCount = buffer_count;
+    swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory2, (IUnknown *)device,
+            window, &swapchain_desc, NULL, NULL, &swapchain);
+    ok(hr == S_OK, "Failed to create benchmark swapchain, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_window;
+
+    for (i = 0; i < buffer_count; ++i)
+    {
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Failed to get benchmark seed buffer %u, hr %#lx.\n", i, hr);
+        if (FAILED(hr))
+            goto done_swapchain;
+        ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture,
+                0, NULL, full_data, width * sizeof(*full_data), 0);
+        ID3D11Texture2D_Release(texture);
+        hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+        ok(hr == S_OK, "Benchmark seed Present %u returned %#lx.\n", i, hr);
+        if (FAILED(hr) || !wait_present1_benchmark_query(context, query))
+            goto done_swapchain;
+    }
+
+    parameters.DirtyRectsCount = 1;
+    parameters.pDirtyRects = &dirty_rect;
+    winetest_printf("PRESENT1_BENCHMARK_CONFIG mode=%s width=%u height=%u buffers=%u "
+            "dirty_width=%u dirty_height=%u warmup=%u frames=%u\n", mode,
+            width, height, buffer_count, dirty_width, dirty_height,
+            warmup_frames, measured_frames);
+    QueryPerformanceFrequency(&frequency);
+    for (frame = 0; frame < warmup_frames + measured_frames; ++frame)
+    {
+        dirty_rect.left = frame * 67 % (width - dirty_width);
+        dirty_rect.top = frame * 29 % (height - dirty_height);
+        dirty_rect.right = dirty_rect.left + dirty_width;
+        dirty_rect.bottom = dirty_rect.top + dirty_height;
+
+        QueryPerformanceCounter(&frame_start);
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0,
+                &IID_ID3D11Texture2D, (void **)&texture);
+        ok(hr == S_OK, "Frame %u: Failed to get benchmark buffer, hr %#lx.\n", frame, hr);
+        if (FAILED(hr))
+            break;
+        update_present1_d3d11_rect(context, texture, &dirty_rect,
+                0xff000000 | (frame * 0x00010101), update_data);
+        ID3D11Texture2D_Release(texture);
+
+        QueryPerformanceCounter(&present_start);
+        hr = IDXGISwapChain1_Present1(swapchain, 0, 0, &parameters);
+        QueryPerformanceCounter(&present_end);
+        ok(hr == S_OK, "Frame %u: Benchmark Present1 returned %#lx.\n", frame, hr);
+        if (FAILED(hr) || !wait_present1_benchmark_query(context, query))
+            break;
+        QueryPerformanceCounter(&frame_end);
+
+        if (frame >= warmup_frames)
+        {
+            winetest_printf("PRESENT1_BENCHMARK_SAMPLE mode=%s frame=%u present_us=%.3f "
+                    "frame_complete_us=%.3f missed_60hz=%u\n", mode,
+                    frame - warmup_frames,
+                    (present_end.QuadPart - present_start.QuadPart) * 1000000.0
+                            / frequency.QuadPart,
+                    (frame_end.QuadPart - frame_start.QuadPart) * 1000000.0
+                            / frequency.QuadPart,
+                    (frame_end.QuadPart - frame_start.QuadPart) * 60
+                            > frequency.QuadPart);
+        }
+    }
+    ok(frame == warmup_frames + measured_frames,
+            "Benchmark stopped after frame %u.\n", frame);
+
+done_swapchain:
+    IDXGISwapChain1_Release(swapchain);
+done_window:
+    DestroyWindow(window);
+    HeapFree(GetProcessHeap(), 0, full_data);
+done_query:
+    ID3D11Query_Release(query);
+done_factory:
+    IDXGIFactory2_Release(factory2);
+done_context:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+done_dxgi_device:
+    IDXGIDevice_Release(dxgi_device);
+}
+
 static void test_swapchain_backbuffer_index(IUnknown *device, BOOL is_d3d12)
 {
     DXGI_SWAP_CHAIN_DESC swapchain_desc;
@@ -10303,6 +10491,7 @@ START_TEST(dxgi)
     HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module;
     BOOL enable_debug_layer = FALSE;
     BOOL present1_history_only = FALSE;
+    BOOL present1_benchmark = FALSE;
     unsigned int argc, i;
     ID3D12Debug *debug;
     char **argv;
@@ -10342,8 +10531,15 @@ START_TEST(dxgi)
             use_mt = FALSE;
         else if (!strcmp(argv[i], "--present1-history-only"))
             present1_history_only = TRUE;
+        else if (!strcmp(argv[i], "--present1-benchmark"))
+            present1_benchmark = TRUE;
     }
 
+    if (present1_benchmark)
+    {
+        test_swapchain_present1_benchmark();
+        return;
+    }
     if (present1_history_only)
     {
         run_on_d3d10(test_swapchain_present1_history);
