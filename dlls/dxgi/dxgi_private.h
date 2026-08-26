@@ -39,6 +39,7 @@
 #include "initguid.h"
 #endif
 #include "wine/wined3d.h"
+#include "wine/wined3d_completion.h"
 #include "wine/winedxgi.h"
 
 enum dxgi_frame_latency
@@ -54,14 +55,17 @@ enum dxgi_frame_latency
 struct dxgi_completion_state
 {
     CRITICAL_SECTION cs;
+    CRITICAL_SECTION submission_cs;
+    CONDITION_VARIABLE active_cv;
     HANDLE wake_event;
     HANDLE stop_event;
-    HANDLE active_event;
     HANDLE worker;
     struct list queue;
+    struct list deferred;
     unsigned int queue_count;
     unsigned int active_count;
     ULONGLONG next_serial;
+    LONG shutdown_started;
     BOOL stopping;
     BOOL initialized;
 };

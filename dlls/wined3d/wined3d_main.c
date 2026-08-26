@@ -561,6 +561,11 @@ void WINAPI wined3d_mutex_lock(void)
     EnterCriticalSection(&wined3d_cs);
 }
 
+BOOL WINAPI wined3d_mutex_trylock(void)
+{
+    return TryEnterCriticalSection(&wined3d_cs);
+}
+
 void WINAPI wined3d_mutex_unlock(void)
 {
     LeaveCriticalSection(&wined3d_cs);

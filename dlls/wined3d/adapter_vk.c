@@ -311,7 +311,8 @@ static void get_physical_device_info(const struct wined3d_adapter_vk *adapter_vk
     memset(info, 0, sizeof(*info));
 
     timeline_semaphore_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
-    if (vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX])
+    if (vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE]
+            || vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX])
         add_structure(features2, timeline_semaphore_features);
 
     draw_parameters_features->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
@@ -350,6 +351,127 @@ static void get_physical_device_info(const struct wined3d_adapter_vk *adapter_vk
         VK_CALL(vkGetPhysicalDeviceFeatures2(physical_device, features2));
     else
         VK_CALL(vkGetPhysicalDeviceFeatures(physical_device, &features2->features));
+}
+
+static bool wined3d_device_vk_init_completion(struct wined3d_device_vk *device_vk)
+{
+    VkSemaphoreTypeCreateInfo type_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+    };
+    VkSemaphoreCreateInfo create_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &type_info,
+    };
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    VkResult vr;
+
+    if (!vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE])
+        return false;
+    if ((!VK_CALL(vkWaitSemaphores) && !VK_CALL(vkWaitSemaphoresKHR))
+            || (!VK_CALL(vkSignalSemaphore) && !VK_CALL(vkSignalSemaphoreKHR)))
+    {
+        WARN("Timeline semaphore entry points are unavailable.\n");
+        return false;
+    }
+
+    if ((vr = VK_CALL(vkCreateSemaphore(device_vk->vk_device,
+            &create_info, NULL, &device_vk->completion_timeline))) < 0)
+    {
+        WARN("Failed to create completion timeline, vr %s.\n", wined3d_debug_vkresult(vr));
+        return false;
+    }
+    if ((vr = VK_CALL(vkCreateSemaphore(device_vk->vk_device,
+            &create_info, NULL, &device_vk->completion_cancel))) < 0)
+    {
+        WARN("Failed to create completion cancellation timeline, vr %s.\n", wined3d_debug_vkresult(vr));
+        VK_CALL(vkDestroySemaphore(device_vk->vk_device, device_vk->completion_timeline, NULL));
+        device_vk->completion_timeline = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
+static VkResult wined3d_device_vk_wait_semaphores(struct wined3d_device_vk *device_vk,
+        const VkSemaphoreWaitInfo *wait_info, uint64_t timeout)
+{
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+
+    if (VK_CALL(vkWaitSemaphores))
+        return VK_CALL(vkWaitSemaphores(device_vk->vk_device, wait_info, timeout));
+    return VK_CALL(vkWaitSemaphoresKHR(device_vk->vk_device, wait_info, timeout));
+}
+
+static VkResult wined3d_device_vk_signal_semaphore(struct wined3d_device_vk *device_vk,
+        const VkSemaphoreSignalInfo *signal_info)
+{
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+
+    if (VK_CALL(vkSignalSemaphore))
+        return VK_CALL(vkSignalSemaphore(device_vk->vk_device, signal_info));
+    return VK_CALL(vkSignalSemaphoreKHR(device_vk->vk_device, signal_info));
+}
+
+static void wined3d_device_vk_cleanup_completion(struct wined3d_device_vk *device_vk)
+{
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+
+    if (device_vk->completion_cancel)
+        VK_CALL(vkDestroySemaphore(device_vk->vk_device, device_vk->completion_cancel, NULL));
+    if (device_vk->completion_timeline)
+        VK_CALL(vkDestroySemaphore(device_vk->vk_device, device_vk->completion_timeline, NULL));
+    device_vk->completion_cancel = VK_NULL_HANDLE;
+    device_vk->completion_timeline = VK_NULL_HANDLE;
+}
+
+HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value)
+{
+    const VkSemaphore semaphores[] = {device_vk->completion_timeline, device_vk->completion_cancel};
+    const uint64_t values[] = {value, 1};
+    VkSemaphoreWaitInfo wait_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .flags = VK_SEMAPHORE_WAIT_ANY_BIT,
+        .semaphoreCount = ARRAY_SIZE(semaphores),
+        .pSemaphores = semaphores,
+        .pValues = values,
+    };
+    VkResult vr;
+
+    if (!device_vk->completion_timeline || !device_vk->completion_cancel)
+        return WINED3DERR_NOTAVAILABLE;
+    if (InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+
+    if ((vr = wined3d_device_vk_wait_semaphores(device_vk, &wait_info, UINT64_MAX)) != VK_SUCCESS)
+    {
+        WARN("Failed to wait for completion value %I64u, vr %s.\n", value, wined3d_debug_vkresult(vr));
+        return E_FAIL;
+    }
+    if (InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+
+    return S_OK;
+}
+
+void wined3d_device_vk_cancel_completion_waits(struct wined3d_device_vk *device_vk)
+{
+    VkSemaphoreSignalInfo signal_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+        .semaphore = device_vk->completion_cancel,
+        .value = 1,
+    };
+    VkResult vr;
+
+    if (!device_vk->completion_cancel
+            || InterlockedExchange(&device_vk->completion_cancelled, TRUE))
+        return;
+    if ((vr = wined3d_device_vk_signal_semaphore(device_vk, &signal_info)) != VK_SUCCESS)
+        WARN("Failed to signal completion cancellation, vr %s.\n", wined3d_debug_vkresult(vr));
 }
 
 static HRESULT adapter_vk_create_device(struct wined3d *wined3d, const struct wined3d_adapter *adapter,
@@ -442,6 +564,10 @@ static HRESULT adapter_vk_create_device(struct wined3d *wined3d, const struct wi
 #undef VK_DEVICE_EXT_PFN
 #undef VK_DEVICE_PFN
 
+    if (device_vk->vk_info.supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE]
+            && !wined3d_device_vk_init_completion(device_vk))
+        device_vk->vk_info.supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE] = false;
+
     if (!wined3d_allocator_init(&device_vk->allocator,
             adapter_vk->memory_properties.memoryTypeCount, &wined3d_allocator_vk_ops))
     {
@@ -465,6 +591,7 @@ static HRESULT adapter_vk_create_device(struct wined3d *wined3d, const struct wi
     return WINED3D_OK;
 
 fail:
+    wined3d_device_vk_cleanup_completion(device_vk);
     VK_CALL(vkDestroyDevice(vk_device, NULL));
     free(device_vk);
     return hr;
@@ -487,6 +614,7 @@ static void adapter_vk_destroy_device(struct wined3d_device *device)
 
     wined3d_lock_cleanup(&device_vk->allocator_cs);
 
+    wined3d_device_vk_cleanup_completion(device_vk);
     VK_CALL(vkDestroyDevice(device_vk->vk_device, NULL));
     wined3d_decref(wined3d);
     free(device_vk);
@@ -2324,6 +2452,12 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
         WARN("Timeline semaphores are unavailable; disabling native Win32 keyed mutex support.\n");
         vk_info->supported[WINED3D_VK_KHR_WIN32_KEYED_MUTEX] = false;
     }
+    if (vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE]
+            && !device_info.timeline_semaphore_features.timelineSemaphore)
+    {
+        WARN("Timeline semaphore feature is unavailable; disabling asynchronous completion waits.\n");
+        vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE] = false;
+    }
 
     if (!device_info.dynamic_state_features.extendedDynamicState)
         adapter_vk->vk_info.supported[WINED3D_VK_EXT_EXTENDED_DYNAMIC_STATE] = FALSE;
@@ -2459,6 +2593,7 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,VK_API_VERSION_1_2},
         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,    VK_API_VERSION_1_1},
         {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,      VK_API_VERSION_1_1},
+        {VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,          VK_API_VERSION_1_2},
         {VK_KHR_SWAPCHAIN_EXTENSION_NAME,                   ~0u,                true},
         /* KHR_synchronization2 is required for KHR_video_queue. */
         {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,           ~0u},
@@ -2490,6 +2625,7 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, WINED3D_VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE},
         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION},
         {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,       WINED3D_VK_KHR_SHADER_DRAW_PARAMETERS},
+        {VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,           WINED3D_VK_KHR_TIMELINE_SEMAPHORE},
         {VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,            WINED3D_VK_KHR_VIDEO_DECODE_H264},
         {VK_KHR_VIDEO_QUEUE_EXTENSION_NAME,                  WINED3D_VK_KHR_VIDEO_QUEUE},
     };

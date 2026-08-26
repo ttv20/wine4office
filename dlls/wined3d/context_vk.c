@@ -2234,10 +2234,15 @@ static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_con
 {
     struct wined3d_device_vk *device_vk = wined3d_device_vk(context_vk->c.device);
     VkSubmitInfo submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = next};
+    VkSubmitInfo completion_submit_info = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkTimelineSemaphoreSubmitInfo timeline_info = {.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkSubmitInfo submit_infos[2];
     const struct wined3d_vk_info *vk_info = context_vk->vk_info;
     struct wined3d_query_pool_vk *pool_vk, *pool_vk_next;
     struct wined3d_command_buffer_vk *buffer;
     struct wined3d_query_vk *query_vk;
+    uint64_t completion_value;
+    unsigned int submit_count;
     VkResult vr;
 
     TRACE("context_vk %p, wait_semaphore_count %u, wait_semaphores %p, wait_stages %p,"
@@ -2320,10 +2325,32 @@ static VkResult wined3d_context_vk_submit_command_buffer_next(struct wined3d_con
     submit_info.signalSemaphoreCount = signal_semaphore_count;
     submit_info.pSignalSemaphores = signal_semaphores;
 
-    if ((vr = VK_CALL(vkQueueSubmit(device_vk->graphics_queue.vk_queue, 1, &submit_info,
+    submit_infos[0] = submit_info;
+    submit_count = 1;
+    if (buffer->vk_command_buffer && device_vk->completion_timeline
+            && context_vk->completion_command_buffer_id == buffer->id)
+    {
+        completion_value = context_vk->completion_value_pending;
+        timeline_info.signalSemaphoreValueCount = 1;
+        timeline_info.pSignalSemaphoreValues = &completion_value;
+        completion_submit_info.pNext = &timeline_info;
+        completion_submit_info.signalSemaphoreCount = 1;
+        completion_submit_info.pSignalSemaphores = &device_vk->completion_timeline;
+        submit_infos[submit_count++] = completion_submit_info;
+    }
+
+    if ((vr = VK_CALL(vkQueueSubmit(device_vk->graphics_queue.vk_queue, submit_count, submit_infos,
             buffer->vk_command_buffer ? buffer->vk_fence : VK_NULL_HANDLE))) < 0)
+    {
         ERR("Failed to submit command buffer %p, vr %s.\n",
                 buffer->vk_command_buffer, wined3d_debug_vkresult(vr));
+        wined3d_device_vk_cancel_completion_waits(device_vk);
+    }
+    if (context_vk->completion_command_buffer_id == buffer->id)
+    {
+        context_vk->completion_command_buffer_id = 0;
+        context_vk->completion_value_pending = 0;
+    }
 
     context_vk->wait_semaphore_count = 0;
 

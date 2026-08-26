@@ -2336,14 +2336,14 @@ static void wined3d_cs_exec_query_issue(struct wined3d_cs *cs, const void *data)
     if (!query->poll_in_cs)
     {
         if (op->flags & WINED3DISSUE_END)
-            InterlockedIncrement(&query->counter_retrieved);
+            wined3d_query_retrieved(query);
         return;
     }
 
     if (poll && list_empty(&query->poll_list_entry))
     {
         if (query->buffer_object)
-            InterlockedIncrement(&query->counter_retrieved);
+            wined3d_query_retrieved(query);
         else
             list_add_tail(&cs->query_poll_list, &query->poll_list_entry);
         return;
@@ -2355,7 +2355,7 @@ static void wined3d_cs_exec_query_issue(struct wined3d_cs *cs, const void *data)
     {
         list_remove(&query->poll_list_entry);
         list_init(&query->poll_list_entry);
-        InterlockedIncrement(&query->counter_retrieved);
+        wined3d_query_retrieved(query);
         return;
     }
 
@@ -2368,7 +2368,7 @@ static void wined3d_cs_exec_query_issue(struct wined3d_cs *cs, const void *data)
      * the poll function will check the new fence. We have to counter-balance
      * the discarded increment. */
     if (op->flags & WINED3DISSUE_END)
-        InterlockedIncrement(&query->counter_retrieved);
+        wined3d_query_retrieved(query);
 }
 
 static void wined3d_cs_issue_query(struct wined3d_device_context *context,
@@ -3467,7 +3467,7 @@ static void poll_queries(struct wined3d_cs *cs)
 
         list_remove(&query->poll_list_entry);
         list_init(&query->poll_list_entry);
-        InterlockedIncrement(&query->counter_retrieved);
+        wined3d_query_retrieved(query);
     }
 }
 

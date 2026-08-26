@@ -25,6 +25,7 @@
 #include "d3d11.h"
 #include "d3d12.h"
 #include "d3d12sdklayers.h"
+#include "tlhelp32.h"
 #include "winternl.h"
 #include "ddk/d3dkmthk.h"
 #include "wine/test.h"
@@ -7380,30 +7381,213 @@ static void test_maximum_frame_latency(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static BOOL wait_for_enqueue_completion(HANDLE event)
+{
+    DWORD ret;
+
+    /* This is only a bounded watchdog for a broken worker. Correctness gates
+     * suspend and resume the marker's command stream instead of using time. */
+    ret = WaitForSingleObject(event, 5000);
+    ok(ret == WAIT_OBJECT_0, "Completion event was not signalled, ret %#lx.\n", ret);
+    return ret == WAIT_OBJECT_0;
+}
+
+struct cs_thread_snapshot
+{
+    DWORD ids[64];
+    unsigned int count;
+};
+
+static void snapshot_wined3d_cs_threads(struct cs_thread_snapshot *snapshot)
+{
+    THREADENTRY32 entry = {.dwSize = sizeof(entry)};
+    HANDLE thread_snapshot, thread;
+    WCHAR *description;
+
+    snapshot->count = 0;
+    thread_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (thread_snapshot == INVALID_HANDLE_VALUE)
+        return;
+
+    if (Thread32First(thread_snapshot, &entry))
+    {
+        do
+        {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId())
+                continue;
+            if (!(thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID)))
+                continue;
+            description = NULL;
+            if (SUCCEEDED(GetThreadDescription(thread, &description)))
+            {
+                if (!lstrcmpW(description, L"wined3d_cs") && snapshot->count < ARRAY_SIZE(snapshot->ids))
+                    snapshot->ids[snapshot->count++] = entry.th32ThreadID;
+                LocalFree(description);
+            }
+            CloseHandle(thread);
+        } while (Thread32Next(thread_snapshot, &entry));
+    }
+    CloseHandle(thread_snapshot);
+}
+
+static HANDLE find_new_wined3d_cs_thread(const struct cs_thread_snapshot *before)
+{
+    struct cs_thread_snapshot after;
+    unsigned int i, j;
+
+    snapshot_wined3d_cs_threads(&after);
+    for (i = 0; i < after.count; ++i)
+    {
+        for (j = 0; j < before->count; ++j)
+        {
+            if (after.ids[i] == before->ids[j])
+                break;
+        }
+        if (j == before->count)
+            return OpenThread(THREAD_SUSPEND_RESUME | THREAD_QUERY_LIMITED_INFORMATION, FALSE, after.ids[i]);
+    }
+
+    return NULL;
+}
+
+static BOOL suspend_wined3d_cs_thread(HANDLE thread)
+{
+    DWORD count;
+
+    if (!thread)
+        return FALSE;
+    count = SuspendThread(thread);
+    ok(count != ~0u, "Failed to suspend the WineD3D CS thread, last error %lu.\n", GetLastError());
+    return count != ~0u;
+}
+
+static void resume_wined3d_cs_thread(HANDLE thread)
+{
+    ok(ResumeThread(thread) != ~0u,
+            "Failed to resume the WineD3D CS thread, last error %lu.\n", GetLastError());
+}
+
+static BOOL create_enqueue_test_devices(IDXGIDevice **device, IDXGIDevice2 **device2,
+        IDXGIDevice **blocker, ID3D10Multithread **blocker_mt, HANDLE *cs_thread)
+{
+    struct cs_thread_snapshot before;
+    HRESULT hr;
+
+    *device = NULL;
+    *device2 = NULL;
+    *blocker = NULL;
+    *blocker_mt = NULL;
+    *cs_thread = NULL;
+
+    snapshot_wined3d_cs_threads(&before);
+    if (!(*device = create_device(0)))
+        return FALSE;
+    *cs_thread = find_new_wined3d_cs_thread(&before);
+    hr = IDXGIDevice_QueryInterface(*device, &IID_IDXGIDevice2, (void **)device2);
+    if (FAILED(hr))
+        goto failed;
+
+    if (!(*blocker = create_device(0)))
+        goto failed;
+    hr = IDXGIDevice_QueryInterface(*blocker, &IID_ID3D10Multithread, (void **)blocker_mt);
+    if (FAILED(hr))
+        goto failed;
+
+    return TRUE;
+
+failed:
+    if (*blocker_mt)
+        ID3D10Multithread_Release(*blocker_mt);
+    if (*blocker)
+        IDXGIDevice_Release(*blocker);
+    if (*device2)
+        IDXGIDevice2_Release(*device2);
+    if (*device)
+        IDXGIDevice_Release(*device);
+    *device = NULL;
+    *device2 = NULL;
+    *blocker = NULL;
+    *blocker_mt = NULL;
+    if (*cs_thread)
+        CloseHandle(*cs_thread);
+    *cs_thread = NULL;
+    return FALSE;
+}
+
+static void release_enqueue_test_devices(IDXGIDevice **device, IDXGIDevice2 **device2,
+        IDXGIDevice **blocker, ID3D10Multithread **blocker_mt, HANDLE *cs_thread)
+{
+    ULONG refcount;
+
+    if (*device2)
+    {
+        refcount = IDXGIDevice2_Release(*device2);
+        ok(refcount == 1, "Target device has %lu references after IDXGIDevice2 release.\n", refcount);
+        *device2 = NULL;
+    }
+    if (*device)
+    {
+        refcount = IDXGIDevice_Release(*device);
+        ok(!refcount, "Target device has %lu references left.\n", refcount);
+        *device = NULL;
+    }
+    if (*blocker_mt)
+    {
+        ID3D10Multithread_Release(*blocker_mt);
+        *blocker_mt = NULL;
+    }
+    if (*blocker)
+    {
+        refcount = IDXGIDevice_Release(*blocker);
+        ok(!refcount, "Blocking device has %lu references left.\n", refcount);
+        *blocker = NULL;
+    }
+    if (*cs_thread)
+    {
+        CloseHandle(*cs_thread);
+        *cs_thread = NULL;
+    }
+}
+
+struct enqueue_release_context
+{
+    IDXGIDevice *device;
+    IDXGIDevice2 *device2;
+    HANDLE started;
+    HANDLE done;
+    ULONG device2_refcount;
+    ULONG device_refcount;
+};
+
+static DWORD WINAPI enqueue_release_thread(void *arg)
+{
+    struct enqueue_release_context *context = arg;
+
+    context->device2_refcount = IDXGIDevice2_Release(context->device2);
+    SetEvent(context->started);
+    context->device_refcount = IDXGIDevice_Release(context->device);
+    SetEvent(context->done);
+    return 0;
+}
+
 static void test_enqueue_set_event(void)
 {
     enum { completion_queue_limit = 64 };
-    IDXGIDevice2 *device2;
-    IDXGIDevice *device;
-    HANDLE event, wait_handle, before, marker, later;
+    IDXGIDevice2 *device2, *saturation_device2;
+    IDXGIDevice *device, *blocker, *saturation_device, *saturation_blocker;
+    ID3D10Multithread *blocker_mt, *saturation_blocker_mt;
+    HANDLE event, wait_handle, before, marker, later, semaphore;
+    HANDLE release_thread, release_started, release_done;
+    HANDLE cs_thread, saturation_cs_thread;
     HANDLE queue_events[completion_queue_limit + 1];
+    struct enqueue_release_context release_context;
     unsigned int queue_count, i;
-    DWORD ret;
-    BOOL success, saturated;
-    ULONG refcount;
-    HRESULT hr;
+    BOOL success, saturated, cs_suspended;
+    HRESULT hr, first_hr, second_hr;
 
-    if (!(device = create_device(0)))
+    if (!create_enqueue_test_devices(&device, &device2, &blocker, &blocker_mt, &cs_thread))
     {
-        skip("Failed to create device.\n");
-        return;
-    }
-
-    hr = IDXGIDevice_QueryInterface(device, &IID_IDXGIDevice2, (void **)&device2);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    if (FAILED(hr))
-    {
-        IDXGIDevice_Release(device);
+        skip("DXGI device or public multithread gate is unavailable.\n");
         return;
     }
 
@@ -7417,21 +7601,67 @@ static void test_enqueue_set_event(void)
         hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
         ok(hr == E_INVALIDARG, "Got unexpected invalid-event result %#lx.\n", hr);
     }
+    semaphore = CreateSemaphoreW(NULL, 0, 1, NULL);
+    ok(!!semaphore, "Failed to create wrong-type handle, last error %lu.\n", GetLastError());
+    if (semaphore)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, semaphore);
+        ok(hr == E_INVALIDARG, "Got unexpected wrong-type handle result %#lx.\n", hr);
+        CloseHandle(semaphore);
+    }
 
+    /* Suspend the target command stream before marker issue. Enqueue must
+     * return while its completion marker is still pending, then the worker
+     * must signal the event after the command stream resumes. */
     event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!event, "Failed to create event, last error %lu.\n", GetLastError());
+    ok(!!event, "Failed to create blocked completion event, last error %lu.\n", GetLastError());
     if (event)
     {
+        cs_suspended = suspend_wined3d_cs_thread(cs_thread);
         hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
-        ok(hr == S_OK, "Got unexpected enqueue result %#lx.\n", hr);
-        ret = WaitForSingleObject(event, 5000);
-        ok(ret == WAIT_OBJECT_0, "Completion event was not signalled, ret %#lx.\n", ret);
+        if (hr == E_NOTIMPL)
+        {
+            if (cs_suspended)
+                resume_wined3d_cs_thread(cs_thread);
+            CloseHandle(event);
+            release_enqueue_test_devices(&device, &device2, &blocker, &blocker_mt, &cs_thread);
+            win_skip("The active graphics backend has no cancellable asynchronous completion primitive.\n");
+            return;
+        }
+        ok(hr == S_OK, "Got unexpected blocked enqueue result %#lx.\n", hr);
+        if (SUCCEEDED(hr) && cs_suspended)
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT,
+                    "Completion event was signalled while its command stream was suspended.\n");
+        if (cs_suspended)
+            resume_wined3d_cs_thread(cs_thread);
+        else
+            skip("Could not identify the WineD3D CS thread for the deterministic completion gate.\n");
+        if (SUCCEEDED(hr))
+            wait_for_enqueue_completion(event);
         CloseHandle(event);
     }
 
+    /* Holding the public D3D multithread lock must not prevent the completion
+     * worker from reaching an already-published marker. */
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create multithread-lock event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        ID3D10Multithread_Enter(blocker_mt);
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == S_OK, "Got unexpected multithread-lock enqueue result %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            wait_for_enqueue_completion(event);
+        ID3D10Multithread_Leave(blocker_mt);
+        CloseHandle(event);
+    }
+
+    /* A successful enqueue retains the event after the caller closes its
+     * original handle. Manual-reset and auto-reset behavior are checked on
+     * separate events below. */
     event = CreateEventW(NULL, TRUE, FALSE, NULL);
-    ok(!!event, "Failed to create manual-reset event, last error %lu.\n", GetLastError());
     wait_handle = NULL;
+    ok(!!event, "Failed to create close-original event, last error %lu.\n", GetLastError());
     if (event)
     {
         success = DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &wait_handle,
@@ -7442,23 +7672,62 @@ static void test_enqueue_set_event(void)
             hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
             ok(hr == S_OK, "Got unexpected close-original enqueue result %#lx.\n", hr);
             CloseHandle(event);
+            event = NULL;
             if (SUCCEEDED(hr))
             {
-                ret = WaitForSingleObject(wait_handle, 5000);
-                ok(ret == WAIT_OBJECT_0, "Duplicated event was not signalled, ret %#lx.\n", ret);
+                wait_for_enqueue_completion(wait_handle);
+                ok(WaitForSingleObject(wait_handle, 0) == WAIT_OBJECT_0,
+                        "Manual-reset completion event did not remain signalled.\n");
             }
             CloseHandle(wait_handle);
+            wait_handle = NULL;
         }
         else
+        {
             CloseHandle(event);
+            event = NULL;
+        }
     }
 
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create auto-reset event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == S_OK, "Got unexpected auto-reset enqueue result %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            wait_for_enqueue_completion(event);
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT,
+                    "Auto-reset completion event remained signalled.\n");
+        }
+        CloseHandle(event);
+        event = NULL;
+    }
+
+    /* A handle without EVENT_MODIFY_STATE must fail before publication. */
+    event = CreateEventExW(NULL, NULL, CREATE_EVENT_MANUAL_RESET, SYNCHRONIZE);
+    ok(!!event, "Failed to create access-check event, last error %lu.\n", GetLastError());
+    if (event)
+    {
+        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(hr == E_ACCESSDENIED, "Got unexpected insufficient-access result %#lx.\n", hr);
+        ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT,
+                "Rejected insufficient-access enqueue signalled its event.\n");
+        CloseHandle(event);
+        event = NULL;
+    }
+
+    /* Publish two markers while their command stream is suspended. The worker
+     * must complete the FIFO prefix before the second marker can signal. */
     before = CreateEventW(NULL, TRUE, FALSE, NULL);
     marker = CreateEventW(NULL, TRUE, FALSE, NULL);
     later = CreateEventW(NULL, TRUE, FALSE, NULL);
-    ok(!!before && !!marker && !!later, "Failed to create ordering events, last error %lu.\n", GetLastError());
+    ok(!!before && !!marker && !!later,
+            "Failed to create ordering events, last error %lu.\n", GetLastError());
     if (before && marker && later)
     {
+        cs_suspended = suspend_wined3d_cs_thread(cs_thread);
         hr = IDXGIDevice2_EnqueueSetEvent(device2, before);
         ok(hr == S_OK, "Got unexpected pre-marker enqueue result %#lx.\n", hr);
         if (SUCCEEDED(hr))
@@ -7466,22 +7735,31 @@ static void test_enqueue_set_event(void)
             hr = IDXGIDevice2_EnqueueSetEvent(device2, marker);
             ok(hr == S_OK, "Got unexpected marker enqueue result %#lx.\n", hr);
         }
+        if (cs_suspended)
+        {
+            ok(WaitForSingleObject(before, 0) == WAIT_TIMEOUT,
+                    "Earlier marker completed before the deterministic gate was released.\n");
+            ok(WaitForSingleObject(marker, 0) == WAIT_TIMEOUT,
+                    "FIFO marker completed before the deterministic gate was released.\n");
+            resume_wined3d_cs_thread(cs_thread);
+        }
+        else
+            skip("Could not suspend the WineD3D CS thread for the ordering gate.\n");
+
         if (SUCCEEDED(hr))
         {
-            ret = WaitForSingleObject(marker, 5000);
-            ok(ret == WAIT_OBJECT_0, "Marker event was not signalled, ret %#lx.\n", ret);
+            wait_for_enqueue_completion(marker);
             ok(WaitForSingleObject(before, 0) == WAIT_OBJECT_0,
-                    "Marker completed before the earlier entry.\n");
-            ok(WaitForSingleObject(later, 0) == WAIT_TIMEOUT,
-                    "Later entry was included before it was submitted.\n");
+                    "FIFO marker completed before the earlier marker.\n");
 
+            /* This event is not submitted until the earlier completion has
+             * been observed, so it cannot be included in that prefix. */
+            ok(WaitForSingleObject(later, 0) == WAIT_TIMEOUT,
+                    "Unsubmitted later work was included in the earlier prefix.\n");
             hr = IDXGIDevice2_EnqueueSetEvent(device2, later);
-            ok(hr == S_OK, "Got unexpected post-marker enqueue result %#lx.\n", hr);
+            ok(hr == S_OK, "Got unexpected later-work enqueue result %#lx.\n", hr);
             if (SUCCEEDED(hr))
-            {
-                ret = WaitForSingleObject(later, 5000);
-                ok(ret == WAIT_OBJECT_0, "Later event was not signalled, ret %#lx.\n", ret);
-            }
+                wait_for_enqueue_completion(later);
         }
     }
     if (before)
@@ -7490,76 +7768,184 @@ static void test_enqueue_set_event(void)
         CloseHandle(marker);
     if (later)
         CloseHandle(later);
+    release_enqueue_test_devices(&device, &device2, &blocker, &blocker_mt, &cs_thread);
+
+    /* Reserve capacity while the target command stream is suspended. The
+     * 65th reserve is therefore checked against an exact, stable count. */
+    if (!create_enqueue_test_devices(&saturation_device, &saturation_device2,
+            &saturation_blocker, &saturation_blocker_mt, &saturation_cs_thread))
+    {
+        skip("Could not create the deterministic saturation devices.\n");
+        return;
+    }
 
     memset(queue_events, 0, sizeof(queue_events));
     queue_count = 0;
-    saturated = FALSE;
+    saturated = TRUE;
     for (i = 0; i < ARRAY_SIZE(queue_events); ++i)
     {
         queue_events[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
         if (!queue_events[i])
         {
             skip("Could not create the queue saturation event, last error %lu.\n", GetLastError());
+            saturated = FALSE;
             break;
         }
-
-        hr = IDXGIDevice2_EnqueueSetEvent(device2, queue_events[i]);
-        if (SUCCEEDED(hr))
-        {
-            ++queue_count;
-            continue;
-        }
-
-        if (i == completion_queue_limit && hr == E_OUTOFMEMORY)
-        {
-            saturated = TRUE;
-            CloseHandle(queue_events[i]);
-            queue_events[i] = NULL;
-            break;
-        }
-
-        ok(FALSE, "Queue submission %u failed unexpectedly, hr %#lx.\n", i, hr);
-        CloseHandle(queue_events[i]);
-        queue_events[i] = NULL;
-        break;
     }
 
-    for (i = 0; i < queue_count; ++i)
+    cs_suspended = FALSE;
+    if (saturated && !(cs_suspended = suspend_wined3d_cs_thread(saturation_cs_thread)))
     {
-        ret = WaitForSingleObject(queue_events[i], 5000);
-        ok(ret == WAIT_OBJECT_0, "Queue event %u was not signalled, ret %#lx.\n", i, ret);
-        CloseHandle(queue_events[i]);
+        skip("Could not suspend the WineD3D CS thread for deterministic saturation.\n");
+        saturated = FALSE;
     }
+
     if (saturated)
-        ok(queue_count == completion_queue_limit, "Got %u queued entries at saturation.\n", queue_count);
-    else
-        skip("Queue drained before the saturation gate was reached; saturation was not proven.\n");
-
-    event = CreateEventW(NULL, FALSE, FALSE, NULL);
-    ok(!!event, "Failed to create destruction event, last error %lu.\n", GetLastError());
-    if (event)
     {
-        hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
-        ok(hr == S_OK, "Got unexpected destruction enqueue result %#lx.\n", hr);
-        IDXGIDevice2_Release(device2);
-        device2 = NULL;
-        /* Release is terminal: it waits for the worker and its drain before
-         * destroying the device, so this zero-timeout check is deterministic. */
-        refcount = IDXGIDevice_Release(device);
-        device = NULL;
-        ok(!refcount, "Device has %lu references left after terminal shutdown.\n", refcount);
-        if (SUCCEEDED(hr))
+        for (i = 0; i < completion_queue_limit; ++i)
         {
-            ret = WaitForSingleObject(event, 0);
-            ok(ret == WAIT_OBJECT_0, "Completion event was not signalled at device destruction, ret %#lx.\n", ret);
+            hr = IDXGIDevice2_EnqueueSetEvent(saturation_device2, queue_events[i]);
+            ok(hr == S_OK, "Queue submission %u failed, hr %#lx.\n", i, hr);
+            if (SUCCEEDED(hr))
+                ++queue_count;
+            else
+                saturated = FALSE;
         }
-        CloseHandle(event);
+        if (saturated)
+        {
+            hr = IDXGIDevice2_EnqueueSetEvent(saturation_device2, queue_events[completion_queue_limit]);
+            ok(hr == E_OUTOFMEMORY, "Got unexpected saturated enqueue result %#lx.\n", hr);
+            if (hr != E_OUTOFMEMORY)
+                saturated = FALSE;
+            else
+                ok(WaitForSingleObject(queue_events[completion_queue_limit], 0) == WAIT_TIMEOUT,
+                        "Rejected saturated entry signalled its event.\n");
+        }
+        resume_wined3d_cs_thread(saturation_cs_thread);
+        cs_suspended = FALSE;
+
+        for (i = 0; i < queue_count; ++i)
+            wait_for_enqueue_completion(queue_events[i]);
+        if (saturated)
+        {
+            ok(queue_count == completion_queue_limit,
+                    "Got %u entries before deterministic saturation.\n", queue_count);
+            ok(WaitForSingleObject(queue_events[completion_queue_limit], 0) == WAIT_TIMEOUT,
+                    "Unaccepted saturated entry was signalled after the queue drained.\n");
+
+            /* The rejected reservation must not leave the queue count stuck
+             * at its limit after all accepted entries have completed. */
+            hr = IDXGIDevice2_EnqueueSetEvent(saturation_device2,
+                    queue_events[completion_queue_limit]);
+            ok(hr == S_OK, "Queue slot was not reclaimed, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+                wait_for_enqueue_completion(queue_events[completion_queue_limit]);
+        }
+        else
+            skip("Queue setup did not reach the configured limit; saturation was not proven.\n");
     }
 
-    if (device2)
-        IDXGIDevice2_Release(device2);
-    if (device)
-        IDXGIDevice_Release(device);
+    if (cs_suspended)
+        resume_wined3d_cs_thread(saturation_cs_thread);
+
+    for (i = 0; i < ARRAY_SIZE(queue_events); ++i)
+    {
+        if (queue_events[i])
+            CloseHandle(queue_events[i]);
+    }
+    release_enqueue_test_devices(&saturation_device, &saturation_device2,
+            &saturation_blocker, &saturation_blocker_mt, &saturation_cs_thread);
+
+    /* Final destruction must not strand an accepted backend marker. The
+     * worker owns the native-backed query until its terminal join completes;
+     * no public caller-owned handle is required to remain open. */
+    if (!create_enqueue_test_devices(&device, &device2, &blocker, &blocker_mt, &cs_thread))
+    {
+        skip("Could not create the terminal-shutdown devices.\n");
+        return;
+    }
+    event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    later = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(!!event && !!later, "Failed to create terminal-shutdown events, last error %lu.\n", GetLastError());
+    release_thread = NULL;
+    release_started = NULL;
+    release_done = NULL;
+    cs_suspended = FALSE;
+    if (event && later && (cs_suspended = suspend_wined3d_cs_thread(cs_thread)))
+    {
+        /* Final release must cancel the pending marker wait and signal every
+         * accepted event without requiring the command stream to advance. */
+        first_hr = IDXGIDevice2_EnqueueSetEvent(device2, event);
+        ok(first_hr == S_OK, "Got unexpected terminal enqueue result %#lx.\n", first_hr);
+        second_hr = E_FAIL;
+        if (SUCCEEDED(first_hr))
+        {
+            second_hr = IDXGIDevice2_EnqueueSetEvent(device2, later);
+            ok(second_hr == S_OK, "Got unexpected second terminal enqueue result %#lx.\n", second_hr);
+        }
+
+        release_started = CreateEventW(NULL, FALSE, FALSE, NULL);
+        release_done = CreateEventW(NULL, TRUE, FALSE, NULL);
+        ok(!!release_started && !!release_done,
+                "Failed to create terminal-release events, last error %lu.\n", GetLastError());
+        if (release_started && release_done)
+        {
+            release_context.device = device;
+            release_context.device2 = device2;
+            release_context.started = release_started;
+            release_context.done = release_done;
+            release_context.device2_refcount = 0;
+            release_context.device_refcount = 0;
+            release_thread = CreateThread(NULL, 0, enqueue_release_thread, &release_context, 0, NULL);
+            ok(!!release_thread, "Failed to create terminal-release thread, last error %lu.\n", GetLastError());
+            if (release_thread)
+            {
+                device = NULL;
+                device2 = NULL;
+                ok(WaitForSingleObject(release_started, 5000) == WAIT_OBJECT_0,
+                        "Final-release thread did not reach shutdown, last error %lu.\n", GetLastError());
+                if (SUCCEEDED(first_hr))
+                    wait_for_enqueue_completion(event);
+                if (SUCCEEDED(second_hr))
+                    wait_for_enqueue_completion(later);
+                ok(WaitForSingleObject(release_done, 0) == WAIT_TIMEOUT,
+                        "Final release finished while its command stream was suspended.\n");
+                resume_wined3d_cs_thread(cs_thread);
+                cs_suspended = FALSE;
+
+                ok(WaitForSingleObject(release_done, 5000) == WAIT_OBJECT_0,
+                        "Final-release thread did not finish, last error %lu.\n", GetLastError());
+                WaitForSingleObject(release_thread, INFINITE);
+                ok(release_context.device2_refcount == 1,
+                        "Target device has %lu references before final release.\n",
+                        release_context.device2_refcount);
+                ok(!release_context.device_refcount,
+                        "Target device has %lu references after terminal shutdown.\n",
+                        release_context.device_refcount);
+                if (SUCCEEDED(first_hr))
+                    ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0,
+                            "Accepted terminal event was not signalled at final destruction.\n");
+                if (SUCCEEDED(second_hr))
+                    ok(WaitForSingleObject(later, 0) == WAIT_OBJECT_0,
+                            "Second terminal event was not signalled at final destruction.\n");
+            }
+        }
+    }
+    else if (event && later)
+        skip("Could not suspend the WineD3D CS thread for terminal-shutdown testing.\n");
+    if (cs_suspended)
+        resume_wined3d_cs_thread(cs_thread);
+    if (release_thread)
+        CloseHandle(release_thread);
+    if (release_started)
+        CloseHandle(release_started);
+    if (release_done)
+        CloseHandle(release_done);
+    if (event)
+        CloseHandle(event);
+    if (later)
+        CloseHandle(later);
+    release_enqueue_test_devices(&device, &device2, &blocker, &blocker_mt, &cs_thread);
 }
 
 static void test_output_desc(void)
@@ -10873,7 +11259,6 @@ START_TEST(dxgi)
     queue_test(test_create_factory);
     queue_test(test_private_data);
     queue_test(test_maximum_frame_latency);
-    queue_test(test_enqueue_set_event);
     queue_test(test_output_desc);
     queue_test(test_output_duplication);
     queue_test(test_object_wrapping);
@@ -10881,6 +11266,10 @@ START_TEST(dxgi)
     queue_test(test_video_memory_budget_notification);
 
     run_queued_tests();
+
+    /* This test identifies and suspends its WineD3D command-stream thread, so
+     * keep it isolated from other tests that create devices concurrently. */
+    test_enqueue_set_event();
 
     /* These tests use full-screen swapchains, so shouldn't run in parallel. */
     test_inexact_modes();

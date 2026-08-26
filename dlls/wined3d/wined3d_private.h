@@ -49,6 +49,7 @@
 
 #include "objbase.h"
 #include "wine/wined3d.h"
+#include "wine/wined3d_completion.h"
 #include "wine/dcomp.h"
 #include "wine/list.h"
 #include "wine/rbtree.h"
@@ -1831,6 +1832,8 @@ struct wined3d_query_ops
     BOOL (*query_poll)(struct wined3d_query *query, uint32_t flags);
     BOOL (*query_issue)(struct wined3d_query *query, uint32_t flags);
     void (*query_destroy)(struct wined3d_query *query);
+    HRESULT (*query_wait)(struct wined3d_query *query);
+    void (*query_wait_cancel)(struct wined3d_query *query);
 };
 
 struct wined3d_query
@@ -1847,6 +1850,9 @@ struct wined3d_query
     const struct wined3d_query_ops *query_ops;
 
     LONG counter_main, counter_retrieved;
+    LONG waiters;
+    LONG wait_generation;
+    LONG wait_cancelled;
     struct list poll_list_entry;
 
     /* FIXME: This is GL-specific. */
@@ -1854,6 +1860,14 @@ struct wined3d_query
     UINT64 *map_ptr;
     bool poll_in_cs;
 };
+
+static inline void wined3d_query_retrieved(struct wined3d_query *query)
+{
+    InterlockedIncrement(&query->counter_retrieved);
+    InterlockedIncrement(&query->wait_generation);
+    if (InterlockedCompareExchange(&query->waiters, 0, 0))
+        RtlWakeAddressAll(&query->wait_generation);
+}
 
 #define WINED3D_QUERY_POOL_SIZE 256
 
