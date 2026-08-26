@@ -183,6 +183,12 @@ struct wined3d_device_vk;
     VK_DEVICE_PFN(vkUnmapMemory) \
     VK_DEVICE_PFN(vkUpdateDescriptorSets) \
     VK_DEVICE_PFN(vkWaitForFences) \
+    /* VK_VERSION_1_2 */ \
+    VK_DEVICE_EXT_PFN(vkSignalSemaphore) \
+    VK_DEVICE_EXT_PFN(vkWaitSemaphores) \
+    /* VK_KHR_timeline_semaphore */ \
+    VK_DEVICE_EXT_PFN(vkSignalSemaphoreKHR) \
+    VK_DEVICE_EXT_PFN(vkWaitSemaphoresKHR) \
     /* VK_EXT_extended_dynamic_state */ \
     VK_DEVICE_EXT_PFN(vkCmdSetDepthCompareOpEXT) \
     VK_DEVICE_EXT_PFN(vkCmdSetDepthTestEnableEXT) \
@@ -271,6 +277,7 @@ enum wined3d_vk_extension
     WINED3D_VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE,
     WINED3D_VK_KHR_SAMPLER_YCBCR_CONVERSION,
     WINED3D_VK_KHR_SHADER_DRAW_PARAMETERS,
+    WINED3D_VK_KHR_TIMELINE_SEMAPHORE,
     WINED3D_VK_KHR_VIDEO_DECODE_H264,
     WINED3D_VK_KHR_VIDEO_QUEUE,
 
@@ -464,6 +471,10 @@ struct wined3d_query_vk
     struct wined3d_query_pool_idx_vk pool_idx;
     uint8_t flags;
     uint64_t command_buffer_id;
+    uint64_t completion_value;
+    VkSemaphore completion_cancel;
+    LONG completion_cancelled;
+    HRESULT completion_result;
     uint32_t control_flags;
     VkEvent vk_event;
     SIZE_T pending_count, pending_size;
@@ -727,6 +738,9 @@ struct wined3d_context_vk
     VkCommandPool vk_command_pool;
     struct wined3d_command_buffer_vk current_command_buffer;
     uint64_t completed_command_buffer_id;
+    uint64_t completion_command_buffer_id;
+    uint64_t completion_value_pending;
+    struct wined3d_query_vk *completion_query_pending;
     VkDeviceSize retired_bo_size;
     /* Number of draw or dispatch calls that have been recorded into the
      * current command buffer. */
@@ -964,6 +978,11 @@ struct wined3d_device_vk
 
     struct wined3d_vk_info vk_info;
 
+    VkSemaphore completion_timeline;
+    VkSemaphore completion_cancel;
+    uint64_t completion_value_next;
+    LONG completion_cancelled;
+
     struct wined3d_null_resources_vk null_resources_vk;
     struct wined3d_null_views_vk null_views_vk;
 
@@ -1004,6 +1023,11 @@ void wined3d_device_vk_destroy_null_views(struct wined3d_device_vk *device_vk,
 
 void wined3d_device_vk_uav_clear_state_init(struct wined3d_device_vk *device_vk);
 void wined3d_device_vk_uav_clear_state_cleanup(struct wined3d_device_vk *device_vk);
+HRESULT wined3d_device_vk_wait_completion(struct wined3d_device_vk *device_vk, uint64_t value,
+        VkSemaphore cancel_semaphore, LONG *cancelled);
+void wined3d_device_vk_cancel_completion_wait(struct wined3d_device_vk *device_vk,
+        VkSemaphore cancel_semaphore, LONG *cancelled);
+void wined3d_device_vk_cancel_completion_waits(struct wined3d_device_vk *device_vk);
 
 struct wined3d_texture_vk
 {

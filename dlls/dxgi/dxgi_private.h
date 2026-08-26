@@ -20,6 +20,7 @@
 #define __WINE_DXGI_PRIVATE_H
 
 #include "wine/debug.h"
+#include "wine/list.h"
 
 #include <assert.h>
 
@@ -38,11 +39,35 @@
 #include "initguid.h"
 #endif
 #include "wine/wined3d.h"
+#include "wine/wined3d_completion.h"
 #include "wine/winedxgi.h"
 
 enum dxgi_frame_latency
 {
     DXGI_FRAME_LATENCY_MAX     = 16,
+};
+
+#define DXGI_COMPLETION_QUEUE_LIMIT 64
+
+/* Once stopping is set under cs, the completion state is terminal: new
+ * submissions are rejected, shutdown waits for active submitters and the
+ * worker, and the worker drains every accepted entry before teardown. */
+struct dxgi_completion_state
+{
+    CRITICAL_SECTION cs;
+    CRITICAL_SECTION submission_cs;
+    CONDITION_VARIABLE active_cv;
+    HANDLE wake_event;
+    HANDLE stop_event;
+    HANDLE worker;
+    struct list queue;
+    struct list deferred;
+    unsigned int queue_count;
+    unsigned int active_count;
+    ULONGLONG next_serial;
+    LONG shutdown_started;
+    BOOL stopping;
+    BOOL initialized;
 };
 
 /* Layered device */
@@ -135,6 +160,7 @@ struct dxgi_device
     struct wined3d_private_store private_store;
     struct wined3d_device *wined3d_device;
     struct wined3d_swapchain *implicit_swapchain;
+    struct dxgi_completion_state completion;
     IWineDXGIAdapter *adapter;
 };
 

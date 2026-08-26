@@ -488,6 +488,74 @@ HRESULT CDECL wined3d_query_get_data(struct wined3d_query *query,
     return S_OK;
 }
 
+HRESULT CDECL wined3d_query_wait(struct wined3d_query *query)
+{
+    LONG generation, retrieved, submitted;
+    NTSTATUS status;
+
+    TRACE("query %p.\n", query);
+
+    if (query->type != WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+        return WINED3DERR_NOTAVAILABLE;
+    if (query->state == QUERY_BUILDING)
+        return S_FALSE;
+    if (query->state == QUERY_CREATED)
+        return WINED3DERR_INVALIDCALL;
+
+    submitted = InterlockedCompareExchange(&query->counter_main, 0, 0);
+    retrieved = InterlockedCompareExchange(&query->counter_retrieved, 0, 0);
+    while (submitted != retrieved)
+    {
+        if (InterlockedCompareExchange(&query->wait_cancelled, FALSE, FALSE))
+            return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+
+        generation = InterlockedCompareExchange(&query->wait_generation, 0, 0);
+        InterlockedIncrement(&query->waiters);
+        submitted = InterlockedCompareExchange(&query->counter_main, 0, 0);
+        retrieved = InterlockedCompareExchange(&query->counter_retrieved, 0, 0);
+        if (submitted == retrieved || InterlockedCompareExchange(&query->wait_cancelled, FALSE, FALSE))
+        {
+            InterlockedDecrement(&query->waiters);
+            continue;
+        }
+
+        status = RtlWaitOnAddress(&query->wait_generation, &generation, sizeof(generation), NULL);
+        InterlockedDecrement(&query->waiters);
+        if (status)
+        {
+            WARN("Failed to wait for query progress, status %#lx.\n", status);
+            return HRESULT_FROM_NT(status);
+        }
+
+        submitted = InterlockedCompareExchange(&query->counter_main, 0, 0);
+        retrieved = InterlockedCompareExchange(&query->counter_retrieved, 0, 0);
+    }
+
+    if (InterlockedCompareExchange(&query->wait_cancelled, FALSE, FALSE))
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (query->poll_in_cs)
+        return S_OK;
+    if (query->query_ops->query_wait)
+        return query->query_ops->query_wait(query);
+
+    return WINED3DERR_NOTAVAILABLE;
+}
+
+void CDECL wined3d_query_wait_cancel(struct wined3d_query *query)
+{
+    TRACE("query %p.\n", query);
+
+    if (query->type != WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+        return;
+    if (InterlockedExchange(&query->wait_cancelled, TRUE))
+        return;
+
+    InterlockedIncrement(&query->wait_generation);
+    RtlWakeAddressAll(&query->wait_generation);
+    if (query->query_ops->query_wait_cancel)
+        query->query_ops->query_wait_cancel(query);
+}
+
 UINT CDECL wined3d_query_get_data_size(const struct wined3d_query *query)
 {
     TRACE("query %p.\n", query);
@@ -1033,6 +1101,8 @@ static const struct wined3d_query_ops event_query_ops =
     wined3d_event_query_ops_poll,
     wined3d_event_query_ops_issue,
     wined3d_event_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_event_query_create(struct wined3d_device *device,
@@ -1045,6 +1115,12 @@ static HRESULT wined3d_event_query_create(struct wined3d_device *device,
 
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
+
+    if (type == WINED3D_QUERY_TYPE_EVENT_COMPLETION && !device->cs->thread)
+    {
+        WARN("Asynchronous completion queries require the command-stream thread.\n");
+        return WINED3DERR_NOTAVAILABLE;
+    }
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
@@ -1079,6 +1155,8 @@ static const struct wined3d_query_ops occlusion_query_ops =
     wined3d_occlusion_query_ops_poll,
     wined3d_occlusion_query_ops_issue,
     wined3d_occlusion_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_occlusion_query_create(struct wined3d_device *device,
@@ -1123,6 +1201,8 @@ static const struct wined3d_query_ops timestamp_query_ops =
     wined3d_timestamp_query_ops_poll,
     wined3d_timestamp_query_ops_issue,
     wined3d_timestamp_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_timestamp_query_create(struct wined3d_device *device,
@@ -1163,6 +1243,8 @@ static const struct wined3d_query_ops timestamp_disjoint_query_ops =
     wined3d_timestamp_disjoint_query_ops_poll,
     wined3d_timestamp_disjoint_query_ops_issue,
     wined3d_timestamp_disjoint_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_timestamp_disjoint_query_create(struct wined3d_device *device,
@@ -1219,6 +1301,8 @@ static const struct wined3d_query_ops so_statistics_query_ops =
     wined3d_so_statistics_query_ops_poll,
     wined3d_so_statistics_query_ops_issue,
     wined3d_so_statistics_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_so_statistics_query_create(struct wined3d_device *device,
@@ -1276,6 +1360,8 @@ static const struct wined3d_query_ops pipeline_query_ops =
     wined3d_pipeline_query_ops_poll,
     wined3d_pipeline_query_ops_issue,
     wined3d_pipeline_query_ops_destroy,
+    NULL,
+    NULL,
 };
 
 static HRESULT wined3d_pipeline_query_create(struct wined3d_device *device,
@@ -1311,6 +1397,9 @@ HRESULT wined3d_query_gl_create(struct wined3d_device *device, enum wined3d_quer
 {
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
+
+    if (type == WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+        return wined3d_event_query_create(device, type, parent, parent_ops, query);
 
     switch (type)
     {
@@ -1782,6 +1871,7 @@ static BOOL wined3d_query_event_vk_issue(struct wined3d_query *query, uint32_t f
     struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
     struct wined3d_context_vk *context_vk;
     VkEventCreateInfo create_info;
+    VkCommandBuffer command_buffer;
     VkResult vr;
 
     TRACE("query %p, flags %#x.\n", query, flags);
@@ -1821,9 +1911,18 @@ static BOOL wined3d_query_event_vk_issue(struct wined3d_query *query, uint32_t f
             }
         }
 
+        if (!(command_buffer = wined3d_context_vk_get_command_buffer(context_vk)))
+        {
+            context_release(&context_vk->c);
+            return FALSE;
+        }
         wined3d_context_vk_reference_query(context_vk, query_vk);
-        VK_CALL(vkCmdSetEvent(wined3d_context_vk_get_command_buffer(context_vk), query_vk->vk_event,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
+        if (query->type == WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+        {
+            context_vk->completion_command_buffer_id = query_vk->command_buffer_id;
+            context_vk->completion_query_pending = query_vk;
+        }
+        VK_CALL(vkCmdSetEvent(command_buffer, query_vk->vk_event, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT));
         context_release(&context_vk->c);
 
         return TRUE;
@@ -1837,6 +1936,117 @@ static const struct wined3d_query_ops wined3d_query_event_vk_ops =
     .query_poll = wined3d_query_event_vk_poll,
     .query_issue = wined3d_query_event_vk_issue,
     .query_destroy = wined3d_query_vk_destroy,
+};
+
+static BOOL wined3d_query_completion_vk_poll(struct wined3d_query *query, uint32_t flags)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(query->device);
+    struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    VkResult vr;
+
+    if (query_vk->completion_cancel)
+        return FALSE;
+
+    if (InterlockedCompareExchange(&device_vk->completion_cancelled, FALSE, FALSE))
+        goto failed;
+
+    if ((vr = VK_CALL(vkGetEventStatus(device_vk->vk_device, query_vk->vk_event))) == VK_EVENT_SET)
+        return *(BOOL *)query->data = TRUE;
+    if (vr != VK_EVENT_RESET)
+    {
+        WARN("Failed to get Vulkan completion event status, vr %s.\n", wined3d_debug_vkresult(vr));
+        goto failed;
+    }
+    if ((flags & WINED3DGETDATA_FLUSH) && !query->device->cs->queries_flushed)
+        query->device->cs->c.ops->flush(&query->device->cs->c);
+    return *(BOOL *)query->data = FALSE;
+
+failed:
+    *(BOOL *)query->data = FALSE;
+    wined3d_query_wait_cancel(query);
+    return TRUE;
+}
+
+static BOOL wined3d_query_completion_vk_issue(struct wined3d_query *query, uint32_t flags)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(query->device);
+    struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
+    struct wined3d_context_vk *context_vk;
+    BOOL issued;
+
+    TRACE("query %p, flags %#x.\n", query, flags);
+
+    if (!query_vk->completion_cancel)
+    {
+        issued = wined3d_query_event_vk_issue(query, flags);
+        if (!issued && (flags & WINED3DISSUE_END))
+            wined3d_query_wait_cancel(query);
+        return issued;
+    }
+
+    if (!(flags & WINED3DISSUE_END))
+    {
+        query_vk->completion_result = WINED3DERR_INVALIDCALL;
+        return FALSE;
+    }
+
+    context_vk = wined3d_context_vk(context_acquire(&device_vk->d, NULL, 0));
+    wined3d_context_vk_end_current_render_pass(context_vk);
+    if (!wined3d_context_vk_get_command_buffer(context_vk))
+    {
+        query_vk->completion_result = E_FAIL;
+        context_release(&context_vk->c);
+        return FALSE;
+    }
+    wined3d_context_vk_reference_query(context_vk, query_vk);
+    query_vk->completion_value = ++device_vk->completion_value_next;
+    context_vk->completion_command_buffer_id = query_vk->command_buffer_id;
+    context_vk->completion_value_pending = query_vk->completion_value;
+    context_vk->completion_query_pending = query_vk;
+    query_vk->completion_result = S_OK;
+    context_release(&context_vk->c);
+
+    return TRUE;
+}
+
+static HRESULT wined3d_query_completion_vk_wait(struct wined3d_query *query)
+{
+    struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
+
+    if (FAILED(query_vk->completion_result))
+        return query_vk->completion_result;
+    return wined3d_device_vk_wait_completion(wined3d_device_vk(query->device), query_vk->completion_value,
+            query_vk->completion_cancel, &query_vk->completion_cancelled);
+}
+
+static void wined3d_query_completion_vk_cancel(struct wined3d_query *query)
+{
+    struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
+
+    wined3d_device_vk_cancel_completion_wait(wined3d_device_vk(query->device),
+            query_vk->completion_cancel, &query_vk->completion_cancelled);
+}
+
+static void wined3d_query_completion_vk_destroy(struct wined3d_query *query)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(query->device);
+    struct wined3d_query_vk *query_vk = wined3d_query_vk(query);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+
+    if (query_vk->completion_cancel)
+        VK_CALL(vkDestroySemaphore(device_vk->vk_device, query_vk->completion_cancel, NULL));
+    query_vk->completion_cancel = VK_NULL_HANDLE;
+    wined3d_query_vk_destroy(query);
+}
+
+static const struct wined3d_query_ops wined3d_query_completion_vk_ops =
+{
+    .query_poll = wined3d_query_completion_vk_poll,
+    .query_issue = wined3d_query_completion_vk_issue,
+    .query_destroy = wined3d_query_completion_vk_destroy,
+    .query_wait = wined3d_query_completion_vk_wait,
+    .query_wait_cancel = wined3d_query_completion_vk_cancel,
 };
 
 static BOOL wined3d_query_timestamp_vk_issue(struct wined3d_query *query, uint32_t flags)
@@ -1894,14 +2104,44 @@ static const struct wined3d_query_ops wined3d_query_timestamp_disjoint_vk_ops =
 HRESULT wined3d_query_vk_create(struct wined3d_device *device, enum wined3d_query_type type,
         void *parent, const struct wined3d_parent_ops *parent_ops, struct wined3d_query **query)
 {
+    VkSemaphoreTypeCreateInfo semaphore_type_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+    };
+    VkSemaphoreCreateInfo semaphore_create_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &semaphore_type_info,
+    };
     struct wined3d_query_data_timestamp_disjoint *disjoint_data;
     const struct wined3d_query_ops *ops = &wined3d_query_vk_ops;
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(device);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
     struct wined3d_query_vk *query_vk;
     unsigned int data_size;
+    VkResult vr;
     void *data;
 
     TRACE("device %p, type %#x, parent %p, parent_ops %p, query %p.\n",
             device, type, parent, parent_ops, query);
+
+    if (type == WINED3D_QUERY_TYPE_EVENT_COMPLETION)
+    {
+        if (!wined3d_device_vk(device)->completion_timeline
+                || !wined3d_device_vk(device)->completion_cancel)
+        {
+            if (!device->cs->thread)
+            {
+                WARN("Vulkan event completion queries require the command-stream thread.\n");
+                return WINED3DERR_NOTAVAILABLE;
+            }
+            WARN("Timeline semaphores are unavailable; using Vulkan event completion queries.\n");
+        }
+        ops = &wined3d_query_completion_vk_ops;
+        data_size = sizeof(BOOL);
+        goto allocate;
+    }
 
     switch (type)
     {
@@ -1956,12 +2196,27 @@ HRESULT wined3d_query_vk_create(struct wined3d_device *device, enum wined3d_quer
             return WINED3DERR_NOTAVAILABLE;
     }
 
+allocate:
     if (!(query_vk = calloc(1, sizeof(*query_vk) + data_size)))
         return E_OUTOFMEMORY;
+    if (type == WINED3D_QUERY_TYPE_EVENT_COMPLETION && device_vk->completion_timeline
+            && device_vk->completion_cancel
+            && (vr = VK_CALL(vkCreateSemaphore(device_vk->vk_device, &semaphore_create_info,
+            NULL, &query_vk->completion_cancel))) != VK_SUCCESS)
+    {
+        WARN("Failed to create completion query cancellation semaphore, vr %s; using a Vulkan event.\n",
+                wined3d_debug_vkresult(vr));
+        if (!device->cs->thread)
+        {
+            free(query_vk);
+            return E_FAIL;
+        }
+    }
     data = query_vk + 1;
 
     wined3d_query_init(&query_vk->q, device, type, data, data_size, ops, parent, parent_ops);
-    query_vk->q.poll_in_cs = false;
+    query_vk->q.poll_in_cs = !!device->cs->thread && type == WINED3D_QUERY_TYPE_EVENT_COMPLETION
+            && !query_vk->completion_cancel;
 
     switch (type)
     {

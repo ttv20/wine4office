@@ -17,7 +17,10 @@
  *
  */
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "dxgi_private.h"
+#include "winternl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
@@ -28,9 +31,399 @@ static const struct wined3d_parent_ops dxgi_null_wined3d_parent_ops =
     dxgi_null_wined3d_object_destroyed,
 };
 
+struct dxgi_completion_entry
+{
+    struct list entry;
+    struct list deferred_entry;
+    struct wined3d_query *query;
+    HANDLE event;
+    ULONGLONG serial;
+    BOOL published;
+};
+
+static void dxgi_completion_query_decref(struct wined3d_query *query)
+{
+    if (!query)
+        return;
+
+    wined3d_mutex_lock();
+    wined3d_query_decref(query);
+    wined3d_mutex_unlock();
+}
+
+static BOOL dxgi_completion_query_try_decref(struct wined3d_query *query)
+{
+    if (!query)
+        return TRUE;
+    if (!wined3d_mutex_trylock())
+        return FALSE;
+
+    wined3d_query_decref(query);
+    wined3d_mutex_unlock();
+    return TRUE;
+}
+
+static void dxgi_completion_entry_close(struct dxgi_completion_entry *entry, BOOL signal)
+{
+    if (entry->event)
+    {
+        if (signal && !SetEvent(entry->event))
+            WARN("Failed to signal event %p, last error %lu.\n", entry->event, GetLastError());
+        CloseHandle(entry->event);
+        entry->event = NULL;
+    }
+}
+
+static void dxgi_completion_entry_release(struct dxgi_completion_entry *entry, BOOL signal)
+{
+    dxgi_completion_entry_close(entry, signal);
+    dxgi_completion_query_decref(entry->query);
+    free(entry);
+}
+
+static void dxgi_completion_drain(struct dxgi_completion_state *state)
+{
+    struct dxgi_completion_entry *entry;
+
+    for (;;)
+    {
+        EnterCriticalSection(&state->cs);
+        if (list_empty(&state->queue))
+        {
+            LeaveCriticalSection(&state->cs);
+            return;
+        }
+
+        entry = LIST_ENTRY(list_head(&state->queue), struct dxgi_completion_entry, entry);
+        list_remove(&entry->entry);
+        assert(state->queue_count);
+        --state->queue_count;
+        assert(entry->published);
+        entry->published = FALSE;
+        list_add_tail(&state->deferred, &entry->deferred_entry);
+        LeaveCriticalSection(&state->cs);
+
+        TRACE("Draining completion entry %I64u.\n", entry->serial);
+        /* Terminal shutdown signals accepted entries, but defers their query
+         * release until the worker has exited and active submissions have
+         * finished. This keeps backend cleanup outside queue locks. */
+        dxgi_completion_entry_close(entry, TRUE);
+    }
+}
+
+static void dxgi_completion_release_deferred(struct dxgi_completion_state *state)
+{
+    struct dxgi_completion_entry *entry;
+
+    for (;;)
+    {
+        EnterCriticalSection(&state->cs);
+        if (list_empty(&state->deferred))
+        {
+            LeaveCriticalSection(&state->cs);
+            return;
+        }
+
+        entry = LIST_ENTRY(list_head(&state->deferred), struct dxgi_completion_entry, deferred_entry);
+        list_remove(&entry->deferred_entry);
+        assert(!entry->published);
+        assert(!entry->event);
+        LeaveCriticalSection(&state->cs);
+
+        dxgi_completion_query_decref(entry->query);
+        free(entry);
+    }
+}
+
+static void dxgi_completion_try_release_deferred(struct dxgi_completion_state *state)
+{
+    struct dxgi_completion_entry *entry;
+
+    for (;;)
+    {
+        EnterCriticalSection(&state->cs);
+        if (list_empty(&state->deferred))
+        {
+            LeaveCriticalSection(&state->cs);
+            return;
+        }
+        entry = LIST_ENTRY(list_head(&state->deferred), struct dxgi_completion_entry, deferred_entry);
+        list_remove(&entry->deferred_entry);
+        LeaveCriticalSection(&state->cs);
+
+        if (!dxgi_completion_query_try_decref(entry->query))
+        {
+            EnterCriticalSection(&state->cs);
+            list_add_head(&state->deferred, &entry->deferred_entry);
+            LeaveCriticalSection(&state->cs);
+            return;
+        }
+        free(entry);
+    }
+}
+
+static void dxgi_completion_entry_complete(struct dxgi_completion_state *state,
+        struct dxgi_completion_entry *entry)
+{
+    dxgi_completion_entry_close(entry, TRUE);
+    if (dxgi_completion_query_try_decref(entry->query))
+        free(entry);
+    else
+    {
+        EnterCriticalSection(&state->cs);
+        list_add_tail(&state->deferred, &entry->deferred_entry);
+        LeaveCriticalSection(&state->cs);
+    }
+}
+
+static DWORD WINAPI dxgi_completion_worker(void *context)
+{
+    struct dxgi_completion_state *state = context;
+
+    for (;;)
+    {
+        struct dxgi_completion_entry *entry;
+        HANDLE wait_handles[2];
+        HRESULT hr;
+        DWORD ret;
+
+        dxgi_completion_try_release_deferred(state);
+        EnterCriticalSection(&state->cs);
+        if (state->stopping)
+        {
+            LeaveCriticalSection(&state->cs);
+            break;
+        }
+
+        if (list_empty(&state->queue))
+        {
+            LeaveCriticalSection(&state->cs);
+            wait_handles[0] = state->stop_event;
+            wait_handles[1] = state->wake_event;
+            ret = WaitForMultipleObjects(ARRAY_SIZE(wait_handles), wait_handles, FALSE, INFINITE);
+            if (ret == WAIT_FAILED)
+            {
+                ERR("Failed to wait for completion work, last error %lu.\n", GetLastError());
+                EnterCriticalSection(&state->cs);
+                state->stopping = TRUE;
+                LeaveCriticalSection(&state->cs);
+                break;
+            }
+            continue;
+        }
+
+        entry = LIST_ENTRY(list_head(&state->queue), struct dxgi_completion_entry, entry);
+        LeaveCriticalSection(&state->cs);
+
+        /* Publication happens after marker issue and the command-stream
+         * counters synchronize issue with this cancellable backend wait. */
+        hr = wined3d_query_wait(entry->query);
+
+        EnterCriticalSection(&state->cs);
+        list_remove(&entry->entry);
+        assert(state->queue_count);
+        --state->queue_count;
+        assert(entry->published);
+        entry->published = FALSE;
+        LeaveCriticalSection(&state->cs);
+
+        if (FAILED(hr))
+            WARN("Completion query %p returned %#lx; signalling the accepted event.\n", entry->query, hr);
+        TRACE("Completing completion entry %I64u.\n", entry->serial);
+        dxgi_completion_entry_complete(state, entry);
+    }
+
+    dxgi_completion_drain(state);
+    return 0;
+}
+
+static HRESULT dxgi_completion_init(struct dxgi_completion_state *state)
+{
+    HRESULT hr;
+
+    InitializeCriticalSection(&state->cs);
+    InitializeCriticalSection(&state->submission_cs);
+    InitializeConditionVariable(&state->active_cv);
+    list_init(&state->queue);
+    list_init(&state->deferred);
+    state->queue_count = 0;
+    state->active_count = 0;
+    state->next_serial = 0;
+    state->shutdown_started = FALSE;
+    state->stopping = FALSE;
+    state->initialized = FALSE;
+
+    if (!(state->wake_event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed_cs;
+    }
+    if (!(state->stop_event = CreateEventW(NULL, TRUE, FALSE, NULL)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed_wake;
+    }
+    if (!(state->worker = CreateThread(NULL, 0, dxgi_completion_worker, state, 0, NULL)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto failed_stop;
+    }
+
+    state->initialized = TRUE;
+    return S_OK;
+
+failed_stop:
+    CloseHandle(state->stop_event);
+failed_wake:
+    CloseHandle(state->wake_event);
+failed_cs:
+    DeleteCriticalSection(&state->submission_cs);
+    DeleteCriticalSection(&state->cs);
+    return hr;
+}
+
+static void dxgi_completion_wait_active(struct dxgi_completion_state *state)
+{
+    EnterCriticalSection(&state->cs);
+    while (state->active_count)
+    {
+        if (!SleepConditionVariableCS(&state->active_cv, &state->cs, INFINITE))
+            ERR("Failed to wait for completion submissions, last error %lu.\n", GetLastError());
+    }
+    LeaveCriticalSection(&state->cs);
+}
+
+static void dxgi_completion_shutdown(struct dxgi_completion_state *state)
+{
+    struct wined3d_query *query = NULL;
+    struct dxgi_completion_entry *entry;
+
+    /* Terminal shutdown: stopping is published before either signal. The
+     * worker drains accepted entries, while active submitters observe the
+     * terminal state and finish all staged cleanup before the state is freed. */
+    if (!state->initialized)
+        return;
+    if (InterlockedCompareExchange(&state->shutdown_started, TRUE, FALSE))
+        return;
+
+    EnterCriticalSection(&state->cs);
+    state->stopping = TRUE;
+    if (!list_empty(&state->queue))
+    {
+        entry = LIST_ENTRY(list_head(&state->queue), struct dxgi_completion_entry, entry);
+        query = entry->query;
+        wined3d_query_incref(query);
+    }
+    LeaveCriticalSection(&state->cs);
+
+    SetEvent(state->stop_event);
+    SetEvent(state->wake_event);
+    if (query)
+    {
+        wined3d_query_wait_cancel(query);
+        dxgi_completion_query_decref(query);
+    }
+    WaitForSingleObject(state->worker, INFINITE);
+    dxgi_completion_wait_active(state);
+    dxgi_completion_release_deferred(state);
+    EnterCriticalSection(&state->cs);
+    assert(!state->queue_count);
+    assert(list_empty(&state->queue));
+    assert(list_empty(&state->deferred));
+    assert(!state->active_count);
+    LeaveCriticalSection(&state->cs);
+    CloseHandle(state->worker);
+    CloseHandle(state->stop_event);
+    CloseHandle(state->wake_event);
+    DeleteCriticalSection(&state->submission_cs);
+    DeleteCriticalSection(&state->cs);
+    state->initialized = FALSE;
+}
+
+static HRESULT dxgi_completion_reserve(struct dxgi_completion_state *state)
+{
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection(&state->cs);
+    if (state->stopping)
+        hr = DXGI_ERROR_DEVICE_REMOVED;
+    else if (state->queue_count >= DXGI_COMPLETION_QUEUE_LIMIT)
+        hr = E_OUTOFMEMORY;
+    else
+    {
+        ++state->active_count;
+        ++state->queue_count;
+    }
+    LeaveCriticalSection(&state->cs);
+
+    return hr;
+}
+
+static void dxgi_completion_submission_done(struct dxgi_completion_state *state)
+{
+    EnterCriticalSection(&state->cs);
+    assert(state->active_count);
+    if (!--state->active_count)
+        WakeAllConditionVariable(&state->active_cv);
+    LeaveCriticalSection(&state->cs);
+}
+
+static void dxgi_completion_cancel(struct dxgi_completion_state *state)
+{
+    EnterCriticalSection(&state->cs);
+    assert(state->active_count);
+    assert(state->queue_count);
+    --state->queue_count;
+    if (!--state->active_count)
+        WakeAllConditionVariable(&state->active_cv);
+    LeaveCriticalSection(&state->cs);
+}
+
+static HRESULT dxgi_completion_publish(struct dxgi_completion_state *state,
+        struct dxgi_completion_entry *entry)
+{
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection(&state->cs);
+    assert(state->active_count);
+    if (state->stopping)
+        hr = DXGI_ERROR_DEVICE_REMOVED;
+    else
+    {
+        entry->serial = ++state->next_serial;
+        entry->published = TRUE;
+        list_add_tail(&state->queue, &entry->entry);
+    }
+    LeaveCriticalSection(&state->cs);
+
+    return hr;
+}
+
 static inline struct dxgi_device *impl_from_IWineDXGIDevice(IWineDXGIDevice *iface)
 {
     return CONTAINING_RECORD(iface, struct dxgi_device, IWineDXGIDevice_iface);
+}
+
+static HRESULT dxgi_validate_event(HANDLE event)
+{
+    static const UNICODE_STRING event_type = RTL_CONSTANT_STRING(L"Event");
+    union
+    {
+        OBJECT_TYPE_INFORMATION info;
+        BYTE buffer[sizeof(OBJECT_TYPE_INFORMATION) + sizeof(L"Event") + sizeof(void *)];
+    } type_info;
+    OBJECT_BASIC_INFORMATION info;
+
+    if (!event || NtQueryObject(event, ObjectBasicInformation, &info, sizeof(info), NULL))
+        return E_INVALIDARG;
+    if (NtQueryObject(event, ObjectTypeInformation, type_info.buffer, sizeof(type_info.buffer), NULL))
+        return E_INVALIDARG;
+    if (!RtlEqualUnicodeString(&type_info.info.TypeName, &event_type, FALSE))
+        return E_INVALIDARG;
+    if (!(info.GrantedAccess & EVENT_MODIFY_STATE))
+        return E_ACCESSDENIED;
+
+    return S_OK;
 }
 
 /* IUnknown methods */
@@ -92,6 +485,7 @@ static ULONG STDMETHODCALLTYPE dxgi_device_Release(IWineDXGIDevice *iface)
 
     if (!refcount)
     {
+        dxgi_completion_shutdown(&device->completion);
         if (device->child_layer)
             IUnknown_Release(device->child_layer);
         wined3d_mutex_lock();
@@ -319,46 +713,62 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_ReclaimResources(IWineDXGIDevice *i
 static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *iface, HANDLE event)
 {
     struct dxgi_device *device = impl_from_IWineDXGIDevice(iface);
-    struct wined3d_query *query = NULL;
+    struct dxgi_completion_entry *entry;
     HANDLE event_copy;
     HRESULT hr;
-    BOOL done;
 
     TRACE("iface %p, event %p.\n", iface, event);
 
-    if (!event || !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(),
+    if (FAILED(hr = dxgi_validate_event(event)))
+        return hr;
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(),
             &event_copy, EVENT_MODIFY_STATE, FALSE, 0))
-        return E_INVALIDARG;
+        return GetLastError() == ERROR_ACCESS_DENIED ? E_ACCESSDENIED : E_INVALIDARG;
 
+    if (!(entry = calloc(1, sizeof(*entry))))
+    {
+        CloseHandle(event_copy);
+        return E_OUTOFMEMORY;
+    }
+    entry->event = event_copy;
+
+    if (FAILED(hr = dxgi_completion_reserve(&device->completion)))
+    {
+        CloseHandle(entry->event);
+        free(entry);
+        return hr;
+    }
+
+    EnterCriticalSection(&device->completion.submission_cs);
     wined3d_mutex_lock();
-    hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT,
-            NULL, &dxgi_null_wined3d_parent_ops, &query);
+    hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT_COMPLETION,
+            NULL, &dxgi_null_wined3d_parent_ops, &entry->query);
     if (SUCCEEDED(hr))
-        hr = wined3d_query_issue(query, WINED3DISSUE_END);
+        hr = wined3d_query_issue(entry->query, WINED3DISSUE_END);
+    if (SUCCEEDED(hr))
+        wined3d_device_context_flush(wined3d_device_get_immediate_context(device->wined3d_device));
+    if (hr == WINED3DERR_NOTAVAILABLE)
+        hr = E_NOTIMPL;
     wined3d_mutex_unlock();
 
-    while (hr == S_OK)
+    if (SUCCEEDED(hr))
+        hr = dxgi_completion_publish(&device->completion, entry);
+    LeaveCriticalSection(&device->completion.submission_cs);
+
+    if (FAILED(hr))
     {
-        wined3d_mutex_lock();
-        hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
-        wined3d_mutex_unlock();
-        if (hr != S_FALSE)
-            break;
-        hr = S_OK;
-        Sleep(0);
+        /* Publication has not transferred ownership. Release the staged
+         * query and event before dropping the active-submission reference so
+         * device destruction cannot race this cleanup. */
+        dxgi_completion_entry_release(entry, FALSE);
+        dxgi_completion_cancel(&device->completion);
+        return hr;
     }
 
-    if (query)
-    {
-        wined3d_mutex_lock();
-        wined3d_query_decref(query);
-        wined3d_mutex_unlock();
-    }
-
-    if (SUCCEEDED(hr) && !SetEvent(event_copy))
-        hr = E_INVALIDARG;
-    CloseHandle(event_copy);
-    return hr;
+    if (!SetEvent(device->completion.wake_event))
+        WARN("Failed to wake completion worker, last error %lu.\n", GetLastError());
+    dxgi_completion_submission_done(&device->completion);
+    return S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_device_Trim(IWineDXGIDevice *iface)
@@ -631,6 +1041,17 @@ HRESULT dxgi_device_init(struct dxgi_device *device, struct dxgi_device_layer *l
         wined3d_private_store_cleanup(&device->private_store);
         wined3d_mutex_unlock();
         return E_OUTOFMEMORY;
+    }
+
+    if (FAILED(hr = dxgi_completion_init(&device->completion)))
+    {
+        WARN("Failed to create completion worker, hr %#lx.\n", hr);
+        wined3d_swapchain_decref(device->implicit_swapchain);
+        wined3d_device_decref(device->wined3d_device);
+        IUnknown_Release(device->child_layer);
+        wined3d_private_store_cleanup(&device->private_store);
+        wined3d_mutex_unlock();
+        return hr;
     }
 
     wined3d_mutex_unlock();

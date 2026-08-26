@@ -1,4 +1,5 @@
 @ stdcall wined3d_mutex_lock()
+@ stdcall wined3d_mutex_trylock()
 @ stdcall wined3d_mutex_unlock()
 
 @ cdecl wined3d_calculate_format_pitch(ptr long long)
@@ -193,6 +194,8 @@
 @ cdecl wined3d_query_get_type(ptr)
 @ cdecl wined3d_query_incref(ptr)
 @ cdecl wined3d_query_issue(ptr long)
+@ cdecl wined3d_query_wait(ptr)
+@ cdecl wined3d_query_wait_cancel(ptr)
 
 @ cdecl wined3d_rasterizer_state_create(ptr ptr ptr ptr ptr)
 @ cdecl wined3d_rasterizer_state_decref(ptr)
