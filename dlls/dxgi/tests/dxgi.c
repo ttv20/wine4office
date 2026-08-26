@@ -6707,6 +6707,19 @@ static void test_swapchain_present1_lifetime(void)
         ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)work_texture[i & 1],
                 (ID3D11Resource *)work_texture[(i + 1) & 1]);
 
+    /* Keep the first Present1 queued while the next sparse update falls back.
+     * The complete shadow remains authoritative while completion is pending;
+     * rebuilding it from the not-yet-updated front buffer loses the first
+     * dirty rectangle. */
+    SetRect(&dirty_rect, 2, 2, 20, 8);
+    if (!update_present1_lifetime_swapchain(context, &b, &dirty_rect,
+            0xff112233, data, "lifetime-b-pending-first", FALSE))
+        goto done_work;
+    SetRect(&dirty_rect, 44, 34, 62, 46);
+    if (!update_present1_lifetime_swapchain(context, &b, &dirty_rect,
+            0xff445566, data, "lifetime-b-pending-fallback", TRUE))
+        goto done_work;
+
     SetRect(&dirty_rect, 1, 35, 47, 39);
     if (!update_present1_lifetime_swapchain(context, &a, &dirty_rect,
             0xff204080, data, "lifetime-a-before-release", FALSE))

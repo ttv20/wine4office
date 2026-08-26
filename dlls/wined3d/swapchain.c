@@ -225,8 +225,15 @@ void CDECL wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWN
 void CDECL wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swapchain,
         const struct wine_dcomp_visual_desc *desc)
 {
+    BOOL old_renderer_active = !!(swapchain->composition_desc.flags
+            & WINE_DCOMP_VISUAL_RENDERER_ACTIVE);
+    BOOL new_renderer_active = desc
+            && !!(desc->flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE);
+
     TRACE("swapchain %p, desc %p.\n", swapchain, desc);
 
+    if (old_renderer_active != new_renderer_active)
+        wined3d_swapchain_invalidate_present_results(swapchain);
     if (!desc)
         memset(&swapchain->composition_desc, 0, sizeof(swapchain->composition_desc));
     else
@@ -1909,6 +1916,7 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
         wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
 
         if (native_present && swapchain->state.desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+                && !(swapchain->composition_desc.flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE)
                 && presented_identity
                 && swapchain->state.desc.backbuffer_count <= WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT)
         {

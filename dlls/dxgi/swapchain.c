@@ -1088,7 +1088,16 @@ static BOOL d3d11_swapchain_reap_present1_result(struct d3d11_swapchain *swapcha
 
     hr = wined3d_swapchain_get_present_result(swapchain->wined3d_swapchain,
             swapchain->present1_pending.present_id, &result);
-    if (hr == S_FALSE || hr == WINED3DERR_NOTAVAILABLE)
+    if (hr == S_FALSE)
+    {
+        /* A queued Present has not failed, so the complete shadow is still
+         * the authoritative source for a full-copy fallback.  Discard the
+         * sparse history that cannot be advanced without completion, but do
+         * not seed the shadow from a front buffer that is still stale. */
+        d3d11_swapchain_invalidate_present1_history(swapchain);
+        return FALSE;
+    }
+    if (hr == WINED3DERR_NOTAVAILABLE)
     {
         d3d11_swapchain_invalidate_present1_history(swapchain);
         swapchain->present1_shadow_valid = FALSE;
