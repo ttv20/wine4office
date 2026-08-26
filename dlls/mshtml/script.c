@@ -184,6 +184,10 @@ static void install_intl_shim(ScriptHost *script_host)
        || !IsEqualGUID(&script_host->guid, &CLSID_JScript))
         return;
 
+    /* Attempt this once per host: retrying from parse_elem_text would re-enter
+     * the script engine for every element that follows. */
+    script_host->intl_installed = TRUE;
+
     V_VT(&res) = VT_EMPTY;
     hres = IActiveScriptParse_ParseScriptText(script_host->parse, intl_shim, L"window", NULL,
                                               NULL, 0, 0, 0, &res, &ei);
@@ -194,7 +198,6 @@ static void install_intl_shim(ScriptHost *script_host)
         SysFreeString(ei.bstrHelpFile);
         return;
     }
-    script_host->intl_installed = TRUE;
     VariantClear(&res);
 }
 
