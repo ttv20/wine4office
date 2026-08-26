@@ -7888,7 +7888,7 @@ static void test_stroke_line_joins(BOOL d3d11)
     D2D1_COLOR_F color;
     D2D1_POINT_2F point;
     D2D1_RECT_F rect;
-    unsigned int i, x, y, count;
+    unsigned int i, x, y, count, reflected_count;
     HRESULT hr;
 
     if (!init_test_context(&ctx, d3d11))
@@ -8018,31 +8018,34 @@ static void test_stroke_line_joins(BOOL d3d11)
     ok(compare_uint(count, 2828, 4), "transformed round: got %u pixels.\n", count);
     release_resource_readback(&rb);
 
-    ID2D1RenderTarget_BeginDraw(ctx.rt);
-    set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
-    ID2D1RenderTarget_Clear(ctx.rt, &color);
-    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
-            (ID2D1Brush *)brush, 20.0f, styles[1]);
-    ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)reflected_geometry,
-            (ID2D1Brush *)brush, 20.0f, styles[1]);
-    hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    for (i = 1; i <= 3; ++i)
+    {
+        ID2D1RenderTarget_BeginDraw(ctx.rt);
+        set_color(&color, 0.396f, 0.180f, 0.537f, 1.0f);
+        ID2D1RenderTarget_Clear(ctx.rt, &color);
+        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, 20.0f, styles[i]);
+        ID2D1RenderTarget_DrawGeometry(ctx.rt, (ID2D1Geometry *)reflected_geometry,
+                (ID2D1Brush *)brush, 20.0f, styles[i]);
+        hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        get_surface_readback(&ctx, &rb);
+        count = reflected_count = 0;
+        for (y = 0; y < 130; ++y)
+            for (x = 0; x < 80; ++x)
+                if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                    ++count;
+        for (y = 0; y < 130; ++y)
+            for (x = 80; x < 160; ++x)
+                if (get_readback_colour(&rb, x, y) != 0xff652e89)
+                    ++reflected_count;
+        ok(count == reflected_count, "Reflected %s join has %u pixels, expected %u.\n",
+                tests[i].name, reflected_count, count);
+        release_resource_readback(&rb);
+    }
     ID2D1TransformedGeometry_Release(reflected_geometry);
     ID2D1PathGeometry_Release(geometry);
-
-    get_surface_readback(&ctx, &rb);
-    count = 0;
-    for (y = 0; y < 130; ++y)
-        for (x = 0; x < 80; ++x)
-            if (get_readback_colour(&rb, x, y) != 0xff652e89)
-                ++count;
-    i = 0;
-    for (y = 0; y < 130; ++y)
-        for (x = 80; x < 160; ++x)
-            if (get_readback_colour(&rb, x, y) != 0xff652e89)
-                ++i;
-    ok(count == i, "Reflected clipped miter has %u pixels, expected %u.\n", i, count);
-    release_resource_readback(&rb);
 
     hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &geometry);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
