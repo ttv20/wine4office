@@ -3423,7 +3423,7 @@ DECL_HANDLER(get_message)
 
 found:
     /* The client processes a returned message without waiting on the queue. */
-    set_queue_masks( queue, 0, 0 );
+    if (!get_error()) set_queue_masks( queue, 0, 0 );
 }
 
 
