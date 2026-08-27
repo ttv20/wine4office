@@ -60,6 +60,14 @@ enum d2d_shape_type
     D2D_SHAPE_TYPE_COUNT,
 };
 
+enum d2d_geometry_aa_backend
+{
+    D2D_GEOMETRY_AA_BACKEND_UNINITIALIZED,
+    D2D_GEOMETRY_AA_BACKEND_UNAVAILABLE,
+    D2D_GEOMETRY_AA_BACKEND_FORCED_COVERAGE,
+    D2D_GEOMETRY_AA_BACKEND_MSAA_MASK,
+};
+
 struct d2d_settings
 {
     unsigned int max_version_factory;
@@ -120,6 +128,11 @@ struct d2d_brush_cb
     } u;
 };
 
+struct d2d_vec4
+{
+    float x, y, z, w;
+};
+
 struct d2d_ps_cb
 {
     BOOL outline;
@@ -128,11 +141,12 @@ struct d2d_ps_cb
     BOOL antialias;
     struct d2d_brush_cb colour_brush;
     struct d2d_brush_cb opacity_brush;
-};
-
-struct d2d_vec4
-{
-    float x, y, z, w;
+    BOOL coverage_resolve;
+    BOOL coverage_msaa;
+    unsigned int coverage_sample_count;
+    unsigned int coverage_pad;
+    struct d2d_vec4 coverage_world_x;
+    struct d2d_vec4 coverage_world_y;
 };
 
 struct d2d_vs_cb
@@ -247,6 +261,23 @@ struct d2d_device_context
     ID3D11Buffer *vb;
     ID3D11RasterizerState *rs;
     ID3D11BlendState *bs;
+    ID3D11PixelShader *coverage_ps;
+    ID3D11PixelShader *coverage_msaa_ps;
+    ID3D11PixelShader *coverage_resolve_ps;
+    ID3D11RasterizerState1 *coverage_rs;
+    ID3D11BlendState1 *coverage_bs;
+    ID3D11Texture2D *coverage_texture;
+    ID3D11RenderTargetView *coverage_rtv;
+    ID3D11ShaderResourceView *coverage_resource_srv;
+    ID3D11ShaderResourceView *coverage_srv;
+    enum d2d_geometry_aa_backend coverage_backend;
+    DXGI_FORMAT coverage_format;
+    unsigned int coverage_sample_count;
+    D2D1_SIZE_U coverage_resource_size;
+    unsigned int coverage_origin_x, coverage_origin_y;
+    D2D1_MATRIX_3X2_F coverage_inverse_transform;
+    float coverage_dpi_x, coverage_dpi_y;
+    BOOL coverage_aa_requested;
     ID3D11SamplerState *sampler_states
             [D2D_SAMPLER_INTERPOLATION_MODE_COUNT]
             [D2D_SAMPLER_EXTEND_MODE_COUNT]
@@ -719,6 +750,8 @@ void d2d_transformed_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *
         ID2D1Geometry *src_geometry, const D2D_MATRIX_3X2_F *transform);
 HRESULT d2d_geometry_group_init(struct d2d_geometry *geometry, ID2D1Factory *factory,
         D2D1_FILL_MODE fill_mode, ID2D1Geometry **src_geometries, unsigned int geometry_count);
+HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
+        float tolerance, ID2D1PathGeometry **ret);
 struct d2d_geometry *unsafe_impl_from_ID2D1Geometry(ID2D1Geometry *iface);
 
 struct d2d_geometry_realization
@@ -754,6 +787,9 @@ struct d2d_device
 
     struct d2d_shader_blob precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
     struct d2d_shader_blob precompiled_shape_ps;
+    struct d2d_shader_blob precompiled_coverage_ps;
+    struct d2d_shader_blob precompiled_coverage_msaa_ps;
+    struct d2d_shader_blob precompiled_coverage_resolve_ps;
 
     struct d2d_indexed_objects shaders;
 };
