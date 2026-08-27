@@ -5514,6 +5514,20 @@ static void test_MsgWaitForMultipleObjects(HWND hwnd)
     ret = MsgWaitForMultipleObjects(0, NULL, FALSE, 0, QS_POSTMESSAGE);
     ok(ret == WAIT_TIMEOUT, "MsgWaitForMultipleObjects returned %lx\n", ret);
 
+    PostMessageA(hwnd, WM_USER, 1, 0);
+    PostMessageA(hwnd, WM_USER, 2, 0);
+
+    ok(PeekMessageA( &msg, 0, 0, 0, PM_REMOVE ), "PeekMessage should succeed\n");
+    ok(msg.message == WM_USER && msg.wParam == 1,
+       "got %04x wParam %Ix instead of WM_USER wParam 1\n", msg.message, msg.wParam);
+
+    ret = MsgWaitForMultipleObjectsEx( 0, NULL, 0, QS_POSTMESSAGE, MWMO_INPUTAVAILABLE );
+    ok(ret == WAIT_OBJECT_0, "MsgWaitForMultipleObjectsEx returned %lx\n", ret);
+
+    ok(PeekMessageA( &msg, 0, 0, 0, PM_REMOVE ), "PeekMessage should succeed\n");
+    ok(msg.message == WM_USER && msg.wParam == 2,
+       "got %04x wParam %Ix instead of WM_USER wParam 2\n", msg.message, msg.wParam);
+
     PostMessageA(hwnd, WM_USER, 0, 0);
 
     ret = MsgWaitForMultipleObjects(0, NULL, FALSE, 0, QS_POSTMESSAGE);
