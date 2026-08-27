@@ -6874,6 +6874,7 @@ INT WINAPI DECLSPEC_HOTPATCH LCMapStringEx( const WCHAR *locale, DWORD flags, co
                                             void *reserved, LPARAM handle )
 {
     const struct sortguid *sortid = NULL;
+    LCID lcid;
 
     if (version) FIXME( "unsupported version structure %p\n", version );
     if (reserved) FIXME( "unsupported reserved pointer %p\n", reserved );
@@ -6901,9 +6902,17 @@ INT WINAPI DECLSPEC_HOTPATCH LCMapStringEx( const WCHAR *locale, DWORD flags, co
         SetLastError( ERROR_INVALID_FLAGS );
         return 0;
     }
-    if (flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE | LCMAP_SORTKEY))
+    /* Plain case mapping uses the default case table and does not need locale sort data. */
+    if ((flags & LCMAP_SORTKEY) ||
+        ((flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE)) && (flags & LCMAP_LINGUISTIC_CASING)))
     {
         if (!(sortid = get_language_sort( locale ))) return 0;
+    }
+    else if ((flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE)) && !get_locale_by_name( locale, &lcid ))
+    {
+        WARN( "unknown locale %s\n", debugstr_w(locale) );
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return 0;
     }
     if (flags & LCMAP_HASH)
     {
