@@ -11909,6 +11909,40 @@ static void CALLBACK callback_count(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWOR
     timer_fired();
 }
 
+struct coalesced_timer_test
+{
+    HANDLE ready_event;
+    HANDLE stop_event;
+    ULONGLONG start_time;
+    ULONGLONG coalesced_time;
+    ULONGLONG exact_time;
+};
+
+static struct coalesced_timer_test coalesced_timer_test;
+
+static void CALLBACK coalesced_timer_callback(HWND hwnd, UINT msg, UINT_PTR id, DWORD time)
+{
+    if (!coalesced_timer_test.coalesced_time)
+        coalesced_timer_test.coalesced_time = GetTickCount64() - coalesced_timer_test.start_time;
+}
+
+static void CALLBACK exact_timer_callback(HWND hwnd, UINT msg, UINT_PTR id, DWORD time)
+{
+    if (!coalesced_timer_test.exact_time)
+        coalesced_timer_test.exact_time = GetTickCount64() - coalesced_timer_test.start_time;
+}
+
+static DWORD WINAPI coalesced_timer_thread(void *arg)
+{
+    UINT_PTR timer = SetTimer(NULL, 0, 600, tfunc);
+
+    ok(timer != 0, "SetTimer failed with %lu.\n", GetLastError());
+    SetEvent(coalesced_timer_test.ready_event);
+    WaitForSingleObject(coalesced_timer_test.stop_event, INFINITE);
+    KillTimer(NULL, timer);
+    return 0;
+}
+
 static DWORD exception;
 static void CALLBACK callback_exception(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 {
@@ -12038,6 +12072,8 @@ static void test_timers_no_wnd(void)
 
     if (pSetCoalescableTimer)
     {
+        HANDLE thread;
+
         count = 0;
         id = pSetCoalescableTimer(NULL, 0, 0, callback_count, 0);
         ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
@@ -12046,6 +12082,57 @@ static void test_timers_no_wnd(void)
             DispatchMessageA(&msg);
         ok(count > 1, "expected count > 1, got %d.\n", count);
         KillTimer(NULL, id);
+
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MINIMUM, callback_count,
+                                  TIMERV_COALESCING_MAX);
+        ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
+        KillTimer(NULL, id);
+
+        SetLastError(0xdeadbeef);
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MINIMUM, callback_count,
+                                  TIMERV_COALESCING_MAX + 1);
+        ok(!id, "SetCoalescableTimer succeeded with invalid tolerance.\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu.\n", GetLastError());
+
+        SetLastError(0xdeadbeef);
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MAXIMUM, callback_count,
+                                  TIMERV_COALESCING_MIN);
+        ok(!id, "SetCoalescableTimer succeeded with overflowing timer range.\n");
+        ok(GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu.\n", GetLastError());
+
+        id = pSetCoalescableTimer(NULL, 0, USER_TIMER_MAXIMUM, callback_count,
+                                  TIMERV_NO_COALESCING);
+        ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
+        KillTimer(NULL, id);
+
+        memset(&coalesced_timer_test, 0, sizeof(coalesced_timer_test));
+        coalesced_timer_test.ready_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        coalesced_timer_test.stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        thread = CreateThread(NULL, 0, coalesced_timer_thread, NULL, 0, NULL);
+        ok(thread != NULL, "CreateThread failed with %lu.\n", GetLastError());
+        WaitForSingleObject(coalesced_timer_test.ready_event, INFINITE);
+
+        coalesced_timer_test.start_time = GetTickCount64();
+        id = pSetCoalescableTimer(NULL, 0, 100, coalesced_timer_callback, 500);
+        ok(id != 0, "SetCoalescableTimer failed with %lu.\n", GetLastError());
+        id2 = SetTimer(NULL, 0, 200, exact_timer_callback);
+        ok(id2 != 0, "SetTimer failed with %lu.\n", GetLastError());
+        while (!coalesced_timer_test.exact_time &&
+               GetTickCount64() - coalesced_timer_test.start_time < 900)
+        {
+            MsgWaitForMultipleObjects(0, NULL, FALSE, 900, QS_ALLINPUT);
+            while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+        }
+        ok(coalesced_timer_test.exact_time && coalesced_timer_test.exact_time < 450,
+           "Exact timer fired after %I64u ms, coalesced timer after %I64u ms.\n",
+           coalesced_timer_test.exact_time, coalesced_timer_test.coalesced_time);
+        KillTimer(NULL, id);
+        KillTimer(NULL, id2);
+        SetEvent(coalesced_timer_test.stop_event);
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+        CloseHandle(coalesced_timer_test.stop_event);
+        CloseHandle(coalesced_timer_test.ready_event);
     }
     else
         win_skip("SetCoalescableTimer not available.\n");

@@ -1564,6 +1564,7 @@ static void dump_set_win_timer_request( const struct set_win_timer_request *req 
     fprintf( stderr, " win=%08x", req->win );
     fprintf( stderr, ", msg=%08x", req->msg );
     fprintf( stderr, ", rate=%08x", req->rate );
+    fprintf( stderr, ", tolerance=%08x", req->tolerance );
     dump_uint64( ", id=", &req->id );
     dump_uint64( ", lparam=", &req->lparam );
 }

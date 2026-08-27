@@ -98,6 +98,7 @@ struct timer
     struct list     entry;     /* entry in timer list */
     abstime_t       when;      /* next expiration */
     unsigned int    rate;      /* timer rate in ms */
+    unsigned int    tolerance; /* coalescing tolerance in ms */
     user_handle_t   win;       /* window handle */
     unsigned int    msg;       /* message to post */
     lparam_t        id;        /* timer id */
@@ -1488,15 +1489,26 @@ static void set_next_timer( struct msg_queue *queue )
 {
     struct list *ptr;
 
-    if (queue->timeout)
-    {
-        remove_timeout_user( queue->timeout );
-        queue->timeout = NULL;
-    }
     if ((ptr = list_head( &queue->pending_timers )))
     {
         struct timer *timer = LIST_ENTRY( ptr, struct timer, entry );
-        queue->timeout = add_timeout_user( abstime_to_timeout(timer->when), timer_callback, queue );
+        timeout_t tolerance = (timeout_t)timer->tolerance * 10000;
+
+        if (ptr->next != &queue->pending_timers)
+        {
+            struct timer *next = LIST_ENTRY( ptr->next, struct timer, entry );
+            tolerance = min( tolerance, timer->when - next->when );
+        }
+        if (queue->timeout)
+            reschedule_timeout_user_coalesced( queue->timeout, timer->when, tolerance );
+        else
+            queue->timeout = add_timeout_user_coalesced( timer->when, tolerance,
+                                                        timer_callback, queue );
+    }
+    else if (queue->timeout)
+    {
+        remove_timeout_user( queue->timeout );
+        queue->timeout = NULL;
     }
     /* set/clear QS_TIMER bit */
     if (list_empty( &queue->expired_timers ))
@@ -1584,16 +1596,17 @@ static struct timer *find_expired_timer( struct msg_queue *queue, user_handle_t 
 }
 
 /* add a timer */
-static struct timer *set_timer( struct msg_queue *queue, unsigned int rate )
+static struct timer *set_timer( struct msg_queue *queue, unsigned int rate, unsigned int tolerance )
 {
     struct timer *timer = mem_alloc( sizeof(*timer) );
     if (timer)
     {
         timer->rate = max( rate, 1 );
+        timer->tolerance = tolerance;
         timer->when = -monotonic_time - (timeout_t)timer->rate * 10000;
         link_timer( queue, timer );
-        /* check if we replaced the next timer */
-        if (list_head( &queue->pending_timers ) == &timer->entry) set_next_timer( queue );
+        /* A new timer can limit how far the current head may be coalesced. */
+        set_next_timer( queue );
     }
     return timer;
 }
@@ -3522,7 +3535,7 @@ DECL_HANDLER(set_win_timer)
         }
     }
 
-    if ((timer = set_timer( queue, req->rate )))
+    if ((timer = set_timer( queue, req->rate, req->tolerance )))
     {
         timer->win    = win;
         timer->msg    = req->msg;

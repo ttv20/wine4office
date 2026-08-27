@@ -3330,6 +3330,8 @@ struct set_win_timer_request
     user_handle_t   win;
     unsigned int    msg;
     unsigned int    rate;
+    unsigned int    tolerance;
+    char __pad_28[4];
     lparam_t        id;
     lparam_t        lparam;
 };
@@ -7428,6 +7430,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 965
+#define SERVER_PROTOCOL_VERSION 966
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
