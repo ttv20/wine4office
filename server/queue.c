@@ -708,6 +708,21 @@ static inline int get_queue_status( struct msg_queue *queue )
             queue_shm->internal_bits;
 }
 
+/* update the queue masks and corresponding synchronization state */
+static void set_queue_masks( struct msg_queue *queue, unsigned int wake_mask,
+                             unsigned int changed_mask )
+{
+    SHARED_WRITE_BEGIN( queue->shared, queue_shm_t )
+    {
+        shared->wake_mask = wake_mask;
+        shared->changed_mask = changed_mask;
+    }
+    SHARED_WRITE_END;
+
+    if (!get_queue_status( queue )) reset_sync( queue->sync );
+    else signal_sync( queue->sync );
+}
+
 /* set some queue bits */
 static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
 {
@@ -3357,22 +3372,22 @@ DECL_HANDLER(get_message)
     /* then check for posted messages */
     if ((filter & QS_POSTMESSAGE) &&
         get_posted_message( queue, get_win, req->get_first, req->get_last, req->flags, reply ))
-        return;
+        goto found;
 
     if ((filter & QS_HOTKEY) && queue->hotkey_count &&
         req->get_first <= WM_HOTKEY && req->get_last >= WM_HOTKEY &&
         get_posted_message( queue, get_win, WM_HOTKEY, WM_HOTKEY, req->flags, reply ))
-        return;
+        goto found;
 
     /* only check for quit messages if not posted messages pending */
     if ((filter & QS_POSTMESSAGE) && get_quit_message( queue, req->flags, reply ))
-        return;
+        goto found;
 
     /* then check for any raw hardware message */
     if ((filter & QS_INPUT) &&
         filter_contains_hw_range( req->get_first, req->get_last ) &&
         get_hardware_message( current, req->hw_id, get_win, req->get_first, req->get_last, req->flags, reply ))
-        return;
+        goto found;
 
     /* now check for WM_PAINT */
     if ((filter & QS_PAINT) &&
@@ -3385,7 +3400,7 @@ DECL_HANDLER(get_message)
         reply->wparam = 0;
         reply->lparam = 0;
         get_message_defaults( queue, &reply->x, &reply->y, &reply->time );
-        return;
+        goto found;
     }
 
     /* now check for timer */
@@ -3399,19 +3414,16 @@ DECL_HANDLER(get_message)
         reply->wparam = timer->id;
         reply->lparam = timer->lparam;
         get_message_defaults( queue, &reply->x, &reply->y, &reply->time );
-        return;
+        goto found;
     }
 
-    SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
-    {
-        shared->wake_mask = req->wake_mask;
-        shared->changed_mask = req->changed_mask;
-    }
-    SHARED_WRITE_END;
-
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
-    else signal_sync( queue->sync );
+    set_queue_masks( queue, req->wake_mask, req->changed_mask );
     set_error( STATUS_PENDING );  /* FIXME */
+    return;
+
+found:
+    /* The client processes a returned message without waiting on the queue. */
+    set_queue_masks( queue, 0, 0 );
 }
 
 

@@ -4,6 +4,7 @@
 
 - Reduce memory use and latency when drawing complex antialiased Direct2D geometry.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
+- Reduce message-loop server calls after retrieving queued messages.
 - Respect Direct2D stroke join styles while keeping sharp WordArt corners bounded.
 - Keep Word responsive while Microsoft 365 tokens are checked or refreshed in the background.
 - Keep Microsoft 365 account and token data consistent when sign-in and background refresh overlap.
