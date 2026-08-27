@@ -4535,9 +4535,16 @@ UINT_PTR WINAPI NtUserSetTimer( HWND hwnd, UINT_PTR id, UINT timeout, TIMERPROC 
     UINT_PTR ret;
     WNDPROC winproc = 0;
 
-    if (proc) winproc = alloc_winproc( (WNDPROC)proc, TRUE );
-
     timeout = min( max( USER_TIMER_MINIMUM, timeout ), USER_TIMER_MAXIMUM );
+    if (tolerance != TIMERV_DEFAULT_COALESCING && tolerance != TIMERV_NO_COALESCING &&
+        (tolerance > TIMERV_COALESCING_MAX || tolerance > USER_TIMER_MAXIMUM - timeout))
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+        return 0;
+    }
+    if (tolerance == TIMERV_DEFAULT_COALESCING || tolerance == TIMERV_NO_COALESCING) tolerance = 0;
+
+    if (proc) winproc = alloc_winproc( (WNDPROC)proc, TRUE );
 
     SERVER_START_REQ( set_win_timer )
     {
@@ -4545,6 +4552,7 @@ UINT_PTR WINAPI NtUserSetTimer( HWND hwnd, UINT_PTR id, UINT timeout, TIMERPROC 
         req->msg    = WM_TIMER;
         req->id     = id;
         req->rate   = timeout;
+        req->tolerance = tolerance;
         req->lparam = (ULONG_PTR)winproc;
         if (!wine_server_call_err( req ))
         {
@@ -4576,6 +4584,7 @@ UINT_PTR WINAPI NtUserSetSystemTimer( HWND hwnd, UINT_PTR id, UINT timeout )
         req->msg    = WM_SYSTIMER;
         req->id     = id;
         req->rate   = timeout;
+        req->tolerance = 0;
         req->lparam = 0;
         if (!wine_server_call_err( req ))
         {

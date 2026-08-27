@@ -2540,6 +2540,7 @@ enum message_type
     user_handle_t   win;       /* window handle */
     unsigned int    msg;       /* message to post */
     unsigned int    rate;      /* timer rate in ms */
+    unsigned int    tolerance; /* coalescing tolerance in ms */
     lparam_t        id;        /* timer id */
     lparam_t        lparam;    /* message lparam (callback proc) */
 @REPLY

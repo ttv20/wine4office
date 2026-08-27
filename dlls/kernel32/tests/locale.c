@@ -2908,6 +2908,12 @@ static void test_LCMapStringEx(void)
     ok(!ret, "LCMapStringEx should fail with bad locale name\n");
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "unexpected error code %ld\n", GetLastError());
 
+    ret = pLCMapStringEx(L"en-US", LCMAP_LOWERCASE,
+                         upper_case, -1, buf, ARRAY_SIZE(buf), NULL, NULL, 0);
+    ok(ret == lstrlenW(upper_case) + 1, "ret %d, error %ld, expected value %d\n",
+       ret, GetLastError(), lstrlenW(upper_case) + 1);
+    ok(!lstrcmpW(buf, lower_case), "string compare mismatch\n");
+
     SetLastError(0xdeadbeef);
     ret = pLCMapStringEx(invalidW, LCMAP_HIRAGANA,
                          upper_case, -1, buf, ARRAY_SIZE(buf), NULL, NULL, 0);
