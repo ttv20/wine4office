@@ -5506,9 +5506,31 @@ static void CALLBACK apc_test_proc(ULONG_PTR param)
     /* nothing */
 }
 
+struct msg_wait_post_params
+{
+    HWND hwnd;
+    DWORD thread_id;
+    UINT message;
+};
+
+static DWORD CALLBACK msg_wait_post_thread(void *arg)
+{
+    struct msg_wait_post_params *params = arg;
+    DWORD ret = 0;
+
+    SendMessageA( params->hwnd, WM_NULL, 0, 0 );
+    if (!PostThreadMessageA( params->thread_id, params->message, 0, 0 )) ret = GetLastError();
+    HeapFree( GetProcessHeap(), 0, params );
+    return ret;
+}
+
 static void test_MsgWaitForMultipleObjects(HWND hwnd)
 {
-    DWORD ret;
+    struct msg_wait_post_params *params;
+    HANDLE event, thread;
+    DWORD ret, exit_code;
+    BOOL got_message = FALSE;
+    unsigned int i;
     MSG msg;
 
     ret = MsgWaitForMultipleObjects(0, NULL, FALSE, 0, QS_POSTMESSAGE);
@@ -5592,6 +5614,88 @@ static void test_MsgWaitForMultipleObjects(HWND hwnd)
     /* the APC call is still queued */
     ret = MsgWaitForMultipleObjectsEx( 0, NULL, 0, QS_POSTMESSAGE, MWMO_ALERTABLE );
     ok(ret == WAIT_IO_COMPLETION, "MsgWaitForMultipleObjectsEx returned %lx\n", ret);
+
+    event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ok(!!event, "CreateEvent failed, error %lu\n", GetLastError());
+    if (!event) return;
+
+    ret = SetEvent( event );
+    ok(ret, "SetEvent failed, error %lu\n", GetLastError());
+    ret = MsgWaitForMultipleObjectsEx( 1, &event, 0, QS_POSTMESSAGE, 0 );
+    ok(ret == WAIT_OBJECT_0, "signaled event wait returned %lx\n", ret);
+
+    ret = ResetEvent( event );
+    ok(ret, "ResetEvent failed, error %lu\n", GetLastError());
+    ret = PostThreadMessageA( GetCurrentThreadId(), WM_APP + 1, 0, 0 );
+    ok(ret, "PostThreadMessage failed, error %lu\n", GetLastError());
+    ret = MsgWaitForMultipleObjectsEx( 1, &event, 0, QS_POSTMESSAGE, MWMO_INPUTAVAILABLE );
+    ok(ret == WAIT_OBJECT_0 + 1, "pending message wait returned %lx\n", ret);
+    ok(PeekMessageA( &msg, 0, WM_APP + 1, WM_APP + 1, PM_REMOVE ),
+       "PeekMessage should remove the pending message\n");
+
+    ret = SetEvent( event );
+    ok(ret, "SetEvent failed, error %lu\n", GetLastError());
+    ret = PostThreadMessageA( GetCurrentThreadId(), WM_APP + 2, 0, 0 );
+    ok(ret, "PostThreadMessage failed, error %lu\n", GetLastError());
+    ret = MsgWaitForMultipleObjectsEx( 1, &event, 1000, QS_POSTMESSAGE,
+                                       MWMO_WAITALL | MWMO_INPUTAVAILABLE );
+    ok(ret == WAIT_OBJECT_0, "wait-all returned %lx\n", ret);
+    ok(PeekMessageA( &msg, 0, WM_APP + 2, WM_APP + 2, PM_REMOVE ),
+       "PeekMessage should remove the wait-all message\n");
+
+    ret = ResetEvent( event );
+    ok(ret, "ResetEvent failed, error %lu\n", GetLastError());
+    ret = PostThreadMessageA( GetCurrentThreadId(), WM_APP + 3, 0, 0 );
+    ok(ret, "PostThreadMessage failed, error %lu\n", GetLastError());
+    ret = MsgWaitForMultipleObjectsEx( 1, &event, 0, QS_POSTMESSAGE,
+                                       MWMO_WAITALL | MWMO_INPUTAVAILABLE );
+    ok(ret == WAIT_TIMEOUT, "unsignaled wait-all returned %lx\n", ret);
+    ok(PeekMessageA( &msg, 0, WM_APP + 3, WM_APP + 3, PM_REMOVE ),
+       "PeekMessage should remove the wait-all timeout message\n");
+
+    ret = MsgWaitForMultipleObjectsEx( 0, NULL, 20, QS_POSTMESSAGE, 0 );
+    ok(ret == WAIT_TIMEOUT, "finite message wait returned %lx\n", ret);
+
+    params = HeapAlloc( GetProcessHeap(), 0, sizeof(*params) );
+    ok(!!params, "failed to allocate post parameters\n");
+    if (!params)
+    {
+        CloseHandle( event );
+        return;
+    }
+    params->hwnd = hwnd;
+    params->thread_id = GetCurrentThreadId();
+    params->message = WM_APP + 4;
+    thread = CreateThread( NULL, 0, msg_wait_post_thread, params, 0, NULL );
+    ok(!!thread, "failed to create post thread, error %lu\n", GetLastError());
+    if (!thread)
+    {
+        HeapFree( GetProcessHeap(), 0, params );
+        CloseHandle( event );
+        return;
+    }
+    /* the sent message may wake the wait before the helper posts its thread message */
+    for (i = 0; i < 3 && !got_message; ++i)
+    {
+        ret = MsgWaitForMultipleObjectsEx( 0, NULL, 10000, QS_POSTMESSAGE | QS_SENDMESSAGE, 0 );
+        ok(ret == WAIT_OBJECT_0, "helper-thread message wait returned %lx\n", ret);
+        if (ret != WAIT_OBJECT_0) break;
+        got_message = PeekMessageA( &msg, 0, WM_APP + 4, WM_APP + 4, PM_REMOVE );
+    }
+    ok(got_message, "PeekMessage should remove the helper-thread message\n");
+    ret = WaitForSingleObject( thread, 1000 );
+    ok(ret == WAIT_OBJECT_0, "post thread wait returned %lx\n", ret);
+    exit_code = STILL_ACTIVE;
+    ret = GetExitCodeThread( thread, &exit_code );
+    ok(ret, "GetExitCodeThread failed, error %lu\n", GetLastError());
+    if (ret) ok(!exit_code, "post thread failed, error %lu\n", exit_code);
+    CloseHandle( thread );
+
+    CloseHandle( event );
+    SetLastError( 0xdeadbeef );
+    ret = MsgWaitForMultipleObjectsEx( 1, &event, 0, QS_POSTMESSAGE, 0 );
+    ok(ret == WAIT_FAILED, "closed handle wait returned %lx\n", ret);
+    ok(GetLastError() == ERROR_INVALID_HANDLE, "expected ERROR_INVALID_HANDLE, got %lu\n", GetLastError());
 }
 
 static void test_WM_DEVICECHANGE(HWND hwnd)
