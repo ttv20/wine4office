@@ -309,7 +309,7 @@ HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *su
         void **render_target);
 HRESULT d2d_device_context_replay_cpu_glyph(struct d2d_device_context *context,
         const RECT *bounds, const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour);
-HRESULT d2d_device_context_flush_cpu_transaction(ID2D1DeviceContext *iface);
+HRESULT d2d_device_context_prepare_target_read(ID2D1DeviceContext *iface);
 
 static inline BOOL d2d_device_context_is_dxgi_target(const struct d2d_device_context *context)
 {

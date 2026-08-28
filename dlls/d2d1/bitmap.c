@@ -199,7 +199,7 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_CopyFromRenderTarget(ID2D1Bitmap1 *i
         return hr;
     }
 
-    if (FAILED(hr = d2d_device_context_flush_cpu_transaction(device_context)))
+    if (FAILED(hr = d2d_device_context_prepare_target_read(device_context)))
     {
         ID2D1DeviceContext_Release(device_context);
         return hr;

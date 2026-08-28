@@ -394,10 +394,16 @@ static HRESULT d2d_device_context_prepare_gpu_draw(struct d2d_device_context *co
     return hr;
 }
 
-HRESULT d2d_device_context_flush_cpu_transaction(ID2D1DeviceContext *iface)
+HRESULT d2d_device_context_prepare_target_read(ID2D1DeviceContext *iface)
 {
-    return d2d_device_context_prepare_gpu_draw(
-            impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface));
+    struct d2d_device_context *context =
+            impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
+
+    if (context->cpu_transaction)
+        return d2d_device_context_prepare_gpu_draw(context);
+    if (context->ops && context->ops->device_context_prepare_gpu_draw)
+        return context->ops->device_context_prepare_gpu_draw(context->outer_unknown, context);
+    return S_OK;
 }
 
 static BOOL d2d_device_context_cpu_transaction_matches(const struct d2d_device_context *context)

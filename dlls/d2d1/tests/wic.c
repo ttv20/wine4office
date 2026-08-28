@@ -686,10 +686,13 @@ static void test_tiny_wic_sequences(void)
     const D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f};
     const D2D1_COLOR_F blue = {0.0f, 0.0f, 1.0f, 1.0f};
     struct benchmark_context ctx;
+    ID2D1Bitmap *copied_bitmap = NULL;
     ID2D1RenderTarget *target = NULL;
     ID2D1SolidColorBrush *brush = NULL;
     IWICBitmap *bitmap = NULL;
+    D2D1_BITMAP_PROPERTIES bitmap_props;
     D2D1_MATRIX_3X2_F transform, identity;
+    D2D1_SIZE_U bitmap_size;
     D2D1_RECT_F rect;
     D2D1_TAG tag1, tag2;
     BYTE pixel[4];
@@ -822,6 +825,21 @@ static void test_tiny_wic_sequences(void)
             hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
             ok(hr == S_OK, "Failed to complete the CPU WIC transaction, hr %#lx.\n", hr);
 
+            memset(&bitmap_props, 0, sizeof(bitmap_props));
+            bitmap_props.pixelFormat = ctx.target_desc.pixelFormat;
+            bitmap_props.dpiX = 96.0f;
+            bitmap_props.dpiY = 96.0f;
+            bitmap_size.width = 17;
+            bitmap_size.height = 17;
+            hr = ID2D1RenderTarget_CreateBitmap(target, bitmap_size, NULL, 0,
+                    &bitmap_props, &copied_bitmap);
+            ok(hr == S_OK, "Failed to create the WIC copy bitmap, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                hr = ID2D1Bitmap_CopyFromRenderTarget(copied_bitmap, NULL, target, NULL);
+                ok(hr == S_OK, "Failed to copy from the CPU WIC target, hr %#lx.\n", hr);
+            }
+
             rect.left = 0.0f;
             rect.top = 0.0f;
             rect.right = 8.0f;
@@ -843,6 +861,22 @@ static void test_tiny_wic_sequences(void)
                         pixel[0], pixel[1], pixel[2], pixel[3]);
             else
                 ok(0, "Failed to read the preserved pixel, hr %#lx.\n", hr);
+
+            if (copied_bitmap)
+            {
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_Clear(target, &blue);
+                ID2D1RenderTarget_DrawBitmap(target, copied_bitmap, NULL, 1.0f,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(hr == S_OK, "Failed to draw the copied WIC contents, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 8, 8, pixel)))
+                    ok(!pixel[0] && !pixel[1] && pixel[2] == 255 && pixel[3] == 255,
+                            "Unexpected copied pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to read the copied pixel, hr %#lx.\n", hr);
+            }
 
             rect.left = 1.0f;
             rect.top = 1.0f;
@@ -883,6 +917,7 @@ static void test_tiny_wic_sequences(void)
         }
     }
 
+    if (copied_bitmap) ID2D1Bitmap_Release(copied_bitmap);
     if (brush) ID2D1SolidColorBrush_Release(brush);
     if (target) ID2D1RenderTarget_Release(target);
     if (bitmap) IWICBitmap_Release(bitmap);
