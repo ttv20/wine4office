@@ -380,6 +380,41 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
     return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1DeviceContext6_iface);
 }
 
+static HRESULT d2d_device_context_prepare_gpu_draw(struct d2d_device_context *context)
+{
+    HRESULT hr;
+
+    if (!context->cpu_transaction || context->target.object != context->cpu_transaction_target
+            || !context->ops || !context->ops->device_context_prepare_gpu_draw)
+        return S_OK;
+
+    context->cpu_transaction = FALSE;
+    if (FAILED(hr = context->ops->device_context_prepare_gpu_draw(context->outer_unknown, context)))
+        d2d_device_context_set_error(context, hr);
+    return hr;
+}
+
+HRESULT d2d_device_context_flush_cpu_transaction(ID2D1DeviceContext *iface)
+{
+    return d2d_device_context_prepare_gpu_draw(
+            impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface));
+}
+
+static BOOL d2d_device_context_cpu_transaction_matches(const struct d2d_device_context *context)
+{
+    return context->cpu_transaction && context->target.object == context->cpu_transaction_target;
+}
+
+static void d2d_device_context_end_cpu_transaction(struct d2d_device_context *context)
+{
+    context->cpu_transaction = FALSE;
+    if (context->cpu_transaction_target)
+    {
+        ID2D1Image_Release(context->cpu_transaction_target);
+        context->cpu_transaction_target = NULL;
+    }
+}
+
 static void d2d_device_context_end_batch(struct d2d_device_context *context)
 {
     if (!context->batched_draw)
@@ -469,6 +504,10 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
     {
         unsigned int i, j, k;
 
+        /* BeginDraw() may have borrowed the immediate context for a small
+         * batched target. Restore it even if the caller abandons the draw. */
+        d2d_device_context_end_batch(context);
+        d2d_device_context_end_cpu_transaction(context);
         d2d_clip_stack_cleanup(&context->clip_stack);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
@@ -1118,6 +1157,9 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     D3D11_BUFFER_DESC buffer_desc;
     ID3D11Buffer *ib, *vb;
     HRESULT hr;
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(render_target)))
+        return;
 
     if (FAILED(hr = d2d_geometry_build_outline_mesh(geometry, stroke_width, stroke_style, &mesh)))
     {
@@ -2234,6 +2276,9 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     ID3D11Buffer *ib, *vb;
     HRESULT hr;
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(render_target)))
+        return;
+
     buffer_desc.Usage = D3D11_USAGE_DEFAULT;
     buffer_desc.CPUAccessFlags = 0;
     buffer_desc.MiscFlags = 0;
@@ -2427,6 +2472,9 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
     D2D1_SIZE_F size;
     D2D1_RECT_F s, d;
     HRESULT hr;
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (perspective_transform)
         FIXME("Perspective transform is ignored.\n");
@@ -2642,6 +2690,9 @@ static void d2d_device_context_draw_glyph_run_outline(struct d2d_device_context 
     ID2D1PathGeometry *geometry;
     HRESULT hr;
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (FAILED(hr = d2d_device_context_get_glyph_run_geometry(context, glyph_run, &geometry)))
     {
         ERR("Failed to create geometry, hr %#lx.\n", hr);
@@ -2762,8 +2813,10 @@ static BOOL d2d_device_context_draw_cached_glyph(struct d2d_device_context *cont
             ? context->text_rendering_params : context->default_text_rendering_params;
     D2D1_COLOR_F colour;
 
-    if (!brush_impl || brush_impl->type != D2D_BRUSH_TYPE_SOLID || !context->ops
+    if (!brush_impl || brush_impl->type != D2D_BRUSH_TYPE_SOLID
+            || !d2d_device_context_cpu_transaction_matches(context) || !context->ops
             || !context->ops->queue_cpu_glyph || context->clip_stack.count || !cache->values
+            || context->drawing_state.primitiveBlend != D2D1_PRIMITIVE_BLEND_SOURCE_OVER
             || cache->text_antialias_mode != context->drawing_state.textAntialiasMode
             || cache->rendering_params != rendering_params
             || !d2d_glyph_bitmap_cache_matches(cache, context, baseline_origin, run,
@@ -2919,7 +2972,9 @@ static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *
 
     if (texture_type == DWRITE_TEXTURE_ALIASED_1x1 && brush_impl
             && brush_impl->type == D2D_BRUSH_TYPE_SOLID && context->ops
-            && context->ops->queue_cpu_glyph && !context->clip_stack.count)
+            && context->ops->queue_cpu_glyph && !context->clip_stack.count
+            && context->drawing_state.primitiveBlend == D2D1_PRIMITIVE_BLEND_SOURCE_OVER
+            && d2d_device_context_cpu_transaction_matches(context))
     {
         colour = brush_impl->u.solid.color;
         colour.a *= brush_impl->opacity;
@@ -2933,6 +2988,9 @@ static void d2d_device_context_draw_glyph_run_bitmap(struct d2d_device_context *
             goto done;
         }
     }
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        goto done;
 
     bitmap_desc.pixelFormat.format = DXGI_FORMAT_A8_UNORM;
     bitmap_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
@@ -2989,6 +3047,73 @@ done:
         ID2D1Bitmap_Release(opacity_bitmap);
     free(opacity_values);
     IDWriteGlyphRunAnalysis_Release(analysis);
+}
+
+HRESULT d2d_device_context_replay_cpu_glyph(struct d2d_device_context *context,
+        const RECT *bounds, const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour)
+{
+    ID2D1RectangleGeometry *geometry = NULL;
+    ID2D1SolidColorBrush *colour_brush = NULL;
+    ID2D1BitmapBrush *opacity_brush = NULL;
+    D2D1_BITMAP_PROPERTIES bitmap_desc;
+    ID2D1Bitmap *opacity_bitmap = NULL;
+    D2D1_BRUSH_PROPERTIES brush_desc;
+    D2D1_MATRIX_3X2_F *transform, saved_transform;
+    D2D1_SIZE_U bitmap_size;
+    D2D1_RECT_F run_rect;
+    float scale_x, scale_y;
+    HRESULT hr;
+
+    d2d_size_set(&bitmap_size, bounds->right - bounds->left, bounds->bottom - bounds->top);
+    if (!bitmap_size.width || !bitmap_size.height)
+        return S_OK;
+
+    bitmap_desc.pixelFormat.format = DXGI_FORMAT_A8_UNORM;
+    bitmap_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    bitmap_desc.dpiX = context->desc.dpiX;
+    bitmap_desc.dpiY = context->desc.dpiY;
+    if (FAILED(hr = d2d_device_context_CreateBitmap(&context->ID2D1DeviceContext6_iface,
+            bitmap_size, values, pitch, &bitmap_desc, &opacity_bitmap)))
+        goto done;
+
+    scale_x = context->desc.dpiX / 96.0f;
+    scale_y = context->desc.dpiY / 96.0f;
+    d2d_rect_set(&run_rect, bounds->left / scale_x, bounds->top / scale_y,
+            bounds->right / scale_x, bounds->bottom / scale_y);
+
+    brush_desc.opacity = 1.0f;
+    brush_desc.transform = identity;
+    brush_desc.transform._31 = run_rect.left;
+    brush_desc.transform._32 = run_rect.top;
+    if (FAILED(hr = d2d_device_context_CreateBitmapBrush(&context->ID2D1DeviceContext6_iface,
+            opacity_bitmap, NULL, &brush_desc, &opacity_brush)))
+        goto done;
+    if (FAILED(hr = d2d_device_context_CreateSolidColorBrush(&context->ID2D1DeviceContext6_iface,
+            colour, NULL, &colour_brush)))
+        goto done;
+    if (FAILED(hr = ID2D1Factory_CreateRectangleGeometry(context->factory, &run_rect, &geometry)))
+        goto done;
+
+    transform = &context->drawing_state.transform;
+    saved_transform = *transform;
+    *transform = identity;
+    d2d_device_context_fill_geometry(context,
+            unsafe_impl_from_ID2D1Geometry((ID2D1Geometry *)geometry),
+            unsafe_impl_from_ID2D1Brush((ID2D1Brush *)colour_brush),
+            unsafe_impl_from_ID2D1Brush((ID2D1Brush *)opacity_brush));
+    *transform = saved_transform;
+    hr = context->error.code;
+
+done:
+    if (geometry)
+        ID2D1RectangleGeometry_Release(geometry);
+    if (colour_brush)
+        ID2D1SolidColorBrush_Release(colour_brush);
+    if (opacity_brush)
+        ID2D1BitmapBrush_Release(opacity_brush);
+    if (opacity_bitmap)
+        ID2D1Bitmap_Release(opacity_bitmap);
+    return hr;
 }
 
 static HRESULT d2d_device_context_get_text_rendering_mode(struct d2d_device_context *context,
@@ -3131,6 +3256,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTransform(ID2D1DeviceContext
 
     TRACE("iface %p, transform %p.\n", iface, transform);
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_transform(context->target.command_list, transform);
 
@@ -3155,6 +3283,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetAntialiasMode(ID2D1DeviceCon
 
     TRACE("iface %p, antialias_mode %#x stub!\n", iface, antialias_mode);
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_antialias_mode(context->target.command_list, antialias_mode);
 
@@ -3177,6 +3308,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTextAntialiasMode(ID2D1Devic
 
     TRACE("iface %p, antialias_mode %#x.\n", iface, antialias_mode);
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_text_antialias_mode(context->target.command_list, antialias_mode);
 
@@ -3198,6 +3332,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTextRenderingParams(ID2D1Dev
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     TRACE("iface %p, text_rendering_params %p.\n", iface, text_rendering_params);
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_text_rendering_params(context->target.command_list, text_rendering_params);
@@ -3249,6 +3386,9 @@ static void STDMETHODCALLTYPE d2d_device_context_PushLayer(ID2D1DeviceContext6 *
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
@@ -3308,6 +3448,8 @@ static void STDMETHODCALLTYPE d2d_device_context_RestoreDrawingState(ID2D1Device
     TRACE("iface %p, state_block %p.\n", iface, state_block);
 
     if (!(state_block_impl = unsafe_impl_from_ID2D1DrawingStateBlock(state_block))) return;
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
     {
         struct d2d_command_list *command_list = context->target.command_list;
@@ -3339,6 +3481,9 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
     D2D1_POINT_2F point;
 
     TRACE("iface %p, clip_rect %s, antialias_mode %#x.\n", iface, debug_d2d_rect_f(clip_rect), antialias_mode);
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_push_clip(context->target.command_list, clip_rect, antialias_mode);
@@ -3408,6 +3553,13 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
         return;
     }
 
+    if (d2d_device_context_cpu_transaction_matches(context) && !context->clip_stack.count
+            && context->ops && context->ops->queue_cpu_clear
+            && context->ops->queue_cpu_clear(context->outer_unknown, colour))
+        return;
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
 
     if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
@@ -3475,8 +3627,27 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
 
     TRACE("iface %p.\n", iface);
 
-    if (context->draw_depth++)
+    if (!context->draw_depth)
+    {
+        context->invalid_draw_sequence = FALSE;
+        memset(&context->error, 0, sizeof(context->error));
+    }
+    else
         context->invalid_draw_sequence = TRUE;
+    ++context->draw_depth;
+
+    if (context->draw_depth == 1)
+    {
+        d2d_device_context_end_cpu_transaction(context);
+        if (context->target.type == D2D_TARGET_BITMAP && context->ops
+                && context->ops->device_context_begin_draw)
+        {
+            context->cpu_transaction_target = context->target.object;
+            ID2D1Image_AddRef(context->cpu_transaction_target);
+            context->cpu_transaction = TRUE;
+            context->ops->device_context_begin_draw(context->outer_unknown);
+        }
+    }
 
     d2d_device_context_atlas_log_rect(context, "BeginDraw", NULL);
 
@@ -3487,7 +3658,7 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
      * shared immediate-context state around every primitive in one transaction. */
     if (context->ops && context->ops->batch_small_draws
             && context->pixel_size.width <= 32 && context->pixel_size.height <= 32
-            && !context->batched_draw)
+            && context->draw_depth == 1 && !context->batched_draw)
     {
         if (context->cs)
             EnterCriticalSection(context->cs);
@@ -3497,7 +3668,6 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
         context->batched_draw = TRUE;
     }
 
-    memset(&context->error, 0, sizeof(context->error));
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 *iface,
@@ -3518,12 +3688,16 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
     if (tag2)
         *tag2 = context->error.tag2;
 
-    if (context->target.type == D2D_TARGET_COMMAND_LIST)
-        return context->error.code;
-
     /* Restore the D3D context before WIC readback. CopyResource/Map may wait
      * for work which cannot complete while the immediate context is borrowed. */
     d2d_device_context_end_batch(context);
+    d2d_device_context_end_cpu_transaction(context);
+
+    if (context->invalid_draw_sequence)
+        return D2DERR_WRONG_STATE;
+
+    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+        return context->error.code;
 
     if (context->ops && context->ops->device_context_present)
     {
@@ -3548,7 +3722,7 @@ static D2D1_PIXEL_FORMAT * STDMETHODCALLTYPE d2d_device_context_GetPixelFormat(I
 
 static void STDMETHODCALLTYPE d2d_device_context_SetDpi(ID2D1DeviceContext6 *iface, float dpi_x, float dpi_y)
 {
-    struct d2d_device_context *render_target = impl_from_ID2D1DeviceContext(iface);
+    struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     TRACE("iface %p, dpi_x %.8e, dpi_y %.8e.\n", iface, dpi_x, dpi_y);
 
@@ -3560,8 +3734,11 @@ static void STDMETHODCALLTYPE d2d_device_context_SetDpi(ID2D1DeviceContext6 *ifa
     else if (dpi_x <= 0.0f || dpi_y <= 0.0f)
         return;
 
-    render_target->desc.dpiX = dpi_x;
-    render_target->desc.dpiY = dpi_y;
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
+    context->desc.dpiX = dpi_x;
+    context->desc.dpiY = dpi_y;
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_GetDpi(ID2D1DeviceContext6 *iface, float *dpi_x, float *dpi_y)
@@ -4024,6 +4201,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
 
     TRACE("iface %p, target %p.\n", iface, target);
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (!target)
     {
         if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
@@ -4122,6 +4302,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetPrimitiveBlend(ID2D1DeviceCo
         return;
     }
 
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
+
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_primitive_blend(context->target.command_list, primitive_blend);
 
@@ -4148,6 +4331,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetUnitMode(ID2D1DeviceContext6
         WARN("Unknown unit mode %#x.\n", unit_mode);
         return;
     }
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_unit_mode(context->target.command_list, unit_mode);
@@ -5149,6 +5335,9 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_PushLayer(ID
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
 
     FIXME("iface %p, layer_parameters %p, layer %p stub!\n", iface, layer_parameters, layer);
+
+    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
+        return;
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_push_layer(context->target.command_list, context, layer_parameters);
