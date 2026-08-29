@@ -44,6 +44,7 @@ struct benchmark_context
     ID2D1PathGeometry *geometry;
     IDWriteFactory *dwrite_factory;
     IDWriteTextFormat *text_format;
+    IDWriteRenderingParams *rendering_params;
     D2D1_RENDER_TARGET_PROPERTIES target_desc;
 };
 
@@ -185,13 +186,16 @@ static HRESULT init_benchmark_context(struct benchmark_context *ctx, D2D1_FACTOR
     if (FAILED(hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
             &IID_IDWriteFactory, (IUnknown **)&ctx->dwrite_factory)))
         return hr;
-    return IDWriteFactory_CreateTextFormat(ctx->dwrite_factory, L"Tahoma", NULL,
+    if (FAILED(hr = IDWriteFactory_CreateTextFormat(ctx->dwrite_factory, L"Tahoma", NULL,
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            7.0f, L"en-us", &ctx->text_format);
+            7.0f, L"en-us", &ctx->text_format)))
+        return hr;
+    return IDWriteFactory_CreateRenderingParams(ctx->dwrite_factory, &ctx->rendering_params);
 }
 
 static void release_benchmark_context(struct benchmark_context *ctx)
 {
+    if (ctx->rendering_params) IDWriteRenderingParams_Release(ctx->rendering_params);
     if (ctx->text_format) IDWriteTextFormat_Release(ctx->text_format);
     if (ctx->dwrite_factory) IDWriteFactory_Release(ctx->dwrite_factory);
     if (ctx->geometry) ID2D1PathGeometry_Release(ctx->geometry);
@@ -483,6 +487,7 @@ static HRESULT draw_office_glyph_thumbnail(struct benchmark_context *ctx,
     if (FAILED(hr = ID2D1RenderTarget_CreateSolidColorBrush(target, &ink, NULL, &brush)))
         goto done;
     ID2D1RenderTarget_SetTextAntialiasMode(target, D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+    ID2D1RenderTarget_SetTextRenderingParams(target, ctx->rendering_params);
     sample->target_ms = now_ms() - t;
 
     t = now_ms();
@@ -498,6 +503,7 @@ static HRESULT draw_office_glyph_thumbnail(struct benchmark_context *ctx,
     ID2D1RenderTarget_DrawText(target, text, ARRAY_SIZE(text) - 1, ctx->text_format,
             &text_rect, (ID2D1Brush *)brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
             DWRITE_MEASURING_MODE_NATURAL);
+    ID2D1RenderTarget_SetTextRenderingParams(target, NULL);
     sample->primitive_ms = now_ms() - t;
 
     t = now_ms();
@@ -903,11 +909,13 @@ static void test_tiny_wic_sequences(void)
                 ok(0, "Failed to read the clipped pixel, hr %#lx.\n", hr);
 
             ID2D1RenderTarget_SetTextAntialiasMode(target, D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            ID2D1RenderTarget_SetTextRenderingParams(target, ctx.rendering_params);
             ID2D1RenderTarget_BeginDraw(target);
             ID2D1RenderTarget_Clear(target, NULL);
             ID2D1RenderTarget_DrawText(target, L"A", 1, ctx.text_format, &rect,
                     (ID2D1Brush *)brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL);
+            ID2D1RenderTarget_SetTextRenderingParams(target, NULL);
             hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
             ok(hr == S_OK, "Failed to complete the CPU glyph transaction, hr %#lx.\n", hr);
             if (SUCCEEDED(hr = count_nonzero_alpha(bitmap, 17, 17, &nonzero_alpha)))

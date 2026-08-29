@@ -3339,9 +3339,6 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTextRenderingParams(ID2D1Dev
 
     TRACE("iface %p, text_rendering_params %p.\n", iface, text_rendering_params);
 
-    if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
-        return;
-
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_set_text_rendering_params(context->target.command_list, text_rendering_params);
 
