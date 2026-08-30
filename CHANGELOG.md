@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce repeated directory scans during case-insensitive file lookup.
 - Speed up small Office gallery images rendered through Direct2D.
 - Reduce memory use and latency when drawing complex antialiased Direct2D geometry.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
