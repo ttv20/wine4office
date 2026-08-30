@@ -4,6 +4,7 @@
 
 - Speed up small Office gallery images rendered through Direct2D.
 - Reduce memory use and latency when drawing complex antialiased Direct2D geometry.
+- Match filled Direct2D curve shapes more closely to Windows without changing their outlines.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
 - Reduce message-loop server calls after retrieving queued messages.
 - Respect Direct2D stroke join styles while keeping sharp WordArt corners bounded.
