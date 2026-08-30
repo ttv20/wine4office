@@ -399,6 +399,10 @@ HRESULT d2d_device_context_prepare_target_read(ID2D1DeviceContext *iface)
     struct d2d_device_context *context =
             impl_from_ID2D1DeviceContext((ID2D1DeviceContext6 *)iface);
 
+    if (context->ops && context->ops->device_context_target_exposed)
+        context->ops->device_context_target_exposed(context->outer_unknown);
+    if (FAILED(context->error.code))
+        return context->error.code;
     if (context->cpu_transaction)
         return d2d_device_context_prepare_gpu_draw(context);
     if (context->ops && context->ops->device_context_prepare_gpu_draw)
@@ -3416,13 +3420,20 @@ static void STDMETHODCALLTYPE d2d_device_context_PopLayer(ID2D1DeviceContext6 *i
 static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *iface, D2D1_TAG *tag1, D2D1_TAG *tag2)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    HRESULT hr = context->error.code;
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
 
-    if (context->ops && context->ops->device_context_present)
-        context->ops->device_context_present(context->outer_unknown);
+    if (SUCCEEDED(hr) && context->ops && context->ops->device_context_present
+            && FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
+        d2d_device_context_set_error(context, hr);
 
-    return S_OK;
+    if (tag1)
+        *tag1 = context->error.tag1;
+    if (tag2)
+        *tag2 = context->error.tag2;
+
+    return hr;
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_SaveDrawingState(ID2D1DeviceContext6 *iface,
@@ -3697,7 +3708,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
     d2d_device_context_end_cpu_transaction(context);
 
     if (context->invalid_draw_sequence)
+    {
+        d2d_device_context_set_error(context, D2DERR_WRONG_STATE);
         return D2DERR_WRONG_STATE;
+    }
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         return context->error.code;
@@ -3740,6 +3754,8 @@ static void STDMETHODCALLTYPE d2d_device_context_SetDpi(ID2D1DeviceContext6 *ifa
     if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
         return;
 
+    if (context->desc.dpiX != dpi_x || context->desc.dpiY != dpi_y)
+        d2d_glyph_bitmap_cache_cleanup(&context->glyph_bitmap_cache);
     context->desc.dpiX = dpi_x;
     context->desc.dpiY = dpi_y;
 }
@@ -4272,12 +4288,18 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
 static void STDMETHODCALLTYPE d2d_device_context_GetTarget(ID2D1DeviceContext6 *iface, ID2D1Image **target)
 {
     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+    HRESULT hr;
 
     TRACE("iface %p, target %p.\n", iface, target);
 
     *target = context->target.object ? context->target.object : NULL;
     if (*target)
+    {
+        if (FAILED(hr = d2d_device_context_prepare_target_read((ID2D1DeviceContext *)iface))
+                && SUCCEEDED(context->error.code))
+            d2d_device_context_set_error(context, hr);
         ID2D1Image_AddRef(*target);
+    }
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_SetRenderingControls(ID2D1DeviceContext6 *iface,

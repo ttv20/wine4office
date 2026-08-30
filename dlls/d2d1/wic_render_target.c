@@ -204,6 +204,8 @@ static void d2d_wic_render_target_apply_cpu_glyphs(struct d2d_wic_render_target 
     }
 }
 
+static HRESULT d2d_wic_render_target_upload_bitmap(struct d2d_wic_render_target *render_target);
+
 static HRESULT d2d_wic_render_target_present_cpu(struct d2d_wic_render_target *render_target)
 {
     IWICBitmapLock *bitmap_lock;
@@ -242,8 +244,10 @@ static HRESULT d2d_wic_render_target_present_cpu(struct d2d_wic_render_target *r
     }
     d2d_wic_render_target_apply_cpu_glyphs(render_target, dst, dst_pitch);
     IWICBitmapLock_Release(bitmap_lock);
-    hr = S_OK;
+    bitmap_lock = NULL;
     render_target->gpu_stale = TRUE;
+    hr = render_target->target_exposed
+            ? d2d_wic_render_target_upload_bitmap(render_target) : S_OK;
 
 done:
     d2d_wic_render_target_discard_cpu_glyphs(render_target);
@@ -255,8 +259,9 @@ done:
 static HRESULT d2d_wic_render_target_upload_bitmap(struct d2d_wic_render_target *render_target)
 {
     IWICBitmapLock *bitmap_lock = NULL;
-    ID3D10Resource *resource = NULL;
-    ID3D10Device *device = NULL;
+    ID3D11DeviceContext *context = NULL;
+    ID3D11Resource *resource = NULL;
+    ID3D11Device *device = NULL;
     UINT data_size, stride;
     WICRect rect;
     BYTE *data;
@@ -273,19 +278,23 @@ static HRESULT d2d_wic_render_target_upload_bitmap(struct d2d_wic_render_target 
             || FAILED(hr = IWICBitmapLock_GetStride(bitmap_lock, &stride)))
         goto done;
     if (FAILED(hr = IDXGISurface_QueryInterface(render_target->dxgi_surface,
-            &IID_ID3D10Resource, (void **)&resource)))
+            &IID_ID3D11Resource, (void **)&resource)))
         goto done;
 
-    ID3D10Texture2D_GetDevice(render_target->readback_texture, &device);
-    ID3D10Device_UpdateSubresource(device, resource, 0, NULL, data, stride, 0);
+    ID3D11Resource_GetDevice(resource, &device);
+    ID3D11Device_GetImmediateContext(device, &context);
+    ID3D11DeviceContext_UpdateSubresource(context, resource, 0, NULL, data, stride, 0);
+    ID3D11DeviceContext_Flush(context);
     render_target->gpu_stale = FALSE;
     hr = S_OK;
 
 done:
+    if (context)
+        ID3D11DeviceContext_Release(context);
     if (device)
-        ID3D10Device_Release(device);
+        ID3D11Device_Release(device);
     if (resource)
-        ID3D10Resource_Release(resource);
+        ID3D11Resource_Release(resource);
     if (bitmap_lock)
         IWICBitmapLock_Release(bitmap_lock);
     return hr;
@@ -302,10 +311,10 @@ static HRESULT d2d_wic_render_target_prepare_gpu_draw(IUnknown *outer_unknown,
     if (render_target->gpu_fallback)
         return S_OK;
 
-    render_target->gpu_fallback = TRUE;
     if (render_target->gpu_stale && !render_target->cpu_clear_pending
             && FAILED(hr = d2d_wic_render_target_upload_bitmap(render_target)))
         return hr;
+    render_target->gpu_fallback = TRUE;
     if (!render_target->cpu_clear_pending)
         return S_OK;
 
@@ -330,17 +339,25 @@ static HRESULT d2d_wic_render_target_prepare_gpu_draw(IUnknown *outer_unknown,
     return hr;
 }
 
+static void d2d_wic_render_target_target_exposed(IUnknown *outer_unknown)
+{
+    struct d2d_wic_render_target *render_target = impl_from_IUnknown(outer_unknown);
+
+    render_target->target_exposed = TRUE;
+}
+
 static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
 {
     struct d2d_wic_render_target *render_target = impl_from_IUnknown(outer_unknown);
     D3D10_MAPPED_TEXTURE2D mapped_texture;
-    ID3D10Resource *src_resource;
-    IWICBitmapLock *bitmap_lock;
+    ID3D10Resource *src_resource = NULL;
+    IWICBitmapLock *bitmap_lock = NULL;
     UINT dst_size, dst_pitch;
-    ID3D10Device *device;
+    ID3D10Device *device = NULL;
     WICRect dst_rect;
     BYTE *src, *dst;
     unsigned int i;
+    BOOL mapped = FALSE;
     HRESULT hr;
 
     if (render_target->cpu_clear_pending && !render_target->gpu_fallback)
@@ -360,9 +377,8 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
     }
 
     ID3D10Texture2D_GetDevice(render_target->readback_texture, &device);
-    ID3D10Device_CopyResource(device, (ID3D10Resource *)render_target->readback_texture, src_resource);
-    ID3D10Device_Release(device);
-    ID3D10Resource_Release(src_resource);
+    ID3D10Device_CopyResource(device,
+            (ID3D10Resource *)render_target->readback_texture, src_resource);
 
     dst_rect.X = 0;
     dst_rect.Y = 0;
@@ -377,23 +393,22 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
     if (FAILED(hr = IWICBitmapLock_GetDataPointer(bitmap_lock, &dst_size, &dst)))
     {
         ERR("Failed to get data pointer, hr %#lx.\n", hr);
-        IWICBitmapLock_Release(bitmap_lock);
         goto end;
     }
 
     if (FAILED(hr = IWICBitmapLock_GetStride(bitmap_lock, &dst_pitch)))
     {
         ERR("Failed to get stride, hr %#lx.\n", hr);
-        IWICBitmapLock_Release(bitmap_lock);
         goto end;
     }
 
-    if (FAILED(hr = ID3D10Texture2D_Map(render_target->readback_texture, 0, D3D10_MAP_READ, 0, &mapped_texture)))
+    if (FAILED(hr = ID3D10Texture2D_Map(render_target->readback_texture,
+            0, D3D10_MAP_READ, 0, &mapped_texture)))
     {
         ERR("Failed to map readback texture, hr %#lx.\n", hr);
-        IWICBitmapLock_Release(bitmap_lock);
         goto end;
     }
+    mapped = TRUE;
 
     src = mapped_texture.pData;
 
@@ -404,15 +419,22 @@ static HRESULT d2d_wic_render_target_present(IUnknown *outer_unknown)
         dst += dst_pitch;
     }
 
-    ID3D10Texture2D_Unmap(render_target->readback_texture, 0);
-    IWICBitmapLock_Release(bitmap_lock);
+    hr = S_OK;
 
 end:
+    if (mapped)
+        ID3D10Texture2D_Unmap(render_target->readback_texture, 0);
+    if (bitmap_lock)
+        IWICBitmapLock_Release(bitmap_lock);
+    if (device)
+        ID3D10Device_Release(device);
+    if (src_resource)
+        ID3D10Resource_Release(src_resource);
+    render_target->gpu_stale = FAILED(hr);
     d2d_wic_render_target_discard_cpu_glyphs(render_target);
     render_target->cpu_clear_pending = FALSE;
     render_target->gpu_fallback = FALSE;
-    render_target->gpu_stale = FALSE;
-    return S_OK;
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_wic_render_target_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -469,6 +491,7 @@ static const struct d2d_device_context_ops d2d_wic_render_target_ops =
     d2d_wic_render_target_begin_draw,
     d2d_wic_render_target_prepare_gpu_draw,
     d2d_wic_render_target_queue_cpu_clear,
+    d2d_wic_render_target_target_exposed,
 };
 
 static HRESULT d2d_wic_resolve_pixel_format(D2D1_PIXEL_FORMAT *pixel_format,

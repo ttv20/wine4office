@@ -173,6 +173,7 @@ struct d2d_device_context_ops
     HRESULT (*device_context_prepare_gpu_draw)(IUnknown *outer_unknown,
             struct d2d_device_context *context);
     BOOL (*queue_cpu_clear)(IUnknown *outer_unknown, const D2D1_COLOR_F *colour);
+    void (*device_context_target_exposed)(IUnknown *outer_unknown);
 };
 
 enum d2d_device_context_sampler_limits
@@ -344,6 +345,7 @@ struct d2d_wic_render_target
     BOOL cpu_clear_pending;
     BOOL gpu_fallback;
     BOOL gpu_stale;
+    BOOL target_exposed;
     unsigned int width;
     unsigned int height;
     unsigned int bpp;

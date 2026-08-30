@@ -16,6 +16,7 @@
 
 #define COBJMACROS
 #include "d2d1.h"
+#include "d2d1_1.h"
 #include "dwrite.h"
 #include "wincrypt.h"
 #include "wincodec.h"
@@ -693,8 +694,13 @@ static void test_tiny_wic_sequences(void)
     const D2D1_COLOR_F blue = {0.0f, 0.0f, 1.0f, 1.0f};
     struct benchmark_context ctx;
     ID2D1Bitmap *copied_bitmap = NULL;
+    ID2D1Bitmap *direct_copied_bitmap = NULL;
+    ID2D1Bitmap *target_bitmap = NULL;
+    ID2D1DeviceContext *device_context = NULL;
+    ID2D1Image *target_image = NULL;
     ID2D1RenderTarget *target = NULL;
     ID2D1SolidColorBrush *brush = NULL;
+    IWICBitmapLock *bitmap_lock = NULL;
     IWICBitmap *bitmap = NULL;
     D2D1_BITMAP_PROPERTIES bitmap_props;
     D2D1_MATRIX_3X2_F transform, identity;
@@ -758,6 +764,11 @@ static void test_tiny_wic_sequences(void)
     if (SUCCEEDED(hr))
     {
         ID2D1RenderTarget_BeginDraw(target);
+        ID2D1RenderTarget_Clear(target, &blue);
+        hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+        ok(hr == S_OK, "Failed to initialize the nested-draw target, hr %#lx.\n", hr);
+
+        ID2D1RenderTarget_BeginDraw(target);
         ID2D1RenderTarget_BeginDraw(target);
         ID2D1RenderTarget_Clear(target, &red);
         nested_hr1 = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
@@ -766,6 +777,15 @@ static void test_tiny_wic_sequences(void)
                 "Got unexpected first nested EndDraw result %#lx.\n", nested_hr1);
         ok(nested_hr2 == D2DERR_WRONG_STATE,
                 "Got unexpected second nested EndDraw result %#lx.\n", nested_hr2);
+        hr = ID2D1RenderTarget_Flush(target, NULL, NULL);
+        ok(hr == D2DERR_WRONG_STATE,
+                "Got unexpected Flush result after nested BeginDraw %#lx.\n", hr);
+        if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 8, 8, pixel)))
+            ok(pixel[0] == 255 && !pixel[1] && !pixel[2] && pixel[3] == 255,
+                    "Invalid nested draw changed pixel %u,%u,%u,%u.\n",
+                    pixel[0], pixel[1], pixel[2], pixel[3]);
+        else
+            ok(0, "Failed to inspect the nested-draw target, hr %#lx.\n", hr);
 
         ID2D1RenderTarget_BeginDraw(target);
         ID2D1RenderTarget_Clear(target, &blue);
@@ -831,12 +851,78 @@ static void test_tiny_wic_sequences(void)
             hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
             ok(hr == S_OK, "Failed to complete the CPU WIC transaction, hr %#lx.\n", hr);
 
+            hr = ID2D1RenderTarget_QueryInterface(target, &IID_ID2D1DeviceContext,
+                    (void **)&device_context);
+            ok(hr == S_OK, "Failed to query the WIC device context, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                ID2D1DeviceContext_GetTarget(device_context, &target_image);
+                ok(!!target_image, "The WIC device context has no target image.\n");
+                if (target_image)
+                {
+                    hr = ID2D1Image_QueryInterface(target_image, &IID_ID2D1Bitmap,
+                            (void **)&target_bitmap);
+                    ok(hr == S_OK, "Failed to query the WIC target bitmap, hr %#lx.\n", hr);
+                }
+            }
+
             memset(&bitmap_props, 0, sizeof(bitmap_props));
             bitmap_props.pixelFormat = ctx.target_desc.pixelFormat;
             bitmap_props.dpiX = 96.0f;
             bitmap_props.dpiY = 96.0f;
             bitmap_size.width = 17;
             bitmap_size.height = 17;
+            hr = ID2D1RenderTarget_CreateBitmap(target, bitmap_size, NULL, 0,
+                    &bitmap_props, &direct_copied_bitmap);
+            ok(hr == S_OK, "Failed to create the direct WIC copy bitmap, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr) && target_bitmap)
+            {
+                hr = ID2D1Bitmap_CopyFromBitmap(direct_copied_bitmap, NULL, target_bitmap, NULL);
+                ok(hr == S_OK, "Failed to copy from the WIC target bitmap, hr %#lx.\n", hr);
+            }
+            if (direct_copied_bitmap)
+            {
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_Clear(target, &blue);
+                ID2D1RenderTarget_DrawBitmap(target, direct_copied_bitmap, NULL, 1.0f,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(hr == S_OK, "Failed to draw the direct WIC copy, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 8, 8, pixel)))
+                    ok(!pixel[0] && !pixel[1] && pixel[2] == 255 && pixel[3] == 255,
+                            "Unexpected direct-copy pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to read the direct-copy pixel, hr %#lx.\n", hr);
+            }
+
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, &blue);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to update the held WIC target, hr %#lx.\n", hr);
+            if (direct_copied_bitmap && target_bitmap)
+            {
+                hr = ID2D1Bitmap_CopyFromBitmap(direct_copied_bitmap, NULL, target_bitmap, NULL);
+                ok(hr == S_OK, "Failed to copy from the held WIC target, hr %#lx.\n", hr);
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_Clear(target, &red);
+                ID2D1RenderTarget_DrawBitmap(target, direct_copied_bitmap, NULL, 1.0f,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, NULL);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(hr == S_OK, "Failed to draw the held-target copy, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 8, 8, pixel)))
+                    ok(pixel[0] == 255 && !pixel[1] && !pixel[2] && pixel[3] == 255,
+                            "Unexpected held-target pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to read the held-target pixel, hr %#lx.\n", hr);
+            }
+
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, &red);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to restore the CPU WIC contents, hr %#lx.\n", hr);
+
             hr = ID2D1RenderTarget_CreateBitmap(target, bitmap_size, NULL, 0,
                     &bitmap_props, &copied_bitmap);
             ok(hr == S_OK, "Failed to create the WIC copy bitmap, hr %#lx.\n", hr);
@@ -922,9 +1008,113 @@ static void test_tiny_wic_sequences(void)
                 ok(nonzero_alpha, "The CPU glyph transaction produced no visible pixels.\n");
             else
                 ok(0, "Failed to inspect the CPU glyph transaction, hr %#lx.\n", hr);
+
+            ID2D1RenderTarget_SetTextRenderingParams(target, ctx.rendering_params);
+            ID2D1RenderTarget_SetDpi(target, 96.0f, 96.0f);
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, NULL);
+            ID2D1RenderTarget_DrawText(target, L"A", 1, ctx.text_format, &rect,
+                    (ID2D1Brush *)brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to cache the 96-DPI glyph, hr %#lx.\n", hr);
+
+            ID2D1RenderTarget_SetDpi(target, 192.0f, 192.0f);
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, NULL);
+            ID2D1RenderTarget_DrawText(target, L"A", 1, ctx.text_format, &rect,
+                    (ID2D1Brush *)brush, D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to draw the 192-DPI glyph, hr %#lx.\n", hr);
+            ID2D1RenderTarget_SetTextRenderingParams(target, NULL);
+            ID2D1RenderTarget_SetDpi(target, 96.0f, 96.0f);
+
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, &red);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to prepare the locked-upload test, hr %#lx.\n", hr);
+            hr = IWICBitmap_Lock(bitmap, NULL, WICBitmapLockWrite, &bitmap_lock);
+            ok(hr == S_OK, "Failed to lock the WIC bitmap for writing, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                rect.left = 0.0f;
+                rect.top = 0.0f;
+                rect.right = 8.0f;
+                rect.bottom = 17.0f;
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_FillRectangle(target, &rect, (ID2D1Brush *)brush);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(FAILED(hr), "Locked WIC upload unexpectedly succeeded.\n");
+                IWICBitmapLock_Release(bitmap_lock);
+                bitmap_lock = NULL;
+
+                rect.left = 8.0f;
+                rect.right = 17.0f;
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_FillRectangle(target, &rect, (ID2D1Brush *)brush);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(hr == S_OK, "Failed to retry the locked WIC upload, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 2, 8, pixel)))
+                    ok(!pixel[0] && !pixel[1] && pixel[2] == 255 && pixel[3] == 255,
+                            "Unexpected preserved pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to inspect the preserved pixel, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 14, 8, pixel)))
+                    ok(pixel[0] == 255 && !pixel[1] && !pixel[2] && pixel[3] == 255,
+                            "Unexpected retried upload pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to inspect the retried upload pixel, hr %#lx.\n", hr);
+            }
+
+            ID2D1RenderTarget_BeginDraw(target);
+            ID2D1RenderTarget_Clear(target, &red);
+            hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+            ok(hr == S_OK, "Failed to prepare the locked-present test, hr %#lx.\n", hr);
+            hr = ID2D1Bitmap_CopyFromRenderTarget(copied_bitmap, NULL, target, NULL);
+            ok(hr == S_OK, "Failed to synchronize the locked-present test, hr %#lx.\n", hr);
+            hr = IWICBitmap_Lock(bitmap, NULL, WICBitmapLockWrite, &bitmap_lock);
+            ok(hr == S_OK, "Failed to lock the synchronized WIC bitmap, hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                rect.left = 0.0f;
+                rect.right = 8.0f;
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_FillRectangle(target, &rect, (ID2D1Brush *)brush);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(FAILED(hr), "Locked WIC present unexpectedly succeeded.\n");
+                IWICBitmapLock_Release(bitmap_lock);
+                bitmap_lock = NULL;
+
+                rect.left = 8.0f;
+                rect.right = 17.0f;
+                ID2D1RenderTarget_BeginDraw(target);
+                ID2D1RenderTarget_FillRectangle(target, &rect, (ID2D1Brush *)brush);
+                hr = ID2D1RenderTarget_EndDraw(target, NULL, NULL);
+                ok(hr == S_OK, "Failed to retry the locked WIC present, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 2, 8, pixel)))
+                    ok(!pixel[0] && !pixel[1] && pixel[2] == 255 && pixel[3] == 255,
+                            "Unexpected discarded GPU pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to inspect the discarded GPU pixel, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr = get_bitmap_pixel(bitmap, 14, 8, pixel)))
+                    ok(pixel[0] == 255 && !pixel[1] && !pixel[2] && pixel[3] == 255,
+                            "Unexpected retried present pixel %u,%u,%u,%u.\n",
+                            pixel[0], pixel[1], pixel[2], pixel[3]);
+                else
+                    ok(0, "Failed to inspect the retried present pixel, hr %#lx.\n", hr);
+            }
         }
     }
 
+    if (bitmap_lock) IWICBitmapLock_Release(bitmap_lock);
+    if (target_bitmap) ID2D1Bitmap_Release(target_bitmap);
+    if (target_image) ID2D1Image_Release(target_image);
+    if (device_context) ID2D1DeviceContext_Release(device_context);
+    if (direct_copied_bitmap) ID2D1Bitmap_Release(direct_copied_bitmap);
     if (copied_bitmap) ID2D1Bitmap_Release(copied_bitmap);
     if (brush) ID2D1SolidColorBrush_Release(brush);
     if (target) ID2D1RenderTarget_Release(target);
