@@ -18443,6 +18443,453 @@ static int compare_geometry_aa_timings(const void *a, const void *b)
     return (*value_a > *value_b) - (*value_a < *value_b);
 }
 
+static HRESULT create_atlas_target_bitmap(ID2D1DeviceContext *context,
+        unsigned int width, unsigned int height, ID2D1Bitmap1 **bitmap)
+{
+    D2D1_BITMAP_PROPERTIES1 desc;
+    D2D1_SIZE_U size;
+
+    set_size_u(&size, width, height);
+    memset(&desc, 0, sizeof(desc));
+    desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+    desc.dpiX = 96.0f;
+    desc.dpiY = 96.0f;
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    return ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, bitmap);
+}
+
+static void check_d3d11_blend_state(ID3D11DeviceContext *context,
+        ID3D11BlendState *expected_state, const float *expected_factor,
+        unsigned int expected_mask, const char *where)
+{
+    ID3D11BlendState *state;
+    float factor[4];
+    unsigned int mask;
+
+    ID3D11DeviceContext_OMGetBlendState(context, &state, factor, &mask);
+    ok(state == expected_state, "%s: D3D blend state %p, expected %p.\n",
+            where, state, expected_state);
+    ok(!memcmp(factor, expected_factor, sizeof(factor)),
+            "%s: D3D blend factor was not restored.\n", where);
+    ok(mask == expected_mask, "%s: D3D sample mask %#x, expected %#x.\n",
+            where, mask, expected_mask);
+    if (state)
+        ID3D11BlendState_Release(state);
+}
+
+static void test_d2d_atlas_transaction(BOOL d3d11)
+{
+    static const D2D1_COLOR_F colours[] =
+    {
+        {1.0f, 0.0f, 0.0f, 1.0f},
+        {0.0f, 1.0f, 0.0f, 1.0f},
+        {0.0f, 0.0f, 1.0f, 1.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f},
+    };
+    static const DWORD expected_colours[] =
+    {
+        0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff,
+    };
+    const float blend_factor[4] = {0.125f, 0.25f, 0.5f, 0.75f};
+    const unsigned int sample_mask = 0x13579bdf;
+    D3D11_BLEND_DESC blend_desc;
+    struct resource_readback rb;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11BlendState *blend_state;
+    ID3D11Device *d3d_device;
+    struct d2d1_test_context ctx;
+    ID2D1Bitmap1 *atlas, *tile;
+    D2D1_COLOR_F transparent = {0};
+    D2D1_RECT_F dst_rect;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, TRUE))
+        return;
+
+    hr = create_atlas_target_bitmap(ctx.context, 64, 16, &atlas);
+    ok(hr == S_OK, "Failed to create atlas target, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+    hr = create_atlas_target_bitmap(ctx.context, 16, 16, &tile);
+    ok(hr == S_OK, "Failed to create atlas tile, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+    ok(hr == S_OK, "Failed to get D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(tile);
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+    memset(&blend_desc, 0, sizeof(blend_desc));
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = ID3D11Device_CreateBlendState(d3d_device, &blend_desc, &blend_state);
+    ok(hr == S_OK, "Failed to create application blend state, hr %#lx.\n", hr);
+    ID3D11Device_GetImmediateContext(d3d_device, &d3d_context);
+    ID3D11Device_Release(d3d_device);
+    if (FAILED(hr))
+    {
+        ID3D11DeviceContext_Release(d3d_context);
+        ID2D1Bitmap1_Release(tile);
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+    ID3D11DeviceContext_OMSetBlendState(d3d_context, blend_state, blend_factor, sample_mask);
+
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)atlas);
+    ID2D1DeviceContext_Clear(ctx.context, &transparent);
+    for (i = 0; i < ARRAY_SIZE(colours); ++i)
+    {
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)tile);
+        ID2D1DeviceContext_Clear(ctx.context, &colours[i]);
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)atlas);
+        set_rect(&dst_rect, i * 16.0f, 0.0f, (i + 1) * 16.0f, 16.0f);
+        ID2D1DeviceContext_DrawBitmap(ctx.context, (ID2D1Bitmap *)tile,
+                &dst_rect, 1.0f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+
+        if (i == 1)
+        {
+            hr = ID2D1DeviceContext_Flush(ctx.context, NULL, NULL);
+            ok(hr == S_OK, "Atlas Flush failed, hr %#lx.\n", hr);
+            check_d3d11_blend_state(d3d_context, blend_state,
+                    blend_factor, sample_mask, "after Flush");
+        }
+    }
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Atlas EndDraw failed, hr %#lx.\n", hr);
+    check_d3d11_blend_state(d3d_context, blend_state,
+            blend_factor, sample_mask, "after EndDraw");
+
+    memset(&rb, 0, sizeof(rb));
+    if (get_d3d11_bitmap_readback(atlas, &rb))
+    {
+        for (i = 0; i < ARRAY_SIZE(expected_colours); ++i)
+        {
+            DWORD colour = get_readback_colour(&rb, i * 16 + 8, 8);
+            ok(colour == expected_colours[i],
+                    "Atlas tile %u colour %#lx, expected %#lx.\n",
+                    i, colour, expected_colours[i]);
+        }
+        release_resource_readback(&rb);
+    }
+
+    ID2D1DeviceContext_SetTarget(ctx.context, NULL);
+    ID3D11BlendState_Release(blend_state);
+    ID3D11DeviceContext_Release(d3d_context);
+    ID2D1Bitmap1_Release(tile);
+    ID2D1Bitmap1_Release(atlas);
+    release_test_context(&ctx);
+}
+
+struct d2d_batch_thread_args
+{
+    ID2D1DeviceContext *context;
+    D2D1_COLOR_F colour;
+    HRESULT hr;
+};
+
+static DWORD WINAPI d2d_batch_thread_func(void *param)
+{
+    struct d2d_batch_thread_args *args = param;
+
+    ID2D1DeviceContext_BeginDraw(args->context);
+    ID2D1DeviceContext_Clear(args->context, &args->colour);
+    args->hr = ID2D1DeviceContext_EndDraw(args->context, NULL, NULL);
+    return 0;
+}
+
+static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type)
+{
+    static const D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f};
+    static const D2D1_COLOR_F green = {0.0f, 1.0f, 0.0f, 1.0f};
+    static const D2D1_COLOR_F blue = {0.0f, 0.0f, 1.0f, 1.0f};
+    static const D2D1_COLOR_F white = {1.0f, 1.0f, 1.0f, 1.0f};
+    const float blend_factor[4] = {0.125f, 0.25f, 0.5f, 0.75f};
+    const unsigned int sample_mask = 0x13579bdf;
+    ID2D1DeviceContext *second_context = NULL;
+    D3D11_BLEND_DESC blend_desc;
+    struct resource_readback rb;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11BlendState *blend_state;
+    ID3D11Device *d3d_device;
+    struct d2d1_test_context ctx;
+    struct d2d_batch_thread_args thread_args;
+    ID2D1Bitmap1 *first_target = NULL, *second_target = NULL;
+    ID2D1Device *d2d_device;
+    HANDLE thread;
+    DWORD colour, wait;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context_(__LINE__, &ctx, TRUE, factory_type))
+        return;
+
+    ID2D1DeviceContext_GetDevice(ctx.context, &d2d_device);
+    hr = ID2D1Device_CreateDeviceContext(d2d_device,
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &second_context);
+    ok(hr == S_OK, "Failed to create second D2D context, hr %#lx.\n", hr);
+    ID2D1Device_Release(d2d_device);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = create_atlas_target_bitmap(ctx.context, 16, 16, &first_target);
+    ok(hr == S_OK, "Failed to create first batch target, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        hr = create_atlas_target_bitmap(second_context, 16, 16, &second_target);
+    ok(hr == S_OK, "Failed to create second batch target, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+    ok(hr == S_OK, "Failed to get D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    memset(&blend_desc, 0, sizeof(blend_desc));
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = ID3D11Device_CreateBlendState(d3d_device, &blend_desc, &blend_state);
+    ok(hr == S_OK, "Failed to create application blend state, hr %#lx.\n", hr);
+    ID3D11Device_GetImmediateContext(d3d_device, &d3d_context);
+    ID3D11Device_Release(d3d_device);
+    if (FAILED(hr))
+    {
+        ID3D11DeviceContext_Release(d3d_context);
+        goto done;
+    }
+    ID3D11DeviceContext_OMSetBlendState(d3d_context, blend_state, blend_factor, sample_mask);
+
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)first_target);
+    ID2D1DeviceContext_SetTransform(ctx.context, &identity);
+    check_d3d11_blend_state(d3d_context, blend_state,
+            blend_factor, sample_mask, "before first GPU draw");
+    ID2D1DeviceContext_Clear(ctx.context, &red);
+
+    ID2D1DeviceContext_BeginDraw(second_context);
+    ID2D1DeviceContext_SetTarget(second_context, (ID2D1Image *)second_target);
+    ID2D1DeviceContext_Clear(second_context, &green);
+    ID2D1DeviceContext_Clear(ctx.context, &blue);
+
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "First interleaved EndDraw failed, hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_EndDraw(second_context, NULL, NULL);
+    ok(hr == S_OK, "Second interleaved EndDraw failed, hr %#lx.\n", hr);
+    check_d3d11_blend_state(d3d_context, blend_state,
+            blend_factor, sample_mask, "after interleaved EndDraw");
+
+    memset(&rb, 0, sizeof(rb));
+    if (get_d3d11_bitmap_readback(first_target, &rb))
+    {
+        colour = get_readback_colour(&rb, 8, 8);
+        ok(colour == 0xff0000ff, "First interleaved target colour %#lx.\n", colour);
+        release_resource_readback(&rb);
+    }
+    memset(&rb, 0, sizeof(rb));
+    if (get_d3d11_bitmap_readback(second_target, &rb))
+    {
+        colour = get_readback_colour(&rb, 8, 8);
+        ok(colour == 0xff00ff00, "Second interleaved target colour %#lx.\n", colour);
+        release_resource_readback(&rb);
+    }
+
+    if (factory_type == D2D1_FACTORY_TYPE_MULTI_THREADED)
+    {
+        thread_args.context = second_context;
+        thread_args.colour = green;
+        thread_args.hr = E_PENDING;
+
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, &red);
+        thread = CreateThread(NULL, 0, d2d_batch_thread_func, &thread_args, 0, NULL);
+        ok(!!thread, "Failed to create batch interleave thread.\n");
+        if (thread)
+        {
+            wait = WaitForSingleObject(thread, 5000);
+            ok(wait == WAIT_OBJECT_0, "Second context blocked across another BeginDraw transaction.\n");
+            hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+            ok(hr == S_OK, "Concurrent first EndDraw failed, hr %#lx.\n", hr);
+            if (wait != WAIT_OBJECT_0)
+                WaitForSingleObject(thread, INFINITE);
+            ok(thread_args.hr == S_OK, "Concurrent second EndDraw failed, hr %#lx.\n", thread_args.hr);
+            CloseHandle(thread);
+        }
+        else
+        {
+            hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+            ok(hr == S_OK, "Concurrent fallback EndDraw failed, hr %#lx.\n", hr);
+        }
+    }
+
+    ID2D1DeviceContext_BeginDraw(second_context);
+    ID2D1DeviceContext_Clear(second_context, &white);
+    ID2D1DeviceContext_Release(second_context);
+    second_context = NULL;
+    check_d3d11_blend_state(d3d_context, blend_state,
+            blend_factor, sample_mask, "after abandoned batch release");
+
+    ID3D11BlendState_Release(blend_state);
+    ID3D11DeviceContext_Release(d3d_context);
+
+done:
+    ID2D1DeviceContext_SetTarget(ctx.context, NULL);
+    if (second_context)
+        ID2D1DeviceContext_Release(second_context);
+    if (second_target)
+        ID2D1Bitmap1_Release(second_target);
+    if (first_target)
+        ID2D1Bitmap1_Release(first_target);
+    release_test_context(&ctx);
+}
+
+static void test_d2d_batch_lifetime(BOOL d3d11)
+{
+    test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_SINGLE_THREADED);
+    test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_MULTI_THREADED);
+}
+
+static void test_d2d_atlas_benchmark(BOOL d3d11)
+{
+    enum {warmup_count = 60, sample_count = 50, tile_count = 192};
+    double samples[sample_count];
+    D3D11_TEXTURE2D_DESC staging_desc;
+    D3D11_MAPPED_SUBRESOURCE map_desc;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11Texture2D *staging;
+    ID3D11Resource *resource;
+    ID3D11Device *d3d_device;
+    struct d2d1_test_context ctx;
+    ID2D1Bitmap1 *atlas, *tile;
+    IDXGISurface *surface;
+    LARGE_INTEGER frequency, start, end;
+    D2D1_COLOR_F colour, transparent = {0};
+    D2D1_RECT_F dst_rect;
+    unsigned int i, j;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, TRUE))
+        return;
+    hr = create_atlas_target_bitmap(ctx.context, 1536, 1024, &atlas);
+    ok(hr == S_OK, "Failed to create benchmark atlas, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+    hr = create_atlas_target_bitmap(ctx.context, 32, 32, &tile);
+    ok(hr == S_OK, "Failed to create benchmark tile, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = ID2D1Bitmap1_GetSurface(atlas, &surface);
+    ok(hr == S_OK, "Failed to get benchmark atlas surface, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(tile);
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGISurface_QueryInterface(surface, &IID_ID3D11Resource, (void **)&resource);
+    ok(hr == S_OK, "Failed to get benchmark atlas resource, hr %#lx.\n", hr);
+    IDXGISurface_Release(surface);
+    if (FAILED(hr))
+    {
+        ID2D1Bitmap1_Release(tile);
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+    ID3D11Resource_GetDevice(resource, &d3d_device);
+    ID3D11Device_GetImmediateContext(d3d_device, &d3d_context);
+    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)resource, &staging_desc);
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging_desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(d3d_device, &staging_desc, NULL, &staging);
+    ok(hr == S_OK, "Failed to create benchmark staging texture, hr %#lx.\n", hr);
+    ID3D11Device_Release(d3d_device);
+    if (FAILED(hr))
+    {
+        ID3D11DeviceContext_Release(d3d_context);
+        ID3D11Resource_Release(resource);
+        ID2D1Bitmap1_Release(tile);
+        ID2D1Bitmap1_Release(atlas);
+        release_test_context(&ctx);
+        return;
+    }
+
+    QueryPerformanceFrequency(&frequency);
+    for (i = 0; i < warmup_count + sample_count; ++i)
+    {
+        QueryPerformanceCounter(&start);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)atlas);
+        ID2D1DeviceContext_Clear(ctx.context, &transparent);
+        for (j = 0; j < tile_count; ++j)
+        {
+            set_color(&colour, (j & 1) ? 0.75f : 0.25f,
+                    (j & 2) ? 0.625f : 0.125f, (j & 4) ? 0.5f : 1.0f, 1.0f);
+            ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)tile);
+            ID2D1DeviceContext_Clear(ctx.context, &colour);
+            ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)atlas);
+            set_rect(&dst_rect, (j % 48) * 32.0f, (j / 48) * 32.0f,
+                    (j % 48 + 1) * 32.0f, (j / 48 + 1) * 32.0f);
+            ID2D1DeviceContext_DrawBitmap(ctx.context, (ID2D1Bitmap *)tile,
+                    &dst_rect, 1.0f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+            ID2D1DeviceContext_DrawBitmap(ctx.context, (ID2D1Bitmap *)tile,
+                    &dst_rect, 0.75f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+            ID2D1DeviceContext_DrawBitmap(ctx.context, (ID2D1Bitmap *)tile,
+                    &dst_rect, 0.5f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL, NULL);
+        }
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        if (SUCCEEDED(hr))
+        {
+            ID3D11DeviceContext_CopyResource(d3d_context, (ID3D11Resource *)staging, resource);
+            hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)staging,
+                    0, D3D11_MAP_READ, 0, &map_desc);
+            if (SUCCEEDED(hr))
+                ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)staging, 0);
+        }
+        QueryPerformanceCounter(&end);
+        ok(hr == S_OK, "Atlas benchmark draw %u failed, hr %#lx.\n", i, hr);
+        if (i >= warmup_count)
+            samples[i - warmup_count] = (end.QuadPart - start.QuadPart)
+                    * 1000000.0 / frequency.QuadPart;
+    }
+    qsort(samples, ARRAY_SIZE(samples), sizeof(*samples), compare_geometry_aa_timings);
+    trace("d2d-atlas-benchmark-us p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u "
+            "tile-switches=%u draws=%u\n", samples[24], samples[46], samples[48],
+            samples[49], sample_count, tile_count * 2, tile_count * 4 + 1);
+
+    ID2D1DeviceContext_SetTarget(ctx.context, NULL);
+    ID3D11Texture2D_Release(staging);
+    ID3D11DeviceContext_Release(d3d_context);
+    ID3D11Resource_Release(resource);
+    ID2D1Bitmap1_Release(tile);
+    ID2D1Bitmap1_Release(atlas);
+    release_test_context(&ctx);
+}
+
 static void test_geometry_aa_benchmark(BOOL d3d11)
 {
     enum {warmup_count = 20, sample_count = 100};
@@ -20116,6 +20563,19 @@ START_TEST(d2d1)
         return;
     }
 
+    if (getenv("WINETEST_ONLY_D2D_ATLAS_BENCHMARK"))
+    {
+        test_d2d_atlas_benchmark(TRUE);
+        return;
+    }
+
+    if (getenv("WINETEST_ONLY_D2D_ATLAS"))
+    {
+        test_d2d_atlas_transaction(TRUE);
+        test_d2d_batch_lifetime(TRUE);
+        return;
+    }
+
     print_adapter_info();
 
     /* These modes isolate internal cases for native Direct2D oracle and Wine regression runs. */
@@ -20224,6 +20684,8 @@ START_TEST(d2d1)
     queue_d3d10_test(test_effect_blob_property);
     queue_test(test_get_dxgi_device);
     queue_test(test_no_target);
+    queue_d3d1x_test(test_d2d_atlas_transaction, TRUE);
+    queue_d3d1x_test(test_d2d_batch_lifetime, TRUE);
     queue_d3d1x_test(test_geometry_aa_guardrails, TRUE);
     queue_test(test_mesh);
     queue_test(test_geometry_realization);

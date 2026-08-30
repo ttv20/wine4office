@@ -54,6 +54,9 @@ static BOOL d2d_device_context_geometry_coverage_enabled(void)
     return d2d_geometry_coverage_enabled;
 }
 
+static void d2d_device_context_begin_batch(struct d2d_device_context *context);
+static void d2d_device_context_end_batch(struct d2d_device_context *context);
+
 static const D2D1_MATRIX_3X2_F identity =
 {{{
     1.0f, 0.0f,
@@ -269,14 +272,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
-    if (render_target->cs && !render_target->batched_draw)
+    if (render_target->cs)
         EnterCriticalSection(render_target->cs);
+    d2d_device_context_begin_batch(render_target);
 
     if (FAILED(hr = d2d_device_context_ensure_shape_resources(render_target, shape_type)))
     {
         WARN("Failed to create resources for shape type %#x, hr %#lx.\n", shape_type, hr);
         render_target->error.code = hr;
-        if (render_target->cs && !render_target->batched_draw)
+        if (render_target->cs)
             LeaveCriticalSection(render_target->cs);
         return;
     }
@@ -356,10 +360,9 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         ID3D11DeviceContext1_SwapDeviceContextState(context, prev_state, NULL);
         ID3D11DeviceContext1_Release(context);
         ID3DDeviceContextState_Release(prev_state);
-
-        if (render_target->cs)
-            LeaveCriticalSection(render_target->cs);
     }
+    if (render_target->cs)
+        LeaveCriticalSection(render_target->cs);
 }
 
 static void d2d_device_context_set_error(struct d2d_device_context *context, HRESULT code)
@@ -380,17 +383,33 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
     return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1DeviceContext6_iface);
 }
 
+static void d2d_device_context_begin_batch(struct d2d_device_context *context)
+{
+    if (context->batched_draw || context->ops || context->draw_depth != 1
+            || context->target.type != D2D_TARGET_BITMAP)
+        return;
+
+    if (context->device->active_batch && context->device->active_batch != context)
+        d2d_device_context_end_batch(context->device->active_batch);
+
+    ID3D11Device1_GetImmediateContext1(context->d3d_device, &context->batched_context);
+    ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
+            context->d3d_state, &context->batched_prev_state);
+    context->batched_draw = TRUE;
+    context->device->active_batch = context;
+}
+
 static HRESULT d2d_device_context_prepare_gpu_draw(struct d2d_device_context *context)
 {
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
-    if (!context->cpu_transaction || context->target.object != context->cpu_transaction_target
-            || !context->ops || !context->ops->device_context_prepare_gpu_draw)
-        return S_OK;
-
-    context->cpu_transaction = FALSE;
-    if (FAILED(hr = context->ops->device_context_prepare_gpu_draw(context->outer_unknown, context)))
-        d2d_device_context_set_error(context, hr);
+    if (context->cpu_transaction && context->target.object == context->cpu_transaction_target
+            && context->ops && context->ops->device_context_prepare_gpu_draw)
+    {
+        context->cpu_transaction = FALSE;
+        if (FAILED(hr = context->ops->device_context_prepare_gpu_draw(context->outer_unknown, context)))
+            d2d_device_context_set_error(context, hr);
+    }
     return hr;
 }
 
@@ -427,9 +446,13 @@ static void d2d_device_context_end_cpu_transaction(struct d2d_device_context *co
 
 static void d2d_device_context_end_batch(struct d2d_device_context *context)
 {
+    if (context->cs)
+        EnterCriticalSection(context->cs);
     if (!context->batched_draw)
-        return;
+        goto done;
 
+    if (context->device->active_batch == context)
+        context->device->active_batch = NULL;
     ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
             context->batched_prev_state, NULL);
     ID3DDeviceContextState_Release(context->batched_prev_state);
@@ -437,6 +460,8 @@ static void d2d_device_context_end_batch(struct d2d_device_context *context)
     context->batched_prev_state = NULL;
     context->batched_context = NULL;
     context->batched_draw = FALSE;
+
+done:
     if (context->cs)
         LeaveCriticalSection(context->cs);
 }
@@ -445,6 +470,8 @@ static void d2d_device_context_flush_gpu(struct d2d_device_context *context)
 {
     ID3D11DeviceContext1 *d3d_context;
 
+    if (context->cs)
+        EnterCriticalSection(context->cs);
     if (context->batched_draw)
     {
         d3d_context = context->batched_context;
@@ -457,6 +484,8 @@ static void d2d_device_context_flush_gpu(struct d2d_device_context *context)
 
     ID3D11DeviceContext1_Flush(d3d_context);
     ID3D11DeviceContext1_Release(d3d_context);
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -514,8 +543,8 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
     {
         unsigned int i, j, k;
 
-        /* BeginDraw() may have borrowed the immediate context for a small
-         * batched target. Restore it even if the caller abandons the draw. */
+        /* Restore the immediate context even if the caller abandons a
+         * batched BeginDraw()/EndDraw() transaction. */
         d2d_device_context_end_batch(context);
         d2d_device_context_end_cpu_transaction(context);
         d2d_clip_stack_cleanup(&context->clip_stack);
@@ -1622,8 +1651,9 @@ static void d2d_device_context_clear_coverage_target(struct d2d_device_context *
     ID3D11DeviceContext1 *d3d_context;
     float clear[4] = {0};
 
-    if (context->cs && !context->batched_draw)
+    if (context->cs)
         EnterCriticalSection(context->cs);
+    d2d_device_context_begin_batch(context);
     if (context->batched_draw)
         d3d_context = context->batched_context;
     else
@@ -1632,11 +1662,9 @@ static void d2d_device_context_clear_coverage_target(struct d2d_device_context *
     ID3D11DeviceContext1_ClearRenderTargetView(d3d_context, rtv, clear);
 
     if (!context->batched_draw)
-    {
         ID3D11DeviceContext1_Release(d3d_context);
-        if (context->cs)
-            LeaveCriticalSection(context->cs);
-    }
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
 }
 
 static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *context,
@@ -1749,8 +1777,9 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
         scissor_rect.bottom = context->pixel_size.height;
     }
 
-    if (context->cs && !context->batched_draw)
+    if (context->cs)
         EnterCriticalSection(context->cs);
+    d2d_device_context_begin_batch(context);
     if (context->batched_draw)
     {
         d3d_context = context->batched_context;
@@ -1791,9 +1820,9 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
         ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, previous_d3d_state, NULL);
         ID3DDeviceContextState_Release(previous_d3d_state);
         ID3D11DeviceContext1_Release(d3d_context);
-        if (context->cs)
-            LeaveCriticalSection(context->cs);
     }
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
     hr = S_OK;
 
 done:
@@ -3424,9 +3453,24 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
 
-    if (SUCCEEDED(hr) && context->ops && context->ops->device_context_present
-            && FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
-        d2d_device_context_set_error(context, hr);
+    /* Flush is the Direct2D/Direct3D interoperation boundary. Restore the
+     * application's immediate-context state before returning control. A later
+     * Direct2D draw in the same transaction starts a fresh batch lazily. */
+    d2d_device_context_end_batch(context);
+
+    if (SUCCEEDED(hr))
+    {
+        if (context->ops && context->ops->device_context_present)
+        {
+            if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
+                d2d_device_context_set_error(context, hr);
+        }
+        else if (context->target.type == D2D_TARGET_BITMAP)
+        {
+            d2d_device_context_flush_gpu(context);
+        }
+
+    }
 
     if (tag1)
         *tag1 = context->error.tag1;
@@ -3661,26 +3705,13 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
             context->cpu_transaction = TRUE;
             context->ops->device_context_begin_draw(context->outer_unknown);
         }
+
     }
 
     d2d_device_context_atlas_log_rect(context, "BeginDraw", NULL);
 
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
-
-    /* Office galleries draw hundreds of tiny WIC bitmaps. Avoid swapping the
-     * shared immediate-context state around every primitive in one transaction. */
-    if (context->ops && context->ops->batch_small_draws
-            && context->pixel_size.width <= 32 && context->pixel_size.height <= 32
-            && context->draw_depth == 1 && !context->batched_draw)
-    {
-        if (context->cs)
-            EnterCriticalSection(context->cs);
-        ID3D11Device1_GetImmediateContext1(context->d3d_device, &context->batched_context);
-        ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
-                context->d3d_state, &context->batched_prev_state);
-        context->batched_draw = TRUE;
-    }
 
 }
 
@@ -4202,10 +4233,6 @@ static void d2d_device_context_reset_target(struct d2d_device_context *context)
     /* Note that DPI settings are kept. */
     memset(&context->desc.pixelFormat, 0, sizeof(context->desc.pixelFormat));
     memset(&context->pixel_size, 0, sizeof(context->pixel_size));
-
-    if (context->bs)
-        ID3D11BlendState_Release(context->bs);
-    context->bs = NULL;
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *iface, ID2D1Image *target)
@@ -4227,6 +4254,7 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
     {
         if (GetEnvironmentVariableA("WINE_D2D_TARGET_DIAG", NULL, 0))
             WARN("OFFICE_D2D SetTarget context %p target NULL.\n", iface);
+        d2d_device_context_end_batch(context);
         d2d_device_context_reset_target(context);
         return;
     }
@@ -4266,13 +4294,15 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
         blend_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
         blend_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
         blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        if (FAILED(hr = ID3D11Device1_CreateBlendState(context->d3d_device, &blend_desc, &context->bs)))
+        if (!context->bs && FAILED(hr = ID3D11Device1_CreateBlendState(
+                context->d3d_device, &blend_desc, &context->bs)))
             WARN("Failed to create blend state, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(ID2D1Image_QueryInterface(target, &IID_ID2D1CommandList, (void **)&command_list)))
     {
         command_list_impl = unsafe_impl_from_ID2D1CommandList(command_list);
 
+        d2d_device_context_end_batch(context);
         d2d_device_context_reset_target(context);
 
         context->target.command_list = command_list_impl;

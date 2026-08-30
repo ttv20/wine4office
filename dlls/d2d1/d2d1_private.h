@@ -821,6 +821,7 @@ struct d2d_device
     struct d2d_shader_blob precompiled_coverage_ps;
     struct d2d_shader_blob precompiled_coverage_msaa_ps;
     struct d2d_shader_blob precompiled_coverage_resolve_ps;
+    struct d2d_device_context *active_batch;
 
     struct d2d_indexed_objects shaders;
 };
