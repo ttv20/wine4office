@@ -161,12 +161,19 @@ struct d2d_vs_cb
     struct d2d_vec4 transform_rty;
 };
 
+struct d2d_device_context;
+
 struct d2d_device_context_ops
 {
     HRESULT (*device_context_present)(IUnknown *outer_unknown);
     BOOL (*queue_cpu_glyph)(IUnknown *outer_unknown, const RECT *bounds,
             const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour);
     BOOL batch_small_draws;
+    void (*device_context_begin_draw)(IUnknown *outer_unknown);
+    HRESULT (*device_context_prepare_gpu_draw)(IUnknown *outer_unknown,
+            struct d2d_device_context *context);
+    BOOL (*queue_cpu_clear)(IUnknown *outer_unknown, const D2D1_COLOR_F *colour);
+    void (*device_context_target_exposed)(IUnknown *outer_unknown);
 };
 
 enum d2d_device_context_sampler_limits
@@ -239,6 +246,8 @@ struct d2d_device_context
     ID3D11DeviceContext1 *batched_context;
     ID3DDeviceContextState *batched_prev_state;
     BOOL batched_draw;
+    ID2D1Image *cpu_transaction_target;
+    BOOL cpu_transaction;
     unsigned int draw_depth;
     BOOL invalid_draw_sequence;
     struct
@@ -299,11 +308,23 @@ struct d2d_device_context
 HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *surface, IUnknown *outer_unknown,
         const struct d2d_device_context_ops *ops, const D2D1_RENDER_TARGET_PROPERTIES *desc,
         void **render_target);
+HRESULT d2d_device_context_replay_cpu_glyph(struct d2d_device_context *context,
+        const RECT *bounds, const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour);
+HRESULT d2d_device_context_prepare_target_read(ID2D1DeviceContext *iface);
 
 static inline BOOL d2d_device_context_is_dxgi_target(const struct d2d_device_context *context)
 {
     return !context->ops;
 }
+
+struct d2d_wic_cpu_glyph
+{
+    struct d2d_wic_cpu_glyph *next;
+    RECT bounds;
+    D2D1_COLOR_F colour;
+    unsigned int pitch;
+    BYTE values[];
+};
 
 struct d2d_wic_render_target
 {
@@ -315,6 +336,16 @@ struct d2d_wic_render_target
     IUnknown *dxgi_inner;
     ID3D10Texture2D *readback_texture;
     IWICBitmap *bitmap;
+    struct d2d_wic_cpu_glyph *cpu_glyphs;
+    struct d2d_wic_cpu_glyph **cpu_glyph_tail;
+    unsigned int cpu_glyph_count;
+    D2D1_COLOR_F cpu_clear;
+    D2D1_PIXEL_FORMAT pixel_format;
+    D2D1_RENDER_TARGET_USAGE usage;
+    BOOL cpu_clear_pending;
+    BOOL gpu_fallback;
+    BOOL gpu_stale;
+    BOOL target_exposed;
     unsigned int width;
     unsigned int height;
     unsigned int bpp;
