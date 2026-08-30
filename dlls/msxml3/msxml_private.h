@@ -194,7 +194,11 @@ enum domnode_flags
     DOMNODE_PARSED_VALUE = 0x8,
     DOMNODE_NS_DECL = 0x10,
     DOMNODE_NO_PARENT = 0x20,
+    DOMNODE_POOLED_QNAME = 0x40,
+    DOMNODE_POOLED_ALLOCATION = 0x80,
 };
+
+struct dom_parsed_pool;
 
 struct domdoc_properties
 {
@@ -214,6 +218,7 @@ struct domdoc_properties
     bool normalize_attribute_values;
     int max_element_depth;
     IUri *uri;
+    struct dom_parsed_pool *parsed_pool;
 };
 
 struct domnode
@@ -235,6 +240,7 @@ struct domnode
     {
         struct domdoc_properties *properties;
         struct dtd *dtd;
+        struct dom_parsed_pool *parsed_pool;
     };
 
     struct domnode *parent;
@@ -274,6 +280,7 @@ struct parsed_name
     BSTR prefix;
     BSTR local;
     BSTR qname;
+    bool pooled;
 };
 
 extern HRESULT parse_qualified_name(const WCHAR *src, struct parsed_name *name);

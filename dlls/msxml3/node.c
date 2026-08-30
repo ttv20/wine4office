@@ -1103,15 +1103,158 @@ static void domnode_insert_attribute(struct domnode *parent, struct domnode *nod
     domnode_set_owner(node, parent);
 }
 
-HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const WCHAR *uri, int uri_len,
-        struct domnode *owner, struct domnode **node)
+#define DOM_PARSED_NAME_POOL_LIMIT 4096
+#define DOM_PARSED_NODE_BLOCK_SIZE 256
+
+struct dom_parsed_name
+{
+    struct list entry;
+    BSTR value;
+    UINT hash;
+};
+
+struct dom_parsed_node_block
+{
+    struct list entry;
+    size_t used;
+    struct domnode nodes[DOM_PARSED_NODE_BLOCK_SIZE];
+};
+
+struct dom_parsed_pool
+{
+    unsigned int refcount;
+    size_t name_count;
+    struct list buckets[256];
+    struct list node_blocks;
+};
+
+static UINT dom_parsed_name_hash(const WCHAR *name, int len)
+{
+    UINT hash = 2166136261u;
+
+    for (int i = 0; i < len; ++i)
+        hash = (hash ^ name[i]) * 16777619u;
+    return hash;
+}
+
+static struct dom_parsed_pool *domdoc_get_parsed_pool(struct domdoc_properties *properties)
+{
+    struct dom_parsed_pool *pool = properties->parsed_pool;
+
+    if (!pool)
+    {
+        if (!(pool = calloc(1, sizeof(*pool))))
+            return NULL;
+        pool->refcount = 1;
+        for (size_t i = 0; i < ARRAY_SIZE(pool->buckets); ++i)
+            list_init(&pool->buckets[i]);
+        list_init(&pool->node_blocks);
+        properties->parsed_pool = pool;
+    }
+    return pool;
+}
+
+static BSTR domdoc_intern_parsed_name(struct domdoc_properties *properties,
+        const WCHAR *name, int len)
+{
+    struct dom_parsed_pool *pool;
+    struct dom_parsed_name *entry;
+    UINT hash;
+
+    if (!(pool = domdoc_get_parsed_pool(properties)))
+        return NULL;
+
+    hash = dom_parsed_name_hash(name, len);
+    LIST_FOR_EACH_ENTRY(entry, &pool->buckets[hash % ARRAY_SIZE(pool->buckets)],
+            struct dom_parsed_name, entry)
+    {
+        if (entry->hash == hash && SysStringLen(entry->value) == len
+                && !memcmp(entry->value, name, len * sizeof(*name)))
+            return entry->value;
+    }
+
+    if (pool->name_count >= DOM_PARSED_NAME_POOL_LIMIT || !(entry = malloc(sizeof(*entry))))
+        return NULL;
+    if (!(entry->value = SysAllocStringLen(name, len)))
+    {
+        free(entry);
+        return NULL;
+    }
+    entry->hash = hash;
+    list_add_head(&pool->buckets[hash % ARRAY_SIZE(pool->buckets)], &entry->entry);
+    ++pool->name_count;
+    return entry->value;
+}
+
+static struct domnode *domdoc_alloc_parsed_node(struct domdoc_properties *properties)
+{
+    struct dom_parsed_node_block *block;
+    struct dom_parsed_pool *pool;
+    struct domnode *node;
+
+    if (!(pool = domdoc_get_parsed_pool(properties)))
+        return NULL;
+    block = list_empty(&pool->node_blocks) ? NULL
+            : LIST_ENTRY(list_head(&pool->node_blocks), struct dom_parsed_node_block, entry);
+    if (!block || block->used == DOM_PARSED_NODE_BLOCK_SIZE)
+    {
+        if (!(block = calloc(1, sizeof(*block))))
+            return NULL;
+        list_add_head(&pool->node_blocks, &block->entry);
+    }
+
+    node = &block->nodes[block->used++];
+    node->flags = DOMNODE_POOLED_ALLOCATION;
+    node->parsed_pool = pool;
+    ++pool->refcount;
+    return node;
+}
+
+static void dom_parsed_pool_release(struct dom_parsed_pool *pool)
+{
+    struct dom_parsed_name *entry, *next;
+    struct dom_parsed_node_block *block, *block_next;
+
+    if (!pool || --pool->refcount)
+        return;
+    for (size_t i = 0; i < ARRAY_SIZE(pool->buckets); ++i)
+    {
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &pool->buckets[i], struct dom_parsed_name, entry)
+        {
+            list_remove(&entry->entry);
+            SysFreeString(entry->value);
+            free(entry);
+        }
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(block, block_next, &pool->node_blocks,
+            struct dom_parsed_node_block, entry)
+    {
+        list_remove(&block->entry);
+        free(block);
+    }
+    free(pool);
+}
+
+static void domdoc_free_parsed_pool(struct domdoc_properties *properties)
+{
+    dom_parsed_pool_release(properties->parsed_pool);
+    properties->parsed_pool = NULL;
+}
+
+static HRESULT domnode_create_internal(DOMNodeType type, const WCHAR *name, int name_len,
+        const WCHAR *uri, int uri_len, struct domnode *owner, bool validate_name, bool parsed,
+        struct domnode **node)
 {
     struct domnode *object, *xmlns_xml;
     WCHAR *p;
 
     *node = NULL;
 
-    if (!(object = calloc(1, sizeof(*object))))
+    if (parsed && type != NODE_DOCUMENT_TYPE)
+        object = domdoc_alloc_parsed_node(owner->properties);
+    else
+        object = calloc(1, sizeof(*object));
+    if (!object)
         return E_OUTOFMEMORY;
 
     list_init(&object->entry);
@@ -1124,10 +1267,26 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
     if (owner)
         list_add_tail(&owner->owned, &object->owner_entry);
 
-    object->qname = SysAllocStringLen(name, name_len);
+    /* Text node names are exposed as the constant "#text" and XPath treats
+     * their internal name as empty. Avoid an otherwise unused empty BSTR for
+     * every parsed text node. */
+    if (parsed && (type == NODE_ELEMENT || type == NODE_ATTRIBUTE))
+    {
+        object->qname = domdoc_intern_parsed_name(owner->properties, name, name_len);
+        if (object->qname)
+            object->flags |= DOMNODE_POOLED_QNAME;
+    }
+    if (!object->qname && (type != NODE_TEXT || name_len))
+    {
+        if (!(object->qname = SysAllocStringLen(name, name_len)))
+        {
+            domnode_destroy_tree(object);
+            return E_OUTOFMEMORY;
+        }
+    }
     if (type == NODE_ELEMENT || type == NODE_ATTRIBUTE)
     {
-        if (!parser_is_valid_qualified_name(object->qname))
+        if (validate_name && !parser_is_valid_qualified_name(object->qname))
         {
             domnode_destroy_tree(object);
             return E_FAIL;
@@ -1170,7 +1329,8 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
             break;
         case NODE_DOCUMENT:
             /* Stash implicit namespace as a document attribute, without a parent. */
-            domnode_create(NODE_ATTRIBUTE, L"xmlns:xml", 9, NULL, 0, object, &xmlns_xml);
+            domnode_create_internal(NODE_ATTRIBUTE, L"xmlns:xml", 9, NULL, 0,
+                    object, true, false, &xmlns_xml);
             node_put_data(xmlns_xml, L"http://www.w3.org/XML/1998/namespace");
             xmlns_xml->flags |= DOMNODE_READONLY_VALUE | DOMNODE_NO_PARENT;
             domnode_insert_attribute(object, xmlns_xml, NULL);
@@ -1182,6 +1342,12 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
     *node = object;
 
     return S_OK;
+}
+
+HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const WCHAR *uri, int uri_len,
+        struct domnode *owner, struct domnode **node)
+{
+    return domnode_create_internal(type, name, name_len, uri, uri_len, owner, true, false, node);
 }
 
 static HRESULT parse_xml_decl_append_attribute(struct domnode *pi, const WCHAR *name, BSTR value)
@@ -1329,6 +1495,7 @@ static void domdoc_properties_destroy(struct domdoc_properties *properties)
     properties->namespaces.value = NULL;
     if (properties->uri)
         IUri_Release(properties->uri);
+    domdoc_free_parsed_pool(properties);
     free(properties);
 }
 
@@ -1356,6 +1523,7 @@ static struct domdoc_properties* domdoc_properties_clone(struct domdoc_propertie
         pcopy->uri = properties->uri;
         if (pcopy->uri)
             IUri_AddRef(pcopy->uri);
+        pcopy->parsed_pool = NULL;
     }
 
     return pcopy;
@@ -1363,6 +1531,8 @@ static struct domdoc_properties* domdoc_properties_clone(struct domdoc_propertie
 
 void domnode_destroy_tree(struct domnode *tree)
 {
+    struct dom_parsed_pool *parsed_pool = tree->flags & DOMNODE_POOLED_ALLOCATION
+            ? tree->parsed_pool : NULL;
     struct domnode *node, *next;
 
     if (tree->type == NODE_DOCUMENT)
@@ -1405,16 +1575,28 @@ void domnode_destroy_tree(struct domnode *tree)
         }
     }
 
-    if (tree->prefix)
+    if (tree->flags & DOMNODE_POOLED_QNAME)
     {
         SysFreeString(tree->prefix);
-        SysFreeString(tree->qname);
+        if (tree->name != tree->qname)
+            SysFreeString(tree->name);
     }
-    SysFreeString(tree->name);
+    else
+    {
+        if (tree->prefix)
+        {
+            SysFreeString(tree->prefix);
+            SysFreeString(tree->qname);
+        }
+        SysFreeString(tree->name);
+    }
     SysFreeString(tree->data);
     SysFreeString(tree->uri);
 
-    free(tree);
+    if (parsed_pool)
+        dom_parsed_pool_release(parsed_pool);
+    else
+        free(tree);
 }
 
 void domnode_release(struct domnode *node)
@@ -3193,7 +3375,6 @@ HRESULT node_transform_node_params(struct domnode *node, IXMLDOMNode *stylesheet
 
     sheet_doc = create_xmldoc_from_domdoc(sheet_domdoc, &xmlnode);
     node_doc = create_xmldoc_from_domdoc(node, &xmlnode);
-
     xsltSS = xsltParseStylesheetDoc(sheet_doc);
     if (xsltSS)
     {
@@ -3706,7 +3887,8 @@ static void parse_context_node_create(struct parse_context *context, DOMNodeType
     if (context->status != S_OK)
         return;
 
-    context->status = domnode_create(type, name, name_len, uri, uri_len, owner, node);
+    context->status = domnode_create_internal(type, name, name_len, uri, uri_len,
+            owner, false, true, node);
 }
 
 static void parse_context_append_child(struct parse_context *context, struct domnode *parent, struct domnode *child)
@@ -3723,10 +3905,43 @@ static void parse_context_append_attribute(struct parse_context *context, struct
 
 static void parse_context_node_put_data(struct parse_context *context, struct domnode *node, const WCHAR *data, int data_len)
 {
+    struct domnode *child;
+    bool normalize = false;
     BSTR str;
+    int i;
 
     if (context->status != S_OK)
         return;
+
+    /* The SAX reader already normalized line endings and validated markup.
+     * Keep the public setter for the uncommon unnormalized case, but avoid
+     * copying parsed data into a temporary BSTR and scanning it again. */
+    for (i = 0; i < data_len; ++i)
+    {
+        if (data[i] == '\r')
+        {
+            normalize = true;
+            break;
+        }
+    }
+    if (normalize)
+    {
+        if (!(str = SysAllocStringLen(data, data_len)))
+        {
+            context->status = E_OUTOFMEMORY;
+            return;
+        }
+
+        context->status = node_put_data(node, str);
+        SysFreeString(str);
+        return;
+    }
+
+    if (node->flags & DOMNODE_READONLY_VALUE)
+    {
+        context->status = E_FAIL;
+        return;
+    }
 
     if (!(str = SysAllocStringLen(data, data_len)))
     {
@@ -3734,8 +3949,25 @@ static void parse_context_node_put_data(struct parse_context *context, struct do
         return;
     }
 
-    context->status = node_put_data(node, str);
-    SysFreeString(str);
+    node->flags &= ~DOMNODE_PARSED_VALUE;
+    if (node->type == NODE_ATTRIBUTE || node->type == NODE_ELEMENT)
+    {
+        node_unlink_children(node);
+        context->status = domnode_create_internal(NODE_TEXT, NULL, 0, NULL, 0,
+                node->owner, false, true, &child);
+        if (context->status != S_OK)
+        {
+            SysFreeString(str);
+            return;
+        }
+        domnode_append_child(node, child);
+        child->data = str;
+    }
+    else
+    {
+        SysFreeString(node->data);
+        node->data = str;
+    }
 }
 
 static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeType type)

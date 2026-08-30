@@ -2231,10 +2231,10 @@ static void test_persiststream(void)
 
     istream = SHCreateMemStream((const BYTE*)"", 0);
     hr = IPersistStreamInit_Load(streaminit, istream);
-    todo_wine ok(hr == XML_E_MISSINGROOT, "Unexpected hr %#lx.\n", hr);
+    ok(hr == XML_E_MISSINGROOT, "Unexpected hr %#lx.\n", hr);
     ok(FAILED(hr), "got success\n");
     IStream_Release(istream);
-    EXPECT_PARSE_ERROR(doc, XML_E_MISSINGROOT, TRUE);
+    EXPECT_PARSE_ERROR(doc, XML_E_MISSINGROOT, FALSE);
 
     failing_stream_read_calls = 0;
     hr = IPersistStreamInit_Load(streaminit, &failing_stream);
@@ -10351,9 +10351,12 @@ static void test_appendChild(void)
     DOMNodeType node_type;
     IXMLDOMNode *node;
     LONG length;
+    VARIANT_BOOL b;
     VARIANT var;
     HRESULT hr;
     BSTR xml;
+    WCHAR pooled_xml[4096], *ptr;
+    unsigned int i;
 
     doc = create_document(&IID_IXMLDOMDocument);
     doc2 = create_document(&IID_IXMLDOMDocument);
@@ -10383,6 +10386,71 @@ static void test_appendChild(void)
     IXMLDOMElement_Release(elem);
     IXMLDOMElement_Release(elem2);
     IXMLDOMDocument_Release(doc);
+    IXMLDOMDocument_Release(doc2);
+
+    /* Parsed names remain valid after moving a subtree to another document. */
+    doc = create_document(&IID_IXMLDOMDocument);
+    doc2 = create_document(&IID_IXMLDOMDocument);
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_("<pooled><child>text</child></pooled>"), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load XML.\n");
+    hr = IXMLDOMDocument_get_documentElement(doc, &elem);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument_appendChild(doc2, (IXMLDOMNode *)elem, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IXMLDOMDocument_Release(doc);
+
+    hr = IXMLDOMElement_get_nodeName(elem, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"pooled"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    hr = IXMLDOMElement_get_firstChild(elem, &node);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMNode_get_nodeName(node, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"child"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    IXMLDOMNode_Release(node);
+    hr = IXMLDOMElement_get_text(elem, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"text"), "Unexpected text %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+
+    IXMLDOMElement_Release(elem);
+    IXMLDOMDocument_Release(doc2);
+
+    /* Parsed nodes spanning allocation blocks also outlive their source document. */
+    ptr = pooled_xml;
+    memcpy(ptr, L"<pooled>", 8 * sizeof(WCHAR));
+    ptr += 8;
+    for (i = 0; i < 300; ++i)
+    {
+        memcpy(ptr, L"<child/>", 8 * sizeof(WCHAR));
+        ptr += 8;
+    }
+    memcpy(ptr, L"</pooled>", 10 * sizeof(WCHAR));
+
+    doc = create_document(&IID_IXMLDOMDocument);
+    doc2 = create_document(&IID_IXMLDOMDocument);
+    xml = SysAllocString(pooled_xml);
+    hr = IXMLDOMDocument_loadXML(doc, xml, &b);
+    SysFreeString(xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load XML.\n");
+    hr = IXMLDOMDocument_get_documentElement(doc, &elem);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument_appendChild(doc2, (IXMLDOMNode *)elem, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IXMLDOMDocument_Release(doc);
+
+    hr = IXMLDOMElement_get_lastChild(elem, &node);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMNode_get_nodeName(node, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"child"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    IXMLDOMNode_Release(node);
+    IXMLDOMElement_Release(elem);
     IXMLDOMDocument_Release(doc2);
 
     /* Append a child to a document */
@@ -11789,7 +11857,7 @@ static void test_load(void)
     hr = IXMLDOMDocument_load(doc, src, &b);
     todo_wine ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_FALSE, "got %d\n", b);
-    EXPECT_PARSE_ERROR(doc, XML_E_INVALIDATROOTLEVEL, TRUE);
+    EXPECT_PARSE_ERROR(doc, XML_E_INVALIDATROOTLEVEL, FALSE);
     VariantClear(&src);
 
     /* A failed read must not be retried or parsed as partial input. */

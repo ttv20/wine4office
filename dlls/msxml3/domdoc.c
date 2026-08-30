@@ -271,58 +271,15 @@ static HRESULT WINAPI PersistStreamInit_IsDirty(IPersistStreamInit *iface)
 
 static HRESULT domdoc_load_from_stream(domdoc *doc, ISequentialStream *stream)
 {
-    LARGE_INTEGER zero = {{0}};
     struct domnode *node;
-    DWORD read, written;
-    IStream *hstream;
-    BYTE buf[4096];
     HRESULT hr;
 
-    hstream = NULL;
-    hr = CreateStreamOnHGlobal(NULL, TRUE, &hstream);
-    if (FAILED(hr))
-        return hr;
+    hr = parse_stream(stream, false, doc->node->properties, &node);
 
-    for (;;)
-    {
-        read = 0;
-        hr = ISequentialStream_Read(stream, buf, sizeof(buf), &read);
-        if (FAILED(hr))
-            break;
-        if (read > sizeof(buf))
-        {
-            hr = E_FAIL;
-            break;
-        }
-        if (!read)
-            break;
-
-        written = 0;
-        hr = IStream_Write(hstream, buf, read, &written);
-        if (FAILED(hr))
-            break;
-        if (written != read)
-        {
-            hr = STG_E_MEDIUMFULL;
-            break;
-        }
-    }
-
-    if (FAILED(hr))
-    {
-        ERR("failed to copy stream, hr %#lx.\n", hr);
-        IStream_Release(hstream);
-        return hr;
-    }
-
-    hr = IStream_Seek(hstream, zero, STREAM_SEEK_SET, NULL);
-    hr = parse_stream((ISequentialStream *)hstream, false, doc->node->properties, &node);
-    IStream_Release(hstream);
-
-    if (!node)
+    if (hr != S_OK || !node)
     {
         ERR("Failed to parse xml\n");
-        return E_FAIL;
+        return FAILED(hr) ? hr : E_FAIL;
     }
 
     attach_doc_node(doc, node);
