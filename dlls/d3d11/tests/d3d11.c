@@ -5955,8 +5955,10 @@ static void test_create_rasterizer_state(void)
 
     if (ID3D11Device_QueryInterface(device, &IID_ID3D11Device1, (void **)&device1) == S_OK)
     {
+        static const unsigned int forced_sample_counts[] = {1, 4, 8, 16};
         ID3D11RasterizerState1 *state_ex1;
         D3D11_RASTERIZER_DESC1 desc1;
+        unsigned int i;
 
         hr = ID3D11RasterizerState_QueryInterface(rast_state1, &IID_ID3D11RasterizerState1, (void **)&state_ex1);
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
@@ -5974,6 +5976,29 @@ static void test_create_rasterizer_state(void)
         ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
         ID3D11RasterizerState1_Release(state_ex1);
+
+        for (i = 0; i < ARRAY_SIZE(forced_sample_counts); ++i)
+        {
+            desc1.ForcedSampleCount = forced_sample_counts[i];
+            state_ex1 = NULL;
+            hr = ID3D11Device1_CreateRasterizerState1(device1, &desc1, &state_ex1);
+            ok(hr == S_OK || hr == E_INVALIDARG,
+                    "Forced sample count %u returned hr %#lx.\n", forced_sample_counts[i], hr);
+            if (SUCCEEDED(hr))
+            {
+                memset(&desc1, 0xcc, sizeof(desc1));
+                ID3D11RasterizerState1_GetDesc1(state_ex1, &desc1);
+                ok(desc1.ForcedSampleCount == forced_sample_counts[i],
+                        "Got forced sample count %u, expected %u.\n",
+                        desc1.ForcedSampleCount, forced_sample_counts[i]);
+                ID3D11RasterizerState1_Release(state_ex1);
+                memcpy(&desc1, &desc, sizeof(desc));
+            }
+        }
+
+        desc1.ForcedSampleCount = 3;
+        hr = ID3D11Device1_CreateRasterizerState1(device1, &desc1, &state_ex1);
+        ok(hr == E_INVALIDARG, "Invalid forced sample count returned hr %#lx.\n", hr);
 
         ID3D11Device1_Release(device1);
     }
@@ -34741,15 +34766,18 @@ static void test_user_defined_annotation(void)
 static void test_logic_op(void)
 {
     D3D11_FEATURE_DATA_D3D11_OPTIONS options;
+    D3D11_BLEND_DESC1 retrieved_desc;
     struct d3d11_test_context test_context;
     D3D11_TEXTURE2D_DESC texture_desc;
     ID3D11RenderTargetView *rtvs[8];
-    ID3D11BlendState1 *blend_state;
+    ID3D11BlendState1 *blend_state, *blend_state2;
     ID3D11DeviceContext *context;
     struct resource_readback rb;
     ID3D11Texture2D *rts[8];
     ID3D11Device1 *device1;
     ID3D11PixelShader *ps;
+    ID3D11PixelShader *float_ps;
+    ID3D10Blob *bytecode;
     ID3D11Device *device;
     unsigned int i, j;
     DWORD color;
@@ -34790,6 +34818,9 @@ static void test_logic_op(void)
          0x00000000, 0x000000ff, 0x000000ff, 0x08000036, 0x001020f2, 0x00000007, 0x00004002, 0x00000000,
          0x00000000, 0x000000ff, 0x000000ff, 0x0100003e
     };
+
+    static const char float_ps_source[] =
+            "float4 main() : SV_Target { return float4(0.0, 0.0, 1.0, 1.0); }";
 
     D3D11_BLEND_DESC1 blend_desc =
     {
@@ -34857,7 +34888,26 @@ static void test_logic_op(void)
     blend_desc.IndependentBlendEnable = FALSE;
     hr = ID3D11Device1_CreateBlendState1(device1, &blend_desc, &blend_state);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    memset(&retrieved_desc, 0, sizeof(retrieved_desc));
+    ID3D11BlendState1_GetDesc1(blend_state, &retrieved_desc);
+    ok(retrieved_desc.RenderTarget[0].LogicOpEnable,
+            "Logic operation was not preserved in the state descriptor.\n");
+    ok(retrieved_desc.RenderTarget[0].LogicOp == D3D11_LOGIC_OP_CLEAR,
+            "Got unexpected logic operation %#x.\n", retrieved_desc.RenderTarget[0].LogicOp);
+    hr = ID3D11Device1_CreateBlendState1(device1, &blend_desc, &blend_state2);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(blend_state2 == blend_state, "Got different blend state objects.\n");
+    ID3D11BlendState1_Release(blend_state2);
     ID3D11BlendState1_Release(blend_state);
+
+    blend_desc.RenderTarget[0].BlendEnable = TRUE;
+    hr = ID3D11Device1_CreateBlendState1(device1, &blend_desc, &blend_state);
+    ok(hr == E_INVALIDARG, "Got hr %#lx for simultaneous blending and logic operation.\n", hr);
+    blend_desc.RenderTarget[0].BlendEnable = FALSE;
+
+    blend_desc.RenderTarget[0].LogicOp = D3D11_LOGIC_OP_OR_INVERTED + 1;
+    hr = ID3D11Device1_CreateBlendState1(device1, &blend_desc, &blend_state);
+    ok(hr == E_INVALIDARG, "Got hr %#lx for an invalid logic operation.\n", hr);
 
     ID3D11Texture2D_GetDesc(test_context.backbuffer, &texture_desc);
     texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UINT;
@@ -34898,6 +34948,42 @@ static void test_logic_op(void)
         ID3D11Texture2D_Release(rts[i]);
         ID3D11RenderTargetView_Release(rtvs[i]);
     }
+
+    bytecode = compile_shader(float_ps_source, sizeof(float_ps_source) - 1, "ps_4_0");
+    hr = ID3D11Device_CreatePixelShader(device, ID3D10Blob_GetBufferPointer(bytecode),
+            ID3D10Blob_GetBufferSize(bytecode), NULL, &float_ps);
+    ok(hr == S_OK, "Failed to create normalized-target pixel shader, hr %#lx.\n", hr);
+    ID3D10Blob_Release(bytecode);
+    ID3D11DeviceContext_PSSetShader(context, float_ps, NULL, 0);
+
+    texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    hr = ID3D11Device_CreateTexture2D(device, &texture_desc, NULL, &rts[0]);
+    ok(hr == S_OK, "Failed to create normalized render target, hr %#lx.\n", hr);
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)rts[0], NULL, &rtvs[0]);
+    ok(hr == S_OK, "Failed to create normalized render target view, hr %#lx.\n", hr);
+    ID3D11DeviceContext_OMSetRenderTargets(context, 1, rtvs, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        blend_desc.RenderTarget[0].LogicOp = tests[i].op;
+        hr = ID3D11Device1_CreateBlendState1(device1, &blend_desc, &blend_state);
+        ok(hr == S_OK, "Failed to create normalized-target blend state, hr %#lx.\n", hr);
+        ID3D11DeviceContext_OMSetBlendState(context,
+                (ID3D11BlendState *)blend_state, NULL, D3D11_DEFAULT_SAMPLE_MASK);
+        ID3D11BlendState1_Release(blend_state);
+
+        ID3D11DeviceContext_ClearRenderTargetView(context, rtvs[0], clear_color);
+        draw_quad(&test_context);
+        get_texture_readback(rts[0], 0, &rb);
+        color = get_readback_color(&rb, 320, 240, 0);
+        ok(compare_color(color, tests[i].color, 1),
+                "Normalized test %u: Got unexpected color 0x%08lx.\n", i, color);
+        release_resource_readback(&rb);
+    }
+
+    ID3D11RenderTargetView_Release(rtvs[0]);
+    ID3D11Texture2D_Release(rts[0]);
+    ID3D11PixelShader_Release(float_ps);
     ID3D11PixelShader_Release(ps);
     ID3D11Device1_Release(device1);
     release_test_context(&test_context);
@@ -37891,6 +37977,15 @@ START_TEST(d3d11)
     }
 
     print_adapter_info();
+
+    if (getenv("WINETEST_D3D11_STATE_ORACLE"))
+    {
+        use_mt = FALSE;
+        queue_test(test_create_rasterizer_state);
+        queue_test(test_logic_op);
+        run_queued_tests();
+        return;
+    }
 
     queue_test(test_create_device);
     queue_for_each_feature_level(test_device_interfaces);

@@ -1,1 +1,4 @@
 #include "shape_shaders.rh"
+
+/* Analytic coverage embeds precompiled vertex, triangle, and curve shaders.
+ * The vertex shader uses clip distances for every analytic triangle. */
