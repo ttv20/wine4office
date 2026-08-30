@@ -1563,7 +1563,8 @@ static BOOL d2d_device_context_ensure_coverage_aa_resources(struct d2d_device_co
     allow_forced = context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_AUTO
             || context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_COVERAGE
             || context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_FORCED;
-    allow_analytic = context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_COVERAGE
+    allow_analytic = context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_AUTO
+            || context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_COVERAGE
             || context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_ANALYTIC;
     allow_msaa = context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_COVERAGE
             || context->coverage_aa_mode == D2D_GEOMETRY_AA_MODE_MSAA;
