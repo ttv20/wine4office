@@ -10152,7 +10152,7 @@ static void test_wic_gdi_interop(BOOL d3d11)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ID2D1RenderTarget_BeginDraw(rt);
     hr = ID2D1RenderTarget_EndDraw(rt, NULL, NULL);
-    todo_wine ok(hr == WINCODEC_ERR_ALREADYLOCKED, "Got unexpected hr %#lx.\n", hr);
+    ok(hr == WINCODEC_ERR_ALREADYLOCKED, "Got unexpected hr %#lx.\n", hr);
     IWICBitmapLock_Release(wic_lock);
 
     ID2D1GdiInteropRenderTarget_Release(interop);
