@@ -1104,7 +1104,8 @@ static void domnode_insert_attribute(struct domnode *parent, struct domnode *nod
 }
 
 #define DOM_PARSED_NAME_POOL_LIMIT 4096
-#define DOM_PARSED_NODE_BLOCK_SIZE 256
+#define DOM_PARSED_NODE_BLOCK_MIN_SIZE 8
+#define DOM_PARSED_NODE_BLOCK_MAX_SIZE 256
 
 struct dom_parsed_name
 {
@@ -1117,7 +1118,8 @@ struct dom_parsed_node_block
 {
     struct list entry;
     size_t used;
-    struct domnode nodes[DOM_PARSED_NODE_BLOCK_SIZE];
+    size_t size;
+    struct domnode nodes[];
 };
 
 struct dom_parsed_pool
@@ -1191,15 +1193,20 @@ static struct domnode *domdoc_alloc_parsed_node(struct domdoc_properties *proper
     struct dom_parsed_node_block *block;
     struct dom_parsed_pool *pool;
     struct domnode *node;
+    size_t size;
 
     if (!(pool = domdoc_get_parsed_pool(properties)))
         return NULL;
     block = list_empty(&pool->node_blocks) ? NULL
             : LIST_ENTRY(list_head(&pool->node_blocks), struct dom_parsed_node_block, entry);
-    if (!block || block->used == DOM_PARSED_NODE_BLOCK_SIZE)
+    if (!block || block->used == block->size)
     {
-        if (!(block = calloc(1, sizeof(*block))))
+        size = block ? min(block->size * 2, (size_t)DOM_PARSED_NODE_BLOCK_MAX_SIZE)
+                : DOM_PARSED_NODE_BLOCK_MIN_SIZE;
+        if (!(block = calloc(1, offsetof(struct dom_parsed_node_block, nodes)
+                + size * sizeof(*block->nodes))))
             return NULL;
+        block->size = size;
         list_add_head(&pool->node_blocks, &block->entry);
     }
 
@@ -4627,6 +4634,8 @@ static void parse_context_cleanup(struct parse_context *c)
         ISAXXMLReader_Release(c->reader);
     if (c->reader_extension)
         ISAXXMLReaderExtension_Release(c->reader_extension);
+    if (c->root)
+        domnode_destroy_tree(c->root);
 }
 
 HRESULT parse_stream(ISequentialStream *stream, bool utf16, const struct domdoc_properties *properties, struct domnode **tree)

@@ -17073,7 +17073,10 @@ static void test_loadXML(void)
 {
     IXMLDOMElement *element;
     IXMLDOMDocument *doc;
+    WCHAR malformed[4096], *ptr;
     VARIANT_BOOL b;
+    unsigned int i;
+    BSTR xml;
     HRESULT hr;
 
     hr = CoCreateInstance(&CLSID_DOMDocument2, NULL, CLSCTX_INPROC_SERVER, &IID_IXMLDOMDocument, (void **)&doc);
@@ -17098,6 +17101,40 @@ static void test_loadXML(void)
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
     hr = IXMLDOMDocument_get_documentElement(doc, &element);
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    /* Repeated failed parses release partial pooled trees and leave the document reusable. */
+    ptr = malformed;
+    memcpy(ptr, L"<root>", 6 * sizeof(WCHAR));
+    ptr += 6;
+    for (i = 0; i < 300; ++i)
+    {
+        memcpy(ptr, L"<child/>", 8 * sizeof(WCHAR));
+        ptr += 8;
+    }
+    wcscpy(ptr, L"<broken></wrong>");
+    xml = SysAllocString(malformed);
+    ok(xml != NULL, "Failed to allocate malformed XML.\n");
+    if (xml)
+    {
+        for (i = 0; i < 32; ++i)
+        {
+            b = VARIANT_TRUE;
+            hr = IXMLDOMDocument_loadXML(doc, xml, &b);
+            ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+            ok(b == VARIANT_FALSE, "Unexpected value %d.\n", b);
+        }
+        SysFreeString(xml);
+    }
+
+    b = VARIANT_FALSE;
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_("<valid/>"), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Unexpected value %d.\n", b);
+    element = NULL;
+    hr = IXMLDOMDocument_get_documentElement(doc, &element);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (element)
+        IXMLDOMElement_Release(element);
 
     IXMLDOMDocument_Release(doc);
 }
