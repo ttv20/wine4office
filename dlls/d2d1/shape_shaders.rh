@@ -10,7 +10,6 @@ IDR_D2D_COVERAGE_PS             RCDATA "coverage_ps_code.dxbc"
 IDR_D2D_COVERAGE_MSAA_PS        RCDATA "coverage_msaa_ps_code.dxbc"
 /* The resolve shader reserves t0-t3 for the ordinary brush resources. */
 IDR_D2D_COVERAGE_RESOLVE_PS     RCDATA "coverage_resolve_ps_code.dxbc"
-/* These blobs expand outline vertices and reject analytically empty pixels. */
 IDR_D2D_COVERAGE_ANALYTIC_VS    RCDATA "coverage_analytic_vs_code.dxbc"
 IDR_D2D_COVERAGE_ANALYTIC_PS    RCDATA "coverage_analytic_ps_code.dxbc"
 IDR_D2D_COVERAGE_ANALYTIC_CURVE_PS RCDATA "coverage_analytic_curve_ps_code.dxbc"

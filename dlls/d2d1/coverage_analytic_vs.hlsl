@@ -58,45 +58,6 @@ float edge_distance(float3 edge, float2 position)
     return dot(edge.xy, position) + edge.z;
 }
 
-void clip_polygon(float3 edge, inout float2 polygon[8], inout uint count)
-{
-    float2 clipped[8], previous, current;
-    float previous_distance, current_distance;
-    bool previous_inside, current_inside;
-    uint clipped_count = 0, i;
-
-    if (!count)
-        return;
-
-    previous = polygon[count - 1];
-    previous_distance = edge_distance(edge, previous);
-    previous_inside = previous_distance >= 0.0f;
-    [loop]
-    for (i = 0; i < count; ++i)
-    {
-        current = polygon[i];
-        current_distance = edge_distance(edge, current);
-        current_inside = current_distance >= 0.0f;
-
-        if (current_inside != previous_inside
-                && (current_inside ? current_distance > 0.0f
-                        : previous_distance > 0.0f))
-            clipped[clipped_count++] = lerp(previous, current,
-                    previous_distance / (previous_distance - current_distance));
-        if (current_inside)
-            clipped[clipped_count++] = current;
-
-        previous = current;
-        previous_distance = current_distance;
-        previous_inside = current_inside;
-    }
-
-    count = clipped_count;
-    [loop]
-    for (i = 0; i < count; ++i)
-        polygon[i] = clipped[i];
-}
-
 void main(float2 position0 : POSITION0, float2 prev0 : PREV0, float2 next0 : NEXT0,
         float4 curve0 : CURVE0,
         float2 position1 : POSITION1, float2 prev1 : PREV1, float2 next1 : NEXT1,
