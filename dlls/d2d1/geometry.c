@@ -4973,8 +4973,9 @@ HRESULT d2d_geometry_get_cached_simplified(struct d2d_geometry *geometry,
             entry = &geometry->simplified_cache[i];
             if (!entry->geometry)
             {
-                empty = i;
-                break;
+                if (empty == ARRAY_SIZE(geometry->simplified_cache))
+                    empty = i;
+                continue;
             }
             if (oldest == ARRAY_SIZE(geometry->simplified_cache)
                     || entry->stamp < geometry->simplified_cache[oldest].stamp)

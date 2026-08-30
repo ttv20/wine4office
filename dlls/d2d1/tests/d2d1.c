@@ -18436,6 +18436,104 @@ static HRESULT create_geometry_aa_compound(ID2D1Factory *factory, ID2D1PathGeome
     return hr;
 }
 
+static HRESULT create_geometry_cache_pressure(ID2D1Factory *factory, ID2D1PathGeometry **geometry)
+{
+    const unsigned int segment_count = 800;
+    ID2D1GeometrySink *sink;
+    D2D1_BEZIER_SEGMENT bezier;
+    D2D1_POINT_2F point;
+    unsigned int i;
+    HRESULT hr;
+
+    if (FAILED(hr = ID2D1Factory_CreatePathGeometry(factory, geometry)))
+        return hr;
+    if (FAILED(hr = ID2D1PathGeometry_Open(*geometry, &sink)))
+    {
+        ID2D1PathGeometry_Release(*geometry);
+        *geometry = NULL;
+        return hr;
+    }
+
+    set_point(&point, 0.0f, 0.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+    for (i = 0; i < segment_count; ++i)
+    {
+        if (i & 1)
+        {
+            set_point(&bezier.point1, 1.0f, -1.0f);
+            set_point(&bezier.point2, 0.0f, -1.0f);
+            set_point(&bezier.point3, 0.0f, 0.0f);
+        }
+        else
+        {
+            set_point(&bezier.point1, 0.0f, 1.0f);
+            set_point(&bezier.point2, 1.0f, 1.0f);
+            set_point(&bezier.point3, 1.0f, 0.0f);
+        }
+        ID2D1GeometrySink_AddBezier(sink, &bezier);
+    }
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+    hr = ID2D1GeometrySink_Close(sink);
+    ID2D1GeometrySink_Release(sink);
+    return hr;
+}
+
+static void test_geometry_cache_eviction(BOOL d3d11)
+{
+    static const float cache_pressure_scales[] = {1.0f, 2.0f, 4.0f, 8.0f, 1.0f};
+    ID2D1PathGeometry *geometry;
+    ID2D1SolidColorBrush *brush;
+    struct d2d1_test_context ctx;
+    D2D1_MATRIX_3X2_F transform;
+    D2D1_COLOR_F colour;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, d3d11))
+        return;
+
+    hr = create_geometry_cache_pressure(ctx.factory, &geometry);
+    ok(hr == S_OK, "Failed to create cache-pressure geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_color(&colour, 0.25f, 0.5f, 1.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &brush);
+    ok(hr == S_OK, "Failed to create cache-pressure brush, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1PathGeometry_Release(geometry);
+        release_test_context(&ctx);
+        return;
+    }
+
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+
+    /* These scale factors produce successively finer flattened paths. The
+     * fourth insertion exceeds the byte budget after its first eviction, and
+     * the final draw revisits the tolerance evicted first. */
+    for (i = 0; i < ARRAY_SIZE(cache_pressure_scales); ++i)
+    {
+        set_matrix_identity(&transform);
+        scale_matrix(&transform, cache_pressure_scales[i], cache_pressure_scales[i]);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, 16.0f, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Cache-pressure draw %u failed, hr %#lx.\n", i, hr);
+    }
+
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1PathGeometry_Release(geometry);
+    release_test_context(&ctx);
+}
+
 static int compare_geometry_aa_timings(const void *a, const void *b)
 {
     const double *value_a = a, *value_b = b;
@@ -20335,6 +20433,12 @@ START_TEST(d2d1)
         return;
     }
 
+    if (getenv("WINETEST_ONLY_GEOMETRY_CACHE_EVICTION"))
+    {
+        test_geometry_cache_eviction(TRUE);
+        return;
+    }
+
     print_adapter_info();
 
     /* These modes isolate internal cases for native Direct2D oracle and Wine regression runs. */
@@ -20444,6 +20548,7 @@ START_TEST(d2d1)
     queue_test(test_get_dxgi_device);
     queue_test(test_no_target);
     queue_d3d1x_test(test_geometry_aa_guardrails, TRUE);
+    queue_d3d1x_test(test_geometry_cache_eviction, TRUE);
     queue_test(test_mesh);
     queue_test(test_geometry_realization);
     queue_d3d10_test(test_path_geometry_stream);
