@@ -3972,7 +3972,7 @@ static void parse_context_node_put_data(struct parse_context *context, struct do
 
 static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeType type)
 {
-    bool preserve = is_preserving_whitespace(c->node), space = true;
+    bool preserve, space = true;
     bool ignored_whitespace = false;
     struct domnode *node;
 
@@ -3993,6 +3993,7 @@ static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeTy
     if (c->buffer.count == 0)
         return S_OK;
 
+    preserve = is_preserving_whitespace(c->node);
     if (!preserve)
     {
         for (size_t i = 0; i < c->buffer.count; ++i)
