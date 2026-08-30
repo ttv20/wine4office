@@ -292,7 +292,7 @@ static void write_image(const char *output_dir, unsigned int forced_count,
 
     if (!output_dir || !*output_dir)
         return;
-    len = sprintf(filename, "%s\\d3d11-r16-f%u-logic%u-%s.pgm",
+    len = snprintf(filename, ARRAY_SIZE(filename), "%s\\d3d11-r16-f%u-logic%u-%s.pgm",
             output_dir, forced_count, logic_op, name);
     ok(len > 0 && len < ARRAY_SIZE(filename), "Output path is too long.\n");
     if (len <= 0 || len >= ARRAY_SIZE(filename))

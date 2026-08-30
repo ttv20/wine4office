@@ -542,7 +542,7 @@ static void write_bitmap(const char *output_dir, const char *name, const DWORD *
 
     if (!output_dir || !*output_dir)
         return;
-    len = sprintf(filename, "%s\\d2d-geometry-%s.bmp", output_dir, name);
+    len = snprintf(filename, ARRAY_SIZE(filename), "%s\\d2d-geometry-%s.bmp", output_dir, name);
     ok(len > 0 && len < ARRAY_SIZE(filename), "Output path is too long.\n");
     if (len <= 0 || len >= ARRAY_SIZE(filename))
         return;
@@ -726,7 +726,11 @@ static void test_geometry_oracle(void)
         hr = draw_oracle_case(&ctx, &cases[i]);
         if (FAILED(hr) || !read_texture(&ctx, pixels))
             continue;
-        ok(hash_pixels(pixels, sha1), "Failed to hash case %s.\n", cases[i].name);
+        if (!hash_pixels(pixels, sha1))
+        {
+            ok(0, "Failed to hash case %s.\n", cases[i].name);
+            strcpy(sha1, "unavailable");
+        }
         covered = 0;
         for (j = 0; j < ARRAY_SIZE(pixels); ++j)
             covered += !!pixels[j];
