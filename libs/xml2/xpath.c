@@ -8317,7 +8317,6 @@ void
 xmlXPathConcatFunction(xmlXPathParserContextPtr ctxt, int nargs) {
     xmlXPathObjectPtr cur, newobj;
     xmlChar *tmp;
-    int stringmax;
 
     if (ctxt == NULL) return;
     if (nargs < 2) {
@@ -8340,12 +8339,42 @@ xmlXPathConcatFunction(xmlXPathParserContextPtr ctxt, int nargs) {
 	    xmlXPathReleaseObject(ctxt->context, cur);
 	    XP_ERROR(XPATH_INVALID_TYPE);
 	}
-	tmp = xmlStrcat(newobj->stringval, cur->stringval);
-	stringmax = cur->index2;
-	newobj->stringval = cur->stringval;
-	newobj->index2 = stringmax;
-	cur->stringval = tmp;
-	cur->index2 = xmlStrlen(tmp) + 1;
+	{
+	    int cur_len = xmlStrlen(cur->stringval);
+	    int left_len = xmlStrlen(newobj->stringval);
+	    int capacity = cur->index2;
+	    int needed;
+
+	    if ((cur_len < 0) || (left_len < 0) ||
+		(cur_len > INT_MAX - left_len - 1)) {
+		xmlXPathReleaseObject(ctxt->context, newobj);
+		xmlXPathReleaseObject(ctxt->context, cur);
+		XP_ERROR(XPATH_MEMORY_ERROR);
+	    }
+	    needed = left_len + cur_len + 1;
+	    if (capacity < needed) {
+		if (capacity <= 0)
+		    capacity = cur_len + 1;
+		while (capacity < needed) {
+		    if (capacity > INT_MAX / 2) {
+			capacity = needed;
+			break;
+		    }
+		    capacity *= 2;
+		}
+		tmp = xmlRealloc(cur->stringval, capacity);
+		if (tmp == NULL) {
+		    xmlXPathReleaseObject(ctxt->context, newobj);
+		    xmlXPathReleaseObject(ctxt->context, cur);
+		    xmlXPathPErrMemory(ctxt, NULL);
+		    return;
+		}
+		cur->stringval = tmp;
+		cur->index2 = capacity;
+	    }
+	    memmove(cur->stringval + left_len, cur->stringval, cur_len + 1);
+	    memcpy(cur->stringval, newobj->stringval, left_len);
+	}
 	xmlXPathReleaseObject(ctxt->context, newobj);
 	nargs--;
     }
