@@ -18771,6 +18771,20 @@ static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type)
     }
     ID3D11DeviceContext_OMSetBlendState(d3d_context, blend_state, blend_factor, sample_mask);
 
+    ID2D1DeviceContext_SetTarget(second_context, (ID2D1Image *)second_target);
+    ID2D1DeviceContext_BeginDraw(second_context);
+    ID2D1DeviceContext_BeginDraw(ctx.context);
+    ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)first_target);
+    ID2D1DeviceContext_Clear(ctx.context, &red);
+    hr = ID2D1DeviceContext_Flush(second_context, NULL, NULL);
+    ok(hr == S_OK, "Cross-context Flush failed, hr %#lx.\n", hr);
+    check_d3d11_blend_state(d3d_context, blend_state,
+            blend_factor, sample_mask, "after cross-context Flush");
+    hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+    ok(hr == S_OK, "Cross-context Flush first EndDraw failed, hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_EndDraw(second_context, NULL, NULL);
+    ok(hr == S_OK, "Cross-context Flush second EndDraw failed, hr %#lx.\n", hr);
+
     ID2D1DeviceContext_BeginDraw(ctx.context);
     ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)first_target);
     ID2D1DeviceContext_SetTransform(ctx.context, &identity);

@@ -1257,6 +1257,9 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         return;
     }
 
+    if (render_target->cs)
+        EnterCriticalSection(render_target->cs);
+
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
@@ -1387,6 +1390,8 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     }
 
 done:
+    if (render_target->cs)
+        LeaveCriticalSection(render_target->cs);
     d2d_outline_mesh_cleanup(&mesh);
 }
 
@@ -1932,6 +1937,7 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
     enum d2d_shape_type shape_type;
     size_t analytic_buffer_size = 0, curve_count = 0, face_count, vertex_count;
     unsigned int curve_offset = 0, offset = 0, stride;
+    BOOL locked = FALSE;
     float clear[4] = {0};
     HRESULT hr;
 
@@ -2033,6 +2039,12 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
             goto done;
     }
 
+    if (context->cs)
+    {
+        EnterCriticalSection(context->cs);
+        locked = TRUE;
+    }
+
     if (FAILED(hr = d2d_device_context_update_vs_cb(context,
             &geometry->transform, fill ? 0.0f : stroke_width))
             || (context->coverage_backend != D2D_GEOMETRY_AA_BACKEND_ANALYTIC_COVERAGE
@@ -2069,8 +2081,6 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
         scissor_rect.bottom = context->pixel_size.height;
     }
 
-    if (context->cs)
-        EnterCriticalSection(context->cs);
     d2d_device_context_begin_batch(context);
     if (context->batched_draw)
     {
@@ -2166,9 +2176,9 @@ restore_state:
         ID3DDeviceContextState_Release(previous_d3d_state);
         ID3D11DeviceContext1_Release(d3d_context);
     }
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
 done:
+    if (locked)
+        LeaveCriticalSection(context->cs);
     free(analytic_triangles);
     free(analytic_curve_triangles);
     if (new_analytic_vb) ID3D11Buffer_Release(new_analytic_vb);
@@ -2681,6 +2691,9 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     if (FAILED(d2d_device_context_prepare_gpu_draw(render_target)))
         return;
 
+    if (render_target->cs)
+        EnterCriticalSection(render_target->cs);
+
     buffer_desc.Usage = D3D11_USAGE_DEFAULT;
     buffer_desc.CPUAccessFlags = 0;
     buffer_desc.MiscFlags = 0;
@@ -2692,14 +2705,14 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     {
         WARN("Failed to update vs constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(render_target, hr);
-        return;
+        goto done;
     }
 
     if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush, opacity_brush, FALSE, FALSE, FALSE)))
     {
         WARN("Failed to update ps constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(render_target, hr);
-        return;
+        goto done;
     }
 
     if (geometry->fill.face_count)
@@ -2712,7 +2725,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         {
             WARN("Failed to create index buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         buffer_desc.ByteWidth = geometry->fill.vertex_count * sizeof(*geometry->fill.vertices);
@@ -2724,7 +2737,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
             ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
             ID3D11Buffer_Release(ib);
-            return;
+            goto done;
         }
 
         d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_TRIANGLE, ib, 3 * geometry->fill.face_count, vb,
@@ -2744,7 +2757,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         {
             ERR("Failed to create curves vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         d2d_device_context_draw(render_target, D2D_SHAPE_TYPE_CURVE, NULL, geometry->fill.bezier_vertex_count, vb,
@@ -2763,7 +2776,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
         {
             ERR("Failed to create arc vertex buffer, hr %#lx.\n", hr);
             d2d_device_context_set_error(render_target, hr);
-            return;
+            goto done;
         }
 
         if (FAILED(hr = d2d_device_context_update_ps_cb(render_target, brush,
@@ -2776,6 +2789,10 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
 
         ID3D11Buffer_Release(vb);
     }
+
+done:
+    if (render_target->cs)
+        LeaveCriticalSection(render_target->cs);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext6 *iface,
@@ -3819,7 +3836,12 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
     /* Flush is the Direct2D/Direct3D interoperation boundary. Restore the
      * application's immediate-context state before returning control. A later
      * Direct2D draw in the same transaction starts a fresh batch lazily. */
-    d2d_device_context_end_batch(context);
+    if (context->cs)
+        EnterCriticalSection(context->cs);
+    if (context->device->active_batch)
+        d2d_device_context_end_batch(context->device->active_batch);
+    else
+        d2d_device_context_end_batch(context);
 
     if (SUCCEEDED(hr))
     {
@@ -3834,6 +3856,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
         }
 
     }
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
 
     if (tag1)
         *tag1 = context->error.tag1;
