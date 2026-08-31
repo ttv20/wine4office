@@ -2407,13 +2407,6 @@ static void xml_write_quotedstring(xmlOutputBufferPtr buf, const xmlChar *string
     }
 }
 
-static int XMLCALL transform_to_stream_write(void *context, const char *buffer, int len)
-{
-    DWORD written;
-    HRESULT hr = ISequentialStream_Write((ISequentialStream *)context, buffer, len, &written);
-    return hr == S_OK ? written : -1;
-}
-
 /* Output for method "text" */
 static void transform_write_text(xmlDocPtr result, xsltStylesheetPtr style, xmlOutputBufferPtr output)
 {
@@ -2653,8 +2646,10 @@ static HRESULT node_transform_write_to_bstr(xsltStylesheetPtr style, xmlDocPtr r
 static HRESULT node_transform_write_to_stream(xsltStylesheetPtr style, xmlDocPtr result, ISequentialStream *stream)
 {
     static const xmlChar *utf16 = (const xmlChar*)"UTF-16";
+    const xmlChar *content;
     xmlOutputBufferPtr output;
     const xmlChar *encoding;
+    size_t offset, size;
     HRESULT hr;
 
     if (transform_is_empty_resultdoc(result))
@@ -2674,11 +2669,29 @@ static HRESULT node_transform_write_to_stream(xsltStylesheetPtr style, xmlDocPtr
     if (!encoding)
         encoding = utf16;
 
-    output = xmlOutputBufferCreateIO(transform_to_stream_write, NULL, stream, xmlFindCharEncodingHandler((const char*)encoding));
+    output = xmlAllocOutputBuffer(xmlFindCharEncodingHandler((const char*)encoding));
     if (!output)
         return E_OUTOFMEMORY;
 
     hr = node_transform_write(style, result, FALSE, (const char*)encoding, output);
+    if (SUCCEEDED(hr))
+    {
+        xmlBufPtr buffer = output->conv ? output->conv : output->buffer;
+
+        content = xmlBufContent(buffer);
+        size = xmlBufUse(buffer);
+        offset = 0;
+        while (offset < size)
+        {
+            ULONG chunk = size - offset > ~(ULONG)0 ? ~(ULONG)0 : size - offset;
+            ULONG written;
+
+            hr = ISequentialStream_Write(stream, content + offset, chunk, &written);
+            if (FAILED(hr) || !written)
+                break;
+            offset += written;
+        }
+    }
     xmlOutputBufferClose(output);
     return hr;
 }
