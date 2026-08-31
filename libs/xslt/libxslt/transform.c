@@ -4079,7 +4079,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 #else
     xsltStylePreCompPtr comp = (xsltStylePreCompPtr) castedComp;
 #endif
-    xmlChar *prop = NULL;
+    xmlChar *prop = NULL, *tmpNsName = NULL;
     const xmlChar *name, *prefix = NULL, *nsName = NULL;
     xmlNodePtr copy;
     xmlNodePtr oldInsert;
@@ -4160,7 +4160,6 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    if (comp->ns[0] != 0)
 		nsName = comp->ns;
 	} else {
-	    xmlChar *tmpNsName;
 	    /*
 	    * Eval the AVT.
 	    */
@@ -4173,8 +4172,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    *  attribute has a null namespace URI."
 	    */
 	    if ((tmpNsName != NULL) && (tmpNsName[0] != 0))
-		nsName = xmlDictLookup(ctxt->dict, BAD_CAST tmpNsName, -1);
-	    xmlFree(tmpNsName);
+		nsName = tmpNsName;
 	}
 
         if (xmlStrEqual(nsName, BAD_CAST "http://www.w3.org/2000/xmlns/")) {
@@ -4237,6 +4235,8 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	*/
 	xsltGetSpecialNamespace(ctxt, inst, NULL, NULL, copy);
     }
+    xmlFree(tmpNsName);
+    tmpNsName = NULL;
 
     ctxt->insert = copy;
 
@@ -4265,6 +4265,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    NULL);
 
 error:
+    xmlFree(tmpNsName);
     ctxt->insert = oldInsert;
     return;
 }
