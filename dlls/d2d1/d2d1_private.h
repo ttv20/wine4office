@@ -65,7 +65,18 @@ enum d2d_geometry_aa_backend
     D2D_GEOMETRY_AA_BACKEND_UNINITIALIZED,
     D2D_GEOMETRY_AA_BACKEND_UNAVAILABLE,
     D2D_GEOMETRY_AA_BACKEND_FORCED_COVERAGE,
+    D2D_GEOMETRY_AA_BACKEND_ANALYTIC_COVERAGE,
     D2D_GEOMETRY_AA_BACKEND_MSAA_MASK,
+};
+
+enum d2d_geometry_aa_mode
+{
+    D2D_GEOMETRY_AA_MODE_AUTO,
+    D2D_GEOMETRY_AA_MODE_COVERAGE,
+    D2D_GEOMETRY_AA_MODE_FORCED,
+    D2D_GEOMETRY_AA_MODE_ANALYTIC,
+    D2D_GEOMETRY_AA_MODE_MSAA,
+    D2D_GEOMETRY_AA_MODE_SUPERSAMPLE,
 };
 
 struct d2d_settings
@@ -271,6 +282,12 @@ struct d2d_device_context
     ID3D11RasterizerState *rs;
     ID3D11BlendState *bs;
     ID3D11PixelShader *coverage_ps;
+    ID3D11VertexShader *coverage_analytic_vs;
+    ID3D11PixelShader *coverage_analytic_ps;
+    ID3D11PixelShader *coverage_analytic_curve_ps;
+    ID3D11InputLayout *coverage_analytic_il;
+    ID3D11Buffer *coverage_analytic_vb;
+    unsigned int coverage_analytic_vb_size;
     ID3D11PixelShader *coverage_msaa_ps;
     ID3D11PixelShader *coverage_resolve_ps;
     ID3D11RasterizerState1 *coverage_rs;
@@ -286,7 +303,9 @@ struct d2d_device_context
     unsigned int coverage_origin_x, coverage_origin_y;
     D2D1_MATRIX_3X2_F coverage_inverse_transform;
     float coverage_dpi_x, coverage_dpi_y;
-    BOOL coverage_aa_requested;
+    size_t coverage_allocation_bytes, coverage_peak_allocation_bytes;
+    unsigned int coverage_allocation_count, coverage_reuse_count;
+    enum d2d_geometry_aa_mode coverage_aa_mode;
     ID3D11SamplerState *sampler_states
             [D2D_SAMPLER_INTERPOLATION_MODE_COUNT]
             [D2D_SAMPLER_EXTEND_MODE_COUNT]
@@ -650,6 +669,17 @@ struct d2d_geometry_ops
 {
     void (*stream)(struct d2d_geometry *geometry, const D2D_MATRIX_3X2_F *transform,
             ID2D1GeometrySink *sink);
+    BOOL (*is_cacheable)(const struct d2d_geometry *geometry, unsigned int depth);
+};
+
+#define D2D_SIMPLIFIED_GEOMETRY_CACHE_SIZE 4
+
+struct d2d_simplified_geometry_cache_entry
+{
+    ID2D1PathGeometry *geometry;
+    float tolerance;
+    size_t bytes;
+    UINT64 stamp;
 };
 
 struct d2d_geometry
@@ -662,6 +692,15 @@ struct d2d_geometry
     ID2D1Factory *factory;
 
     D2D_MATRIX_3X2_F transform;
+
+    SRWLOCK simplified_cache_lock;
+    struct d2d_simplified_geometry_cache_entry
+            simplified_cache[D2D_SIMPLIFIED_GEOMETRY_CACHE_SIZE];
+    size_t simplified_cache_bytes;
+    UINT64 simplified_cache_stamp;
+    unsigned int simplified_cache_hits;
+    unsigned int simplified_cache_misses;
+    unsigned int simplified_cache_evictions;
 
     struct
     {
@@ -783,6 +822,8 @@ HRESULT d2d_geometry_group_init(struct d2d_geometry *geometry, ID2D1Factory *fac
         D2D1_FILL_MODE fill_mode, ID2D1Geometry **src_geometries, unsigned int geometry_count);
 HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1PathGeometry **ret);
+HRESULT d2d_geometry_get_cached_simplified(struct d2d_geometry *geometry,
+        float tolerance, ID2D1PathGeometry **ret);
 struct d2d_geometry *unsafe_impl_from_ID2D1Geometry(ID2D1Geometry *iface);
 
 struct d2d_geometry_realization
@@ -819,6 +860,9 @@ struct d2d_device
     struct d2d_shader_blob precompiled_shape_vs[D2D_SHAPE_TYPE_COUNT];
     struct d2d_shader_blob precompiled_shape_ps;
     struct d2d_shader_blob precompiled_coverage_ps;
+    struct d2d_shader_blob precompiled_coverage_analytic_vs;
+    struct d2d_shader_blob precompiled_coverage_analytic_ps;
+    struct d2d_shader_blob precompiled_coverage_analytic_curve_ps;
     struct d2d_shader_blob precompiled_coverage_msaa_ps;
     struct d2d_shader_blob precompiled_coverage_resolve_ps;
     struct d2d_device_context *active_batch;

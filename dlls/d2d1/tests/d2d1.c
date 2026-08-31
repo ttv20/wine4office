@@ -10152,7 +10152,7 @@ static void test_wic_gdi_interop(BOOL d3d11)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ID2D1RenderTarget_BeginDraw(rt);
     hr = ID2D1RenderTarget_EndDraw(rt, NULL, NULL);
-    todo_wine ok(hr == WINCODEC_ERR_ALREADYLOCKED, "Got unexpected hr %#lx.\n", hr);
+    ok(hr == WINCODEC_ERR_ALREADYLOCKED, "Got unexpected hr %#lx.\n", hr);
     IWICBitmapLock_Release(wic_lock);
 
     ID2D1GdiInteropRenderTarget_Release(interop);
@@ -18436,6 +18436,104 @@ static HRESULT create_geometry_aa_compound(ID2D1Factory *factory, ID2D1PathGeome
     return hr;
 }
 
+static HRESULT create_geometry_cache_pressure(ID2D1Factory *factory, ID2D1PathGeometry **geometry)
+{
+    const unsigned int segment_count = 800;
+    ID2D1GeometrySink *sink;
+    D2D1_BEZIER_SEGMENT bezier;
+    D2D1_POINT_2F point;
+    unsigned int i;
+    HRESULT hr;
+
+    if (FAILED(hr = ID2D1Factory_CreatePathGeometry(factory, geometry)))
+        return hr;
+    if (FAILED(hr = ID2D1PathGeometry_Open(*geometry, &sink)))
+    {
+        ID2D1PathGeometry_Release(*geometry);
+        *geometry = NULL;
+        return hr;
+    }
+
+    set_point(&point, 0.0f, 0.0f);
+    ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
+    for (i = 0; i < segment_count; ++i)
+    {
+        if (i & 1)
+        {
+            set_point(&bezier.point1, 1.0f, -1.0f);
+            set_point(&bezier.point2, 0.0f, -1.0f);
+            set_point(&bezier.point3, 0.0f, 0.0f);
+        }
+        else
+        {
+            set_point(&bezier.point1, 0.0f, 1.0f);
+            set_point(&bezier.point2, 1.0f, 1.0f);
+            set_point(&bezier.point3, 1.0f, 0.0f);
+        }
+        ID2D1GeometrySink_AddBezier(sink, &bezier);
+    }
+    ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
+    hr = ID2D1GeometrySink_Close(sink);
+    ID2D1GeometrySink_Release(sink);
+    return hr;
+}
+
+static void test_geometry_cache_eviction(BOOL d3d11)
+{
+    static const float cache_pressure_scales[] = {1.0f, 2.0f, 4.0f, 8.0f, 1.0f};
+    ID2D1PathGeometry *geometry;
+    ID2D1SolidColorBrush *brush;
+    struct d2d1_test_context ctx;
+    D2D1_MATRIX_3X2_F transform;
+    D2D1_COLOR_F colour;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, d3d11))
+        return;
+
+    hr = create_geometry_cache_pressure(ctx.factory, &geometry);
+    ok(hr == S_OK, "Failed to create cache-pressure geometry, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        release_test_context(&ctx);
+        return;
+    }
+
+    set_color(&colour, 0.25f, 0.5f, 1.0f, 1.0f);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &brush);
+    ok(hr == S_OK, "Failed to create cache-pressure brush, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        ID2D1PathGeometry_Release(geometry);
+        release_test_context(&ctx);
+        return;
+    }
+
+    ID2D1DeviceContext_SetAntialiasMode(ctx.context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetPrimitiveBlend(ctx.context, D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+
+    /* These scale factors produce successively finer flattened paths. The
+     * fourth insertion exceeds the byte budget after its first eviction, and
+     * the final draw revisits the tolerance evicted first. */
+    for (i = 0; i < ARRAY_SIZE(cache_pressure_scales); ++i)
+    {
+        set_matrix_identity(&transform);
+        scale_matrix(&transform, cache_pressure_scales[i], cache_pressure_scales[i]);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_DrawGeometry(ctx.context, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, 16.0f, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Cache-pressure draw %u failed, hr %#lx.\n", i, hr);
+    }
+
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1PathGeometry_Release(geometry);
+    release_test_context(&ctx);
+}
+
 static int compare_geometry_aa_timings(const void *a, const void *b)
 {
     const double *value_a = a, *value_b = b;
@@ -18893,21 +18991,33 @@ static void test_d2d_atlas_benchmark(BOOL d3d11)
 static void test_geometry_aa_benchmark(BOOL d3d11)
 {
     enum {warmup_count = 20, sample_count = 100};
-    double samples[sample_count];
+    static const float cache_stress_scales[] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 1.0f};
+    double samples[sample_count], submit_samples[sample_count];
+    double readback_samples[sample_count], gpu_samples[sample_count];
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS statistics;
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint;
+    D3D11_QUERY_DESC query_desc = {D3D11_QUERY_PIPELINE_STATISTICS, 0};
     D3D11_TEXTURE2D_DESC staging_desc;
     D3D11_MAPPED_SUBRESOURCE map_desc;
     ID3D11DeviceContext *d3d_context;
+    ID3D11Query *gpu_disjoint_query = NULL;
+    ID3D11Query *gpu_start_query = NULL;
+    ID3D11Query *gpu_end_query = NULL;
+    ID3D11Query *pipeline_query = NULL;
     ID3D11Texture2D *staging;
     ID3D11Resource *surface;
     ID3D11Device *d3d_device;
-    ID2D1PathGeometry *geometry;
+    ID2D1PathGeometry *geometry, *draw_geometry;
     ID2D1SolidColorBrush *brush;
     struct d2d1_test_context ctx;
-    LARGE_INTEGER frequency, start, end;
+    LARGE_INTEGER frequency, start, submit_end, end;
     D2D1_MATRIX_3X2_F transform;
     D2D1_COLOR_F colour;
-    unsigned int i;
-    HRESULT hr;
+    UINT64 gpu_start, gpu_end;
+    unsigned int gpu_sample_count = 0, i;
+    BOOL recreate_geometry = !!getenv("WINETEST_GEOMETRY_AA_BENCHMARK_RECREATE");
+    BOOL gpu_timing = FALSE;
+    HRESULT hr, query_hr;
 
     if (!d3d11 || !init_test_context(&ctx, d3d11))
         return;
@@ -18918,6 +19028,7 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
         release_test_context(&ctx);
         return;
     }
+
     set_color(&colour, 0.25f, 0.5f, 1.0f, 0.75f);
     hr = ID2D1DeviceContext_CreateSolidColorBrush(ctx.context, &colour, NULL, &brush);
     ok(hr == S_OK, "Failed to create benchmark brush, hr %#lx.\n", hr);
@@ -18945,16 +19056,27 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
     staging_desc.MiscFlags = 0;
     hr = ID3D11Device_CreateTexture2D(d3d_device, &staging_desc, NULL, &staging);
     ok(hr == S_OK, "Failed to create staging texture, hr %#lx.\n", hr);
-    ID3D11Device_Release(d3d_device);
     if (FAILED(hr))
     {
         ID3D11DeviceContext_Release(d3d_context);
+        ID3D11Device_Release(d3d_device);
         ID3D11Resource_Release(surface);
         ID2D1SolidColorBrush_Release(brush);
         ID2D1PathGeometry_Release(geometry);
         release_test_context(&ctx);
         return;
     }
+
+    query_desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    if (SUCCEEDED(ID3D11Device_CreateQuery(d3d_device, &query_desc, &gpu_disjoint_query)))
+    {
+        query_desc.Query = D3D11_QUERY_TIMESTAMP;
+        if (SUCCEEDED(ID3D11Device_CreateQuery(d3d_device, &query_desc, &gpu_start_query))
+                && SUCCEEDED(ID3D11Device_CreateQuery(d3d_device, &query_desc, &gpu_end_query)))
+            gpu_timing = TRUE;
+    }
+    if (!gpu_timing)
+        skip("GPU timestamp queries are unavailable for the geometry AA benchmark.\n");
 
     set_matrix_identity(&transform);
     scale_matrix(&transform, 6.0f, 6.0f);
@@ -18965,12 +19087,31 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
 
     for (i = 0; i < warmup_count + sample_count; ++i)
     {
+        draw_geometry = geometry;
+        if (recreate_geometry)
+        {
+            hr = create_geometry_aa_compound(ctx.factory, &draw_geometry);
+            ok(hr == S_OK, "Failed to recreate benchmark geometry %u, hr %#lx.\n", i, hr);
+            if (FAILED(hr))
+                break;
+        }
+        if (gpu_timing)
+        {
+            ID3D11DeviceContext_Begin(d3d_context, (ID3D11Asynchronous *)gpu_disjoint_query);
+            ID3D11DeviceContext_End(d3d_context, (ID3D11Asynchronous *)gpu_start_query);
+        }
         QueryPerformanceCounter(&start);
         ID2D1DeviceContext_BeginDraw(ctx.context);
         ID2D1DeviceContext_Clear(ctx.context, NULL);
-        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)geometry,
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)draw_geometry,
                 (ID2D1Brush *)brush, NULL);
         hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        QueryPerformanceCounter(&submit_end);
+        if (gpu_timing)
+        {
+            ID3D11DeviceContext_End(d3d_context, (ID3D11Asynchronous *)gpu_end_query);
+            ID3D11DeviceContext_End(d3d_context, (ID3D11Asynchronous *)gpu_disjoint_query);
+        }
         if (SUCCEEDED(hr))
         {
             ID3D11DeviceContext_CopyResource(d3d_context, (ID3D11Resource *)staging, surface);
@@ -18980,17 +19121,134 @@ static void test_geometry_aa_benchmark(BOOL d3d11)
                 ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)staging, 0);
         }
         QueryPerformanceCounter(&end);
+        if (recreate_geometry)
+            ID2D1PathGeometry_Release(draw_geometry);
         ok(hr == S_OK, "Benchmark draw %u failed, hr %#lx.\n", i, hr);
         if (i >= warmup_count)
+        {
             samples[i - warmup_count] = (end.QuadPart - start.QuadPart)
                     * 1000000.0 / frequency.QuadPart;
+            submit_samples[i - warmup_count] = (submit_end.QuadPart - start.QuadPart)
+                    * 1000000.0 / frequency.QuadPart;
+            readback_samples[i - warmup_count] = (end.QuadPart - submit_end.QuadPart)
+                    * 1000000.0 / frequency.QuadPart;
+        }
+        if (gpu_timing)
+        {
+            query_hr = ID3D11DeviceContext_GetData(d3d_context,
+                    (ID3D11Asynchronous *)gpu_disjoint_query,
+                    &disjoint, sizeof(disjoint), 0);
+            if (query_hr == S_OK && !disjoint.Disjoint
+                    && ID3D11DeviceContext_GetData(d3d_context,
+                            (ID3D11Asynchronous *)gpu_start_query,
+                            &gpu_start, sizeof(gpu_start), 0) == S_OK
+                    && ID3D11DeviceContext_GetData(d3d_context,
+                            (ID3D11Asynchronous *)gpu_end_query,
+                            &gpu_end, sizeof(gpu_end), 0) == S_OK
+                    && gpu_end >= gpu_start && i >= warmup_count)
+                gpu_samples[gpu_sample_count++] = (gpu_end - gpu_start)
+                        * 1000000.0 / disjoint.Frequency;
+        }
+    }
+    if (i != warmup_count + sample_count)
+    {
+        skip("Geometry recreation failed before the benchmark completed.\n");
+        goto done;
     }
     qsort(samples, ARRAY_SIZE(samples), sizeof(*samples), compare_geometry_aa_timings);
-    trace("geometry-aa-benchmark-us p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u\n",
+    qsort(submit_samples, ARRAY_SIZE(submit_samples), sizeof(*submit_samples),
+            compare_geometry_aa_timings);
+    qsort(readback_samples, ARRAY_SIZE(readback_samples), sizeof(*readback_samples),
+            compare_geometry_aa_timings);
+    trace("geometry-aa-benchmark-us cache=%s p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u\n",
+            recreate_geometry ? "cold" : "warm",
             samples[49], samples[94], samples[98], samples[99], sample_count);
+    trace("geometry-aa-breakdown-us cache=%s submit_p50=%.3f submit_p95=%.3f "
+            "readback_p50=%.3f readback_p95=%.3f samples=%u\n",
+            recreate_geometry ? "cold" : "warm",
+            submit_samples[49], submit_samples[94],
+            readback_samples[49], readback_samples[94], sample_count);
+    if (gpu_sample_count)
+    {
+        qsort(gpu_samples, gpu_sample_count, sizeof(*gpu_samples), compare_geometry_aa_timings);
+        trace("geometry-aa-gpu-us cache=%s p50=%.3f p95=%.3f p99=%.3f max=%.3f samples=%u\n",
+                recreate_geometry ? "cold" : "warm",
+                gpu_samples[(gpu_sample_count - 1) * 50 / 100],
+                gpu_samples[(gpu_sample_count - 1) * 95 / 100],
+                gpu_samples[(gpu_sample_count - 1) * 99 / 100],
+                gpu_samples[gpu_sample_count - 1], gpu_sample_count);
+    }
 
+    query_desc.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+    hr = ID3D11Device_CreateQuery(d3d_device, &query_desc, &pipeline_query);
+    ok(hr == S_OK, "Failed to create the geometry AA pipeline query, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ID3D11DeviceContext_Begin(d3d_context, (ID3D11Asynchronous *)pipeline_query);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ID3D11DeviceContext_End(d3d_context, (ID3D11Asynchronous *)pipeline_query);
+        ok(hr == S_OK, "Pipeline-statistics draw failed, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            unsigned int retry_count;
+
+            for (retry_count = 0; retry_count < 10000; ++retry_count)
+            {
+                hr = ID3D11DeviceContext_GetData(d3d_context,
+                        (ID3D11Asynchronous *)pipeline_query,
+                        &statistics, sizeof(statistics), 0);
+                if (hr != S_FALSE)
+                    break;
+                Sleep(0);
+            }
+            if (hr == S_FALSE)
+                skip("Geometry AA pipeline statistics did not become ready.\n");
+            else
+                ok(hr == S_OK, "Failed to read geometry AA pipeline statistics, hr %#lx.\n", hr);
+            if (hr == S_OK)
+                trace("geometry-aa-pipeline cache=%s ia_vertices=%s ia_primitives=%s "
+                        "vs_invocations=%s gs_invocations=%s gs_primitives=%s "
+                        "ps_invocations=%s clipper_invocations=%s clipper_primitives=%s\n",
+                        recreate_geometry ? "cold" : "warm",
+                        wine_dbgstr_longlong(statistics.IAVertices),
+                        wine_dbgstr_longlong(statistics.IAPrimitives),
+                        wine_dbgstr_longlong(statistics.VSInvocations),
+                        wine_dbgstr_longlong(statistics.GSInvocations),
+                        wine_dbgstr_longlong(statistics.GSPrimitives),
+                        wine_dbgstr_longlong(statistics.PSInvocations),
+                        wine_dbgstr_longlong(statistics.CInvocations),
+                        wine_dbgstr_longlong(statistics.CPrimitives));
+        }
+    }
+
+    /* Exercise more tolerance keys than the bounded geometry cache retains,
+     * then revisit the first key. This catches stale-key and eviction lifetime
+     * failures without making a timing assertion. */
+    for (i = 0; i < ARRAY_SIZE(cache_stress_scales); ++i)
+    {
+        set_matrix_identity(&transform);
+        scale_matrix(&transform, cache_stress_scales[i], cache_stress_scales[i]);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        ID2D1DeviceContext_FillGeometry(ctx.context, (ID2D1Geometry *)geometry,
+                (ID2D1Brush *)brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Cache-stress draw %u failed, hr %#lx.\n", i, hr);
+    }
+
+done:
+    if (pipeline_query) ID3D11Query_Release(pipeline_query);
+    if (gpu_end_query) ID3D11Query_Release(gpu_end_query);
+    if (gpu_start_query) ID3D11Query_Release(gpu_start_query);
+    if (gpu_disjoint_query) ID3D11Query_Release(gpu_disjoint_query);
     ID3D11Texture2D_Release(staging);
     ID3D11DeviceContext_Release(d3d_context);
+    ID3D11Device_Release(d3d_device);
     ID3D11Resource_Release(surface);
     ID2D1SolidColorBrush_Release(brush);
     ID2D1PathGeometry_Release(geometry);
@@ -19021,7 +19279,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
         {0.0f, {1.0f, 0.0f, 0.0f, 1.0f}},
         {1.0f, {0.0f, 0.0f, 1.0f, 1.0f}},
     };
-    D2D1_SIZE_U small_size = {64, 64}, large_size = {4097, 4096};
+    D2D1_SIZE_U small_size = {64, 64}, resize_size = {128, 96}, large_size = {4097, 4096};
     D2D1_SIZE_U brush_size = {64, 64};
     D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{0}};
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES gradient_desc;
@@ -19045,6 +19303,7 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
     ID2D1SolidColorBrush *brush;
     ID2D1Image *original_target, *current_target;
     ID2D1Bitmap1 *small_bitmap, *large_bitmap, *format_bitmap, *brush_bitmap = NULL;
+    ID2D1Bitmap1 *resize_bitmap = NULL;
     struct d2d1_test_context ctx;
     struct resource_readback rb;
     float dpi_x, dpi_y;
@@ -19553,6 +19812,64 @@ static void test_geometry_aa_guardrails(BOOL d3d11)
             ok(!total, "Empty coverage draw reused %u stale mask pixels.\n", total);
             release_resource_readback(&rb);
         }
+    }
+
+    /* Grow the destination-sized coverage cache by one size class, then
+     * alternate between the old and new sizes. The final small draw catches
+     * stale rows, incomplete clears, and context state left by cache reuse. */
+    bitmap_desc.pixelFormat = pixel_format;
+    bitmap_desc.dpiX = 96.0f;
+    bitmap_desc.dpiY = 96.0f;
+    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    hr = ID2D1DeviceContext_CreateBitmap(ctx.context, resize_size, NULL, 0,
+            &bitmap_desc, &resize_bitmap);
+    ok(hr == S_OK, "Failed to create the coverage resize target, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        for (i = 0; i < 24; ++i)
+        {
+            BOOL grow = i & 1;
+
+            ID2D1DeviceContext_SetTarget(ctx.context, grow
+                    ? (ID2D1Image *)resize_bitmap : (ID2D1Image *)small_bitmap);
+            ID2D1DeviceContext_BeginDraw(ctx.context);
+            ID2D1DeviceContext_Clear(ctx.context, NULL);
+            ID2D1DeviceContext_SetDpi(ctx.context, 96.0f, 96.0f);
+            set_matrix_identity(&transform);
+            if (grow)
+                scale_matrix(&transform, 1.5f, 1.5f);
+            ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+            ID2D1DeviceContext_SetAntialiasMode(ctx.context,
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            ID2D1DeviceContext_SetPrimitiveBlend(ctx.context,
+                    D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+            ID2D1DeviceContext_FillGeometry(ctx.context,
+                    (ID2D1Geometry *)compound_geometry, (ID2D1Brush *)brush, NULL);
+            hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+            ok(hr == S_OK, "Coverage resize draw %u failed, hr %#lx.\n", i, hr);
+        }
+
+        ID2D1DeviceContext_SetTarget(ctx.context, (ID2D1Image *)small_bitmap);
+        ID2D1DeviceContext_BeginDraw(ctx.context);
+        ID2D1DeviceContext_Clear(ctx.context, NULL);
+        set_matrix_identity(&transform);
+        ID2D1DeviceContext_SetTransform(ctx.context, &transform);
+        ID2D1DeviceContext_FillGeometry(ctx.context,
+                (ID2D1Geometry *)compound_geometry, (ID2D1Brush *)brush, NULL);
+        hr = ID2D1DeviceContext_EndDraw(ctx.context, NULL, NULL);
+        ok(hr == S_OK, "Final reused coverage draw failed, hr %#lx.\n", hr);
+        readback = get_d3d11_bitmap_readback(small_bitmap, &rb);
+        ok(readback, "Failed to read back the reused coverage target.\n");
+        if (readback)
+        {
+            pixel = get_readback_colour(&rb, 32, 32);
+            ok(!pixel, "Reused coverage target filled alternate-mode hole with %#lx.\n", pixel);
+            pixel = get_readback_colour(&rb, 44, 32);
+            ok(pixel, "Reused coverage target omitted the path interior.\n");
+            release_resource_readback(&rb);
+        }
+        ID2D1Bitmap1_Release(resize_bitmap);
+        resize_bitmap = NULL;
     }
 
     /* COPY is not implemented by immediate bitmap targets yet. It must take
@@ -20576,6 +20893,12 @@ START_TEST(d2d1)
         return;
     }
 
+    if (getenv("WINETEST_ONLY_GEOMETRY_CACHE_EVICTION"))
+    {
+        test_geometry_cache_eviction(TRUE);
+        return;
+    }
+
     print_adapter_info();
 
     /* These modes isolate internal cases for native Direct2D oracle and Wine regression runs. */
@@ -20687,6 +21010,7 @@ START_TEST(d2d1)
     queue_d3d1x_test(test_d2d_atlas_transaction, TRUE);
     queue_d3d1x_test(test_d2d_batch_lifetime, TRUE);
     queue_d3d1x_test(test_geometry_aa_guardrails, TRUE);
+    queue_d3d1x_test(test_geometry_cache_eviction, TRUE);
     queue_test(test_mesh);
     queue_test(test_geometry_realization);
     queue_d3d10_test(test_path_geometry_stream);

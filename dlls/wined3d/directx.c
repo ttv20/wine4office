@@ -2774,6 +2774,8 @@ HRESULT CDECL wined3d_get_device_caps(const struct wined3d_adapter *adapter,
     caps->stencil_export = d3d_info->stencil_export;
     caps->simple_instancing = d3d_info->simple_instancing;
     caps->min_max_filtering = d3d_info->min_max_filtering;
+    caps->logic_ops = d3d_info->logic_ops;
+    caps->forced_sample_count_mask = d3d_info->forced_sample_count_mask;
 
     caps->max_feature_level = d3d_info->feature_level;
 

@@ -5134,8 +5134,16 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFeatureSupport(ID3D11Device5 
                 return E_INVALIDARG;
             }
 
-            FIXME("Returning fake Options support data.\n");
-            options->OutputMergerLogicOp = FALSE;
+            wined3d_mutex_lock();
+            hr = wined3d_device_get_device_caps(device->wined3d_device, &wined3d_caps);
+            wined3d_mutex_unlock();
+            if (FAILED(hr))
+            {
+                WARN("Failed to get device caps, hr %#lx.\n", hr);
+                return hr;
+            }
+
+            options->OutputMergerLogicOp = wined3d_caps.logic_ops;
             options->UAVOnlyRenderingForcedSampleCount = FALSE;
             options->DiscardAPIsSeenByDriver = FALSE;
             options->FlagsForUpdateAndCopySeenByDriver = FALSE;

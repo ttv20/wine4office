@@ -197,6 +197,32 @@ static GLenum gl_blend_op(const struct wined3d_gl_info *gl_info, enum wined3d_bl
     }
 }
 
+static GLenum gl_logic_op(enum wined3d_logic_op op)
+{
+    switch (op)
+    {
+        case WINED3D_LOGIC_OP_CLEAR:          return GL_CLEAR;
+        case WINED3D_LOGIC_OP_SET:            return GL_SET;
+        case WINED3D_LOGIC_OP_COPY:           return GL_COPY;
+        case WINED3D_LOGIC_OP_COPY_INVERTED:  return GL_COPY_INVERTED;
+        case WINED3D_LOGIC_OP_NOOP:           return GL_NOOP;
+        case WINED3D_LOGIC_OP_INVERT:         return GL_INVERT;
+        case WINED3D_LOGIC_OP_AND:            return GL_AND;
+        case WINED3D_LOGIC_OP_NAND:           return GL_NAND;
+        case WINED3D_LOGIC_OP_OR:             return GL_OR;
+        case WINED3D_LOGIC_OP_NOR:            return GL_NOR;
+        case WINED3D_LOGIC_OP_XOR:            return GL_XOR;
+        case WINED3D_LOGIC_OP_EQUIV:          return GL_EQUIV;
+        case WINED3D_LOGIC_OP_AND_REVERSE:    return GL_AND_REVERSE;
+        case WINED3D_LOGIC_OP_AND_INVERTED:   return GL_AND_INVERTED;
+        case WINED3D_LOGIC_OP_OR_REVERSE:     return GL_OR_REVERSE;
+        case WINED3D_LOGIC_OP_OR_INVERTED:    return GL_OR_INVERTED;
+        default:
+            FIXME("Unhandled logic op %#x.\n", op);
+            return GL_COPY;
+    }
+}
+
 static void blendop(const struct wined3d_state *state, const struct wined3d_gl_info *gl_info)
 {
     const struct wined3d_blend_state *b = state->blend_state;
@@ -372,6 +398,18 @@ static void blend(struct wined3d_context *context, const struct wined3d_state *s
             mask & WINED3DCOLORWRITEENABLE_ALPHA ? GL_TRUE : GL_FALSE);
     checkGLcall("glColorMask");
 
+    if (b && b->desc.rt[0].logic_op_enable)
+    {
+        gl_info->gl_ops.gl.p_glDisable(GL_BLEND);
+        gl_info->gl_ops.gl.p_glEnable(GL_COLOR_LOGIC_OP);
+        gl_info->gl_ops.gl.p_glLogicOp(gl_logic_op(b->desc.rt[0].logic_op));
+        checkGLcall("glLogicOp");
+        return;
+    }
+
+    gl_info->gl_ops.gl.p_glDisable(GL_COLOR_LOGIC_OP);
+    checkGLcall("glDisable GL_COLOR_LOGIC_OP");
+
     if (!b || !is_blend_enabled(context, state, 0))
     {
         gl_info->gl_ops.gl.p_glDisable(GL_BLEND);
@@ -450,6 +488,9 @@ static void blend_db2(struct wined3d_context *context, const struct wined3d_stat
         return;
     }
 
+    gl_info->gl_ops.gl.p_glDisable(GL_COLOR_LOGIC_OP);
+    checkGLcall("glDisable GL_COLOR_LOGIC_OP");
+
     rt_format = state->fb.render_targets[0]->format;
     gl_blend_from_d3d(&src_blend, &dst_blend, b->desc.rt[0].src, b->desc.rt[0].dst, rt_format);
     gl_blend_from_d3d(&src_blend_alpha, &dst_blend_alpha, b->desc.rt[0].src_alpha, b->desc.rt[0].dst_alpha, rt_format);
@@ -510,6 +551,9 @@ static void blend_dbb(struct wined3d_context *context, const struct wined3d_stat
         blend(context, state, state_id);
         return;
     }
+
+    gl_info->gl_ops.gl.p_glDisable(GL_COLOR_LOGIC_OP);
+    checkGLcall("glDisable GL_COLOR_LOGIC_OP");
 
     for (i = 0; i < WINED3D_MAX_RENDER_TARGETS; ++i)
     {
