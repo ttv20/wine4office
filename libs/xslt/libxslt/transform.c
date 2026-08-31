@@ -2300,6 +2300,22 @@ xsltReleaseLocalRVTs(xsltTransformContextPtr ctxt, xmlDocPtr base)
     } while (cur != base);
 }
 
+#ifndef XSLT_REFACTORED
+static int
+xsltIsCompiledInstruction(xmlNodePtr node, xsltStyleType type)
+{
+    xsltStylePreCompPtr info;
+
+    if ((node == NULL) || (node->type != XML_ELEMENT_NODE) ||
+        (node->psvi == NULL) || (node->psvi == xsltExtMarker))
+        return(0);
+
+    info = (xsltStylePreCompPtr) node->psvi;
+    return((info->inst == node) && (info->type != XSLT_FUNC_EXTENSION) &&
+        ((type == 0) || (info->type == type)));
+}
+#endif
+
 /**
  * xsltApplySequenceConstructor:
  * @ctxt:  a XSLT process context
@@ -2730,7 +2746,8 @@ xsltApplySequenceConstructor(xsltTransformContextPtr ctxt,
 
 #else /* XSLT_REFACTORED */
 
-        if (IS_XSLT_ELEM(cur)) {
+        if (xsltIsCompiledInstruction(cur, 0) ||
+            IS_XSLT_ELEM(cur)) {
             /*
              * This is an XSLT node
              */
@@ -5158,7 +5175,9 @@ xsltChoose(xsltTransformContextPtr ctxt, xmlNodePtr contextNode,
     * We don't check the content model during transformation.
     */
 #else
-    if ((! IS_XSLT_ELEM(cur)) || (! IS_XSLT_NAME(cur, "when"))) {
+    if ((! xsltIsCompiledInstruction(cur, XSLT_FUNC_WHEN)) &&
+        ((! IS_XSLT_ELEM(cur)) ||
+         (! IS_XSLT_NAME(cur, "when")))) {
 	xsltTransformError(ctxt, NULL, inst,
 	     "xsl:choose: xsl:when expected first\n");
 	return;
@@ -5177,7 +5196,8 @@ xsltChoose(xsltTransformContextPtr ctxt, xmlNodePtr contextNode,
 	/*
 	* Process xsl:when ---------------------------------------------------
 	*/
-	while (IS_XSLT_ELEM(cur) && IS_XSLT_NAME(cur, "when")) {
+	while (xsltIsCompiledInstruction(cur, XSLT_FUNC_WHEN) ||
+	       (IS_XSLT_ELEM(cur) && IS_XSLT_NAME(cur, "when"))) {
 	    wcomp = cur->psvi;
 
 	    if ((wcomp == NULL) || (wcomp->test == NULL) ||

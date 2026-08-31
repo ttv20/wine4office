@@ -85,7 +85,7 @@ xsltEvalXPathPredicate(xsltTransformContextPtr ctxt, xmlXPathCompExprPtr comp,
 
     if (res != NULL) {
 	ret = xmlXPathEvalPredicate(ctxt->xpathCtxt, res);
-	xmlXPathFreeObject(res);
+	xmlXPathReleaseObject(ctxt->xpathCtxt, res);
 #ifdef WITH_XSLT_DEBUG_TEMPLATES
 	XSLT_TRACE(ctxt,XSLT_TRACE_TEMPLATES,xsltGenericDebug(xsltGenericDebugContext,
 	     "xsltEvalXPathPredicate: returns %d\n", ret));
@@ -161,7 +161,7 @@ xsltEvalXPathStringNs(xsltTransformContextPtr ctxt, xmlXPathCompExprPtr comp,
 	    xsltTransformError(ctxt, NULL, NULL,
 		 "xpath : string() function didn't return a String\n");
 	}
-	xmlXPathFreeObject(res);
+	xmlXPathReleaseObject(ctxt->xpathCtxt, res);
     } else {
 	ctxt->state = XSLT_STATE_STOPPED;
     }
