@@ -2427,8 +2427,10 @@ static bool saxreader_peek(struct saxlocator *locator, const WCHAR *str, size_t 
 
 static bool saxreader_cmp(struct saxlocator *locator, const WCHAR *str)
 {
+    struct input_buffer *input = &locator->buffer;
     const WCHAR *ptr;
     size_t i = 0;
+    bool single_line = true;
 
     if (FAILED(locator->status))
         return false;
@@ -2443,9 +2445,23 @@ static bool saxreader_cmp(struct saxlocator *locator, const WCHAR *str)
         }
         if (str[i] != ptr[i])
             return false;
+        if (str[i] == '\r' || str[i] == '\n')
+            single_line = false;
         i++;
     }
-    saxreader_skip(locator, i);
+
+    /* Most parser tokens are single-line delimiters in the main input. Avoid
+     * walking them a second time when there is no collection or entity state
+     * for saxreader_skip() to maintain. */
+    if (i && single_line && !locator->collect && list_empty(&input->entities))
+    {
+        input->utf16.cur += i;
+        input->consumed += i;
+        input->position.column += i;
+        input->last_cr = false;
+    }
+    else
+        saxreader_skip(locator, i);
     return true;
 }
 
@@ -4232,6 +4248,40 @@ static void saxreader_stringify_entity(struct saxlocator *locator, struct string
     }
 }
 
+static bool saxreader_parse_attvalue_run(struct saxlocator *locator,
+        struct string_buffer *buffer, WCHAR quote, bool normalize)
+{
+    struct encoded_buffer *input = &locator->buffer.utf16;
+    const WCHAR *ptr;
+    size_t available, length;
+
+    if (locator->collect || !list_empty(&locator->buffer.entities))
+        return false;
+
+    ptr = saxreader_get_ptr(locator);
+    available = input->written / sizeof(WCHAR) - input->cur;
+    for (length = 0; length < available; ++length)
+    {
+        WCHAR ch = ptr[length];
+
+        if (!ch || ch == quote || ch == '<' || ch == '&' || ch == '\r'
+                || ch == '\n' || (normalize && ch == '\t'))
+            break;
+    }
+    if (!length)
+        return false;
+
+    saxreader_string_append(locator, buffer, ptr, length);
+    if (locator->status == S_OK)
+    {
+        input->cur += length;
+        locator->buffer.consumed += length;
+        locator->buffer.position.column += length;
+        locator->buffer.last_cr = false;
+    }
+    return true;
+}
+
 /* [10] AttValue ::= '"' ([^<&"] | Reference)* '"'
         |  "'" ([^<&'] | Reference)* "'" */
 static BSTR saxreader_parse_attvalue(struct saxlocator *locator)
@@ -4239,7 +4289,7 @@ static BSTR saxreader_parse_attvalue(struct saxlocator *locator)
     struct string_buffer buffer = { 0 };
     struct text_position position;
     WCHAR quote[2] = { 0 }, ch;
-    bool normalized;
+    bool normalize, normalized;
     BSTR name;
 
     if (!(quote[0] = saxreader_is_quote(locator)))
@@ -4249,10 +4299,15 @@ static BSTR saxreader_parse_attvalue(struct saxlocator *locator)
     }
     saxreader_skip(locator, 1);
 
+    normalize = locator->saxreader->features & NormalizeAttributeValues;
+
     /* All references are resolved */
 
     while (locator->status == S_OK)
     {
+        if (saxreader_parse_attvalue_run(locator, &buffer, quote[0], normalize))
+            continue;
+
         if (saxreader_cmp(locator, quote))
             break;
 
@@ -4281,7 +4336,7 @@ static BSTR saxreader_parse_attvalue(struct saxlocator *locator)
         else
         {
             normalized = false;
-            if (locator->saxreader->features & NormalizeAttributeValues)
+            if (normalize)
             {
                 if (saxreader_cmp(locator, L"\r\n")
                         || saxreader_cmp(locator, L"\r")

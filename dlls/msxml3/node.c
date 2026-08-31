@@ -1128,6 +1128,8 @@ struct dom_parsed_pool
     size_t name_count;
     struct list buckets[256];
     struct list node_blocks;
+    struct dom_parsed_name *recent_qname;
+    struct dom_parsed_name *recent_uri;
 };
 
 static UINT dom_parsed_name_hash(const WCHAR *name, int len)
@@ -1157,14 +1159,21 @@ static struct dom_parsed_pool *domdoc_get_parsed_pool(struct domdoc_properties *
 }
 
 static BSTR domdoc_intern_parsed_name(struct domdoc_properties *properties,
-        const WCHAR *name, int len)
+        const WCHAR *name, int len, bool is_uri)
 {
     struct dom_parsed_pool *pool;
+    struct dom_parsed_name **recent;
     struct dom_parsed_name *entry;
     UINT hash;
 
     if (!(pool = domdoc_get_parsed_pool(properties)))
         return NULL;
+
+    recent = is_uri ? &pool->recent_uri : &pool->recent_qname;
+    entry = *recent;
+    if (entry && SysStringLen(entry->value) == len
+            && !memcmp(entry->value, name, len * sizeof(*name)))
+        return entry->value;
 
     hash = dom_parsed_name_hash(name, len);
     LIST_FOR_EACH_ENTRY(entry, &pool->buckets[hash % ARRAY_SIZE(pool->buckets)],
@@ -1172,7 +1181,10 @@ static BSTR domdoc_intern_parsed_name(struct domdoc_properties *properties,
     {
         if (entry->hash == hash && SysStringLen(entry->value) == len
                 && !memcmp(entry->value, name, len * sizeof(*name)))
+        {
+            *recent = entry;
             return entry->value;
+        }
     }
 
     if (pool->name_count >= DOM_PARSED_NAME_POOL_LIMIT || !(entry = malloc(sizeof(*entry))))
@@ -1185,6 +1197,7 @@ static BSTR domdoc_intern_parsed_name(struct domdoc_properties *properties,
     entry->hash = hash;
     list_add_head(&pool->buckets[hash % ARRAY_SIZE(pool->buckets)], &entry->entry);
     ++pool->name_count;
+    *recent = entry;
     return entry->value;
 }
 
@@ -1279,7 +1292,7 @@ static HRESULT domnode_create_internal(DOMNodeType type, const WCHAR *name, int 
      * every parsed text node. */
     if (parsed && (type == NODE_ELEMENT || type == NODE_ATTRIBUTE))
     {
-        object->qname = domdoc_intern_parsed_name(owner->properties, name, name_len);
+        object->qname = domdoc_intern_parsed_name(owner->properties, name, name_len, false);
         if (object->qname)
             object->flags |= DOMNODE_POOLED_QNAME;
     }
@@ -1316,7 +1329,13 @@ static HRESULT domnode_create_internal(DOMNodeType type, const WCHAR *name, int 
 
     if (uri_len)
     {
-        if (!(object->uri = SysAllocStringLen(uri, uri_len)))
+        if (parsed)
+        {
+            object->uri = domdoc_intern_parsed_name(owner->properties, uri, uri_len, true);
+            if (object->uri)
+                object->flags |= DOMNODE_POOLED_URI;
+        }
+        if (!object->uri && !(object->uri = SysAllocStringLen(uri, uri_len)))
         {
             domnode_destroy_tree(object);
             return E_OUTOFMEMORY;
@@ -1598,7 +1617,8 @@ void domnode_destroy_tree(struct domnode *tree)
         SysFreeString(tree->name);
     }
     SysFreeString(tree->data);
-    SysFreeString(tree->uri);
+    if (!(tree->flags & DOMNODE_POOLED_URI))
+        SysFreeString(tree->uri);
 
     if (parsed_pool)
         dom_parsed_pool_release(parsed_pool);
@@ -3898,16 +3918,27 @@ static void parse_context_node_create(struct parse_context *context, DOMNodeType
             owner, false, true, node);
 }
 
+static void parse_context_link_node(struct domnode *parent, struct domnode *node,
+        struct list *list)
+{
+    assert(!node->parent);
+    assert(node->owner == node_get_doc(parent));
+
+    list_add_tail(list, &node->entry);
+    node->parent = parent;
+    domnode_add_refs(parent, node->refcount);
+}
+
 static void parse_context_append_child(struct parse_context *context, struct domnode *parent, struct domnode *child)
 {
     if (context->status == S_OK)
-        domnode_append_child(parent, child);
+        parse_context_link_node(parent, child, &parent->children);
 }
 
 static void parse_context_append_attribute(struct parse_context *context, struct domnode *node, struct domnode *attribute)
 {
     if (context->status == S_OK)
-        domnode_insert_attribute(node, attribute, NULL);
+        parse_context_link_node(node, attribute, &node->attributes);
 }
 
 static void parse_context_node_put_data(struct parse_context *context, struct domnode *node, const WCHAR *data, int data_len)
@@ -3967,7 +3998,7 @@ static void parse_context_node_put_data(struct parse_context *context, struct do
             SysFreeString(str);
             return;
         }
-        domnode_append_child(node, child);
+        parse_context_append_child(context, node, child);
         child->data = str;
     }
     else
@@ -4681,23 +4712,35 @@ struct xmldoc_context
 
 static xmlNsPtr xmlnode_get_ns(xmlNodePtr tree, struct domnode *node, xmlNodePtr element)
 {
-    xmlChar *uri, *prefix;
+    xmlChar *uri = NULL, *prefix;
     xmlNsPtr ns;
 
     if (!node->uri)
         return NULL;
 
-    uri = xmlchar_from_wchar(node->uri);
     prefix = node->prefix ? xmlchar_from_wchar(node->prefix) : NULL;
 
     if ((ns = xmlSearchNs(tree->doc, element, prefix)))
     {
-        if (!xmlStrEqual(ns->href, uri))
-            ns = xmlNewNs(element, uri, prefix);
+        if (ns->_private != node->uri)
+        {
+            uri = xmlchar_from_wchar(node->uri);
+            if (!xmlStrEqual(ns->href, uri))
+            {
+                ns = xmlNewNs(element, uri, prefix);
+                if (ns)
+                    ns->_private = node->uri;
+            }
+            else
+                ns->_private = node->uri;
+        }
     }
     else
     {
+        uri = xmlchar_from_wchar(node->uri);
         ns = xmlNewNs(element, uri, prefix);
+        if (ns)
+            ns->_private = node->uri;
     }
 
     free(uri);
