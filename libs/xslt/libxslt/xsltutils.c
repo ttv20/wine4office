@@ -1119,6 +1119,7 @@ xsltComputeSortResultInternal(xsltTransformContextPtr ctxt, xmlNodePtr sort,
                                 "xsltComputeSortResult: sort key is null\n");
                         } else {
                             res->stringval = sortKey;
+                            res->index2 = 0;
                             xmlFree(str);
                         }
 		    }
