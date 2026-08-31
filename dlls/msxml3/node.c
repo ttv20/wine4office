@@ -3903,6 +3903,8 @@ struct parse_context
     HRESULT status;
     int max_depth;
     int depth;
+    bool preserve_document;
+    bool preserve_whitespace;
 };
 
 static void parse_context_node_create(struct parse_context *context, DOMNodeType type,
@@ -4010,7 +4012,7 @@ static void parse_context_node_put_data(struct parse_context *context, struct do
 
 static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeType type)
 {
-    bool preserve, space = true;
+    bool space = true;
     bool ignored_whitespace = false;
     struct domnode *node;
 
@@ -4031,8 +4033,7 @@ static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeTy
     if (c->buffer.count == 0)
         return S_OK;
 
-    preserve = is_preserving_whitespace(c->node);
-    if (!preserve)
+    if (!c->preserve_whitespace)
     {
         for (size_t i = 0; i < c->buffer.count; ++i)
         {
@@ -4072,6 +4073,25 @@ static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeTy
     }
 
     return c->status;
+}
+
+static void parse_context_set_element_whitespace(struct parse_context *c, struct domnode *element)
+{
+    struct domnode *attr;
+    BSTR value;
+    bool preserve = c->preserve_whitespace;
+
+    if (!c->preserve_document && domnode_get_qualified_attribute(element, L"space",
+            L"http://www.w3.org/XML/1998/namespace", &attr) == S_OK
+            && node_get_text(attr, &value) == S_OK)
+    {
+        preserve = !wcscmp(value, L"preserve");
+        SysFreeString(value);
+    }
+
+    if (preserve)
+        element->flags |= DOMNODE_PARSED_PRESERVE_SPACE;
+    c->preserve_whitespace = preserve;
 }
 
 static struct parse_context *impl_from_ISAXContentHandler(ISAXContentHandler *iface)
@@ -4189,6 +4209,8 @@ static HRESULT WINAPI parse_content_handler_startElement(ISAXContentHandler *ifa
         }
     }
 
+    parse_context_set_element_whitespace(c, element);
+
     return c->status;
 }
 
@@ -4200,6 +4222,8 @@ static HRESULT WINAPI parse_content_handler_endElement(ISAXContentHandler *iface
     --c->depth;
     parse_context_create_text_node(c, NODE_TEXT);
     c->node = c->node->parent;
+    c->preserve_whitespace = c->preserve_document
+            || (c->node->flags & DOMNODE_PARSED_PRESERVE_SPACE);
 
     return c->status;
 }
@@ -4621,6 +4645,8 @@ static HRESULT parse_context_init(struct parse_context *c, const struct domdoc_p
     c->buffer.status = &c->status;
     c->max_depth = properties->max_element_depth;
     c->version = properties->version;
+    c->preserve_document = properties->preserving == VARIANT_TRUE;
+    c->preserve_whitespace = c->preserve_document;
 
     if (FAILED(hr = SAXXMLReader_create(MSXML3, (void **)&unk)))
         return hr;
@@ -4758,10 +4784,9 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
     xmlNsPtr ns;
     BSTR text;
 
-    name = xmlchar_from_wchar(node->name);
-    xmlnode = xmlNewDocNode(context->xmldoc, NULL, name, NULL);
+    name = xmlchar_from_wcharn(node->name, -1, TRUE);
+    xmlnode = xmlNewDocNodeEatName(context->xmldoc, NULL, name, NULL);
     xmlAddChild(context->tree, xmlnode);
-    free(name);
 
     ns = xmlnode_get_ns(context->tree, node, xmlnode);
     xmlSetNs(xmlnode, ns);
@@ -4794,11 +4819,11 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
 
         node_get_text(attr, &text);
 
-        name = xmlchar_from_wchar(attr->name);
+        name = xmlchar_from_wcharn(attr->name, -1, TRUE);
         value = xmlchar_from_wchar(text);
 
         ns = xmlnode_get_ns(xmlnode, attr, xmlnode);
-        xmlattr = xmlNewProp(xmlnode, name, value);
+        xmlattr = xmlNewNsPropEatName(xmlnode, NULL, name, value);
         xmlattr->_private2 = attr;
         xmlSetNs((xmlNodePtr)xmlattr, ns);
 
@@ -4807,7 +4832,6 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
 
         SysFreeString(text);
         free(value);
-        free(name);
     }
 
     return xmlnode;
@@ -4844,8 +4868,7 @@ static xmlNodePtr create_xmlnode_from_domnode(struct xmldoc_context *context, st
     struct domnode *n;
     xmlDtdPtr dtd;
 
-    name = node->name ? xmlchar_from_wchar(node->name) : NULL;
-    data = node->data ? xmlchar_from_wchar(node->data) : NULL;
+    name = data = NULL;
 
     switch (node->type)
     {
@@ -4853,18 +4876,23 @@ static xmlNodePtr create_xmlnode_from_domnode(struct xmldoc_context *context, st
             xmlnode = create_xmlnode_element(context, node);
             break;
         case NODE_COMMENT:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocComment(context->xmldoc, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_TEXT:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocText(context->xmldoc, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_PROCESSING_INSTRUCTION:
+            name = node->name ? xmlchar_from_wchar(node->name) : NULL;
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocPI(context->xmldoc, name, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_CDATA_SECTION:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewCDataBlock(context->xmldoc, data, xmlStrlen(data));
             xmlAddChild(context->tree, xmlnode);
             break;

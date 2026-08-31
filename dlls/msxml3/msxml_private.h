@@ -197,6 +197,7 @@ enum domnode_flags
     DOMNODE_POOLED_QNAME = 0x40,
     DOMNODE_POOLED_ALLOCATION = 0x80,
     DOMNODE_POOLED_URI = 0x100,
+    DOMNODE_PARSED_PRESERVE_SPACE = 0x200,
 };
 
 struct dom_parsed_pool;

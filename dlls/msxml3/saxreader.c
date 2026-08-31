@@ -888,6 +888,7 @@ struct saxlocator
     bool pool_names;
     size_t name_pool_count;
     struct list name_pool[256];
+    BSTR recent_names[16];
 
     ISequentialStream *stream;
     bool eos;
@@ -1177,10 +1178,19 @@ static UINT saxreader_name_hash(const WCHAR *str, UINT len)
 static BSTR saxreader_intern_stringlen(struct saxlocator *locator, const WCHAR *str, UINT len)
 {
     struct pooled_name *entry;
-    UINT hash;
+    BSTR recent;
+    UINT hash, slot;
 
     if (!locator->pool_names)
         return saxreader_alloc_stringlen(locator, str, len);
+
+    slot = len * 33u;
+    if (len)
+        slot += str[0] * 17u + str[len - 1];
+    slot %= ARRAY_SIZE(locator->recent_names);
+    recent = locator->recent_names[slot];
+    if (recent && SysStringLen(recent) == len && !memcmp(recent, str, len * sizeof(WCHAR)))
+        return recent;
 
     hash = saxreader_name_hash(str, len);
     LIST_FOR_EACH_ENTRY(entry, &locator->name_pool[hash % ARRAY_SIZE(locator->name_pool)],
@@ -1188,7 +1198,10 @@ static BSTR saxreader_intern_stringlen(struct saxlocator *locator, const WCHAR *
     {
         if (entry->hash == hash && SysStringLen(entry->value) == len
                 && !memcmp(entry->value, str, len * sizeof(WCHAR)))
+        {
+            locator->recent_names[slot] = entry->value;
             return entry->value;
+        }
     }
 
     if (!(entry = malloc(sizeof(*entry))))
@@ -1205,6 +1218,7 @@ static BSTR saxreader_intern_stringlen(struct saxlocator *locator, const WCHAR *
     entry->hash = hash;
     list_add_head(&locator->name_pool[hash % ARRAY_SIZE(locator->name_pool)], &entry->entry);
     ++locator->name_pool_count;
+    locator->recent_names[slot] = entry->value;
     return entry->value;
 }
 
@@ -2465,6 +2479,25 @@ static bool saxreader_cmp(struct saxlocator *locator, const WCHAR *str)
     return true;
 }
 
+static inline bool saxreader_cmp_char(struct saxlocator *locator, WCHAR ch)
+{
+    struct input_buffer *input = &locator->buffer;
+
+    if (FAILED(locator->status) || *saxreader_get_ptr(locator) != ch)
+        return false;
+
+    if (ch != '\r' && ch != '\n' && !locator->collect && list_empty(&input->entities))
+    {
+        ++input->utf16.cur;
+        ++input->consumed;
+        ++input->position.column;
+        input->last_cr = false;
+    }
+    else
+        saxreader_skip(locator, 1);
+    return true;
+}
+
 static void saxreader_fatal_error(struct saxlocator *locator)
 {
     struct saxerrorhandler_iface *handler = saxreader_get_errorhandler(locator->saxreader);
@@ -3682,6 +3715,10 @@ bool xml_is_ncnamechar(WCHAR ch)
 
 static bool saxreader_is_ncnamechar(WCHAR ch)
 {
+    if (ch < 0x80)
+        return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+                || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-'
+                || ch == '_';
     return xml_is_ncnamechar(ch);
 }
 
@@ -3695,6 +3732,8 @@ bool xml_is_ncname_startchar(WCHAR ch)
 
 static bool saxreader_is_ncname_startchar(WCHAR c)
 {
+    if (c < 0x80)
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
     return xml_is_ncname_startchar(c);
 }
 
@@ -3870,7 +3909,7 @@ static void saxreader_parse_qname(struct saxlocator *locator, struct parsed_name
 
     ncname = saxreader_parse_ncname(locator);
 
-    if (saxreader_cmp(locator, L":"))
+    if (saxreader_cmp_char(locator, ':'))
     {
         name->prefix = ncname;
         name->local = saxreader_parse_ncname(locator);
@@ -4520,7 +4559,7 @@ static void saxreader_parse_starttag(struct saxlocator *locator)
     struct element *element;
     struct parsed_name name;
 
-    if (!saxreader_cmp(locator, L"<"))
+    if (!saxreader_cmp_char(locator, '<'))
         return saxreader_set_error(locator, E_SAX_INVALIDATROOTLEVEL);
 
     saxreader_parse_qname(locator, &name);
@@ -4548,7 +4587,7 @@ static void saxreader_parse_starttag(struct saxlocator *locator)
             break;
         }
 
-        if (saxreader_cmp(locator, L">"))
+        if (saxreader_cmp_char(locator, '>'))
         {
             position = locator->buffer.position;
             break;
