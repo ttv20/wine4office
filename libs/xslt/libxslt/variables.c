@@ -2310,8 +2310,10 @@ xsltXPathVariableLookup(void *ctxt, const xmlChar *name,
 	{
 	    const xmlChar *tmpName = name, *tmpNsName = ns_uri;
 
-	    name = xmlDictLookup(tctxt->dict, name, -1);
-	    if (ns_uri)
+	    if (xmlDictOwns(tctxt->dict, name) != 1)
+		name = xmlDictLookup(tctxt->dict, name, -1);
+	    if ((ns_uri != NULL) &&
+		(xmlDictOwns(tctxt->dict, ns_uri) != 1))
 		ns_uri = xmlDictLookup(tctxt->dict, ns_uri, -1);
 	    if ((tmpName != name) || (tmpNsName != ns_uri)) {
 		for (i = tctxt->varsNr; i > tctxt->varsBase; i--) {
