@@ -3981,6 +3981,10 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
     if (FAILED(d2d_device_context_prepare_gpu_draw(context)))
         return;
 
+    /* Serialize constant-buffer updates with the shared immediate-context
+     * state handoff performed by d2d_device_context_draw(). */
+    if (context->cs)
+        EnterCriticalSection(context->cs);
     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
 
     if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
@@ -3989,7 +3993,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
         WARN("Failed to map vs constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
-        return;
+        goto done;
     }
 
     vs_cb_data = map_desc.pData;
@@ -4018,7 +4022,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
         WARN("Failed to map ps constant buffer, hr %#lx.\n", hr);
         d2d_device_context_set_error(context, hr);
         ID3D11DeviceContext_Release(d3d_context);
-        return;
+        goto done;
     }
 
     ps_cb_data = map_desc.pData;
@@ -4040,6 +4044,10 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
 
     d2d_device_context_draw(context, D2D_SHAPE_TYPE_TRIANGLE, context->ib, 6,
             context->vb, context->vb_stride, NULL, NULL);
+
+done:
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *iface)

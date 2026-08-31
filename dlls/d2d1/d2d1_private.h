@@ -179,7 +179,6 @@ struct d2d_device_context_ops
     HRESULT (*device_context_present)(IUnknown *outer_unknown);
     BOOL (*queue_cpu_glyph)(IUnknown *outer_unknown, const RECT *bounds,
             const BYTE *values, unsigned int pitch, const D2D1_COLOR_F *colour);
-    BOOL batch_small_draws;
     void (*device_context_begin_draw)(IUnknown *outer_unknown);
     HRESULT (*device_context_prepare_gpu_draw)(IUnknown *outer_unknown,
             struct d2d_device_context *context);
