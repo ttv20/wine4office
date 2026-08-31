@@ -21,6 +21,16 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
+#define D2D_SIMPLIFIED_GEOMETRY_CACHE_MAX_BYTES ((size_t)4 * 1024 * 1024)
+#define D2D_GEOMETRY_CACHE_MAX_DEPTH 64
+
+static BOOL d2d_geometry_is_cacheable(const struct d2d_geometry *geometry, unsigned int depth)
+{
+    if (depth >= D2D_GEOMETRY_CACHE_MAX_DEPTH)
+        return FALSE;
+    return !geometry->ops->is_cacheable || geometry->ops->is_cacheable(geometry, depth + 1);
+}
+
 #define D2D_FIGURE_FLAG_CLOSED          0x00000001u
 #define D2D_FIGURE_FLAG_HOLLOW          0x00000002u
 
@@ -3610,6 +3620,16 @@ static BOOL d2d_geometry_fill_add_arc_triangle(struct d2d_geometry *geometry,
 
 static void d2d_geometry_cleanup(struct d2d_geometry *geometry)
 {
+    unsigned int i;
+
+    if (geometry->simplified_cache_hits || geometry->simplified_cache_misses)
+        TRACE("Geometry %p simplified cache hits %u, misses %u, evictions %u, retained %Iu bytes.\n",
+                geometry, geometry->simplified_cache_hits, geometry->simplified_cache_misses,
+                geometry->simplified_cache_evictions, geometry->simplified_cache_bytes);
+    for (i = 0; i < ARRAY_SIZE(geometry->simplified_cache); ++i)
+        if (geometry->simplified_cache[i].geometry)
+            ID2D1PathGeometry_Release(geometry->simplified_cache[i].geometry);
+
     free(geometry->outline.joins);
     free(geometry->outline.arc_faces);
     free(geometry->outline.arcs);
@@ -3633,6 +3653,13 @@ static void d2d_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *facto
     ID2D1Factory_AddRef(geometry->factory = factory);
     geometry->transform = *transform;
     geometry->ops = ops;
+    geometry->simplified_cache_lock = (SRWLOCK)SRWLOCK_INIT;
+    memset(geometry->simplified_cache, 0, sizeof(geometry->simplified_cache));
+    geometry->simplified_cache_bytes = 0;
+    geometry->simplified_cache_stamp = 0;
+    geometry->simplified_cache_hits = 0;
+    geometry->simplified_cache_misses = 0;
+    geometry->simplified_cache_evictions = 0;
 }
 
 static inline struct d2d_geometry *impl_from_ID2D1GeometrySink(ID2D1GeometrySink *iface)
@@ -3990,6 +4017,95 @@ static BOOL d2d_geometry_split_bezier(struct d2d_geometry *geometry, const struc
     return TRUE;
 }
 
+static BOOL d2d_cubic_is_quadratic(const D2D1_POINT_2F *p0, const D2D1_POINT_2F *p1,
+        const D2D1_POINT_2F *p2, const D2D1_POINT_2F *p3)
+{
+    float scale, x, y;
+
+    scale = max(max(fabsf(p0->x), fabsf(p0->y)), max(fabsf(p1->x), fabsf(p1->y)));
+    scale = max(scale, max(max(fabsf(p2->x), fabsf(p2->y)), max(fabsf(p3->x), fabsf(p3->y))));
+    scale = max(scale, 1.0f);
+
+    /* A cubic is also a quadratic when its third finite difference is zero. */
+    x = p3->x - 3.0f * p2->x + 3.0f * p1->x - p0->x;
+    y = p3->y - 3.0f * p2->y + 3.0f * p1->y - p0->y;
+    return fabsf(x) <= 16.0f * FLT_EPSILON * scale
+            && fabsf(y) <= 16.0f * FLT_EPSILON * scale;
+}
+
+static BOOL d2d_geometry_refine_fill_cubics(struct d2d_geometry *geometry)
+{
+    size_t figure_idx;
+
+    for (figure_idx = 0; figure_idx < geometry->u.path.figure_count; ++figure_idx)
+    {
+        struct d2d_figure *figure = &geometry->u.path.figures[figure_idx];
+        size_t vertex_idx = 0, control_idx = 0, original_control_idx = 0;
+
+        if (figure->flags & D2D_FIGURE_FLAG_HOLLOW)
+            continue;
+
+        while (vertex_idx < figure->vertex_count)
+        {
+            D2D1_POINT_2F p0, p1, p2, p3, a, b, c, d, e, midpoint, q[2];
+            D2D1_RECT_F bezier_bounds;
+            enum d2d_vertex_type type = figure->vertex_types[vertex_idx];
+
+            if (!d2d_vertex_type_is_bezier(type))
+            {
+                ++vertex_idx;
+                continue;
+            }
+
+            p0 = figure->vertices[vertex_idx];
+            p1 = figure->original_bezier_controls[original_control_idx];
+            p2 = figure->original_bezier_controls[original_control_idx + 1];
+            p3 = figure->vertices[vertex_idx + 1];
+
+            if (d2d_cubic_is_quadratic(&p0, &p1, &p2, &p3))
+            {
+                ++vertex_idx;
+                ++control_idx;
+                original_control_idx += 2;
+                continue;
+            }
+
+            /* Split the original cubic at t = 0.5, then approximate each
+             * half with a quadratic.  The outline has already been built by
+             * EndFigure(), so this only refines the subsequently built fill. */
+            d2d_point_lerp(&a, &p0, &p1, 0.5f);
+            d2d_point_lerp(&b, &p1, &p2, 0.5f);
+            d2d_point_lerp(&c, &p2, &p3, 0.5f);
+            d2d_point_lerp(&d, &a, &b, 0.5f);
+            d2d_point_lerp(&e, &b, &c, 0.5f);
+            d2d_point_lerp(&midpoint, &d, &e, 0.5f);
+
+            q[0].x = 0.75f * (a.x + d.x) - 0.25f * (p0.x + midpoint.x);
+            q[0].y = 0.75f * (a.y + d.y) - 0.25f * (p0.y + midpoint.y);
+            q[1].x = 0.75f * (e.x + c.x) - 0.25f * (midpoint.x + p3.x);
+            q[1].y = 0.75f * (e.y + c.y) - 0.25f * (midpoint.y + p3.y);
+
+            d2d_rect_get_bezier_bounds(&bezier_bounds, &p0, &q[0], &midpoint);
+            d2d_rect_union(&figure->bounds, &bezier_bounds);
+            d2d_rect_get_bezier_bounds(&bezier_bounds, &midpoint, &q[1], &p3);
+            d2d_rect_union(&figure->bounds, &bezier_bounds);
+
+            figure->bezier_controls[control_idx] = q[0];
+            if (!d2d_figure_insert_bezier_controls(figure, control_idx + 1, 1, &q[1]))
+                return FALSE;
+            if (!d2d_figure_insert_vertex(figure, vertex_idx + 1, midpoint))
+                return FALSE;
+            figure->vertex_types[vertex_idx + 1] = D2D_VERTEX_TYPE_SPLIT_BEZIER;
+
+            vertex_idx += 2;
+            control_idx += 2;
+            original_control_idx += 2;
+        }
+    }
+
+    return TRUE;
+}
+
 static HRESULT d2d_geometry_resolve_beziers(struct d2d_geometry *geometry)
 {
     struct d2d_segment_idx idx_p, idx_q;
@@ -4109,6 +4225,11 @@ static HRESULT STDMETHODCALLTYPE d2d_geometry_sink_Close(ID2D1GeometrySink *ifac
 
     geometry->u.path.state = D2D_GEOMETRY_STATE_CLOSED;
 
+    if (!d2d_geometry_refine_fill_cubics(geometry))
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
     if (!d2d_geometry_intersect_self(geometry))
         goto done;
     if (FAILED(hr = d2d_geometry_resolve_beziers(geometry)))
@@ -4663,6 +4784,13 @@ static HRESULT STDMETHODCALLTYPE d2d_path_geometry_Simplify(ID2D1PathGeometry1 *
     return S_OK;
 }
 
+static float d2d_geometry_normalize_tolerance(float tolerance)
+{
+    if (!(tolerance > 0.0f) || !isfinite(tolerance))
+        return D2D1_DEFAULT_FLATTENING_TOLERANCE;
+    return tolerance;
+}
+
 HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
         float tolerance, ID2D1PathGeometry **ret)
 {
@@ -4673,8 +4801,7 @@ HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_MATRIX_3
 
     *ret = NULL;
 
-    if (!(tolerance > 0.0f) || !isfinite(tolerance))
-        tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
+    tolerance = d2d_geometry_normalize_tolerance(tolerance);
 
     ID2D1Geometry_GetFactory(geometry, &factory);
 
@@ -4702,6 +4829,184 @@ HRESULT d2d_geometry_get_simplified(ID2D1Geometry *geometry, const D2D1_MATRIX_3
     ID2D1Factory_Release(factory);
 
     return hr;
+}
+
+static size_t d2d_path_geometry_get_heap_size(const struct d2d_geometry *geometry)
+{
+    size_t size = sizeof(*geometry), i;
+
+#define ADD_ARRAY_SIZE(count, type) \
+    do \
+    { \
+        if ((count) > (SIZE_MAX - size) / sizeof(type)) \
+            return SIZE_MAX; \
+        size += (count) * sizeof(type); \
+    } while (0)
+
+    ADD_ARRAY_SIZE(geometry->fill.vertex_count, *geometry->fill.vertices);
+    ADD_ARRAY_SIZE(geometry->fill.faces_size, *geometry->fill.faces);
+    ADD_ARRAY_SIZE(geometry->fill.bezier_vertices_size, *geometry->fill.bezier_vertices);
+    ADD_ARRAY_SIZE(geometry->fill.arc_vertices_size, *geometry->fill.arc_vertices);
+    ADD_ARRAY_SIZE(geometry->outline.vertices_size, *geometry->outline.vertices);
+    ADD_ARRAY_SIZE(geometry->outline.faces_size, *geometry->outline.faces);
+    ADD_ARRAY_SIZE(geometry->outline.beziers_size, *geometry->outline.beziers);
+    ADD_ARRAY_SIZE(geometry->outline.bezier_faces_size, *geometry->outline.bezier_faces);
+    ADD_ARRAY_SIZE(geometry->outline.arcs_size, *geometry->outline.arcs);
+    ADD_ARRAY_SIZE(geometry->outline.arc_faces_size, *geometry->outline.arc_faces);
+    ADD_ARRAY_SIZE(geometry->outline.joins_size, *geometry->outline.joins);
+    ADD_ARRAY_SIZE(geometry->u.path.figures_size, *geometry->u.path.figures);
+
+    for (i = 0; i < geometry->u.path.figure_count; ++i)
+    {
+        const struct d2d_figure *figure = &geometry->u.path.figures[i];
+
+        ADD_ARRAY_SIZE(figure->vertices_size, *figure->vertices);
+        ADD_ARRAY_SIZE(figure->vertex_types_size, *figure->vertex_types);
+        ADD_ARRAY_SIZE(figure->bezier_controls_size, *figure->bezier_controls);
+        ADD_ARRAY_SIZE(figure->original_bezier_controls_size, *figure->original_bezier_controls);
+        ADD_ARRAY_SIZE(figure->segments.capacity, *figure->segments.data);
+    }
+
+#undef ADD_ARRAY_SIZE
+
+    return size;
+}
+
+static UINT64 d2d_geometry_cache_next_stamp(struct d2d_geometry *geometry)
+{
+    unsigned int i;
+
+    if (++geometry->simplified_cache_stamp)
+        return geometry->simplified_cache_stamp;
+
+    for (i = 0; i < ARRAY_SIZE(geometry->simplified_cache); ++i)
+        geometry->simplified_cache[i].stamp = 0;
+    return geometry->simplified_cache_stamp = 1;
+}
+
+static ID2D1PathGeometry *d2d_geometry_cache_lookup(struct d2d_geometry *geometry,
+        float tolerance)
+{
+    ID2D1PathGeometry *cached = NULL;
+    unsigned int i;
+
+    AcquireSRWLockExclusive(&geometry->simplified_cache_lock);
+    for (i = 0; i < ARRAY_SIZE(geometry->simplified_cache); ++i)
+    {
+        struct d2d_simplified_geometry_cache_entry *entry = &geometry->simplified_cache[i];
+
+        if (entry->geometry && entry->tolerance == tolerance)
+        {
+            entry->stamp = d2d_geometry_cache_next_stamp(geometry);
+            ID2D1PathGeometry_AddRef(cached = entry->geometry);
+            ++geometry->simplified_cache_hits;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&geometry->simplified_cache_lock);
+
+    return cached;
+}
+
+HRESULT d2d_geometry_get_cached_simplified(struct d2d_geometry *geometry,
+        float tolerance, ID2D1PathGeometry **ret)
+{
+    ID2D1PathGeometry *displaced[D2D_SIMPLIFIED_GEOMETRY_CACHE_SIZE] = {0};
+    ID2D1PathGeometry *flattened, *cached;
+    struct d2d_simplified_geometry_cache_entry *entry;
+    size_t bytes;
+    unsigned int displaced_count = 0, empty, i, oldest;
+    HRESULT hr;
+
+    *ret = NULL;
+    tolerance = d2d_geometry_normalize_tolerance(tolerance);
+    if (!d2d_geometry_is_cacheable(geometry, 0))
+        return d2d_geometry_get_simplified(&geometry->ID2D1Geometry_iface,
+                NULL, tolerance, ret);
+
+    if ((cached = d2d_geometry_cache_lookup(geometry, tolerance)))
+    {
+        *ret = cached;
+        return S_OK;
+    }
+
+    AcquireSRWLockExclusive(&geometry->simplified_cache_lock);
+    ++geometry->simplified_cache_misses;
+    ReleaseSRWLockExclusive(&geometry->simplified_cache_lock);
+
+    if (FAILED(hr = d2d_geometry_get_simplified(&geometry->ID2D1Geometry_iface,
+            NULL, tolerance, &flattened)))
+        return hr;
+
+    bytes = d2d_path_geometry_get_heap_size(
+            unsafe_impl_from_ID2D1Geometry((ID2D1Geometry *)flattened));
+    if (bytes > D2D_SIMPLIFIED_GEOMETRY_CACHE_MAX_BYTES)
+    {
+        *ret = flattened;
+        return S_OK;
+    }
+
+    AcquireSRWLockExclusive(&geometry->simplified_cache_lock);
+
+    /* A concurrent miss may have populated this tolerance while we built it. */
+    for (i = 0; i < ARRAY_SIZE(geometry->simplified_cache); ++i)
+    {
+        entry = &geometry->simplified_cache[i];
+        if (entry->geometry && entry->tolerance == tolerance)
+        {
+            entry->stamp = d2d_geometry_cache_next_stamp(geometry);
+            ID2D1PathGeometry_AddRef(cached = entry->geometry);
+            ++geometry->simplified_cache_hits;
+            ReleaseSRWLockExclusive(&geometry->simplified_cache_lock);
+            ID2D1PathGeometry_Release(flattened);
+            *ret = cached;
+            return S_OK;
+        }
+    }
+
+    for (;;)
+    {
+        empty = ARRAY_SIZE(geometry->simplified_cache);
+        oldest = ARRAY_SIZE(geometry->simplified_cache);
+        for (i = 0; i < ARRAY_SIZE(geometry->simplified_cache); ++i)
+        {
+            entry = &geometry->simplified_cache[i];
+            if (!entry->geometry)
+            {
+                if (empty == ARRAY_SIZE(geometry->simplified_cache))
+                    empty = i;
+                continue;
+            }
+            if (oldest == ARRAY_SIZE(geometry->simplified_cache)
+                    || entry->stamp < geometry->simplified_cache[oldest].stamp)
+                oldest = i;
+        }
+
+        if (empty < ARRAY_SIZE(geometry->simplified_cache)
+                && geometry->simplified_cache_bytes
+                        <= D2D_SIMPLIFIED_GEOMETRY_CACHE_MAX_BYTES - bytes)
+            break;
+
+        entry = &geometry->simplified_cache[oldest];
+        displaced[displaced_count++] = entry->geometry;
+        geometry->simplified_cache_bytes -= entry->bytes;
+        memset(entry, 0, sizeof(*entry));
+        ++geometry->simplified_cache_evictions;
+    }
+
+    entry = &geometry->simplified_cache[empty];
+    ID2D1PathGeometry_AddRef(entry->geometry = flattened);
+    entry->tolerance = tolerance;
+    entry->bytes = bytes;
+    entry->stamp = d2d_geometry_cache_next_stamp(geometry);
+    geometry->simplified_cache_bytes += bytes;
+    ReleaseSRWLockExclusive(&geometry->simplified_cache_lock);
+
+    for (i = 0; i < displaced_count; ++i)
+        ID2D1PathGeometry_Release(displaced[i]);
+
+    *ret = flattened;
+    return S_OK;
 }
 
 static HRESULT d2d_geometry_tessellate(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
@@ -5018,6 +5323,12 @@ static void d2d_path_geometry_stream(struct d2d_geometry *geometry, const D2D_MA
     }
 }
 
+static BOOL d2d_path_geometry_is_cacheable(const struct d2d_geometry *geometry, unsigned int depth)
+{
+    (void)depth;
+    return geometry->u.path.state == D2D_GEOMETRY_STATE_CLOSED;
+}
+
 static HRESULT STDMETHODCALLTYPE d2d_path_geometry_Stream(ID2D1PathGeometry1 *iface, ID2D1GeometrySink *sink)
 {
     struct d2d_geometry *geometry = impl_from_ID2D1PathGeometry1(iface);
@@ -5099,6 +5410,7 @@ static const struct ID2D1PathGeometry1Vtbl d2d_path_geometry_vtbl =
 static const struct d2d_geometry_ops d2d_path_geometry_ops =
 {
     .stream = d2d_path_geometry_stream,
+    .is_cacheable = d2d_path_geometry_is_cacheable,
 };
 
 void d2d_path_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *factory)
@@ -6680,9 +6992,17 @@ static void d2d_transformed_geometry_stream(struct d2d_geometry *geometry,
     d2d_geometry_stream(geometry->u.transformed.src_geometry, &m, sink);
 }
 
+static BOOL d2d_transformed_geometry_is_cacheable(const struct d2d_geometry *geometry,
+        unsigned int depth)
+{
+    return d2d_geometry_is_cacheable(
+            unsafe_impl_from_ID2D1Geometry(geometry->u.transformed.src_geometry), depth);
+}
+
 static const struct d2d_geometry_ops d2d_transformed_geometry_ops =
 {
     .stream = d2d_transformed_geometry_stream,
+    .is_cacheable = d2d_transformed_geometry_is_cacheable,
 };
 
 void d2d_transformed_geometry_init(struct d2d_geometry *geometry, ID2D1Factory *factory,

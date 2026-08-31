@@ -447,6 +447,26 @@ enum wined3d_blend_op
     WINED3D_BLEND_OP_MAX                    = 5,
 };
 
+enum wined3d_logic_op
+{
+    WINED3D_LOGIC_OP_CLEAR                  = 0,
+    WINED3D_LOGIC_OP_SET                    = 1,
+    WINED3D_LOGIC_OP_COPY                   = 2,
+    WINED3D_LOGIC_OP_COPY_INVERTED          = 3,
+    WINED3D_LOGIC_OP_NOOP                   = 4,
+    WINED3D_LOGIC_OP_INVERT                 = 5,
+    WINED3D_LOGIC_OP_AND                    = 6,
+    WINED3D_LOGIC_OP_NAND                   = 7,
+    WINED3D_LOGIC_OP_OR                     = 8,
+    WINED3D_LOGIC_OP_NOR                    = 9,
+    WINED3D_LOGIC_OP_XOR                    = 10,
+    WINED3D_LOGIC_OP_EQUIV                  = 11,
+    WINED3D_LOGIC_OP_AND_REVERSE            = 12,
+    WINED3D_LOGIC_OP_AND_INVERTED           = 13,
+    WINED3D_LOGIC_OP_OR_REVERSE             = 14,
+    WINED3D_LOGIC_OP_OR_INVERTED            = 15,
+};
+
 enum wined3d_vertex_blend_flags
 {
     WINED3D_VBF_DISABLE                     = 0,
@@ -2033,6 +2053,9 @@ struct wined3d_caps
     bool stencil_export;
     bool simple_instancing;
     bool min_max_filtering;
+    bool logic_ops;
+
+    unsigned int forced_sample_count_mask;
 
     enum wined3d_feature_level max_feature_level;
 };
@@ -2076,6 +2099,8 @@ struct wined3d_blend_state_desc
         enum wined3d_blend src_alpha;
         enum wined3d_blend dst_alpha;
         enum wined3d_blend_op op_alpha;
+        BOOL logic_op_enable;
+        enum wined3d_logic_op logic_op;
         unsigned int writemask;
     } rt[WINED3D_MAX_RENDER_TARGETS];
 };
@@ -2119,6 +2144,7 @@ struct wined3d_rasterizer_state_desc
     BOOL depth_clip;
     BOOL scissor;
     BOOL line_antialias;
+    unsigned int forced_sample_count;
 };
 
 struct wined3d_sampler_desc
