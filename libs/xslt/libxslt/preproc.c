@@ -852,6 +852,20 @@ xsltTextComp(xsltStylesheetPtr style, xmlNodePtr inst) {
 }
 #endif /* else of XSLT_REFACTORED */
 
+static void
+xsltCompileInstructionAttr(xsltStylesheetPtr style, xmlNodePtr inst,
+                           const xmlChar *name)
+{
+    xmlAttrPtr attr;
+
+    for (attr = inst->properties; attr != NULL; attr = attr->next) {
+        if ((attr->ns == NULL) && xmlStrEqual(attr->name, name)) {
+            xsltCompileAttr(style, attr);
+            return;
+        }
+    }
+}
+
 /**
  * xsltElementComp:
  * @style: an XSLT compiled stylesheet
@@ -892,9 +906,6 @@ xsltElementComp(xsltStylesheetPtr style, xmlNodePtr inst) {
     /*
     * Attribute "name".
     */
-    /*
-    * TODO: Precompile the AVT. See bug #344894.
-    */
     comp->name = xsltEvalStaticAttrValueTemplate(style, inst,
 	(const xmlChar *)"name", NULL, &comp->has_name);
     if (! comp->has_name) {
@@ -903,14 +914,15 @@ xsltElementComp(xsltStylesheetPtr style, xmlNodePtr inst) {
 	style->errors++;
 	goto error;
     }
+    if (comp->name == NULL)
+        xsltCompileInstructionAttr(style, inst, BAD_CAST "name");
     /*
     * Attribute "namespace".
     */
-    /*
-    * TODO: Precompile the AVT. See bug #344894.
-    */
     comp->ns = xsltEvalStaticAttrValueTemplate(style, inst,
 	(const xmlChar *)"namespace", NULL, &comp->has_ns);
+    if ((comp->ns == NULL) && comp->has_ns)
+        xsltCompileInstructionAttr(style, inst, BAD_CAST "namespace");
 
     if (comp->name != NULL) {
 	if (xmlValidateQName(comp->name, 0)) {
@@ -1012,9 +1024,6 @@ xsltAttributeComp(xsltStylesheetPtr style, xmlNodePtr inst) {
     /*
     * Attribute "name".
     */
-    /*
-    * TODO: Precompile the AVT. See bug #344894.
-    */
     comp->name = xsltEvalStaticAttrValueTemplate(style, inst,
 				 (const xmlChar *)"name",
 				 NULL, &comp->has_name);
@@ -1024,15 +1033,16 @@ xsltAttributeComp(xsltStylesheetPtr style, xmlNodePtr inst) {
 	style->errors++;
 	return;
     }
+    if (comp->name == NULL)
+        xsltCompileInstructionAttr(style, inst, BAD_CAST "name");
     /*
     * Attribute "namespace".
-    */
-    /*
-    * TODO: Precompile the AVT. See bug #344894.
     */
     comp->ns = xsltEvalStaticAttrValueTemplate(style, inst,
 	(const xmlChar *)"namespace",
 	NULL, &comp->has_ns);
+    if ((comp->ns == NULL) && comp->has_ns)
+        xsltCompileInstructionAttr(style, inst, BAD_CAST "namespace");
 
     if (comp->name != NULL) {
 	if (xmlValidateQName(comp->name, 0)) {
