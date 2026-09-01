@@ -84,12 +84,15 @@ struct shared_map
     struct file    *file;            /* temp file holding the shared data */
     struct list     entry;           /* entry in global shared maps list */
     struct stat     source_stat;     /* source metadata when the temp file was built */
+    XXH128_hash_t   source_hash;     /* source content when the temp file was built */
+    int             source_hash_valid;
 };
 
 struct cached_shared_map
 {
     struct list entry;
     struct stat source_stat;         /* source identity without retaining its fd */
+    XXH128_hash_t source_hash;       /* source content when the temp file was built */
     file_pos_t copied_size;          /* data written to the temporary file */
     int fd;                          /* duplicate of the unlinked temporary file */
 };
@@ -521,21 +524,55 @@ static int shared_map_source_matches( const struct stat *left, const struct stat
     return 1;
 }
 
-static void cache_shared_map( int fd, const struct stat *source_stat, file_pos_t copied_size )
+static int hash_shared_map_source( int fd, const struct stat *source_stat, XXH128_hash_t *hash )
+{
+    void *data;
+
+    /* Metadata only rejects cache candidates cheaply; content equality authorizes reuse. */
+    if (source_stat->st_size <= 0 || source_stat->st_size > SIZE_MAX) return 0;
+    data = mmap( NULL, source_stat->st_size, PROT_READ, MAP_PRIVATE, fd, 0 );
+    if (data == MAP_FAILED) return 0;
+    *hash = XXH3_128bits( data, source_stat->st_size );
+    munmap( data, source_stat->st_size );
+    return 1;
+}
+
+static int ensure_shared_map_source_hash( int fd, const struct stat *source_stat,
+                                          XXH128_hash_t *hash, int *hash_valid )
+{
+    if (*hash_valid) return 1;
+    if (!hash_shared_map_source( fd, source_stat, hash )) return 0;
+    *hash_valid = 1;
+    return 1;
+}
+
+static void cache_shared_map( int fd, const struct stat *source_stat,
+                              const XXH128_hash_t *source_hash, file_pos_t copied_size )
 {
     struct cached_shared_map *cached, *evicted;
     struct list *tail;
     int cache_fd;
 
     if (copied_size > SHARED_MAP_CACHE_MAX_SIZE) return;
+    if ((cache_fd = dup( fd )) == -1) return;
     LIST_FOR_EACH_ENTRY( cached, &shared_map_cache, struct cached_shared_map, entry )
     {
         if (!shared_map_source_matches( &cached->source_stat, source_stat )) continue;
+        if (!XXH128_isEqual( cached->source_hash, *source_hash ))
+        {
+            shared_map_cache_size -= cached->copied_size;
+            close( cached->fd );
+            cached->source_stat = *source_stat;
+            cached->source_hash = *source_hash;
+            cached->copied_size = copied_size;
+            cached->fd = cache_fd;
+            shared_map_cache_size += copied_size;
+        }
+        else close( cache_fd );
         list_remove( &cached->entry );
         list_add_head( &shared_map_cache, &cached->entry );
-        return;
+        goto trim;
     }
-    if ((cache_fd = dup( fd )) == -1) return;
     if (!(cached = malloc( sizeof(*cached) )))
     {
         close( cache_fd );
@@ -543,12 +580,14 @@ static void cache_shared_map( int fd, const struct stat *source_stat, file_pos_t
     }
 
     cached->source_stat = *source_stat;
+    cached->source_hash = *source_hash;
     cached->copied_size = copied_size;
     cached->fd = cache_fd;
     shared_map_cache_count++;
     shared_map_cache_size += copied_size;
     list_add_head( &shared_map_cache, &cached->entry );
 
+ trim:
     while (shared_map_cache_count > SHARED_MAP_CACHE_MAX_COUNT ||
            shared_map_cache_size > SHARED_MAP_CACHE_MAX_SIZE)
     {
@@ -562,13 +601,18 @@ static void cache_shared_map( int fd, const struct stat *source_stat, file_pos_t
     }
 }
 
-static int get_cached_shared_map( const struct stat *source_stat )
+static int get_cached_shared_map( int source_fd, const struct stat *source_stat,
+                                  XXH128_hash_t *source_hash, int *source_hash_valid )
 {
     struct cached_shared_map *cached;
 
     LIST_FOR_EACH_ENTRY( cached, &shared_map_cache, struct cached_shared_map, entry )
     {
         if (!shared_map_source_matches( &cached->source_stat, source_stat )) continue;
+        if (!ensure_shared_map_source_hash( source_fd, source_stat, source_hash,
+                                            source_hash_valid ))
+            return -1;
+        if (!XXH128_isEqual( cached->source_hash, *source_hash )) continue;
         list_remove( &cached->entry );
         list_add_head( &shared_map_cache, &cached->entry );
         return dup( cached->fd );
@@ -705,21 +749,6 @@ static int open_persistent_map_cache_file( const char *name, file_pos_t total_si
     return fd;
 }
 
-static int hash_persistent_map_source( int fd, const struct stat *source_stat,
-                                       XXH128_hash_t *hash )
-{
-    struct stat after;
-    void *data;
-
-    if (source_stat->st_size <= 0 || source_stat->st_size > SIZE_MAX) return 0;
-    data = mmap( NULL, source_stat->st_size, PROT_READ, MAP_PRIVATE, fd, 0 );
-    if (data == MAP_FAILED) return 0;
-    *hash = XXH3_128bits( data, source_stat->st_size );
-    munmap( data, source_stat->st_size );
-    if (fstat( fd, &after ) == -1 || !shared_map_source_matches( source_stat, &after )) return 0;
-    return 1;
-}
-
 static void link_persistent_map_metadata( const char *content_name, const char *metadata_name )
 {
     if (!persistent_map_cache_enter()) return;
@@ -734,30 +763,41 @@ static int get_persistent_shared_map( int source_fd, const struct stat *source_s
                                       XXH128_hash_t *hash, int *hash_valid )
 {
     char metadata_name[256], content_name[160];
-    struct stat after;
-    int fd;
+    struct stat metadata_stat, content_stat;
+    int metadata_fd, content_fd;
 
-    *hash_valid = 0;
     if (!persistent_map_cache_enter()) return -1;
     persistent_map_cache_leave();
     if (!make_persistent_metadata_name( metadata_name, sizeof(metadata_name), source_stat,
                                         total_size, align_mask ))
         return -1;
-    if ((fd = open_persistent_map_cache_file( metadata_name, total_size, NULL )) != -1)
+    metadata_fd = open_persistent_map_cache_file( metadata_name, total_size, &metadata_stat );
+    if (!ensure_shared_map_source_hash( source_fd, source_stat, hash, hash_valid ))
     {
-        if (fstat( source_fd, &after ) != -1 && shared_map_source_matches( source_stat, &after ))
-            return fd;
-        close( fd );
+        if (metadata_fd != -1) close( metadata_fd );
         return -1;
     }
-    if (!hash_persistent_map_source( source_fd, source_stat, hash )) return -1;
-    *hash_valid = 1;
     if (!make_persistent_content_name( content_name, sizeof(content_name), source_stat,
                                        total_size, align_mask, hash ))
+    {
+        if (metadata_fd != -1) close( metadata_fd );
         return -1;
-    if ((fd = open_persistent_map_cache_file( content_name, total_size, NULL )) != -1)
-        link_persistent_map_metadata( content_name, metadata_name );
-    return fd;
+    }
+    content_fd = open_persistent_map_cache_file( content_name, total_size, &content_stat );
+    if (content_fd == -1)
+    {
+        if (metadata_fd != -1) close( metadata_fd );
+        return -1;
+    }
+    if (metadata_fd != -1 && metadata_stat.st_dev == content_stat.st_dev &&
+        metadata_stat.st_ino == content_stat.st_ino)
+    {
+        close( content_fd );
+        return metadata_fd;
+    }
+    if (metadata_fd != -1) close( metadata_fd );
+    link_persistent_map_metadata( content_name, metadata_name );
+    return content_fd;
 }
 
 static int create_persistent_map_temp( file_pos_t total_size, char name[16] )
@@ -897,13 +937,19 @@ static void publish_persistent_shared_map( int fd, char temp_name[16],
 }
 
 /* find the shared PE mapping for a given mapping */
-static struct shared_map *get_shared_file( struct fd *fd, const struct stat *source_stat )
+static struct shared_map *get_shared_file( struct fd *fd, int source_fd,
+                                           const struct stat *source_stat,
+                                           XXH128_hash_t *source_hash, int *source_hash_valid )
 {
     struct shared_map *ptr;
 
     LIST_FOR_EACH_ENTRY( ptr, &shared_map_list, struct shared_map, entry )
         if (is_same_file_fd( ptr->fd, fd ) &&
-            shared_map_source_matches( &ptr->source_stat, source_stat ))
+            shared_map_source_matches( &ptr->source_stat, source_stat ) &&
+            ptr->source_hash_valid &&
+            ensure_shared_map_source_hash( source_fd, source_stat, source_hash,
+                                           source_hash_valid ) &&
+            XXH128_isEqual( ptr->source_hash, *source_hash ))
             return (struct shared_map *)grab_object( ptr );
     return NULL;
 }
@@ -1026,7 +1072,7 @@ static int find_committed_range( struct memory_view *view, file_pos_t start, mem
 static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int fd,
                                  IMAGE_SECTION_HEADER *sec, unsigned int nb_sec )
 {
-    XXH128_hash_t persistent_hash = {0};
+    XXH128_hash_t source_hash = {0};
     struct shared_map *shared;
     struct file *file;
     unsigned int i;
@@ -1037,7 +1083,7 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
     char persistent_temp[16] = {0};
     struct stat source_stat, source_after;
     int shared_fd, cached_fd, needs_backing = 0, has_shared_writable = 0;
-    int persistent_hash_valid = 0;
+    int source_hash_valid = 0;
     file_pos_t copied = 0;
     long toread;
 
@@ -1064,9 +1110,12 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
         return 0;
     }
 
-    if ((mapping->shared = get_shared_file( mapping->fd, &source_stat )))
+    if ((mapping->shared = get_shared_file( mapping->fd, fd, &source_stat,
+                                            &source_hash, &source_hash_valid )))
         return 1;
-    if (!has_shared_writable && (cached_fd = get_cached_shared_map( &source_stat )) != -1)
+    if (!has_shared_writable &&
+        (cached_fd = get_cached_shared_map( fd, &source_stat, &source_hash,
+                                            &source_hash_valid )) != -1)
     {
         if (!(file = create_file_for_fd( cached_fd, FILE_GENERIC_READ|FILE_GENERIC_WRITE, 0 )))
             return 0;
@@ -1078,15 +1127,17 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
         shared->fd = (struct fd *)grab_object( mapping->fd );
         shared->file = file;
         shared->source_stat = source_stat;
+        shared->source_hash = source_hash;
+        shared->source_hash_valid = 1;
         list_add_head( &shared_map_list, &shared->entry );
         mapping->shared = shared;
         return 1;
     }
     if (!has_shared_writable &&
         (cached_fd = get_persistent_shared_map( fd, &source_stat, total_size, align_mask,
-                                                &persistent_hash, &persistent_hash_valid )) != -1)
+                                                &source_hash, &source_hash_valid )) != -1)
     {
-        cache_shared_map( cached_fd, &source_stat, total_size );
+        cache_shared_map( cached_fd, &source_stat, &source_hash, total_size );
         if (!(file = create_file_for_fd( cached_fd, FILE_GENERIC_READ|FILE_GENERIC_WRITE, 0 )))
             return 0;
         if (!(shared = alloc_object( &shared_map_ops )))
@@ -1097,6 +1148,8 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
         shared->fd = (struct fd *)grab_object( mapping->fd );
         shared->file = file;
         shared->source_stat = source_stat;
+        shared->source_hash = source_hash;
+        shared->source_hash_valid = 1;
         list_add_head( &shared_map_list, &shared->entry );
         mapping->shared = shared;
         return 1;
@@ -1104,7 +1157,7 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
 
     /* A real temporary file keeps untouched image pages reclaimable.  A memfd
      * is shmem and would turn the complete reconstructed image into dirty RAM. */
-    if (persistent_hash_valid)
+    if (source_hash_valid)
         shared_fd = create_persistent_map_temp( total_size, persistent_temp );
     else
         shared_fd = -1;
@@ -1148,17 +1201,24 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
     shared->fd = (struct fd *)grab_object( mapping->fd );
     shared->file = file;
     shared->source_stat = source_stat;
+    shared->source_hash_valid = 0;
     list_add_head( &shared_map_list, &shared->entry );
     mapping->shared = shared;
-    if (!has_shared_writable && fstat( fd, &source_after ) != -1 &&
-        shared_map_source_matches( &source_stat, &source_after ))
+    if (fstat( fd, &source_after ) != -1 &&
+        shared_map_source_matches( &source_stat, &source_after ) &&
+        ensure_shared_map_source_hash( fd, &source_stat, &source_hash, &source_hash_valid ))
     {
-        if (persistent_temp[0])
-            publish_persistent_shared_map( shared_fd, persistent_temp, &source_stat, total_size,
-                                           align_mask, &persistent_hash );
-        cache_shared_map( shared_fd, &source_stat, copied );
+        shared->source_hash = source_hash;
+        shared->source_hash_valid = 1;
+        if (!has_shared_writable)
+        {
+            if (persistent_temp[0])
+                publish_persistent_shared_map( shared_fd, persistent_temp, &source_stat,
+                                               total_size, align_mask, &source_hash );
+            cache_shared_map( shared_fd, &source_stat, &source_hash, copied );
+        }
     }
-    else
+    if (persistent_temp[0])
         discard_persistent_map_temp( persistent_temp );
     free( buffer );
     return 1;

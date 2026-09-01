@@ -2124,11 +2124,10 @@ static void test_image_mapping_refresh(void)
     BYTE data[0x200], changed = 0x5a;
     char dll_name[MAX_PATH];
     FILETIME write_time;
-    ULARGE_INTEGER ticks;
     HANDLE file, mapping;
     void *view;
     DWORD written;
-    BOOL ret;
+    BOOL ret, have_write_time;
 
     memset(data, 0x25, sizeof(data));
     memcpy(test_section.Name, ".rdata", 7);
@@ -2147,6 +2146,8 @@ static void test_image_mapping_refresh(void)
     file = CreateFileA( dll_name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         NULL, OPEN_EXISTING, 0, NULL );
     ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    have_write_time = GetFileTime( file, NULL, NULL, &write_time );
+    ok( have_write_time, "GetFileTime failed err %lu\n", GetLastError() );
     mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
     ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
     view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
@@ -2166,15 +2167,9 @@ static void test_image_mapping_refresh(void)
     SetFilePointer( file, test_section.PointerToRawData, NULL, FILE_BEGIN );
     ret = WriteFile( file, &changed, sizeof(changed), &written, NULL );
     ok( ret && written == sizeof(changed), "WriteFile failed err %lu\n", GetLastError() );
-    ret = GetFileTime( file, NULL, NULL, &write_time );
-    ok( ret, "GetFileTime failed err %lu\n", GetLastError() );
-    if (ret)
+    if (have_write_time)
     {
-        ticks.u.LowPart = write_time.dwLowDateTime;
-        ticks.u.HighPart = write_time.dwHighDateTime;
-        ticks.QuadPart += 2 * (ULONGLONG)10000000;
-        write_time.dwLowDateTime = ticks.u.LowPart;
-        write_time.dwHighDateTime = ticks.u.HighPart;
+        /* Preserve the metadata fast path's mtime key while changing the source contents. */
         ret = SetFileTime( file, NULL, NULL, &write_time );
         ok( ret, "SetFileTime failed err %lu\n", GetLastError() );
     }
