@@ -4470,6 +4470,13 @@ static NTSTATUS get_appv_vfs_unix_name( const OBJECT_ATTRIBUTES *attr, const UNI
         prefix_len = match - name->Buffer;
         search = match + 1;
         suffix_len = name->Length / sizeof(WCHAR) - prefix_len - strlen(marker);
+        remainder.Buffer = (WCHAR *)(match + strlen(marker));
+        remainder.Length = suffix_len * sizeof(WCHAR);
+        remainder.MaximumLength = remainder.Length;
+        /* root/vfs is already the package backing store; do not overlay it again. */
+        if (find_ascii_substring_i( &remainder, "vfs" ) == remainder.Buffer &&
+            (suffix_len == 3 || remainder.Buffer[3] == '\\'))
+            continue;
 
         for (i = 0; i < ARRAY_SIZE(replacements); i++)
         {

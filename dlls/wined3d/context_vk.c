@@ -151,6 +151,32 @@ static VkBlendOp vk_blend_op_from_wined3d(enum wined3d_blend_op op)
     }
 }
 
+static VkLogicOp vk_logic_op_from_wined3d(enum wined3d_logic_op op)
+{
+    switch (op)
+    {
+        case WINED3D_LOGIC_OP_CLEAR:          return VK_LOGIC_OP_CLEAR;
+        case WINED3D_LOGIC_OP_SET:            return VK_LOGIC_OP_SET;
+        case WINED3D_LOGIC_OP_COPY:           return VK_LOGIC_OP_COPY;
+        case WINED3D_LOGIC_OP_COPY_INVERTED:  return VK_LOGIC_OP_COPY_INVERTED;
+        case WINED3D_LOGIC_OP_NOOP:           return VK_LOGIC_OP_NO_OP;
+        case WINED3D_LOGIC_OP_INVERT:         return VK_LOGIC_OP_INVERT;
+        case WINED3D_LOGIC_OP_AND:            return VK_LOGIC_OP_AND;
+        case WINED3D_LOGIC_OP_NAND:           return VK_LOGIC_OP_NAND;
+        case WINED3D_LOGIC_OP_OR:             return VK_LOGIC_OP_OR;
+        case WINED3D_LOGIC_OP_NOR:            return VK_LOGIC_OP_NOR;
+        case WINED3D_LOGIC_OP_XOR:            return VK_LOGIC_OP_XOR;
+        case WINED3D_LOGIC_OP_EQUIV:          return VK_LOGIC_OP_EQUIVALENT;
+        case WINED3D_LOGIC_OP_AND_REVERSE:    return VK_LOGIC_OP_AND_REVERSE;
+        case WINED3D_LOGIC_OP_AND_INVERTED:   return VK_LOGIC_OP_AND_INVERTED;
+        case WINED3D_LOGIC_OP_OR_REVERSE:     return VK_LOGIC_OP_OR_REVERSE;
+        case WINED3D_LOGIC_OP_OR_INVERTED:    return VK_LOGIC_OP_OR_INVERTED;
+        default:
+            FIXME("Unhandled logic op %#x.\n", op);
+            return VK_LOGIC_OP_COPY;
+    }
+}
+
 static VkColorComponentFlags vk_colour_write_mask_from_wined3d(uint32_t wined3d_mask)
 {
     VkColorComponentFlags vk_mask = 0;
@@ -2658,6 +2684,10 @@ static int wined3d_graphics_pipeline_vk_compare(const void *key, const struct wi
 
     if ((ret = wined3d_uint32_compare(a->blend_desc.attachmentCount, b->blend_desc.attachmentCount)))
         return ret;
+    if ((ret = wined3d_uint32_compare(a->blend_desc.logicOpEnable, b->blend_desc.logicOpEnable)))
+        return ret;
+    if ((ret = wined3d_uint32_compare(a->blend_desc.logicOp, b->blend_desc.logicOp)))
+        return ret;
     if ((ret = memcmp(a->blend_attachments, b->blend_attachments,
             a->blend_desc.attachmentCount * sizeof(*a->blend_attachments))))
         return ret;
@@ -3257,6 +3287,25 @@ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_conte
         wined3d_context_vk_update_blend_state(context_vk, state, key);
 
         update = true;
+    }
+
+    if (wined3d_context_is_graphics_state_dirty(&context_vk->c, STATE_BLEND))
+    {
+        VkLogicOp logic_op = VK_LOGIC_OP_COPY;
+        VkBool32 logic_op_enable = VK_FALSE;
+
+        if (state->blend_state && state->blend_state->desc.rt[0].logic_op_enable)
+        {
+            logic_op_enable = VK_TRUE;
+            logic_op = vk_logic_op_from_wined3d(state->blend_state->desc.rt[0].logic_op);
+        }
+
+        if (key->blend_desc.logicOpEnable != logic_op_enable || key->blend_desc.logicOp != logic_op)
+        {
+            key->blend_desc.logicOpEnable = logic_op_enable;
+            key->blend_desc.logicOp = logic_op;
+            update = true;
+        }
     }
 
     if (key->pipeline_desc.layout != vk_pipeline_layout)

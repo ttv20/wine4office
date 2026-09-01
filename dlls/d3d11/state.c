@@ -343,18 +343,52 @@ static enum wined3d_blend_op wined3d_blend_op_from_d3d11(D3D11_BLEND_OP op)
     return (enum wined3d_blend_op)op;
 }
 
+static enum wined3d_logic_op wined3d_logic_op_from_d3d11(D3D11_LOGIC_OP op)
+{
+    return (enum wined3d_logic_op)op;
+}
+
 HRESULT d3d_blend_state_create(struct d3d_device *device, const D3D11_BLEND_DESC1 *desc,
         struct d3d_blend_state **state)
 {
+    struct wined3d_caps caps;
     struct wined3d_blend_state_desc wined3d_desc;
     struct d3d_blend_state *object;
     struct wine_rb_entry *entry;
     D3D11_BLEND_DESC1 tmp_desc;
+    bool uses_logic_op = false;
     unsigned int i, j;
     HRESULT hr;
 
     if (!desc)
         return E_INVALIDARG;
+
+    for (i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+    {
+        j = desc->IndependentBlendEnable ? i : 0;
+        if (!desc->RenderTarget[j].LogicOpEnable)
+            continue;
+
+        if (desc->IndependentBlendEnable || desc->RenderTarget[j].BlendEnable
+                || (unsigned int)desc->RenderTarget[j].LogicOp > D3D11_LOGIC_OP_OR_INVERTED)
+        {
+            WARN("Invalid logic operation state for render target %u.\n", j);
+            return E_INVALIDARG;
+        }
+        uses_logic_op = true;
+    }
+
+    if (uses_logic_op)
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_device_get_device_caps(device->wined3d_device, &caps);
+        wined3d_mutex_unlock();
+        if (FAILED(hr) || !caps.logic_ops)
+        {
+            WARN("Output-merger logic operations are unsupported.\n");
+            return E_INVALIDARG;
+        }
+    }
 
     /* D3D11_RENDER_TARGET_BLEND_DESC1 has a hole, which is a problem because we use
      * D3D11_BLEND_DESC1 as a key in the rbtree. */
@@ -427,22 +461,22 @@ HRESULT d3d_blend_state_create(struct d3d_device *device, const D3D11_BLEND_DESC
         return E_FAIL;
     }
 
-    wined3d_desc.alpha_to_coverage = desc->AlphaToCoverageEnable;
-    wined3d_desc.independent = desc->IndependentBlendEnable;
+    memset(&wined3d_desc, 0, sizeof(wined3d_desc));
+    wined3d_desc.alpha_to_coverage = tmp_desc.AlphaToCoverageEnable;
+    wined3d_desc.independent = tmp_desc.IndependentBlendEnable;
     for (i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
     {
-        wined3d_desc.rt[i].enable = desc->RenderTarget[i].BlendEnable;
-        wined3d_desc.rt[i].src = wined3d_blend_from_d3d11(desc->RenderTarget[i].SrcBlend);
-        wined3d_desc.rt[i].dst = wined3d_blend_from_d3d11(desc->RenderTarget[i].DestBlend);
-        wined3d_desc.rt[i].op = wined3d_blend_op_from_d3d11(desc->RenderTarget[i].BlendOp);
-        wined3d_desc.rt[i].src_alpha = wined3d_blend_from_d3d11(desc->RenderTarget[i].SrcBlendAlpha);
-        wined3d_desc.rt[i].dst_alpha = wined3d_blend_from_d3d11(desc->RenderTarget[i].DestBlendAlpha);
-        wined3d_desc.rt[i].op_alpha = wined3d_blend_op_from_d3d11(desc->RenderTarget[i].BlendOpAlpha);
-        wined3d_desc.rt[i].writemask = desc->RenderTarget[i].RenderTargetWriteMask;
+        wined3d_desc.rt[i].enable = tmp_desc.RenderTarget[i].BlendEnable;
+        wined3d_desc.rt[i].src = wined3d_blend_from_d3d11(tmp_desc.RenderTarget[i].SrcBlend);
+        wined3d_desc.rt[i].dst = wined3d_blend_from_d3d11(tmp_desc.RenderTarget[i].DestBlend);
+        wined3d_desc.rt[i].op = wined3d_blend_op_from_d3d11(tmp_desc.RenderTarget[i].BlendOp);
+        wined3d_desc.rt[i].src_alpha = wined3d_blend_from_d3d11(tmp_desc.RenderTarget[i].SrcBlendAlpha);
+        wined3d_desc.rt[i].dst_alpha = wined3d_blend_from_d3d11(tmp_desc.RenderTarget[i].DestBlendAlpha);
+        wined3d_desc.rt[i].op_alpha = wined3d_blend_op_from_d3d11(tmp_desc.RenderTarget[i].BlendOpAlpha);
+        wined3d_desc.rt[i].logic_op_enable = tmp_desc.RenderTarget[i].LogicOpEnable;
+        wined3d_desc.rt[i].logic_op = wined3d_logic_op_from_d3d11(tmp_desc.RenderTarget[i].LogicOp);
+        wined3d_desc.rt[i].writemask = tmp_desc.RenderTarget[i].RenderTargetWriteMask;
     }
-
-    if (desc->RenderTarget[0].LogicOpEnable && desc->RenderTarget[0].LogicOp != D3D11_LOGIC_OP_NOOP)
-        FIXME("Ignoring logic op %#x.\n", desc->RenderTarget[0].LogicOp);
 
     /* We cannot fail after creating a wined3d_blend_state object. It
      * would lead to double free. */
@@ -1198,6 +1232,7 @@ static HRESULT d3d_rasterizer_state_init(struct d3d_rasterizer_state *state, str
         return E_FAIL;
     }
 
+    memset(&wined3d_desc, 0, sizeof(wined3d_desc));
     wined3d_desc.fill_mode = wined3d_fill_mode_from_d3d11(desc->FillMode);
     wined3d_desc.cull_mode = wined3d_cull_from_d3d11(desc->CullMode);
     wined3d_desc.front_ccw = desc->FrontCounterClockwise;
@@ -1207,19 +1242,13 @@ static HRESULT d3d_rasterizer_state_init(struct d3d_rasterizer_state *state, str
     wined3d_desc.depth_clip = desc->DepthClipEnable;
     wined3d_desc.scissor = desc->ScissorEnable;
     wined3d_desc.line_antialias = desc->AntialiasedLineEnable;
+    wined3d_desc.forced_sample_count = desc->ForcedSampleCount;
 
     if (desc->MultisampleEnable)
     {
         static unsigned int once;
         if (!once++)
             FIXME("Ignoring MultisampleEnable %#x.\n", desc->MultisampleEnable);
-    }
-
-    if (desc->ForcedSampleCount)
-    {
-        static unsigned int once;
-        if (!once++)
-            FIXME("Ignoring ForcedSampleCount %#x.\n", desc->ForcedSampleCount);
     }
 
     if (desc->ConservativeRaster)
@@ -1248,9 +1277,36 @@ static HRESULT d3d_rasterizer_state_init(struct d3d_rasterizer_state *state, str
 HRESULT d3d_rasterizer_state_create(struct d3d_device *device, const D3D11_RASTERIZER_DESC2 *desc,
         struct d3d_rasterizer_state **state)
 {
+    struct wined3d_caps caps;
     struct d3d_rasterizer_state *object;
     struct wine_rb_entry *entry;
     HRESULT hr;
+
+    if (!desc)
+        return E_INVALIDARG;
+
+    switch (desc->ForcedSampleCount)
+    {
+        case 0:
+            break;
+        case 1:
+        case 2:
+        case 4:
+        case 8:
+        case 16:
+            wined3d_mutex_lock();
+            hr = wined3d_device_get_device_caps(device->wined3d_device, &caps);
+            wined3d_mutex_unlock();
+            if (FAILED(hr) || !(caps.forced_sample_count_mask & (1u << desc->ForcedSampleCount)))
+            {
+                WARN("Forced sample count %u is unsupported.\n", desc->ForcedSampleCount);
+                return E_INVALIDARG;
+            }
+            break;
+        default:
+            WARN("Invalid forced sample count %u.\n", desc->ForcedSampleCount);
+            return E_INVALIDARG;
+    }
 
     wined3d_mutex_lock();
     if ((entry = wine_rb_get(&device->rasterizer_states, desc)))

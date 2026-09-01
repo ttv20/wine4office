@@ -2549,6 +2549,7 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     d3d_info->persistent_map = true;
     d3d_info->gpu_push_constants = true;
     d3d_info->ffp_hlsl = true;
+    d3d_info->logic_ops = device_info.features2.features.logicOp;
 
     /* Like GL, Vulkan doesn't explicitly specify a filling convention and only mandates that a
      * shared edge of two adjacent triangles generate a fragment for exactly one of the triangles.
