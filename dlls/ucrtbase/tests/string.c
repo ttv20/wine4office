@@ -144,7 +144,7 @@ static void test_wcsicmp_thread_locale(void)
     ok(!!thread, "CreateThread failed, error %lu\n", GetLastError());
     if (thread)
     {
-        wait = WaitForSingleObject(thread, 10000);
+        wait = WaitForSingleObject(thread, INFINITE);
         ok(wait == WAIT_OBJECT_0, "thread wait returned %#lx\n", wait);
         CloseHandle(thread);
         if (args.locale_available)

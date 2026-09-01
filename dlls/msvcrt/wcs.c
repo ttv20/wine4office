@@ -34,6 +34,11 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
+static inline BOOL is_initial_locale(void)
+{
+    return InterlockedCompareExchange((LONG *)&initial_locale, FALSE, FALSE);
+}
+
 typedef struct
 {
     enum { LEN_DEFAULT, LEN_SHORT, LEN_LONG } IntegerLength;
@@ -127,7 +132,7 @@ INT CDECL _wcsicmp_l(const wchar_t *str1, const wchar_t *str2, _locale_t locale)
     if(!MSVCRT_CHECK_PMT(str1 != NULL) || !MSVCRT_CHECK_PMT(str2 != NULL))
         return _NLSCMPERROR;
 
-    if (!locale && initial_locale)
+    if (!locale && is_initial_locale())
     {
         do
         {
