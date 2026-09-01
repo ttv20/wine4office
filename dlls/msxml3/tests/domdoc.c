@@ -14160,6 +14160,50 @@ static const char dynamic_name_doc[] =
 "    <beta value=\"two\"/>"
 "</items>";
 
+static const char invalid_dynamic_name_xsl[] =
+"<?xml version=\"1.0\"?>"
+"<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">"
+"<xsl:output method=\"text\"/>"
+"<xsl:template match=\"/\">"
+"    <xsl:for-each select=\"/items/item\">"
+"        <xsl:element name=\"{@name}\">ok</xsl:element>"
+"    </xsl:for-each>"
+"</xsl:template>"
+"</xsl:stylesheet>";
+
+static const char invalid_dynamic_name_doc[] =
+"<items>"
+"    <item name=\"valid\"/>"
+"    <item name=\"bad:name\"/>"
+"</items>";
+
+static const char xpath_cache_xsl[] =
+"<?xml version=\"1.0\"?>"
+"<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">"
+"<xsl:output method=\"text\"/>"
+"<xsl:variable name=\"label\" select=\"'global'\"/>"
+"<xsl:variable name=\"offset\" select=\"7\"/>"
+"<xsl:variable name=\"enabled\" select=\"true()\"/>"
+"<xsl:variable name=\"nodes\" select=\"/items/item\"/>"
+"<xsl:template match=\"/\">"
+"    <xsl:for-each select=\"$nodes\">"
+"        <xsl:sort select=\"concat(@group, substring(@name, 1, 2), @rank)\"/>"
+"        <xsl:variable name=\"label\" select=\"concat(../@prefix, @name)\"/>"
+"        <xsl:if test=\"$enabled and position() &lt;= count($nodes)\">"
+"            <xsl:value-of select=\"concat($label, ':', $offset + position(), ';')\"/>"
+"        </xsl:if>"
+"    </xsl:for-each>"
+"    <xsl:value-of select=\"concat('|', $label, '|', count($nodes), '|', not($enabled))\"/>"
+"</xsl:template>"
+"</xsl:stylesheet>";
+
+static const char xpath_cache_doc[] =
+"<items prefix=\"p-\">"
+"    <item group=\"b\" name=\"beta\" rank=\"2\"/>"
+"    <item group=\"a\" name=\"alpha\" rank=\"3\"/>"
+"    <item group=\"a\" name=\"aardvark\" rank=\"1\"/>"
+"</items>";
+
 static void check_dynamic_name_result(BSTR result)
 {
     static const char *const names[] = {"alpha", "beta"};
@@ -14233,6 +14277,7 @@ static void test_xsltext(void)
 {
     IXMLDOMDocument *doc, *doc2;
     VARIANT_BOOL b;
+    unsigned int i;
     HRESULT hr;
     BSTR ret;
 
@@ -14273,6 +14318,38 @@ static void test_xsltext(void)
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     check_dynamic_name_result(ret);
     SysFreeString(ret);
+
+    /* AVT evaluation failure after a successful dynamic name */
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_(invalid_dynamic_name_xsl), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load stylesheet.\n");
+    hr = IXMLDOMDocument_loadXML(doc2, _bstr_(invalid_dynamic_name_doc), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load source document.\n");
+
+    ret = NULL;
+    hr = IXMLDOMDocument_transformNode(doc2, (IXMLDOMNode *)doc, &ret);
+    todo_wine ok(hr == E_FAIL, "Unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        ok(ret && !*ret, "Unexpected partial transform result %s.\n", wine_dbgstr_w(ret));
+    SysFreeString(ret);
+
+    /* repeated XPath contexts, cached variable values, nested functions, and sort keys */
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_(xpath_cache_xsl), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load stylesheet.\n");
+    hr = IXMLDOMDocument_loadXML(doc2, _bstr_(xpath_cache_doc), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load source document.\n");
+
+    for (i = 0; i < 16; ++i)
+    {
+        hr = IXMLDOMDocument_transformNode(doc2, (IXMLDOMNode *)doc, &ret);
+        ok(hr == S_OK, "%u: Unexpected hr %#lx.\n", i, hr);
+        ok(!lstrcmpW(ret, L"p-aardvark:8;p-alpha:9;p-beta:10;|global|3|false"),
+                "%u: Transform result %s.\n", i, wine_dbgstr_w(ret));
+        SysFreeString(ret);
+    }
 
     IXMLDOMDocument_Release(doc2);
     IXMLDOMDocument_Release(doc);
