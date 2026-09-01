@@ -456,9 +456,6 @@ XMLPUBVAR double xmlXPathNINF;
 
 XMLPUBFUN void
 		    xmlXPathFreeObject		(xmlXPathObjectPtr obj);
-XMLPUBFUN void
-		    xmlXPathReleaseObject	(xmlXPathContextPtr ctxt,
-                                                 xmlXPathObjectPtr obj);
 XMLPUBFUN xmlNodeSetPtr
 		    xmlXPathNodeSetCreate	(xmlNodePtr val);
 XMLPUBFUN void
@@ -467,9 +464,6 @@ XMLPUBFUN void
 		    xmlXPathFreeNodeSet		(xmlNodeSetPtr obj);
 XMLPUBFUN xmlXPathObjectPtr
 		    xmlXPathObjectCopy		(xmlXPathObjectPtr val);
-XMLPUBFUN xmlXPathObjectPtr
-		    xmlXPathCacheObjectCopy	(xmlXPathContextPtr ctxt,
-                                                 xmlXPathObjectPtr val);
 XMLPUBFUN int
 		    xmlXPathCmpNodes		(xmlNodePtr node1,
 						 xmlNodePtr node2);

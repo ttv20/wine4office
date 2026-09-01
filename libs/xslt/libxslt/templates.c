@@ -21,6 +21,7 @@
 #include <libxml/dict.h>
 #include <libxml/xpathInternals.h>
 #include <libxml/parserInternals.h>
+#include "private/xpath.h"
 #include "xslt.h"
 #include "xsltInternals.h"
 #include "xsltutils.h"
