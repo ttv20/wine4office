@@ -526,15 +526,33 @@ static int shared_map_source_matches( const struct stat *left, const struct stat
 
 static int hash_shared_map_source( int fd, const struct stat *source_stat, XXH128_hash_t *hash )
 {
-    void *data;
+    static const size_t buffer_size = 64 * 1024;
+    XXH3_state_t *state = NULL;
+    unsigned char *buffer = NULL;
+    off_t offset = 0;
+    int ret = 0;
 
     /* Metadata only rejects cache candidates cheaply; content equality authorizes reuse. */
-    if (source_stat->st_size <= 0 || source_stat->st_size > SIZE_MAX) return 0;
-    data = mmap( NULL, source_stat->st_size, PROT_READ, MAP_PRIVATE, fd, 0 );
-    if (data == MAP_FAILED) return 0;
-    *hash = XXH3_128bits( data, source_stat->st_size );
-    munmap( data, source_stat->st_size );
-    return 1;
+    if (source_stat->st_size <= 0 || !(buffer = malloc( buffer_size )) ||
+        !(state = XXH3_createState()) || XXH3_128bits_reset( state ) == XXH_ERROR)
+        goto done;
+    while (offset < source_stat->st_size)
+    {
+        off_t remaining = source_stat->st_size - offset;
+        size_t size = remaining > (off_t)buffer_size ? buffer_size : (size_t)remaining;
+        ssize_t count;
+
+        do count = pread( fd, buffer, size, offset ); while (count == -1 && errno == EINTR);
+        if (count <= 0 || XXH3_128bits_update( state, buffer, count ) == XXH_ERROR) goto done;
+        offset += count;
+    }
+    *hash = XXH3_128bits_digest( state );
+    ret = 1;
+
+ done:
+    if (state) XXH3_freeState( state );
+    free( buffer );
+    return ret;
 }
 
 static int ensure_shared_map_source_hash( int fd, const struct stat *source_stat,
@@ -939,18 +957,24 @@ static void publish_persistent_shared_map( int fd, char temp_name[16],
 /* find the shared PE mapping for a given mapping */
 static struct shared_map *get_shared_file( struct fd *fd, int source_fd,
                                            const struct stat *source_stat,
-                                           XXH128_hash_t *source_hash, int *source_hash_valid )
+                                           XXH128_hash_t *source_hash, int *source_hash_valid,
+                                           int verify_hash )
 {
     struct shared_map *ptr;
 
     LIST_FOR_EACH_ENTRY( ptr, &shared_map_list, struct shared_map, entry )
-        if (is_same_file_fd( ptr->fd, fd ) &&
-            shared_map_source_matches( &ptr->source_stat, source_stat ) &&
-            ptr->source_hash_valid &&
-            ensure_shared_map_source_hash( source_fd, source_stat, source_hash,
-                                           source_hash_valid ) &&
-            XXH128_isEqual( ptr->source_hash, *source_hash ))
-            return (struct shared_map *)grab_object( ptr );
+    {
+        if (!is_same_file_fd( ptr->fd, fd )) continue;
+        /* Active shared-writable image sections must keep same-file sharing semantics. */
+        if (!verify_hash) return (struct shared_map *)grab_object( ptr );
+        if (!shared_map_source_matches( &ptr->source_stat, source_stat ) ||
+            !ptr->source_hash_valid ||
+            !ensure_shared_map_source_hash( source_fd, source_stat, source_hash,
+                                            source_hash_valid ) ||
+            !XXH128_isEqual( ptr->source_hash, *source_hash ))
+            continue;
+        return (struct shared_map *)grab_object( ptr );
+    }
     return NULL;
 }
 
@@ -1111,7 +1135,8 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
     }
 
     if ((mapping->shared = get_shared_file( mapping->fd, fd, &source_stat,
-                                            &source_hash, &source_hash_valid )))
+                                            &source_hash, &source_hash_valid,
+                                            !has_shared_writable )))
         return 1;
     if (!has_shared_writable &&
         (cached_fd = get_cached_shared_map( fd, &source_stat, &source_hash,
@@ -1206,12 +1231,13 @@ static int build_shared_mapping( struct mapping *mapping, size_t align_mask, int
     mapping->shared = shared;
     if (fstat( fd, &source_after ) != -1 &&
         shared_map_source_matches( &source_stat, &source_after ) &&
-        ensure_shared_map_source_hash( fd, &source_stat, &source_hash, &source_hash_valid ))
+        (has_shared_writable ||
+         ensure_shared_map_source_hash( fd, &source_stat, &source_hash, &source_hash_valid )))
     {
-        shared->source_hash = source_hash;
-        shared->source_hash_valid = 1;
         if (!has_shared_writable)
         {
+            shared->source_hash = source_hash;
+            shared->source_hash_valid = 1;
             if (persistent_temp[0])
                 publish_persistent_shared_map( shared_fd, persistent_temp, &source_stat,
                                                total_size, align_mask, &source_hash );
