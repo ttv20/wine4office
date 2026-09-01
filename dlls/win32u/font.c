@@ -3195,6 +3195,22 @@ struct gdi_font_enum_data
     NEWTEXTMETRICEXW ntm;
 };
 
+#define ENUM_NTM_CACHE_BUCKETS 64
+
+struct enum_ntm_cache_entry
+{
+    struct enum_ntm_cache_entry *next;
+    UINT face_index;
+    UINT ntm_flags;
+    BOOL scalable;
+    FONTSIGNATURE fs;
+    struct bitmap_font_size size;
+    NEWTEXTMETRICEXW ntm;
+    WCHAR file[1];
+};
+
+static struct enum_ntm_cache_entry *enum_ntm_cache[ENUM_NTM_CACHE_BUCKETS];
+
 struct enum_charset
 {
     DWORD mask;
@@ -3284,6 +3300,90 @@ static UINT get_font_type( const NEWTEXTMETRICEXW *ntm )
     return ret;
 }
 
+static BOOL face_enum_ntm_is_cacheable( const struct gdi_font_face *face )
+{
+    return face->file && !(face->flags & ADDFONT_ADD_RESOURCE) &&
+           (face->fs.fsCsb[0] & FS_DBCS_MASK);
+}
+
+static UINT face_enum_ntm_hash( const struct gdi_font_face *face )
+{
+    const WCHAR *ptr;
+    UINT hash = face->face_index;
+
+    for (ptr = face->file; *ptr; ptr++) hash = hash * 65599 + facename_tolower( *ptr );
+    return hash % ARRAY_SIZE(enum_ntm_cache);
+}
+
+static BOOL enum_ntm_cache_entry_matches( const struct enum_ntm_cache_entry *entry,
+                                          const struct gdi_font_face *face )
+{
+    return entry->face_index == face->face_index && entry->ntm_flags == face->ntmFlags &&
+           entry->scalable == face->scalable && !memcmp( &entry->fs, &face->fs, sizeof(entry->fs) ) &&
+           (face->scalable || !memcmp( &entry->size, &face->size, sizeof(entry->size) )) &&
+           !wcsicmp( entry->file, face->file );
+}
+
+static BOOL get_cached_face_enum_ntm( const struct gdi_font_face *face, NEWTEXTMETRICEXW *ntm )
+{
+    struct enum_ntm_cache_entry *entry;
+
+    if (!face_enum_ntm_is_cacheable( face )) return FALSE;
+    for (entry = enum_ntm_cache[face_enum_ntm_hash( face )]; entry; entry = entry->next)
+    {
+        if (!enum_ntm_cache_entry_matches( entry, face )) continue;
+        *ntm = entry->ntm;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void cache_face_enum_ntm( const struct gdi_font_face *face, const NEWTEXTMETRICEXW *ntm )
+{
+    struct enum_ntm_cache_entry *entry;
+    UINT hash;
+    SIZE_T size;
+
+    if (!face_enum_ntm_is_cacheable( face )) return;
+    hash = face_enum_ntm_hash( face );
+    for (entry = enum_ntm_cache[hash]; entry; entry = entry->next)
+        if (enum_ntm_cache_entry_matches( entry, face )) return;
+
+    size = offsetof( struct enum_ntm_cache_entry, file ) +
+           (lstrlenW( face->file ) + 1) * sizeof(WCHAR);
+    if (!(entry = malloc( size ))) return;
+    entry->face_index = face->face_index;
+    entry->ntm_flags = face->ntmFlags;
+    entry->scalable = face->scalable;
+    entry->fs = face->fs;
+    entry->size = face->size;
+    entry->ntm = *ntm;
+    lstrcpyW( entry->file, face->file );
+    entry->next = enum_ntm_cache[hash];
+    enum_ntm_cache[hash] = entry;
+}
+
+static void set_face_enum_logfont( const struct gdi_font_face *face,
+                                   const NEWTEXTMETRICEXW *ntm, ENUMLOGFONTEXW *elf )
+{
+    elf->elfLogFont.lfEscapement = 0;
+    elf->elfLogFont.lfOrientation = 0;
+    elf->elfLogFont.lfHeight = ntm->ntmTm.tmHeight;
+    elf->elfLogFont.lfWidth = ntm->ntmTm.tmAveCharWidth;
+    elf->elfLogFont.lfWeight = ntm->ntmTm.tmWeight;
+    elf->elfLogFont.lfItalic = ntm->ntmTm.tmItalic;
+    elf->elfLogFont.lfUnderline = ntm->ntmTm.tmUnderlined;
+    elf->elfLogFont.lfStrikeOut = ntm->ntmTm.tmStruckOut;
+    elf->elfLogFont.lfCharSet = ntm->ntmTm.tmCharSet;
+    elf->elfLogFont.lfOutPrecision = OUT_STROKE_PRECIS;
+    elf->elfLogFont.lfClipPrecision = CLIP_STROKE_PRECIS;
+    elf->elfLogFont.lfQuality = DRAFT_QUALITY;
+    elf->elfLogFont.lfPitchAndFamily = (ntm->ntmTm.tmPitchAndFamily & 0xf1) + 1;
+    lstrcpynW( elf->elfLogFont.lfFaceName, face->family->family_name, LF_FACESIZE );
+    lstrcpynW( elf->elfFullName, face->full_name, LF_FULLFACESIZE );
+    lstrcpynW( elf->elfStyle, face->style_name, LF_FACESIZE );
+}
+
 static BOOL get_face_enum_data( struct gdi_font_face *face, ENUMLOGFONTEXW *elf, NEWTEXTMETRICEXW *ntm )
 {
     struct gdi_font *font;
@@ -3348,22 +3448,7 @@ static BOOL get_face_enum_data( struct gdi_font_face *face, ENUMLOGFONTEXW *elf,
     ntm->ntmTm.ntmFlags = font->ntmFlags;
     ntm->ntmFontSig = font->fs;
 
-    elf->elfLogFont.lfEscapement = 0;
-    elf->elfLogFont.lfOrientation = 0;
-    elf->elfLogFont.lfHeight = ntm->ntmTm.tmHeight;
-    elf->elfLogFont.lfWidth = ntm->ntmTm.tmAveCharWidth;
-    elf->elfLogFont.lfWeight = ntm->ntmTm.tmWeight;
-    elf->elfLogFont.lfItalic = ntm->ntmTm.tmItalic;
-    elf->elfLogFont.lfUnderline = ntm->ntmTm.tmUnderlined;
-    elf->elfLogFont.lfStrikeOut = ntm->ntmTm.tmStruckOut;
-    elf->elfLogFont.lfCharSet = ntm->ntmTm.tmCharSet;
-    elf->elfLogFont.lfOutPrecision = OUT_STROKE_PRECIS;
-    elf->elfLogFont.lfClipPrecision = CLIP_STROKE_PRECIS;
-    elf->elfLogFont.lfQuality = DRAFT_QUALITY;
-    elf->elfLogFont.lfPitchAndFamily = (ntm->ntmTm.tmPitchAndFamily & 0xf1) + 1;
-    lstrcpynW( elf->elfLogFont.lfFaceName, (WCHAR *)font->otm.otmpFamilyName, LF_FACESIZE );
-    lstrcpynW( elf->elfFullName, (WCHAR *)font->otm.otmpFaceName, LF_FULLFACESIZE );
-    lstrcpynW( elf->elfStyle, (WCHAR *)font->otm.otmpStyleName, LF_FACESIZE );
+    set_face_enum_logfont( face, ntm, elf );
 
     free_gdi_font( font );
     return TRUE;
@@ -3397,12 +3482,15 @@ static BOOL enum_face_charsets( const struct gdi_font_family *family, struct gdi
     {
         struct gdi_font_enum_data *data;
 
-        if (!(data = calloc( 1, sizeof(*data) )) ||
-            !get_face_enum_data( face, &data->elf, &data->ntm ))
+        if (!(data = calloc( 1, sizeof(*data) ))) return TRUE;
+        if (get_cached_face_enum_ntm( face, &data->ntm ))
+            set_face_enum_logfont( face, &data->ntm, &data->elf );
+        else if (!get_face_enum_data( face, &data->elf, &data->ntm ))
         {
             free( data );
             return TRUE;
         }
+        else cache_face_enum_ntm( face, &data->ntm );
         face->cached_enum_data = data;
     }
 
