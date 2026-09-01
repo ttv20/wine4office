@@ -3386,7 +3386,7 @@ static void set_face_enum_logfont( const struct gdi_font_face *face,
 
 static BOOL get_face_enum_data( struct gdi_font_face *face, ENUMLOGFONTEXW *elf, NEWTEXTMETRICEXW *ntm )
 {
-    struct gdi_font *font;
+    struct gdi_font *font, *new_font;
     LOGFONTW lf = { .lfHeight = -4096 /* preferable EM Square size */ };
 
     if (!face->scalable) lf.lfHeight = 0;
@@ -3403,14 +3403,19 @@ static BOOL get_face_enum_data( struct gdi_font_face *face, ENUMLOGFONTEXW *elf,
     {
         /* reload with the original EM Square size */
         lf.lfHeight = -font->otm.otmEMSquare;
-        free_gdi_font( font );
-
-        if (!(font = create_gdi_font( face, NULL, &lf ))) return FALSE;
-        if (!font_funcs->load_font( font ))
+        if (!(new_font = create_gdi_font( face, NULL, &lf )))
         {
             free_gdi_font( font );
             return FALSE;
         }
+        if (!font_funcs->load_font( new_font ))
+        {
+            free_gdi_font( new_font );
+            free_gdi_font( font );
+            return FALSE;
+        }
+        free_gdi_font( font );
+        font = new_font;
     }
 
     if (font_funcs->set_outline_text_metrics( font ))
