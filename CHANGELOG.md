@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce repeated directory scans during case-insensitive file lookup.
 - Reduce Office startup file-system work by avoiding recursive App-V VFS lookups.
 - Speed up small Office gallery images rendered through Direct2D.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
