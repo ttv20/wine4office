@@ -127,6 +127,19 @@ INT CDECL _wcsicmp_l(const wchar_t *str1, const wchar_t *str2, _locale_t locale)
     if(!MSVCRT_CHECK_PMT(str1 != NULL) || !MSVCRT_CHECK_PMT(str2 != NULL))
         return _NLSCMPERROR;
 
+    if (!locale && initial_locale)
+    {
+        do
+        {
+            c1 = *str1++;
+            c2 = *str2++;
+            if (c1 >= 'A' && c1 <= 'Z') c1 += 'a' - 'A';
+            if (c2 >= 'A' && c2 <= 'Z') c2 += 'a' - 'A';
+        } while (c1 && (c1 == c2));
+
+        return c1 - c2;
+    }
+
     if(!locale)
         locale = get_current_locale_noalloc(&tmp);
 
