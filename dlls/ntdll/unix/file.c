@@ -2989,6 +2989,51 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
 
 
 /***********************************************************************
+ *           try_file_case_variants
+ *
+ * Try common casing variants before falling back to directory enumeration.
+ */
+static BOOL try_file_case_variants( int root_fd, char *unix_name, int pos, const WCHAR *name,
+                                    int length, struct stat *st )
+{
+    WCHAR variants[2][MAX_DIR_ENTRY_LEN];
+    BOOL word_start = TRUE, has_dot = FALSE;
+    unsigned int count = 0, i, j;
+    int ret;
+
+    if (length > MAX_DIR_ENTRY_LEN) return FALSE;
+
+    for (i = 0; i < length; i++)
+    {
+        variants[count][i] = word_start ? towupper( name[i] ) : name[i];
+        word_start = name[i] == ' ' || name[i] == '-' || name[i] == '_';
+        if (name[i] == '.') has_dot = TRUE;
+    }
+    /* Dotted components are normally file names, where title casing rarely matches. */
+    if (!has_dot && memcmp( variants[count], name, length * sizeof(WCHAR) )) count++;
+
+    for (i = 0; i < length; i++) variants[count][i] = towlower( name[i] );
+    if (memcmp( variants[count], name, length * sizeof(WCHAR) ))
+    {
+        for (j = 0; j < count; j++)
+            if (!memcmp( variants[j], variants[count], length * sizeof(WCHAR) )) break;
+        if (j == count) count++;
+    }
+
+    unix_name[pos - 1] = '/';
+    for (i = 0; i < count; i++)
+    {
+        ret = ntdll_wcstoumbs( variants[i], length, unix_name + pos, MAX_DIR_ENTRY_LEN + 1, TRUE );
+        if (ret < 0 || ret > MAX_DIR_ENTRY_LEN) continue;
+        unix_name[pos + ret] = 0;
+        if (!fstatat( root_fd, unix_name, st, 0 )) return TRUE;
+    }
+    if (pos > 1) unix_name[pos - 1] = 0;
+    else unix_name[1] = 0;
+    return FALSE;
+}
+
+/***********************************************************************
  *           find_file_in_dir
  *
  * Find a file in a directory the hard way, by doing a case-insensitive search.
@@ -3077,6 +3122,9 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
         /* fall through to normal handling */
     }
 #endif /* VFAT_IOCTL_READDIR_BOTH */
+
+    if (try_file_case_variants( root_fd, unix_name, pos, name, length, &st ))
+        return STATUS_SUCCESS;
 
     if ((fd = openat( root_fd, unix_name, O_RDONLY )) == -1) return errno_to_status( errno );
     if (!(dir = fdopendir( fd )))
@@ -4422,6 +4470,13 @@ static NTSTATUS get_appv_vfs_unix_name( const OBJECT_ATTRIBUTES *attr, const UNI
         prefix_len = match - name->Buffer;
         search = match + 1;
         suffix_len = name->Length / sizeof(WCHAR) - prefix_len - strlen(marker);
+        remainder.Buffer = (WCHAR *)(match + strlen(marker));
+        remainder.Length = suffix_len * sizeof(WCHAR);
+        remainder.MaximumLength = remainder.Length;
+        /* root/vfs is already the package backing store; do not overlay it again. */
+        if (find_ascii_substring_i( &remainder, "vfs" ) == remainder.Buffer &&
+            (suffix_len == 3 || remainder.Buffer[3] == '\\'))
+            continue;
 
         for (i = 0; i < ARRAY_SIZE(replacements); i++)
         {
