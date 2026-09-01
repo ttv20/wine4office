@@ -2222,9 +2222,9 @@ static void test_shared_image_mapping_reset(void)
     IMAGE_SECTION_HEADER test_section = {0};
     BYTE data[0x200];
     char dll_name[MAX_PATH];
-    HANDLE file, mapping;
+    HANDLE file, mapping, second_file, second_mapping;
     DWORD old_protect;
-    BYTE *view;
+    BYTE *view, *second_view;
     BOOL ret;
 
     memset( data, 0x25, sizeof(data) );
@@ -2254,7 +2254,31 @@ static void test_shared_image_mapping_reset(void)
         ret = VirtualProtect( view + test_section.VirtualAddress, sizeof(data), PAGE_READWRITE,
                               &old_protect );
         ok( ret, "VirtualProtect failed err %lu\n", GetLastError() );
-        if (ret) view[test_section.VirtualAddress] = 0x5a;
+        if (ret)
+        {
+            view[test_section.VirtualAddress] = 0x5a;
+            second_file = CreateFileA( dll_name, GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       NULL, OPEN_EXISTING, 0, NULL );
+            ok( second_file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+            second_mapping = NULL;
+            if (second_file != INVALID_HANDLE_VALUE)
+                second_mapping = CreateFileMappingA( second_file, NULL, PAGE_READONLY | SEC_IMAGE,
+                                                     0, 0, NULL );
+            ok( second_mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
+            second_view = NULL;
+            if (second_mapping) second_view = MapViewOfFile( second_mapping, FILE_MAP_READ, 0, 0, 0 );
+            ok( second_view != NULL, "MapViewOfFile failed err %lu\n", GetLastError() );
+            if (second_view)
+            {
+                ok( second_view[test_section.VirtualAddress] == 0x5a,
+                    "simultaneous image mapping did not share byte %#x\n",
+                    second_view[test_section.VirtualAddress] );
+                UnmapViewOfFile( second_view );
+            }
+            if (second_mapping) CloseHandle( second_mapping );
+            if (second_file != INVALID_HANDLE_VALUE) CloseHandle( second_file );
+        }
         UnmapViewOfFile( view );
     }
     if (mapping) CloseHandle( mapping );
