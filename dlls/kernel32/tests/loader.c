@@ -2123,11 +2123,14 @@ static void test_image_mapping_refresh(void)
     IMAGE_SECTION_HEADER test_section = {0};
     BYTE data[0x200], changed = 0x5a;
     char dll_name[MAX_PATH];
+    FILE_BASIC_INFORMATION before_info, after_info;
     FILETIME write_time;
+    IO_STATUS_BLOCK io;
     HANDLE file, mapping;
     void *view;
+    NTSTATUS status;
     DWORD written;
-    BOOL ret, have_write_time;
+    BOOL ret, have_write_time, have_basic_info;
 
     memset(data, 0x25, sizeof(data));
     memcpy(test_section.Name, ".rdata", 7);
@@ -2148,6 +2151,10 @@ static void test_image_mapping_refresh(void)
     ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
     have_write_time = GetFileTime( file, NULL, NULL, &write_time );
     ok( have_write_time, "GetFileTime failed err %lu\n", GetLastError() );
+    status = NtQueryInformationFile( file, &io, &before_info, sizeof(before_info),
+                                     FileBasicInformation );
+    have_basic_info = !status;
+    ok( !status, "NtQueryInformationFile failed status %#lx\n", status );
     mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
     ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
     view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
@@ -2172,6 +2179,19 @@ static void test_image_mapping_refresh(void)
         /* Preserve the metadata fast path's mtime key while changing the source contents. */
         ret = SetFileTime( file, NULL, NULL, &write_time );
         ok( ret, "SetFileTime failed err %lu\n", GetLastError() );
+    }
+    status = NtQueryInformationFile( file, &io, &after_info, sizeof(after_info),
+                                     FileBasicInformation );
+    ok( !status, "NtQueryInformationFile failed status %#lx\n", status );
+    if (have_basic_info && !status && have_write_time)
+    {
+        ok( before_info.LastWriteTime.QuadPart == after_info.LastWriteTime.QuadPart,
+            "mtime changed from %s to %s\n", wine_dbgstr_longlong(before_info.LastWriteTime.QuadPart),
+            wine_dbgstr_longlong(after_info.LastWriteTime.QuadPart) );
+        if (before_info.ChangeTime.QuadPart == after_info.ChangeTime.QuadPart)
+            trace( "host preserved ctime; exercising content-hash invalidation\n" );
+        else
+            skip( "host changed ctime; metadata rejected the stale cache before hashing\n" );
     }
     CloseHandle( file );
 
