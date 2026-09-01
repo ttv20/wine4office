@@ -24,7 +24,7 @@
 
 static inline BOOL is_initial_locale(void)
 {
-    return InterlockedCompareExchange((LONG *)&initial_locale, FALSE, FALSE);
+    return ReadAcquire((const LONG volatile *)&initial_locale);
 }
 
 /* Some abbreviations to make the following table readable */

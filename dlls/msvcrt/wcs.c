@@ -36,7 +36,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
 static inline BOOL is_initial_locale(void)
 {
-    return InterlockedCompareExchange((LONG *)&initial_locale, FALSE, FALSE);
+    return ReadAcquire((const LONG volatile *)&initial_locale);
 }
 
 typedef struct
