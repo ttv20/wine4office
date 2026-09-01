@@ -366,6 +366,14 @@ extern void factory_detach_fontcollection(IDWriteFactory7 *factory, IDWriteFontC
 extern void factory_detach_gdiinterop(IDWriteFactory7 *factory, IDWriteGdiInterop1 *interop);
 extern struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *factory, struct list *fontfaces,
         IDWriteFontFace5 *fontface);
+extern BOOL factory_get_cached_glyph_advance(IDWriteFactory7 *factory, IDWriteFontFileLoader *loader,
+        const void *reference_key, UINT32 reference_key_size, UINT32 face_index,
+        DWRITE_FONT_SIMULATIONS simulations, float size, unsigned short glyph, unsigned short mode,
+        int *advance, unsigned int *has_contours);
+extern void factory_cache_glyph_advance(IDWriteFactory7 *factory, IDWriteFontFileLoader *loader,
+        const void *reference_key, UINT32 reference_key_size, UINT32 face_index,
+        DWRITE_FONT_SIMULATIONS simulations, float size, unsigned short glyph, unsigned short mode,
+        int advance, unsigned int has_contours);
 extern IDWriteFontFile *get_fontfile_from_font(IDWriteFont *font);
 extern void    get_logfont_from_font(IDWriteFont*,LOGFONTW*);
 extern void    get_logfont_from_fontface(IDWriteFontFace*,LOGFONTW*);

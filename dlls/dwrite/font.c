@@ -131,6 +131,10 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
     struct cache_key key = { .size = fontsize, .glyph = glyph, .mode = mode };
     struct get_glyph_advance_params params;
     struct cache_entry *entry;
+    IDWriteFontFileLoader *loader = NULL;
+    const void *reference_key = NULL;
+    UINT32 reference_key_size = 0;
+    BOOL cacheable;
     unsigned int value;
 
     *has_contours = FALSE;
@@ -140,16 +144,32 @@ static int fontface_get_glyph_advance(struct dwrite_fontface *fontface, float fo
 
     if (!entry->has_advance)
     {
-        params.object = fontface->get_font_object(fontface);
-        params.glyph = glyph;
-        params.mode = mode;
-        params.emsize = fontsize;
-        params.advance = &entry->advance;
-        params.has_contours = &value;
+        cacheable = SUCCEEDED(IDWriteFontFile_GetReferenceKey(fontface->file, &reference_key,
+                &reference_key_size)) && reference_key && reference_key_size &&
+                SUCCEEDED(IDWriteFontFile_GetLoader(fontface->file, &loader));
+        if (cacheable && factory_get_cached_glyph_advance(fontface->factory, loader, reference_key,
+                reference_key_size, fontface->index, fontface->simulations, fontsize, glyph, mode,
+                &entry->advance, &value))
+        {
+            entry->has_contours = !!value;
+        }
+        else
+        {
+            params.object = fontface->get_font_object(fontface);
+            params.glyph = glyph;
+            params.mode = mode;
+            params.emsize = fontsize;
+            params.advance = &entry->advance;
+            params.has_contours = &value;
 
-        UNIX_CALL(get_glyph_advance, &params);
+            cacheable = !UNIX_CALL(get_glyph_advance, &params) && cacheable;
 
-        entry->has_contours = !!value;
+            entry->has_contours = !!value;
+            if (cacheable)
+                factory_cache_glyph_advance(fontface->factory, loader, reference_key, reference_key_size,
+                        fontface->index, fontface->simulations, fontsize, glyph, mode, entry->advance, value);
+        }
+        if (loader) IDWriteFontFileLoader_Release(loader);
         entry->has_advance = 1;
     }
 

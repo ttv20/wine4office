@@ -592,6 +592,31 @@ struct fileloader
     IDWriteFontFileLoader *loader;
 };
 
+#define GLYPH_ADVANCE_CACHE_MAX_SIZE 0x80000
+
+struct glyph_advance_key
+{
+    IDWriteFontFileLoader *loader;
+    const void *reference_key;
+    UINT32 reference_key_size;
+    UINT32 face_index;
+    UINT32 size_bits;
+    unsigned short simulations;
+    unsigned short glyph;
+    unsigned short mode;
+};
+
+struct glyph_advance_entry
+{
+    struct wine_rb_entry entry;
+    struct list mru;
+    struct glyph_advance_key key;
+    size_t allocation_size;
+    int advance;
+    unsigned int has_contours : 1;
+    BYTE reference_key[];
+};
+
 struct dwritefactory
 {
     IDWriteFactory7 IDWriteFactory7_iface;
@@ -616,12 +641,149 @@ struct dwritefactory
     struct list collection_loaders;
     struct list file_loaders;
 
+    struct wine_rb_tree glyph_advances;
+    struct list glyph_advance_mru;
+    size_t glyph_advance_cache_size;
+
     CRITICAL_SECTION cs;
 };
 
 static inline struct dwritefactory *impl_from_IDWriteFactory7(IDWriteFactory7 *iface)
 {
     return CONTAINING_RECORD(iface, struct dwritefactory, IDWriteFactory7_iface);
+}
+
+static struct fileloader *factory_get_file_loader(struct dwritefactory *factory, IDWriteFontFileLoader *loader);
+
+static int glyph_advance_cache_compare(const void *key_ptr, const struct wine_rb_entry *entry_ptr)
+{
+    const struct glyph_advance_entry *entry = WINE_RB_ENTRY_VALUE(entry_ptr,
+            const struct glyph_advance_entry, entry);
+    const struct glyph_advance_key *key = key_ptr, *key2 = &entry->key;
+    ULONG_PTR loader, loader2;
+    int ret;
+
+    loader = (ULONG_PTR)key->loader;
+    loader2 = (ULONG_PTR)key2->loader;
+    if (loader != loader2) return loader < loader2 ? -1 : 1;
+    if (key->reference_key_size != key2->reference_key_size)
+        return key->reference_key_size < key2->reference_key_size ? -1 : 1;
+    if (key->reference_key_size &&
+            (ret = memcmp(key->reference_key, key2->reference_key, key->reference_key_size))) return ret;
+    if (key->face_index != key2->face_index) return key->face_index < key2->face_index ? -1 : 1;
+    if (key->simulations != key2->simulations) return key->simulations < key2->simulations ? -1 : 1;
+    if (key->size_bits != key2->size_bits) return key->size_bits < key2->size_bits ? -1 : 1;
+    if (key->glyph != key2->glyph) return (int)key->glyph - (int)key2->glyph;
+    return (int)key->mode - (int)key2->mode;
+}
+
+static void factory_release_glyph_advance_entry(struct dwritefactory *factory,
+        struct glyph_advance_entry *entry)
+{
+    wine_rb_remove(&factory->glyph_advances, &entry->entry);
+    list_remove(&entry->mru);
+    factory->glyph_advance_cache_size -= entry->allocation_size;
+    free(entry);
+}
+
+static void factory_cleanup_glyph_advances(struct dwritefactory *factory, IDWriteFontFileLoader *loader)
+{
+    struct glyph_advance_entry *entry, *entry2;
+
+    EnterCriticalSection(&factory->cs);
+    LIST_FOR_EACH_ENTRY_SAFE(entry, entry2, &factory->glyph_advance_mru, struct glyph_advance_entry, mru)
+    {
+        if (!loader || entry->key.loader == loader)
+            factory_release_glyph_advance_entry(factory, entry);
+    }
+    LeaveCriticalSection(&factory->cs);
+}
+
+BOOL factory_get_cached_glyph_advance(IDWriteFactory7 *iface, IDWriteFontFileLoader *loader,
+        const void *reference_key, UINT32 reference_key_size, UINT32 face_index,
+        DWRITE_FONT_SIMULATIONS simulations, float size, unsigned short glyph, unsigned short mode,
+        int *advance, unsigned int *has_contours)
+{
+    struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
+    struct glyph_advance_key key = {loader, reference_key, reference_key_size, face_index};
+    struct glyph_advance_entry *entry;
+    struct wine_rb_entry *rb_entry;
+    BOOL found = FALSE;
+
+    memcpy(&key.size_bits, &size, sizeof(key.size_bits));
+    key.simulations = simulations;
+    key.glyph = glyph;
+    key.mode = mode;
+
+    EnterCriticalSection(&factory->cs);
+    if (loader != factory->localfontfileloader && !factory_get_file_loader(factory, loader))
+        goto done;
+    if ((rb_entry = wine_rb_get(&factory->glyph_advances, &key)))
+    {
+        entry = WINE_RB_ENTRY_VALUE(rb_entry, struct glyph_advance_entry, entry);
+        list_remove(&entry->mru);
+        list_add_head(&factory->glyph_advance_mru, &entry->mru);
+        *advance = entry->advance;
+        *has_contours = entry->has_contours;
+        found = TRUE;
+    }
+done:
+    LeaveCriticalSection(&factory->cs);
+    return found;
+}
+
+void factory_cache_glyph_advance(IDWriteFactory7 *iface, IDWriteFontFileLoader *loader,
+        const void *reference_key, UINT32 reference_key_size, UINT32 face_index,
+        DWRITE_FONT_SIMULATIONS simulations, float size, unsigned short glyph, unsigned short mode,
+        int advance, unsigned int has_contours)
+{
+    struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
+    struct glyph_advance_key key = {loader, reference_key, reference_key_size, face_index};
+    size_t allocation_size;
+    struct glyph_advance_entry *entry, *old_entry;
+
+    memcpy(&key.size_bits, &size, sizeof(key.size_bits));
+    key.simulations = simulations;
+    key.glyph = glyph;
+    key.mode = mode;
+
+    if (!reference_key || !reference_key_size ||
+            reference_key_size > GLYPH_ADVANCE_CACHE_MAX_SIZE - offsetof(struct glyph_advance_entry, reference_key))
+        return;
+    allocation_size = offsetof(struct glyph_advance_entry, reference_key) + reference_key_size;
+
+    EnterCriticalSection(&factory->cs);
+    if (loader != factory->localfontfileloader && !factory_get_file_loader(factory, loader))
+        goto done;
+    if (wine_rb_get(&factory->glyph_advances, &key))
+        goto done;
+
+    while (factory->glyph_advance_cache_size + allocation_size > GLYPH_ADVANCE_CACHE_MAX_SIZE &&
+            !list_empty(&factory->glyph_advance_mru))
+    {
+        old_entry = LIST_ENTRY(list_tail(&factory->glyph_advance_mru), struct glyph_advance_entry, mru);
+        factory_release_glyph_advance_entry(factory, old_entry);
+    }
+    if (allocation_size > GLYPH_ADVANCE_CACHE_MAX_SIZE || !(entry = malloc(allocation_size)))
+        goto done;
+
+    entry->key = key;
+    entry->key.reference_key = entry->reference_key;
+    memcpy(entry->reference_key, reference_key, reference_key_size);
+    entry->allocation_size = allocation_size;
+    entry->advance = advance;
+    entry->has_contours = !!has_contours;
+    list_init(&entry->mru);
+    if (wine_rb_put(&factory->glyph_advances, &entry->key, &entry->entry) == -1)
+    {
+        free(entry);
+        goto done;
+    }
+    list_add_head(&factory->glyph_advance_mru, &entry->mru);
+    factory->glyph_advance_cache_size += allocation_size;
+
+done:
+    LeaveCriticalSection(&factory->cs);
 }
 
 static void release_fontface_cache(struct list *fontfaces)
@@ -657,6 +819,8 @@ static void release_dwritefactory(struct dwritefactory *factory)
     struct fileloader *fileloader, *fileloader2;
     struct collectionloader *loader, *loader2;
     unsigned int i;
+
+    factory_cleanup_glyph_advances(factory, NULL);
 
     EnterCriticalSection(&factory->cs);
     release_fontface_cache(&factory->localfontfaces);
@@ -1190,6 +1354,7 @@ static HRESULT WINAPI dwritefactory_UnregisterFontFileLoader(IDWriteFactory7 *if
     if (!found)
         return E_INVALIDARG;
 
+    factory_cleanup_glyph_advances(factory, loader);
     release_fileloader(found);
     return S_OK;
 }
@@ -2241,6 +2406,8 @@ static void init_dwritefactory(struct dwritefactory *factory, DWRITE_FACTORY_TYP
     list_init(&factory->collection_loaders);
     list_init(&factory->file_loaders);
     list_init(&factory->localfontfaces);
+    list_init(&factory->glyph_advance_mru);
+    wine_rb_init(&factory->glyph_advances, glyph_advance_cache_compare);
 
     InitializeCriticalSectionEx(&factory->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
     factory->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": dwritefactory.lock");
