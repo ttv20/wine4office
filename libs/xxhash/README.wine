@@ -1,0 +1,7 @@
+This directory contains the xxHash v0.8.3 single-header library from
+https://github.com/Cyan4973/xxHash at commit
+e626a72bc2321cd320e953a0ccf1584cad60f363.
+
+Wine4Office includes it in header-only mode for the wineserver PE backing-file
+cache. The upstream BSD 2-Clause license is preserved in LICENSE and in the
+header itself.

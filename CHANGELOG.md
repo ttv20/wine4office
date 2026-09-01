@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse reconstructed PE images across Wine server restarts to reduce Office startup disk I/O.
 - Speed up small Office gallery images rendered through Direct2D.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.

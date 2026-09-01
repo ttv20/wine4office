@@ -2117,6 +2117,154 @@ static void test_section_access(void)
     }
 }
 
+static void test_image_mapping_refresh(void)
+{
+    IMAGE_NT_HEADERS nt_header = nt_header_template;
+    IMAGE_SECTION_HEADER test_section = {0};
+    BYTE data[0x200], changed = 0x5a;
+    char dll_name[MAX_PATH];
+    FILETIME write_time;
+    ULARGE_INTEGER ticks;
+    HANDLE file, mapping;
+    void *view;
+    DWORD written;
+    BOOL ret;
+
+    memset(data, 0x25, sizeof(data));
+    memcpy(test_section.Name, ".rdata", 7);
+    test_section.Misc.VirtualSize = sizeof(data);
+    test_section.VirtualAddress = page_size;
+    test_section.SizeOfRawData = sizeof(data);
+    test_section.PointerToRawData = 0x200;
+    test_section.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+
+    nt_header.OptionalHeader.SectionAlignment = page_size;
+    nt_header.OptionalHeader.FileAlignment = 0x200;
+    nt_header.OptionalHeader.SizeOfImage = page_size * 2;
+    nt_header.OptionalHeader.SizeOfHeaders = 0x200;
+    create_test_dll_sections( &dos_header, &nt_header, &test_section, data, dll_name );
+
+    file = CreateFileA( dll_name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
+    ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
+    view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
+    ok( view != NULL, "MapViewOfFile failed err %lu\n", GetLastError() );
+    if (view)
+    {
+        ok( *((BYTE *)view + test_section.VirtualAddress) == data[0], "wrong section data\n" );
+        UnmapViewOfFile( view );
+    }
+    if (mapping) CloseHandle( mapping );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+
+    file = CreateFileA( dll_name, GENERIC_READ | GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    SetFilePointer( file, test_section.PointerToRawData, NULL, FILE_BEGIN );
+    ret = WriteFile( file, &changed, sizeof(changed), &written, NULL );
+    ok( ret && written == sizeof(changed), "WriteFile failed err %lu\n", GetLastError() );
+    ret = GetFileTime( file, NULL, NULL, &write_time );
+    ok( ret, "GetFileTime failed err %lu\n", GetLastError() );
+    if (ret)
+    {
+        ticks.u.LowPart = write_time.dwLowDateTime;
+        ticks.u.HighPart = write_time.dwHighDateTime;
+        ticks.QuadPart += 2 * (ULONGLONG)10000000;
+        write_time.dwLowDateTime = ticks.u.LowPart;
+        write_time.dwHighDateTime = ticks.u.HighPart;
+        ret = SetFileTime( file, NULL, NULL, &write_time );
+        ok( ret, "SetFileTime failed err %lu\n", GetLastError() );
+    }
+    CloseHandle( file );
+
+    file = CreateFileA( dll_name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
+    ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
+    view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
+    ok( view != NULL, "MapViewOfFile failed err %lu\n", GetLastError() );
+    if (view)
+    {
+        ok( *((BYTE *)view + test_section.VirtualAddress) == changed,
+            "image mapping returned stale section data\n" );
+        UnmapViewOfFile( view );
+    }
+    if (mapping) CloseHandle( mapping );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    ret = DeleteFileA( dll_name );
+    ok( ret, "DeleteFile failed err %lu\n", GetLastError() );
+}
+
+static void test_shared_image_mapping_reset(void)
+{
+    /* A cached template must not retain writes made through a shared PE section
+     * after the final mapping object has been closed. */
+    IMAGE_NT_HEADERS nt_header = nt_header_template;
+    IMAGE_SECTION_HEADER test_section = {0};
+    BYTE data[0x200];
+    char dll_name[MAX_PATH];
+    HANDLE file, mapping;
+    DWORD old_protect;
+    BYTE *view;
+    BOOL ret;
+
+    memset( data, 0x25, sizeof(data) );
+    memcpy( test_section.Name, ".shared", 7 );
+    test_section.Misc.VirtualSize = sizeof(data);
+    test_section.VirtualAddress = page_size;
+    test_section.SizeOfRawData = sizeof(data);
+    test_section.PointerToRawData = 0x200;
+    test_section.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ |
+                                  IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_SHARED;
+
+    nt_header.OptionalHeader.SectionAlignment = page_size;
+    nt_header.OptionalHeader.FileAlignment = 0x200;
+    nt_header.OptionalHeader.SizeOfImage = page_size * 2;
+    nt_header.OptionalHeader.SizeOfHeaders = 0x200;
+    create_test_dll_sections( &dos_header, &nt_header, &test_section, data, dll_name );
+
+    file = CreateFileA( dll_name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
+    ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
+    view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
+    ok( view != NULL, "MapViewOfFile failed err %lu\n", GetLastError() );
+    if (view)
+    {
+        ret = VirtualProtect( view + test_section.VirtualAddress, sizeof(data), PAGE_READWRITE,
+                              &old_protect );
+        ok( ret, "VirtualProtect failed err %lu\n", GetLastError() );
+        if (ret) view[test_section.VirtualAddress] = 0x5a;
+        UnmapViewOfFile( view );
+    }
+    if (mapping) CloseHandle( mapping );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+
+    file = CreateFileA( dll_name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed err %lu\n", GetLastError() );
+    mapping = CreateFileMappingA( file, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL );
+    ok( mapping != NULL, "CreateFileMapping failed err %lu\n", GetLastError() );
+    view = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, 0 );
+    ok( view != NULL, "MapViewOfFile failed err %lu\n", GetLastError() );
+    if (view)
+    {
+        ok( view[test_section.VirtualAddress] == data[0],
+            "newly created image mapping retained shared byte %#x\n",
+            view[test_section.VirtualAddress] );
+        UnmapViewOfFile( view );
+    }
+    if (mapping) CloseHandle( mapping );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    ret = DeleteFileA( dll_name );
+    ok( ret, "DeleteFile failed err %lu\n", GetLastError() );
+}
+
 static void test_security_cookie_readonly(void)
 {
     /* a PE whose load-config SecurityCookie points into a
@@ -5007,6 +5155,8 @@ START_TEST(loader)
     test_ResolveDelayLoadedAPI();
     test_ImportDescriptors();
     test_section_access();
+    test_image_mapping_refresh();
+    test_shared_image_mapping_reset();
     test_security_cookie_readonly();
     test_import_resolution();
     test_export_forwarder_dep_chain();
