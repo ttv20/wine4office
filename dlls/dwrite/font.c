@@ -4768,7 +4768,7 @@ static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collectio
     }
 
     /* Font set faces from one family are normally consecutive. */
-    if (recent->index != ~0u && !wcsicmp(recent->name, familyW))
+    if (familyW[0] && recent->index != ~0u && !wcsicmp(recent->name, familyW))
         index = recent->index;
     else
         index = collection_find_family(collection, familyW);
@@ -4794,12 +4794,14 @@ static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collectio
 
     if (FAILED(hr))
         release_font_data(font_data);
-    else
+    else if (familyW[0])
     {
         if (index == ~0u) index = collection->count - 1;
         lstrcpynW(recent->name, familyW, ARRAY_SIZE(recent->name));
         recent->index = index;
     }
+    else
+        recent->index = ~0u;
 
     return hr;
 }
