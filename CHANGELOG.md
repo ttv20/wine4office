@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reduce CPU work while building DirectWrite font collections.
 - Reduce repeated directory scans during case-insensitive file lookup.
 - Reduce Office startup file-system work by avoiding recursive App-V VFS lookups.
 - Speed up small Office gallery images rendered through Direct2D.

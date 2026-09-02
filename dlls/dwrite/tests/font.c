@@ -557,6 +557,100 @@ static WCHAR *create_testfontfile(const WCHAR *filename)
     return pathW;
 }
 
+static WORD read_be_word(const BYTE *data)
+{
+    return (data[0] << 8) | data[1];
+}
+
+static DWORD read_be_dword(const BYTE *data)
+{
+    return ((DWORD)data[0] << 24) | ((DWORD)data[1] << 16) | ((DWORD)data[2] << 8) | data[3];
+}
+
+static void write_be_word(BYTE *data, WORD value)
+{
+    data[0] = value >> 8;
+    data[1] = value;
+}
+
+static BOOL make_testfont_localized_only(const WCHAR *path, WCHAR family_initial)
+{
+    DWORD size, read, written, table_offset = 0, table_size = 0;
+    BOOL family_changed = FALSE, language_changed = FALSE, ret = FALSE;
+    unsigned int table_count, name_count, string_offset, i;
+    BYTE *data = NULL, *name;
+    HANDLE file;
+
+    file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    size = GetFileSize(file, NULL);
+    if (size == INVALID_FILE_SIZE || size < 12 || !(data = malloc(size)))
+        goto done;
+    if (!ReadFile(file, data, size, &read, NULL) || read != size)
+        goto done;
+
+    table_count = read_be_word(data + 4);
+    if (table_count > (size - 12) / 16)
+        goto done;
+    for (i = 0; i < table_count; ++i)
+    {
+        BYTE *record = data + 12 + i * 16;
+
+        if (!memcmp(record, "name", 4))
+        {
+            table_offset = read_be_dword(record + 8);
+            table_size = read_be_dword(record + 12);
+            break;
+        }
+    }
+    if (!table_offset || table_offset > size || table_size > size - table_offset || table_size < 6)
+        goto done;
+
+    name = data + table_offset;
+    name_count = read_be_word(name + 2);
+    string_offset = read_be_word(name + 4);
+    if (name_count > (table_size - 6) / 12 || string_offset > table_size)
+        goto done;
+
+    for (i = 0; i < name_count; ++i)
+    {
+        BYTE *record = name + 6 + i * 12;
+        unsigned int length, offset, platform = read_be_word(record);
+
+        if (platform != 1 && platform != 3)
+            continue;
+
+        write_be_word(record + 4, platform == 3 ? 0x0411 : 11);
+        language_changed = TRUE;
+
+        if (read_be_word(record + 6) != 1)
+            continue;
+        length = read_be_word(record + 8);
+        offset = read_be_word(record + 10);
+        if (length < (platform == 3 ? 2 : 1) || offset > table_size - string_offset ||
+                length > table_size - string_offset - offset)
+            goto done;
+        if (platform == 3)
+            write_be_word(name + string_offset + offset, family_initial);
+        else
+            name[string_offset + offset] = family_initial;
+        family_changed = TRUE;
+    }
+
+    if (!family_changed || !language_changed || SetFilePointer(file, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+        goto done;
+    if (!WriteFile(file, data, size, &written, NULL) || written != size)
+        goto done;
+    ret = TRUE;
+
+done:
+    free(data);
+    CloseHandle(file);
+    return ret;
+}
+
 #define DELETE_FONTFILE(filename) _delete_testfontfile(filename, __LINE__)
 static void _delete_testfontfile(const WCHAR *filename, int line)
 {
@@ -10724,6 +10818,71 @@ static void test_CreateFontCollectionFromFontSet(void)
     DELETE_FONTFILE(path);
 }
 
+static void test_localized_family_collection(void)
+{
+    static const WCHAR filenames[][32] = {L"wine_test_ja_a.ttf", L"wine_test_ja_b.ttf"};
+    IDWriteFontCollection1 *collection = NULL;
+    IDWriteFontSetBuilder1 *builder = NULL;
+    IDWriteFontFile *files[2] = {0};
+    WCHAR paths[2][MAX_PATH] = {{0}};
+    IDWriteFactory5 *factory;
+    IDWriteFontSet *fontset = NULL;
+    unsigned int count, i;
+    HRESULT hr;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory5)))
+    {
+        win_skip("CreateFontCollectionFromFontSet() is not available.\n");
+        return;
+    }
+
+    hr = IDWriteFactory5_CreateFontSetBuilder(factory, &builder);
+    ok(hr == S_OK, "Failed to create font set builder, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    for (i = 0; i < ARRAY_SIZE(files); ++i)
+    {
+        lstrcpyW(paths[i], create_testfontfile(filenames[i]));
+        if (!make_testfont_localized_only(paths[i], 'A' + i))
+        {
+            ok(0, "Failed to localize test font %u.\n", i);
+            goto done;
+        }
+        hr = IDWriteFactory5_CreateFontFileReference(factory, paths[i], NULL, &files[i]);
+        ok(hr == S_OK, "Failed to create font file %u, hr %#lx.\n", i, hr);
+        if (FAILED(hr))
+            goto done;
+        hr = IDWriteFontSetBuilder1_AddFontFile(builder, files[i]);
+        ok(hr == S_OK, "Failed to add font file %u, hr %#lx.\n", i, hr);
+        if (FAILED(hr))
+            goto done;
+    }
+
+    hr = IDWriteFontSetBuilder1_CreateFontSet(builder, &fontset);
+    ok(hr == S_OK, "Failed to create font set, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    hr = IDWriteFactory5_CreateFontCollectionFromFontSet(factory, fontset, &collection);
+    ok(hr == S_OK, "Failed to create font collection, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    count = IDWriteFontCollection1_GetFontFamilyCount(collection);
+    ok(count == 2, "Expected two localized-only families, got %u.\n", count);
+
+done:
+    if (collection) IDWriteFontCollection1_Release(collection);
+    if (fontset) IDWriteFontSet_Release(fontset);
+    for (i = 0; i < ARRAY_SIZE(files); ++i)
+    {
+        if (files[i]) IDWriteFontFile_Release(files[i]);
+        if (paths[i][0]) DELETE_FONTFILE(paths[i]);
+    }
+    if (builder) IDWriteFontSetBuilder1_Release(builder);
+    IDWriteFactory5_Release(factory);
+}
+
 static void test_GetMatchingFontsByLOGFONT(void)
 {
     IDWriteFontSet *systemset, *set;
@@ -10898,6 +11057,7 @@ START_TEST(font)
     test_family_font_set();
     test_system_font_set();
     test_CreateFontCollectionFromFontSet();
+    test_localized_family_collection();
     test_GetMatchingFontsByLOGFONT();
     test_font_download_queue();
 
