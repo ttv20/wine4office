@@ -22,6 +22,11 @@
 #include "msvcrt.h"
 #include "winnls.h"
 
+static inline BOOL is_initial_locale(void)
+{
+    return ReadAcquire((const LONG volatile *)&initial_locale);
+}
+
 /* Some abbreviations to make the following table readable */
 #define _C_ _CONTROL
 #define _S_ _SPACE
@@ -513,7 +518,7 @@ int CDECL _toupper_l(int c, _locale_t locale)
  */
 int CDECL toupper(int c)
 {
-    if(initial_locale)
+    if(is_initial_locale())
         return c>='a' && c<='z' ? c-'a'+'A' : c;
     return _toupper_l(c, NULL);
 }
@@ -571,7 +576,7 @@ int CDECL _tolower_l(int c, _locale_t locale)
  */
 int CDECL tolower(int c)
 {
-    if(initial_locale)
+    if(is_initial_locale())
         return c>='A' && c<='Z' ? c-'A'+'a' : c;
     return _tolower_l(c, NULL);
 }
