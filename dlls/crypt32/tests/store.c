@@ -1102,9 +1102,7 @@ static void testRegStore(void)
     /* Opening up any old key works.. */
     key = HKEY_CURRENT_USER;
     store = CertOpenStore(CERT_STORE_PROV_REG, 0, 0, 0, key);
-    /* Not sure if this is a bug in DuplicateHandle, marking todo_wine for now
-     */
-    todo_wine ok(store != 0, "CertOpenStore failed: %08lx\n", GetLastError());
+    ok(store != 0, "CertOpenStore failed: %08lx\n", GetLastError());
     CertCloseStore(store, 0);
 
     rc = RegCreateKeyExA(HKEY_CURRENT_USER, tempKey, 0, NULL, 0, KEY_ALL_ACCESS,
