@@ -17,8 +17,12 @@
  */
 #include <assert.h>
 #include <stdarg.h>
+#include <string.h>
+
+#include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winternl.h"
 #include "wincrypt.h"
 #include "winreg.h"
 #include "winuser.h"
@@ -515,6 +519,79 @@ static void *regProvFuncs[] = {
     CRYPT_RegControl,
 };
 
+/* Open our own copy of a registry key through the registry API, as the
+ * native provider does, so registry-layer hooks observe a balanced
+ * open/close pair for a real key path.  A DuplicateHandle copy would
+ * bypass those hooks: it is never seen as opened, yet it is closed with
+ * RegCloseKey.  The input key is not closed; the caller keeps ownership
+ * of it.  Returns ERROR_SUCCESS on success, otherwise a Win32 error code. */
+static LONG reg_open_key_copy( HKEY src, REGSAM access, HKEY *dst )
+{
+    static const WCHAR machine_path[] = L"\\REGISTRY\\Machine\\";
+    static const WCHAR user_path[] = L"\\REGISTRY\\User\\";
+    KEY_NAME_INFORMATION *info;
+    DWORD len = 256, needed;
+    NTSTATUS status;
+    HKEY root;
+    LPCWSTR subkey;
+    LPWSTR path;
+    DWORD count;
+
+    /* Predefined roots need no copy: opening them returns the same
+     * pseudo-handle, and closing them is a no-op. */
+    if (HandleToULong( src ) >= HandleToULong( HKEY_CLASSES_ROOT ) &&
+        HandleToULong( src ) <= HandleToULong( HKEY_DYN_DATA ))
+    {
+        *dst = src;
+        return ERROR_SUCCESS;
+    }
+
+    if (!(info = CryptMemAlloc( len ))) return ERROR_NOT_ENOUGH_MEMORY;
+    status = NtQueryKey( src, KeyNameInformation, info, len, &needed );
+    while (status == STATUS_BUFFER_OVERFLOW)
+    {
+        CryptMemFree( info );
+        len = needed;
+        if (!(info = CryptMemAlloc( len ))) return ERROR_NOT_ENOUGH_MEMORY;
+        status = NtQueryKey( src, KeyNameInformation, info, len, &needed );
+    }
+    if (status)
+    {
+        CryptMemFree( info );
+        return RtlNtStatusToDosError( status );
+    }
+    /* Reopen the key from its predefined root using its full path, so the
+     * open is indistinguishable from any other registry open. */
+    if (!wcsnicmp( info->Name, machine_path, ARRAY_SIZE( machine_path ) - 1 ))
+    {
+        root = HKEY_LOCAL_MACHINE;
+        subkey = info->Name + ARRAY_SIZE( machine_path ) - 1;
+    }
+    else if (!wcsnicmp( info->Name, user_path, ARRAY_SIZE( user_path ) - 1 ))
+    {
+        root = HKEY_USERS;
+        subkey = info->Name + ARRAY_SIZE( user_path ) - 1;
+    }
+    else
+    {
+        CryptMemFree( info );
+        return ERROR_INVALID_HANDLE;
+    }
+    /* The queried name is not null-terminated, copy it with a terminator. */
+    count = (info->Name + info->NameLength / sizeof(WCHAR)) - subkey;
+    if (!(path = CryptMemAlloc( (count + 1) * sizeof(WCHAR) )))
+    {
+        CryptMemFree( info );
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    memcpy( path, subkey, count * sizeof(WCHAR) );
+    path[count] = 0;
+    CryptMemFree( info );
+    status = RegOpenKeyExW( root, path, 0, access, dst );
+    CryptMemFree( path );
+    return status;
+}
+
 WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara)
 {
@@ -537,11 +614,11 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
     else
     {
         HKEY key;
+        REGSAM sam = dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS;
+        LONG rc;
 
-        if (DuplicateHandle(GetCurrentProcess(), (HANDLE)pvPara,
-         GetCurrentProcess(), (LPHANDLE)&key,
-         dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS,
-         TRUE, 0))
+        rc = reg_open_key_copy((HKEY)pvPara, sam, &key);
+        if (!rc)
         {
             WINECRYPT_CERTSTORE *memStore;
 
@@ -582,6 +659,8 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
                 }
             }
         }
+        else
+            SetLastError(rc);
     }
     TRACE("returning %p\n", store);
     return store;
