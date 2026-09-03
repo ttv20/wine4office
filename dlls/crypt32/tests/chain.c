@@ -150,11 +150,10 @@ static DWORD WINAPI default_chain_engine_thread(void *arg)
     return 0;
 }
 
-static void test_default_chain_engine_threads(void)
+static void run_default_chain_engine_threads(void)
 {
     struct default_chain_engine_thread contexts[16];
     HANDLE threads[ARRAY_SIZE(contexts)], start;
-    DWORD ret;
     unsigned int i;
 
     start = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -175,15 +174,44 @@ static void test_default_chain_engine_threads(void)
         CloseHandle(start);
         return;
     }
-    ret = WaitForMultipleObjects(i, threads, TRUE, 30000);
-    ok(ret == WAIT_OBJECT_0, "WaitForMultipleObjects returned %#lx\n", ret);
-    if (ret != WAIT_OBJECT_0) WaitForMultipleObjects(i, threads, TRUE, INFINITE);
+    WaitForMultipleObjects(i, threads, TRUE, INFINITE);
     while (i--)
     {
         ok(contexts[i].ret, "thread %u failed: %#lx\n", i, contexts[i].error);
         CloseHandle(threads[i]);
     }
     CloseHandle(start);
+}
+
+static void test_default_chain_engine_threads(void)
+{
+    STARTUPINFOA startup = { sizeof(startup) };
+    PROCESS_INFORMATION info;
+    char command[MAX_PATH + 64], **argv;
+    DWORD ret, exit_code;
+
+    winetest_get_mainargs(&argv);
+    snprintf(command, sizeof(command), "\"%s\" %s default_chain_engine_threads", argv[0], argv[1]);
+    if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &info))
+    {
+        ok(0, "CreateProcess failed: %lu\n", GetLastError());
+        return;
+    }
+
+    ret = WaitForSingleObject(info.hProcess, 30000);
+    ok(ret == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx\n", ret);
+    if (ret == WAIT_TIMEOUT)
+    {
+        TerminateProcess(info.hProcess, WAIT_TIMEOUT);
+        WaitForSingleObject(info.hProcess, 5000);
+    }
+    else if (ret == WAIT_OBJECT_0)
+    {
+        GetExitCodeProcess(info.hProcess, &exit_code);
+        ok(!exit_code, "child process exited with code %#lx\n", exit_code);
+    }
+    CloseHandle(info.hThread);
+    CloseHandle(info.hProcess);
 }
 
 static const BYTE bigCert[] = { 0x30, 0x7a, 0x02, 0x01, 0x01, 0x30, 0x02, 0x06,
@@ -5634,6 +5662,16 @@ static void test_chain_engine_cache_update(void)
 
 START_TEST(chain)
 {
+    char **argv;
+    int argc;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !strcmp(argv[2], "default_chain_engine_threads"))
+    {
+        run_default_chain_engine_threads();
+        return;
+    }
+
     testCreateCertChainEngine();
     test_default_chain_engine_threads();
     testVerifyCertChainPolicy();
