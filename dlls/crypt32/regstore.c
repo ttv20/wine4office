@@ -17,8 +17,12 @@
  */
 #include <assert.h>
 #include <stdarg.h>
+#include <string.h>
+
+#include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winternl.h"
 #include "wincrypt.h"
 #include "winreg.h"
 #include "winuser.h"
@@ -515,6 +519,98 @@ static void *regProvFuncs[] = {
     CRYPT_RegControl,
 };
 
+/* Open our own copy of a registry key through the registry API, as the
+ * native provider does, so registry-layer hooks observe a balanced
+ * open/close pair for a real key path.  A DuplicateHandle copy would
+ * bypass those hooks: it is never seen as opened, yet it is closed with
+ * RegCloseKey.  The input key is not closed; the caller keeps ownership
+ * of it.  Returns ERROR_SUCCESS on success, otherwise a Win32 error code. */
+static LONG reg_open_key_copy( HKEY src, REGSAM access, HKEY *dst )
+{
+    static const WCHAR machine_path[] = L"\\REGISTRY\\Machine";
+    static const WCHAR user_path[] = L"\\REGISTRY\\User";
+    KEY_NAME_INFORMATION *info;
+    DWORD len = 256, needed;
+    NTSTATUS status;
+    HKEY root;
+    LPCWSTR subkey;
+    LPWSTR path;
+    DWORD count, name_len, prefix_len;
+
+    *dst = NULL;
+
+    /* Predefined roots need no copy: opening them returns the same
+     * pseudo-handle, and closing them is a no-op. */
+    if (HandleToULong( src ) >= HandleToULong( HKEY_CLASSES_ROOT ) &&
+        HandleToULong( src ) <= HandleToULong( HKEY_DYN_DATA ))
+    {
+        *dst = src;
+        return ERROR_SUCCESS;
+    }
+
+    if (!(info = CryptMemAlloc( len ))) return ERROR_NOT_ENOUGH_MEMORY;
+    status = NtQueryKey( src, KeyNameInformation, info, len, &needed );
+    while (status == STATUS_BUFFER_OVERFLOW)
+    {
+        CryptMemFree( info );
+        len = needed;
+        if (!(info = CryptMemAlloc( len ))) return ERROR_NOT_ENOUGH_MEMORY;
+        status = NtQueryKey( src, KeyNameInformation, info, len, &needed );
+    }
+    if (status)
+    {
+        CryptMemFree( info );
+        return RtlNtStatusToDosError( status );
+    }
+    if (info->NameLength % sizeof(WCHAR))
+    {
+        CryptMemFree( info );
+        return ERROR_INVALID_HANDLE;
+    }
+
+    /* Reopen the key from its predefined root using its full path, so the
+     * open is indistinguishable from any other registry open. */
+    name_len = info->NameLength / sizeof(WCHAR);
+    prefix_len = ARRAY_SIZE( machine_path ) - 1;
+    if (name_len >= prefix_len && !wcsnicmp( info->Name, machine_path, prefix_len ) &&
+        (name_len == prefix_len || info->Name[prefix_len] == '\\'))
+    {
+        root = HKEY_LOCAL_MACHINE;
+        subkey = info->Name + prefix_len + (name_len != prefix_len);
+    }
+    else
+    {
+        prefix_len = ARRAY_SIZE( user_path ) - 1;
+        if (name_len >= prefix_len && !wcsnicmp( info->Name, user_path, prefix_len ) &&
+            (name_len == prefix_len || info->Name[prefix_len] == '\\'))
+        {
+            root = HKEY_USERS;
+            subkey = info->Name + prefix_len + (name_len != prefix_len);
+        }
+        else
+        {
+            CryptMemFree( info );
+            return ERROR_INVALID_HANDLE;
+        }
+    }
+    /* The queried name is not null-terminated, copy it with a terminator. */
+    count = info->Name + name_len - subkey;
+    if (!(path = CryptMemAlloc( (count + 1) * sizeof(WCHAR) )))
+    {
+        CryptMemFree( info );
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    memcpy( path, subkey, count * sizeof(WCHAR) );
+    path[count] = 0;
+    CryptMemFree( info );
+    /* KeyNameInformation returns the physical path.  Force the 64-bit view
+     * so a 32-bit caller's default redirection does not reinterpret it;
+     * physical 32-bit paths already contain Wow6432Node. */
+    status = RegOpenKeyExW( root, path, 0, access | KEY_WOW64_64KEY, dst );
+    CryptMemFree( path );
+    return status;
+}
+
 WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
  const void *pvPara)
 {
@@ -536,53 +632,88 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
     }
     else
     {
-        HKEY key;
+        HKEY key = NULL;
+        REGSAM sam = dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS;
+        LONG rc;
 
-        if (DuplicateHandle(GetCurrentProcess(), (HANDLE)pvPara,
-         GetCurrentProcess(), (LPHANDLE)&key,
-         dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS,
-         TRUE, 0))
+        rc = reg_open_key_copy((HKEY)pvPara, sam, &key);
+        if (!rc)
         {
-            WINECRYPT_CERTSTORE *memStore;
+            WINECRYPT_CERTSTORE *memStore = NULL;
+            WINE_REGSTOREINFO *regInfo = NULL;
+            BOOL cs_initialized = FALSE;
+            DWORD err;
 
             memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, hCryptProv,
              CERT_STORE_CREATE_NEW_FLAG, NULL);
-            if (memStore)
+            if (!memStore)
             {
-                WINE_REGSTOREINFO *regInfo = CryptMemAlloc(
-                 sizeof(WINE_REGSTOREINFO));
-
-                if (regInfo)
-                {
-                    CERT_STORE_PROV_INFO provInfo = { 0 };
-
-                    regInfo->dwOpenFlags = dwFlags;
-                    regInfo->memStore = memStore;
-                    regInfo->key = key;
-                    InitializeCriticalSectionEx(&regInfo->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO);
-                    regInfo->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": PWINE_REGSTOREINFO->cs");
-                    list_init(&regInfo->certsToDelete);
-                    list_init(&regInfo->crlsToDelete);
-                    list_init(&regInfo->ctlsToDelete);
-                    regInfo->key_modified_event = CreateEventW(NULL, FALSE, FALSE, NULL);
-                    if (RegNotifyChangeKeyValue(regInfo->key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
-                        regInfo->key_modified_event, TRUE))
-                        ERR("RegNotifyChangeKeyValue failed.\n");
-                    CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
-                    regInfo->dirty = FALSE;
-                    provInfo.cbSize = sizeof(provInfo);
-                    provInfo.cStoreProvFunc = ARRAY_SIZE(regProvFuncs);
-                    provInfo.rgpvStoreProvFunc = regProvFuncs;
-                    provInfo.hStoreProv = regInfo;
-                    store = CRYPT_ProvCreateStore(dwFlags, memStore, &provInfo);
-                    /* Reg store doesn't need crypto provider, so close it */
-                    if (hCryptProv &&
-                     !(dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG))
-                        CryptReleaseContext(hCryptProv, 0);
-                }
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                goto failed;
             }
+
+            if (!(regInfo = CryptMemAlloc(sizeof(*regInfo))))
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                goto failed;
+            }
+            regInfo->dwOpenFlags = dwFlags;
+            regInfo->memStore = memStore;
+            regInfo->key = key;
+            regInfo->key_modified_event = NULL;
+            if (!InitializeCriticalSectionEx(&regInfo->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO))
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                goto failed;
+            }
+            cs_initialized = TRUE;
+            regInfo->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": PWINE_REGSTOREINFO->cs");
+            list_init(&regInfo->certsToDelete);
+            list_init(&regInfo->crlsToDelete);
+            list_init(&regInfo->ctlsToDelete);
+            if (!(regInfo->key_modified_event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+                goto failed;
+            if (RegNotifyChangeKeyValue(regInfo->key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                regInfo->key_modified_event, TRUE))
+                ERR("RegNotifyChangeKeyValue failed.\n");
+            CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
+            regInfo->dirty = FALSE;
+            {
+                CERT_STORE_PROV_INFO provInfo = { 0 };
+
+                provInfo.cbSize = sizeof(provInfo);
+                provInfo.cStoreProvFunc = ARRAY_SIZE(regProvFuncs);
+                provInfo.rgpvStoreProvFunc = regProvFuncs;
+                provInfo.hStoreProv = regInfo;
+                store = CRYPT_ProvCreateStore(dwFlags, memStore, &provInfo);
+            }
+            /* Reg store doesn't need crypto provider, so close it */
+            if (hCryptProv && !(dwFlags & CERT_STORE_NO_CRYPT_RELEASE_FLAG))
+                CryptReleaseContext(hCryptProv, 0);
+            if (store)
+                goto done;
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+
+failed:
+            err = GetLastError();
+            if (regInfo)
+            {
+                if (regInfo->key_modified_event) CloseHandle(regInfo->key_modified_event);
+                if (cs_initialized)
+                {
+                    regInfo->cs.DebugInfo->Spare[0] = 0;
+                    DeleteCriticalSection(&regInfo->cs);
+                }
+                CryptMemFree(regInfo);
+            }
+            if (memStore) CertCloseStore(memStore, 0);
+            RegCloseKey(key);
+            SetLastError(err);
         }
+        else
+            SetLastError(rc);
     }
+done:
     TRACE("returning %p\n", store);
     return store;
 }
