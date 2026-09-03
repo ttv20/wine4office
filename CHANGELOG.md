@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Prevent Office startup crashes when certificate chains are built concurrently.
 - Speed up case-insensitive string comparisons in the default C locale.
 - Reduce CPU work while building DirectWrite font collections.
 - Reduce repeated directory scans during case-insensitive file lookup.
