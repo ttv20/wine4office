@@ -4740,7 +4740,14 @@ HRESULT create_font_collection(IDWriteFactory7 *factory, IDWriteFontFileEnumerat
     return hr;
 }
 
-static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collection, const struct fontface_desc *desc)
+struct recent_font_family
+{
+    WCHAR name[255];
+    UINT32 index;
+};
+
+static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collection, const struct fontface_desc *desc,
+        struct recent_font_family *recent)
 {
     struct dwrite_font_data *font_data;
     WCHAR familyW[255];
@@ -4760,7 +4767,11 @@ static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collectio
         return S_OK;
     }
 
-    index = collection_find_family(collection, familyW);
+    /* Font set faces from one family are normally consecutive. */
+    if (familyW[0] && recent->index != ~0u && !wcsicmp(recent->name, familyW))
+        index = recent->index;
+    else
+        index = collection_find_family(collection, familyW);
     if (index != ~0u)
         hr = fontfamily_add_font(collection->family_data[index], font_data);
     else
@@ -4783,6 +4794,14 @@ static HRESULT collection_add_font_entry(struct dwrite_fontcollection *collectio
 
     if (FAILED(hr))
         release_font_data(font_data);
+    else if (familyW[0])
+    {
+        if (index == ~0u) index = collection->count - 1;
+        lstrcpynW(recent->name, familyW, ARRAY_SIZE(recent->name));
+        recent->index = index;
+    }
+    else
+        recent->index = ~0u;
 
     return hr;
 }
@@ -4792,6 +4811,7 @@ HRESULT create_font_collection_from_set(IDWriteFactory7 *factory, IDWriteFontSet
 {
     struct dwrite_fontset *set = unsafe_impl_from_IDWriteFontSet(fontset);
     struct dwrite_fontcollection *collection;
+    struct recent_font_family recent = {.index = ~0u};
     HRESULT hr = S_OK;
     size_t i;
 
@@ -4831,7 +4851,7 @@ HRESULT create_font_collection_from_set(IDWriteFactory7 *factory, IDWriteFontSet
         desc.simulations = entry->simulations;
         desc.font_data = NULL;
 
-        if (FAILED(hr = collection_add_font_entry(collection, &desc)))
+        if (FAILED(hr = collection_add_font_entry(collection, &desc, &recent)))
             WARN("Failed to add font collection element, hr %#lx.\n", hr);
 
         IDWriteFontFileStream_Release(stream);

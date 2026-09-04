@@ -2039,7 +2039,7 @@ char* CDECL setlocale(int category, const char* locale)
     }
 
     if(locale[0] != 'C' || locale[1] != '\0')
-        initial_locale = FALSE;
+        InterlockedExchange((LONG *)&initial_locale, FALSE);
 
     if(data->locale_flags & LOCALE_THREAD)
     {
