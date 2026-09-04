@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse reconstructed PE images across Wine server restarts to reduce Office startup disk I/O.
 - Fix Excel startup crashes caused by certificate-store registry handling.
 - Prevent Office startup crashes when certificate chains are built concurrently.
 - Speed up case-insensitive string comparisons in the default C locale.
