@@ -383,8 +383,6 @@ POINT map_point_to_surface(struct wayland_surface *surface, POINT point);
 RECT map_rect_from_surface(struct wayland_surface *surface, RECT rect);
 POINT map_point_from_surface(struct wayland_surface *surface, POINT point);
 void wayland_client_surface_attach(struct wayland_client_surface *client, HWND toplevel, const RECT *rect);
-struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
-                                                     struct wayland_client_surface *client);
 void wayland_surface_ensure_contents(struct wayland_surface *surface);
 void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR title);
 void wayland_surface_assign_icon(struct wayland_surface *surface);

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Restore Excel worksheets and formula bars when using Vulkan on Wayland.
+- Prevent a Wayland window-restacking deadlock when resizing Excel.
 - Fix distorted rounded selection borders around PowerPoint slide thumbnails.
 - Report failed XML transformation checks without crashing the test suite.
 - Handle empty XML downloads safely and report stalled transformation output as an error.

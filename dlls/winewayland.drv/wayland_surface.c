@@ -982,24 +982,6 @@ static RECT wayland_surface_get_presentation_rect(struct wayland_surface *surfac
     return rect;
 }
 
-struct wl_surface *wayland_client_surface_get_parent(struct wayland_surface *surface,
-                                                     struct wayland_client_surface *client)
-{
-    HWND parent = NtUserGetAncestor(client->client.hwnd, GA_PARENT);
-
-    while (parent && parent != client->toplevel && parent != NtUserGetDesktopWindow())
-    {
-        struct wayland_win_data *data = wayland_win_data_get_nolock(parent);
-
-        if (data && data->client_surface && data->client_surface->wl_subsurface &&
-            data->client_surface->toplevel == client->toplevel)
-            return data->client_surface->wl_surface;
-        parent = NtUserGetAncestor(parent, GA_PARENT);
-    }
-
-    return surface->wl_surface;
-}
-
 /**********************************************************************
  *          wayland_surface_reconfigure_client
  *

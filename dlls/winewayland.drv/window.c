@@ -158,17 +158,58 @@ void wayland_win_data_release(struct wayland_win_data *data)
 
 static HWND *build_hwnd_list(HWND hwnd, BOOL children);
 
+struct client_stack_entry
+{
+    HWND hwnd;
+    unsigned int parent;
+};
+
+/* Collect both Z-order and ancestry before taking win_data_mutex. Entries
+ * contain handles, not driver pointers, since windows may disappear while
+ * collecting the snapshot. Index zero represents the group root. */
+static struct client_stack_entry *build_client_stack(HWND toplevel)
+{
+    struct client_stack_entry *stack;
+    HWND *list = build_hwnd_list(toplevel, TRUE), parent;
+    unsigned int count, i, j;
+
+    if (!list) return NULL;
+    for (count = 0; list[count] != HWND_BOTTOM; ++count) {}
+    if (!(stack = calloc((size_t)count + 2, sizeof(*stack))))
+    {
+        free(list);
+        return NULL;
+    }
+    stack[0].hwnd = toplevel;
+    for (i = 1; i <= count; ++i)
+    {
+        stack[i].hwnd = list[i - 1];
+        parent = NtUserGetAncestor(stack[i].hwnd, GA_PARENT);
+        /* The server enumerates parents before their descendants. Reject an
+         * entry whose ancestry changed out of this snapshot; a subsequent
+         * window update or presentation will rebuild the group. Requiring a
+         * preceding parent also bounds traversal even during reparenting. */
+        for (j = 0; j < i; ++j)
+            if (stack[j].hwnd == parent) break;
+        stack[i].parent = j;
+    }
+    stack[count + 1].hwnd = HWND_BOTTOM;
+    free(list);
+    return stack;
+}
+
 /* The caller holds win_data_mutex. Rebuild the GPU client hierarchy in
  * Win32 child Z-order. Client surfaces are Wayland siblings regardless of
  * their HWND ancestry, so creation or presentation order cannot determine
  * stacking. */
 static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
-                                                            const HWND *list)
+                                                            const struct client_stack_entry *stack)
 {
     struct wayland_win_data *data, *toplevel_data;
     struct wayland_surface *toplevel_surface;
     struct wayland_client_surface *client;
-    UINT i;
+    struct wl_surface *anchor;
+    UINT i, j;
 
     if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) ||
         !(toplevel_surface = toplevel_data->wayland_surface))
@@ -177,17 +218,28 @@ static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
     /* NtUserBuildHwndList returns descendants from top to bottom. Placing
      * each surface immediately above its attached ancestor in that order
      * leaves later (lower) siblings below the earlier (higher) ones. */
-    if (list)
+    if (stack)
     {
-        for (i = 0; list[i] != HWND_BOTTOM; ++i)
+        for (i = 1; stack[i].hwnd != HWND_BOTTOM; ++i)
         {
-            if (!(data = wayland_win_data_get_nolock(list[i])) ||
+            if (!(data = wayland_win_data_get_nolock(stack[i].hwnd)) ||
                 !(client = data->client_surface) || !client->wl_subsurface ||
                 client->toplevel != toplevel ||
                 client->parent_surface != toplevel_surface->wl_surface)
                 continue;
-            wl_subsurface_place_above(client->wl_subsurface,
-                                      wayland_client_surface_get_parent(toplevel_surface, client));
+            anchor = toplevel_surface->wl_surface;
+            for (j = stack[i].parent; j && stack[j].parent < j; j = stack[j].parent)
+            {
+                if (!(data = wayland_win_data_get_nolock(stack[j].hwnd)) ||
+                    !data->client_surface || !data->client_surface->wl_subsurface ||
+                    data->client_surface->toplevel != toplevel ||
+                    data->client_surface->parent_surface != toplevel_surface->wl_surface)
+                    continue;
+                anchor = data->client_surface->wl_surface;
+                break;
+            }
+            if (j && stack[j].parent >= j) continue;
+            wl_subsurface_place_above(client->wl_subsurface, anchor);
         }
     }
 
@@ -207,14 +259,14 @@ static void wayland_win_data_restack_client_surfaces_locked(HWND toplevel,
 static void wayland_win_data_restack_client_surfaces(HWND toplevel)
 {
     struct wayland_win_data *data;
-    HWND *list = build_hwnd_list(toplevel, TRUE);
+    struct client_stack_entry *stack = build_client_stack(toplevel);
 
     if ((data = wayland_win_data_get(toplevel)))
     {
-        wayland_win_data_restack_client_surfaces_locked(toplevel, list);
+        wayland_win_data_restack_client_surfaces_locked(toplevel, stack);
         wayland_win_data_release(data);
     }
-    free(list);
+    free(stack);
 }
 
 /* Keep all visible owner-relative popups
@@ -230,11 +282,11 @@ static void wayland_win_data_restack_owned_popups(HWND toplevel)
     struct wayland_win_data *data, *locked_data, *toplevel_data;
     struct wayland_surface *toplevel_surface, *popup;
     RECT intersection;
-    HWND *list = build_hwnd_list(toplevel, TRUE);
+    struct client_stack_entry *stack = build_client_stack(toplevel);
 
     if (!(locked_data = wayland_win_data_get(toplevel)))
     {
-        free(list);
+        free(stack);
         return;
     }
     if (!(toplevel_data = wayland_win_data_get_nolock(toplevel)) ||
@@ -266,11 +318,11 @@ static void wayland_win_data_restack_owned_popups(HWND toplevel)
 
     /* Rebuild clients even without popups. A newly attached ancestor client
      * must not cover child clients which were attached before it. */
-    wayland_win_data_restack_client_surfaces_locked(toplevel, list);
+    wayland_win_data_restack_client_surfaces_locked(toplevel, stack);
 
 done:
     wayland_win_data_release(locked_data);
-    free(list);
+    free(stack);
 }
 
 /* Called by window_surface_flush_done, after the window-surface mutex has
