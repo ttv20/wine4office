@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Handle empty XML downloads safely and report stalled transformation output as an error.
 - Handle XML allocation failures safely and release shared XML memory reliably across threads.
 - Speed up Office Click-to-Run manifest parsing and reduce MSXML heap churn.
 - Reuse reconstructed PE images across Wine server restarts to reduce Office startup disk I/O.

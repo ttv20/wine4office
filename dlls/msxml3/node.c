@@ -2687,8 +2687,13 @@ static HRESULT node_transform_write_to_stream(xsltStylesheetPtr style, xmlDocPtr
             ULONG written;
 
             hr = ISequentialStream_Write(stream, content + offset, chunk, &written);
-            if (FAILED(hr) || !written)
+            if (FAILED(hr))
                 break;
+            if (!written)
+            {
+                hr = E_FAIL;
+                break;
+            }
             offset += written;
         }
     }
@@ -2738,15 +2743,29 @@ static HRESULT import_loader_onDataAvailable(void *ctxt, char *ptr, DWORD len)
     xmlParserInputBufferPtr inputbuffer;
     struct import_buffer *buffer;
 
-    buffer = malloc(sizeof(*buffer));
+    if (!(buffer = malloc(sizeof(*buffer))))
+        return E_OUTOFMEMORY;
 
-    buffer->data = malloc(len);
-    memcpy(buffer->data, ptr, len);
+    buffer->data = NULL;
+    if (len)
+    {
+        if (!(buffer->data = malloc(len)))
+        {
+            free(buffer);
+            return E_OUTOFMEMORY;
+        }
+        memcpy(buffer->data, ptr, len);
+    }
     buffer->cur = 0;
     buffer->len = len;
 
     inputbuffer = xmlParserInputBufferCreateIO(import_loader_io_read, import_loader_io_close, buffer,
             XML_CHAR_ENCODING_NONE);
+    if (!inputbuffer)
+    {
+        import_loader_io_close(buffer);
+        return E_OUTOFMEMORY;
+    }
     *input = xmlNewIOInputStream(NULL, inputbuffer, XML_CHAR_ENCODING_NONE);
     if (!*input)
         xmlFreeParserInputBuffer(inputbuffer);

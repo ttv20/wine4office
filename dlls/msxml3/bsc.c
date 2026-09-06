@@ -217,7 +217,7 @@ static HRESULT WINAPI bsc_OnDataAvailable(
     do
     {
         hr = IStream_Read(pstgmed->pstm, buf, sizeof(buf), &read);
-        if(FAILED(hr))
+        if (FAILED(hr) || !read)
             break;
 
         if (read > ~(DWORD)0 - bsc->data_size)
