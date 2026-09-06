@@ -1124,7 +1124,7 @@ struct dom_parsed_node_block
 
 struct dom_parsed_pool
 {
-    unsigned int refcount;
+    LONG refcount;
     size_t name_count;
     struct list buckets[256];
     struct list node_blocks;
@@ -1226,7 +1226,7 @@ static struct domnode *domdoc_alloc_parsed_node(struct domdoc_properties *proper
     node = &block->nodes[block->used++];
     node->flags = DOMNODE_POOLED_ALLOCATION;
     node->parsed_pool = pool;
-    ++pool->refcount;
+    InterlockedIncrement(&pool->refcount);
     return node;
 }
 
@@ -1235,7 +1235,7 @@ static void dom_parsed_pool_release(struct dom_parsed_pool *pool)
     struct dom_parsed_name *entry, *next;
     struct dom_parsed_node_block *block, *block_next;
 
-    if (!pool || --pool->refcount)
+    if (!pool || InterlockedDecrement(&pool->refcount))
         return;
     for (size_t i = 0; i < ARRAY_SIZE(pool->buckets); ++i)
     {
@@ -4193,6 +4193,8 @@ static HRESULT WINAPI parse_content_handler_startElement(ISAXContentHandler *ifa
 
     parse_context_create_text_node(c, NODE_TEXT);
     parse_context_node_create(c, NODE_ELEMENT, qname, qname_len, uri, uri_len, c->root, &element);
+    if (c->status != S_OK)
+        return c->status;
     parse_context_append_child(c, c->node, element);
     c->node = element;
 

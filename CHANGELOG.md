@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Handle XML allocation failures safely and release shared XML memory reliably across threads.
 - Speed up Office Click-to-Run manifest parsing and reduce MSXML heap churn.
 - Speed up small Office gallery images rendered through Direct2D.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
