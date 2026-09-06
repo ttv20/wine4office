@@ -62,6 +62,86 @@ static enum d2d_geometry_aa_mode d2d_device_context_geometry_aa_mode(void)
     return d2d_geometry_aa_mode;
 }
 
+/* D2D devices created from the same DXGI device share its immediate context,
+ * including across factories. The registry lock is only used at device creation
+ * and destruction; draws use the per-device lock. */
+struct d2d_shared_device
+{
+    struct list entry;
+    IUnknown *identity;
+    unsigned int refcount;
+    CRITICAL_SECTION cs;
+    struct d2d_device_context *active_batch;
+};
+
+static struct list shared_devices = LIST_INIT(shared_devices);
+static SRWLOCK shared_devices_lock = SRWLOCK_INIT;
+
+static HRESULT d2d_shared_device_acquire(IDXGIDevice *device, struct d2d_shared_device **out)
+{
+    struct d2d_shared_device *shared;
+    IUnknown *identity;
+    HRESULT hr;
+
+    *out = NULL;
+    if (FAILED(hr = IDXGIDevice_QueryInterface(device, &IID_IUnknown, (void **)&identity)))
+        return hr;
+
+    AcquireSRWLockExclusive(&shared_devices_lock);
+    LIST_FOR_EACH_ENTRY(shared, &shared_devices, struct d2d_shared_device, entry)
+    {
+        if (shared->identity != identity)
+            continue;
+        ++shared->refcount;
+        *out = shared;
+        break;
+    }
+    if (!*out && (shared = calloc(1, sizeof(*shared))))
+    {
+        shared->identity = identity;
+        identity = NULL;
+        shared->refcount = 1;
+        InitializeCriticalSection(&shared->cs);
+        list_add_tail(&shared_devices, &shared->entry);
+        *out = shared;
+    }
+    ReleaseSRWLockExclusive(&shared_devices_lock);
+    if (identity) IUnknown_Release(identity);
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+
+static void d2d_shared_device_release(struct d2d_shared_device *shared)
+{
+    unsigned int refcount;
+
+    if (!shared)
+        return;
+    AcquireSRWLockExclusive(&shared_devices_lock);
+    if (!(refcount = --shared->refcount))
+        list_remove(&shared->entry);
+    ReleaseSRWLockExclusive(&shared_devices_lock);
+    if (!refcount)
+    {
+        DeleteCriticalSection(&shared->cs);
+        IUnknown_Release(shared->identity);
+        free(shared);
+    }
+}
+
+static void d2d_device_context_lock(struct d2d_device_context *context)
+{
+    if (context->cs)
+        EnterCriticalSection(context->cs);
+    EnterCriticalSection(&context->device->shared->cs);
+}
+
+static void d2d_device_context_unlock(struct d2d_device_context *context)
+{
+    LeaveCriticalSection(&context->device->shared->cs);
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
+}
+
 static void d2d_device_context_begin_batch(struct d2d_device_context *context);
 static void d2d_device_context_end_batch(struct d2d_device_context *context);
 
@@ -308,16 +388,14 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
 
-    if (render_target->cs)
-        EnterCriticalSection(render_target->cs);
+    d2d_device_context_lock(render_target);
     d2d_device_context_begin_batch(render_target);
 
     if (FAILED(hr = d2d_device_context_ensure_shape_resources(render_target, shape_type)))
     {
         WARN("Failed to create resources for shape type %#x, hr %#lx.\n", shape_type, hr);
         render_target->error.code = hr;
-        if (render_target->cs)
-            LeaveCriticalSection(render_target->cs);
+        d2d_device_context_unlock(render_target);
         return;
     }
 
@@ -397,8 +475,7 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         ID3D11DeviceContext1_Release(context);
         ID3DDeviceContextState_Release(prev_state);
     }
-    if (render_target->cs)
-        LeaveCriticalSection(render_target->cs);
+    d2d_device_context_unlock(render_target);
 }
 
 static void d2d_device_context_set_error(struct d2d_device_context *context, HRESULT code)
@@ -425,14 +502,14 @@ static void d2d_device_context_begin_batch(struct d2d_device_context *context)
             || context->target.type != D2D_TARGET_BITMAP)
         return;
 
-    if (context->device->active_batch && context->device->active_batch != context)
-        d2d_device_context_end_batch(context->device->active_batch);
+    if (context->device->shared->active_batch && context->device->shared->active_batch != context)
+        d2d_device_context_end_batch(context->device->shared->active_batch);
 
     ID3D11Device1_GetImmediateContext1(context->d3d_device, &context->batched_context);
     ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
             context->d3d_state, &context->batched_prev_state);
     context->batched_draw = TRUE;
-    context->device->active_batch = context;
+    context->device->shared->active_batch = context;
 }
 
 static HRESULT d2d_device_context_prepare_gpu_draw(struct d2d_device_context *context)
@@ -482,13 +559,14 @@ static void d2d_device_context_end_cpu_transaction(struct d2d_device_context *co
 
 static void d2d_device_context_end_batch(struct d2d_device_context *context)
 {
-    if (context->cs)
-        EnterCriticalSection(context->cs);
+    /* A handoff can end a batch belonging to another factory. Never acquire
+     * that factory's lock while holding the caller's factory/device locks. */
+    EnterCriticalSection(&context->device->shared->cs);
     if (!context->batched_draw)
         goto done;
 
-    if (context->device->active_batch == context)
-        context->device->active_batch = NULL;
+    if (context->device->shared->active_batch == context)
+        context->device->shared->active_batch = NULL;
     ID3D11DeviceContext1_SwapDeviceContextState(context->batched_context,
             context->batched_prev_state, NULL);
     ID3DDeviceContextState_Release(context->batched_prev_state);
@@ -498,16 +576,14 @@ static void d2d_device_context_end_batch(struct d2d_device_context *context)
     context->batched_draw = FALSE;
 
 done:
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
+    LeaveCriticalSection(&context->device->shared->cs);
 }
 
 static void d2d_device_context_flush_gpu(struct d2d_device_context *context)
 {
     ID3D11DeviceContext1 *d3d_context;
 
-    if (context->cs)
-        EnterCriticalSection(context->cs);
+    d2d_device_context_lock(context);
     if (context->batched_draw)
     {
         d3d_context = context->batched_context;
@@ -520,8 +596,7 @@ static void d2d_device_context_flush_gpu(struct d2d_device_context *context)
 
     ID3D11DeviceContext1_Flush(d3d_context);
     ID3D11DeviceContext1_Release(d3d_context);
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
+    d2d_device_context_unlock(context);
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
@@ -1257,8 +1332,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
         return;
     }
 
-    if (render_target->cs)
-        EnterCriticalSection(render_target->cs);
+    d2d_device_context_lock(render_target);
 
     if (FAILED(hr = d2d_device_context_update_vs_cb(render_target, &geometry->transform, stroke_width)))
     {
@@ -1390,8 +1464,7 @@ static void d2d_device_context_draw_geometry(struct d2d_device_context *render_t
     }
 
 done:
-    if (render_target->cs)
-        LeaveCriticalSection(render_target->cs);
+    d2d_device_context_unlock(render_target);
     d2d_outline_mesh_cleanup(&mesh);
 }
 
@@ -1774,8 +1847,7 @@ static void d2d_device_context_clear_coverage_target(struct d2d_device_context *
     ID3D11DeviceContext1 *d3d_context;
     float clear[4] = {0};
 
-    if (context->cs)
-        EnterCriticalSection(context->cs);
+    d2d_device_context_lock(context);
     d2d_device_context_begin_batch(context);
     if (context->batched_draw)
         d3d_context = context->batched_context;
@@ -1786,8 +1858,7 @@ static void d2d_device_context_clear_coverage_target(struct d2d_device_context *
 
     if (!context->batched_draw)
         ID3D11DeviceContext1_Release(d3d_context);
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
+    d2d_device_context_unlock(context);
 }
 
 struct d2d_analytic_vertex
@@ -2039,11 +2110,8 @@ static HRESULT d2d_device_context_draw_coverage_mesh(struct d2d_device_context *
             goto done;
     }
 
-    if (context->cs)
-    {
-        EnterCriticalSection(context->cs);
-        locked = TRUE;
-    }
+    d2d_device_context_lock(context);
+    locked = TRUE;
 
     if (FAILED(hr = d2d_device_context_update_vs_cb(context,
             &geometry->transform, fill ? 0.0f : stroke_width))
@@ -2178,7 +2246,7 @@ restore_state:
     }
 done:
     if (locked)
-        LeaveCriticalSection(context->cs);
+        d2d_device_context_unlock(context);
     free(analytic_triangles);
     free(analytic_curve_triangles);
     if (new_analytic_vb) ID3D11Buffer_Release(new_analytic_vb);
@@ -2691,8 +2759,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     if (FAILED(d2d_device_context_prepare_gpu_draw(render_target)))
         return;
 
-    if (render_target->cs)
-        EnterCriticalSection(render_target->cs);
+    d2d_device_context_lock(render_target);
 
     buffer_desc.Usage = D3D11_USAGE_DEFAULT;
     buffer_desc.CPUAccessFlags = 0;
@@ -2791,8 +2858,7 @@ static void d2d_device_context_fill_geometry(struct d2d_device_context *render_t
     }
 
 done:
-    if (render_target->cs)
-        LeaveCriticalSection(render_target->cs);
+    d2d_device_context_unlock(render_target);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_FillGeometry(ID2D1DeviceContext6 *iface,
@@ -3836,10 +3902,9 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
     /* Flush is the Direct2D/Direct3D interoperation boundary. Restore the
      * application's immediate-context state before returning control. A later
      * Direct2D draw in the same transaction starts a fresh batch lazily. */
-    if (context->cs)
-        EnterCriticalSection(context->cs);
-    if (context->device->active_batch)
-        d2d_device_context_end_batch(context->device->active_batch);
+    d2d_device_context_lock(context);
+    if (context->device->shared->active_batch)
+        d2d_device_context_end_batch(context->device->shared->active_batch);
     else
         d2d_device_context_end_batch(context);
 
@@ -3856,8 +3921,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
         }
 
     }
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
+    d2d_device_context_unlock(context);
 
     if (tag1)
         *tag1 = context->error.tag1;
@@ -4007,8 +4071,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
 
     /* Serialize constant-buffer updates with the shared immediate-context
      * state handoff performed by d2d_device_context_draw(). */
-    if (context->cs)
-        EnterCriticalSection(context->cs);
+    d2d_device_context_lock(context);
     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
 
     if (FAILED(hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)context->vs_cb,
@@ -4070,8 +4133,7 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
             context->vb, context->vb_stride, NULL, NULL);
 
 done:
-    if (context->cs)
-        LeaveCriticalSection(context->cs);
+    d2d_device_context_unlock(context);
 }
 
 static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *iface)
@@ -8373,6 +8435,7 @@ static ULONG WINAPI d2d_device_Release(ID2D1Device6 *iface)
 
     if (!refcount)
     {
+        d2d_shared_device_release(device->shared);
         IDXGIDevice_Release(device->dxgi_device);
         ID2D1Factory1_Release(device->factory);
         d2d_device_indexed_objects_clear(&device->shaders);
@@ -8633,6 +8696,9 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
     device->dxgi_device = dxgi_device;
     IDXGIDevice_AddRef(device->dxgi_device);
     device->allow_get_dxgi_device = allow_get_dxgi_device;
+
+    if (FAILED(hr = d2d_shared_device_acquire(dxgi_device, &device->shared)))
+        return hr;
 
     for (unsigned int i = 0; i < ARRAY_SIZE(shape_info); ++i)
     {

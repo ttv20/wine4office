@@ -18710,7 +18710,7 @@ static DWORD WINAPI d2d_batch_thread_func(void *param)
     return 0;
 }
 
-static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type)
+static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type, unsigned int device_mode)
 {
     static const D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f};
     static const D2D1_COLOR_F green = {0.0f, 1.0f, 0.0f, 1.0f};
@@ -18728,6 +18728,7 @@ static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type)
     struct d2d_batch_thread_args thread_args;
     ID2D1Bitmap1 *first_target = NULL, *second_target = NULL;
     ID2D1Device *d2d_device;
+    ID2D1Factory1 *second_factory;
     HANDLE thread;
     DWORD colour, wait;
     HRESULT hr;
@@ -18735,16 +18736,37 @@ static void test_d2d_batch_lifetime_(BOOL d3d11, D2D1_FACTORY_TYPE factory_type)
     if (!d3d11 || !init_test_context_(__LINE__, &ctx, TRUE, factory_type))
         return;
 
-    ID2D1DeviceContext_GetDevice(ctx.context, &d2d_device);
+    winetest_push_context("factory type %u, device mode %u", factory_type, device_mode);
+    if (device_mode)
+    {
+        if (device_mode == 2)
+        {
+            hr = D2D1CreateFactory(factory_type, &IID_ID2D1Factory1, NULL, (void **)&second_factory);
+            ok(hr == S_OK, "Failed to create second factory, hr %#lx.\n", hr);
+            if (FAILED(hr))
+                goto done;
+        }
+        else
+        {
+            second_factory = ctx.factory1;
+            ID2D1Factory1_AddRef(second_factory);
+        }
+        hr = ID2D1Factory1_CreateDevice(second_factory, ctx.device, &d2d_device);
+        ID2D1Factory1_Release(second_factory);
+        ok(hr == S_OK, "Failed to create second D2D device, hr %#lx.\n", hr);
+        if (FAILED(hr))
+            goto done;
+    }
+    else
+    {
+        ID2D1DeviceContext_GetDevice(ctx.context, &d2d_device);
+    }
     hr = ID2D1Device_CreateDeviceContext(d2d_device,
             D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &second_context);
     ok(hr == S_OK, "Failed to create second D2D context, hr %#lx.\n", hr);
     ID2D1Device_Release(d2d_device);
     if (FAILED(hr))
-    {
-        release_test_context(&ctx);
-        return;
-    }
+        goto done;
 
     hr = create_atlas_target_bitmap(ctx.context, 16, 16, &first_target);
     ok(hr == S_OK, "Failed to create first batch target, hr %#lx.\n", hr);
@@ -18866,12 +18888,20 @@ done:
     if (first_target)
         ID2D1Bitmap1_Release(first_target);
     release_test_context(&ctx);
+    winetest_pop_context();
 }
 
 static void test_d2d_batch_lifetime(BOOL d3d11)
 {
-    test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_SINGLE_THREADED);
-    test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_MULTI_THREADED);
+    unsigned int i;
+
+    /* Distinct D2D devices, even from different factories, can share the
+     * same DXGI device and D3D immediate context. */
+    for (i = 0; i < 3; ++i)
+    {
+        test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_SINGLE_THREADED, i);
+        test_d2d_batch_lifetime_(d3d11, D2D1_FACTORY_TYPE_MULTI_THREADED, i);
+    }
 }
 
 static void test_d2d_atlas_benchmark(BOOL d3d11)

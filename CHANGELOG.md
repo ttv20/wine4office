@@ -11,6 +11,7 @@
 - Reduce Office startup file-system work by avoiding recursive App-V VFS lookups.
 - Speed up small Office gallery images rendered through Direct2D.
 - Speed up Direct2D bitmap-atlas rendering in Office galleries.
+- Preserve graphics state when multiple Direct2D devices share a Direct3D device.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
 - Reduce message-loop server calls after retrieving queued messages.
