@@ -5237,6 +5237,10 @@ static void test_rounded_rectangle_geometry(BOOL d3d11)
     ID2D1RoundedRectangleGeometry *geometry;
     D2D1_ROUNDED_RECT rect, rect2;
     struct d2d1_test_context ctx;
+    ID2D1PathGeometry *path;
+    ID2D1GeometrySink *sink;
+    D2D1_RECT_F bounds;
+    BOOL match;
     HRESULT hr;
 
     if (!init_test_context(&ctx, d3d11))
@@ -5273,6 +5277,30 @@ static void test_rounded_rectangle_geometry(BOOL d3d11)
     ID2D1RoundedRectangleGeometry_GetRoundedRect(geometry, &rect2);
     ok(!memcmp(&rect, &rect2, sizeof(rect)), "Got unexpected rectangle {%.8e, %.8e, %.8e, %.8e, %.8e, %.8e}.\n",
             rect2.rect.left, rect2.rect.top, rect2.rect.right, rect2.rect.bottom, rect2.radiusX, rect2.radiusY);
+    ID2D1RoundedRectangleGeometry_Release(geometry);
+
+    /* PowerPoint uses rounded rectangle geometry groups for thumbnail selection frames. */
+    set_rounded_rect(&rect, 4.0f, 4.0f, 198.0f, 116.0f, 7.0f, 7.0f);
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &rect, &geometry);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &path);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_Open(path, &sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1RoundedRectangleGeometry_Simplify(geometry,
+            D2D1_GEOMETRY_SIMPLIFICATION_OPTION_CUBICS_AND_LINES, NULL, 0.0f,
+            (ID2D1SimplifiedGeometrySink *)sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+    hr = ID2D1PathGeometry_GetBounds(path, NULL, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    match = compare_rect(&bounds, 4.0f, 4.0f, 198.0f, 116.0f, 1);
+    ok(match, "Got unexpected simplified bounds {%.8e, %.8e, %.8e, %.8e}.\n",
+            bounds.left, bounds.top, bounds.right, bounds.bottom);
+    ID2D1PathGeometry_Release(path);
     ID2D1RoundedRectangleGeometry_Release(geometry);
 
     release_test_context(&ctx);
@@ -12027,12 +12055,17 @@ static void test_colour_space(BOOL d3d11)
 static void test_geometry_group(BOOL d3d11)
 {
     ID2D1TransformedGeometry *transformed_geometry;
+    ID2D1SolidColorBrush *brush;
+    struct resource_readback rb;
+    D2D1_COLOR_F color;
+    unsigned int mode, x, y, outside;
     struct d2d1_test_context ctx;
     ID2D1Geometry *geometries[2];
     ID2D1GeometryGroup *group;
     D2D1_MATRIX_3X2_F matrix;
     ID2D1PathGeometry *path;
     ID2D1GeometrySink *sink;
+    D2D1_ROUNDED_RECT rounded_rect;
     D2D1_POINT_2F point;
     D2D1_RECT_F rect;
     HRESULT hr;
@@ -12072,6 +12105,62 @@ static void test_geometry_group(BOOL d3d11)
 
     ID2D1Geometry_Release(geometries[0]);
     ID2D1Geometry_Release(geometries[1]);
+
+    set_rounded_rect(&rounded_rect, 4.0f, 4.0f, 198.0f, 116.0f, 7.0f, 7.0f);
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &rounded_rect,
+            (ID2D1RoundedRectangleGeometry **)&geometries[0]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Factory_CreateGeometryGroup(ctx.factory, D2D1_FILL_MODE_ALTERNATE, geometries, 1, &group);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1GeometryGroup_GetBounds(group, NULL, &rect);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    match = compare_rect(&rect, 4.0f, 4.0f, 198.0f, 116.0f, 0);
+    ok(match, "Got unexpected rounded rectangle group bounds {%.8e, %.8e, %.8e, %.8e}.\n",
+            rect.left, rect.top, rect.right, rect.bottom);
+    ID2D1GeometryGroup_Release(group);
+
+    set_rounded_rect(&rounded_rect, 7.0f, 7.0f, 195.0f, 113.0f, 4.0f, 4.0f);
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &rounded_rect,
+            (ID2D1RoundedRectangleGeometry **)&geometries[1]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Factory_CreateGeometryGroup(ctx.factory, D2D1_FILL_MODE_ALTERNATE, geometries, 2, &group);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    set_color(&color, 1.0f, 0.0f, 0.0f, 1.0f);
+    hr = ID2D1RenderTarget_CreateSolidColorBrush(ctx.rt, &color, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1RenderTarget_SetDpi(ctx.rt, 96.0f, 96.0f);
+    for (mode = D2D1_ANTIALIAS_MODE_PER_PRIMITIVE; mode <= D2D1_ANTIALIAS_MODE_ALIASED; ++mode)
+    {
+        ID2D1RenderTarget_SetAntialiasMode(ctx.rt, mode);
+        ID2D1RenderTarget_BeginDraw(ctx.rt);
+        ID2D1RenderTarget_Clear(ctx.rt, NULL);
+        ID2D1RenderTarget_FillGeometry(ctx.rt, (ID2D1Geometry *)group, (ID2D1Brush *)brush, NULL);
+        hr = ID2D1RenderTarget_EndDraw(ctx.rt, NULL, NULL);
+        ok(hr == S_OK, "Mode %u: got unexpected hr %#lx.\n", mode, hr);
+        get_surface_readback(&ctx, &rb);
+        outside = 0;
+        for (y = 0; y < 120; ++y)
+            for (x = 0; x < 202; ++x)
+                if ((x < 4 || x >= 198 || y < 4 || y >= 116)
+                        && (get_readback_colour(&rb, x, y) & 0x00ffffff))
+                    ++outside;
+        ok(!outside, "Mode %u: %u coloured pixels outside the frame.\n", mode, outside);
+        ok((get_readback_colour(&rb, 100, 5) & 0x00ffffff) == 0x00ff0000,
+                "Mode %u: missing top edge.\n", mode);
+        ok((get_readback_colour(&rb, 100, 114) & 0x00ffffff) == 0x00ff0000,
+                "Mode %u: missing bottom edge.\n", mode);
+        ok((get_readback_colour(&rb, 5, 60) & 0x00ffffff) == 0x00ff0000,
+                "Mode %u: missing left edge.\n", mode);
+        ok((get_readback_colour(&rb, 196, 60) & 0x00ffffff) == 0x00ff0000,
+                "Mode %u: missing right edge.\n", mode);
+        ok(!(get_readback_colour(&rb, 100, 60) & 0x00ffffff),
+                "Mode %u: the frame interior was filled.\n", mode);
+        release_resource_readback(&rb);
+    }
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1GeometryGroup_Release(group);
+    ID2D1Geometry_Release(geometries[1]);
+    ID2D1Geometry_Release(geometries[0]);
 
     /* Empty path. */
     hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &path);
@@ -20956,6 +21045,12 @@ START_TEST(d2d1)
     {
         test_draw_geometry(FALSE);
         test_draw_geometry(TRUE);
+        return;
+    }
+    if (getenv("WINE_D2D1_ROUNDED_RECTANGLE_ONLY"))
+    {
+        test_rounded_rectangle_geometry(FALSE);
+        test_geometry_group(FALSE);
         return;
     }
 

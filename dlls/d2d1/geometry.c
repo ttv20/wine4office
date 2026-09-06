@@ -6423,25 +6423,25 @@ static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_Simplify(ID2D1Ro
 
     d2d_ellipse_to_segments(&ellipse, &start_point, segments);
 
-    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.bottom + r->radiusY);
+    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.top + r->radiusY);
     d2d_point_translate(&start_point, p.x, p.y);
     d2d_bezier_segment_translate(&segments[0], p.x, p.y);
-    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.bottom + r->radiusY);
+    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.top + r->radiusY);
     d2d_bezier_segment_translate(&segments[1], p.x, p.y);
-    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.top - r->radiusY);
+    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.bottom - r->radiusY);
     d2d_bezier_segment_translate(&segments[2], p.x, p.y);
-    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.top - r->radiusY);
+    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.bottom - r->radiusY);
     d2d_bezier_segment_translate(&segments[3], p.x, p.y);
 
     ret = d2d_figure_begin(&figure, start_point, D2D1_FIGURE_BEGIN_FILLED);
     ret = ret && d2d_figure_add_beziers(&figure, &segments[0], 1);
-    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.bottom);
+    d2d_point_set(&p, r->rect.right - r->radiusX, r->rect.top);
     ret = ret && d2d_figure_add_lines(&figure, &p, 1);
     ret = ret && d2d_figure_add_beziers(&figure, &segments[1], 1);
-    d2d_point_set(&p, r->rect.right, r->rect.top - r->radiusY);
+    d2d_point_set(&p, r->rect.right, r->rect.bottom - r->radiusY);
     ret = ret && d2d_figure_add_lines(&figure, &p, 1);
     ret = ret && d2d_figure_add_beziers(&figure, &segments[2], 1);
-    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.top);
+    d2d_point_set(&p, r->rect.left + r->radiusX, r->rect.bottom);
     ret = ret && d2d_figure_add_lines(&figure, &p, 1);
     ret = ret && d2d_figure_add_beziers(&figure, &segments[3], 1);
     if (!ret)
@@ -6568,18 +6568,18 @@ static void d2d_rounded_rectangle_geometry_stream(struct d2d_geometry *geometry,
 
     arcs[0].size.width = r->radiusX;
     arcs[0].size.height = r->radiusY;
-    arcs[0].rotationAngle = 90.0f;
+    arcs[0].rotationAngle = 0.0f;
     arcs[0].sweepDirection = D2D1_SWEEP_DIRECTION_CLOCKWISE;
     arcs[0].arcSize = D2D1_ARC_SIZE_SMALL;
     arcs[1] = arcs[2] = arcs[3] = arcs[0];
 
-    d2d_point_set(&points[0], r->rect.left, r->rect.top - r->radiusY);
+    d2d_point_set(&points[0], r->rect.left, r->rect.top + r->radiusY);
     d2d_point_set(&points[1], r->rect.right - r->radiusX, r->rect.top);
     d2d_point_set(&points[2], r->rect.right, r->rect.bottom - r->radiusY);
-    d2d_point_set(&points[3], r->rect.left - r->radiusX, r->rect.bottom);
+    d2d_point_set(&points[3], r->rect.left + r->radiusX, r->rect.bottom);
 
-    d2d_point_set(&arcs[0].point, r->rect.left - r->radiusX, r->rect.top);
-    d2d_point_set(&arcs[1].point, r->rect.right, r->rect.top - r->radiusY);
+    d2d_point_set(&arcs[0].point, r->rect.left + r->radiusX, r->rect.top);
+    d2d_point_set(&arcs[1].point, r->rect.right, r->rect.top + r->radiusY);
     d2d_point_set(&arcs[2].point, r->rect.right - r->radiusX, r->rect.bottom);
     d2d_point_set(&arcs[3].point, r->rect.left, r->rect.bottom - r->radiusY);
 
