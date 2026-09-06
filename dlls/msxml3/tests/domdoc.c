@@ -14209,67 +14209,92 @@ static void check_dynamic_name_result(BSTR result)
     static const char *const names[] = {"alpha", "beta"};
     static const char *const qnames[] = {"o:alpha", "o:beta"};
     static const char *const values[] = {"one", "two"};
-    IXMLDOMNamedNodeMap *attributes;
+    IXMLDOMNamedNodeMap *attributes = NULL;
     IXMLDOMDocument *doc;
-    IXMLDOMNodeList *children;
-    IXMLDOMElement *root;
-    IXMLDOMNode *node, *attr;
+    IXMLDOMNodeList *children = NULL;
+    IXMLDOMElement *root = NULL;
+    IXMLDOMNode *node = NULL, *attr = NULL;
     VARIANT_BOOL b;
     LONG len, i;
     HRESULT hr;
-    BSTR str;
+    BSTR str = NULL;
 
     doc = create_document(&IID_IXMLDOMDocument);
     hr = IXMLDOMDocument_loadXML(doc, result, &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load transform result %s.\n", wine_dbgstr_w(result));
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
 
     hr = IXMLDOMDocument_get_documentElement(doc, &root);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr != S_OK || !root) goto done;
     hr = IXMLDOMElement_get_childNodes(root, &children);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr != S_OK || !children) goto done;
     hr = IXMLDOMNodeList_get_length(children, &len);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (hr != S_OK) goto done;
     ok(len == ARRAY_SIZE(names), "Got %ld child nodes.\n", len);
 
     for (i = 0; i < len && i < ARRAY_SIZE(names); ++i)
     {
         hr = IXMLDOMNodeList_get_item(children, i, &node);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
+        if (hr != S_OK || !node) goto done;
 
         hr = IXMLDOMNode_get_baseName(node, &str);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(str, _bstr_(names[i])), "%ld: Got base name %s.\n", i, wine_dbgstr_w(str));
+        if (hr != S_OK) goto done;
+        ok(str && !lstrcmpW(str, _bstr_(names[i])), "%ld: Got base name %s.\n", i, wine_dbgstr_w(str));
         SysFreeString(str);
+        str = NULL;
         hr = IXMLDOMNode_get_namespaceURI(node, &str);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(str, L"urn:out"), "%ld: Got namespace URI %s.\n", i, wine_dbgstr_w(str));
+        if (hr != S_OK) goto done;
+        ok(str && !lstrcmpW(str, L"urn:out"), "%ld: Got namespace URI %s.\n", i, wine_dbgstr_w(str));
         SysFreeString(str);
+        str = NULL;
 
         hr = IXMLDOMNode_get_attributes(node, &attributes);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
+        if (hr != S_OK || !attributes) goto done;
         hr = IXMLDOMNamedNodeMap_getNamedItem(attributes, _bstr_(qnames[i]), &attr);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
+        if (hr != S_OK || !attr) goto done;
         hr = IXMLDOMNode_get_baseName(attr, &str);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(str, _bstr_(names[i])), "%ld: Got attribute base name %s.\n", i, wine_dbgstr_w(str));
+        if (hr != S_OK) goto done;
+        ok(str && !lstrcmpW(str, _bstr_(names[i])), "%ld: Got attribute base name %s.\n", i, wine_dbgstr_w(str));
         SysFreeString(str);
+        str = NULL;
         hr = IXMLDOMNode_get_namespaceURI(attr, &str);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(str, L"urn:out"), "%ld: Got attribute namespace URI %s.\n", i, wine_dbgstr_w(str));
+        if (hr != S_OK) goto done;
+        ok(str && !lstrcmpW(str, L"urn:out"), "%ld: Got attribute namespace URI %s.\n", i, wine_dbgstr_w(str));
         SysFreeString(str);
+        str = NULL;
         hr = IXMLDOMNode_get_text(attr, &str);
         ok(hr == S_OK, "%ld: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(str, _bstr_(values[i])), "%ld: Got attribute value %s.\n", i, wine_dbgstr_w(str));
+        if (hr != S_OK) goto done;
+        ok(str && !lstrcmpW(str, _bstr_(values[i])), "%ld: Got attribute value %s.\n", i, wine_dbgstr_w(str));
         SysFreeString(str);
+        str = NULL;
 
         IXMLDOMNode_Release(attr);
+        attr = NULL;
         IXMLDOMNamedNodeMap_Release(attributes);
+        attributes = NULL;
         IXMLDOMNode_Release(node);
+        node = NULL;
     }
 
-    IXMLDOMNodeList_Release(children);
-    IXMLDOMElement_Release(root);
+done:
+    SysFreeString(str);
+    if (attr) IXMLDOMNode_Release(attr);
+    if (attributes) IXMLDOMNamedNodeMap_Release(attributes);
+    if (node) IXMLDOMNode_Release(node);
+    if (children) IXMLDOMNodeList_Release(children);
+    if (root) IXMLDOMElement_Release(root);
     IXMLDOMDocument_Release(doc);
 }
 
@@ -14310,22 +14335,27 @@ static void test_xsltext(void)
     hr = IXMLDOMDocument_loadXML(doc, _bstr_(dynamic_name_xsl), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load stylesheet.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
     hr = IXMLDOMDocument_loadXML(doc2, _bstr_(dynamic_name_doc), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load source document.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
 
+    ret = NULL;
     hr = IXMLDOMDocument_transformNode(doc2, (IXMLDOMNode*)doc, &ret);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
-    check_dynamic_name_result(ret);
+    if (hr == S_OK) check_dynamic_name_result(ret);
     SysFreeString(ret);
 
     /* AVT evaluation failure after a successful dynamic name */
     hr = IXMLDOMDocument_loadXML(doc, _bstr_(invalid_dynamic_name_xsl), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load stylesheet.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
     hr = IXMLDOMDocument_loadXML(doc2, _bstr_(invalid_dynamic_name_doc), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load source document.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
 
     ret = NULL;
     hr = IXMLDOMDocument_transformNode(doc2, (IXMLDOMNode *)doc, &ret);
@@ -14338,19 +14368,24 @@ static void test_xsltext(void)
     hr = IXMLDOMDocument_loadXML(doc, _bstr_(xpath_cache_xsl), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load stylesheet.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
     hr = IXMLDOMDocument_loadXML(doc2, _bstr_(xpath_cache_doc), &b);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_TRUE, "Failed to load source document.\n");
+    if (hr != S_OK || b != VARIANT_TRUE) goto done;
 
     for (i = 0; i < 16; ++i)
     {
+        ret = NULL;
         hr = IXMLDOMDocument_transformNode(doc2, (IXMLDOMNode *)doc, &ret);
         ok(hr == S_OK, "%u: Unexpected hr %#lx.\n", i, hr);
-        ok(!lstrcmpW(ret, L"p-aardvark:8;p-alpha:9;p-beta:10;|global|3|false"),
-                "%u: Transform result %s.\n", i, wine_dbgstr_w(ret));
+        if (hr == S_OK)
+            ok(ret && !lstrcmpW(ret, L"p-aardvark:8;p-alpha:9;p-beta:10;|global|3|false"),
+                    "%u: Transform result %s.\n", i, wine_dbgstr_w(ret));
         SysFreeString(ret);
     }
 
+done:
     IXMLDOMDocument_Release(doc2);
     IXMLDOMDocument_Release(doc);
     free_bstrs();

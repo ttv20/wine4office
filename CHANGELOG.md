@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report failed XML transformation checks without crashing the test suite.
 - Reuse reconstructed PE images across Wine server restarts to reduce Office startup disk I/O.
 - Fix Excel startup crashes caused by certificate-store registry handling.
 - Prevent Office startup crashes when certificate chains are built concurrently.
