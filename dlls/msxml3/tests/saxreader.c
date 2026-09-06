@@ -6457,6 +6457,69 @@ static void test_saxreader_max_element_depth(void)
     ISAXXMLReader_Release(reader);
 }
 
+static void test_saxreader_name_parsing(void)
+{
+    const struct msxmlsupported_data_t *table = reader_support_data;
+    ISAXXMLReader *reader;
+    IStream *stream;
+    VARIANT input;
+    char *xml, *ptr;
+    HRESULT hr;
+    unsigned int i;
+
+    xml = malloc(128 * 1024);
+    ok(!!xml, "Failed to allocate test buffer.\n");
+    if (!xml)
+        return;
+
+    while (table->clsid)
+    {
+        if (!is_clsid_supported(table->clsid, reader_support_data))
+        {
+            ++table;
+            continue;
+        }
+
+        hr = CoCreateInstance(table->clsid, NULL, CLSCTX_INPROC_SERVER,
+                &IID_ISAXXMLReader, (void **)&reader);
+        ok(hr == S_OK, "%s: Unexpected hr %#lx.\n", table->name, hr);
+
+        ptr = xml;
+        ptr += sprintf(ptr, "<root>");
+        memset(ptr, ' ', 4084);
+        ptr += 4084;
+        ptr += sprintf(ptr, "<p:boundary xmlns:p=\"urn:test\"></p:boundary></root>");
+        stream = create_test_stream(xml, ptr - xml);
+        V_VT(&input) = VT_UNKNOWN;
+        V_UNKNOWN(&input) = (IUnknown *)stream;
+        hr = ISAXXMLReader_parse(reader, input);
+        ok(hr == S_OK, "%s: Chunk-boundary name parse failed, hr %#lx.\n", table->name, hr);
+        IStream_Release(stream);
+
+        ptr = xml;
+        ptr += sprintf(ptr, "<root>");
+        for (i = 0; i < 4105; ++i)
+            ptr += sprintf(ptr, "<n%u></n%u>", i, i);
+        ptr += sprintf(ptr, "</root>");
+        stream = create_test_stream(xml, ptr - xml);
+        V_UNKNOWN(&input) = (IUnknown *)stream;
+        hr = ISAXXMLReader_parse(reader, input);
+        ok(hr == S_OK, "%s: Name-pool limit parse failed, hr %#lx.\n", table->name, hr);
+        IStream_Release(stream);
+
+        stream = create_test_stream("<root><child></chilx></root>", -1);
+        V_UNKNOWN(&input) = (IUnknown *)stream;
+        hr = ISAXXMLReader_parse(reader, input);
+        ok(FAILED(hr), "%s: Mismatched end tag unexpectedly succeeded.\n", table->name);
+        IStream_Release(stream);
+
+        ISAXXMLReader_Release(reader);
+        ++table;
+    }
+
+    free(xml);
+}
+
 START_TEST(saxreader)
 {
     ISAXXMLReader *reader;
@@ -6495,6 +6558,7 @@ START_TEST(saxreader)
     test_saxreader_dtd();
     test_saxreader_parse_input();
     test_saxreader_max_element_depth();
+    test_saxreader_name_parsing();
 
     /* MXXMLWriter tests */
     get_class_support_data(mxwriter_support_data, &IID_IMXWriter);

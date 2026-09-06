@@ -1103,15 +1103,178 @@ static void domnode_insert_attribute(struct domnode *parent, struct domnode *nod
     domnode_set_owner(node, parent);
 }
 
-HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const WCHAR *uri, int uri_len,
-        struct domnode *owner, struct domnode **node)
+#define DOM_PARSED_NAME_POOL_LIMIT 4096
+#define DOM_PARSED_NODE_BLOCK_MIN_SIZE 8
+#define DOM_PARSED_NODE_BLOCK_MAX_SIZE 256
+
+struct dom_parsed_name
+{
+    struct list entry;
+    BSTR value;
+    UINT hash;
+};
+
+struct dom_parsed_node_block
+{
+    struct list entry;
+    size_t used;
+    size_t size;
+    struct domnode nodes[];
+};
+
+struct dom_parsed_pool
+{
+    LONG refcount;
+    size_t name_count;
+    struct list buckets[256];
+    struct list node_blocks;
+    struct dom_parsed_name *recent_qname;
+    struct dom_parsed_name *recent_uri;
+};
+
+static UINT dom_parsed_name_hash(const WCHAR *name, int len)
+{
+    UINT hash = 2166136261u;
+
+    for (int i = 0; i < len; ++i)
+        hash = (hash ^ name[i]) * 16777619u;
+    return hash;
+}
+
+static struct dom_parsed_pool *domdoc_get_parsed_pool(struct domdoc_properties *properties)
+{
+    struct dom_parsed_pool *pool = properties->parsed_pool;
+
+    if (!pool)
+    {
+        if (!(pool = calloc(1, sizeof(*pool))))
+            return NULL;
+        pool->refcount = 1;
+        for (size_t i = 0; i < ARRAY_SIZE(pool->buckets); ++i)
+            list_init(&pool->buckets[i]);
+        list_init(&pool->node_blocks);
+        properties->parsed_pool = pool;
+    }
+    return pool;
+}
+
+static BSTR domdoc_intern_parsed_name(struct domdoc_properties *properties,
+        const WCHAR *name, int len, bool is_uri)
+{
+    struct dom_parsed_pool *pool;
+    struct dom_parsed_name **recent;
+    struct dom_parsed_name *entry;
+    UINT hash;
+
+    if (!(pool = domdoc_get_parsed_pool(properties)))
+        return NULL;
+
+    recent = is_uri ? &pool->recent_uri : &pool->recent_qname;
+    entry = *recent;
+    if (entry && SysStringLen(entry->value) == len
+            && !memcmp(entry->value, name, len * sizeof(*name)))
+        return entry->value;
+
+    hash = dom_parsed_name_hash(name, len);
+    LIST_FOR_EACH_ENTRY(entry, &pool->buckets[hash % ARRAY_SIZE(pool->buckets)],
+            struct dom_parsed_name, entry)
+    {
+        if (entry->hash == hash && SysStringLen(entry->value) == len
+                && !memcmp(entry->value, name, len * sizeof(*name)))
+        {
+            *recent = entry;
+            return entry->value;
+        }
+    }
+
+    if (pool->name_count >= DOM_PARSED_NAME_POOL_LIMIT || !(entry = malloc(sizeof(*entry))))
+        return NULL;
+    if (!(entry->value = SysAllocStringLen(name, len)))
+    {
+        free(entry);
+        return NULL;
+    }
+    entry->hash = hash;
+    list_add_head(&pool->buckets[hash % ARRAY_SIZE(pool->buckets)], &entry->entry);
+    ++pool->name_count;
+    *recent = entry;
+    return entry->value;
+}
+
+static struct domnode *domdoc_alloc_parsed_node(struct domdoc_properties *properties)
+{
+    struct dom_parsed_node_block *block;
+    struct dom_parsed_pool *pool;
+    struct domnode *node;
+    size_t size;
+
+    if (!(pool = domdoc_get_parsed_pool(properties)))
+        return NULL;
+    block = list_empty(&pool->node_blocks) ? NULL
+            : LIST_ENTRY(list_head(&pool->node_blocks), struct dom_parsed_node_block, entry);
+    if (!block || block->used == block->size)
+    {
+        size = block ? min(block->size * 2, (size_t)DOM_PARSED_NODE_BLOCK_MAX_SIZE)
+                : DOM_PARSED_NODE_BLOCK_MIN_SIZE;
+        if (!(block = calloc(1, offsetof(struct dom_parsed_node_block, nodes)
+                + size * sizeof(*block->nodes))))
+            return NULL;
+        block->size = size;
+        list_add_head(&pool->node_blocks, &block->entry);
+    }
+
+    node = &block->nodes[block->used++];
+    node->flags = DOMNODE_POOLED_ALLOCATION;
+    node->parsed_pool = pool;
+    InterlockedIncrement(&pool->refcount);
+    return node;
+}
+
+static void dom_parsed_pool_release(struct dom_parsed_pool *pool)
+{
+    struct dom_parsed_name *entry, *next;
+    struct dom_parsed_node_block *block, *block_next;
+
+    if (!pool || InterlockedDecrement(&pool->refcount))
+        return;
+    for (size_t i = 0; i < ARRAY_SIZE(pool->buckets); ++i)
+    {
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &pool->buckets[i], struct dom_parsed_name, entry)
+        {
+            list_remove(&entry->entry);
+            SysFreeString(entry->value);
+            free(entry);
+        }
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(block, block_next, &pool->node_blocks,
+            struct dom_parsed_node_block, entry)
+    {
+        list_remove(&block->entry);
+        free(block);
+    }
+    free(pool);
+}
+
+static void domdoc_free_parsed_pool(struct domdoc_properties *properties)
+{
+    dom_parsed_pool_release(properties->parsed_pool);
+    properties->parsed_pool = NULL;
+}
+
+static HRESULT domnode_create_internal(DOMNodeType type, const WCHAR *name, int name_len,
+        const WCHAR *uri, int uri_len, struct domnode *owner, bool validate_name, bool parsed,
+        struct domnode **node)
 {
     struct domnode *object, *xmlns_xml;
     WCHAR *p;
 
     *node = NULL;
 
-    if (!(object = calloc(1, sizeof(*object))))
+    if (parsed && type != NODE_DOCUMENT_TYPE)
+        object = domdoc_alloc_parsed_node(owner->properties);
+    else
+        object = calloc(1, sizeof(*object));
+    if (!object)
         return E_OUTOFMEMORY;
 
     list_init(&object->entry);
@@ -1124,10 +1287,26 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
     if (owner)
         list_add_tail(&owner->owned, &object->owner_entry);
 
-    object->qname = SysAllocStringLen(name, name_len);
+    /* Text node names are exposed as the constant "#text" and XPath treats
+     * their internal name as empty. Avoid an otherwise unused empty BSTR for
+     * every parsed text node. */
+    if (parsed && (type == NODE_ELEMENT || type == NODE_ATTRIBUTE))
+    {
+        object->qname = domdoc_intern_parsed_name(owner->properties, name, name_len, false);
+        if (object->qname)
+            object->flags |= DOMNODE_POOLED_QNAME;
+    }
+    if (!object->qname && (type != NODE_TEXT || name_len))
+    {
+        if (!(object->qname = SysAllocStringLen(name, name_len)))
+        {
+            domnode_destroy_tree(object);
+            return E_OUTOFMEMORY;
+        }
+    }
     if (type == NODE_ELEMENT || type == NODE_ATTRIBUTE)
     {
-        if (!parser_is_valid_qualified_name(object->qname))
+        if (validate_name && !parser_is_valid_qualified_name(object->qname))
         {
             domnode_destroy_tree(object);
             return E_FAIL;
@@ -1150,7 +1329,13 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
 
     if (uri_len)
     {
-        if (!(object->uri = SysAllocStringLen(uri, uri_len)))
+        if (parsed)
+        {
+            object->uri = domdoc_intern_parsed_name(owner->properties, uri, uri_len, true);
+            if (object->uri)
+                object->flags |= DOMNODE_POOLED_URI;
+        }
+        if (!object->uri && !(object->uri = SysAllocStringLen(uri, uri_len)))
         {
             domnode_destroy_tree(object);
             return E_OUTOFMEMORY;
@@ -1170,7 +1355,8 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
             break;
         case NODE_DOCUMENT:
             /* Stash implicit namespace as a document attribute, without a parent. */
-            domnode_create(NODE_ATTRIBUTE, L"xmlns:xml", 9, NULL, 0, object, &xmlns_xml);
+            domnode_create_internal(NODE_ATTRIBUTE, L"xmlns:xml", 9, NULL, 0,
+                    object, true, false, &xmlns_xml);
             node_put_data(xmlns_xml, L"http://www.w3.org/XML/1998/namespace");
             xmlns_xml->flags |= DOMNODE_READONLY_VALUE | DOMNODE_NO_PARENT;
             domnode_insert_attribute(object, xmlns_xml, NULL);
@@ -1182,6 +1368,12 @@ HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const 
     *node = object;
 
     return S_OK;
+}
+
+HRESULT domnode_create(DOMNodeType type, const WCHAR *name, int name_len, const WCHAR *uri, int uri_len,
+        struct domnode *owner, struct domnode **node)
+{
+    return domnode_create_internal(type, name, name_len, uri, uri_len, owner, true, false, node);
 }
 
 static HRESULT parse_xml_decl_append_attribute(struct domnode *pi, const WCHAR *name, BSTR value)
@@ -1329,6 +1521,7 @@ static void domdoc_properties_destroy(struct domdoc_properties *properties)
     properties->namespaces.value = NULL;
     if (properties->uri)
         IUri_Release(properties->uri);
+    domdoc_free_parsed_pool(properties);
     free(properties);
 }
 
@@ -1356,6 +1549,7 @@ static struct domdoc_properties* domdoc_properties_clone(struct domdoc_propertie
         pcopy->uri = properties->uri;
         if (pcopy->uri)
             IUri_AddRef(pcopy->uri);
+        pcopy->parsed_pool = NULL;
     }
 
     return pcopy;
@@ -1363,6 +1557,8 @@ static struct domdoc_properties* domdoc_properties_clone(struct domdoc_propertie
 
 void domnode_destroy_tree(struct domnode *tree)
 {
+    struct dom_parsed_pool *parsed_pool = tree->flags & DOMNODE_POOLED_ALLOCATION
+            ? tree->parsed_pool : NULL;
     struct domnode *node, *next;
 
     if (tree->type == NODE_DOCUMENT)
@@ -1405,16 +1601,29 @@ void domnode_destroy_tree(struct domnode *tree)
         }
     }
 
-    if (tree->prefix)
+    if (tree->flags & DOMNODE_POOLED_QNAME)
     {
         SysFreeString(tree->prefix);
-        SysFreeString(tree->qname);
+        if (tree->name != tree->qname)
+            SysFreeString(tree->name);
     }
-    SysFreeString(tree->name);
+    else
+    {
+        if (tree->prefix)
+        {
+            SysFreeString(tree->prefix);
+            SysFreeString(tree->qname);
+        }
+        SysFreeString(tree->name);
+    }
     SysFreeString(tree->data);
-    SysFreeString(tree->uri);
+    if (!(tree->flags & DOMNODE_POOLED_URI))
+        SysFreeString(tree->uri);
 
-    free(tree);
+    if (parsed_pool)
+        dom_parsed_pool_release(parsed_pool);
+    else
+        free(tree);
 }
 
 void domnode_release(struct domnode *node)
@@ -2198,13 +2407,6 @@ static void xml_write_quotedstring(xmlOutputBufferPtr buf, const xmlChar *string
     }
 }
 
-static int XMLCALL transform_to_stream_write(void *context, const char *buffer, int len)
-{
-    DWORD written;
-    HRESULT hr = ISequentialStream_Write((ISequentialStream *)context, buffer, len, &written);
-    return hr == S_OK ? written : -1;
-}
-
 /* Output for method "text" */
 static void transform_write_text(xmlDocPtr result, xsltStylesheetPtr style, xmlOutputBufferPtr output)
 {
@@ -2444,8 +2646,10 @@ static HRESULT node_transform_write_to_bstr(xsltStylesheetPtr style, xmlDocPtr r
 static HRESULT node_transform_write_to_stream(xsltStylesheetPtr style, xmlDocPtr result, ISequentialStream *stream)
 {
     static const xmlChar *utf16 = (const xmlChar*)"UTF-16";
+    const xmlChar *content;
     xmlOutputBufferPtr output;
     const xmlChar *encoding;
+    size_t offset, size;
     HRESULT hr;
 
     if (transform_is_empty_resultdoc(result))
@@ -2465,11 +2669,34 @@ static HRESULT node_transform_write_to_stream(xsltStylesheetPtr style, xmlDocPtr
     if (!encoding)
         encoding = utf16;
 
-    output = xmlOutputBufferCreateIO(transform_to_stream_write, NULL, stream, xmlFindCharEncodingHandler((const char*)encoding));
+    output = xmlAllocOutputBuffer(xmlFindCharEncodingHandler((const char*)encoding));
     if (!output)
         return E_OUTOFMEMORY;
 
     hr = node_transform_write(style, result, FALSE, (const char*)encoding, output);
+    if (SUCCEEDED(hr))
+    {
+        xmlBufPtr buffer = output->conv ? output->conv : output->buffer;
+
+        content = xmlBufContent(buffer);
+        size = xmlBufUse(buffer);
+        offset = 0;
+        while (offset < size)
+        {
+            ULONG chunk = size - offset > ~(ULONG)0 ? ~(ULONG)0 : size - offset;
+            ULONG written;
+
+            hr = ISequentialStream_Write(stream, content + offset, chunk, &written);
+            if (FAILED(hr))
+                break;
+            if (!written)
+            {
+                hr = E_FAIL;
+                break;
+            }
+            offset += written;
+        }
+    }
     xmlOutputBufferClose(output);
     return hr;
 }
@@ -2516,15 +2743,29 @@ static HRESULT import_loader_onDataAvailable(void *ctxt, char *ptr, DWORD len)
     xmlParserInputBufferPtr inputbuffer;
     struct import_buffer *buffer;
 
-    buffer = malloc(sizeof(*buffer));
+    if (!(buffer = malloc(sizeof(*buffer))))
+        return E_OUTOFMEMORY;
 
-    buffer->data = malloc(len);
-    memcpy(buffer->data, ptr, len);
+    buffer->data = NULL;
+    if (len)
+    {
+        if (!(buffer->data = malloc(len)))
+        {
+            free(buffer);
+            return E_OUTOFMEMORY;
+        }
+        memcpy(buffer->data, ptr, len);
+    }
     buffer->cur = 0;
     buffer->len = len;
 
     inputbuffer = xmlParserInputBufferCreateIO(import_loader_io_read, import_loader_io_close, buffer,
             XML_CHAR_ENCODING_NONE);
+    if (!inputbuffer)
+    {
+        import_loader_io_close(buffer);
+        return E_OUTOFMEMORY;
+    }
     *input = xmlNewIOInputStream(NULL, inputbuffer, XML_CHAR_ENCODING_NONE);
     if (!*input)
         xmlFreeParserInputBuffer(inputbuffer);
@@ -3193,7 +3434,6 @@ HRESULT node_transform_node_params(struct domnode *node, IXMLDOMNode *stylesheet
 
     sheet_doc = create_xmldoc_from_domdoc(sheet_domdoc, &xmlnode);
     node_doc = create_xmldoc_from_domdoc(node, &xmlnode);
-
     xsltSS = xsltParseStylesheetDoc(sheet_doc);
     if (xsltSS)
     {
@@ -3695,6 +3935,8 @@ struct parse_context
     HRESULT status;
     int max_depth;
     int depth;
+    bool preserve_document;
+    bool preserve_whitespace;
 };
 
 static void parse_context_node_create(struct parse_context *context, DOMNodeType type,
@@ -3706,27 +3948,72 @@ static void parse_context_node_create(struct parse_context *context, DOMNodeType
     if (context->status != S_OK)
         return;
 
-    context->status = domnode_create(type, name, name_len, uri, uri_len, owner, node);
+    context->status = domnode_create_internal(type, name, name_len, uri, uri_len,
+            owner, false, true, node);
+}
+
+static void parse_context_link_node(struct domnode *parent, struct domnode *node,
+        struct list *list)
+{
+    assert(!node->parent);
+    assert(node->owner == node_get_doc(parent));
+
+    list_add_tail(list, &node->entry);
+    node->parent = parent;
+    domnode_add_refs(parent, node->refcount);
 }
 
 static void parse_context_append_child(struct parse_context *context, struct domnode *parent, struct domnode *child)
 {
     if (context->status == S_OK)
-        domnode_append_child(parent, child);
+        parse_context_link_node(parent, child, &parent->children);
 }
 
 static void parse_context_append_attribute(struct parse_context *context, struct domnode *node, struct domnode *attribute)
 {
     if (context->status == S_OK)
-        domnode_insert_attribute(node, attribute, NULL);
+        parse_context_link_node(node, attribute, &node->attributes);
 }
 
 static void parse_context_node_put_data(struct parse_context *context, struct domnode *node, const WCHAR *data, int data_len)
 {
+    struct domnode *child;
+    bool normalize = false;
     BSTR str;
+    int i;
 
     if (context->status != S_OK)
         return;
+
+    /* The SAX reader already normalized line endings and validated markup.
+     * Keep the public setter for the uncommon unnormalized case, but avoid
+     * copying parsed data into a temporary BSTR and scanning it again. */
+    for (i = 0; i < data_len; ++i)
+    {
+        if (data[i] == '\r')
+        {
+            normalize = true;
+            break;
+        }
+    }
+    if (normalize)
+    {
+        if (!(str = SysAllocStringLen(data, data_len)))
+        {
+            context->status = E_OUTOFMEMORY;
+            return;
+        }
+
+        context->status = node_put_data(node, str);
+        SysFreeString(str);
+        return;
+    }
+
+    if (node->flags & DOMNODE_READONLY_VALUE)
+    {
+        context->status = E_FAIL;
+        return;
+    }
 
     if (!(str = SysAllocStringLen(data, data_len)))
     {
@@ -3734,13 +4021,30 @@ static void parse_context_node_put_data(struct parse_context *context, struct do
         return;
     }
 
-    context->status = node_put_data(node, str);
-    SysFreeString(str);
+    node->flags &= ~DOMNODE_PARSED_VALUE;
+    if (node->type == NODE_ATTRIBUTE || node->type == NODE_ELEMENT)
+    {
+        node_unlink_children(node);
+        context->status = domnode_create_internal(NODE_TEXT, NULL, 0, NULL, 0,
+                node->owner, false, true, &child);
+        if (context->status != S_OK)
+        {
+            SysFreeString(str);
+            return;
+        }
+        parse_context_append_child(context, node, child);
+        child->data = str;
+    }
+    else
+    {
+        SysFreeString(node->data);
+        node->data = str;
+    }
 }
 
 static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeType type)
 {
-    bool preserve = is_preserving_whitespace(c->node), space = true;
+    bool space = true;
     bool ignored_whitespace = false;
     struct domnode *node;
 
@@ -3761,7 +4065,7 @@ static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeTy
     if (c->buffer.count == 0)
         return S_OK;
 
-    if (!preserve)
+    if (!c->preserve_whitespace)
     {
         for (size_t i = 0; i < c->buffer.count; ++i)
         {
@@ -3801,6 +4105,25 @@ static HRESULT parse_context_create_text_node(struct parse_context *c, DOMNodeTy
     }
 
     return c->status;
+}
+
+static void parse_context_set_element_whitespace(struct parse_context *c, struct domnode *element)
+{
+    struct domnode *attr;
+    BSTR value;
+    bool preserve = c->preserve_whitespace;
+
+    if (!c->preserve_document && domnode_get_qualified_attribute(element, L"space",
+            L"http://www.w3.org/XML/1998/namespace", &attr) == S_OK
+            && node_get_text(attr, &value) == S_OK)
+    {
+        preserve = !wcscmp(value, L"preserve");
+        SysFreeString(value);
+    }
+
+    if (preserve)
+        element->flags |= DOMNODE_PARSED_PRESERVE_SPACE;
+    c->preserve_whitespace = preserve;
 }
 
 static struct parse_context *impl_from_ISAXContentHandler(ISAXContentHandler *iface)
@@ -3889,6 +4212,8 @@ static HRESULT WINAPI parse_content_handler_startElement(ISAXContentHandler *ifa
 
     parse_context_create_text_node(c, NODE_TEXT);
     parse_context_node_create(c, NODE_ELEMENT, qname, qname_len, uri, uri_len, c->root, &element);
+    if (c->status != S_OK)
+        return c->status;
     parse_context_append_child(c, c->node, element);
     c->node = element;
 
@@ -3918,6 +4243,8 @@ static HRESULT WINAPI parse_content_handler_startElement(ISAXContentHandler *ifa
         }
     }
 
+    parse_context_set_element_whitespace(c, element);
+
     return c->status;
 }
 
@@ -3929,6 +4256,8 @@ static HRESULT WINAPI parse_content_handler_endElement(ISAXContentHandler *iface
     --c->depth;
     parse_context_create_text_node(c, NODE_TEXT);
     c->node = c->node->parent;
+    c->preserve_whitespace = c->preserve_document
+            || (c->node->flags & DOMNODE_PARSED_PRESERVE_SPACE);
 
     return c->status;
 }
@@ -4350,6 +4679,8 @@ static HRESULT parse_context_init(struct parse_context *c, const struct domdoc_p
     c->buffer.status = &c->status;
     c->max_depth = properties->max_element_depth;
     c->version = properties->version;
+    c->preserve_document = properties->preserving == VARIANT_TRUE;
+    c->preserve_whitespace = c->preserve_document;
 
     if (FAILED(hr = SAXXMLReader_create(MSXML3, (void **)&unk)))
         return hr;
@@ -4394,6 +4725,8 @@ static void parse_context_cleanup(struct parse_context *c)
         ISAXXMLReader_Release(c->reader);
     if (c->reader_extension)
         ISAXXMLReaderExtension_Release(c->reader_extension);
+    if (c->root)
+        domnode_destroy_tree(c->root);
 }
 
 HRESULT parse_stream(ISequentialStream *stream, bool utf16, const struct domdoc_properties *properties, struct domnode **tree)
@@ -4439,23 +4772,35 @@ struct xmldoc_context
 
 static xmlNsPtr xmlnode_get_ns(xmlNodePtr tree, struct domnode *node, xmlNodePtr element)
 {
-    xmlChar *uri, *prefix;
+    xmlChar *uri = NULL, *prefix;
     xmlNsPtr ns;
 
     if (!node->uri)
         return NULL;
 
-    uri = xmlchar_from_wchar(node->uri);
     prefix = node->prefix ? xmlchar_from_wchar(node->prefix) : NULL;
 
     if ((ns = xmlSearchNs(tree->doc, element, prefix)))
     {
-        if (!xmlStrEqual(ns->href, uri))
-            ns = xmlNewNs(element, uri, prefix);
+        if (ns->_private != node->uri)
+        {
+            uri = xmlchar_from_wchar(node->uri);
+            if (!xmlStrEqual(ns->href, uri))
+            {
+                ns = xmlNewNs(element, uri, prefix);
+                if (ns)
+                    ns->_private = node->uri;
+            }
+            else
+                ns->_private = node->uri;
+        }
     }
     else
     {
+        uri = xmlchar_from_wchar(node->uri);
         ns = xmlNewNs(element, uri, prefix);
+        if (ns)
+            ns->_private = node->uri;
     }
 
     free(uri);
@@ -4473,10 +4818,9 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
     xmlNsPtr ns;
     BSTR text;
 
-    name = xmlchar_from_wchar(node->name);
-    xmlnode = xmlNewDocNode(context->xmldoc, NULL, name, NULL);
+    name = xmlchar_from_wcharn(node->name, -1, TRUE);
+    xmlnode = xmlNewDocNodeEatName(context->xmldoc, NULL, name, NULL);
     xmlAddChild(context->tree, xmlnode);
-    free(name);
 
     ns = xmlnode_get_ns(context->tree, node, xmlnode);
     xmlSetNs(xmlnode, ns);
@@ -4509,11 +4853,11 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
 
         node_get_text(attr, &text);
 
-        name = xmlchar_from_wchar(attr->name);
+        name = xmlchar_from_wcharn(attr->name, -1, TRUE);
         value = xmlchar_from_wchar(text);
 
         ns = xmlnode_get_ns(xmlnode, attr, xmlnode);
-        xmlattr = xmlNewProp(xmlnode, name, value);
+        xmlattr = xmlNewNsPropEatName(xmlnode, NULL, name, value);
         xmlattr->_private2 = attr;
         xmlSetNs((xmlNodePtr)xmlattr, ns);
 
@@ -4522,7 +4866,6 @@ static xmlNodePtr create_xmlnode_element(struct xmldoc_context *context, struct 
 
         SysFreeString(text);
         free(value);
-        free(name);
     }
 
     return xmlnode;
@@ -4559,8 +4902,7 @@ static xmlNodePtr create_xmlnode_from_domnode(struct xmldoc_context *context, st
     struct domnode *n;
     xmlDtdPtr dtd;
 
-    name = node->name ? xmlchar_from_wchar(node->name) : NULL;
-    data = node->data ? xmlchar_from_wchar(node->data) : NULL;
+    name = data = NULL;
 
     switch (node->type)
     {
@@ -4568,18 +4910,23 @@ static xmlNodePtr create_xmlnode_from_domnode(struct xmldoc_context *context, st
             xmlnode = create_xmlnode_element(context, node);
             break;
         case NODE_COMMENT:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocComment(context->xmldoc, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_TEXT:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocText(context->xmldoc, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_PROCESSING_INSTRUCTION:
+            name = node->name ? xmlchar_from_wchar(node->name) : NULL;
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewDocPI(context->xmldoc, name, data);
             xmlAddChild(context->tree, xmlnode);
             break;
         case NODE_CDATA_SECTION:
+            data = node->data ? xmlchar_from_wchar(node->data) : NULL;
             xmlnode = xmlNewCDataBlock(context->xmldoc, data, xmlStrlen(data));
             xmlAddChild(context->tree, xmlnode);
             break;
