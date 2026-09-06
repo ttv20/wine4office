@@ -417,6 +417,10 @@ def default_config() -> dict:
         "wine": detect_wine(),
         "desktop_copy": False,
         "use_x11": True,
+        "use_vulkan": False,
+        "graphics_restart_required": False,
+        "graphics_active_use_x11": True,
+        "graphics_active_use_vulkan": False,
         "office_telemetry_disabled": {},
         "office_compatibility_policies": {},
         "update_url": configured_update_url(),
@@ -795,7 +799,8 @@ def office_winappsdk_runtime_environment(prefix: str | Path) -> str | None:
 
 
 def wine_environment(prefix: str | Path, wine: str | Path,
-                     use_x11: bool = True, *, _manager_create: bool = False) -> dict[str, str]:
+                     use_x11: bool = True, use_vulkan: bool = False, *,
+                     _manager_create: bool = False) -> dict[str, str]:
     env = os.environ.copy()
     managed = _manager_create or is_prefix_owned(prefix)
     env["WINEPREFIX"] = str(prefix)
@@ -806,6 +811,12 @@ def wine_environment(prefix: str | Path, wine: str | Path,
                 "WINEDLLOVERRIDES", "riched20=n;mshtml=b"
             ),
         })
+        renderer = "vulkan" if use_vulkan else "gl"
+        existing_d3d = env.get("WINE_D3D_CONFIG", "").strip()
+        env["WINE_D3D_CONFIG"] = (
+            f"renderer={renderer};{existing_d3d}"
+            if existing_d3d else f"renderer={renderer}"
+        )
         winappsdk_runtime = office_winappsdk_runtime_environment(prefix)
         if winappsdk_runtime:
             env["OFFICE_WINAPPSDK_RUNTIME_DIR"] = winappsdk_runtime
@@ -1628,6 +1639,7 @@ def _windows_document_path(document: str, wine: Path, env: dict[str, str]) -> st
 def launch_app_process(
         prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
         documents: Iterable[str] = (), use_x11: bool = True,
+        use_vulkan: bool = False,
         *, capture_diagnostics: bool = False) -> subprocess.Popen:
     """Launch one Office application and return its process handle.
 
@@ -1645,7 +1657,7 @@ def launch_app_process(
     if app == "word":
         prepare_office_building_blocks(prefix)
     register_cloud_fonts(prefix, wine, helper, use_x11)
-    env = wine_environment(prefix, wine, use_x11)
+    env = wine_environment(prefix, wine, use_x11, use_vulkan)
     arguments = [_windows_document_path(document, wine, env) for document in documents]
     if app == "outlook" and managed:
         prepare_outlook_first_run(prefix, wine, env)
@@ -1664,9 +1676,10 @@ def launch_app_process(
 
 
 def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
-               documents: Iterable[str] = (), use_x11: bool = True) -> int:
+               documents: Iterable[str] = (), use_x11: bool = True,
+               use_vulkan: bool = False) -> int:
     process = launch_app_process(
-        prefix_value, wine_value, app, helper, documents, use_x11,
+        prefix_value, wine_value, app, helper, documents, use_x11, use_vulkan,
     )
     return process.pid
 
@@ -1674,7 +1687,7 @@ def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None
 def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
                       arguments: str | Iterable[str] = (),
                       working_directory: PathValue | None = None,
-                      use_x11: bool = True) -> int:
+                      use_x11: bool = True, use_vulkan: bool = False) -> int:
     prefix = validate_prefix(prefix_value)
     if not (prefix / "system.reg").is_file():
         raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
@@ -1695,7 +1708,8 @@ def launch_executable(prefix_value: str, wine_value: str, executable_value: str,
                 raise NotADirectoryError(f"Working directory was not found: {cwd}")
     parsed_arguments = shlex.split(arguments) if isinstance(arguments, str) else list(arguments)
     process = subprocess.Popen([str(wine), str(executable), *parsed_arguments],
-                               cwd=cwd, env=wine_environment(prefix, wine, use_x11),
+                               cwd=cwd, env=wine_environment(
+                                   prefix, wine, use_x11, use_vulkan),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     return process.pid
@@ -1735,7 +1749,8 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
                 use_x11: bool = True,
-                progress_callback: Callable[[str, int | None], None] | None = None) -> int | None:
+                progress_callback: Callable[[str, int | None], None] | None = None,
+                *, use_vulkan: bool = False) -> int | None:
     if tool == "stop":
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         restart_preload = _preload_active_for_environment(
@@ -1756,7 +1771,7 @@ def launch_tool(prefix_value: str, wine_value: str, tool: str,
         raise ValueError(f"Unknown Wine tool: {tool}")
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
-    env = wine_environment(prefix, wine, use_x11)
+    env = wine_environment(prefix, wine, use_x11, use_vulkan)
     env.setdefault("WINEDEBUG", "-all")
     if tool == "cmd":
         terminal = host_terminal_command([str(wine), "cmd.exe"], env)
@@ -1985,11 +2000,13 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         'host_display=${DISPLAY-}',
         'host_wayland_display=${WAYLAND_DISPLAY-}',
         "use_x11=true",
+        "use_vulkan=false",
         'if [[ -r "$config_file" ]]; then',
         "    while IFS= read -r config_line; do",
         r'        if [[ $config_line =~ ^[[:space:]]*\"use_x11\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
         '            use_x11=${BASH_REMATCH[1]}',
-        "            break",
+        r'        elif [[ $config_line =~ ^[[:space:]]*\"use_vulkan\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
+        '            use_vulkan=${BASH_REMATCH[1]}',
         "        fi",
         '    done < "$config_file"',
         "fi",
@@ -1997,6 +2014,11 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         "    unset WAYLAND_DISPLAY",
         'elif [[ $managed_prefix == true && -n ${WAYLAND_DISPLAY:-} ]]; then',
         "    unset DISPLAY",
+        "fi",
+        'if [[ $managed_prefix == true ]]; then',
+        '    renderer=gl',
+        '    [[ $use_vulkan == true ]] && renderer=vulkan',
+        '    export WINE_D3D_CONFIG="renderer=$renderer${WINE_D3D_CONFIG:+;$WINE_D3D_CONFIG}"',
         "fi",
     ]
     if app == "word":

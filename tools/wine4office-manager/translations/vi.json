@@ -82,5 +82,21 @@
 "Wine environment is ready": "Môi trường Wine đã sẵn sàng",
 "Wine environment is ready.": "Môi trường Wine đã sẵn sàng.",
 "Wine environment operation was cancelled.": "Thao tác môi trường Wine đã bị hủy.",
-"Wine environment operation failed. Review the details below.": "Thao tác môi trường Wine thất bại. Xem chi tiết bên dưới."
+"Wine environment operation failed. Review the details below.": "Thao tác môi trường Wine thất bại. Xem chi tiết bên dưới.",
+"Graphics backend": "Bộ xử lý đồ họa",
+"Choose how Wine presents windows and renders Direct3D applications.": "Chọn cách Wine hiển thị cửa sổ và kết xuất các ứng dụng Direct3D.",
+"Direct3D renderer:": "Trình kết xuất Direct3D:",
+"Display system:": "Hệ thống hiển thị:",
+"Graphics settings applied.": "Đã áp dụng cài đặt đồ họa.",
+"Graphics settings applied. They will be used on the next launch.": "Đã áp dụng cài đặt đồ họa. Các cài đặt này sẽ được dùng ở lần khởi chạy tiếp theo.",
+"Graphics settings restored to the active values.": "Đã khôi phục cài đặt đồ họa về các giá trị đang hoạt động.",
+"Graphics settings saved. Restart Wine to apply the change.": "Đã lưu cài đặt đồ họa. Khởi động lại Wine để áp dụng thay đổi.",
+"Graphics settings saved. Wine is still using the previous settings.": "Đã lưu cài đặt đồ họa. Wine vẫn đang dùng các cài đặt trước đó.",
+"Stop Wine and apply": "Dừng Wine và áp dụng",
+"Stop Wine to apply graphics settings": "Dừng Wine để áp dụng cài đặt đồ họa",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Thao tác này sẽ đóng mọi ứng dụng Office trong môi trường Wine đã chọn. Hãy lưu các tài liệu đang mở trước khi tiếp tục.",
+"OK": "OK",
+"Cancel": "Hủy",
+"Yes": "Có",
+"No": "Không"
 }

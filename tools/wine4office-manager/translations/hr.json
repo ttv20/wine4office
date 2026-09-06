@@ -78,5 +78,21 @@
 "Wine environment is ready": "Okruženje Wine je spremno",
 "Wine environment is ready.": "Okruženje Wine je spremno.",
 "Wine environment operation was cancelled.": "Operacija okruženja Wine je otkazana.",
-"Wine environment operation failed. Review the details below.": "Operacija okruženja Wine nije uspjela. Pogledajte pojedinosti u nastavku."
+"Wine environment operation failed. Review the details below.": "Operacija okruženja Wine nije uspjela. Pogledajte pojedinosti u nastavku.",
+"Graphics backend": "Grafički pozadinski sustav",
+"Choose how Wine presents windows and renders Direct3D applications.": "Odaberite kako Wine prikazuje prozore i iscrtava Direct3D aplikacije.",
+"Direct3D renderer:": "Direct3D iscrtavanje:",
+"Display system:": "Sustav prikaza:",
+"Graphics settings applied.": "Grafičke postavke su primijenjene.",
+"Graphics settings applied. They will be used on the next launch.": "Grafičke postavke su primijenjene. Koristit će se pri sljedećem pokretanju.",
+"Graphics settings restored to the active values.": "Grafičke postavke vraćene su na aktivne vrijednosti.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafičke postavke su spremljene. Ponovno pokrenite Wine da biste primijenili promjenu.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafičke postavke su spremljene. Wine još uvijek koristi prethodne postavke.",
+"Stop Wine and apply": "Zaustavi Wine i primijeni",
+"Stop Wine to apply graphics settings": "Zaustavi Wine radi primjene grafičkih postavki",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Time će se zatvoriti sve Office aplikacije u odabranom Wine okruženju. Spremite otvorene dokumente prije nastavka.",
+"OK": "U redu",
+"Cancel": "Odustani",
+"Yes": "Da",
+"No": "Ne"
 }

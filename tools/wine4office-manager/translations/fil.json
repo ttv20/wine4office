@@ -78,5 +78,21 @@
 "Wine environment is ready": "Handa na ang environment ng Wine",
 "Wine environment is ready.": "Handa na ang environment ng Wine.",
 "Wine environment operation was cancelled.": "Kinansela ang operasyon ng environment ng Wine.",
-"Wine environment operation failed. Review the details below.": "Nabigo ang operasyon ng environment ng Wine. Suriin ang mga detalye sa ibaba."
+"Wine environment operation failed. Review the details below.": "Nabigo ang operasyon ng environment ng Wine. Suriin ang mga detalye sa ibaba.",
+"Graphics backend": "Backend ng graphics",
+"Choose how Wine presents windows and renders Direct3D applications.": "Piliin kung paano ipinapakita ng Wine ang mga window at nire-render ang mga Direct3D application.",
+"Direct3D renderer:": "Direct3D renderer:",
+"Display system:": "Sistema ng display:",
+"Graphics settings applied.": "Inilapat ang mga setting ng graphics.",
+"Graphics settings applied. They will be used on the next launch.": "Inilapat ang mga setting ng graphics. Gagamitin ang mga ito sa susunod na paglunsad.",
+"Graphics settings restored to the active values.": "Ibinalik ang mga setting ng graphics sa mga aktibong value.",
+"Graphics settings saved. Restart Wine to apply the change.": "Na-save ang mga setting ng graphics. I-restart ang Wine para ilapat ang pagbabago.",
+"Graphics settings saved. Wine is still using the previous settings.": "Na-save ang mga setting ng graphics. Ginagamit pa rin ng Wine ang mga dating setting.",
+"Stop Wine and apply": "Ihinto ang Wine at ilapat",
+"Stop Wine to apply graphics settings": "Ihinto ang Wine para ilapat ang mga setting ng graphics",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Isasara nito ang lahat ng Office application sa napiling Wine environment. I-save ang mga bukas na dokumento bago magpatuloy.",
+"OK": "OK",
+"Cancel": "Kanselahin",
+"Yes": "Oo",
+"No": "Hindi"
 }

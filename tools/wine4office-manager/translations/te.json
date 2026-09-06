@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine వాతావరణం సిద్ధంగా ఉంది",
 "Wine environment is ready.": "Wine వాతావరణం సిద్ధంగా ఉంది.",
 "Wine environment operation was cancelled.": "Wine వాతావరణం ఆపరేషన్ రద్దు చేయబడింది.",
-"Wine environment operation failed. Review the details below.": "Wine వాతావరణం ఆపరేషన్ విఫలమైంది. దిగువ వివరాలను చూడండి."
+"Wine environment operation failed. Review the details below.": "Wine వాతావరణం ఆపరేషన్ విఫలమైంది. దిగువ వివరాలను చూడండి.",
+"Graphics backend": "గ్రాఫిక్స్ బ్యాకెండ్",
+"Choose how Wine presents windows and renders Direct3D applications.": "Wine విండోలను చూపే మరియు Direct3D అనువర్తనాలను రెండర్ చేసే విధానాన్ని ఎంచుకోండి.",
+"Direct3D renderer:": "Direct3D రెండరర్:",
+"Display system:": "ప్రదర్శన వ్యవస్థ:",
+"Graphics settings applied.": "గ్రాఫిక్స్ సెట్టింగ్‌లు వర్తింపజేయబడ్డాయి.",
+"Graphics settings applied. They will be used on the next launch.": "గ్రాఫిక్స్ సెట్టింగ్‌లు వర్తింపజేయబడ్డాయి. తదుపరి ప్రారంభంలో అవి ఉపయోగించబడతాయి.",
+"Graphics settings restored to the active values.": "గ్రాఫిక్స్ సెట్టింగ్‌లు సక్రియ విలువలకు పునరుద్ధరించబడ్డాయి.",
+"Graphics settings saved. Restart Wine to apply the change.": "గ్రాఫిక్స్ సెట్టింగ్‌లు సేవ్ చేయబడ్డాయి. మార్పును వర్తింపజేయడానికి Wineను పునఃప్రారంభించండి.",
+"Graphics settings saved. Wine is still using the previous settings.": "గ్రాఫిక్స్ సెట్టింగ్‌లు సేవ్ చేయబడ్డాయి. Wine ఇప్పటికీ మునుపటి సెట్టింగ్‌లను ఉపయోగిస్తోంది.",
+"Stop Wine and apply": "Wineను ఆపి వర్తింపజేయండి",
+"Stop Wine to apply graphics settings": "గ్రాఫిక్స్ సెట్టింగ్‌లను వర్తింపజేయడానికి Wineను ఆపండి",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "ఇది ఎంచుకున్న Wine వాతావరణంలోని అన్ని Office అనువర్తనాలను మూసివేస్తుంది. కొనసాగించే ముందు తెరిచి ఉన్న పత్రాలను సేవ్ చేయండి.",
+"OK": "సరే",
+"Cancel": "రద్దు",
+"Yes": "అవును",
+"No": "కాదు"
 }

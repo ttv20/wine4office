@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSize, QTimer, QTranslator, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -68,6 +68,34 @@ OFFICE_INSTALLER_STARTUP_TIMEOUT_MS = 60_000
 OFFICE_INSTALLER_STARTUP_TIMEOUT_ERROR = (
     "Office installer did not open within 60 seconds. Installation was stopped."
 )
+STANDARD_BUTTON_TEXTS = frozenset(("OK", "Cancel", "Yes", "No"))
+
+
+class _StandardButtonTranslator(QTranslator):
+    """Translate Qt's built-in message-box buttons from the Manager catalog."""
+
+    def __init__(self, language: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.language = language
+
+    def translate(self, context: str, source_text: str,
+                  disambiguation: str | None = None, n: int = -1) -> str:
+        del disambiguation, n
+        key = source_text.replace("&", "")
+        if context == "QPlatformTheme" and key in STANDARD_BUTTON_TEXTS:
+            return i18n.translate(key, self.language)
+        return ""
+
+
+def _install_standard_button_translator(
+        app: QApplication, language: str) -> QTranslator:
+    previous = getattr(app, "_wine4office_standard_button_translator", None)
+    if previous is not None:
+        app.removeTranslator(previous)
+    translator = _StandardButtonTranslator(language, app)
+    app.installTranslator(translator)
+    app._wine4office_standard_button_translator = translator
+    return translator
 
 
 def _create_environment_worker(state, config: dict, recreate: bool) -> str:
@@ -392,11 +420,6 @@ class ManagerWindow(QMainWindow):
         self.wine_edit.setAccessibleName("Wine executable path")
         form.addRow("Wine executable:", self._path_row(self.wine_edit, self.browse_wine))
         environment_layout.addLayout(form)
-        self.use_x11 = QCheckBox(
-            "Launch Wine4Office through X11 (uncheck for native Wayland)"
-        )
-        self.use_x11.setAccessibleName("Launch Wine4Office through X11")
-        environment_layout.addWidget(self.use_x11)
         self.prefix_edit.textChanged.connect(self._sync_office_settings_summary)
 
         environment_buttons = QHBoxLayout()
@@ -408,15 +431,87 @@ class ManagerWindow(QMainWindow):
         )
         environment_buttons.addWidget(self.create_button)
         environment_buttons.addWidget(self.recreate_button)
-        environment_buttons.addWidget(self._action_button(
-            "Stop Wine", lambda: self.launch_tool("stop"), QStyle.StandardPixmap.SP_MediaStop
-        ))
         environment_buttons.addStretch()
         environment_buttons.addWidget(self._action_button(
             "Save paths", lambda: self.save_config(True), QStyle.StandardPixmap.SP_DialogSaveButton
         ))
         environment_layout.addLayout(environment_buttons)
         layout.addWidget(environment)
+
+        graphics = self.graphics_group = QGroupBox("Graphics backend")
+        graphics_layout = QVBoxLayout(graphics)
+        graphics_intro = QLabel(
+            "Choose how Wine presents windows and renders Direct3D applications."
+        )
+        graphics_intro.setWordWrap(True)
+        graphics_layout.addWidget(graphics_intro)
+        graphics_form = self._form()
+
+        display_choices = QWidget()
+        display_layout = QHBoxLayout(display_choices)
+        display_layout.setContentsMargins(0, 0, 0, 0)
+        display_layout.setSpacing(6)
+        self.display_backend_group = QButtonGroup(self)
+        self.display_backend_group.setExclusive(True)
+        self.use_x11 = QPushButton("X11")
+        self.use_wayland = QPushButton("Wayland")
+        for button in (self.use_x11, self.use_wayland):
+            button.setCheckable(True)
+            button.setMinimumWidth(105)
+            self.display_backend_group.addButton(button)
+            display_layout.addWidget(button)
+            self.task_sensitive_buttons.append(button)
+        display_layout.addStretch()
+        self.use_x11.setAccessibleName("Use the X11 display backend")
+        self.use_wayland.setAccessibleName("Use the native Wayland display backend")
+        graphics_form.addRow("Display system:", display_choices)
+
+        renderer_choices = QWidget()
+        renderer_layout = QHBoxLayout(renderer_choices)
+        renderer_layout.setContentsMargins(0, 0, 0, 0)
+        renderer_layout.setSpacing(6)
+        self.renderer_group = QButtonGroup(self)
+        self.renderer_group.setExclusive(True)
+        self.use_opengl = QPushButton("OpenGL")
+        self.use_vulkan = QPushButton("Vulkan")
+        for button in (self.use_opengl, self.use_vulkan):
+            button.setCheckable(True)
+            button.setMinimumWidth(105)
+            self.renderer_group.addButton(button)
+            renderer_layout.addWidget(button)
+            self.task_sensitive_buttons.append(button)
+        renderer_layout.addStretch()
+        self.use_opengl.setAccessibleName("Use the OpenGL Direct3D renderer")
+        self.use_vulkan.setAccessibleName("Use the Vulkan Direct3D renderer")
+        graphics_form.addRow("Direct3D renderer:", renderer_choices)
+        graphics_layout.addLayout(graphics_form)
+
+        self.graphics_restart_panel = QWidget()
+        restart_layout = QHBoxLayout(self.graphics_restart_panel)
+        restart_layout.setContentsMargins(0, 4, 0, 0)
+        restart_layout.setSpacing(10)
+        restart_icon = QLabel()
+        restart_icon.setPixmap(self._standard_icon(
+            QStyle.StandardPixmap.SP_MessageBoxWarning).pixmap(24, 24))
+        restart_layout.addWidget(restart_icon)
+        self.graphics_restart_label = QLabel(
+            "Graphics settings saved. Wine is still using the previous settings."
+        )
+        self.graphics_restart_label.setWordWrap(True)
+        restart_layout.addWidget(self.graphics_restart_label, 1)
+        self.graphics_restart_button = self._action_button(
+            "Stop Wine and apply", self.apply_graphics_settings,
+            QStyle.StandardPixmap.SP_MediaStop,
+        )
+        restart_layout.addWidget(self.graphics_restart_button)
+        self.graphics_restart_panel.setVisible(False)
+        graphics_layout.addWidget(self.graphics_restart_panel)
+
+        self.display_backend_group.buttonClicked.connect(
+            self._graphics_choice_changed
+        )
+        self.renderer_group.buttonClicked.connect(self._graphics_choice_changed)
+        layout.addWidget(graphics)
 
         preload = self.preload_group = QGroupBox("Background services")
         preload_layout = QVBoxLayout(preload)
@@ -1354,9 +1449,96 @@ class ManagerWindow(QMainWindow):
             "wine": self.wine_edit.text(),
             "desktop_copy": self.desktop_copy.isChecked(),
             "use_x11": self.use_x11.isChecked(),
+            "use_vulkan": self.use_vulkan.isChecked(),
             "update_url": self.update_edit.text(),
             "include_prereleases": self.include_prereleases.isChecked(),
         }
+
+    def _update_graphics_restart_notice(self, config: dict) -> None:
+        self.graphics_restart_panel.setVisible(
+            config.get("graphics_restart_required") is True
+        )
+
+    def _graphics_choice_changed(self, _button: QAbstractButton) -> None:
+        if not self.initialized:
+            return
+        try:
+            config = self.state.update_graphics_settings(
+                self.use_x11.isChecked(), self.use_vulkan.isChecked()
+            )
+        except Exception as error:
+            self._restore_config_fields()
+            self.show_error(f"Could not save graphics settings: {error}")
+            return
+        self._update_graphics_restart_notice(config)
+        self.notify(
+            "Graphics settings saved. Restart Wine to apply the change."
+            if config.get("graphics_restart_required") is True
+            else "Graphics settings restored to the active values."
+        )
+
+    def apply_graphics_settings(self) -> None:
+        if not self.ensure_idle():
+            return
+        result = QMessageBox.warning(
+            self,
+            self._tr("Stop Wine to apply graphics settings"),
+            self._tr(
+                "This will close every Office application in the selected Wine "
+                "environment. Save open documents before continuing."
+            ),
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        with self.state.lock:
+            config = dict(self.state.config)
+        stop_use_x11 = bool(config.get(
+            "graphics_active_use_x11", config.get("use_x11", True)
+        ))
+
+        def stop() -> str:
+            backend.launch_tool(
+                config["prefix"], config["wine"], "stop",
+                use_x11=stop_use_x11,
+                progress_callback=self.state.set_progress,
+            )
+            return "Wine processes stopped."
+
+        def completed(_result, error) -> None:
+            if error is not None:
+                return
+            try:
+                saved = self.state.mark_graphics_settings_applied()
+            except Exception as apply_error:
+                self.show_error(f"Could not record graphics settings: {apply_error}")
+                return
+            self._set_config_fields(saved)
+            self.notify("Graphics settings applied. They will be used on the next launch.")
+
+        self._show_task_progress(
+            "wine-stop",
+            "Stopping Wine",
+            "Selected Wine environment",
+            "Stopping Wine environment…",
+            {
+                "completed": "Graphics settings applied.",
+                "cancelled": "Wine shutdown was interrupted.",
+                "failed": "Wine shutdown failed. Review the details below.",
+            },
+            cancellable=False,
+        )
+        try:
+            self.state.start_task(
+                "wine-stop", stop, self._task_completion(completed)
+            )
+            self.last_task_state = "True:running"
+            self.refresh_state()
+        except Exception as error:
+            if self.update_progress_dialog is not None:
+                self.update_progress_dialog.accept()
+            self.show_error(error)
 
     def _sync_office_settings_summary(self, prefix: str) -> None:
         if not hasattr(self, "office_settings_environment_label"):
@@ -1388,6 +1570,10 @@ class ManagerWindow(QMainWindow):
         self.update_edit.setText(config["update_url"])
         self.desktop_copy.setChecked(config["desktop_copy"])
         self.use_x11.setChecked(config["use_x11"])
+        self.use_wayland.setChecked(not config["use_x11"])
+        self.use_vulkan.setChecked(config.get("use_vulkan", False))
+        self.use_opengl.setChecked(not config.get("use_vulkan", False))
+        self._update_graphics_restart_notice(config)
         self.include_prereleases.setChecked(
             config.get("include_prereleases") is True
         )
@@ -1673,6 +1859,7 @@ class ManagerWindow(QMainWindow):
         def launch() -> str:
             pid = backend.launch_tool(
                 config["prefix"], config["wine"], tool, use_x11=config["use_x11"],
+                use_vulkan=config.get("use_vulkan", False),
                 progress_callback=(self.state.set_progress if tool == "stop" else None),
             )
             return (
@@ -1723,6 +1910,7 @@ class ManagerWindow(QMainWindow):
                 config["prefix"], config["wine"], executable, self.arguments_edit.text(),
                 working_directory=self.working_directory_edit.text().strip() or None,
                 use_x11=config["use_x11"],
+                use_vulkan=config.get("use_vulkan", False),
             )
             self.notify(f"Executable started (PID {pid}).")
         except Exception as error:
@@ -2691,6 +2879,7 @@ def run_manager(state, launcher: Path, icons: Path, font_helper: Path,
         QApplication.addLibraryPath(str(plugin_bridge))
     app = QApplication.instance() or QApplication(sys.argv[:1])
     language = i18n.system_language()
+    _install_standard_button_translator(app, language)
     app.setLayoutDirection(
         Qt.LayoutDirection.RightToLeft
         if language in i18n.RTL_LANGUAGES

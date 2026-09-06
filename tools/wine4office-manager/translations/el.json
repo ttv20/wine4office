@@ -82,5 +82,21 @@
 "Wine environment is ready": "Το περιβάλλον Wine είναι έτοιμο",
 "Wine environment is ready.": "Το περιβάλλον Wine είναι έτοιμο.",
 "Wine environment operation was cancelled.": "Η λειτουργία του περιβάλλοντος Wine ακυρώθηκε.",
-"Wine environment operation failed. Review the details below.": "Η λειτουργία του περιβάλλοντος Wine απέτυχε. Δείτε τις λεπτομέρειες παρακάτω."
+"Wine environment operation failed. Review the details below.": "Η λειτουργία του περιβάλλοντος Wine απέτυχε. Δείτε τις λεπτομέρειες παρακάτω.",
+"Graphics backend": "Σύστημα γραφικών",
+"Choose how Wine presents windows and renders Direct3D applications.": "Επιλέξτε πώς το Wine εμφανίζει παράθυρα και αποδίδει εφαρμογές Direct3D.",
+"Direct3D renderer:": "Απόδοση Direct3D:",
+"Display system:": "Σύστημα εμφάνισης:",
+"Graphics settings applied.": "Οι ρυθμίσεις γραφικών εφαρμόστηκαν.",
+"Graphics settings applied. They will be used on the next launch.": "Οι ρυθμίσεις γραφικών εφαρμόστηκαν. Θα χρησιμοποιηθούν στην επόμενη εκκίνηση.",
+"Graphics settings restored to the active values.": "Οι ρυθμίσεις γραφικών επανήλθαν στις ενεργές τιμές.",
+"Graphics settings saved. Restart Wine to apply the change.": "Οι ρυθμίσεις γραφικών αποθηκεύτηκαν. Επανεκκινήστε το Wine για να εφαρμοστεί η αλλαγή.",
+"Graphics settings saved. Wine is still using the previous settings.": "Οι ρυθμίσεις γραφικών αποθηκεύτηκαν. Το Wine εξακολουθεί να χρησιμοποιεί τις προηγούμενες ρυθμίσεις.",
+"Stop Wine and apply": "Διακοπή Wine και εφαρμογή",
+"Stop Wine to apply graphics settings": "Διακοπή Wine για εφαρμογή των ρυθμίσεων γραφικών",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Αυτό θα κλείσει όλες τις εφαρμογές Office στο επιλεγμένο περιβάλλον Wine. Αποθηκεύστε τα ανοιχτά έγγραφα πριν συνεχίσετε.",
+"OK": "Εντάξει",
+"Cancel": "Ακύρωση",
+"Yes": "Ναι",
+"No": "Όχι"
 }

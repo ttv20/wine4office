@@ -82,5 +82,21 @@
 "Wine environment is ready": "L'entorn del Wine està a punt",
 "Wine environment is ready.": "L'entorn del Wine està a punt.",
 "Wine environment operation was cancelled.": "L'operació de l'entorn del Wine s'ha cancel·lat.",
-"Wine environment operation failed. Review the details below.": "L'operació de l'entorn del Wine ha fallat. Consulteu els detalls següents."
+"Wine environment operation failed. Review the details below.": "L'operació de l'entorn del Wine ha fallat. Consulteu els detalls següents.",
+"Graphics backend": "Motor gràfic",
+"Choose how Wine presents windows and renders Direct3D applications.": "Trieu com Wine mostra les finestres i renderitza les aplicacions Direct3D.",
+"Direct3D renderer:": "Renderitzador Direct3D:",
+"Display system:": "Sistema de visualització:",
+"Graphics settings applied.": "S’han aplicat els paràmetres gràfics.",
+"Graphics settings applied. They will be used on the next launch.": "S’han aplicat els paràmetres gràfics. Es faran servir a l’inici següent.",
+"Graphics settings restored to the active values.": "Els paràmetres gràfics s’han restaurat als valors actius.",
+"Graphics settings saved. Restart Wine to apply the change.": "S’han desat els paràmetres gràfics. Reinicieu Wine per aplicar el canvi.",
+"Graphics settings saved. Wine is still using the previous settings.": "S’han desat els paràmetres gràfics. Wine encara utilitza els paràmetres anteriors.",
+"Stop Wine and apply": "Atura Wine i aplica",
+"Stop Wine to apply graphics settings": "Atura Wine per aplicar els paràmetres gràfics",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Això tancarà totes les aplicacions d’Office de l’entorn Wine seleccionat. Deseu els documents oberts abans de continuar.",
+"OK": "D’acord",
+"Cancel": "Cancel·la",
+"Yes": "Sí",
+"No": "No"
 }

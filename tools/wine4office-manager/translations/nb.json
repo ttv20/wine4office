@@ -82,5 +82,21 @@
 "Wine environment is ready": "Wine-miljøet er klart",
 "Wine environment is ready.": "Wine-miljøet er klart.",
 "Wine environment operation was cancelled.": "Handlingen for Wine-miljøet ble avbrutt.",
-"Wine environment operation failed. Review the details below.": "Handlingen for Wine-miljøet mislyktes. Se detaljene nedenfor."
+"Wine environment operation failed. Review the details below.": "Handlingen for Wine-miljøet mislyktes. Se detaljene nedenfor.",
+"Graphics backend": "Grafikkmotor",
+"Choose how Wine presents windows and renders Direct3D applications.": "Velg hvordan Wine viser vinduer og gjengir Direct3D-programmer.",
+"Direct3D renderer:": "Direct3D-gjengiver:",
+"Display system:": "Visningssystem:",
+"Graphics settings applied.": "Grafikkinnstillingene er tatt i bruk.",
+"Graphics settings applied. They will be used on the next launch.": "Grafikkinnstillingene er tatt i bruk. De brukes ved neste oppstart.",
+"Graphics settings restored to the active values.": "Grafikkinnstillingene er tilbakestilt til de aktive verdiene.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafikkinnstillingene er lagret. Start Wine på nytt for å ta i bruk endringen.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafikkinnstillingene er lagret. Wine bruker fortsatt de forrige innstillingene.",
+"Stop Wine and apply": "Stopp Wine og bruk",
+"Stop Wine to apply graphics settings": "Stopp Wine for å bruke grafikkinnstillingene",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Dette lukker alle Office-programmer i det valgte Wine-miljøet. Lagre åpne dokumenter før du fortsetter.",
+"OK": "OK",
+"Cancel": "Avbryt",
+"Yes": "Ja",
+"No": "Nei"
 }

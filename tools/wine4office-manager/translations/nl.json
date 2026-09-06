@@ -116,5 +116,21 @@
 "Wine environment is ready": "Wine-omgeving is gereed",
 "Wine environment is ready.": "Wine-omgeving is gereed.",
 "Wine environment operation was cancelled.": "De bewerking van de Wine-omgeving is geannuleerd.",
-"Wine environment operation failed. Review the details below.": "De bewerking van de Wine-omgeving is mislukt. Bekijk de details hieronder."
+"Wine environment operation failed. Review the details below.": "De bewerking van de Wine-omgeving is mislukt. Bekijk de details hieronder.",
+"Graphics backend": "Grafische backend",
+"Choose how Wine presents windows and renders Direct3D applications.": "Kies hoe Wine vensters weergeeft en Direct3D-toepassingen rendert.",
+"Direct3D renderer:": "Direct3D-renderer:",
+"Display system:": "Weergavesysteem:",
+"Graphics settings applied.": "Grafische instellingen toegepast.",
+"Graphics settings applied. They will be used on the next launch.": "Grafische instellingen toegepast. Ze worden bij de volgende start gebruikt.",
+"Graphics settings restored to the active values.": "De grafische instellingen zijn hersteld naar de actieve waarden.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafische instellingen opgeslagen. Start Wine opnieuw om de wijziging toe te passen.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafische instellingen opgeslagen. Wine gebruikt nog steeds de vorige instellingen.",
+"Stop Wine and apply": "Wine stoppen en toepassen",
+"Stop Wine to apply graphics settings": "Wine stoppen om de grafische instellingen toe te passen",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Hierdoor worden alle Office-toepassingen in de geselecteerde Wine-omgeving gesloten. Sla open documenten op voordat u doorgaat.",
+"OK": "OK",
+"Cancel": "Annuleren",
+"Yes": "Ja",
+"No": "Nee"
 }

@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine vide ir gatava",
 "Wine environment is ready.": "Wine vide ir gatava.",
 "Wine environment operation was cancelled.": "Wine vides darbība tika atcelta.",
-"Wine environment operation failed. Review the details below.": "Wine vides darbība neizdevās. Skatiet tālāk sniegto informāciju."
+"Wine environment operation failed. Review the details below.": "Wine vides darbība neizdevās. Skatiet tālāk sniegto informāciju.",
+"Graphics backend": "Grafikas aizmugursistēma",
+"Choose how Wine presents windows and renders Direct3D applications.": "Izvēlieties, kā Wine rāda logus un renderē Direct3D lietotnes.",
+"Direct3D renderer:": "Direct3D renderētājs:",
+"Display system:": "Attēlošanas sistēma:",
+"Graphics settings applied.": "Grafikas iestatījumi ir lietoti.",
+"Graphics settings applied. They will be used on the next launch.": "Grafikas iestatījumi ir lietoti. Tie tiks izmantoti nākamajā palaišanas reizē.",
+"Graphics settings restored to the active values.": "Grafikas iestatījumi ir atjaunoti uz aktīvajām vērtībām.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafikas iestatījumi ir saglabāti. Pārstartējiet Wine, lai lietotu izmaiņas.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafikas iestatījumi ir saglabāti. Wine joprojām izmanto iepriekšējos iestatījumus.",
+"Stop Wine and apply": "Apturēt Wine un lietot",
+"Stop Wine to apply graphics settings": "Apturēt Wine, lai lietotu grafikas iestatījumus",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Tiks aizvērtas visas Office lietotnes atlasītajā Wine vidē. Pirms turpināt, saglabājiet atvērtos dokumentus.",
+"OK": "Labi",
+"Cancel": "Atcelt",
+"Yes": "Jā",
+"No": "Nē"
 }

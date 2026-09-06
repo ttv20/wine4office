@@ -116,5 +116,21 @@
 "Wine environment is ready": "Wine 環境の準備が完了しました",
 "Wine environment is ready.": "Wine 環境の準備が完了しました。",
 "Wine environment operation was cancelled.": "Wine 環境の操作はキャンセルされました。",
-"Wine environment operation failed. Review the details below.": "Wine 環境の操作に失敗しました。以下の詳細を確認してください。"
+"Wine environment operation failed. Review the details below.": "Wine 環境の操作に失敗しました。以下の詳細を確認してください。",
+"Graphics backend": "グラフィックスバックエンド",
+"Choose how Wine presents windows and renders Direct3D applications.": "Wine によるウィンドウ表示と Direct3D アプリケーションのレンダリング方法を選択します。",
+"Direct3D renderer:": "Direct3D レンダラー:",
+"Display system:": "ディスプレイシステム:",
+"Graphics settings applied.": "グラフィックス設定を適用しました。",
+"Graphics settings applied. They will be used on the next launch.": "グラフィックス設定を適用しました。次回の起動時から使用されます。",
+"Graphics settings restored to the active values.": "グラフィックス設定を現在有効な値に戻しました。",
+"Graphics settings saved. Restart Wine to apply the change.": "グラフィックス設定を保存しました。変更を適用するには Wine を再起動してください。",
+"Graphics settings saved. Wine is still using the previous settings.": "グラフィックス設定を保存しました。Wine はまだ以前の設定を使用しています。",
+"Stop Wine and apply": "Wine を停止して適用",
+"Stop Wine to apply graphics settings": "グラフィックス設定を適用するため Wine を停止",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "選択した Wine 環境のすべての Office アプリケーションを閉じます。続行する前に、開いている文書を保存してください。",
+"OK": "OK",
+"Cancel": "キャンセル",
+"Yes": "はい",
+"No": "いいえ"
 }

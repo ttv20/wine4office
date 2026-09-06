@@ -264,9 +264,25 @@ class ManagerState:
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
-        for key in ("desktop_copy", "use_x11", "include_prereleases"):
+        graphics_changed = "use_x11" in payload or "use_vulkan" in payload
+        if graphics_changed:
+            if candidate.get("graphics_restart_required") is not True:
+                candidate["graphics_active_use_x11"] = bool(
+                    candidate.get("use_x11", True)
+                )
+                candidate["graphics_active_use_vulkan"] = bool(
+                    candidate.get("use_vulkan", False)
+                )
+        for key in ("desktop_copy", "use_x11", "use_vulkan", "include_prereleases"):
             if key in payload:
                 candidate[key] = bool(payload[key])
+        if graphics_changed:
+            candidate["graphics_restart_required"] = (
+                bool(candidate.get("use_x11", True))
+                != bool(candidate.get("graphics_active_use_x11", True))
+                or bool(candidate.get("use_vulkan", False))
+                != bool(candidate.get("graphics_active_use_vulkan", False))
+            )
         if "disable_office_telemetry" in payload:
             candidate = backend.set_office_telemetry_disabled(
                 candidate, candidate["prefix"], bool(payload["disable_office_telemetry"])
@@ -284,6 +300,32 @@ class ManagerState:
     def configured_prefix(self) -> str:
         with self.lock:
             return str(self.config["prefix"])
+
+    def mark_graphics_settings_applied(self) -> dict:
+        """Record that Wine stopped after the selected graphics settings changed."""
+        with self.lock:
+            candidate = dict(self.config)
+            candidate["graphics_restart_required"] = False
+            candidate["graphics_active_use_x11"] = bool(
+                candidate.get("use_x11", True)
+            )
+            candidate["graphics_active_use_vulkan"] = bool(
+                candidate.get("use_vulkan", False)
+            )
+            backend.save_config(candidate)
+            self.config = candidate
+            return dict(candidate)
+
+    def update_graphics_settings(self, use_x11: bool, use_vulkan: bool) -> dict:
+        """Persist a pending graphics selection without launching Wine."""
+        with self.lock:
+            candidate = self._candidate_config({
+                "use_x11": use_x11,
+                "use_vulkan": use_vulkan,
+            })
+            backend.save_config(candidate)
+            self.config = candidate
+            return dict(candidate)
 
     def update_config(self, payload: dict) -> dict:
         with self.lock:
@@ -306,6 +348,11 @@ class ManagerState:
                 {"cancel_event": self.cancel_event, "process_callback": self.set_process}
                 if self.task["running"] else {}
             )
+            policy_use_x11 = bool(candidate.get(
+                "graphics_active_use_x11", candidate.get("use_x11", True)
+            )) if candidate.get("graphics_restart_required") is True else bool(
+                candidate.get("use_x11", True)
+            )
         policy_applied = False
         compatibility_changed: list[str] = []
         try:
@@ -313,14 +360,14 @@ class ManagerState:
                 policy_applied = backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_disabled,
                     remove_managed=policy_was_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             if compatibility_after != compatibility_before and valid_prefix:
                 compatibility_changed = backend.apply_office_compatibility_policies(
                     candidate["prefix"], candidate["wine"],
                     compatibility_after, compatibility_before,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             backend.save_config(candidate)
@@ -333,7 +380,7 @@ class ManagerState:
                     backend.apply_office_compatibility_policies(
                         candidate["prefix"], candidate["wine"],
                         rollback_settings, compatibility_after,
-                        use_x11=candidate.get("use_x11", True),
+                        use_x11=policy_use_x11,
                         **policy_callbacks,
                     )
                 except Exception:
@@ -342,7 +389,7 @@ class ManagerState:
                 backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_was_disabled,
                     remove_managed=policy_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             raise
@@ -1321,11 +1368,13 @@ def main() -> int:
         prefix = args.prefix or defaults["prefix"]
         wine = args.wine or defaults["wine"]
         use_x11 = defaults["use_x11"]
+        use_vulkan = defaults.get("use_vulkan", False)
         if args.target in backend.APP_META:
             if incident.monitoring_enabled(defaults):
                 process = backend.launch_app_process(
                     prefix, wine, args.target, FONT_HELPER, args.documents,
-                    use_x11=use_x11, capture_diagnostics=True,
+                    use_x11=use_x11, use_vulkan=use_vulkan,
+                    capture_diagnostics=True,
                 )
                 return incident.supervise_process(
                     process, app=args.target, prefix=Path(prefix), use_x11=use_x11,
@@ -1334,11 +1383,14 @@ def main() -> int:
                     review_command=MANAGER_RESTART_COMMAND,
                 )
             backend.launch_app(prefix, wine, args.target, FONT_HELPER, args.documents,
-                               use_x11=use_x11)
+                               use_x11=use_x11, use_vulkan=use_vulkan)
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
-            backend.launch_tool(prefix, wine, args.target, use_x11=use_x11)
+            backend.launch_tool(
+                prefix, wine, args.target, use_x11=use_x11,
+                use_vulkan=use_vulkan,
+            )
         return 0
 
     if args.install_shortcut:
