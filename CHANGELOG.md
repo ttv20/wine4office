@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restore Excel worksheets and formula bars when using Vulkan on Wayland.
 - Report failed XML transformation checks without crashing the test suite.
 - Handle empty XML downloads safely and report stalled transformation output as an error.
 - Handle XML allocation failures safely and release shared XML memory reliably across threads.

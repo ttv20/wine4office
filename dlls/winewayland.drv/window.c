@@ -229,7 +229,6 @@ static void wayland_win_data_restack_owned_popups(HWND toplevel)
 {
     struct wayland_win_data *data, *locked_data, *toplevel_data;
     struct wayland_surface *toplevel_surface, *popup;
-    BOOL popup_found = FALSE;
     RECT intersection;
     HWND *list = build_hwnd_list(toplevel, TRUE);
 
@@ -263,11 +262,10 @@ static void wayland_win_data_restack_owned_popups(HWND toplevel)
             wayland_surface_make_subsurface(popup, toplevel_surface);
         if (!popup->wl_subsurface) continue;
         wl_subsurface_place_above(popup->wl_subsurface, toplevel_surface->wl_surface);
-        popup_found = TRUE;
     }
-    if (!popup_found) goto done;
 
-    /* Rebuild clients in Win32 Z-order below the popup group. */
+    /* Rebuild clients even without popups. A newly attached ancestor client
+     * must not cover child clients which were attached before it. */
     wayland_win_data_restack_client_surfaces_locked(toplevel, list);
 
 done:

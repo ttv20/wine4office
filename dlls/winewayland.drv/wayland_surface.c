@@ -1532,7 +1532,9 @@ static void wayland_client_surface_update(struct client_surface *client)
 
     TRACE("%s\n", debugstr_client_surface(client));
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
-    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
+    /* Only OpenGL drawables can read back their pixels for GDI composition.
+     * Vulkan clients have format zero and must keep their native surface. */
+    for (child = client->format > 0 ? NtUserGetWindowRelative(hwnd, GW_CHILD) : NULL; child;
          child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
     {
         if ((offscreen = NtUserIsWindowVisible(child))) break;
