@@ -316,6 +316,17 @@ class ManagerState:
             self.config = candidate
             return dict(candidate)
 
+    def update_graphics_settings(self, use_x11: bool, use_vulkan: bool) -> dict:
+        """Persist a pending graphics selection without launching Wine."""
+        with self.lock:
+            candidate = self._candidate_config({
+                "use_x11": use_x11,
+                "use_vulkan": use_vulkan,
+            })
+            backend.save_config(candidate)
+            self.config = candidate
+            return dict(candidate)
+
     def update_config(self, payload: dict) -> dict:
         with self.lock:
             previous = dict(self.config)
@@ -337,6 +348,11 @@ class ManagerState:
                 {"cancel_event": self.cancel_event, "process_callback": self.set_process}
                 if self.task["running"] else {}
             )
+            policy_use_x11 = bool(candidate.get(
+                "graphics_active_use_x11", candidate.get("use_x11", True)
+            )) if candidate.get("graphics_restart_required") is True else bool(
+                candidate.get("use_x11", True)
+            )
         policy_applied = False
         compatibility_changed: list[str] = []
         try:
@@ -344,14 +360,14 @@ class ManagerState:
                 policy_applied = backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_disabled,
                     remove_managed=policy_was_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             if compatibility_after != compatibility_before and valid_prefix:
                 compatibility_changed = backend.apply_office_compatibility_policies(
                     candidate["prefix"], candidate["wine"],
                     compatibility_after, compatibility_before,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             backend.save_config(candidate)
@@ -364,7 +380,7 @@ class ManagerState:
                     backend.apply_office_compatibility_policies(
                         candidate["prefix"], candidate["wine"],
                         rollback_settings, compatibility_after,
-                        use_x11=candidate.get("use_x11", True),
+                        use_x11=policy_use_x11,
                         **policy_callbacks,
                     )
                 except Exception:
@@ -373,7 +389,7 @@ class ManagerState:
                 backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_was_disabled,
                     remove_managed=policy_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             raise

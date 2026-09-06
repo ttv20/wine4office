@@ -2800,8 +2800,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             backend, "_systemctl_user"
         ) as systemctl:
             result = backend.launch_tool(
-                str(prefix), str(self.wine), "stop", False,
-                progress_callback=progress,
+                str(prefix), str(self.wine), "stop", False, progress,
             )
 
         self.assertIsNone(result)

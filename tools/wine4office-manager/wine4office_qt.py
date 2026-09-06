@@ -1463,11 +1463,9 @@ class ManagerWindow(QMainWindow):
         if not self.initialized:
             return
         try:
-            config = self.state.update_config({
-                "prefix": self.state.configured_prefix(),
-                "use_x11": self.use_x11.isChecked(),
-                "use_vulkan": self.use_vulkan.isChecked(),
-            })
+            config = self.state.update_graphics_settings(
+                self.use_x11.isChecked(), self.use_vulkan.isChecked()
+            )
         except Exception as error:
             self._restore_config_fields()
             self.show_error(f"Could not save graphics settings: {error}")

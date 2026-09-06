@@ -82,6 +82,46 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(applied["graphics_active_use_vulkan"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
+    def test_graphics_update_persists_without_reconciling_office_policies(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+        state.config = backend.set_office_telemetry_disabled(
+            state.config, prefix, True
+        )
+
+        with mock.patch.object(
+            backend, "apply_office_telemetry_policy"
+        ) as telemetry, mock.patch.object(
+            backend, "apply_office_compatibility_policies"
+        ) as compatibility:
+            updated = state.update_graphics_settings(False, True)
+
+        self.assertFalse(updated["use_x11"])
+        self.assertTrue(updated["use_vulkan"])
+        self.assertTrue(updated["graphics_restart_required"])
+        telemetry.assert_not_called()
+        compatibility.assert_not_called()
+
+    def test_pending_graphics_uses_active_display_for_policy_changes(self):
+        state = manager.ManagerState()
+        prefix = Path(state.config["prefix"])
+        self._make_prefix(prefix)
+        state.update_graphics_settings(False, True)
+
+        with mock.patch.object(
+            backend, "apply_office_telemetry_policy"
+        ) as apply:
+            state.update_config({
+                "prefix": str(prefix),
+                "disable_office_telemetry": True,
+            })
+
+        apply.assert_called_once_with(
+            str(prefix), state.config["wine"], True,
+            remove_managed=False, use_x11=True,
+        )
+
     def test_state_enables_and_disables_automatic_update_schedule(self):
         state = manager.ManagerState()
         with mock.patch.object(

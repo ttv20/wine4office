@@ -1748,8 +1748,9 @@ def host_terminal_command(command: list[str], env: dict[str, str]) -> list[str]:
 
 
 def launch_tool(prefix_value: str, wine_value: str, tool: str,
-                use_x11: bool = True, use_vulkan: bool = False,
-                progress_callback: Callable[[str, int | None], None] | None = None) -> int | None:
+                use_x11: bool = True,
+                progress_callback: Callable[[str, int | None], None] | None = None,
+                *, use_vulkan: bool = False) -> int | None:
     if tool == "stop":
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         restart_preload = _preload_active_for_environment(
