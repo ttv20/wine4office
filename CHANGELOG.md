@@ -4,7 +4,16 @@
 
 - Handle XML allocation failures safely and release shared XML memory reliably across threads.
 - Speed up Office Click-to-Run manifest parsing and reduce MSXML heap churn.
+- Reuse reconstructed PE images across Wine server restarts to reduce Office startup disk I/O.
+- Fix Excel startup crashes caused by certificate-store registry handling.
+- Prevent Office startup crashes when certificate chains are built concurrently.
+- Speed up case-insensitive string comparisons in the default C locale.
+- Reduce CPU work while building DirectWrite font collections.
+- Reduce repeated directory scans during case-insensitive file lookup.
+- Reduce Office startup file-system work by avoiding recursive App-V VFS lookups.
 - Speed up small Office gallery images rendered through Direct2D.
+- Speed up Direct2D bitmap-atlas rendering in Office galleries.
+- Preserve graphics state when multiple Direct2D devices share a Direct3D device.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
 - Reduce message-loop server calls after retrieving queued messages.

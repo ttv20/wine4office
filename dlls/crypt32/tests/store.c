@@ -29,6 +29,7 @@
 #include <winreg.h>
 #include <winerror.h>
 #include <wincrypt.h>
+#include <winternl.h>
 
 #include "wine/test.h"
 
@@ -1082,6 +1083,97 @@ static const struct CertPropIDHeader *findPropID(const BYTE *buf, DWORD size,
     return ret;
 }
 
+static BOOL has_wow64_registry(void)
+{
+    BOOL (WINAPI *pIsWow64Process)(HANDLE, BOOL *);
+    BOOL is_wow64;
+
+    if (sizeof(void *) == 8) return TRUE;
+    pIsWow64Process = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process");
+    return pIsWow64Process && pIsWow64Process(GetCurrentProcess(), &is_wow64) && is_wow64;
+}
+
+static void delete_wow64_reg_store_key(REGSAM view)
+{
+    HKEY parent;
+
+    if (!RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine", 0, KEY_ALL_ACCESS | view, &parent))
+    {
+        SHDeleteKeyA(parent, "CryptRegWow64");
+        RegCloseKey(parent);
+    }
+}
+
+static void testRegStoreWow64(void)
+{
+    static const char path[] = "Software\\Wine\\CryptRegWow64";
+    HKEY key32 = NULL, key64 = NULL, selected, other, subkey;
+    DWORD value, size, type;
+    HCERTSTORE store;
+    LONG rc;
+
+    if (!has_wow64_registry())
+    {
+        skip("WOW64 registry views are unavailable\n");
+        return;
+    }
+
+    delete_wow64_reg_store_key(KEY_WOW64_32KEY);
+    delete_wow64_reg_store_key(KEY_WOW64_64KEY);
+    rc = RegCreateKeyExA(HKEY_LOCAL_MACHINE, path, 0, NULL, 0,
+                         KEY_ALL_ACCESS | KEY_WOW64_32KEY, NULL, &key32, NULL);
+    if (rc == ERROR_ACCESS_DENIED)
+    {
+        skip("Not authorized to test WOW64 registry stores\n");
+        return;
+    }
+    ok(!rc, "RegCreateKeyExA failed for 32-bit view: %ld\n", rc);
+    rc = RegCreateKeyExA(HKEY_LOCAL_MACHINE, path, 0, NULL, 0,
+                         KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &key64, NULL);
+    ok(!rc, "RegCreateKeyExA failed for 64-bit view: %ld\n", rc);
+    if (!key32 || !key64) goto cleanup;
+
+    value = 32;
+    rc = RegSetValueExA(key32, "View", 0, REG_DWORD, (BYTE *)&value, sizeof(value));
+    ok(!rc, "RegSetValueExA failed for 32-bit view: %ld\n", rc);
+    value = 64;
+    rc = RegSetValueExA(key64, "View", 0, REG_DWORD, (BYTE *)&value, sizeof(value));
+    ok(!rc, "RegSetValueExA failed for 64-bit view: %ld\n", rc);
+
+    selected = sizeof(void *) == 8 ? key32 : key64;
+    other = sizeof(void *) == 8 ? key64 : key32;
+    value = 0;
+    size = sizeof(value);
+    rc = RegQueryValueExA(selected, "View", NULL, &type, (BYTE *)&value, &size);
+    ok(!rc && value == (sizeof(void *) == 8 ? 32 : 64),
+       "Wrong selected registry view, rc %ld, value %lu\n", rc, value);
+    value = 0;
+    size = sizeof(value);
+    rc = RegQueryValueExA(other, "View", NULL, &type, (BYTE *)&value, &size);
+    ok(!rc && value == (sizeof(void *) == 8 ? 64 : 32),
+       "Wrong other registry view, rc %ld, value %lu\n", rc, value);
+
+    store = CertOpenStore(CERT_STORE_PROV_REG, 0, 0, 0, selected);
+    ok(store != NULL, "CertOpenStore failed for alternate WOW64 view: %08lx\n", GetLastError());
+    if (store) CertCloseStore(store, 0);
+
+    rc = RegOpenKeyExA(selected, "Certificates", 0, KEY_READ, &subkey);
+    ok(!rc, "Certificates not created in selected WOW64 view: %ld\n", rc);
+    if (!rc) RegCloseKey(subkey);
+    rc = RegOpenKeyExA(other, "Certificates", 0, KEY_READ, &subkey);
+    ok(rc == ERROR_FILE_NOT_FOUND, "Certificates unexpectedly created in other WOW64 view: %ld\n", rc);
+    if (!rc) RegCloseKey(subkey);
+
+    rc = RegQueryInfoKeyA(selected, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    ok(!rc, "Input key was invalidated by CertCloseStore: %ld\n", rc);
+
+cleanup:
+    if (key32) RegCloseKey(key32);
+    if (key64) RegCloseKey(key64);
+    delete_wow64_reg_store_key(KEY_WOW64_32KEY);
+    delete_wow64_reg_store_key(KEY_WOW64_64KEY);
+}
+
 static void testRegStore(void)
 {
     static const char tempKey[] = "Software\\Wine\\CryptTemp";
@@ -1102,10 +1194,39 @@ static void testRegStore(void)
     /* Opening up any old key works.. */
     key = HKEY_CURRENT_USER;
     store = CertOpenStore(CERT_STORE_PROV_REG, 0, 0, 0, key);
-    /* Not sure if this is a bug in DuplicateHandle, marking todo_wine for now
-     */
-    todo_wine ok(store != 0, "CertOpenStore failed: %08lx\n", GetLastError());
+    ok(store != 0, "CertOpenStore failed: %08lx\n", GetLastError());
     CertCloseStore(store, 0);
+
+    {
+        static const WCHAR *root_paths[] = { L"\\Registry\\Machine", L"\\Registry\\User" };
+        NTSTATUS (WINAPI *pNtOpenKey)(HANDLE *, ACCESS_MASK, OBJECT_ATTRIBUTES *);
+        unsigned int i;
+
+        pNtOpenKey = (void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtOpenKey");
+        ok(pNtOpenKey != NULL, "NtOpenKey is unavailable\n");
+        for (i = 0; pNtOpenKey && i < ARRAY_SIZE(root_paths); i++)
+        {
+            UNICODE_STRING name;
+            OBJECT_ATTRIBUTES attr;
+            NTSTATUS status;
+
+            name.Buffer = (WCHAR *)root_paths[i];
+            name.Length = wcslen(root_paths[i]) * sizeof(WCHAR);
+            name.MaximumLength = name.Length + sizeof(WCHAR);
+            InitializeObjectAttributes(&attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            status = pNtOpenKey((HANDLE *)&key, KEY_READ, &attr);
+            ok(!status, "NtOpenKey failed for %s: %#lx\n", wine_dbgstr_w(root_paths[i]), status);
+            if (status) continue;
+
+            store = CertOpenStore(CERT_STORE_PROV_REG, 0, 0, CERT_STORE_READONLY_FLAG, key);
+            ok(store != NULL, "CertOpenStore failed for real root %s: %08lx\n",
+               wine_dbgstr_w(root_paths[i]), GetLastError());
+            if (store) CertCloseStore(store, 0);
+            rc = RegQueryInfoKeyW(key, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+            ok(!rc, "Input root key was invalidated by CertCloseStore: %ld\n", rc);
+            RegCloseKey(key);
+        }
+    }
 
     rc = RegCreateKeyExA(HKEY_CURRENT_USER, tempKey, 0, NULL, 0, KEY_ALL_ACCESS,
      NULL, &key, NULL);
@@ -3869,6 +3990,7 @@ START_TEST(store)
     testStoresInCollection();
 
     testRegStore();
+    testRegStoreWow64();
     testRegStoreSavedCerts();
 
     testSystemRegStore();
