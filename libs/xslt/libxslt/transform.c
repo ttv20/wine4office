@@ -2300,6 +2300,22 @@ xsltReleaseLocalRVTs(xsltTransformContextPtr ctxt, xmlDocPtr base)
     } while (cur != base);
 }
 
+#ifndef XSLT_REFACTORED
+static int
+xsltIsCompiledInstruction(xmlNodePtr node, xsltStyleType type)
+{
+    xsltStylePreCompPtr info;
+
+    if ((node == NULL) || (node->type != XML_ELEMENT_NODE) ||
+        (node->psvi == NULL) || (node->psvi == xsltExtMarker))
+        return(0);
+
+    info = (xsltStylePreCompPtr) node->psvi;
+    return((info->inst == node) && (info->type != XSLT_FUNC_EXTENSION) &&
+        ((type == 0) || (info->type == type)));
+}
+#endif
+
 /**
  * xsltApplySequenceConstructor:
  * @ctxt:  a XSLT process context
@@ -2730,7 +2746,8 @@ xsltApplySequenceConstructor(xsltTransformContextPtr ctxt,
 
 #else /* XSLT_REFACTORED */
 
-        if (IS_XSLT_ELEM(cur)) {
+        if (xsltIsCompiledInstruction(cur, 0) ||
+            IS_XSLT_ELEM(cur)) {
             /*
              * This is an XSLT node
              */
@@ -4062,7 +4079,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 #else
     xsltStylePreCompPtr comp = (xsltStylePreCompPtr) castedComp;
 #endif
-    xmlChar *prop = NULL;
+    xmlChar *prop = NULL, *tmpNsName = NULL;
     const xmlChar *name, *prefix = NULL, *nsName = NULL;
     xmlNodePtr copy;
     xmlNodePtr oldInsert;
@@ -4143,7 +4160,6 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    if (comp->ns[0] != 0)
 		nsName = comp->ns;
 	} else {
-	    xmlChar *tmpNsName;
 	    /*
 	    * Eval the AVT.
 	    */
@@ -4156,8 +4172,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    *  attribute has a null namespace URI."
 	    */
 	    if ((tmpNsName != NULL) && (tmpNsName[0] != 0))
-		nsName = xmlDictLookup(ctxt->dict, BAD_CAST tmpNsName, -1);
-	    xmlFree(tmpNsName);
+		nsName = tmpNsName;
 	}
 
         if (xmlStrEqual(nsName, BAD_CAST "http://www.w3.org/2000/xmlns/")) {
@@ -4220,6 +4235,8 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	*/
 	xsltGetSpecialNamespace(ctxt, inst, NULL, NULL, copy);
     }
+    xmlFree(tmpNsName);
+    tmpNsName = NULL;
 
     ctxt->insert = copy;
 
@@ -4248,6 +4265,7 @@ xsltElement(xsltTransformContextPtr ctxt, xmlNodePtr node,
 	    NULL);
 
 error:
+    xmlFree(tmpNsName);
     ctxt->insert = oldInsert;
     return;
 }
@@ -5158,7 +5176,9 @@ xsltChoose(xsltTransformContextPtr ctxt, xmlNodePtr contextNode,
     * We don't check the content model during transformation.
     */
 #else
-    if ((! IS_XSLT_ELEM(cur)) || (! IS_XSLT_NAME(cur, "when"))) {
+    if ((! xsltIsCompiledInstruction(cur, XSLT_FUNC_WHEN)) &&
+        ((! IS_XSLT_ELEM(cur)) ||
+         (! IS_XSLT_NAME(cur, "when")))) {
 	xsltTransformError(ctxt, NULL, inst,
 	     "xsl:choose: xsl:when expected first\n");
 	return;
@@ -5177,7 +5197,8 @@ xsltChoose(xsltTransformContextPtr ctxt, xmlNodePtr contextNode,
 	/*
 	* Process xsl:when ---------------------------------------------------
 	*/
-	while (IS_XSLT_ELEM(cur) && IS_XSLT_NAME(cur, "when")) {
+	while (xsltIsCompiledInstruction(cur, XSLT_FUNC_WHEN) ||
+	       (IS_XSLT_ELEM(cur) && IS_XSLT_NAME(cur, "when"))) {
 	    wcomp = cur->psvi;
 
 	    if ((wcomp == NULL) || (wcomp->test == NULL) ||

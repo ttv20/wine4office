@@ -23,6 +23,7 @@
 #include <libxml/xpathInternals.h>
 #include <libxml/parserInternals.h>
 #include <libxml/dict.h>
+#include "private/xpath.h"
 #include "xslt.h"
 #include "xsltInternals.h"
 #include "xsltutils.h"
@@ -647,7 +648,8 @@ xsltStackLookup(xsltTransformContextPtr ctxt, const xmlChar *name,
     int i;
     xsltStackElemPtr cur;
 
-    if ((ctxt == NULL) || (name == NULL) || (ctxt->varsNr == 0))
+    if ((ctxt == NULL) || (name == NULL)
+            || (ctxt->varsNr <= ctxt->varsBase))
 	return(NULL);
 
     /*
@@ -1928,7 +1930,7 @@ xsltGlobalVariableLookup(xsltTransformContextPtr ctxt, const xmlChar *name,
 	ret = xsltEvalGlobalVariable(elem, ctxt);
     } else
 	ret = elem->value;
-    return(xmlXPathObjectCopy(ret));
+    return(xmlXPathCacheObjectCopy(ctxt->xpathCtxt, ret));
 }
 
 /**
@@ -1963,7 +1965,7 @@ xsltVariableLookup(xsltTransformContextPtr ctxt, const xmlChar *name,
 	elem->computed = 1;
     }
     if (elem->value != NULL)
-	return(xmlXPathObjectCopy(elem->value));
+	return(xmlXPathCacheObjectCopy(ctxt->xpathCtxt, elem->value));
 #ifdef WITH_XSLT_DEBUG_VARIABLE
     XSLT_TRACE(ctxt,XSLT_TRACE_VARIABLES,xsltGenericDebug(xsltGenericDebugContext,
 		     "variable not found %s\n", name));
@@ -2288,7 +2290,7 @@ xsltXPathVariableLookup(void *ctxt, const xmlChar *name,
     * First lookup expects the variable name and URI to
     * come from the disctionnary and hence pointer comparison.
     */
-    if (tctxt->varsNr != 0) {
+    if (tctxt->varsNr > tctxt->varsBase) {
 	int i;
 	xsltStackElemPtr variable = NULL, cur;
 
@@ -2309,8 +2311,10 @@ xsltXPathVariableLookup(void *ctxt, const xmlChar *name,
 	{
 	    const xmlChar *tmpName = name, *tmpNsName = ns_uri;
 
-	    name = xmlDictLookup(tctxt->dict, name, -1);
-	    if (ns_uri)
+	    if (xmlDictOwns(tctxt->dict, name) != 1)
+		name = xmlDictLookup(tctxt->dict, name, -1);
+	    if ((ns_uri != NULL) &&
+		(xmlDictOwns(tctxt->dict, ns_uri) != 1))
 		ns_uri = xmlDictLookup(tctxt->dict, ns_uri, -1);
 	    if ((tmpName != name) || (tmpNsName != ns_uri)) {
 		for (i = tctxt->varsNr; i > tctxt->varsBase; i--) {
@@ -2336,7 +2340,7 @@ local_variable_found:
 		variable->computed = 1;
 	    }
 	    if (variable->value != NULL) {
-		valueObj = xmlXPathObjectCopy(variable->value);
+		valueObj = xmlXPathCacheObjectCopy(tctxt->xpathCtxt, variable->value);
 	    }
 	    return(valueObj);
 	}

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Report failed XML transformation checks without crashing the test suite.
 - Handle empty XML downloads safely and report stalled transformation output as an error.
 - Handle XML allocation failures safely and release shared XML memory reliably across threads.
 - Speed up Office Click-to-Run manifest parsing and reduce MSXML heap churn.
@@ -17,6 +18,7 @@
 - Preserve graphics state when multiple Direct2D devices share a Direct3D device.
 - Improve antialiasing quality and rendering performance while reducing GPU memory use for complex Direct2D geometry with analytic coverage rendering.
 - Reduce Word CPU use by coalescing Office timers that allow delayed delivery.
+- Speed up repeated XSLT and XPath evaluation during Office startup.
 - Reduce message-loop server calls after retrieving queued messages.
 - Respect Direct2D stroke join styles while keeping sharp WordArt corners bounded.
 - Keep Word responsive while Microsoft 365 tokens are checked or refreshed in the background.

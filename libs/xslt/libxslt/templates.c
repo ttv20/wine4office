@@ -21,6 +21,7 @@
 #include <libxml/dict.h>
 #include <libxml/xpathInternals.h>
 #include <libxml/parserInternals.h>
+#include "private/xpath.h"
 #include "xslt.h"
 #include "xsltInternals.h"
 #include "xsltutils.h"
@@ -85,7 +86,7 @@ xsltEvalXPathPredicate(xsltTransformContextPtr ctxt, xmlXPathCompExprPtr comp,
 
     if (res != NULL) {
 	ret = xmlXPathEvalPredicate(ctxt->xpathCtxt, res);
-	xmlXPathFreeObject(res);
+	xmlXPathReleaseObject(ctxt->xpathCtxt, res);
 #ifdef WITH_XSLT_DEBUG_TEMPLATES
 	XSLT_TRACE(ctxt,XSLT_TRACE_TEMPLATES,xsltGenericDebug(xsltGenericDebugContext,
 	     "xsltEvalXPathPredicate: returns %d\n", ret));
@@ -161,7 +162,7 @@ xsltEvalXPathStringNs(xsltTransformContextPtr ctxt, xmlXPathCompExprPtr comp,
 	    xsltTransformError(ctxt, NULL, NULL,
 		 "xpath : string() function didn't return a String\n");
 	}
-	xmlXPathFreeObject(res);
+	xmlXPathReleaseObject(ctxt->xpathCtxt, res);
     } else {
 	ctxt->state = XSLT_STATE_STOPPED;
     }
@@ -394,6 +395,28 @@ xsltAttrTemplateValueProcess(xsltTransformContextPtr ctxt, const xmlChar *str) {
     return(xsltAttrTemplateValueProcessNode(ctxt, str, NULL));
 }
 
+static xmlAttrPtr
+xsltGetNsPropNode(xmlNodePtr node, const xmlChar *name,
+                  const xmlChar *nameSpace)
+{
+    xmlAttrPtr prop;
+
+    if ((node == NULL) || (node->type != XML_ELEMENT_NODE))
+        return(NULL);
+
+    for (prop = node->properties; prop != NULL; prop = prop->next) {
+        if (!xmlStrEqual(prop->name, name))
+            continue;
+        if (nameSpace == NULL)
+            return(prop);
+        if (((prop->ns == NULL) && (node->ns != NULL) &&
+             xmlStrEqual(node->ns->href, nameSpace)) ||
+            ((prop->ns != NULL) && xmlStrEqual(prop->ns->href, nameSpace)))
+            return(prop);
+    }
+    return(NULL);
+}
+
 /**
  * xsltEvalAttrValueTemplate:
  * @ctxt:  the XSLT transformation context
@@ -413,12 +436,23 @@ xmlChar *
 xsltEvalAttrValueTemplate(xsltTransformContextPtr ctxt, xmlNodePtr inst,
 	                  const xmlChar *name, const xmlChar *ns)
 {
+    xmlAttrPtr attr;
     xmlChar *ret;
     xmlChar *expr;
 
     if ((ctxt == NULL) || (inst == NULL) || (name == NULL) ||
         (inst->type != XML_ELEMENT_NODE))
 	return(NULL);
+
+    attr = xsltGetNsPropNode(inst, name, ns);
+    if ((attr != NULL) && (attr->psvi != NULL)) {
+#ifdef XSLT_REFACTORED
+        if (attr->psvi != xsltXSLTAttrMarker)
+            return(xsltEvalAVT(ctxt, attr->psvi, inst));
+#else
+        return(xsltEvalAVT(ctxt, attr->psvi, inst));
+#endif
+    }
 
     expr = xsltGetNsProp(inst, name, ns);
     if (expr == NULL)
