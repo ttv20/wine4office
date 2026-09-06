@@ -7420,6 +7420,7 @@ static void test_appv_vfs_overlay(void)
 {
     static const char payload[] = "App-V VFS resource";
     char temp[MAX_PATH], base[MAX_PATH], path[MAX_PATH], source[MAX_PATH], requested[MAX_PATH];
+    char nested_source[MAX_PATH], prefix_source[MAX_PATH];
     DWORD written, read, attributes;
     HANDLE file;
     BOOL ret;
@@ -7447,6 +7448,8 @@ static void test_appv_vfs_overlay(void)
     CREATE_SUBDIR( "\\AppVPackage\\root\\vfs" );
     CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64" );
     CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared" );
+    CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfs" );
+    CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfsfoo" );
     CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Product42" );
     CREATE_SUBDIR( "\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Product42\\1033" );
 #undef CREATE_SUBDIR
@@ -7461,6 +7464,33 @@ static void test_appv_vfs_overlay(void)
     ret = WriteFile( file, payload, sizeof(payload), &written, NULL );
     ok( ret && written == sizeof(payload), "Failed to write VFS source, error %lu.\n", GetLastError() );
     CloseHandle( file );
+
+    snprintf( nested_source, ARRAY_SIZE(nested_source),
+              "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfs\\sentinel.bin",
+              base );
+    file = CreateFileA( nested_source, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "Failed to create nested VFS source, error %lu.\n", GetLastError() );
+    CloseHandle( file );
+
+    snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\VfS\\sentinel.bin", base );
+    attributes = GetFileAttributesA( path );
+    ok( attributes == INVALID_FILE_ATTRIBUTES,
+        "Backing-store path unexpectedly received another VFS overlay.\n" );
+    file = CreateFileA( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    ok( file == INVALID_HANDLE_VALUE, "Open unexpectedly received another VFS overlay.\n" );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+    ok( GetFileAttributesA( nested_source ) != INVALID_FILE_ATTRIBUTES,
+        "Nested VFS source is not directly accessible.\n" );
+
+    snprintf( prefix_source, ARRAY_SIZE(prefix_source),
+              "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfsfoo\\sentinel.bin",
+              base );
+    file = CreateFileA( prefix_source, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "Failed to create VFS-prefix source, error %lu.\n", GetLastError() );
+    CloseHandle( file );
+    snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfsfoo\\sentinel.bin", base );
+    ok( GetFileAttributesA( path ) != INVALID_FILE_ATTRIBUTES,
+        "Non-component VFS prefix was not overlaid, error %lu.\n", GetLastError() );
 
     attributes = GetFileAttributesA( requested );
     ok( attributes != INVALID_FILE_ATTRIBUTES, "VFS attributes failed, error %lu.\n", GetLastError() );
@@ -7479,9 +7509,13 @@ static void test_appv_vfs_overlay(void)
     ok( !ret, "Delete unexpectedly reached the immutable VFS source.\n" );
     ok( GetFileAttributesA( source ) != INVALID_FILE_ATTRIBUTES, "VFS source was removed.\n" );
 
+    DeleteFileA( prefix_source );
+    DeleteFileA( nested_source );
     DeleteFileA( source );
     snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Product42\\1033", base ); RemoveDirectoryA( path );
     snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\Product42", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfsfoo", base ); RemoveDirectoryA( path );
+    snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared\\vfs", base ); RemoveDirectoryA( path );
     snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64\\Microsoft Shared", base ); RemoveDirectoryA( path );
     snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs\\ProgramFilesCommonX64", base ); RemoveDirectoryA( path );
     snprintf( path, ARRAY_SIZE(path), "%s\\AppVPackage\\root\\vfs", base ); RemoveDirectoryA( path );

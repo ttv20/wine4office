@@ -161,40 +161,47 @@ HCERTCHAINENGINE CRYPT_CreateChainEngine(HCERTSTORE root, DWORD system_store, co
 }
 
 static CertificateChainEngine *default_cu_engine, *default_lm_engine;
+static INIT_ONCE default_cu_engine_once = INIT_ONCE_STATIC_INIT;
+static INIT_ONCE default_lm_engine_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK create_default_chain_engine(INIT_ONCE *once, void *param, void **context)
+{
+    const CERT_CHAIN_ENGINE_CONFIG config = { sizeof(config) };
+
+    *context = CRYPT_CreateChainEngine(NULL, PtrToUlong(param), &config);
+    return *context != NULL;
+}
 
 static CertificateChainEngine *get_chain_engine(HCERTCHAINENGINE handle, BOOL allow_default)
 {
-    const CERT_CHAIN_ENGINE_CONFIG config = { sizeof(config) };
+    INIT_ONCE *once;
+    CertificateChainEngine **default_engine;
+    DWORD system_store;
 
     if(handle == HCCE_CURRENT_USER) {
         if(!allow_default)
             return NULL;
 
-        if(!default_cu_engine) {
-            handle = CRYPT_CreateChainEngine(NULL, CERT_SYSTEM_STORE_CURRENT_USER, &config);
-            InterlockedCompareExchangePointer((void**)&default_cu_engine, handle, NULL);
-            if(default_cu_engine != handle)
-                CertFreeCertificateChainEngine(handle);
-        }
-        CertControlStore(default_cu_engine->hWorld, 0, CERT_STORE_CTRL_RESYNC, NULL);
-        return default_cu_engine;
+        once = &default_cu_engine_once;
+        default_engine = &default_cu_engine;
+        system_store = CERT_SYSTEM_STORE_CURRENT_USER;
     }
-
-    if(handle == HCCE_LOCAL_MACHINE) {
+    else if(handle == HCCE_LOCAL_MACHINE) {
         if(!allow_default)
             return NULL;
 
-        if(!default_lm_engine) {
-            handle = CRYPT_CreateChainEngine(NULL, CERT_SYSTEM_STORE_LOCAL_MACHINE, &config);
-            InterlockedCompareExchangePointer((void**)&default_lm_engine, handle, NULL);
-            if(default_lm_engine != handle)
-                CertFreeCertificateChainEngine(handle);
-        }
-        CertControlStore(default_lm_engine->hWorld, 0, CERT_STORE_CTRL_RESYNC, NULL);
-        return default_lm_engine;
+        once = &default_lm_engine_once;
+        default_engine = &default_lm_engine;
+        system_store = CERT_SYSTEM_STORE_LOCAL_MACHINE;
     }
+    else
+        return (CertificateChainEngine*)handle;
 
-    return (CertificateChainEngine*)handle;
+    if (!InitOnceExecuteOnce(once, create_default_chain_engine, UlongToPtr(system_store),
+                             (void **)default_engine))
+        return NULL;
+    CertControlStore((*default_engine)->hWorld, 0, CERT_STORE_CTRL_RESYNC, NULL);
+    return *default_engine;
 }
 
 static void free_chain_engine(CertificateChainEngine *engine)

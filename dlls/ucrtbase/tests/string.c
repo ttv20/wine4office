@@ -72,6 +72,91 @@ static void __cdecl test_invalid_parameter_handler(const wchar_t *expression,
 _ACRTIMP int __cdecl _o_tolower(int);
 _ACRTIMP int __cdecl _o_toupper(int);
 
+static wchar_t ascii_tolower(wchar_t c)
+{
+    return c >= 'A' && c <= 'Z' ? c + 'a' - 'A' : c;
+}
+
+struct wcsicmp_thread_args
+{
+    _locale_t locale;
+    int current_result;
+    int explicit_result;
+    BOOL locale_available;
+};
+
+static DWORD WINAPI wcsicmp_thread_locale(void *param)
+{
+    struct wcsicmp_thread_args *args = param;
+
+    _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+    if (!setlocale(LC_CTYPE, "Turkish")) return 0;
+
+    args->locale_available = TRUE;
+    args->current_result = _wcsicmp_l(L"I", L"\x131", NULL);
+    args->explicit_result = _wcsicmp_l(L"I", L"\x131", args->locale);
+    setlocale(LC_CTYPE, "C");
+    return 0;
+}
+
+static void test_wcsicmp_initial_locale(void)
+{
+    wchar_t left[2] = {0}, right[2] = {0};
+    _locale_t locale;
+    unsigned int i, j;
+    int expected, ret;
+
+    ok(!strcmp(setlocale(LC_ALL, NULL), "C"), "expected initial C locale\n");
+    locale = _create_locale(LC_ALL, "C");
+    ok(!!locale, "failed to create C locale\n");
+    if (!locale) return;
+
+    for (i = 1; i <= 0xffff; ++i)
+    {
+        j = (i * 40503u + 17u) & 0xffff;
+        if (!j) j = 1;
+        left[0] = i;
+        right[0] = j;
+        expected = ascii_tolower(left[0]) - ascii_tolower(right[0]);
+        ret = _wcsicmp_l(left, right, NULL);
+        ok(ret == expected, "initial C locale returned %d, expected %d for %#x and %#x\n",
+                ret, expected, i, j);
+        ret = _wcsicmp_l(left, right, locale);
+        ok(ret == expected, "explicit C locale returned %d, expected %d for %#x and %#x\n",
+                ret, expected, i, j);
+    }
+    _free_locale(locale);
+}
+
+static void test_wcsicmp_thread_locale(void)
+{
+    struct wcsicmp_thread_args args = {0};
+    HANDLE thread;
+    DWORD wait;
+
+    args.locale = _create_locale(LC_ALL, "Turkish");
+    if (!args.locale)
+    {
+        win_skip("Turkish locale is not available\n");
+        return;
+    }
+    thread = CreateThread(NULL, 0, wcsicmp_thread_locale, &args, 0, NULL);
+    ok(!!thread, "CreateThread failed, error %lu\n", GetLastError());
+    if (thread)
+    {
+        wait = WaitForSingleObject(thread, INFINITE);
+        ok(wait == WAIT_OBJECT_0, "thread wait returned %#lx\n", wait);
+        CloseHandle(thread);
+        if (args.locale_available)
+            ok(args.current_result == args.explicit_result,
+                    "thread locale returned %d, explicit locale returned %d\n",
+                    args.current_result, args.explicit_result);
+        else
+            win_skip("Turkish thread locale is not available\n");
+    }
+    _free_locale(args.locale);
+}
+
 static BOOL local_isnan(double d)
 {
     return d != d;
@@ -842,6 +927,7 @@ START_TEST(string)
     ok(_set_invalid_parameter_handler(test_invalid_parameter_handler) == NULL,
             "Invalid parameter handler was already set\n");
 
+    test_wcsicmp_initial_locale();
     test_strtod();
     test_strtof();
     test__memicmp();
@@ -857,4 +943,5 @@ START_TEST(string)
     test_strcmp();
     test__mbsncpy_s();
     test_mbstowcs();
+    test_wcsicmp_thread_locale();
 }
