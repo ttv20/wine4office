@@ -45,13 +45,40 @@ struct bsc_t {
     HRESULT (*onDataAvailable)(void*,char*,DWORD);
 
     IBinding *binding;
-    IStream *memstream;
+    BYTE *data;
+    DWORD data_size;
+    DWORD data_capacity;
     HRESULT hres;
 };
 
 static inline bsc_t *impl_from_IBindStatusCallback( IBindStatusCallback *iface )
 {
     return CONTAINING_RECORD(iface, bsc_t, IBindStatusCallback_iface);
+}
+
+static HRESULT bsc_reserve(bsc_t *bsc, DWORD size)
+{
+    DWORD capacity = bsc->data_capacity;
+    BYTE *data;
+
+    if (size <= capacity)
+        return S_OK;
+    if (capacity < 4096)
+        capacity = 4096;
+    while (capacity < size)
+    {
+        if (capacity > ~(DWORD)0 / 2)
+        {
+            capacity = size;
+            break;
+        }
+        capacity *= 2;
+    }
+    if (!(data = realloc(bsc->data, capacity)))
+        return E_OUTOFMEMORY;
+    bsc->data = data;
+    bsc->data_capacity = capacity;
+    return S_OK;
 }
 
 static HRESULT WINAPI bsc_QueryInterface(
@@ -95,8 +122,7 @@ static ULONG WINAPI bsc_Release(
     {
         if (bsc->binding)
             IBinding_Release(bsc->binding);
-        if (bsc->memstream)
-            IStream_Release(bsc->memstream);
+        free(bsc->data);
         free(bsc);
     }
 
@@ -109,16 +135,10 @@ static HRESULT WINAPI bsc_OnStartBinding(
         IBinding* pib)
 {
     bsc_t *This = impl_from_IBindStatusCallback(iface);
-    HRESULT hr;
-
     TRACE("%p, %lx, %p.\n", iface, dwReserved, pib);
 
     This->binding = pib;
     IBinding_AddRef(pib);
-
-    hr = CreateStreamOnHGlobal(NULL, TRUE, &This->memstream);
-    if(FAILED(hr))
-        return hr;
 
     return S_OK;
 }
@@ -163,17 +183,8 @@ static HRESULT WINAPI bsc_OnStopBinding(
     }
 
     if(This->obj && SUCCEEDED(hresult)) {
-        HGLOBAL hglobal;
-        hr = GetHGlobalFromStream(This->memstream, &hglobal);
-        if(SUCCEEDED(hr))
-        {
-            DWORD len = GlobalSize(hglobal);
-            char *ptr = GlobalLock(hglobal);
-
-            This->hres = This->onDataAvailable(This->obj, ptr, len);
-
-            GlobalUnlock(hglobal);
-        }
+        This->hres = This->onDataAvailable(This->obj, (char *)This->data,
+                This->data_size);
     }
 
     return hr;
@@ -198,7 +209,7 @@ static HRESULT WINAPI bsc_OnDataAvailable(
 {
     bsc_t *bsc = impl_from_IBindStatusCallback(iface);
     BYTE buf[4096];
-    DWORD read, written;
+    DWORD read;
     HRESULT hr;
 
     TRACE("%p, %lx, %lu, %p, %p.\n", iface, grfBSCF, dwSize, pformatetc, pstgmed);
@@ -206,11 +217,16 @@ static HRESULT WINAPI bsc_OnDataAvailable(
     do
     {
         hr = IStream_Read(pstgmed->pstm, buf, sizeof(buf), &read);
-        if(FAILED(hr))
+        if (FAILED(hr) || !read)
             break;
 
-        hr = IStream_Write(bsc->memstream, buf, read, &written);
-    } while(SUCCEEDED(hr) && written != 0 && read != 0);
+        if (read > ~(DWORD)0 - bsc->data_size)
+            return E_OUTOFMEMORY;
+        if (FAILED(hr = bsc_reserve(bsc, bsc->data_size + read)))
+            return hr;
+        memcpy(bsc->data + bsc->data_size, buf, read);
+        bsc->data_size += read;
+    } while(SUCCEEDED(hr) && read != 0);
 
     return S_OK;
 }
@@ -316,7 +332,9 @@ HRESULT bind_url(IMoniker *mon, HRESULT (*onDataAvailable)(void*,char*,DWORD),
     bsc->obj = obj;
     bsc->onDataAvailable = onDataAvailable;
     bsc->binding = NULL;
-    bsc->memstream = NULL;
+    bsc->data = NULL;
+    bsc->data_size = 0;
+    bsc->data_capacity = 0;
     bsc->hres = S_OK;
 
     hr = RegisterBindStatusCallback(pbc, &bsc->IBindStatusCallback_iface, NULL, 0);

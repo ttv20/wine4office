@@ -2231,10 +2231,10 @@ static void test_persiststream(void)
 
     istream = SHCreateMemStream((const BYTE*)"", 0);
     hr = IPersistStreamInit_Load(streaminit, istream);
-    todo_wine ok(hr == XML_E_MISSINGROOT, "Unexpected hr %#lx.\n", hr);
+    ok(hr == XML_E_MISSINGROOT, "Unexpected hr %#lx.\n", hr);
     ok(FAILED(hr), "got success\n");
     IStream_Release(istream);
-    EXPECT_PARSE_ERROR(doc, XML_E_MISSINGROOT, TRUE);
+    EXPECT_PARSE_ERROR(doc, XML_E_MISSINGROOT, FALSE);
 
     failing_stream_read_calls = 0;
     hr = IPersistStreamInit_Load(streaminit, &failing_stream);
@@ -10339,6 +10339,106 @@ static void test_insertBefore(void)
     IXMLDOMDocument_Release(doc);
 }
 
+struct document_release_context
+{
+    IXMLDOMDocument *doc;
+    HANDLE start;
+};
+
+static DWORD WINAPI release_document_thread(void *arg)
+{
+    struct document_release_context *context = arg;
+    HRESULT hr;
+
+    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    WaitForSingleObject(context->start, INFINITE);
+    IXMLDOMDocument_Release(context->doc);
+    if (SUCCEEDED(hr)) CoUninitialize();
+    return 0;
+}
+
+static void test_moved_subtree_threads(void)
+{
+    struct document_release_context contexts[2];
+    IXMLDOMDocument *source, *docs[3];
+    IXMLDOMElement *root, *element;
+    HANDLE threads[2], start;
+    IXMLDOMNode *child;
+    VARIANT_BOOL loaded;
+    unsigned int i;
+    HRESULT hr;
+    BSTR text;
+
+    if (!is_clsid_supported(&CLSID_FreeThreadedDOMDocument, &IID_IXMLDOMDocument))
+        return;
+
+    hr = CoCreateInstance(&CLSID_FreeThreadedDOMDocument, NULL, CLSCTX_INPROC_SERVER,
+            &IID_IXMLDOMDocument, (void **)&source);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument_loadXML(source, _bstr_("<root xmlns:p='urn:shared'>"
+            "<p:child>one</p:child><p:child>two</p:child><p:child>three</p:child></root>"), &loaded);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(loaded == VARIANT_TRUE, "Failed to load XML.\n");
+    hr = IXMLDOMDocument_get_documentElement(source, &root);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* Transfer ownership before starting the threads. Each thread releases a
+     * separate document; the third document keeps its moved subtree alive. */
+    for (i = 0; i < ARRAY_SIZE(docs); ++i)
+    {
+        hr = CoCreateInstance(&CLSID_FreeThreadedDOMDocument, NULL, CLSCTX_INPROC_SERVER,
+                &IID_IXMLDOMDocument, (void **)&docs[i]);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMElement_get_firstChild(root, &child);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument_appendChild(docs[i], child, NULL);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IXMLDOMNode_Release(child);
+    }
+    IXMLDOMElement_Release(root);
+    IXMLDOMDocument_Release(source);
+
+    start = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(!!start, "Failed to create event.\n");
+    for (i = 0; i < ARRAY_SIZE(threads); ++i)
+    {
+        contexts[i].doc = docs[i];
+        contexts[i].start = start;
+        threads[i] = CreateThread(NULL, 0, release_document_thread, &contexts[i], 0, NULL);
+        ok(!!threads[i], "Failed to create thread.\n");
+    }
+    SetEvent(start);
+    for (i = 0; i < ARRAY_SIZE(threads); ++i)
+    {
+        if (threads[i])
+        {
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
+        }
+        else
+            IXMLDOMDocument_Release(docs[i]);
+    }
+    CloseHandle(start);
+
+    hr = IXMLDOMDocument_get_documentElement(docs[2], &element);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMElement_get_nodeName(element, &text);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(text, L"p:child"), "Unexpected name %s.\n", debugstr_w(text));
+    SysFreeString(text);
+    hr = IXMLDOMElement_get_namespaceURI(element, &text);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(text, L"urn:shared"), "Unexpected namespace %s.\n", debugstr_w(text));
+    SysFreeString(text);
+    hr = IXMLDOMElement_get_text(element, &text);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(text, L"three"), "Unexpected text %s.\n", debugstr_w(text));
+    SysFreeString(text);
+    IXMLDOMElement_Release(element);
+    IXMLDOMDocument_Release(docs[2]);
+}
+
 static void test_appendChild(void)
 {
     IXMLDOMDocumentFragment *fragment, *fragment2;
@@ -10351,9 +10451,12 @@ static void test_appendChild(void)
     DOMNodeType node_type;
     IXMLDOMNode *node;
     LONG length;
+    VARIANT_BOOL b;
     VARIANT var;
     HRESULT hr;
     BSTR xml;
+    WCHAR pooled_xml[4096], *ptr;
+    unsigned int i;
 
     doc = create_document(&IID_IXMLDOMDocument);
     doc2 = create_document(&IID_IXMLDOMDocument);
@@ -10383,6 +10486,71 @@ static void test_appendChild(void)
     IXMLDOMElement_Release(elem);
     IXMLDOMElement_Release(elem2);
     IXMLDOMDocument_Release(doc);
+    IXMLDOMDocument_Release(doc2);
+
+    /* Parsed names remain valid after moving a subtree to another document. */
+    doc = create_document(&IID_IXMLDOMDocument);
+    doc2 = create_document(&IID_IXMLDOMDocument);
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_("<pooled><child>text</child></pooled>"), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load XML.\n");
+    hr = IXMLDOMDocument_get_documentElement(doc, &elem);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument_appendChild(doc2, (IXMLDOMNode *)elem, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IXMLDOMDocument_Release(doc);
+
+    hr = IXMLDOMElement_get_nodeName(elem, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"pooled"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    hr = IXMLDOMElement_get_firstChild(elem, &node);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMNode_get_nodeName(node, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"child"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    IXMLDOMNode_Release(node);
+    hr = IXMLDOMElement_get_text(elem, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"text"), "Unexpected text %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+
+    IXMLDOMElement_Release(elem);
+    IXMLDOMDocument_Release(doc2);
+
+    /* Parsed nodes spanning allocation blocks also outlive their source document. */
+    ptr = pooled_xml;
+    memcpy(ptr, L"<pooled>", 8 * sizeof(WCHAR));
+    ptr += 8;
+    for (i = 0; i < 300; ++i)
+    {
+        memcpy(ptr, L"<child/>", 8 * sizeof(WCHAR));
+        ptr += 8;
+    }
+    memcpy(ptr, L"</pooled>", 10 * sizeof(WCHAR));
+
+    doc = create_document(&IID_IXMLDOMDocument);
+    doc2 = create_document(&IID_IXMLDOMDocument);
+    xml = SysAllocString(pooled_xml);
+    hr = IXMLDOMDocument_loadXML(doc, xml, &b);
+    SysFreeString(xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Failed to load XML.\n");
+    hr = IXMLDOMDocument_get_documentElement(doc, &elem);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument_appendChild(doc2, (IXMLDOMNode *)elem, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IXMLDOMDocument_Release(doc);
+
+    hr = IXMLDOMElement_get_lastChild(elem, &node);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMNode_get_nodeName(node, &xml);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!wcscmp(xml, L"child"), "Unexpected name %s.\n", debugstr_w(xml));
+    SysFreeString(xml);
+    IXMLDOMNode_Release(node);
+    IXMLDOMElement_Release(elem);
     IXMLDOMDocument_Release(doc2);
 
     /* Append a child to a document */
@@ -11789,7 +11957,7 @@ static void test_load(void)
     hr = IXMLDOMDocument_load(doc, src, &b);
     todo_wine ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
     ok(b == VARIANT_FALSE, "got %d\n", b);
-    EXPECT_PARSE_ERROR(doc, XML_E_INVALIDATROOTLEVEL, TRUE);
+    EXPECT_PARSE_ERROR(doc, XML_E_INVALIDATROOTLEVEL, FALSE);
     VariantClear(&src);
 
     /* A failed read must not be retried or parsed as partial input. */
@@ -17224,7 +17392,10 @@ static void test_loadXML(void)
 {
     IXMLDOMElement *element;
     IXMLDOMDocument *doc;
+    WCHAR malformed[4096], *ptr;
     VARIANT_BOOL b;
+    unsigned int i;
+    BSTR xml;
     HRESULT hr;
 
     hr = CoCreateInstance(&CLSID_DOMDocument2, NULL, CLSCTX_INPROC_SERVER, &IID_IXMLDOMDocument, (void **)&doc);
@@ -17249,6 +17420,40 @@ static void test_loadXML(void)
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
     hr = IXMLDOMDocument_get_documentElement(doc, &element);
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    /* Repeated failed parses release partial pooled trees and leave the document reusable. */
+    ptr = malformed;
+    memcpy(ptr, L"<root>", 6 * sizeof(WCHAR));
+    ptr += 6;
+    for (i = 0; i < 300; ++i)
+    {
+        memcpy(ptr, L"<child/>", 8 * sizeof(WCHAR));
+        ptr += 8;
+    }
+    wcscpy(ptr, L"<broken></wrong>");
+    xml = SysAllocString(malformed);
+    ok(xml != NULL, "Failed to allocate malformed XML.\n");
+    if (xml)
+    {
+        for (i = 0; i < 32; ++i)
+        {
+            b = VARIANT_TRUE;
+            hr = IXMLDOMDocument_loadXML(doc, xml, &b);
+            ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+            ok(b == VARIANT_FALSE, "Unexpected value %d.\n", b);
+        }
+        SysFreeString(xml);
+    }
+
+    b = VARIANT_FALSE;
+    hr = IXMLDOMDocument_loadXML(doc, _bstr_("<valid/>"), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "Unexpected value %d.\n", b);
+    element = NULL;
+    hr = IXMLDOMDocument_get_documentElement(doc, &element);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    if (element)
+        IXMLDOMElement_Release(element);
 
     IXMLDOMDocument_Release(doc);
 }
@@ -19193,6 +19398,7 @@ START_TEST(domdoc)
     test_get_xml();
     test_insertBefore();
     test_appendChild();
+    test_moved_subtree_threads();
     test_get_doctype();
     test_get_tagName();
     test_get_dataType();
