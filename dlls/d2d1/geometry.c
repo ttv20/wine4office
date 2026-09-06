@@ -6402,12 +6402,22 @@ static inline void d2d_bezier_segment_translate(D2D1_BEZIER_SEGMENT *segment, fl
     d2d_point_translate(&segment->point3, x, y);
 }
 
+static void d2d_rounded_rectangle_normalize(const D2D1_ROUNDED_RECT *src, D2D1_ROUNDED_RECT *dst)
+{
+    dst->rect.left = min(src->rect.left, src->rect.right);
+    dst->rect.right = max(src->rect.left, src->rect.right);
+    dst->rect.top = min(src->rect.top, src->rect.bottom);
+    dst->rect.bottom = max(src->rect.top, src->rect.bottom);
+    dst->radiusX = min(src->radiusX, 0.5f * (dst->rect.right - dst->rect.left));
+    dst->radiusY = min(src->radiusY, 0.5f * (dst->rect.bottom - dst->rect.top));
+}
+
 static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_Simplify(ID2D1RoundedRectangleGeometry *iface,
         D2D1_GEOMETRY_SIMPLIFICATION_OPTION option, const D2D1_MATRIX_3X2_F *transform, float tolerance,
         ID2D1SimplifiedGeometrySink *sink)
 {
     struct d2d_geometry *geometry = impl_from_ID2D1RoundedRectangleGeometry(iface);
-    const D2D1_ROUNDED_RECT *r = &geometry->u.rounded_rectangle.rounded_rect;
+    D2D1_ROUNDED_RECT normalized, *r = &normalized;
     struct d2d_figure figure = { 0 };
     D2D1_BEZIER_SEGMENT segments[4];
     D2D1_POINT_2F start_point, p;
@@ -6417,6 +6427,7 @@ static HRESULT STDMETHODCALLTYPE d2d_rounded_rectangle_geometry_Simplify(ID2D1Ro
     TRACE("iface %p, option %#x, transform %p, tolerance %.8e, sink %p.\n",
             iface, option, transform, tolerance, sink);
 
+    d2d_rounded_rectangle_normalize(&geometry->u.rounded_rectangle.rounded_rect, &normalized);
     d2d_point_set(&ellipse.point, 0.0f, 0.0f);
     ellipse.radiusX = r->radiusX;
     ellipse.radiusY = r->radiusY;
@@ -6559,10 +6570,11 @@ static const struct ID2D1RoundedRectangleGeometryVtbl d2d_rounded_rectangle_geom
 static void d2d_rounded_rectangle_geometry_stream(struct d2d_geometry *geometry,
         const D2D_MATRIX_3X2_F *transform, ID2D1GeometrySink *sink)
 {
-    const D2D1_ROUNDED_RECT *r = &geometry->u.rounded_rectangle.rounded_rect;
+    D2D1_ROUNDED_RECT normalized, *r = &normalized;
     D2D1_ARC_SEGMENT arcs[4];
     D2D1_POINT_2F points[4];
 
+    d2d_rounded_rectangle_normalize(&geometry->u.rounded_rectangle.rounded_rect, &normalized);
     if (r->radiusX == 0.0f || r->radiusY == 0.0f)
         return d2d_rectangle_stream(&r->rect, transform, sink);
 

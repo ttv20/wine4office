@@ -5235,13 +5235,23 @@ static void test_rectangle_geometry(BOOL d3d11)
 static void test_rounded_rectangle_geometry(BOOL d3d11)
 {
     ID2D1RoundedRectangleGeometry *geometry;
+    ID2D1GeometryGroup *group;
     D2D1_ROUNDED_RECT rect, rect2;
     struct d2d1_test_context ctx;
     ID2D1PathGeometry *path;
     ID2D1GeometrySink *sink;
     D2D1_RECT_F bounds;
+    unsigned int i;
     BOOL match;
     HRESULT hr;
+
+    static const D2D1_ROUNDED_RECT oversized[] =
+    {
+        {{0.0f, 0.0f, 10.0f, 10.0f}, 20.0f, 20.0f},
+        {{0.0f, 0.0f, 10.0f, 10.0f}, 20.0f,  2.0f},
+        {{0.0f, 0.0f, 10.0f, 10.0f},  2.0f, 20.0f},
+        {{10.0f, 10.0f, 0.0f, 0.0f}, 20.0f, 20.0f},
+    };
 
     if (!init_test_context(&ctx, d3d11))
         return;
@@ -5302,6 +5312,47 @@ static void test_rounded_rectangle_geometry(BOOL d3d11)
             bounds.left, bounds.top, bounds.right, bounds.bottom);
     ID2D1PathGeometry_Release(path);
     ID2D1RoundedRectangleGeometry_Release(geometry);
+
+    for (i = 0; i < ARRAY_SIZE(oversized); ++i)
+    {
+        hr = ID2D1Factory_CreateRoundedRectangleGeometry(ctx.factory, &oversized[i], &geometry);
+        ok(hr == S_OK, "Case %u: got unexpected hr %#lx.\n", i, hr);
+        ID2D1RoundedRectangleGeometry_GetRoundedRect(geometry, &rect2);
+        ok(!memcmp(&oversized[i], &rect2, sizeof(rect2)), "Case %u: original rectangle changed.\n", i);
+
+        hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &path);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1PathGeometry_Open(path, &sink);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1RoundedRectangleGeometry_Simplify(geometry,
+                D2D1_GEOMETRY_SIMPLIFICATION_OPTION_CUBICS_AND_LINES, NULL, 0.0f,
+                (ID2D1SimplifiedGeometrySink *)sink);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1GeometrySink_Close(sink);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1GeometrySink_Release(sink);
+        hr = ID2D1PathGeometry_GetBounds(path, NULL, &bounds);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(fabsf(bounds.left) < 0.001f && fabsf(bounds.top) < 0.001f
+                && fabsf(bounds.right - 10.0f) < 0.001f && fabsf(bounds.bottom - 10.0f) < 0.001f,
+                "Case %u: unexpected simplified bounds {%.8e, %.8e, %.8e, %.8e}.\n",
+                i, bounds.left, bounds.top, bounds.right, bounds.bottom);
+        ID2D1PathGeometry_Release(path);
+
+        hr = ID2D1Factory_CreateGeometryGroup(ctx.factory, D2D1_FILL_MODE_ALTERNATE,
+                (ID2D1Geometry **)&geometry, 1, &group);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID2D1GeometryGroup_GetBounds(group, NULL, &bounds);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(fabsf(bounds.left) < 0.001f && fabsf(bounds.top) < 0.001f
+                && fabsf(bounds.right - 10.0f) < 0.001f && fabsf(bounds.bottom - 10.0f) < 0.001f,
+                "Case %u: unexpected group bounds {%.8e, %.8e, %.8e, %.8e}.\n",
+                i, bounds.left, bounds.top, bounds.right, bounds.bottom);
+        ID2D1GeometryGroup_Release(group);
+        ID2D1RoundedRectangleGeometry_GetRoundedRect(geometry, &rect2);
+        ok(!memcmp(&oversized[i], &rect2, sizeof(rect2)), "Case %u: original rectangle changed.\n", i);
+        ID2D1RoundedRectangleGeometry_Release(geometry);
+    }
 
     release_test_context(&ctx);
 }
