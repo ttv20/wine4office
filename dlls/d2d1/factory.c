@@ -544,15 +544,17 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_CreateDCRenderTarget(ID2D1Factory7 
 HRESULT d2d_factory_create_device(ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
         bool allow_get_dxgi_device, REFIID iid, void **device)
 {
+    char sync_external_device[2];
     IWineDXGIDevice *wine_device;
     struct d2d_device *object;
     HRESULT hr;
 
-    /* Direct2D uses the immediate context of the supplied device for
-     * synchronous bitmap and composition work. Keep that work on the calling
-     * thread; an asynchronous command stream can leave the UI thread waiting
-     * for a long sequence of small map and flush operations. */
-    if (SUCCEEDED(IDXGIDevice_QueryInterface(dxgi_device,
+    /* GPU bitmap targets only need command-stream ordering. GPU-backed WIC
+     * targets keep their narrower CopyResource/Map completion boundary. */
+    if (GetEnvironmentVariableA("WINE_D2D_SYNC_EXTERNAL_DEVICE",
+            sync_external_device, sizeof(sync_external_device)) == 1
+            && sync_external_device[0] == '1'
+            && SUCCEEDED(IDXGIDevice_QueryInterface(dxgi_device,
             &d2d_IID_IWineDXGIDevice, (void **)&wine_device)))
     {
         IWineDXGIDevice_use_sync_command_stream(wine_device);

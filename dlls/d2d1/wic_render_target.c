@@ -487,7 +487,6 @@ static const struct d2d_device_context_ops d2d_wic_render_target_ops =
 {
     d2d_wic_render_target_present,
     d2d_wic_render_target_queue_cpu_glyph,
-    FALSE,
     d2d_wic_render_target_begin_draw,
     d2d_wic_render_target_prepare_gpu_draw,
     d2d_wic_render_target_queue_cpu_clear,
