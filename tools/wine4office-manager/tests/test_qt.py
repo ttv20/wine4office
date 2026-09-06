@@ -57,6 +57,10 @@ class QtManagerTests(unittest.TestCase):
             "wine": str(self.home / "runner/bin/wine"),
             "desktop_copy": False,
             "use_x11": True,
+            "use_vulkan": False,
+            "graphics_restart_required": False,
+            "graphics_active_use_x11": True,
+            "graphics_active_use_vulkan": False,
             "update_url": "",
             "include_prereleases": False,
             "office_telemetry_disabled": {},
@@ -864,16 +868,68 @@ class QtManagerTests(unittest.TestCase):
         self.assertEqual(self.window.update_progress_button.text(), "Close")
         self.window.update_progress_dialog.accept()
 
-    def test_x11_checkbox_defaults_checked_and_persists_native_wayland_choice(self):
+    def test_graphics_backend_choices_save_immediately_and_request_wine_restart(self):
         self.assertTrue(self.window.use_x11.isChecked())
-        self.assertIn("X11", self.window.use_x11.text())
-        self.assertIn("native Wayland", self.window.use_x11.text())
+        self.assertTrue(self.window.use_opengl.isChecked())
+        self.assertTrue(self.window.graphics_restart_panel.isHidden())
 
-        self.window.use_x11.setChecked(False)
-        saved = self.window.save_config()
+        self.window.use_wayland.click()
+        self.window.use_vulkan.click()
 
-        self.assertFalse(saved["use_x11"])
         self.assertFalse(self.state.snapshot()["config"]["use_x11"])
+        self.assertTrue(self.state.snapshot()["config"]["use_vulkan"])
+        self.assertTrue(self.state.snapshot()["config"]["graphics_restart_required"])
+        self.assertFalse(self.window.graphics_restart_panel.isHidden())
+        self.assertEqual(
+            self.window.graphics_restart_button.text(),
+            self.window._tr("Stop Wine and apply"),
+        )
+
+    def test_apply_graphics_settings_stops_old_backend_then_clears_notice(self):
+        self.window.use_wayland.click()
+        self.assertTrue(self.state.snapshot()["config"]["graphics_restart_required"])
+
+        with mock.patch.object(
+            QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes
+        ), mock.patch.object(backend, "launch_tool") as stop:
+            self.window.apply_graphics_settings()
+            self._wait_task()
+
+        self.assertEqual(stop.call_args.args[:3], (
+            self.config["prefix"], self.config["wine"], "stop",
+        ))
+        self.assertTrue(stop.call_args.kwargs["use_x11"])
+        applied = self.state.snapshot()["config"]
+        self.assertFalse(applied["graphics_restart_required"])
+        self.assertFalse(applied["graphics_active_use_x11"])
+        self.assertTrue(self.window.graphics_restart_panel.isHidden())
+
+    def test_standard_message_box_buttons_use_manager_language(self):
+        qt_module._install_standard_button_translator(self.application, "he")
+        try:
+            dialog = QMessageBox()
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Ok
+                | QMessageBox.StandardButton.Cancel
+                | QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+            )
+            self.assertEqual(
+                dialog.button(QMessageBox.StandardButton.Ok).text(), "אישור"
+            )
+            self.assertEqual(
+                dialog.button(QMessageBox.StandardButton.Cancel).text(), "ביטול"
+            )
+            self.assertEqual(
+                dialog.button(QMessageBox.StandardButton.Yes).text(), "כן"
+            )
+            self.assertEqual(
+                dialog.button(QMessageBox.StandardButton.No).text(), "לא"
+            )
+        finally:
+            qt_module._install_standard_button_translator(
+                self.application, self.window.language
+            )
 
     def test_prerelease_updates_are_opt_in_and_persisted(self):
         self.assertFalse(self.window.include_prereleases.isChecked())
@@ -1151,7 +1207,7 @@ class QtManagerTests(unittest.TestCase):
 
     def test_slow_application_launch_does_not_block_qt_and_gates_actions(self):
         self.window.app_items["word"].setCheckState(0, Qt.CheckState.Checked)
-        self.window.use_x11.setChecked(False)
+        self.window.use_wayland.click()
 
         def slow_launch(*args, **kwargs):
             time.sleep(0.35)
@@ -1182,7 +1238,7 @@ class QtManagerTests(unittest.TestCase):
         self.assertFalse(self.state.config["use_x11"])
 
     def test_wine_tool_launch_propagates_native_wayland_choice(self):
-        self.window.use_x11.setChecked(False)
+        self.window.use_wayland.click()
         with mock.patch.object(backend, "launch_tool", return_value=5678) as launch:
             self.window.launch_tool("winecfg")
             deadline = time.monotonic() + 2
@@ -1191,6 +1247,7 @@ class QtManagerTests(unittest.TestCase):
 
         launch.assert_called_once()
         self.assertFalse(launch.call_args.kwargs["use_x11"])
+        self.assertFalse(launch.call_args.kwargs["use_vulkan"])
 
     def test_stop_wine_shows_persistent_progress_dialog(self):
         dialog_visible_during_stop = []
@@ -1999,6 +2056,7 @@ class QtManagerTests(unittest.TestCase):
                     "/configure office.xml",
                     working_directory=expected,
                     use_x11=self.config["use_x11"],
+                    use_vulkan=self.config["use_vulkan"],
                 )
 
 

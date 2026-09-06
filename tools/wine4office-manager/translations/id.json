@@ -82,5 +82,21 @@
 "Wine environment is ready": "Lingkungan Wine siap",
 "Wine environment is ready.": "Lingkungan Wine siap.",
 "Wine environment operation was cancelled.": "Operasi lingkungan Wine dibatalkan.",
-"Wine environment operation failed. Review the details below.": "Operasi lingkungan Wine gagal. Lihat detail di bawah."
+"Wine environment operation failed. Review the details below.": "Operasi lingkungan Wine gagal. Lihat detail di bawah.",
+"Graphics backend": "Backend grafis",
+"Choose how Wine presents windows and renders Direct3D applications.": "Pilih cara Wine menampilkan jendela dan merender aplikasi Direct3D.",
+"Direct3D renderer:": "Perender Direct3D:",
+"Display system:": "Sistem tampilan:",
+"Graphics settings applied.": "Pengaturan grafis diterapkan.",
+"Graphics settings applied. They will be used on the next launch.": "Pengaturan grafis diterapkan. Pengaturan ini akan digunakan saat peluncuran berikutnya.",
+"Graphics settings restored to the active values.": "Pengaturan grafis dikembalikan ke nilai yang aktif.",
+"Graphics settings saved. Restart Wine to apply the change.": "Pengaturan grafis disimpan. Mulai ulang Wine untuk menerapkan perubahan.",
+"Graphics settings saved. Wine is still using the previous settings.": "Pengaturan grafis disimpan. Wine masih menggunakan pengaturan sebelumnya.",
+"Stop Wine and apply": "Hentikan Wine dan terapkan",
+"Stop Wine to apply graphics settings": "Hentikan Wine untuk menerapkan pengaturan grafis",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Tindakan ini akan menutup semua aplikasi Office di lingkungan Wine yang dipilih. Simpan dokumen yang terbuka sebelum melanjutkan.",
+"OK": "Oke",
+"Cancel": "Batal",
+"Yes": "Ya",
+"No": "Tidak"
 }

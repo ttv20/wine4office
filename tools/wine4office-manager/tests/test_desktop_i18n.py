@@ -185,6 +185,39 @@ class TranslationTests(unittest.TestCase):
                     if "Office" in source:
                         self.assertIn("Office", translated)
 
+    def test_graphics_and_standard_buttons_are_localized_in_every_language(self):
+        texts = (
+            "Graphics backend",
+            "Choose how Wine presents windows and renders Direct3D applications.",
+            "Direct3D renderer:",
+            "Display system:",
+            "Graphics settings applied.",
+            "Graphics settings applied. They will be used on the next launch.",
+            "Graphics settings restored to the active values.",
+            "Graphics settings saved. Restart Wine to apply the change.",
+            "Graphics settings saved. Wine is still using the previous settings.",
+            "Stop Wine and apply",
+            "Stop Wine to apply graphics settings",
+            "This will close every Office application in the selected Wine "
+            "environment. Save open documents before continuing.",
+            "OK", "Cancel", "Yes", "No",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            catalog = i18n.CATALOGS[language]
+            with self.subTest(language=language):
+                self.assertTrue(all(catalog.get(source) for source in texts))
+                if language != "en":
+                    self.assertGreaterEqual(
+                        sum(catalog[source] != source for source in texts), 12
+                    )
+                for source in texts:
+                    if "Wine" in source:
+                        self.assertIn("Wine", catalog[source])
+                    if "Office" in source:
+                        self.assertIn("Office", catalog[source])
+                    if "Direct3D" in source:
+                        self.assertIn("Direct3D", catalog[source])
+
     def test_environment_progress_is_localized_in_every_language(self):
         """Every supported locale translates the environment progress UI."""
         texts = (

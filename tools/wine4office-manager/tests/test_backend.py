@@ -72,6 +72,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(config["prefix"], str(self.home / ".wine4office"))
         self.assertEqual(config["update_url"], backend.DEFAULT_METADATA_URL)
         self.assertTrue(config["use_x11"])
+        self.assertFalse(config["use_vulkan"])
 
     def test_config_without_use_x11_loads_x11_default(self):
         path = backend.config_path()
@@ -90,6 +91,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         backend.save_config(config)
 
         self.assertFalse(backend.load_config()["use_x11"])
+
+    def test_vulkan_renderer_choice_is_persisted(self):
+        config = backend.default_config()
+        config["use_vulkan"] = True
+
+        backend.save_config(config)
+
+        self.assertTrue(backend.load_config()["use_vulkan"])
 
     def test_automatic_update_checks_are_opt_in_by_default(self):
         config = backend.default_config()
@@ -399,23 +408,33 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 "DISPLAY": ":7",
                 "WAYLAND_DISPLAY": "wayland-7",
                 "WINEDLLOVERRIDES": "user32=b",
+                "WINE_D3D_CONFIG": "csmt=0x1;renderer=no3d",
             }
         ):
             marked_x11 = backend.wine_environment(marked, self.wine, True)
             unmarked_x11 = backend.wine_environment(unmarked, self.wine, True)
             marked_wayland = backend.wine_environment(marked, self.wine, False)
+            marked_vulkan = backend.wine_environment(marked, self.wine, False, True)
             unmarked_wayland = backend.wine_environment(unmarked, self.wine, False)
 
         self.assertEqual(marked_x11["DISPLAY"], ":7")
         self.assertNotIn("WAYLAND_DISPLAY", marked_x11)
         self.assertEqual(marked_x11["WINEARCH"], "win64")
         self.assertEqual(marked_x11["WINEDLLOVERRIDES"], "user32=b")
+        self.assertEqual(
+            marked_x11["WINE_D3D_CONFIG"],
+            "renderer=gl;csmt=0x1;renderer=no3d",
+        )
         self.assertEqual(marked_wayland["WAYLAND_DISPLAY"], "wayland-7")
         self.assertNotIn("DISPLAY", marked_wayland)
         self.assertNotIn("WINEARCH", unmarked_x11)
         self.assertEqual(unmarked_x11["WINEDLLOVERRIDES"], "user32=b")
         self.assertIn("WAYLAND_DISPLAY", unmarked_wayland)
         self.assertIn("DISPLAY", unmarked_wayland)
+        self.assertEqual(
+            marked_vulkan["WINE_D3D_CONFIG"],
+            "renderer=vulkan;csmt=0x1;renderer=no3d",
+        )
 
     def test_managed_environment_keeps_builtin_mscoree_enabled(self):
         marked = self._make_prefix(self.home / "marked-prefix")
@@ -939,10 +958,17 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         ), mock.patch.object(
             backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
         ) as popen:
-            backend.launch_app(str(prefix), str(self.wine), "excel", use_x11=False)
-            backend.launch_tool(str(prefix), str(self.wine), "winecfg", use_x11=False)
+            backend.launch_app(
+                str(prefix), str(self.wine), "excel",
+                use_x11=False, use_vulkan=True,
+            )
+            backend.launch_tool(
+                str(prefix), str(self.wine), "winecfg",
+                use_x11=False, use_vulkan=True,
+            )
             backend.launch_executable(
-                str(prefix), str(self.wine), str(executable), use_x11=False
+                str(prefix), str(self.wine), str(executable),
+                use_x11=False, use_vulkan=True,
             )
 
         self.assertEqual(len(popen.call_args_list), 3)
@@ -950,6 +976,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             environment = call.kwargs["env"]
             self.assertEqual(environment["WAYLAND_DISPLAY"], "wayland-8")
             self.assertNotIn("DISPLAY", environment)
+            self.assertEqual(environment["WINE_D3D_CONFIG"], "renderer=vulkan")
 
     def test_executable_launcher_forwards_valid_working_directory(self):
         prefix = self.home / ".wine4office"
@@ -1168,6 +1195,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             "#!/bin/bash\n"
             "printf 'DISPLAY=%s\\n' \"${DISPLAY-unset}\" > \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'WAYLAND_DISPLAY=%s\\n' \"${WAYLAND_DISPLAY-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'D3D=%s\\n' \"${WINE_D3D_CONFIG-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'WINAPPSDK=%s\\n' \"${OFFICE_WINAPPSDK_RUNTIME_DIR-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n",
         )
@@ -1177,6 +1205,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         icon.write_bytes(b"cached icon")
         config = backend.default_config()
         config["use_x11"] = False
+        config["use_vulkan"] = True
         backend.save_config(config)
 
         backend.create_app_shortcuts(["word"], prefix, self.wine, False)
@@ -1193,6 +1222,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         output = log.read_text()
         self.assertIn("DISPLAY=unset", output)
         self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
+        self.assertIn("D3D=renderer=vulkan", output)
         self.assertIn(
             "WINAPPSDK=C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\",
             output,

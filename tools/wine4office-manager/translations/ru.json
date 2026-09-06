@@ -116,5 +116,21 @@
 "Wine environment is ready": "Среда Wine готова",
 "Wine environment is ready.": "Среда Wine готова.",
 "Wine environment operation was cancelled.": "Операция со средой Wine отменена.",
-"Wine environment operation failed. Review the details below.": "Операция со средой Wine завершилась ошибкой. См. подробности ниже."
+"Wine environment operation failed. Review the details below.": "Операция со средой Wine завершилась ошибкой. См. подробности ниже.",
+"Graphics backend": "Графическая подсистема",
+"Choose how Wine presents windows and renders Direct3D applications.": "Выберите, как Wine отображает окна и обрабатывает приложения Direct3D.",
+"Direct3D renderer:": "Средство отрисовки Direct3D:",
+"Display system:": "Система отображения:",
+"Graphics settings applied.": "Настройки графики применены.",
+"Graphics settings applied. They will be used on the next launch.": "Настройки графики применены. Они будут использоваться при следующем запуске.",
+"Graphics settings restored to the active values.": "Настройки графики восстановлены до активных значений.",
+"Graphics settings saved. Restart Wine to apply the change.": "Настройки графики сохранены. Перезапустите Wine, чтобы применить изменение.",
+"Graphics settings saved. Wine is still using the previous settings.": "Настройки графики сохранены. Wine всё ещё использует предыдущие настройки.",
+"Stop Wine and apply": "Остановить Wine и применить",
+"Stop Wine to apply graphics settings": "Остановить Wine для применения настроек графики",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Это закроет все приложения Office в выбранной среде Wine. Сохраните открытые документы перед продолжением.",
+"OK": "ОК",
+"Cancel": "Отмена",
+"Yes": "Да",
+"No": "Нет"
 }

@@ -116,5 +116,21 @@
 "Wine environment is ready": "L’environnement Wine est prêt",
 "Wine environment is ready.": "L’environnement Wine est prêt.",
 "Wine environment operation was cancelled.": "L’opération de l’environnement Wine a été annulée.",
-"Wine environment operation failed. Review the details below.": "L’opération de l’environnement Wine a échoué. Consultez les détails ci-dessous."
+"Wine environment operation failed. Review the details below.": "L’opération de l’environnement Wine a échoué. Consultez les détails ci-dessous.",
+"Graphics backend": "Moteur graphique",
+"Choose how Wine presents windows and renders Direct3D applications.": "Choisissez comment Wine affiche les fenêtres et restitue les applications Direct3D.",
+"Direct3D renderer:": "Moteur de rendu Direct3D :",
+"Display system:": "Système d’affichage :",
+"Graphics settings applied.": "Paramètres graphiques appliqués.",
+"Graphics settings applied. They will be used on the next launch.": "Paramètres graphiques appliqués. Ils seront utilisés au prochain lancement.",
+"Graphics settings restored to the active values.": "Les paramètres graphiques ont été rétablis aux valeurs actives.",
+"Graphics settings saved. Restart Wine to apply the change.": "Paramètres graphiques enregistrés. Redémarrez Wine pour appliquer la modification.",
+"Graphics settings saved. Wine is still using the previous settings.": "Paramètres graphiques enregistrés. Wine utilise encore les paramètres précédents.",
+"Stop Wine and apply": "Arrêter Wine et appliquer",
+"Stop Wine to apply graphics settings": "Arrêter Wine pour appliquer les paramètres graphiques",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Toutes les applications Office de l’environnement Wine sélectionné seront fermées. Enregistrez les documents ouverts avant de continuer.",
+"OK": "OK",
+"Cancel": "Annuler",
+"Yes": "Oui",
+"No": "Non"
 }

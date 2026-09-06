@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine পরিবেশ প্রস্তুত",
 "Wine environment is ready.": "Wine পরিবেশ প্রস্তুত।",
 "Wine environment operation was cancelled.": "Wine পরিবেশের কাজ বাতিল করা হয়েছে।",
-"Wine environment operation failed. Review the details below.": "Wine পরিবেশের কাজ ব্যর্থ হয়েছে। নিচের বিবরণ দেখুন।"
+"Wine environment operation failed. Review the details below.": "Wine পরিবেশের কাজ ব্যর্থ হয়েছে। নিচের বিবরণ দেখুন।",
+"Graphics backend": "গ্রাফিক্স ব্যাকএন্ড",
+"Choose how Wine presents windows and renders Direct3D applications.": "Wine কীভাবে উইন্ডো দেখাবে এবং Direct3D অ্যাপ্লিকেশন রেন্ডার করবে তা বেছে নিন।",
+"Direct3D renderer:": "Direct3D রেন্ডারার:",
+"Display system:": "ডিসপ্লে সিস্টেম:",
+"Graphics settings applied.": "গ্রাফিক্স সেটিংস প্রয়োগ করা হয়েছে।",
+"Graphics settings applied. They will be used on the next launch.": "গ্রাফিক্স সেটিংস প্রয়োগ করা হয়েছে। পরবর্তীবার চালু হলে এগুলি ব্যবহার করা হবে।",
+"Graphics settings restored to the active values.": "গ্রাফিক্স সেটিংস সক্রিয় মানে ফিরিয়ে আনা হয়েছে।",
+"Graphics settings saved. Restart Wine to apply the change.": "গ্রাফিক্স সেটিংস সংরক্ষণ করা হয়েছে। পরিবর্তনটি প্রয়োগ করতে Wine পুনরায় চালু করুন।",
+"Graphics settings saved. Wine is still using the previous settings.": "গ্রাফিক্স সেটিংস সংরক্ষণ করা হয়েছে। Wine এখনও আগের সেটিংস ব্যবহার করছে।",
+"Stop Wine and apply": "Wine বন্ধ করে প্রয়োগ করুন",
+"Stop Wine to apply graphics settings": "গ্রাফিক্স সেটিংস প্রয়োগ করতে Wine বন্ধ করুন",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "এটি নির্বাচিত Wine পরিবেশের সব Office অ্যাপ্লিকেশন বন্ধ করবে। চালিয়ে যাওয়ার আগে খোলা নথিগুলি সংরক্ষণ করুন।",
+"OK": "ঠিক আছে",
+"Cancel": "বাতিল",
+"Yes": "হ্যাঁ",
+"No": "না"
 }

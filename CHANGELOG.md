@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add localized X11/Wayland and OpenGL/Vulkan controls with translated dialog buttons to the Manager's environment page.
 - Restore Excel worksheets and formula bars when using Vulkan on Wayland.
 - Prevent a Wayland window-restacking deadlock when resizing Excel.
 - Fix distorted rounded selection borders around PowerPoint slide thumbnails.

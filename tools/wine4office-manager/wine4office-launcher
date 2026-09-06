@@ -44,7 +44,9 @@ def main() -> int:
             if incident.monitoring_enabled(defaults):
                 process = backend.launch_app_process(
                     args.prefix, args.wine, args.target, HELPER, args.documents,
-                    use_x11=defaults["use_x11"], capture_diagnostics=True,
+                    use_x11=defaults["use_x11"],
+                    use_vulkan=defaults.get("use_vulkan", False),
+                    capture_diagnostics=True,
                 )
                 return incident.supervise_process(
                     process, app=args.target, prefix=Path(args.prefix),
@@ -54,12 +56,14 @@ def main() -> int:
                     review_command=manager_command(),
                 )
             backend.launch_app(args.prefix, args.wine, args.target, HELPER, args.documents,
-                               use_x11=defaults["use_x11"])
+                               use_x11=defaults["use_x11"],
+                               use_vulkan=defaults.get("use_vulkan", False))
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
             backend.launch_tool(
-                args.prefix, args.wine, args.target, use_x11=defaults["use_x11"]
+                args.prefix, args.wine, args.target, use_x11=defaults["use_x11"],
+                use_vulkan=defaults.get("use_vulkan", False),
             )
     except Exception as error:
         print(f"wine4office-launcher: {error}", file=sys.stderr)

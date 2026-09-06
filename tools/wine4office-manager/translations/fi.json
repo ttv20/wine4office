@@ -82,5 +82,21 @@
 "Wine environment is ready": "Wine-ympäristö on valmis",
 "Wine environment is ready.": "Wine-ympäristö on valmis.",
 "Wine environment operation was cancelled.": "Wine-ympäristön toiminto peruutettiin.",
-"Wine environment operation failed. Review the details below.": "Wine-ympäristön toiminto epäonnistui. Katso lisätiedot alta."
+"Wine environment operation failed. Review the details below.": "Wine-ympäristön toiminto epäonnistui. Katso lisätiedot alta.",
+"Graphics backend": "Grafiikkataustaosa",
+"Choose how Wine presents windows and renders Direct3D applications.": "Valitse, miten Wine näyttää ikkunat ja hahmontaa Direct3D-sovellukset.",
+"Direct3D renderer:": "Direct3D-hahmontaja:",
+"Display system:": "Näyttöjärjestelmä:",
+"Graphics settings applied.": "Grafiikka-asetukset otettu käyttöön.",
+"Graphics settings applied. They will be used on the next launch.": "Grafiikka-asetukset otettu käyttöön. Niitä käytetään seuraavassa käynnistyksessä.",
+"Graphics settings restored to the active values.": "Grafiikka-asetukset palautettu käytössä oleviin arvoihin.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafiikka-asetukset tallennettu. Ota muutos käyttöön käynnistämällä Wine uudelleen.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafiikka-asetukset tallennettu. Wine käyttää edelleen aiempia asetuksia.",
+"Stop Wine and apply": "Pysäytä Wine ja ota käyttöön",
+"Stop Wine to apply graphics settings": "Pysäytä Wine ottaaksesi grafiikka-asetukset käyttöön",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Tämä sulkee kaikki valitun Wine-ympäristön Office-sovellukset. Tallenna avoimet asiakirjat ennen jatkamista.",
+"OK": "OK",
+"Cancel": "Peruuta",
+"Yes": "Kyllä",
+"No": "Ei"
 }

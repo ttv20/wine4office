@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine'i keskkond on valmis",
 "Wine environment is ready.": "Wine'i keskkond on valmis.",
 "Wine environment operation was cancelled.": "Wine'i keskkonna toiming tühistati.",
-"Wine environment operation failed. Review the details below.": "Wine'i keskkonna toiming nurjus. Vaadake allolevaid üksikasju."
+"Wine environment operation failed. Review the details below.": "Wine'i keskkonna toiming nurjus. Vaadake allolevaid üksikasju.",
+"Graphics backend": "Graafikataust",
+"Choose how Wine presents windows and renders Direct3D applications.": "Valige, kuidas Wine aknaid kuvab ja Direct3D-rakendusi renderdab.",
+"Direct3D renderer:": "Direct3D renderdaja:",
+"Display system:": "Kuvamissüsteem:",
+"Graphics settings applied.": "Graafikaseaded on rakendatud.",
+"Graphics settings applied. They will be used on the next launch.": "Graafikaseaded on rakendatud. Neid kasutatakse järgmisel käivitamisel.",
+"Graphics settings restored to the active values.": "Graafikaseaded taastati aktiivsetele väärtustele.",
+"Graphics settings saved. Restart Wine to apply the change.": "Graafikaseaded on salvestatud. Muudatuse rakendamiseks taaskäivitage Wine.",
+"Graphics settings saved. Wine is still using the previous settings.": "Graafikaseaded on salvestatud. Wine kasutab endiselt eelmisi seadeid.",
+"Stop Wine and apply": "Peata Wine ja rakenda",
+"Stop Wine to apply graphics settings": "Peata Wine graafikaseadete rakendamiseks",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "See sulgeb kõik Office’i rakendused valitud Wine’i keskkonnas. Enne jätkamist salvestage avatud dokumendid.",
+"OK": "OK",
+"Cancel": "Loobu",
+"Yes": "Jah",
+"No": "Ei"
 }

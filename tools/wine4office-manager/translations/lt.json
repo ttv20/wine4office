@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine aplinka paruošta",
 "Wine environment is ready.": "Wine aplinka paruošta.",
 "Wine environment operation was cancelled.": "Wine aplinkos operacija atšaukta.",
-"Wine environment operation failed. Review the details below.": "Wine aplinkos operacija nepavyko. Peržiūrėkite toliau pateiktą informaciją."
+"Wine environment operation failed. Review the details below.": "Wine aplinkos operacija nepavyko. Peržiūrėkite toliau pateiktą informaciją.",
+"Graphics backend": "Grafikos posistemė",
+"Choose how Wine presents windows and renders Direct3D applications.": "Pasirinkite, kaip Wine rodo langus ir atvaizduoja Direct3D programas.",
+"Direct3D renderer:": "Direct3D atvaizdavimo priemonė:",
+"Display system:": "Vaizdavimo sistema:",
+"Graphics settings applied.": "Grafikos nuostatos pritaikytos.",
+"Graphics settings applied. They will be used on the next launch.": "Grafikos nuostatos pritaikytos. Jos bus naudojamos kitą kartą paleidus.",
+"Graphics settings restored to the active values.": "Grafikos nuostatos atkurtos į aktyvias reikšmes.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafikos nuostatos įrašytos. Paleiskite Wine iš naujo, kad pritaikytumėte pakeitimą.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafikos nuostatos įrašytos. Wine vis dar naudoja ankstesnes nuostatas.",
+"Stop Wine and apply": "Stabdyti Wine ir pritaikyti",
+"Stop Wine to apply graphics settings": "Stabdyti Wine grafikos nuostatoms pritaikyti",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Bus užvertos visos Office programos pasirinktoje Wine aplinkoje. Prieš tęsdami įrašykite atvertus dokumentus.",
+"OK": "Gerai",
+"Cancel": "Atšaukti",
+"Yes": "Taip",
+"No": "Ne"
 }

@@ -82,5 +82,21 @@
 "Wine environment is ready": "A Wine-környezet kész",
 "Wine environment is ready.": "A Wine-környezet kész.",
 "Wine environment operation was cancelled.": "A Wine-környezet művelete megszakítva.",
-"Wine environment operation failed. Review the details below.": "A Wine-környezet művelete sikertelen. Tekintse meg az alábbi részleteket."
+"Wine environment operation failed. Review the details below.": "A Wine-környezet művelete sikertelen. Tekintse meg az alábbi részleteket.",
+"Graphics backend": "Grafikus háttérrendszer",
+"Choose how Wine presents windows and renders Direct3D applications.": "Válassza ki, hogyan jelenítse meg a Wine az ablakokat és renderelje a Direct3D-alkalmazásokat.",
+"Direct3D renderer:": "Direct3D-renderelő:",
+"Display system:": "Megjelenítési rendszer:",
+"Graphics settings applied.": "A grafikai beállítások alkalmazva.",
+"Graphics settings applied. They will be used on the next launch.": "A grafikai beállítások alkalmazva. A következő indításkor lesznek használatban.",
+"Graphics settings restored to the active values.": "A grafikai beállítások visszaálltak az aktív értékekre.",
+"Graphics settings saved. Restart Wine to apply the change.": "A grafikai beállítások mentve. A módosítás alkalmazásához indítsa újra a Wine-t.",
+"Graphics settings saved. Wine is still using the previous settings.": "A grafikai beállítások mentve. A Wine továbbra is az előző beállításokat használja.",
+"Stop Wine and apply": "Wine leállítása és alkalmazás",
+"Stop Wine to apply graphics settings": "Wine leállítása a grafikai beállítások alkalmazásához",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Ez bezár minden Office-alkalmazást a kiválasztott Wine-környezetben. A folytatás előtt mentse a megnyitott dokumentumokat.",
+"OK": "OK",
+"Cancel": "Mégse",
+"Yes": "Igen",
+"No": "Nem"
 }

@@ -64,13 +64,22 @@ class ManagerTests(unittest.TestCase):
                 "prefix": original_prefix,
                 "desktop_copy": True,
                 "use_x11": False,
+                "use_vulkan": True,
             })
             snapshot = state.snapshot()
         self.assertEqual(updated["prefix"], original_prefix)
         self.assertTrue(updated["desktop_copy"])
         self.assertFalse(updated["use_x11"])
+        self.assertTrue(updated["use_vulkan"])
+        self.assertTrue(updated["graphics_restart_required"])
         self.assertFalse(snapshot["config"]["use_x11"])
         self.assertFalse(backend.load_config()["use_x11"])
+        self.assertTrue(backend.load_config()["use_vulkan"])
+
+        applied = state.mark_graphics_settings_applied()
+        self.assertFalse(applied["graphics_restart_required"])
+        self.assertFalse(applied["graphics_active_use_x11"])
+        self.assertTrue(applied["graphics_active_use_vulkan"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
     def test_state_enables_and_disables_automatic_update_schedule(self):
@@ -342,6 +351,7 @@ class ManagerTests(unittest.TestCase):
     def test_standalone_manager_launcher_uses_current_display_mode(self):
         config = backend.default_config()
         config["use_x11"] = False
+        config["use_vulkan"] = True
         with mock.patch.object(backend, "load_config", return_value=config), \
              mock.patch.object(manager.incident, "monitoring_enabled", return_value=False), \
              mock.patch.object(backend, "launch_app") as launch, \
@@ -350,6 +360,7 @@ class ManagerTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertFalse(launch.call_args.kwargs["use_x11"])
+        self.assertTrue(launch.call_args.kwargs["use_vulkan"])
 
     def test_post_update_cli_runs_new_version_hooks_with_explicit_paths(self):
         prefix = str(self.home / "selected-prefix")
