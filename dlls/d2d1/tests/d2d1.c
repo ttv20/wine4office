@@ -21039,6 +21039,14 @@ START_TEST(d2d1)
     argc = winetest_get_mainargs(&argv);
     for (i = 2; i < argc; ++i)
     {
+        if (!strcmp(argv[i], "--command-list"))
+        {
+            test_command_list(FALSE);
+            test_command_list(TRUE);
+            test_command_list_glyph_run_lifetime(FALSE);
+            test_command_list_glyph_run_lifetime(TRUE);
+            return;
+        }
         if (!strcmp(argv[i], "--single"))
             use_mt = FALSE;
     }
