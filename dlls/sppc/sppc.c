@@ -622,10 +622,14 @@ static const struct grace_policy_string o365_grace_string_policies[] =
 struct installed_grace_profile
 {
     BOOL valid;
+    BOOL pkey_valid;
     SLID sku_id;
     SLID binding_license_id;
     SLID ul_license_id;
     SLID ppd_license_id;
+    SLID pkey_config_license_id;
+    SLID pkey_id;
+    DWORD pkey_group_id;
     WCHAR ul_path[MAX_PATH];
     WCHAR ppd_path[MAX_PATH];
     WCHAR name[160];
@@ -633,6 +637,10 @@ struct installed_grace_profile
     WCHAR author[80];
     WCHAR application_bitmap[32];
     WCHAR ux_differentiator[64];
+    WCHAR pkey_channel[32];
+    WCHAR pkey_partial[6];
+    WCHAR digital_pid[80];
+    WCHAR digital_pid2[32];
     char *ppd_xml;
 };
 
@@ -640,6 +648,8 @@ static INIT_ONCE installed_profile_once = INIT_ONCE_STATIC_INIT;
 static struct installed_grace_profile installed_profile;
 
 static BOOL validate_installed_profile_files(const struct installed_grace_profile *profile);
+static BOOL load_installed_profile_pkey(const WCHAR *license_root,
+        struct installed_grace_profile *profile);
 
 static BOOL get_configured_product_ids(WCHAR *product_ids, DWORD size)
 {
@@ -969,8 +979,15 @@ static BOOL CALLBACK init_installed_profile(INIT_ONCE *once, void *param, void *
         if (!installed_profile.description[0])
             lstrcpynW(installed_profile.description, installed_profile.name,
                     ARRAY_SIZE(installed_profile.description));
+        memset(&installed_profile.pkey_config_license_id, 0,
+                sizeof(installed_profile.pkey_config_license_id));
+        if ((token = strstr(ul_xml, "<tm:infoStr name=\"pkeyConfigLicenseId\">")))
+            parse_slid(token + strlen("<tm:infoStr name=\"pkeyConfigLicenseId\">"),
+                    &installed_profile.pkey_config_license_id);
         installed_profile.ppd_xml = ppd_xml;
         ppd_xml = NULL;
+        installed_profile.pkey_valid = load_installed_profile_pkey(license_root,
+                &installed_profile);
         installed_profile.valid = TRUE;
         break;
 
@@ -1293,8 +1310,9 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     static const WCHAR o365_digital_pid2[] = L"00202-30000-00000-AA478";
     static const WCHAR o365_partial[] = L"VMFTK";
     static const WCHAR channel[] = L"Retail";
+    const struct installed_grace_profile *profile = get_installed_profile();
     const WCHAR *digital_pid = NULL, *digital_pid2 = NULL, *partial = NULL;
-    const WCHAR *string = NULL;
+    const WCHAR *string = NULL, *pkey_channel = channel;
     UINT bytes;
 
     FIXME("(%p, %s, %s, %p, %p, %p) semi-stub\n", handle, wine_dbgstr_guid(pkey_id),
@@ -1318,6 +1336,15 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
         digital_pid2 = o365_digital_pid2;
         partial = o365_partial;
     }
+    else if (grace_license_present() && profile && profile->pkey_valid &&
+        IsEqualGUID(selected_grace_id(), &profile->sku_id) &&
+        IsEqualGUID(pkey_id, &profile->pkey_id))
+    {
+        digital_pid = profile->digital_pid;
+        digital_pid2 = profile->digital_pid2;
+        partial = profile->pkey_partial;
+        pkey_channel = profile->pkey_channel;
+    }
     else
     {
         if (type) *type = SL_DATA_NONE;
@@ -1334,7 +1361,7 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     else if (!wcsicmp(name, L"PartialProductKey"))
         string = partial;
     else if (!wcsicmp(name, L"Channel"))
-        string = channel;
+        string = pkey_channel;
 
     if (!string)
     {
@@ -1416,6 +1443,8 @@ HRESULT WINAPI SLGetServiceInformation(HSLC handle, LPCWSTR name, SLDATATYPE *ty
 static const xmlChar rel_namespace[] = "urn:mpeg:mpeg21:2003:01-REL-R-NS";
 static const xmlChar dsig_namespace[] = "http://www.w3.org/2000/09/xmldsig#";
 static const xmlChar tm_namespace[] = "http://www.microsoft.com/DRM/XrML2/TM/v2";
+static const xmlChar pkey_namespace[] =
+        "http://www.microsoft.com/DRM/PKEY/Configuration/2.0";
 static const WCHAR sppc_issuers_key[] = L"Software\\Wine\\SPPC\\TrustedIssuers";
 static const WCHAR sppc_licenses_key[] = L"Software\\Wine\\SPPC\\InstalledLicenses";
 
@@ -2128,6 +2157,199 @@ static BOOL read_xrm_file(const WCHAR *path, BYTE **data, UINT *size)
     return TRUE;
 }
 
+static BOOL xml_node_slid(xmlNodePtr node, SLID *id)
+{
+    xmlChar *text;
+    BOOL ret;
+
+    if (!node || !(text = xmlNodeGetContent(node))) return FALSE;
+    ret = parse_slid((const char *)text, id);
+    xmlFree(text);
+    return ret;
+}
+
+static BOOL xml_node_dword(xmlNodePtr node, DWORD *value)
+{
+    xmlChar *text;
+    const xmlChar *cursor;
+    DWORD parsed = 0;
+
+    if (!node || !(text = xmlNodeGetContent(node))) return FALSE;
+    cursor = text;
+    if (!*cursor) goto invalid;
+    while (*cursor)
+    {
+        DWORD digit;
+
+        if (*cursor < '0' || *cursor > '9') goto invalid;
+        digit = *cursor++ - '0';
+        if (parsed > (MAXDWORD - digit) / 10) goto invalid;
+        parsed = parsed * 10 + digit;
+    }
+    *value = parsed;
+    xmlFree(text);
+    return TRUE;
+
+invalid:
+    xmlFree(text);
+    return FALSE;
+}
+
+static BOOL xml_node_text_is(xmlNodePtr node, const char *expected)
+{
+    xmlChar *text;
+    BOOL ret;
+
+    if (!node || !(text = xmlNodeGetContent(node))) return FALSE;
+    ret = !xmlStrcmp(text, (const xmlChar *)expected);
+    xmlFree(text);
+    return ret;
+}
+
+static BOOL make_dynamic_pkey(struct installed_grace_profile *profile,
+        xmlNodePtr product_key_type)
+{
+    static const WCHAR alphabet[] = L"BCDFGHJKMPQRTVWXY2346789";
+    BYTE material[sizeof(SLID) * 2 + sizeof(DWORD)], digest[32];
+    xmlChar *type;
+    unsigned int i, length, suffix;
+
+    memcpy(material, &profile->pkey_config_license_id, sizeof(SLID));
+    memcpy(material + sizeof(SLID), &profile->sku_id, sizeof(SLID));
+    memcpy(material + sizeof(SLID) * 2, &profile->pkey_group_id, sizeof(DWORD));
+    if (!hash_bytes(CALG_SHA_256, material, sizeof(material), digest, sizeof(digest)) ||
+            !(type = xmlNodeGetContent(product_key_type)))
+        return FALSE;
+
+    length = strcspn((const char *)type, ":");
+    if (!length || length >= ARRAY_SIZE(profile->pkey_channel))
+    {
+        xmlFree(type);
+        return FALSE;
+    }
+    for (i = 0; i < length; ++i)
+    {
+        if (type[i] > 0x7f)
+        {
+            xmlFree(type);
+            return FALSE;
+        }
+        profile->pkey_channel[i] = type[i];
+    }
+    profile->pkey_channel[length] = 0;
+    xmlFree(type);
+
+    memcpy(&profile->pkey_id, digest, sizeof(profile->pkey_id));
+    profile->pkey_id.Data3 = (profile->pkey_id.Data3 & 0x0fff) | 0x5000;
+    profile->pkey_id.Data4[0] = (profile->pkey_id.Data4[0] & 0x3f) | 0x80;
+    for (i = 0; i < ARRAY_SIZE(profile->pkey_partial) - 1; ++i)
+        profile->pkey_partial[i] = alphabet[digest[16 + i] % (ARRAY_SIZE(alphabet) - 1)];
+    profile->pkey_partial[i] = 0;
+
+    suffix = ((unsigned int)digest[21] << 8 | digest[22]) % 1000;
+    if (swprintf(profile->digital_pid, ARRAY_SIZE(profile->digital_pid),
+            L"03612-%05lu-000-000000-00-1033-19044.0000-0000000",
+            profile->pkey_group_id) < 0 ||
+        swprintf(profile->digital_pid2, ARRAY_SIZE(profile->digital_pid2),
+            L"%05lu-%05lu-00000-AA%03u", profile->pkey_group_id / 10,
+            profile->pkey_group_id % 10 * 10000, suffix) < 0)
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL load_installed_profile_pkey(const WCHAR *license_root,
+        struct installed_grace_profile *profile)
+{
+    WCHAR path[MAX_PATH];
+    struct xrm_document record;
+    xmlDocPtr config_doc = NULL;
+    xmlNodePtr root, info, configurations, configuration, key_ranges, key_range;
+    xmlNodePtr act_config, group, type, reference, eula, valid, start_node, end_node;
+    xmlChar *name = NULL;
+    BYTE *xrm = NULL, *config = NULL;
+    UINT xrm_size;
+    DWORD config_size, start, end;
+    SLID id;
+    BOOL configuration_found = FALSE, range_found = FALSE, ret = FALSE;
+
+    profile->pkey_valid = FALSE;
+    lstrcpynW(path, license_root, ARRAY_SIZE(path));
+    if (!append_path(path, ARRAY_SIZE(path), L"pkeyconfig-office.xrm-ms") ||
+            !read_xrm_file(path, &xrm, &xrm_size) ||
+            FAILED(validate_xrm(xrm, xrm_size, &record)))
+        goto done;
+    if (!IsEqualGUID(&record.file_id, &profile->pkey_config_license_id))
+        goto done_record;
+
+    root = xmlDocGetRootElement(record.doc);
+    info = xml_descendant(root, "infoBin", tm_namespace);
+    if (!info || !(name = xmlGetProp(info, (const xmlChar *)"name")) ||
+            xmlStrcmp(name, (const xmlChar *)"pkeyConfigData") ||
+            !decode_base64_node(info, &config, &config_size) || config_size > XRM_MAX_SIZE)
+        goto done_record;
+    config_doc = xmlReadMemory((const char *)config, config_size, "pkeyconfig.xml", NULL,
+            XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
+    if (!config_doc || config_doc->intSubset || config_doc->extSubset ||
+            !(root = xmlDocGetRootElement(config_doc)) ||
+            xmlStrcmp(root->name, (const xmlChar *)"ProductKeyConfiguration") ||
+            !root->ns || xmlStrcmp(root->ns->href, pkey_namespace) ||
+            !(configurations = xml_child(root, "Configurations", pkey_namespace)))
+        goto done_record;
+
+    for (configuration = configurations->children; configuration;
+            configuration = configuration->next)
+    {
+        if (configuration->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(configuration->name, (const xmlChar *)"Configuration") ||
+                !configuration->ns || xmlStrcmp(configuration->ns->href, pkey_namespace))
+            continue;
+        act_config = xml_child(configuration, "ActConfigId", pkey_namespace);
+        if (!xml_node_slid(act_config, &id) || !IsEqualGUID(&id, &profile->sku_id))
+            continue;
+        group = xml_child(configuration, "RefGroupId", pkey_namespace);
+        type = xml_child(configuration, "ProductKeyType", pkey_namespace);
+        if (!xml_node_dword(group, &profile->pkey_group_id) ||
+                !profile->pkey_group_id || profile->pkey_group_id > 99999 || !type)
+            goto done_record;
+        configuration_found = TRUE;
+        break;
+    }
+    if (!configuration_found || !(key_ranges = xml_child(root, "KeyRanges", pkey_namespace)))
+        goto done_record;
+
+    for (key_range = key_ranges->children; key_range; key_range = key_range->next)
+    {
+        if (key_range->type != XML_ELEMENT_NODE ||
+                xmlStrcmp(key_range->name, (const xmlChar *)"KeyRange") ||
+                !key_range->ns || xmlStrcmp(key_range->ns->href, pkey_namespace))
+            continue;
+        reference = xml_child(key_range, "RefActConfigId", pkey_namespace);
+        if (!xml_node_slid(reference, &id) || !IsEqualGUID(&id, &profile->sku_id))
+            continue;
+        eula = xml_child(key_range, "EulaType", pkey_namespace);
+        valid = xml_child(key_range, "IsValid", pkey_namespace);
+        start_node = xml_child(key_range, "Start", pkey_namespace);
+        end_node = xml_child(key_range, "End", pkey_namespace);
+        if (!xml_node_text_is(eula, "ltGrace") || !xml_node_text_is(valid, "true") ||
+                !xml_node_dword(start_node, &start) || !xml_node_dword(end_node, &end) ||
+                start > end)
+            continue;
+        range_found = TRUE;
+        break;
+    }
+    if (range_found)
+        ret = make_dynamic_pkey(profile, type);
+
+done_record:
+    xmlFree(name);
+    if (config_doc) xmlFreeDoc(config_doc);
+    LocalFree(config);
+    xmlFreeDoc(record.doc);
+done:
+    LocalFree(xrm);
+    return ret;
+}
+
 static BOOL validate_profile_file(const WCHAR *path, const SLID *expected_id)
 {
     struct xrm_document record;
@@ -2691,6 +2913,8 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         pkey_id = &word2024_grace_pkey_id;
     else if (IsEqualGUID(grace_id, &o365_proplus_grace_id))
         pkey_id = &o365_proplus_grace_pkey_id;
+    else if (profile && profile->pkey_valid && IsEqualGUID(grace_id, &profile->sku_id))
+        pkey_id = &profile->pkey_id;
 
     /* SKU → PKEY: expose only product-key SLIDs captured for this exact SKU. */
     if (pkey_id && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&

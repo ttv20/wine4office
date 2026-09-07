@@ -174,6 +174,11 @@ OFFICE_PRODUCTS = (
         "channel": "Current",
     },
     {
+        "label": "Microsoft 365 Personal/Family (consumer subscription)",
+        "product_id": "O365HomePremRetail",
+        "channel": "Current",
+    },
+    {
         "label": "Microsoft 365 Apps for business",
         "product_id": "O365BusinessRetail",
         "channel": "Current",
@@ -1431,6 +1436,12 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
             "/d", "x11,wayland", "/f",
         ], wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback)
+        # Wine writes system.reg and user.reg only when the server shuts down, so
+        # the prefix cannot be classified as valid while it is still running.
+        # A packaging layout without a sibling wineserver must not turn a
+        # successful creation into a failure that discards the new prefix.
+        if sibling_tool(wine, "wineserver"):
+            stop_wine(str(prefix), str(wine), progress_callback=progress_callback)
         if classify_prefix(str(prefix)) != "valid":
             raise RuntimeError(f"Wine initialization did not create a valid prefix at: {prefix}")
         ensure_safe_x11_defaults(

@@ -456,6 +456,7 @@ typedef struct {
     X(DocumentFragment)                    \
     X(DocumentType)                        \
     X(Element)                             \
+    X(ErrorEvent)                          \
     X(Event)                               \
     X(HTMLAnchorElement)                   \
     X(HTMLAreaElement)                     \

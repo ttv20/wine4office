@@ -81,6 +81,7 @@ struct ScriptHost {
 
     HTMLInnerWindow *window;
     IWineJSDispatch *script_jsdisp;
+    BOOL intl_installed;
 
     GUID guid;
     struct list entry;
@@ -108,6 +109,96 @@ static BOOL set_script_prop(IActiveScript *script, DWORD property, VARIANT *val)
     }
 
     return TRUE;
+}
+
+/* Minimal ECMA-402 surface. Modern Microsoft bundles abort without Intl; a full
+ * implementation in C is not warranted, so install a JS shim into each JScript
+ * engine. Locale-aware formatting and collation are approximated. */
+static void install_intl_shim(ScriptHost *script_host)
+{
+    static const WCHAR intl_shim[] =
+        L"(function(){ "
+        L"if(window.Intl) return; "
+        L"function opts(o){ return o || {}; } "
+        L"function locs(l){ return l ? (typeof l === 'string' ? [l] : l) : []; } "
+        L"function DateTimeFormat(locale, options){ "
+        L"if(!(this instanceof DateTimeFormat)) return new DateTimeFormat(locale, options); "
+        L"this._locale = locale || 'en-US'; this._options = opts(options); "
+        L"} "
+        L"DateTimeFormat.prototype.format = function(date){ "
+        L"var d = (date === undefined) ? new Date() : (date instanceof Date ? date : new Date(date)); "
+        L"return d.toLocaleString(); "
+        L"}; "
+        L"DateTimeFormat.prototype.resolvedOptions = function(){ "
+        L"return { locale: this._locale, calendar: 'gregory', numberingSystem: 'latn', "
+        L"timeZone: this._options.timeZone || 'UTC' }; "
+        L"}; "
+        L"DateTimeFormat.supportedLocalesOf = locs; "
+        L"function NumberFormat(locale, options){ "
+        L"if(!(this instanceof NumberFormat)) return new NumberFormat(locale, options); "
+        L"this._locale = locale || 'en-US'; this._options = opts(options); "
+        L"} "
+        L"NumberFormat.prototype.format = function(n){ "
+        L"var num = Number(n); "
+        L"var min = this._options.minimumFractionDigits; "
+        L"var max = this._options.maximumFractionDigits; "
+        L"if(typeof max === 'number') num = Number(num.toFixed(max)); "
+        L"return (typeof min === 'number') ? num.toFixed(min) : String(num); "
+        L"}; "
+        L"NumberFormat.prototype.resolvedOptions = function(){ "
+        L"return { locale: this._locale, numberingSystem: 'latn', style: this._options.style || 'decimal' }; "
+        L"}; "
+        L"NumberFormat.supportedLocalesOf = locs; "
+        L"function Collator(locale, options){ "
+        L"if(!(this instanceof Collator)) return new Collator(locale, options); "
+        L"this._locale = locale || 'en-US'; "
+        L"} "
+        L"Collator.prototype.compare = function(a, b){ "
+        L"var x = String(a), y = String(b); "
+        L"return x < y ? -1 : (x > y ? 1 : 0); "
+        L"}; "
+        L"Collator.prototype.resolvedOptions = function(){ "
+        L"return { locale: this._locale, usage: 'sort', sensitivity: 'variant' }; "
+        L"}; "
+        L"Collator.supportedLocalesOf = locs; "
+        L"function PluralRules(locale, options){ "
+        L"if(!(this instanceof PluralRules)) return new PluralRules(locale, options); "
+        L"this._locale = locale || 'en-US'; this._type = opts(options).type || 'cardinal'; "
+        L"} "
+        L"PluralRules.prototype.select = function(n){ "
+        L"if(this._type === 'ordinal') return 'other'; "
+        L"return Number(n) === 1 ? 'one' : 'other'; "
+        L"}; "
+        L"PluralRules.prototype.resolvedOptions = function(){ "
+        L"return { locale: this._locale, type: this._type }; "
+        L"}; "
+        L"PluralRules.supportedLocalesOf = locs; "
+        L"window.Intl = { DateTimeFormat: DateTimeFormat, NumberFormat: NumberFormat, "
+        L"Collator: Collator, PluralRules: PluralRules, getCanonicalLocales: locs }; "
+        L"})(); ";
+    EXCEPINFO ei = { 0 };
+    VARIANT res;
+    HRESULT hres;
+
+    if(script_host->intl_installed || !script_host->parse
+       || !IsEqualGUID(&script_host->guid, &CLSID_JScript))
+        return;
+
+    /* Attempt this once per host: retrying from parse_elem_text would re-enter
+     * the script engine for every element that follows. */
+    script_host->intl_installed = TRUE;
+
+    V_VT(&res) = VT_EMPTY;
+    hres = IActiveScriptParse_ParseScriptText(script_host->parse, intl_shim, L"window", NULL,
+                                              NULL, 0, 0, 0, &res, &ei);
+    if(FAILED(hres)) {
+        WARN("could not install the Intl shim: %08lx\n", hres);
+        SysFreeString(ei.bstrSource);
+        SysFreeString(ei.bstrDescription);
+        SysFreeString(ei.bstrHelpFile);
+        return;
+    }
+    VariantClear(&res);
 }
 
 static BOOL init_script_engine(ScriptHost *script_host, IActiveScript *script)
@@ -463,7 +554,29 @@ static HRESULT WINAPI ActiveScriptSite_OnStateChange(IActiveScriptSite *iface, S
 static HRESULT WINAPI ActiveScriptSite_OnScriptError(IActiveScriptSite *iface, IActiveScriptError *pscripterror)
 {
     ScriptHost *This = impl_from_IActiveScriptSite(iface);
-    FIXME("(%p)->(%p)\n", This, pscripterror);
+    EXCEPINFO ei = { 0 };
+    BSTR line_text = NULL;
+    DWORD source_ctx = 0;
+    ULONG line = 0;
+    LONG char_pos = 0;
+
+    TRACE("(%p)->(%p)\n", This, pscripterror);
+
+    if(SUCCEEDED(IActiveScriptError_GetExceptionInfo(pscripterror, &ei))) {
+        IActiveScriptError_GetSourcePosition(pscripterror, &source_ctx, &line, &char_pos);
+        IActiveScriptError_GetSourceLineText(pscripterror, &line_text);
+        WARN("script error %08lx at line %lu char %ld: source %s desc %s text %s\n",
+             ei.scode ? (unsigned long)ei.scode : (unsigned long)ei.wCode,
+             line, char_pos, debugstr_w(ei.bstrSource), debugstr_w(ei.bstrDescription),
+             debugstr_w(line_text));
+        SysFreeString(line_text);
+        SysFreeString(ei.bstrSource);
+        SysFreeString(ei.bstrDescription);
+        SysFreeString(ei.bstrHelpFile);
+    }else {
+        WARN("could not retrieve script error information\n");
+    }
+
     return E_NOTIMPL;
 }
 
@@ -940,6 +1053,8 @@ static void parse_elem_text(ScriptHost *script_host, HTMLScriptElement *script_e
     HRESULT hres;
 
     TRACE("%s\n", debugstr_w(text));
+
+    install_intl_shim(script_host);
 
     VariantInit(&var);
     memset(&excepinfo, 0, sizeof(excepinfo));
