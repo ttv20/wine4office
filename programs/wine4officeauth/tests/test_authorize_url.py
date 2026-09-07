@@ -43,10 +43,12 @@ class AuthorizeUrlSourceTest(unittest.TestCase):
         normalize = refresh.index(
             "std::string scope = consumer_live ? requested_scope : normalize_resource_scope(requested_scope);"
         )
-        tenant = refresh.index('consumer ? "consumers" : "organizations"')
+        tenant = refresh.index('consumer && !consumer_live ? "consumers" : "organizations"')
         preserve_liveid = refresh.index("if (!consumer || consumer_live)")
 
         self.assertIn('if (oauth_consumer && tenant != "consumers")', source)
+        self.assertIn("account.consumer_client_id = requested_client_id;", refresh)
+        self.assertIn("account.consumer_scope = consumer_licensing_scope;", refresh)
         self.assertLess(live_route, normalize)
         self.assertLess(normalize, tenant)
         self.assertLess(tenant, preserve_liveid)
@@ -69,6 +71,21 @@ class AuthorizeUrlSourceTest(unittest.TestCase):
         self.assertLess(classify, bootstrap)
         self.assertLess(bootstrap, browser_scope)
         self.assertLess(browser_scope, resource_refresh)
+
+    def test_consumer_refresh_routing_is_scoped_to_the_active_account(self):
+        source = (pathlib.Path(__file__).parents[1] / "wine4officeauth.cpp").read_text()
+        refresh = source[source.index('if (argc >= 2 && !wcscmp(argv[1], L"--refresh"))') :]
+
+        load_active = refresh.index("success = cache_record_load({}, active);")
+        account_routing = refresh.index("!active.consumer_client_id.empty()")
+        legacy_consumer_only = refresh.index("active.tid == consumer_tenant_id")
+        legacy_projection = refresh.index("load_consumer_identity(cached_client, cached_scope);")
+
+        self.assertIn('add_string("consumer_client_id", record.consumer_client_id);', source)
+        self.assertIn('add_string("consumer_scope", record.consumer_scope);', source)
+        self.assertLess(load_active, account_routing)
+        self.assertLess(account_routing, legacy_consumer_only)
+        self.assertLess(legacy_consumer_only, legacy_projection)
 
 
 if __name__ == "__main__":
