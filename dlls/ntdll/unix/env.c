@@ -162,11 +162,11 @@ static NTSTATUS open_nls_data_file( const char *path, const WCHAR *sysdir, HANDL
     init_unicode_string( &valueW, buffer );
     InitializeObjectAttributes( &attr, &valueW, 0, 0, NULL );
 
-    status = open_unix_file( file, path, GENERIC_READ, &attr, 0, FILE_SHARE_READ,
+    status = open_unix_file( file, path, GENERIC_READ | SYNCHRONIZE, &attr, 0, FILE_SHARE_READ,
                              FILE_OPEN, FILE_SYNCHRONOUS_IO_ALERT, NULL, 0 );
     if (status != STATUS_NO_SUCH_FILE) return status;
 
-    return NtOpenFile( file, GENERIC_READ, &attr, &io, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_ALERT );
+    return NtOpenFile( file, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_ALERT );
 }
 
 static NTSTATUS get_nls_section_name( UINT type, UINT id, WCHAR name[32] )

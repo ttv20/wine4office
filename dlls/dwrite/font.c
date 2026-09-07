@@ -4004,9 +4004,6 @@ static DWRITE_FONT_WEIGHT font_extract_weight(struct list *tokens, DWRITE_FONT_W
     if (match_pattern_list(tokens, black_patterns, match))
         return DWRITE_FONT_WEIGHT_BLACK;
 
-    if (match_pattern_list(tokens, black_patterns, match))
-        return DWRITE_FONT_WEIGHT_BLACK;
-
     if (match_pattern_list(tokens, demibold2_patterns, match))
         return DWRITE_FONT_WEIGHT_DEMI_BOLD;
 

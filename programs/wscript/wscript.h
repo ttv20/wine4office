@@ -16,7 +16,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "ihost.h"
+/* The sources of this module are also built for the cscript module, which
+ * generates its own ihost.h.  Use angle brackets to prevent the compiler from
+ * picking up the ihost.h from this directory when building cscript. */
+#include <ihost.h>
 
 extern IHost host_obj;
 

@@ -2114,21 +2114,6 @@ ok(Date === 1, "Date = " + Date);
 Error = 1;
 ok(Error === 1, "Error = " + Error);
 
-/* Keep this test in the end of file */
-undefined = 6;
-ok(undefined === 6, "undefined = " + undefined);
-
-NaN = 6;
-ok(NaN === 6, "NaN !== 6");
-
-Infinity = 6;
-ok(Infinity === 6, "Infinity !== 6");
-
-Math = 6;
-ok(Math === 6, "NaN !== 6");
-
-reportSuccess();
-
 function test_es5_keywords() {
     var let = 1
     var tmp
@@ -2284,3 +2269,18 @@ function test_identifers() {
     }
 }
 test_identifers();
+
+/* Keep this test in the end of file */
+undefined = 6;
+ok(undefined === 6, "undefined = " + undefined);
+
+NaN = 6;
+ok(NaN === 6, "NaN !== 6");
+
+Infinity = 6;
+ok(Infinity === 6, "Infinity !== 6");
+
+Math = 6;
+ok(Math === 6, "NaN !== 6");
+
+reportSuccess();

@@ -2511,41 +2511,6 @@ static BOOL macdrv_pbuffer_updated(HDC hdc, struct opengl_drawable *base, GLenum
 
 static void macdrv_init_extensions(struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT])
 {
-    /*
-     * ARB Extensions
-     */
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_color_buffer_float", (GLubyte*)gl_info.glExtensions))
-    {
-        extensions[WGL_ARB_pixel_format_float] = 1;
-        extensions[WGL_ATI_pixel_format_float] = 1;
-    }
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_multisample", (GLubyte*)gl_info.glExtensions))
-        extensions[WGL_ARB_multisample] = 1;
-
-    if (gluCheckExtension((GLubyte*)"GL_ARB_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
-        extensions[WGL_ARB_framebuffer_sRGB] = 1;
-
-    if (gluCheckExtension((GLubyte*)"GL_APPLE_pixel_buffer", (GLubyte*)gl_info.glExtensions))
-    {
-        if (gluCheckExtension((GLubyte*)"GL_ARB_texture_rectangle", (GLubyte*)gl_info.glExtensions) ||
-            gluCheckExtension((GLubyte*)"GL_EXT_texture_rectangle", (GLubyte*)gl_info.glExtensions))
-            extensions[WGL_NV_render_texture_rectangle] = 1;
-    }
-
-    /* Presumably identical to [W]GL_ARB_framebuffer_sRGB, above, but clients may
-       check for either, so register them separately. */
-    if (gluCheckExtension((GLubyte*)"GL_EXT_framebuffer_sRGB", (GLubyte*)gl_info.glExtensions))
-        extensions[WGL_EXT_framebuffer_sRGB] = 1;
-
-    if (gluCheckExtension((GLubyte*)"GL_EXT_packed_float", (GLubyte*)gl_info.glExtensions))
-        extensions[WGL_EXT_pixel_format_packed_float] = 1;
-
-    /*
-     * WINE-specific WGL Extensions
-     */
-
     extensions[WGL_WINE_query_renderer] = 1;
     funcs->p_wglQueryCurrentRendererIntegerWINE = macdrv_wglQueryCurrentRendererIntegerWINE;
     funcs->p_wglQueryCurrentRendererStringWINE = macdrv_wglQueryCurrentRendererStringWINE;

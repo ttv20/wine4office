@@ -264,11 +264,13 @@ static UINT apply_substorage_transform( MSIPACKAGE *package, MSIDATABASE *patch_
 
     TRACE("%p %s\n", package, debugstr_w(name));
 
-    if (*name++ != ':')
+    if (*name != ':')
     {
         ERR("expected a colon in %s\n", debugstr_w(name));
         return ERROR_FUNCTION_FAILED;
     }
+
+    name++;
     r = IStorage_OpenStorage( patch_db->storage, name, NULL, STGM_SHARE_EXCLUSIVE, NULL, 0, &stg );
     if (SUCCEEDED(r))
     {
@@ -305,11 +307,14 @@ UINT msi_check_patch_applicable( MSIPACKAGE *package, MSISUMMARYINFO *si )
     }
     guid_list = msi_suminfo_dup_string( si, PID_TEMPLATE );
     guids = msi_split_string( guid_list, ';' );
-    for (i = 0; guids[i] && ret != ERROR_SUCCESS; i++)
+    if (guids)
     {
-        if (!wcscmp( guids[i], product_code )) ret = ERROR_SUCCESS;
+        for (i = 0; guids[i] && ret != ERROR_SUCCESS; i++)
+        {
+            if (!wcscmp( guids[i], product_code )) ret = ERROR_SUCCESS;
+        }
+        free( guids );
     }
-    free( guids );
     free( guid_list );
     free( product_code );
     return ret;

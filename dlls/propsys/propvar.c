@@ -858,13 +858,10 @@ HRESULT WINAPI InitPropVariantFromStringVector(PCWSTR *strs, ULONG count, PROPVA
 
     for (i = 0; i < count; ++i)
     {
-        if (strs[i])
+        if (!(ppropvar->calpwstr.pElems[i] = CoTaskMemAlloc((wcslen(strs[i]) + 1)*sizeof(**strs))))
         {
-            if (!(ppropvar->calpwstr.pElems[i] = CoTaskMemAlloc((wcslen(strs[i]) + 1)*sizeof(**strs))))
-            {
-                PropVariantClear(ppropvar);
-                return E_OUTOFMEMORY;
-            }
+            PropVariantClear(ppropvar);
+            return E_OUTOFMEMORY;
         }
         wcscpy(ppropvar->calpwstr.pElems[i], strs[i]);
         ppropvar->calpwstr.cElems++;
@@ -1142,15 +1139,15 @@ INT WINAPI PropVariantCompareEx(REFPROPVARIANT propvar1, REFPROPVARIANT propvar2
             res = lstrcmpA(propvar1->pszVal, propvar2_converted->pszVal);
         break;
     case VT_CLSID:
-        res = memcmp(propvar1->puuid, propvar2->puuid, sizeof(*propvar1->puuid));
+        res = memcmp(propvar1->puuid, propvar2_converted->puuid, sizeof(*propvar1->puuid));
         if (res) res = res > 0 ? 1 : -1;
         break;
     case VT_VECTOR | VT_UI1:
-        count = min(propvar1->caub.cElems, propvar2->caub.cElems);
-        res = count ? memcmp(propvar1->caub.pElems, propvar2->caub.pElems, sizeof(*propvar1->caub.pElems) * count) : 0;
+        count = min(propvar1->caub.cElems, propvar2_converted->caub.cElems);
+        res = count ? memcmp(propvar1->caub.pElems, propvar2_converted->caub.pElems, sizeof(*propvar1->caub.pElems) * count) : 0;
         if (res) res = res > 0 ? 1 : -1;
-        if (!res && propvar1->caub.cElems != propvar2->caub.cElems)
-            res = propvar1->caub.cElems > propvar2->caub.cElems ? 1 : -1;
+        if (!res && propvar1->caub.cElems != propvar2_converted->caub.cElems)
+            res = propvar1->caub.cElems > propvar2_converted->caub.cElems ? 1 : -1;
         break;
     default:
         FIXME("vartype %#x not handled\n", propvar1->vt);

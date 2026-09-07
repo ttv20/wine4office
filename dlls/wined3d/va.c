@@ -98,7 +98,7 @@ static NTSTATUS open_va_display(UINT64 handle, struct va_context *ctx)
 {
     VkPhysicalDeviceDrmPropertiesEXT drm_properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-    const struct vulkan_physical_device *device = vulkan_physical_device_from_handle((VkPhysicalDevice)handle);
+    const struct vulkan_physical_device *device = vulkan_physical_device_from_handle((VkPhysicalDevice)(uintptr_t)handle);
     int major, minor;
     VAStatus status;
     char *path;
@@ -233,7 +233,7 @@ static NTSTATUS va_decoder_create_vk(void *args)
     VkImportMemoryFdInfoKHR fd_desc = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
     VkMemoryRequirements2 memory_reqs = {.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
     VkMemoryAllocateInfo memory_desc = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    struct vulkan_device *device = vulkan_device_from_handle((VkDevice)params->device);
+    struct vulkan_device *device = vulkan_device_from_handle((VkDevice)(uintptr_t)params->device);
     VkImageCreateInfo image_desc = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     VADRMPRIMESurfaceDescriptor descriptor;
     VASurfaceAttrib surface_attribs[1];
@@ -415,7 +415,7 @@ fail:
 static NTSTATUS va_decoder_destroy_vk(void *args)
 {
     struct va_decoder_destroy_vk_params *params = args;
-    struct vulkan_device *device = vulkan_device_from_handle((VkDevice)params->device);
+    struct vulkan_device *device = vulkan_device_from_handle((VkDevice)(uintptr_t)params->device);
     struct va_decoder *decoder = (struct va_decoder *)(uintptr_t)params->decoder;
     struct va_context *ctx = &decoder->ctx;
 

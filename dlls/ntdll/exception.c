@@ -1040,9 +1040,6 @@ NTSTATUS WINAPI RtlCopyExtendedContext( CONTEXT_EX *dst, ULONG context_flags, CO
     dst_xs->Mask = (src_xs->Mask & ~(ULONG64)3) & feature_mask;
     dst_xs->CompactionMask = user_shared_data->XState.CompactionEnabled
             ? ((ULONG64)1 << 63) | (src_xs->CompactionMask & feature_mask) : 0;
-
-
-    if (dst_xs->CompactionMask) feature_mask &= dst_xs->CompactionMask;
     feature_mask = dst_xs->Mask >> 2;
 
     i = 2;

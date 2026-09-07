@@ -3718,7 +3718,6 @@ if (0)
     hr = ps->lpVtbl->GetOutputSignatureElementDesc(ps, 0, 0, &sign);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     ok(!strcmp(sign.SemanticName, "SV_Target"), "Unexpected semantic %s.\n", sign.SemanticName);
-    todo_wine
     ok(!sign.SystemValueType, "Unexpected system value type %u.\n", sign.SystemValueType);
 
     hr = ps->lpVtbl->GetOutputSignatureElementDesc(ps, 4, 0, &sign);

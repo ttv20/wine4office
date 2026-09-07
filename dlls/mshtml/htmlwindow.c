@@ -1411,6 +1411,7 @@ static HRESULT WINAPI HTMLWindow2_resizeBy(IHTMLWindow2 *iface, LONG x, LONG y)
 static HRESULT WINAPI HTMLWindow2_get_external(IHTMLWindow2 *iface, IDispatch **p)
 {
     HTMLWindow *This = impl_from_IHTMLWindow2(iface);
+    HRESULT hres;
 
     TRACE("(%p)->(%p)\n", This, p);
 
@@ -1422,7 +1423,14 @@ static HRESULT WINAPI HTMLWindow2_get_external(IHTMLWindow2 *iface, IDispatch **
     if(!This->outer_window->browser->doc->hostui)
         return S_OK;
 
-    return IDocHostUIHandler_GetExternal(This->outer_window->browser->doc->hostui, p);
+    hres = IDocHostUIHandler_GetExternal(This->outer_window->browser->doc->hostui, p);
+    if(FAILED(hres)) {
+        *p = NULL;
+        if(hres == E_NOINTERFACE)
+            hres = S_OK;
+    }
+
+    return hres;
 }
 
 static const IHTMLWindow2Vtbl HTMLWindow2Vtbl = {

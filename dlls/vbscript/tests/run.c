@@ -241,11 +241,10 @@ static void detect_locale(void)
 {
     UINT cp;
     CPINFOEXA cpinfo;
-    HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-    LANGID (WINAPI *pGetThreadUILanguage)(void) = (void*)GetProcAddress(kernel32, "GetThreadUILanguage");
 
-    is_english = ((!pGetThreadUILanguage || PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH) &&
-                  PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_ENGLISH &&
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
+
+    is_english = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_ENGLISH &&
                   PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH);
 
     GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER, (WCHAR*)&cp, sizeof(cp));
@@ -2333,9 +2332,8 @@ static void test_option_explicit_errors(void)
     hres = IActiveScriptError_GetExceptionInfo(error, &ei);
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(ei.scode == MAKE_VBSERROR(500), "scode = %lx\n", ei.scode);
-    if(is_english)
-        ok(ei.bstrDescription && !wcscmp(ei.bstrDescription, L"Variable is undefined: 'x'"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
+    ok(ei.bstrDescription && !wcscmp(ei.bstrDescription, L"Variable is undefined: 'x'"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     SysFreeString(ei.bstrSource);
     SysFreeString(ei.bstrDescription);
     SysFreeString(ei.bstrHelpFile);
@@ -2588,12 +2586,10 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!wcscmp(ei.bstrSource, L"Microsoft VBScript runtime error"),
-           "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!wcscmp(ei.bstrDescription, L"Unknown runtime error"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!wcscmp(ei.bstrSource, L"Microsoft VBScript runtime error"),
+        "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!wcscmp(ei.bstrDescription, L"Unknown runtime error"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);
@@ -2669,12 +2665,10 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!wcscmp(ei.bstrSource, L"Microsoft VBScript runtime error"),
-           "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!wcscmp(ei.bstrDescription, L"Class doesn't support Automation"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!wcscmp(ei.bstrSource, L"Microsoft VBScript runtime error"),
+        "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!wcscmp(ei.bstrDescription, L"Class doesn't support Automation"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);
@@ -2695,11 +2689,9 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!wcscmp(ei.bstrSource, L"test src"), "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!wcscmp(ei.bstrDescription, L"Class doesn't support Automation"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!wcscmp(ei.bstrSource, L"test src"), "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!wcscmp(ei.bstrDescription, L"Class doesn't support Automation"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);
@@ -2720,11 +2712,9 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!ei.bstrSource, "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!wcscmp(ei.bstrDescription, L"test desc"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!ei.bstrSource, "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!wcscmp(ei.bstrDescription, L"test desc"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);
@@ -2745,11 +2735,9 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!wcscmp(ei.bstrSource, L"test src"), "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!wcscmp(ei.bstrDescription, L"test desc"),
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!wcscmp(ei.bstrSource, L"test src"), "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!wcscmp(ei.bstrDescription, L"test desc"),
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);
@@ -2770,12 +2758,10 @@ static void test_callbacks(void)
     ok(hres == S_OK, "GetExceptionInfo returned %08lx\n", hres);
     ok(!ei.wCode, "wCode = %x\n", ei.wCode);
     ok(!ei.wReserved, "wReserved = %x\n", ei.wReserved);
-    if(is_english) {
-        ok(!ei.bstrSource,
-           "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
-        ok(!ei.bstrDescription,
-           "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
-    }
+    ok(!ei.bstrSource,
+        "bstrSource = %s\n", wine_dbgstr_w(ei.bstrSource));
+    ok(!ei.bstrDescription,
+        "bstrDescription = %s\n", wine_dbgstr_w(ei.bstrDescription));
     ok(!ei.bstrHelpFile, "bstrHelpFile = %s\n", wine_dbgstr_w(ei.bstrHelpFile));
     ok(!ei.dwHelpContext, "dwHelpContext = %lx\n", ei.dwHelpContext);
     ok(!ei.pvReserved, "pvReserved = %p\n", ei.pvReserved);

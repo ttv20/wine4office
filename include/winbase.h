@@ -2089,7 +2089,7 @@ WINBASEAPI BOOL        WINAPI MoveFileExW(LPCWSTR,LPCWSTR,DWORD);
 #define                       MoveFileEx WINELIB_NAME_AW(MoveFileEx)
 WINBASEAPI BOOL        WINAPI MoveFileTransactedA(const char*,const char*,LPPROGRESS_ROUTINE,void*,DWORD,HANDLE);
 WINBASEAPI BOOL        WINAPI MoveFileTransactedW(const WCHAR*,const WCHAR*,LPPROGRESS_ROUTINE,void*,DWORD,HANDLE);
-#define                       MoveFileTransacted WINELIB_NAME_AW(MoveFiletransacted)
+#define                       MoveFileTransacted WINELIB_NAME_AW(MoveFileTransacted)
 WINBASEAPI BOOL        WINAPI MoveFileWithProgressA(LPCSTR,LPCSTR,LPPROGRESS_ROUTINE,LPVOID,DWORD);
 WINBASEAPI BOOL        WINAPI MoveFileWithProgressW(LPCWSTR,LPCWSTR,LPPROGRESS_ROUTINE,LPVOID,DWORD);
 #define                       MoveFileWithProgress WINELIB_NAME_AW(MoveFileWithProgress)

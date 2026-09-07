@@ -20,6 +20,7 @@ Option Explicit
 
 const E_TESTERROR = &h80080008&
 
+const VB_E_OUTOFSTACK = 28
 const VB_E_FORLOOPNOTINITIALIZED = 92
 const VB_E_OBJNOTCOLLECTION = 451
 
@@ -321,7 +322,7 @@ call ok(x = "ok", "testOnErrorClear failed")
 sub testForEachError()
     on error resume next
 
-    dim x, y, z
+    dim x, y, z, o
     y = false
     z = false
     for each x in empty
@@ -331,9 +332,52 @@ sub testForEachError()
     call ok(y, "for each not executed")
     call ok(z, "line after next not executed")
     call ok(Err.Number = VB_E_OBJNOTCOLLECTION, "Err.Number = " & Err.Number)
+
+    Err.Clear
+    y = false
+    z = false
+    set o = nothing
+    for each x in o
+        y = true
+    next
+    z = true
+    call ok(y, "for each on nothing not executed")
+    call ok(z, "line after next not executed for nothing")
+    call ok(Err.Number = VB_E_OBJNOTCOLLECTION, "Err.Number = " & Err.Number)
 end sub
 
 call testForEachError()
+
+dim recursionDepth
+
+sub recurse()
+    on error resume next
+    recursionDepth = recursionDepth + 1
+    call recurse()
+end sub
+
+sub recurseWithArg(x)
+    on error resume next
+    recursionDepth = recursionDepth + 1
+    call recurseWithArg(x)
+end sub
+
+sub testRecursionLimit()
+    call Err.Clear()
+    recursionDepth = 0
+    call recurse()
+    call ok(recursionDepth > 100, "recursionDepth = " & recursionDepth)
+    call ok(Err.Number = VB_E_OUTOFSTACK, "Err.Number = " & Err.Number)
+
+    call Err.Clear()
+    recursionDepth = 0
+    call recurseWithArg(1)
+    call ok(recursionDepth > 100, "recursionDepth = " & recursionDepth)
+    call ok(Err.Number = VB_E_OUTOFSTACK, "Err.Number = " & Err.Number)
+    call Err.Clear()
+end sub
+
+call testRecursionLimit()
 
 sub testWithError()
     on error resume next

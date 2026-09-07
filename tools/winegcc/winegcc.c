@@ -683,6 +683,7 @@ static const char *get_multiarch_dir( struct target target )
    case CPU_i386:    return "/i386-linux-gnu";
    case CPU_x86_64:  return "/x86_64-linux-gnu";
    case CPU_ARM:     return "/arm-linux-gnueabi";
+   case CPU_ARM64EC:
    case CPU_ARM64:   return "/aarch64-linux-gnu";
    default:
        assert(0);

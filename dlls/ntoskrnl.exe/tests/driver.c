@@ -280,31 +280,65 @@ static void test_queue(void)
 static void test_mdl_map(void)
 {
     char buffer[20] = "test buffer";
-    void *addr;
+    void *addr, *pool;
     MDL *mdl;
 
     mdl = IoAllocateMdl(buffer, sizeof(buffer), FALSE, FALSE, NULL);
     ok(mdl != NULL, "IoAllocateMdl failed\n");
+    ok(!(mdl->MdlFlags & MDL_PAGES_LOCKED), "got flags %#x\n", mdl->MdlFlags);
+    ok(!(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA), "got flags %#x\n", mdl->MdlFlags);
 
     MmProbeAndLockPages(mdl, KernelMode, IoReadAccess);
+    ok(mdl->MdlFlags & MDL_PAGES_LOCKED, "got flags %#x\n", mdl->MdlFlags);
 
     addr = MmMapLockedPages(mdl, KernelMode);
     ok(addr != NULL, "MmMapLockedPages failed\n");
+    ok(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA, "got flags %#x\n", mdl->MdlFlags);
+    ok(mdl->MappedSystemVa == addr, "got %p, expected %p\n", mdl->MappedSystemVa, addr);
     if (addr != NULL)
         ok(!kmemcmp(addr, buffer, sizeof(buffer)), "Unexpected data in mapped memory\n");
 
     MmUnmapLockedPages(addr, mdl);
+    ok(!(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA), "got flags %#x\n", mdl->MdlFlags);
+    ok(mdl->MdlFlags & MDL_PAGES_LOCKED, "got flags %#x\n", mdl->MdlFlags);
 
     addr = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
-    todo_wine
     ok(addr != NULL, "MmMapLockedPagesSpecifyCache failed\n");
+    ok(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA, "got flags %#x\n", mdl->MdlFlags);
+    ok(mdl->MappedSystemVa == addr, "got %p, expected %p\n", mdl->MappedSystemVa, addr);
     if (addr != NULL)
         ok(!kmemcmp(addr, buffer, sizeof(buffer)), "Unexpected data in mapped memory\n");
 
     MmUnmapLockedPages(addr, mdl);
+    ok(!(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA), "got flags %#x\n", mdl->MdlFlags);
 
     MmUnlockPages(mdl);
+    ok(!(mdl->MdlFlags & MDL_PAGES_LOCKED), "got flags %#x\n", mdl->MdlFlags);
     IoFreeMdl(mdl);
+
+    pool = ExAllocatePool(NonPagedPool, sizeof(buffer));
+    ok(pool != NULL, "ExAllocatePool failed\n");
+    memcpy(pool, buffer, sizeof(buffer));
+
+    mdl = IoAllocateMdl(pool, sizeof(buffer), FALSE, FALSE, NULL);
+    ok(mdl != NULL, "IoAllocateMdl failed\n");
+    ok(!(mdl->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL), "got flags %#x\n", mdl->MdlFlags);
+
+    MmBuildMdlForNonPagedPool(mdl);
+    ok(mdl->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL, "got flags %#x\n", mdl->MdlFlags);
+    ok(mdl->MappedSystemVa == (char *)mdl->StartVa + mdl->ByteOffset,
+       "got %p, expected %p\n", mdl->MappedSystemVa, (char *)mdl->StartVa + mdl->ByteOffset);
+    ok(!(mdl->MdlFlags & MDL_PAGES_LOCKED), "got flags %#x\n", mdl->MdlFlags);
+    ok(!(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA), "got flags %#x\n", mdl->MdlFlags);
+
+    addr = MmMapLockedPages(mdl, KernelMode);
+    ok(addr != NULL, "MmMapLockedPages failed\n");
+    ok(mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA, "got flags %#x\n", mdl->MdlFlags);
+    if (addr != NULL)
+        ok(!kmemcmp(addr, buffer, sizeof(buffer)), "Unexpected data in mapped memory\n");
+
+    IoFreeMdl(mdl);
+    ExFreePool(pool);
 }
 
 static void test_init_funcs(void)
@@ -447,6 +481,9 @@ static void test_current_thread(BOOL is_system)
     PROCESS_BASIC_INFORMATION info;
     DISPATCHER_HEADER *header;
     HANDLE process_handle, id;
+    KERNEL_USER_TIMES times;
+    LONGLONG create_time;
+    ULONG session_id;
     PEPROCESS current;
     PETHREAD thread;
     NTSTATUS ret;
@@ -488,6 +525,26 @@ static void test_current_thread(BOOL is_system)
 
     id = PsGetProcessInheritedFromUniqueProcessId(current);
     ok(id == (HANDLE)info.InheritedFromUniqueProcessId, "unexpected process id %p\n", id);
+
+    session_id = 0xdeadbeef;
+    ret = ZwQueryInformationProcess(process_handle, ProcessSessionInformation, &session_id, sizeof(session_id), NULL);
+    ok(!ret, "ZwQueryInformationProcess failed: %#lx\n", ret);
+    ok(PsGetProcessSessionId(current) == session_id, "got session id %lu, expected %lu\n",
+       PsGetProcessSessionId(current), session_id);
+
+    /* the system process reports session 0 on windows */
+    todo_wine ok(!PsGetProcessSessionId(*pPsInitialSystemProcess), "got session id %lu for the system process\n",
+                 PsGetProcessSessionId(*pPsInitialSystemProcess));
+
+    memset(&times, 0xcc, sizeof(times));
+    ret = ZwQueryInformationProcess(process_handle, ProcessTimes, &times, sizeof(times), NULL);
+    ok(!ret, "ZwQueryInformationProcess failed: %#lx\n", ret);
+    create_time = PsGetProcessCreateTimeQuadPart(current);
+    ok(create_time == times.CreateTime.QuadPart, "got create time %#I64x, expected %#I64x\n",
+       create_time, times.CreateTime.QuadPart);
+
+    create_time = PsGetProcessCreateTimeQuadPart(*pPsInitialSystemProcess);
+    ok(create_time != 0, "got create time %#I64x for the system process\n", create_time);
 
     ret = ZwClose(process_handle);
     ok(!ret, "ZwClose failed: %#lx\n", ret);

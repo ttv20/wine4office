@@ -1252,7 +1252,7 @@ static NTSTATUS schan_set_application_protocols( void *args )
     if (!count || !(protocols = malloc(count * sizeof(*protocols)))) return STATUS_NO_MEMORY;
 
     parse_alpn_protocol_list(&params->buffer[offset], list_len, protocols);
-    if ((ret = pgnutls_alpn_set_protocols(s, protocols, count, GNUTLS_ALPN_SERVER_PRECEDENCE) < 0))
+    if ((ret = pgnutls_alpn_set_protocols(s, protocols, count, GNUTLS_ALPN_SERVER_PRECEDENCE)) < 0)
     {
         pgnutls_perror(ret);
     }

@@ -1041,6 +1041,23 @@ sync_test("defineProperty", function() {
         Object.defineProperty(o, "f", { get: function() { return 0; } });
         o.f();
     }, JS_E_FUNCTION_EXPECTED);
+
+    function proto_test() {}
+    desc = { writable: false };
+    Object.defineProperty(proto_test, "prototype", desc);
+
+    proto_test.prototype = 1234;
+    test_own_data_prop_desc(proto_test, "prototype", false, false, false);
+    ok(typeof(proto_test.prototype) === "object", "proto_test.prototype is " + typeof(proto_test.prototype));
+    test_own_data_prop_desc(proto_test, "prototype", false, false, false);
+
+    var array = [4, 2];
+    desc = { writable: false };
+    Object.defineProperty(array, "length", desc);
+    test_own_data_prop_desc(array, "length", false, false, false);
+    ok(array.length === 2, "array.length = " + array.length);
+    array.length = 42;
+    ok(array.length === 2, "array.length after set = " + array.length);
 });
 
 sync_test("defineProperties", function() {

@@ -612,9 +612,10 @@ typedef struct _FILE_FS_VOLUME_INFORMATION {
 } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
 
 /* FileFsLabelInformation = 2 */
-/*
- unknown
-*/
+typedef struct _FILE_FS_LABEL_INFORMATION {
+    ULONG       VolumeLabelLength;
+    WCHAR       VolumeLabel[1];
+} FILE_FS_LABEL_INFORMATION, *PFILE_FS_LABEL_INFORMATION;
 
 /* FileFsSizeInformation = 3 */
 typedef struct _FILE_FS_SIZE_INFORMATION {

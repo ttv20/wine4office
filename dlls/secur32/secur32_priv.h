@@ -73,9 +73,8 @@ SecurePackage *SECUR32_findPackageA(PCSTR packageName);
 /* Initialization functions for built-in providers */
 void SECUR32_initSchannelSP(void);
 void load_auth_packages(void);
-NTSTATUS NTAPI nego_SpLsaModeInitialize(ULONG, PULONG, PSECPKG_FUNCTION_TABLE *, PULONG);
 NTSTATUS NTAPI nego_SpUserModeInitialize(ULONG, PULONG, PSECPKG_USER_FUNCTION_TABLE *, PULONG);
-SECPKG_FUNCTION_TABLE *lsa_find_package(const char *name, SECPKG_USER_FUNCTION_TABLE **user_api);
+extern SECPKG_USER_FUNCTION_TABLE *lsa_find_func_table( const WCHAR *name );
 
 /* Cleanup functions for built-in providers */
 void SECUR32_deinitSchannelSP(void);

@@ -618,6 +618,8 @@ static HRESULT prop_put(jsdisp_t *This, dispex_prop_t *prop, jsval_t val)
             TRACE("getter with no setter\n");
             return S_OK;
         }
+        if(!(prop->flags & PROPF_WRITABLE))
+            return S_OK;
         return prop->u.p->setter(This->ctx, This, val);
     case PROP_PROTREF:
     case PROP_DELETED:
@@ -947,7 +949,7 @@ HRESULT gc_run(script_ctx_t *ctx)
     }
     LIST_FOR_EACH_ENTRY(obj, &thread_data->objects, jsdisp_t, entry) {
         /* Skip objects with external reference counter */
-        if(obj->builtin_info->addref) {
+        if(obj->builtin_info->get_host_disp) {
             obj->gc_marked = FALSE;
             continue;
         }
@@ -1100,7 +1102,7 @@ HRESULT gc_run(script_ctx_t *ctx)
     return S_OK;
 }
 
-HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *obj, jsdisp_t *link, void **unlink_ref)
+HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *link, void **unlink_ref)
 {
     if(op == GC_TRAVERSE_UNLINK) {
         *unlink_ref = NULL;
@@ -1115,7 +1117,7 @@ HRESULT gc_process_linked_obj(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsd
     return S_OK;
 }
 
-HRESULT gc_process_linked_val(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *obj, jsval_t *link)
+HRESULT gc_process_linked_val(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsval_t *link)
 {
     jsdisp_t *jsdisp;
 
@@ -1880,8 +1882,8 @@ static void jsdisp_free(jsdisp_t *obj)
 
 jsdisp_t *jsdisp_addref(jsdisp_t *obj)
 {
-    if(obj->builtin_info->addref)
-        obj->builtin_info->addref(obj);
+    if(obj->builtin_info->get_host_disp)
+        IWineJSDispatchHost_AddRef(obj->builtin_info->get_host_disp(obj));
     else
         ++obj->ref;
     return obj;
@@ -1891,8 +1893,8 @@ ULONG jsdisp_release(jsdisp_t *obj)
 {
     ULONG ref;
 
-    if(obj->builtin_info->release)
-        return obj->builtin_info->release(obj);
+    if(obj->builtin_info->get_host_disp)
+        return IWineJSDispatchHost_Release(obj->builtin_info->get_host_disp(obj));
 
     ref = --obj->ref;
     if(!ref)
@@ -1934,8 +1936,8 @@ static HRESULT WINAPI DispatchEx_QueryInterface(IWineJSDispatch *iface, REFIID r
 static ULONG WINAPI DispatchEx_AddRef(IWineJSDispatch *iface)
 {
     jsdisp_t *This = impl_from_IWineJSDispatch(iface);
-    if(This->builtin_info->addref)
-        return This->builtin_info->addref(This);
+    if(This->builtin_info->get_host_disp)
+        return IWineJSDispatchHost_AddRef(This->builtin_info->get_host_disp(This));
     jsdisp_addref(This);
     return This->ref;
 }
@@ -3434,6 +3436,21 @@ HRESULT jsdisp_define_data_property(jsdisp_t *obj, const WCHAR *name, unsigned f
     return jsdisp_define_property(obj, name, &prop_desc);
 }
 
+HRESULT jsdisp_replace_builtin_property(jsdisp_t *obj, const WCHAR *name, jsval_t value)
+{
+    dispex_prop_t *prop;
+    HRESULT hres;
+
+    hres = find_prop_name(obj, string_hash(name), name, FALSE, NULL, &prop);
+    if(FAILED(hres) || !prop || prop->type != PROP_BUILTIN)
+        return hres;
+
+    hres = jsval_copy(value, &prop->u.val);
+    if(SUCCEEDED(hres))
+        prop->type = PROP_JSVAL;
+    return hres;
+}
+
 HRESULT jsdisp_change_prototype(jsdisp_t *obj, jsdisp_t *proto)
 {
     jsdisp_t *iter;
@@ -3528,16 +3545,10 @@ static inline HostObject *HostObject_from_jsdisp(jsdisp_t *jsdisp)
     return CONTAINING_RECORD(jsdisp, HostObject, jsdisp);
 }
 
-static ULONG HostObject_addref(jsdisp_t *jsdisp)
+static IWineJSDispatchHost *HostObject_get_host_disp(jsdisp_t *jsdisp)
 {
     HostObject *This = HostObject_from_jsdisp(jsdisp);
-    return IWineJSDispatchHost_AddRef(This->host_iface);
-}
-
-static ULONG HostObject_release(jsdisp_t *jsdisp)
-{
-    HostObject *This = HostObject_from_jsdisp(jsdisp);
-    return IWineJSDispatchHost_Release(This->host_iface);
+    return This->host_iface;
 }
 
 static HRESULT HostObject_lookup_prop(jsdisp_t *jsdisp, const WCHAR *name, unsigned  flags, struct property_info *desc)
@@ -3623,16 +3634,15 @@ static HRESULT HostObject_to_string(jsdisp_t *jsdisp, jsstr_t **ret)
 }
 
 static const builtin_info_t HostObject_info = {
-    .class       = JSCLASS_HOST,
-    .addref      = HostObject_addref,
-    .release     = HostObject_release,
-    .lookup_prop = HostObject_lookup_prop,
-    .prop_get    = HostObject_prop_get,
-    .prop_put    = HostObject_prop_put,
-    .prop_delete = HostObject_prop_delete,
-    .prop_config = HostObject_prop_config,
-    .fill_props  = HostObject_fill_props,
-    .to_string   = HostObject_to_string,
+    .class         = JSCLASS_HOST,
+    .get_host_disp = HostObject_get_host_disp,
+    .lookup_prop   = HostObject_lookup_prop,
+    .prop_get      = HostObject_prop_get,
+    .prop_put      = HostObject_prop_put,
+    .prop_delete   = HostObject_prop_delete,
+    .prop_config   = HostObject_prop_config,
+    .fill_props    = HostObject_fill_props,
+    .to_string     = HostObject_to_string,
 };
 
 HRESULT init_host_object(script_ctx_t *ctx, IWineJSDispatchHost *host_iface, IWineJSDispatch *prototype_iface,
@@ -3667,16 +3677,12 @@ HRESULT init_host_object(script_ctx_t *ctx, IWineJSDispatchHost *host_iface, IWi
 IWineJSDispatchHost *get_host_dispatch(IDispatch *disp)
 {
     IWineJSDispatchHost *ret;
-    HostObject *host_obj;
     jsdisp_t *jsdisp;
 
-    if(!(jsdisp = to_jsdisp(disp)))
-        return NULL;
-    if(jsdisp->builtin_info != &HostObject_info)
+    if(!(jsdisp = to_jsdisp(disp)) || !jsdisp->builtin_info->get_host_disp)
         return NULL;
 
-    host_obj = HostObject_from_jsdisp(jsdisp);
-    IWineJSDispatchHost_GetOuterDispatch(host_obj->host_iface, &ret);
+    IWineJSDispatchHost_GetOuterDispatch(jsdisp->builtin_info->get_host_disp(jsdisp), &ret);
     return ret;
 }
 

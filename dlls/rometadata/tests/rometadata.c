@@ -970,6 +970,7 @@ static void test_IMetaDataImport(void)
         { tdInterface | tdAbstract | tdWindowsRuntime, "ITest2", "Wine.Test", 0x1000000, "Windows.Foundation.UniversalApiContract", 0x30000 },
         { tdPublic | tdSealed | tdWindowsRuntime, "Test2", "Wine.Test", 0x100000b, "Windows.Foundation.UniversalApiContract", 0x30000 },
         { tdPublic | tdInterface | tdAbstract | tdWindowsRuntime, "ITest3", "Wine.Test", 0x1000000, "Windows.Foundation.UniversalApiContract", 0x10000 },
+        { tdPublic | tdInterface | tdAbstract | tdWindowsRuntime, "ITest4", "Wine.Test", 0x1000000, "Windows.Foundation.UniversalApiContract", 0x10000 },
     };
     static const struct method_props test2_methods[2] =
     {
@@ -1015,6 +1016,8 @@ static void test_IMetaDataImport(void)
     mdMethodDef *methoddef_tokens, methoddef;
     mdFieldDef *fielddef_tokens, fielddef;
     HCORENUM henum = NULL, henum2 = NULL;
+    mdInterfaceImpl impl = mdTokenNil;
+    mdTypeRef typeref = mdTokenNil;
     IMetaDataDispenser *dispenser;
     mdProperty *property_tokens;
     IMetaDataImport *md_import;
@@ -1543,6 +1546,196 @@ static void test_IMetaDataImport(void)
         winetest_pop_context();
     }
     IMetaDataImport_CloseEnum(md_import, henum);
+
+    hr = IMetaDataImport_FindTypeDefByName(md_import, L"Wine.Test.ITest4", mdTokenNil, &typedef1);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+
+    henum = NULL;
+    buf_count = 0;
+    hr = IMetaDataImport_EnumInterfaceImpls(md_import, &henum, typedef1, &impl, 1, &buf_count);
+    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+    todo_wine ok(buf_count == 1, "got buf_count %lu\n", buf_count);
+    todo_wine test_token(md_import, impl, mdtInterfaceImpl, FALSE);
+    IMetaDataImport_CloseEnum(md_import, henum);
+
+    token = typedef2 = mdTokenNil;
+    hr = IMetaDataImport_GetInterfaceImplProps(md_import, impl, &typedef2, &token);
+    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+    todo_wine test_token(md_import, typedef2, mdtTypeDef, FALSE);
+    todo_wine test_token(md_import, token, mdtTypeRef, FALSE);
+    todo_wine ok(typedef2 == typedef1, "got typedef2 %s != %s\n", debugstr_mdToken(typedef2), debugstr_mdToken(typedef1));
+
+    hr = IMetaDataImport_FindTypeRef(md_import, mdtModule | 1, L"Wine.Test.ITest3", &typeref);
+    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+    todo_wine test_token(md_import, typeref, mdtTypeRef, FALSE);
+    todo_wine_if(token != mdTokenNil)
+    ok(token == typeref, "got token %s != %s\n", debugstr_mdToken(token), debugstr_mdToken(typeref));
+
+    IMetaDataImport_Release(md_import);
+}
+
+static ULONG encode_int(int line, ULONG value, BYTE *encoded)
+{
+    ok_(__FILE__, line)(value < 0x20000000, "value too large to encode: %#lx\n", value);
+
+    if (value < 0x80)
+    {
+        encoded[0] = value;
+        return 1;
+    }
+    if (value < 0x4000)
+    {
+        encoded[0] = value >> 8 | 0x80;
+        encoded[1] = value & 0xff;
+        return 2;
+    }
+    encoded[0] = value >> 24 | 0xc0;
+    encoded[1] = value >> 16 & 0xff;
+    encoded[2] = value >> 8 & 0xff;
+    encoded[3] = value & 0xff;
+    return 4;
+}
+
+static ULONG decode_int(int line, const BYTE *encoded, ULONG *len)
+{
+    ok_(__FILE__, line)((encoded[0] & 0xe0) != 0xe0, "invalid encoding: %#x\n", encoded[0]);
+
+    if (!(encoded[0] & 0x80))
+    {
+        *len = 1;
+        return encoded[0];
+    }
+    if (!(encoded[0] & 0x40))
+    {
+        *len = 2;
+        return ((encoded[0] & ~0xc0) << 8) + encoded[1];
+    }
+    *len = 4;
+    return ((encoded[0] & ~0xe0) << 24) + (encoded[1] << 16) + (encoded[2] << 8) + encoded[3];
+}
+
+/* Tests for WinRT metadata shipped with Windows. */
+static void test_IMetaDataImport_winrt(void)
+{
+    static const BYTE keyvaluepair_tmpl_params[] = { 2, ELEMENT_TYPE_STRING, ELEMENT_TYPE_OBJECT };
+    static const WCHAR *foundation_path = L"c:\\windows\\system32\\winmetadata\\windows.foundation.winmd";
+
+    IMetaDataDispenser *dispenser;
+    IMetaDataImport *md_import;
+    HCORENUM henum = NULL;
+    mdInterfaceImpl impl;
+    mdTypeRef kvpair_ref;
+    mdTypeDef type_def;
+    BYTE encoded[4];
+    ULONG i, len;
+    HRESULT hr;
+    struct
+    {
+        const WCHAR *name;
+        BOOL found;
+        ULONG exp_sig_len;
+        /* Expected signature for the TypeSpec, after the initial [ELEMENT_TYPE_GENERICINST ELEMENT_TYPE_CLASS <type>] prefix. */
+        COR_SIGNATURE exp_sig[10];
+    } propertyset_ifaces[] = {
+        {L"Windows.Foundation.Collections.IMap`2", FALSE, 3, { 2, ELEMENT_TYPE_STRING, ELEMENT_TYPE_OBJECT } },
+        {L"Windows.Foundation.Collections.IObservableMap`2", FALSE, 3, { 2, ELEMENT_TYPE_STRING, ELEMENT_TYPE_OBJECT } },
+        /* The interface for this one is IIterable<IKeyValuePair<string, object>>, because the TypeRef token value for IKeyValuePair
+           is not known, we initialize it from the metadata. */
+        {L"Windows.Foundation.Collections.IIterable`1", FALSE, 3, { 1, ELEMENT_TYPE_GENERICINST, ELEMENT_TYPE_CLASS } },
+    };
+
+    hr = MetaDataGetDispenser(&CLSID_CorMetaDataDispenser, &IID_IMetaDataDispenser, (void **)&dispenser);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+
+    hr = IMetaDataDispenser_OpenScope(dispenser, foundation_path, 0, &IID_IMetaDataImport,
+                                      (IUnknown **)&md_import);
+    todo_wine ok(hr == S_OK, "got hr %#lx\n", hr);
+    IMetaDataDispenser_Release(dispenser);
+    if (FAILED(hr))
+    {
+        skip("OpenScope failed\n");
+        return;
+    }
+
+    /* Get the typeref for IKeyValuePair`2 and append it. */
+    hr = IMetaDataImport_FindTypeRef(md_import, mdtModule | 1, L"Windows.Foundation.Collections.IKeyValuePair`2", &kvpair_ref);
+    ok(hr == S_OK, "gor hr %#lx\n", hr);
+    /* See ECMA-335 Partition II.23.2.8, "TypeDefOrRefOrSpecEncoded". */
+    len = encode_int(__LINE__, (RidFromToken(kvpair_ref) << 2) | 1, encoded);
+    memcpy(&propertyset_ifaces[2].exp_sig[propertyset_ifaces[2].exp_sig_len], encoded, len);
+    propertyset_ifaces[2].exp_sig_len += len;
+    /* Copy the remaining signature for the <string, object> template params. */
+    memcpy(&propertyset_ifaces[2].exp_sig[propertyset_ifaces[2].exp_sig_len], keyvaluepair_tmpl_params, sizeof(keyvaluepair_tmpl_params));
+    propertyset_ifaces[2].exp_sig_len += sizeof(keyvaluepair_tmpl_params);
+
+    hr = IMetaDataImport_FindTypeDefByName(md_import, L"Windows.Foundation.Collections.IPropertySet", mdTokenNil, &type_def);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    hr = IMetaDataImport_EnumInterfaceImpls(md_import, &henum, type_def, &impl, 1, NULL);
+    ok(hr == S_OK, "got hr %#lx\n", hr);
+    /* IPropertySet implements IObservableMap<string, object>, IMap<string, object>, and IIterable<IKeyValuePair<string, object>>. */
+    while (hr == S_OK)
+    {
+        static const ULONG class_mask = 3; /* 0b11 */
+        static WCHAR name[80];
+
+        ULONG sig_len = 0, class_raw, class_bits;
+        mdToken class_def = 0, iface_def = 0;
+        const COR_SIGNATURE *sig_blob = NULL;
+        enum CorTokenType type;
+        mdToken class;
+
+        winetest_push_context("impl=%s", debugstr_mdToken(impl));
+
+        hr = IMetaDataImport_GetInterfaceImplProps(md_import, impl, &class_def, &iface_def);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
+        ok(class_def == type_def, "got class_type %s != %s\n", debugstr_mdToken(class_def), debugstr_mdToken(type_def));
+        type = TypeFromToken(iface_def);
+        ok(type == mdtTypeSpec, "got type %#x\n", type);
+
+        hr = IMetaDataImport_GetTypeSpecFromToken(md_import, iface_def, &sig_blob, &sig_len);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
+        ok(!!sig_blob, "got sig_blob %p\n", sig_blob);
+        ok(sig_len, "got sig_len %lu\n", sig_len);
+
+        ok(sig_len > 2, "got sig_len %lu\n", sig_len);
+        if (sig_len < 2) goto next;
+
+        ok(sig_blob[0] == ELEMENT_TYPE_GENERICINST && sig_blob[1] == ELEMENT_TYPE_CLASS,
+           "got sig_blob prefix %#x %#x\n", sig_blob[0], sig_blob[1]);
+        class_raw = decode_int(__LINE__, &sig_blob[2], &len);
+        class_bits = class_raw & class_mask;
+        ok(class_bits < 2, "got class_bits %#lx\n", class_bits);
+        class = (class_raw & ~class_mask) >> 2;
+        if (class_bits == 0)
+            hr = IMetaDataImport_GetTypeDefProps(md_import, class | mdtTypeDef, name, ARRAY_SIZE(name), NULL, NULL, NULL );
+        else
+            hr = IMetaDataImport_GetTypeRefProps(md_import, class | mdtTypeRef, NULL, name, ARRAY_SIZE(name), NULL);
+        ok(hr == S_OK, "got hr %#lx\n", hr);
+        for (i = 0; i < ARRAY_SIZE(propertyset_ifaces); i++)
+        {
+            winetest_push_context("i=%lu", i);
+            if (!wcscmp(name, propertyset_ifaces[i].name))
+            {
+                propertyset_ifaces[i].found = TRUE;
+                ok(sig_len == propertyset_ifaces[i].exp_sig_len + 2 + len, "got sig_len %lu != %lu\n", sig_len,
+                   propertyset_ifaces[i].exp_sig_len + 2 + len);
+                if (sig_len == propertyset_ifaces[i].exp_sig_len + 2 + len)
+                    ok(!memcmp(&sig_blob[2 + len], propertyset_ifaces[i].exp_sig, propertyset_ifaces[i].exp_sig_len),
+                       "unexpected signature blob\n");
+            }
+            winetest_pop_context();
+        }
+    next:
+        hr = IMetaDataImport_EnumInterfaceImpls(md_import, &henum, type_def, &impl, 1, NULL);
+        ok(SUCCEEDED(hr), "got hr %#lx\n", hr);
+
+        winetest_pop_context();
+    }
+    IMetaDataImport_CloseEnum(md_import, henum);
+
+    for (i = 0; i < ARRAY_SIZE(propertyset_ifaces); i++)
+        ok(propertyset_ifaces[i].found, "Extends entry for %s not found\n", debugstr_w(propertyset_ifaces[i].name));
+
     IMetaDataImport_Release(md_import);
 }
 
@@ -1556,6 +1749,7 @@ START_TEST(rometadata)
     test_MetaDataGetDispenser();
     test_MetaDataDispenser_OpenScope();
     test_IMetaDataImport();
+    test_IMetaDataImport_winrt();
 
     RoUninitialize();
 }

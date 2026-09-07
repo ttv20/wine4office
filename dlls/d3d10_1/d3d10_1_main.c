@@ -86,12 +86,12 @@ static HRESULT d3d10_create_device1(IDXGIAdapter *adapter, D3D10_DRIVER_TYPE dri
 
     if (adapter)
     {
-        IDXGIAdapter_AddRef(adapter);
         if (FAILED(hr = IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory, (void **)&factory)))
         {
             WARN("Failed to get dxgi factory, hr %#lx.\n", hr);
             return hr;
         }
+        IDXGIAdapter_AddRef(adapter);
     }
     else
     {

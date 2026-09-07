@@ -427,21 +427,28 @@ SymCryptRsakeyCalculatePrivateFields(
         SymCryptIntSetValueUint64( pkRsakey->au64PubExp[i], piScr );
 
         // Calculate D
-        SymCryptIntExtendedGcd(
-            piPhi,
-            piScr,
-            SYMCRYPT_FLAG_GCD_INPUTS_NOT_BOTH_EVEN,
-            piTmpGcd,   // Gcd
-            NULL,   // Lcm
-            NULL,   // InvSrc1ModSrc2
-            pkRsakey->piPrivExps[i],
-            pbScratch,
-            cbScratch);
-
-        if( !SymCryptIntIsEqualUint32( piTmpGcd, 1 ) )
+        if (pkRsakey->au64PubExp[i] == 1)
         {
-            scError = SYMCRYPT_INVALID_ARGUMENT;
-            goto cleanup;
+            SymCryptIntSetValueUint64( 1, pkRsakey->piPrivExps[i]);
+        }
+        else
+        {
+            SymCryptIntExtendedGcd(
+                piPhi,
+                piScr,
+                SYMCRYPT_FLAG_GCD_INPUTS_NOT_BOTH_EVEN,
+                piTmpGcd,   // Gcd
+                NULL,   // Lcm
+                NULL,   // InvSrc1ModSrc2
+                pkRsakey->piPrivExps[i],
+                pbScratch,
+                cbScratch);
+
+            if( !SymCryptIntIsEqualUint32( piTmpGcd, 1 ) )
+            {
+                scError = SYMCRYPT_INVALID_ARGUMENT;
+                goto cleanup;
+           }
         }
     }
 

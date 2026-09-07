@@ -273,7 +273,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_surface_GetResource(IDXGISurface2 *iface, 
     if (SUCCEEDED(hr))
         *subresource_idx = resource->subresource_idx;
     else
-        parent_resource = NULL;
+        *parent_resource = NULL;
     return hr;
 }
 

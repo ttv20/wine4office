@@ -2868,153 +2868,6 @@ static void rotate_X(FLOAT *out, UINT order, FLOAT a, FLOAT *in)
     out[35] = 0.9057110548f * in[31] - 0.4192627370f * in[33] + 0.0624999329f * in[35];
 }
 
-static void set_vec3(D3DXVECTOR3 *v, float x, float y, float z)
-{
-    v->x = x;
-    v->y = y;
-    v->z = z;
-}
-
-/*
- * The following implementation of D3DXSHProjectCubeMap is based on the
- * SHProjectCubeMap() implementation from Microsoft's DirectXMath library,
- * covered under the following copyright:
- *
- * Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License.
- */
-HRESULT WINAPI D3DXSHProjectCubeMap(unsigned int order, IDirect3DCubeTexture9 *texture, float *red, float *green, float *blue)
-{
-    const unsigned int order_square = order * order;
-    const struct pixel_format_desc *format;
-    unsigned int x, y, i, face;
-    float B, S, proj_normal;
-    D3DSURFACE_DESC desc;
-    float Wt = 0.0f;
-    float *temp;
-    HRESULT hr;
-
-    TRACE("order %u, texture %p, red %p, green %p, blue %p.\n", order, texture, red, green, blue);
-
-    if (!texture || !red || order < D3DXSH_MINORDER || order > D3DXSH_MAXORDER)
-        return D3DERR_INVALIDCALL;
-
-    memset(red, 0, order_square * sizeof(float));
-    if (green)
-        memset(green, 0, order_square * sizeof(float));
-    if (blue)
-        memset(blue, 0, order_square * sizeof(float));
-
-    if (FAILED(hr = IDirect3DCubeTexture9_GetLevelDesc(texture, 0, &desc)))
-    {
-        ERR("Failed to get level desc, hr %#lx.\n", hr);
-        return hr;
-    }
-
-    format = get_format_info(desc.Format);
-    if (is_unknown_format(format) || is_index_format(format) || is_compressed_format(format))
-    {
-        FIXME("Unsupported texture format %#x.\n", desc.Format);
-        return D3DERR_INVALIDCALL;
-    }
-
-    if (!(temp = malloc(order_square * sizeof(*temp))))
-        return E_OUTOFMEMORY;
-
-    B = -1.0f + 1.0f / desc.Width;
-    if (desc.Width > 1)
-        S = 2.0f * (1.0f - 1.0f / desc.Width) / (desc.Width - 1.0f);
-    else
-        S = 0.0f;
-
-    for (face = 0; face < 6; ++face)
-    {
-        D3DLOCKED_RECT map_desc;
-
-        if (FAILED(hr = IDirect3DCubeTexture9_LockRect(texture, face, 0, &map_desc, NULL, D3DLOCK_READONLY)))
-        {
-            ERR("Failed to map texture, hr %#lx.\n", hr);
-            free(temp);
-            return hr;
-        }
-
-        for (y = 0; y < desc.Height; ++y)
-        {
-            const BYTE *row = (const BYTE *)map_desc.pBits + y * map_desc.Pitch;
-
-            for (x = 0; x < desc.Width; ++x)
-            {
-                float diff_solid, x_3d, y_3d;
-                const float u = x * S + B;
-                const float v = y * S + B;
-                struct d3dx_color colour;
-                D3DXVECTOR3 dir;
-
-                x_3d = (x * 2.0f + 1.0f) / desc.Width - 1.0f;
-                y_3d = (y * 2.0f + 1.0f) / desc.Width - 1.0f;
-
-                switch (face)
-                {
-                    case D3DCUBEMAP_FACE_POSITIVE_X:
-                        set_vec3(&dir, 1.0f, -y_3d, -x_3d);
-                        break;
-
-                    case D3DCUBEMAP_FACE_NEGATIVE_X:
-                        set_vec3(&dir, -1.0f, -y_3d, x_3d);
-                        break;
-
-                    case D3DCUBEMAP_FACE_POSITIVE_Y:
-                        set_vec3(&dir, x_3d, 1.0f, y_3d);
-                        break;
-
-                    case D3DCUBEMAP_FACE_NEGATIVE_Y:
-                        set_vec3(&dir, x_3d, -1.0f, -y_3d);
-                        break;
-
-                    case D3DCUBEMAP_FACE_POSITIVE_Z:
-                        set_vec3(&dir, x_3d, -y_3d, 1.0f);
-                        break;
-
-                    case D3DCUBEMAP_FACE_NEGATIVE_Z:
-                        set_vec3(&dir, -x_3d, -y_3d, -1.0f);
-                        break;
-                }
-
-                /* This is more complex than powf(..., 1.5f), but also happens
-                 * to be slightly more accurate, and slightly faster as well. */
-                diff_solid = 4.0f / ((1.0f + u * u + v * v) * sqrtf(1.0f + u * u + v * v));
-                Wt += diff_solid;
-
-                D3DXVec3Normalize(&dir, &dir);
-                D3DXSHEvalDirection(temp, order, &dir);
-
-                format_to_d3dx_color(format, &row[x * format->block_byte_count], NULL, &colour);
-
-                for (i = 0; i < order_square; ++i)
-                {
-                    red[i] += temp[i] * colour.value.x * diff_solid;
-                    if (green)
-                        green[i] += temp[i] * colour.value.y * diff_solid;
-                    if (blue)
-                        blue[i] += temp[i] * colour.value.z * diff_solid;
-                }
-            }
-        }
-
-        IDirect3DCubeTexture9_UnlockRect(texture, face, 0);
-    }
-
-    proj_normal = (4.0f * M_PI) / Wt;
-    D3DXSHScale(red, order, red, proj_normal);
-    if (green)
-        D3DXSHScale(green, order, green, proj_normal);
-    if (blue)
-        D3DXSHScale(blue, order, blue, proj_normal);
-
-    free(temp);
-    return D3D_OK;
-}
-
 FLOAT* WINAPI D3DXSHRotate(FLOAT *out, UINT order, const D3DXMATRIX *matrix, const FLOAT *in)
 {
     FLOAT alpha, beta, gamma, sinb, temp[36], temp1[36];
@@ -3158,4 +3011,190 @@ FLOAT* WINAPI D3DXSHScale(FLOAT *out, UINT order, const FLOAT *a, const FLOAT sc
         out[i] = a[i] * scale;
 
     return out;
+}
+
+BOOL WINAPI D3DXIntersectTri(const D3DXVECTOR3 *p0, const D3DXVECTOR3 *p1, const D3DXVECTOR3 *p2,
+        const D3DXVECTOR3 *praypos, const D3DXVECTOR3 *praydir, float *pu, float *pv, float *pdist)
+{
+    D3DXMATRIX m;
+    D3DXVECTOR4 vec;
+
+    TRACE("p0 %p, p1 %p, p2 %p, praypos %p, praydir %p, pu %p, pv %p, pdist %p.\n",
+            p0, p1, p2, praypos, praydir, pu, pv, pdist);
+
+    m.m[0][0] = p1->x - p0->x;
+    m.m[1][0] = p2->x - p0->x;
+    m.m[2][0] = -praydir->x;
+    m.m[3][0] = 0.0f;
+    m.m[0][1] = p1->y - p0->y;
+    m.m[1][1] = p2->y - p0->y;
+    m.m[2][1] = -praydir->y;
+    m.m[3][1] = 0.0f;
+    m.m[0][2] = p1->z - p0->z;
+    m.m[1][2] = p2->z - p0->z;
+    m.m[2][2] = -praydir->z;
+    m.m[3][2] = 0.0f;
+    m.m[0][3] = 0.0f;
+    m.m[1][3] = 0.0f;
+    m.m[2][3] = 0.0f;
+    m.m[3][3] = 1.0f;
+
+    vec.x = praypos->x - p0->x;
+    vec.y = praypos->y - p0->y;
+    vec.z = praypos->z - p0->z;
+    vec.w = 0.0f;
+
+    if ( D3DXMatrixInverse(&m, NULL, &m) )
+    {
+        D3DXVec4Transform(&vec, &vec, &m);
+        if ( (vec.x >= 0.0f) && (vec.y >= 0.0f) && (vec.x + vec.y <= 1.0f) && (vec.z >= 0.0f) )
+        {
+            if (pu) *pu = vec.x;
+            if (pv) *pv = vec.y;
+            if (pdist) *pdist = fabsf( vec.z );
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+BOOL WINAPI D3DXSphereBoundProbe(const D3DXVECTOR3 *center, float radius,
+        const D3DXVECTOR3 *ray_position, const D3DXVECTOR3 *ray_direction)
+{
+    D3DXVECTOR3 difference = {0};
+    float a, b, c, d;
+
+    D3DXVec3Subtract(&difference, ray_position, center);
+    c = D3DXVec3LengthSq(&difference) - radius * radius;
+    if (c < 0.0f)
+        return TRUE;
+    a = D3DXVec3LengthSq(ray_direction);
+    b = D3DXVec3Dot(&difference, ray_direction);
+    d = b * b - a * c;
+
+    return d >= 0.0f && (b <= 0.0f || d > b * b);
+}
+
+/* Algorithm taken from the article: An Efficient and Robust Ray-Box Intersection Algorithm
+Amy Williams             University of Utah
+Steve Barrus             University of Utah
+R. Keith Morley          University of Utah
+Peter Shirley            University of Utah
+
+International Conference on Computer Graphics and Interactive Techniques  archive
+ACM SIGGRAPH 2005 Courses
+Los Angeles, California
+
+This algorithm is free of patents or of copyrights, as confirmed by Peter Shirley himself.
+
+Algorithm: Consider the box as the intersection of three slabs. Clip the ray
+against each slab, if there's anything left of the ray after we're
+done we've got an intersection of the ray with the box. */
+BOOL WINAPI D3DXBoxBoundProbe(const D3DXVECTOR3 *pmin, const D3DXVECTOR3 *pmax,
+        const D3DXVECTOR3 *prayposition, const D3DXVECTOR3 *praydirection)
+{
+    FLOAT div, tmin, tmax, tymin, tymax, tzmin, tzmax;
+
+    div = 1.0f / praydirection->x;
+    if ( div >= 0.0f )
+    {
+        tmin = ( pmin->x - prayposition->x ) * div;
+        tmax = ( pmax->x - prayposition->x ) * div;
+    }
+    else
+    {
+        tmin = ( pmax->x - prayposition->x ) * div;
+        tmax = ( pmin->x - prayposition->x ) * div;
+    }
+
+    if ( tmax < 0.0f ) return FALSE;
+
+    div = 1.0f / praydirection->y;
+    if ( div >= 0.0f )
+    {
+        tymin = ( pmin->y - prayposition->y ) * div;
+        tymax = ( pmax->y - prayposition->y ) * div;
+    }
+    else
+    {
+        tymin = ( pmax->y - prayposition->y ) * div;
+        tymax = ( pmin->y - prayposition->y ) * div;
+    }
+
+    if ( ( tymax < 0.0f ) || ( tmin > tymax ) || ( tymin > tmax ) ) return FALSE;
+
+    if ( tymin > tmin ) tmin = tymin;
+    if ( tymax < tmax ) tmax = tymax;
+
+    div = 1.0f / praydirection->z;
+    if ( div >= 0.0f )
+    {
+        tzmin = ( pmin->z - prayposition->z ) * div;
+        tzmax = ( pmax->z - prayposition->z ) * div;
+    }
+    else
+    {
+        tzmin = ( pmax->z - prayposition->z ) * div;
+        tzmax = ( pmin->z - prayposition->z ) * div;
+    }
+
+    if ( (tzmax < 0.0f ) || ( tmin > tzmax ) || ( tzmin > tmax ) ) return FALSE;
+
+    return TRUE;
+}
+
+HRESULT WINAPI D3DXComputeBoundingBox(const D3DXVECTOR3 *pfirstposition,
+        DWORD numvertices, DWORD dwstride, D3DXVECTOR3 *pmin, D3DXVECTOR3 *pmax)
+{
+    D3DXVECTOR3 vec;
+    unsigned int i;
+
+    if( !pfirstposition || !pmin || !pmax ) return D3DERR_INVALIDCALL;
+
+    *pmin = *pfirstposition;
+    *pmax = *pmin;
+
+    for(i=0; i<numvertices; i++)
+    {
+        vec = *( (const D3DXVECTOR3*)((const char*)pfirstposition + dwstride * i) );
+
+        if ( vec.x < pmin->x ) pmin->x = vec.x;
+        if ( vec.x > pmax->x ) pmax->x = vec.x;
+
+        if ( vec.y < pmin->y ) pmin->y = vec.y;
+        if ( vec.y > pmax->y ) pmax->y = vec.y;
+
+        if ( vec.z < pmin->z ) pmin->z = vec.z;
+        if ( vec.z > pmax->z ) pmax->z = vec.z;
+    }
+
+    return D3D_OK;
+}
+
+HRESULT WINAPI D3DXComputeBoundingSphere(const D3DXVECTOR3 *pfirstposition,
+        DWORD numvertices, DWORD dwstride, D3DXVECTOR3 *pcenter, float *pradius)
+{
+    D3DXVECTOR3 temp;
+    FLOAT d;
+    unsigned int i;
+
+    if( !pfirstposition || !pcenter || !pradius ) return D3DERR_INVALIDCALL;
+
+    temp.x = 0.0f;
+    temp.y = 0.0f;
+    temp.z = 0.0f;
+    *pradius = 0.0f;
+
+    for(i=0; i<numvertices; i++)
+        D3DXVec3Add(&temp, &temp, (const D3DXVECTOR3*)((const char*)pfirstposition + dwstride * i));
+
+    D3DXVec3Scale(pcenter, &temp, 1.0f / numvertices);
+
+    for(i=0; i<numvertices; i++)
+    {
+        d = D3DXVec3Length(D3DXVec3Subtract(&temp, (const D3DXVECTOR3*)((const char*)pfirstposition + dwstride * i), pcenter));
+        if ( d > *pradius ) *pradius = d;
+    }
+    return D3D_OK;
 }

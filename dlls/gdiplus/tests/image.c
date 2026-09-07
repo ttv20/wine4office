@@ -3371,6 +3371,9 @@ static void test_colormatrix(void)
     ok(color_match(0xeeff40cc, color, 3), "expected 0xeeff40cc, got 0x%08lx\n", color);
 
     /* Toggle NoOp */
+    stat = GdipSetImageAttributesNoOp(NULL, ColorAdjustTypeDefault, FALSE);
+    expect(InvalidParameter, stat);
+
     stat = GdipSetImageAttributesNoOp(imageattr, ColorAdjustTypeDefault, FALSE);
     expect(Ok, stat);
 

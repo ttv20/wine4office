@@ -40,7 +40,6 @@ struct drop_view
     MSIDATABASE *db;
     MSIVIEW *table;
     column_info *colinfo;
-    INT hold;
 };
 
 static UINT DROP_execute(struct tagMSIVIEW *view, MSIRECORD *record)

@@ -38,30 +38,6 @@ static double       (WINAPI *pPdhVbGetDoubleCounterValue)(PDH_HCOUNTER, PDH_STAT
 
 #define GETFUNCPTR(func) p##func = (void *)GetProcAddress( pdh, #func );
 
-
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
-
 static void init_function_ptrs( void )
 {
     pdh = GetModuleHandleA( "pdh" );
@@ -94,6 +70,9 @@ static void test_PdhOpenQueryA( void )
     ret = PdhCloseQuery( NULL );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
+    ret = PdhCloseQuery( (PDH_HQUERY)0xdeadbeef );
+    ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
+
     ret = PdhCloseQuery( &query );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
@@ -116,6 +95,9 @@ static void test_PdhOpenQueryW( void )
     ok(ret == ERROR_SUCCESS, "PdhOpenQueryW failed 0x%08lx\n", ret);
 
     ret = PdhCloseQuery( NULL );
+    ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
+
+    ret = PdhCloseQuery( (PDH_HQUERY)0xdeadbeef );
     ok(ret == PDH_INVALID_HANDLE, "PdhCloseQuery failed 0x%08lx\n", ret);
 
     ret = PdhCloseQuery( &query );
@@ -445,7 +427,8 @@ static void test_PdhGetFormattedCounterArrayW( void )
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
 
     ret = PdhGetFormattedCounterArrayW( NULL, PDH_FMT_LARGE, &size, &count, NULL );
-    ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
+    ok(ret == PDH_INVALID_ARGUMENT || ret == PDH_INVALID_HANDLE,
+        "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
 
     ret = PdhGetFormattedCounterArrayW( counter, PDH_FMT_LARGE, NULL, &count, NULL );
     ok(ret == PDH_INVALID_ARGUMENT, "PdhGetFormattedCounterArrayW failed 0x%08lx\n", ret);
@@ -1196,11 +1179,7 @@ static void test_PdhGetDllVersion(void)
 
 START_TEST(pdh)
 {
-    if (!is_lang_english())
-    {
-        skip("An English UI is needed for the pdh tests\n");
-        return;
-    }
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
     init_function_ptrs();
 
     test_PdhOpenQueryA();

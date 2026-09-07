@@ -680,6 +680,7 @@ NTSTATUS __wine_unix_lib_init(void)
     x11drv_xinput2_load();
 
     x11drv_init_keyboard( gdi_display );
+    x11drv_init_mouse( gdi_display );
     if (use_xim) use_xim = xim_init( input_style );
 
     init_icm_profile();

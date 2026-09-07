@@ -396,7 +396,7 @@ char * CDECL wine_get_unix_file_name( LPCWSTR dosW )
 
     if (!RtlDosPathNameToNtPathName_U( dosW, &nt_name, NULL, NULL )) return NULL;
     InitializeObjectAttributes( &attr, &nt_name, 0, 0, NULL );
-    status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          FILE_SYNCHRONOUS_IO_NONALERT );
     if (status)
     {
@@ -409,7 +409,7 @@ char * CDECL wine_get_unix_file_name( LPCWSTR dosW )
         if (i > 5)
         {
             nt_name.Length = i * sizeof(WCHAR);
-            status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
         }
     }
@@ -495,7 +495,7 @@ WCHAR * CDECL wine_get_dos_file_name( LPCSTR str )
         InitializeObjectAttributes( &attr, &nt_name, 0, 0, NULL );
         for (i = nt_name.Length / sizeof(WCHAR); i > 9 && nt_name.Buffer[i - 1] == '\\'; i--)
             nt_name.Length -= sizeof(WCHAR);
-        status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              FILE_SYNCHRONOUS_IO_NONALERT );
         while (status)
         {
@@ -504,7 +504,7 @@ WCHAR * CDECL wine_get_dos_file_name( LPCSTR str )
             while (i && nt_name.Buffer[i - 1] == '\\') i--;
             if (i <= 9) break;
             nt_name.Length = i * sizeof(WCHAR);
-            status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
         }
         if (!set_ntstatus( status )) goto failed;

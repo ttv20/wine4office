@@ -474,7 +474,11 @@ static WCHAR *get_key_container_path(const CERT_CONTEXT *ctx)
         char *str;
         if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, NULL, &size, 0)) return NULL;
         if (!(str = malloc(size))) return NULL;
-        if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, (BYTE *)str, &size, 0)) return NULL;
+        if (!CryptGetProvParam(keyctx.hCryptProv, PP_CONTAINER, (BYTE *)str, &size, 0))
+        {
+            free(str);
+            return NULL;
+        }
 
         len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
         if (!(ret = malloc(sizeof(L"Software\\Wine\\Crypto\\RSA\\") + len * sizeof(WCHAR))))
@@ -739,8 +743,12 @@ static SECURITY_STATUS acquire_credentials_handle(ULONG fCredentialUse,
     free(key_blob);
     if (status) goto fail;
 
-    handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED);
-    if (handle == SCHAN_INVALID_HANDLE) goto fail;
+    if ((handle = schan_alloc_handle(creds, SCHAN_HANDLE_CRED)) == SCHAN_INVALID_HANDLE)
+    {
+        struct free_certificate_credentials_params free_params = { creds };
+        GNUTLS_CALL( free_certificate_credentials, &free_params );
+        goto fail;
+    }
 
     phCredential->dwLower = handle;
     phCredential->dwUpper = 0;
@@ -1170,7 +1178,8 @@ static SECURITY_STATUS SEC_ENTRY schan_InitializeSecurityContextW(
     dump_buffer_desc(pInput);
     dump_buffer_desc(pOutput);
 
-    return establish_context(phCredential, phContext, pszTargetName, pInput, fContextReq, TargetDataRep, phNewContext, pOutput, pfContextAttr, ptsExpiry, FALSE);
+    return establish_context(phCredential, phContext, pszTargetName, pInput, fContextReq, TargetDataRep,
+                             phNewContext, pOutput, pfContextAttr, ptsExpiry, FALSE);
 }
 
 /***********************************************************************
@@ -1218,7 +1227,8 @@ static SECURITY_STATUS SEC_ENTRY schan_AcceptSecurityContext(
     dump_buffer_desc(pInput);
     dump_buffer_desc(pOutput);
 
-    return establish_context(phCredential, phContext, NULL, pInput, fContextReq, TargetDataRep, phNewContext, pOutput, pfContextAttr, ptsTimeStamp, TRUE);
+    return establish_context(phCredential, phContext, NULL, pInput, fContextReq, TargetDataRep, phNewContext,
+                             pOutput, pfContextAttr, ptsTimeStamp, TRUE);
 }
 
 static void *get_alg_name(ALG_ID id, BOOL wide)
@@ -1282,8 +1292,11 @@ static SECURITY_STATUS ensure_remote_cert(struct schan_context *ctx)
             if (!CertAddEncodedCertificateToStore(store, X509_ASN_ENCODING, blob, sizes[i],
                     CERT_STORE_ADD_REPLACE_EXISTING, i ? NULL : &cert))
             {
+                status = GetLastError();
                 if (i) CertFreeCertificateContext(cert);
-                return GetLastError();
+                free(params.buffer);
+                CertCloseStore(store, 0);
+                return status;
             }
             blob += sizes[i];
         }
@@ -1519,8 +1532,8 @@ static SECURITY_STATUS SEC_ENTRY schan_EncryptMessage(PCtxtHandle context_handle
     TRACE("context_handle %p, quality %ld, message %p, message_seq_no %ld\n",
             context_handle, quality, message, message_seq_no);
 
-    if (!context_handle) return SEC_E_INVALID_HANDLE;
-    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!context_handle || !(ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX)))
+        return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 
@@ -1655,8 +1668,8 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
     TRACE("context_handle %p, message %p, message_seq_no %ld, quality %p\n",
             context_handle, message, message_seq_no, quality);
 
-    if (!context_handle) return SEC_E_INVALID_HANDLE;
-    ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX);
+    if (!context_handle || !(ctx = schan_get_object(context_handle->dwLower, SCHAN_HANDLE_CTX)))
+        return SEC_E_INVALID_HANDLE;
 
     dump_buffer_desc(message);
 

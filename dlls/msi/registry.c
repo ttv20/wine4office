@@ -144,11 +144,11 @@ BOOL decode_base85_guid( LPCWSTR str, GUID *guid )
             val = 0;
             base = 1;
         }
-        val += table_dec85[str[i]] * base;
         if( str[i] >= 0x80 )
             return FALSE;
         if( table_dec85[str[i]] == 0xff )
             return FALSE;
+        val += table_dec85[str[i]] * base;
         if( (i%5) == 4 )
             p[i/5] = val;
         base *= 85;

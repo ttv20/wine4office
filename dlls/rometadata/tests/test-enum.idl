@@ -85,4 +85,14 @@ namespace Wine.Test {
         [propget] HRESULT Prop5([out, retval] int *a);
         [propput] HRESULT Prop5([in] int a);
     }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(deadbeef-dead-beef-dead-deadbeef0004)
+    ]
+    interface ITest4 : IInspectable
+        requires Wine.Test.ITest3
+    {
+        HRESULT Method1();
+    }
 }

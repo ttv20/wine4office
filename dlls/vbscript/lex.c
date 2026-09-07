@@ -545,7 +545,9 @@ static int parse_next_token(void *lval, unsigned *loc, parser_ctx_t *ctx)
         if('0' <= ctx->ptr[1] && ctx->ptr[1] <= '9')
             return parse_numeric_literal(ctx, lval);
         c = ctx->ptr > ctx->code ? ctx->ptr[-1] : '\n';
-        if (is_identifier_char(c) || c == ')') {
+        if ((is_identifier_char(c) || c == ')')
+                && (ctx->last_token == tIdentifier || ctx->last_token == ')'
+                || ctx->last_token == tEMPTYBRACKETS || ctx->last_token == tME)) {
             ctx->ptr++;
             return '.';
         }

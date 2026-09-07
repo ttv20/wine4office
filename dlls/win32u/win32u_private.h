@@ -160,6 +160,7 @@ extern void track_scroll_bar( HWND hwnd, int scrollbar, POINT pt );
 
 /* sysparams.c */
 extern UINT system_dpi;
+extern BOOL emulate_modeset;
 extern BOOL decorated_mode;
 extern UINT64 thunk_lock_callback;
 extern HBRUSH get_55aa_brush(void);
@@ -204,6 +205,10 @@ extern void user_unlock(void);
 extern void user_check_not_lock(void);
 extern BOOL get_gpu_uuid_from_luid( const LUID *luid, GUID *uuid );
 extern BOOL get_gpu_info_from_uuid( const GUID *uuid, LUID *luid, UINT32 *node_mask, char *name );
+extern BOOL use_default_gamma_ramp(void);
+extern BOOL get_float_gamma_ramp( float *ramp, LONG *serial );
+extern BOOL get_global_gamma_ramp( void *data );
+extern BOOL set_global_gamma_ramp( void *data );
 
 /* d3dkmtc. */
 
@@ -331,7 +336,7 @@ extern BOOL is_client_surface_window( struct client_surface *surface, HWND hwnd 
 extern void client_surface_update( struct client_surface *surface );
 extern BOOL client_surface_get_size( struct client_surface *surface, SIZE *virtual_size, SIZE *monitor_size );
 extern void use_window_client_surface( struct client_surface *surface, BOOL use );
-extern struct client_surface *get_unused_client_surface( HWND hwnd, int format );
+extern struct client_surface *get_unused_client_surface( HWND hwnd, int format, BOOL raw );
 extern HICON get_window_icon_info( HWND hwnd, UINT type, HICON icon, ICONINFO *ret );
 extern void init_startup_info(void);
 
@@ -431,6 +436,11 @@ static inline UINT unicodez_to_ascii( char *dst, const WCHAR *src )
     char *p = dst;
     while ((*p++ = *src++));
     return p - dst;
+}
+
+static inline void unicode_to_ascii( char *dst, const WCHAR *src, size_t len )
+{
+    while (len--) *dst++ = *src++;
 }
 
 static inline BOOL is_win9x(void)

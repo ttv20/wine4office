@@ -96,6 +96,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(KHR_PORTABILITY_SUBSET, KHR_portability_subset),
     VK_EXTENSION(KHR_PUSH_DESCRIPTOR, KHR_push_descriptor),
     VK_EXTENSION(KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE, KHR_sampler_mirror_clamp_to_edge),
+    VK_EXTENSION(KHR_SHADER_FLOAT_CONTROLS, KHR_shader_float_controls),
     VK_EXTENSION(KHR_TIMELINE_SEMAPHORE, KHR_timeline_semaphore),
     VK_EXTENSION(KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY, KHR_zero_initialize_workgroup_memory),
     /* EXT extensions */
@@ -103,8 +104,8 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(EXT_CALIBRATED_TIMESTAMPS, EXT_calibrated_timestamps),
     VK_EXTENSION(EXT_CONDITIONAL_RENDERING, EXT_conditional_rendering),
     VK_DEBUG_EXTENSION(EXT_DEBUG_MARKER, EXT_debug_marker),
-    VK_EXTENSION(EXT_DEPTH_RANGE_UNRESTRICTED, EXT_depth_range_unrestricted),
     VK_EXTENSION(EXT_DEPTH_CLIP_ENABLE, EXT_depth_clip_enable),
+    VK_EXTENSION(EXT_DEPTH_RANGE_UNRESTRICTED, EXT_depth_range_unrestricted),
     VK_EXTENSION(EXT_DESCRIPTOR_INDEXING, EXT_descriptor_indexing),
     VK_EXTENSION(EXT_FRAGMENT_SHADER_INTERLOCK, EXT_fragment_shader_interlock),
     VK_EXTENSION(EXT_MUTABLE_DESCRIPTOR_TYPE, EXT_mutable_descriptor_type),
@@ -835,12 +836,13 @@ struct vkd3d_physical_device_info
 {
     /* properties */
     VkPhysicalDeviceDescriptorIndexingPropertiesEXT descriptor_indexing_properties;
+    VkPhysicalDeviceFloatControlsPropertiesKHR float_controls_properties;
     VkPhysicalDeviceMaintenance3Properties maintenance3_properties;
     VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT filter_minmax_properties;
+    VkPhysicalDeviceSubgroupProperties subgroup_properties;
     VkPhysicalDeviceTexelBufferAlignmentPropertiesEXT texel_buffer_alignment_properties;
     VkPhysicalDeviceTransformFeedbackPropertiesEXT xfb_properties;
     VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT vertex_divisor_properties;
-    VkPhysicalDeviceSubgroupProperties subgroup_properties;
 
     VkPhysicalDeviceProperties2KHR properties2;
 
@@ -869,6 +871,12 @@ static void vkd3d_chain_physical_device_info_structures(struct vkd3d_physical_de
 
     info->features2.pNext = NULL;
 
+    if (vulkan_info->KHR_timeline_semaphore)
+        vk_prepend_struct(&info->features2, &info->timeline_semaphore_features);
+    if (vulkan_info->KHR_zero_initialize_workgroup_memory)
+        vk_prepend_struct(&info->features2, &info->zero_initialize_workgroup_memory_features);
+    if (vulkan_info->EXT_4444_formats)
+        vk_prepend_struct(&info->features2, &info->formats4444_features);
     if (vulkan_info->EXT_conditional_rendering)
         vk_prepend_struct(&info->features2, &info->conditional_rendering_features);
     if (vulkan_info->EXT_depth_clip_enable)
@@ -877,6 +885,8 @@ static void vkd3d_chain_physical_device_info_structures(struct vkd3d_physical_de
         vk_prepend_struct(&info->features2, &info->descriptor_indexing_features);
     if (vulkan_info->EXT_fragment_shader_interlock)
         vk_prepend_struct(&info->features2, &info->fragment_shader_interlock_features);
+    if (vulkan_info->EXT_mutable_descriptor_type)
+        vk_prepend_struct(&info->features2, &info->mutable_features);
     if (vulkan_info->EXT_robustness2)
         vk_prepend_struct(&info->features2, &info->robustness2_features);
     if (vulkan_info->EXT_shader_demote_to_helper_invocation)
@@ -887,19 +897,13 @@ static void vkd3d_chain_physical_device_info_structures(struct vkd3d_physical_de
         vk_prepend_struct(&info->features2, &info->xfb_features);
     if (vulkan_info->EXT_vertex_attribute_divisor)
         vk_prepend_struct(&info->features2, &info->vertex_divisor_features);
-    if (vulkan_info->KHR_timeline_semaphore)
-        vk_prepend_struct(&info->features2, &info->timeline_semaphore_features);
-    if (vulkan_info->EXT_mutable_descriptor_type)
-        vk_prepend_struct(&info->features2, &info->mutable_features);
-    if (vulkan_info->EXT_4444_formats)
-        vk_prepend_struct(&info->features2, &info->formats4444_features);
-    if (vulkan_info->KHR_zero_initialize_workgroup_memory)
-        vk_prepend_struct(&info->features2, &info->zero_initialize_workgroup_memory_features);
 
     info->properties2.pNext = NULL;
 
     if (vulkan_info->KHR_maintenance3)
         vk_prepend_struct(&info->properties2, &info->maintenance3_properties);
+    if (vulkan_info->KHR_shader_float_controls)
+        vk_prepend_struct(&info->properties2, &info->float_controls_properties);
     if (vulkan_info->EXT_descriptor_indexing)
         vk_prepend_struct(&info->properties2, &info->descriptor_indexing_properties);
     if (vulkan_info->EXT_sampler_filter_minmax)
@@ -938,13 +942,14 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
     info->zero_initialize_workgroup_memory_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES_KHR;
 
     info->properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-    info->maintenance3_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
     info->descriptor_indexing_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT;
+    info->float_controls_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES_KHR;
+    info->maintenance3_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
     info->filter_minmax_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES_EXT;
+    info->subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
     info->texel_buffer_alignment_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES_EXT;
     info->xfb_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT;
     info->vertex_divisor_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT;
-    info->subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
 
     vkd3d_chain_physical_device_info_structures(info, device);
 
@@ -1022,6 +1027,7 @@ static void vkd3d_trace_physical_device_limits(const struct vkd3d_physical_devic
     const VkPhysicalDeviceLimits *limits = &info->properties2.properties.limits;
     const VkPhysicalDeviceDescriptorIndexingPropertiesEXT *descriptor_indexing;
     const VkPhysicalDeviceTexelBufferAlignmentPropertiesEXT *buffer_alignment;
+    const VkPhysicalDeviceFloatControlsPropertiesKHR *float_controls;
     const VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *minmax;
     const VkPhysicalDeviceMaintenance3Properties *maintenance3;
     const VkPhysicalDeviceTransformFeedbackPropertiesEXT *xfb;
@@ -1196,6 +1202,26 @@ static void vkd3d_trace_physical_device_limits(const struct vkd3d_physical_devic
             descriptor_indexing->maxDescriptorSetUpdateAfterBindStorageImages);
     TRACE("    maxDescriptorSetUpdateAfterBindInputAttachments: %u.\n",
             descriptor_indexing->maxDescriptorSetUpdateAfterBindInputAttachments);
+
+    float_controls = &info->float_controls_properties;
+    TRACE("  VkPhysicalDeviceFloatControlsPropertiesKHR:\n");
+    TRACE("    denormBehaviorIndependence: %#x.\n", float_controls->denormBehaviorIndependence);
+    TRACE("    roundingModeIndependence: %#x.\n", float_controls->roundingModeIndependence);
+    TRACE("    shaderSignedZeroInfNanPreserveFloat16: %#x.\n", float_controls->shaderSignedZeroInfNanPreserveFloat16);
+    TRACE("    shaderSignedZeroInfNanPreserveFloat32: %#x.\n", float_controls->shaderSignedZeroInfNanPreserveFloat32);
+    TRACE("    shaderSignedZeroInfNanPreserveFloat64: %#x.\n", float_controls->shaderSignedZeroInfNanPreserveFloat64);
+    TRACE("    shaderDenormPreserveFloat16: %#x.\n", float_controls->shaderDenormPreserveFloat16);
+    TRACE("    shaderDenormPreserveFloat32: %#x.\n", float_controls->shaderDenormPreserveFloat32);
+    TRACE("    shaderDenormPreserveFloat64: %#x.\n", float_controls->shaderDenormPreserveFloat64);
+    TRACE("    shaderDenormFlushToZeroFloat16: %#x.\n", float_controls->shaderDenormFlushToZeroFloat16);
+    TRACE("    shaderDenormFlushToZeroFloat32: %#x.\n", float_controls->shaderDenormFlushToZeroFloat32);
+    TRACE("    shaderDenormFlushToZeroFloat64: %#x.\n", float_controls->shaderDenormFlushToZeroFloat64);
+    TRACE("    shaderRoundingModeRTEFloat16: %#x.\n", float_controls->shaderRoundingModeRTEFloat16);
+    TRACE("    shaderRoundingModeRTEFloat32: %#x.\n", float_controls->shaderRoundingModeRTEFloat32);
+    TRACE("    shaderRoundingModeRTEFloat64: %#x.\n", float_controls->shaderRoundingModeRTEFloat64);
+    TRACE("    shaderRoundingModeRTZFloat16: %#x.\n", float_controls->shaderRoundingModeRTZFloat16);
+    TRACE("    shaderRoundingModeRTZFloat32: %#x.\n", float_controls->shaderRoundingModeRTZFloat32);
+    TRACE("    shaderRoundingModeRTZFloat64: %#X.\n", float_controls->shaderRoundingModeRTZFloat64);
 
     maintenance3 = &info->maintenance3_properties;
     TRACE("  VkPhysicalDeviceMaintenance3Properties:\n");
@@ -1935,6 +1961,10 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
     if (vulkan_info->EXT_shader_viewport_index_layer)
         vulkan_info->shader_extensions[vulkan_info->shader_extension_count++]
                 = VKD3D_SHADER_SPIRV_EXTENSION_EXT_VIEWPORT_INDEX_LAYER;
+
+    if (vulkan_info->KHR_shader_float_controls)
+        vulkan_info->shader_extensions[vulkan_info->shader_extension_count++]
+                = VKD3D_SHADER_SPIRV_EXTENSION_KHR_FLOAT_CONTROLS;
 
     /* Disable unused Vulkan features. */
     features->shaderTessellationAndGeometryPointSize = VK_FALSE;

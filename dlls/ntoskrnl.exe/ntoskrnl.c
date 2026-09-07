@@ -2520,7 +2520,10 @@ static void *create_process_object( HANDLE handle )
     process->header.Type = 3;
     process->header.WaitListHead.Blink = INVALID_HANDLE_VALUE; /* mark as kernel object */
     NtQueryInformationProcess( handle, ProcessBasicInformation, &process->info, sizeof(process->info), NULL );
+    NtQueryInformationProcess( handle, ProcessSessionInformation, &process->session_id, sizeof(process->session_id), NULL );
+    NtQueryInformationProcess( handle, ProcessTimes, &process->times, sizeof(process->times), NULL );
     IsWow64Process( handle, &process->wow64 );
+
     return process;
 }
 
@@ -2579,6 +2582,24 @@ HANDLE WINAPI PsGetProcessInheritedFromUniqueProcessId( PEPROCESS process )
     HANDLE id = (HANDLE)process->info.InheritedFromUniqueProcessId;
     TRACE( "%p -> %p\n", process, id );
     return id;
+}
+
+/*********************************************************************
+ *           PsGetProcessSessionId    (NTOSKRNL.@)
+ */
+ULONG WINAPI PsGetProcessSessionId( PEPROCESS process )
+{
+    TRACE("%p -> %lu", process, process->session_id);
+    return process->session_id;
+}
+
+/*********************************************************************
+ *           PsGetProcessCreateTimeQuadPart    (NTOSKRNL.@)
+ */
+LONGLONG WINAPI PsGetProcessCreateTimeQuadPart( PEPROCESS process )
+{
+    TRACE("%p -> %I64x\n", process, process->times.CreateTime.QuadPart);
+    return process->times.CreateTime.QuadPart;
 }
 
 static void *create_thread_object( HANDLE handle )
@@ -2859,6 +2880,34 @@ void WINAPI KeRevertToUserAffinityThreadEx(KAFFINITY affinity)
 }
 
 /***********************************************************************
+ *           KeRegisterBugCheckCallback   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeRegisterBugCheckCallback(void *record, void *routine,
+                                          void *buffer, ULONG length, char *component)
+{
+    FIXME("%p %p %p %lu %s stub.\n", record, routine, buffer, length, debugstr_a(component));
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeRegisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeRegisterBugCheckReasonCallback(void *record, void *routine, ULONG reason, char *component)
+{
+    FIXME("%p %p %lu %s stub.\n", record, routine, reason, debugstr_a(component));
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeDeregisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOLEAN WINAPI KeDeregisterBugCheckReasonCallback(void *record)
+{
+    FIXME("%p stub.\n", record);
+    return TRUE;
+}
+
+/***********************************************************************
  *           IoRegisterFileSystem   (NTOSKRNL.EXE.@)
  */
 VOID WINAPI IoRegisterFileSystem(PDEVICE_OBJECT DeviceObject)
@@ -2940,7 +2989,10 @@ PMDL WINAPI MmAllocatePagesForMdl(PHYSICAL_ADDRESS lowaddress, PHYSICAL_ADDRESS 
  */
 void WINAPI MmBuildMdlForNonPagedPool(MDL *mdl)
 {
-    FIXME("stub: %p\n", mdl);
+    TRACE("%p\n", mdl);
+
+    mdl->MdlFlags |= MDL_SOURCE_IS_NONPAGED_POOL;
+    mdl->MappedSystemVa = (char *)mdl->StartVa + mdl->ByteOffset;
 }
 
 /***********************************************************************
@@ -3030,9 +3082,12 @@ PVOID WINAPI MmMapLockedPages( MDL *mdl, KPROCESSOR_MODE mode )
 PVOID WINAPI  MmMapLockedPagesSpecifyCache(PMDLX MemoryDescriptorList, KPROCESSOR_MODE AccessMode, MEMORY_CACHING_TYPE CacheType,
                                            PVOID BaseAddress, ULONG BugCheckOnFailure, MM_PAGE_PRIORITY Priority)
 {
-    FIXME("(%p, %u, %u, %p, %lu, %u): stub\n", MemoryDescriptorList, AccessMode, CacheType, BaseAddress, BugCheckOnFailure, Priority);
+    TRACE("(%p, %u, %u, %p, %lu, %u)\n", MemoryDescriptorList, AccessMode, CacheType,
+          BaseAddress, BugCheckOnFailure, Priority);
 
-    return NULL;
+    if (BaseAddress) FIXME("requested base address %p ignored\n", BaseAddress);
+
+    return MmMapLockedPages( MemoryDescriptorList, AccessMode );
 }
 
 /***********************************************************************
@@ -3040,7 +3095,9 @@ PVOID WINAPI  MmMapLockedPagesSpecifyCache(PMDLX MemoryDescriptorList, KPROCESSO
  */
 void WINAPI MmUnmapLockedPages( void *base, MDL *mdl )
 {
-    FIXME( "(%p %p_\n", base, mdl );
+    TRACE( "%p %p\n", base, mdl );
+
+    mdl->MdlFlags &= ~MDL_MAPPED_TO_SYSTEM_VA;
 }
 
 /***********************************************************************
@@ -3066,7 +3123,9 @@ PVOID WINAPI MmPageEntireDriver(PVOID AddrInSection)
  */
 void WINAPI MmProbeAndLockPages(PMDLX MemoryDescriptorList, KPROCESSOR_MODE AccessMode, LOCK_OPERATION Operation)
 {
-    FIXME("(%p, %u, %u): stub\n", MemoryDescriptorList, AccessMode, Operation);
+    TRACE("(%p, %u, %u)\n", MemoryDescriptorList, AccessMode, Operation);
+
+    MemoryDescriptorList->MdlFlags |= MDL_PAGES_LOCKED;
 }
 
 
@@ -3084,7 +3143,9 @@ void WINAPI MmResetDriverPaging(PVOID AddrInSection)
  */
 void WINAPI  MmUnlockPages(PMDLX MemoryDescriptorList)
 {
-    FIXME("(%p): stub\n", MemoryDescriptorList);
+    TRACE("(%p)\n", MemoryDescriptorList);
+
+    MemoryDescriptorList->MdlFlags &= ~MDL_PAGES_LOCKED;
 }
 
 
@@ -3275,7 +3336,7 @@ HANDLE WINAPI PsGetCurrentProcessId(void)
  */
 ULONG WINAPI PsGetCurrentProcessSessionId(void)
 {
-    return PsGetCurrentProcess()->info.PebBaseAddress->SessionId;
+    return PsGetCurrentProcess()->session_id;
 }
 
 /***********************************************************************

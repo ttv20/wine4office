@@ -3734,6 +3734,20 @@ static void test_string_functions(void)
     ok(rc.Width > 0, "unexpected Width %0.2f\n", rc.Width);
     expectf(rc.Height, char_height);
 
+    rc.X = -1;
+    rc.Y = -1;
+    rc.Width = -1;
+    rc.Height = -1;
+    status = GdipMeasureDriverString(graphics, teststring2, 0, font, positions,
+        DriverStringOptionsCmapLookup|DriverStringOptionsRealizedAdvance,
+        identity, &rc);
+    expect(Ok, status);
+
+    expectf(rc.X, 0.0);
+    expectf(rc.Y, 0.0);
+    expectf(rc.Width, 0.0);
+    expectf(rc.Height, 0.0);
+
     GdipDeleteMatrix(identity);
     GdipDeleteStringFormat(format);
     GdipDeleteBrush(brush);

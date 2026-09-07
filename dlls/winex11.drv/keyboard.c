@@ -2265,11 +2265,7 @@ BOOL X11DRV_ActivateKeyboardLayout(HKL hkl, UINT flags)
     return TRUE;
 }
 
-
-/***********************************************************************
- *           X11DRV_MappingNotify
- */
-BOOL X11DRV_MappingNotify( HWND dummy, XEvent *event )
+static BOOL X11DRV_KeyboardMappingNotify( HWND dummy, XEvent *event )
 {
     HWND hwnd;
 
@@ -2283,6 +2279,20 @@ BOOL X11DRV_MappingNotify( HWND dummy, XEvent *event )
     return TRUE;
 }
 
+BOOL X11DRV_MappingNotify( HWND dummy, XEvent *event )
+{
+    switch (event->xmapping.request)
+    {
+    case MappingModifier:
+    case MappingKeyboard:
+        return X11DRV_KeyboardMappingNotify( dummy, event );
+    case MappingPointer:
+        x11drv_init_mouse( event->xmapping.display );
+        break;
+    }
+
+    return TRUE;
+}
 
 /***********************************************************************
  *           x11drv_init_keyboard

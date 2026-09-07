@@ -228,7 +228,7 @@ BOOL WINAPI AllocateLocallyUniqueId( PLUID luid )
  */
 BOOL WINAPI CopySid( DWORD len, PSID dest, PSID source )
 {
-    return RtlCopySid( len, dest, source );
+    return set_ntstatus( RtlCopySid( len, dest, source ));
 }
 
 /******************************************************************************

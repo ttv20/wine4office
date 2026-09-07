@@ -1446,6 +1446,7 @@ static HRESULT WINAPI video_presenter_control_SetVideoWindow(IMFVideoDisplayCont
     {
         if (presenter->swapchain)
             IDirect3DSwapChain9_Release(presenter->swapchain);
+        presenter->swapchain = NULL;
         presenter->video_window = window;
         hr = video_presenter_create_swapchain(presenter);
     }
@@ -1591,9 +1592,18 @@ static HRESULT WINAPI video_presenter_control_GetBorderColor(IMFVideoDisplayCont
 
 static HRESULT WINAPI video_presenter_control_SetRenderingPrefs(IMFVideoDisplayControl *iface, DWORD flags)
 {
+    struct video_presenter *presenter = impl_from_IMFVideoDisplayControl(iface);
+
     FIXME("%p, %#lx.\n", iface, flags);
 
-    return E_NOTIMPL;
+    if (flags & ~MFVideoRenderPrefs_Mask)
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&presenter->cs);
+    presenter->rendering_prefs = flags;
+    LeaveCriticalSection(&presenter->cs);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI video_presenter_control_GetRenderingPrefs(IMFVideoDisplayControl *iface, DWORD *flags)

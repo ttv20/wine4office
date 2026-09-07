@@ -856,7 +856,6 @@ static struct system_property_description system_properties[] =
     {L"System.Devices.Aep.ProtocolId", &PKEY_Devices_Aep_ProtocolId, VT_CLSID},
     {L"System.Devices.Aep.IsPaired", &PKEY_Devices_Aep_IsPaired, VT_BOOL},
     {L"System.Devices.Aep.IsConnected", &PKEY_Devices_Aep_IsConnected, VT_BOOL},
-    {L"System.Devices.Aep.IsConnected", &PKEY_Devices_Aep_IsConnected, VT_BOOL},
     {L"System.Devices.Aep.Bluetooth.Le.AddressType", &PKEY_Devices_Aep_Bluetooth_Le_AddressType, VT_UI1},
     {L"System.Devices.Aep.DeviceAddress", &PKEY_Devices_Aep_DeviceAddress, VT_LPWSTR},
     {L"System.Devices.AepContainer.IsPaired", &PKEY_Devices_AepContainer_IsPaired, VT_BOOL},

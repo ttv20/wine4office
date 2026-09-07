@@ -91,7 +91,6 @@ static struct list ifaces = LIST_INIT( ifaces );
 static IGameController *iface_selected;
 
 static HWND dialog_hwnd;
-static HANDLE state_event;
 
 static void set_device_state( struct device_state *state )
 {
@@ -357,6 +356,7 @@ static HRESULT check_gamepad_interface( IRawGameController *device, IGameControl
     IGamepadStatics2 *statics;
     IGamepad *gamepad = NULL;
     HSTRING str;
+    HRESULT hr;
 
     WindowsCreateString( class_name, wcslen( class_name ), &str );
     RoGetActivationFactory( str, &IID_IGamepadStatics2, (void **)&statics );
@@ -372,9 +372,9 @@ static HRESULT check_gamepad_interface( IRawGameController *device, IGameControl
     IGamepadStatics2_Release( statics );
     if (!gamepad) return E_NOINTERFACE;
 
-    IGamepad_QueryInterface( gamepad, &IID_IGameController, (void **)iface );
+    hr = IGamepad_QueryInterface( gamepad, &IID_IGameController, (void **)iface );
     IGamepad_Release( gamepad );
-    return S_OK;
+    return hr;
 }
 
 static HRESULT check_racing_wheel_interface( IRawGameController *device, IGameController **iface )
@@ -384,6 +384,7 @@ static HRESULT check_racing_wheel_interface( IRawGameController *device, IGameCo
     IGameController *controller;
     IRacingWheel *wheel = NULL;
     HSTRING str;
+    HRESULT hr;
 
     WindowsCreateString( class_name, wcslen( class_name ), &str );
     RoGetActivationFactory( str, &IID_IRacingWheelStatics2, (void **)&statics );
@@ -399,9 +400,9 @@ static HRESULT check_racing_wheel_interface( IRawGameController *device, IGameCo
     IRacingWheelStatics2_Release( statics );
     if (!wheel) return E_NOINTERFACE;
 
-    IRacingWheel_QueryInterface( wheel, &IID_IGameController, (void **)iface );
+    hr = IRacingWheel_QueryInterface( wheel, &IID_IGameController, (void **)iface );
     IRacingWheel_Release( wheel );
-    return S_OK;
+    return hr;
 }
 
 static void update_wgi_interface( HWND hwnd, IRawGameController *device )
@@ -479,6 +480,7 @@ static void update_wgi_devices( HWND hwnd )
     UINT size;
 
     clear_devices();
+    clear_interfaces();
 
     WindowsCreateString( class_name, wcslen( class_name ), &str );
     RoGetActivationFactory( str, &IID_IRawGameControllerStatics, (void **)&statics );
@@ -663,7 +665,6 @@ extern INT_PTR CALLBACK test_wgi_dialog_proc( HWND hwnd, UINT msg, WPARAM wparam
             RoInitialize( RO_INIT_MULTITHREADED );
 
             dialog_hwnd = hwnd;
-            state_event = CreateEventW( NULL, FALSE, FALSE, NULL );
             thread_stop = CreateEventW( NULL, FALSE, FALSE, NULL );
 
             update_wgi_devices( hwnd );
@@ -674,7 +675,6 @@ extern INT_PTR CALLBACK test_wgi_dialog_proc( HWND hwnd, UINT msg, WPARAM wparam
             SendDlgItemMessageW( hwnd, IDC_WGI_INTERFACE, CB_SETCURSEL, 0, 0 );
             handle_wgi_interface_change( hwnd );
 
-            thread_stop = CreateEventW( NULL, FALSE, FALSE, NULL );
             thread = CreateThread( NULL, 0, input_thread_proc, (void *)thread_stop, 0, NULL );
             break;
 
@@ -683,11 +683,11 @@ extern INT_PTR CALLBACK test_wgi_dialog_proc( HWND hwnd, UINT msg, WPARAM wparam
             if (!thread) break;
             SetEvent( thread_stop );
             MsgWaitForMultipleObjects( 1, &thread, FALSE, INFINITE, 0 );
-            CloseHandle( state_event );
             CloseHandle( thread_stop );
             CloseHandle( thread );
             thread = NULL;
 
+            clear_interfaces();
             clear_devices();
 
             RoUninitialize();

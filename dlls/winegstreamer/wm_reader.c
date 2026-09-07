@@ -1494,7 +1494,7 @@ static HRESULT init_stream(struct wm_reader *reader)
     HRESULT hr;
     WORD i;
 
-    if (!(wg_parser = wg_parser_create(FALSE)))
+    if (!(wg_parser = wg_parser_create(WG_PARSER_CREATE_FLAG_NONE)))
         return E_OUTOFMEMORY;
 
     reader->wg_parser = wg_parser;
@@ -1621,7 +1621,7 @@ static HRESULT reinit_stream(struct wm_reader *reader, bool read_compressed)
     wg_parser_destroy(reader->wg_parser);
     reader->wg_parser = 0;
 
-    if (!(wg_parser = wg_parser_create(read_compressed)))
+    if (!(wg_parser = wg_parser_create(read_compressed ? WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED : WG_PARSER_CREATE_FLAG_NONE)))
         return E_OUTOFMEMORY;
 
     reader->wg_parser = wg_parser;

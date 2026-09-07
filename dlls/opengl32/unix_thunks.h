@@ -14,7 +14,6 @@ extern void wrap_glGetDoublev( TEB *teb, GLenum pname, GLdouble *data, PFN_glGet
 extern GLenum wrap_glGetError( TEB *teb, PFN_glGetError func );
 extern void wrap_glGetFloatv( TEB *teb, GLenum pname, GLfloat *data, PFN_glGetFloatv func );
 extern void wrap_glGetIntegerv( TEB *teb, GLenum pname, GLint *data, PFN_glGetIntegerv func );
-extern const GLubyte *wrap_glGetString( TEB *teb, GLenum name, PFN_glGetString func );
 extern void wrap_glReadBuffer( TEB *teb, GLenum src, PFN_glReadBuffer func );
 extern void wrap_glReadPixels( TEB *teb, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels, PFN_glReadPixels func );
 extern void wrap_glViewport( TEB *teb, GLint x, GLint y, GLsizei width, GLsizei height, PFN_glViewport func );

@@ -398,8 +398,10 @@ MAKE_FUNCPTR( gss_accept_sec_context );
 MAKE_FUNCPTR( gss_acquire_cred );
 MAKE_FUNCPTR( gss_delete_sec_context );
 MAKE_FUNCPTR( gss_display_status );
+MAKE_FUNCPTR( gss_export_sec_context );
 MAKE_FUNCPTR( gss_get_mic );
 MAKE_FUNCPTR( gss_import_name );
+MAKE_FUNCPTR( gss_import_sec_context );
 MAKE_FUNCPTR( gss_init_sec_context );
 MAKE_FUNCPTR( gss_inquire_context );
 MAKE_FUNCPTR( gss_inquire_sec_context_by_oid );
@@ -434,8 +436,10 @@ static BOOL load_gssapi_krb5(void)
     LOAD_FUNCPTR( gss_acquire_cred )
     LOAD_FUNCPTR( gss_delete_sec_context )
     LOAD_FUNCPTR( gss_display_status )
+    LOAD_FUNCPTR( gss_export_sec_context );
     LOAD_FUNCPTR( gss_get_mic )
     LOAD_FUNCPTR( gss_import_name )
+    LOAD_FUNCPTR( gss_import_sec_context );
     LOAD_FUNCPTR( gss_init_sec_context )
     LOAD_FUNCPTR( gss_inquire_context )
     LOAD_FUNCPTR( gss_inquire_sec_context_by_oid )
@@ -698,6 +702,44 @@ static NTSTATUS delete_context( void *args )
     return status_gss_to_sspi( ret );
 }
 
+static NTSTATUS export_context( void *args )
+{
+    struct export_context_params *params = args;
+    gss_ctx_id_t ctx_handle = ctxhandle_sspi_to_gss( *params->context );
+    gss_buffer_desc data = GSS_C_EMPTY_BUFFER;
+    OM_uint32 ret, minor_status;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    ret = pgss_export_sec_context( &minor_status, &ctx_handle, &data );
+    TRACE( "gss_export_sec_context returned %#x minor status %#x\n", ret, minor_status );
+    if (GSS_ERROR( ret ))
+    {
+        trace_gss_status( ret, minor_status );
+        return status_gss_to_sspi( ret );
+    }
+
+    /* FIXME: don't re-import the context on Lsa side */
+    ret = pgss_import_sec_context( &minor_status, &data, &ctx_handle );
+    TRACE( "gss_import_sec_context returned %#x minor status %#x\n", ret, minor_status );
+    if (GSS_ERROR( ret ))
+    {
+        pgss_release_buffer(&minor_status, &data);
+        *params->context = 0;
+        trace_gss_status( ret, minor_status );
+        return status_gss_to_sspi( ret );
+    }
+
+    TRACE( "exported context size: %d\n", (int)data.length );
+    if (*params->size < data.length)
+        status = STATUS_BUFFER_TOO_SMALL;
+    else
+        memcpy( params->buf, data.value, data.length );
+    ctxhandle_gss_to_sspi( ctx_handle, params->context );
+    *params->size = data.length;
+    pgss_release_buffer(&minor_status, &data);
+    return status;
+}
+
 static NTSTATUS free_credentials_handle( void *args )
 {
     const struct free_credentials_handle_params *params = args;
@@ -707,6 +749,23 @@ static NTSTATUS free_credentials_handle( void *args )
     ret = pgss_release_cred( &minor_status, &cred );
     TRACE( "gss_release_cred returned %#x minor status %#x\n", ret, minor_status );
     if (GSS_ERROR( ret )) trace_gss_status( ret, minor_status );
+    return status_gss_to_sspi( ret );
+}
+
+static NTSTATUS import_context( void *args )
+{
+    struct import_context_params *params = args;
+    gss_ctx_id_t ctx_handle = GSS_C_NO_CONTEXT;
+    OM_uint32 ret, minor_status;
+    gss_buffer_desc data;
+
+    data.length = params->size;
+    data.value = params->buf;
+    ret = pgss_import_sec_context( &minor_status, &data, &ctx_handle );
+    TRACE( "gss_import_sec_context returned %#x minor status %#x\n", ret, minor_status );
+    if (GSS_ERROR( ret )) trace_gss_status( ret, minor_status );
+
+    ctxhandle_gss_to_sspi( ctx_handle, params->context );
     return status_gss_to_sspi( ret );
 }
 
@@ -1127,7 +1186,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     accept_context,
     acquire_credentials_handle,
     delete_context,
+    export_context,
     free_credentials_handle,
+    import_context,
     initialize_context,
     make_signature,
     query_context_attributes,
@@ -1208,6 +1269,23 @@ static NTSTATUS wow64_delete_context( void *args )
     return delete_context( &params );
 }
 
+static NTSTATUS wow64_export_context( void *args )
+{
+    struct
+    {
+        PTR32 context;
+        PTR32 buf;
+        PTR32 size;
+    } const *params32 = args;
+    struct export_context_params params =
+    {
+        ULongToPtr(params32->context),
+        ULongToPtr(params32->buf),
+        ULongToPtr(params32->size),
+    };
+    return export_context( &params );
+}
+
 static NTSTATUS wow64_free_credentials_handle( void *args )
 {
     struct
@@ -1252,6 +1330,23 @@ static NTSTATUS wow64_initialize_context( void *args )
         ULongToPtr(params32->expiry),
     };
     return initialize_context( &params );
+}
+
+static NTSTATUS wow64_import_context( void *args )
+{
+    struct
+    {
+        PTR32 buf;
+        ULONG size;
+        PTR32 context;
+    } const *params32 = args;
+    struct import_context_params params =
+    {
+        ULongToPtr(params32->buf),
+        params32->size,
+        ULongToPtr(params32->context),
+    };
+    return import_context( &params );
 }
 
 static NTSTATUS wow64_make_signature( void *args )
@@ -1416,6 +1511,7 @@ static NTSTATUS wow64_seal_message( void *args )
 
 static NTSTATUS wow64_unseal_message( void *args )
 {
+    BYTE *data;
     struct
     {
         UINT64 context;
@@ -1432,13 +1528,18 @@ static NTSTATUS wow64_unseal_message( void *args )
         params32->context,
         ULongToPtr(params32->stream),
         params32->stream_length,
-        ULongToPtr(params32->data),
+        &data,
         ULongToPtr(params32->data_length),
         ULongToPtr(params32->token),
         params32->token_length,
         ULongToPtr(params32->qop),
     };
-    return unseal_message( &params );
+    NTSTATUS ret;
+
+    data = ULongToPtr(*(PTR32*)ULongToPtr(params32->data));
+    ret = unseal_message( &params );
+    *(PTR32*)ULongToPtr(params32->data) = PtrToUlong( data );
+    return ret;
 }
 
 static NTSTATUS wow64_verify_signature( void *args )
@@ -1470,7 +1571,9 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     wow64_accept_context,
     wow64_acquire_credentials_handle,
     wow64_delete_context,
+    wow64_export_context,
     wow64_free_credentials_handle,
+    wow64_import_context,
     wow64_initialize_context,
     wow64_make_signature,
     wow64_query_context_attributes,

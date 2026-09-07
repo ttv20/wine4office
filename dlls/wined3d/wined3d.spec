@@ -376,6 +376,7 @@
 
 @ stdcall vkd3d_D3DPreprocess(ptr long ptr ptr ptr ptr ptr) D3DPreprocess
 @ stdcall vkd3d_D3DCompile2VKD3D(ptr long ptr ptr ptr ptr ptr long long long ptr long ptr ptr long) D3DCompile2VKD3D
+@ stdcall vkd3d_D3DReflectVKD3D(ptr long ptr ptr long) D3DReflectVKD3D
 
 @ cdecl vkd3d_acquire_vk_queue(ptr)
 @ cdecl vkd3d_create_device(ptr ptr ptr)

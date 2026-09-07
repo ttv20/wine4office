@@ -346,6 +346,7 @@ static HRESULT open_listener_tcp( struct listener *listener, const WS_STRING *ur
     struct sockaddr_storage storage;
     struct sockaddr *addr = (struct sockaddr *)&storage;
     int addr_len, on = 1;
+    ULONG backlog = 0;
     WS_URL_SCHEME_TYPE scheme;
     WCHAR *host;
     USHORT port;
@@ -381,7 +382,9 @@ static HRESULT open_listener_tcp( struct listener *listener, const WS_STRING *ur
         return HRESULT_FROM_WIN32( WSAGetLastError() );
     }
 
-    if (listen( listener->u.tcp.socket, 0 ) < 0)
+    prop_get( listener->prop, listener->prop_count, WS_LISTENER_PROPERTY_LISTEN_BACKLOG, &backlog, sizeof(backlog) );
+
+    if (listen( listener->u.tcp.socket, backlog ) < 0)
     {
         closesocket( listener->u.tcp.socket );
         listener->u.tcp.socket = -1;

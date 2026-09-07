@@ -631,7 +631,7 @@ fail:
     wined3d_mutex_unlock();
     for (j = 0; j < i; ++j)
     {
-        IDXGISurface_Release(surface[i]);
+        IDXGISurface_Release(surface[j]);
     }
     IWineDXGIDeviceParent_Release(dxgi_device_parent);
     return hr;

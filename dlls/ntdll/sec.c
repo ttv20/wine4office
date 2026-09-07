@@ -301,8 +301,6 @@ DWORD WINAPI RtlLengthRequiredSid(DWORD nrofsubauths)
  */
 DWORD WINAPI RtlLengthSid(PSID pSid)
 {
-	TRACE("sid=%p\n",pSid);
-	if (!pSid) return 0;
 	return RtlLengthRequiredSid(*RtlSubAuthorityCountSid(pSid));
 }
 
@@ -383,18 +381,15 @@ LPBYTE WINAPI RtlSubAuthorityCountSid(PSID pSid)
 /**************************************************************************
  *                 RtlCopySid				[NTDLL.@]
  */
-BOOLEAN WINAPI RtlCopySid( DWORD nDestinationSidLength, PSID pDestinationSid, PSID pSourceSid )
+NTSTATUS WINAPI RtlCopySid( DWORD destlen, PSID dest, PSID source )
 {
-	if (!pSourceSid || !RtlValidSid(pSourceSid) ||
-	    (nDestinationSidLength < RtlLengthSid(pSourceSid)))
-          return FALSE;
+	DWORD len = RtlLengthSid(source);
 
-	if (nDestinationSidLength < (((SID*)pSourceSid)->SubAuthorityCount*4+8))
-	  return FALSE;
-
-	memmove(pDestinationSid, pSourceSid, ((SID*)pSourceSid)->SubAuthorityCount*4+8);
-	return TRUE;
+	if (destlen < len) return STATUS_BUFFER_TOO_SMALL;
+	memmove(dest, source, len);
+	return STATUS_SUCCESS;
 }
+
 /******************************************************************************
  * RtlValidSid [NTDLL.@]
  *

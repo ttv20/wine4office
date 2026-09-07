@@ -363,7 +363,7 @@ static WCHAR *read_text_archive(const WCHAR *path, DWORD *len)
 
     if (!ReadFile( file, data, size, &read, NULL ) || read != size) goto done;
 
-    while (!data[size - 1]) size--;
+    while (size && !data[size - 1]) size--;
     *len = MultiByteToWideChar( CP_ACP, 0, data, size, NULL, 0 );
     if ((wdata = malloc( (*len + 1) * sizeof(WCHAR) )))
     {
@@ -561,6 +561,8 @@ static WCHAR *build_createsql_postlude(WCHAR **primary_keys, DWORD num_keys)
     LPWSTR postlude, keys, ptr;
     DWORD size, i;
 
+    if (!num_keys) return NULL;
+
     for (i = 0, size = 1; i < num_keys; i++)
         size += lstrlenW(L"`%s`, ") + lstrlenW(primary_keys[i]) - 2;
 
@@ -601,17 +603,15 @@ static UINT add_table_to_db(MSIDATABASE *db, WCHAR **columns, WCHAR **types, WCH
     columns_sql = build_createsql_columns(columns, types, num_columns);
     postlude = build_createsql_postlude(labels + 1, num_labels - 1); /* skip over table name */
 
-    if (!prelude || !columns_sql || !postlude)
-        goto done;
+    if (!prelude || !columns_sql) goto done;
 
-    size = lstrlenW(prelude) + lstrlenW(columns_sql) + lstrlenW(postlude) + 1;
-    create_sql = malloc(size * sizeof(WCHAR));
-    if (!create_sql)
-        goto done;
+    size = wcslen(prelude) + wcslen(columns_sql) + 1;
+    if (postlude) size += wcslen(postlude);
+    if (!(create_sql = malloc(size * sizeof(WCHAR)))) goto done;
 
-    lstrcpyW(create_sql, prelude);
-    lstrcatW(create_sql, columns_sql);
-    lstrcatW(create_sql, postlude);
+    wcscpy(create_sql, prelude);
+    wcscat(create_sql, columns_sql);
+    if (postlude) wcscat(create_sql, postlude);
 
     r = MSI_DatabaseOpenViewW( db, create_sql, &view );
     if (r != ERROR_SUCCESS)

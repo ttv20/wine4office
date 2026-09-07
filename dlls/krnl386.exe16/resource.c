@@ -1023,6 +1023,9 @@ HGLOBAL16 WINAPI LoadResource16( HMODULE16 hModule, HRSRC16 hRsrc )
         if (pNameInfo->handle && !(GlobalFlags16(pNameInfo->handle) & GMEM_DISCARDED))
         {
             pNameInfo->usage++;
+            /* clear the GMEM_DISCARDABLE flag if present */
+            GlobalReAlloc16( pNameInfo->handle, 0,
+                             GMEM_MODIFY | (pNameInfo->flags & NE_SEGFLAGS_MOVEABLE ? GMEM_MOVEABLE : GMEM_FIXED) );
             TRACE("  Already loaded, new count=%d\n", pNameInfo->usage );
         }
         else
@@ -1127,9 +1130,18 @@ BOOL16 WINAPI FreeResource16( HGLOBAL16 handle )
                     if (pNameInfo->usage > 0) pNameInfo->usage--;
                     if (pNameInfo->usage == 0)
                     {
-                        GlobalFree16( pNameInfo->handle );
-                        pNameInfo->handle = 0;
-                        pNameInfo->flags &= ~NE_SEGFLAGS_LOADED;
+                        if (pNameInfo->flags & NE_SEGFLAGS_DISCARDABLE)
+                        {
+                            GlobalReAlloc16( pNameInfo->handle, 0,
+                                             GMEM_MODIFY | GMEM_DISCARDABLE |
+                                             (pNameInfo->flags & NE_SEGFLAGS_MOVEABLE ? GMEM_MOVEABLE : GMEM_FIXED) );
+                        }
+                        else
+                        {
+                            GlobalFree16( pNameInfo->handle );
+                            pNameInfo->handle = 0;
+                            pNameInfo->flags &= ~NE_SEGFLAGS_LOADED;
+                        }
                     }
                     return FALSE;
                 }

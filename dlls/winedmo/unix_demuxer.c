@@ -211,14 +211,14 @@ NTSTATUS demuxer_create( void *arg )
     return STATUS_SUCCESS;
 
 failed:
+    for (i = 0; demuxer->streams && i < demuxer->ctx->nb_streams; i++)
+        av_bsf_free( &demuxer->streams[i].filter );
+    free( demuxer->streams );
     if (demuxer->ctx)
     {
         avio_context_free( &demuxer->ctx->pb );
         avformat_free_context( demuxer->ctx );
     }
-    for (i = 0; demuxer->streams && i < demuxer->ctx->nb_streams; i++)
-        av_bsf_free( &demuxer->streams[i].filter );
-    free( demuxer->streams );
     free( demuxer );
     return STATUS_UNSUCCESSFUL;
 }
@@ -231,12 +231,12 @@ NTSTATUS demuxer_destroy( void *arg )
 
     TRACE( "demuxer %p\n", demuxer );
 
-    params->context = demuxer->ctx->pb->opaque;
-    avio_context_free( &demuxer->ctx->pb );
-    avformat_free_context( demuxer->ctx );
     for (i = 0; i < demuxer->ctx->nb_streams; i++)
         av_bsf_free( &demuxer->streams[i].filter );
     free( demuxer->streams );
+    params->context = demuxer->ctx->pb->opaque;
+    avio_context_free( &demuxer->ctx->pb );
+    avformat_free_context( demuxer->ctx );
     free( demuxer );
 
     return STATUS_SUCCESS;

@@ -22,9 +22,7 @@
 
 #import <AppKit/AppKit.h>
 #import <IOKit/graphics/IOGraphicsLib.h>
-#ifdef HAVE_MTLDEVICE_REGISTRYID
 #import <Metal/Metal.h>
-#endif
 #include <dlfcn.h>
 #include "macdrv_cocoa.h"
 
@@ -172,8 +170,6 @@ done:
 }
 }
 
-#ifdef HAVE_MTLDEVICE_REGISTRYID
-
 /***********************************************************************
  *              macdrv_get_gpu_info_from_registry_id
  *
@@ -247,7 +243,7 @@ static int macdrv_get_gpus_from_metal(struct macdrv_gpu** new_gpus, int* count)
     if (&MTLCopyAllDevices == NULL)
         return -1;
     NSArray<id<MTLDevice>>* devices = [MTLCopyAllDevices() autorelease];
-    if (!devices.count || ![devices[0] respondsToSelector:@selector(registryID)])
+    if (!devices.count)
         return -1;
 
     gpus = calloc(devices.count, sizeof(*gpus));
@@ -321,26 +317,12 @@ static int macdrv_get_gpu_info_from_display_id_using_metal(struct macdrv_gpu* gp
         return -1;
 
     device = [CGDirectDisplayCopyCurrentMetalDevice(display_id) autorelease];
-    if (device && [device respondsToSelector:@selector(registryID)])
+    if (device)
         return macdrv_get_gpu_info_from_registry_id(gpu, device.registryID);
     else
         return -1;
 }
 }
-
-#else
-
-static int macdrv_get_gpus_from_metal(struct macdrv_gpu** new_gpus, int* count)
-{
-    return -1;
-}
-
-static int macdrv_get_gpu_info_from_display_id_using_metal(struct macdrv_gpu* gpu, CGDirectDisplayID display_id)
-{
-    return -1;
-}
-
-#endif
 
 /***********************************************************************
  *              macdrv_get_gpu_info_from_display_id

@@ -164,8 +164,8 @@ HRESULT create_named_item_script_obj(script_ctx_t*,named_item_t*);
 named_item_t *lookup_named_item(script_ctx_t*,const WCHAR*,unsigned);
 void release_named_item(named_item_t*);
 HRESULT gc_run(script_ctx_t*);
-HRESULT gc_process_linked_obj(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,jsdisp_t*,void**);
-HRESULT gc_process_linked_val(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,jsval_t*);
+HRESULT gc_process_linked_obj(struct gc_ctx*,enum gc_traverse_op,jsdisp_t*,void**);
+HRESULT gc_process_linked_val(struct gc_ctx*,enum gc_traverse_op,jsval_t*);
 
 typedef struct {
     const WCHAR *name;
@@ -181,8 +181,7 @@ typedef struct {
     DWORD props_cnt;
     const builtin_prop_t *props;
     void (*destructor)(jsdisp_t*);
-    ULONG (*addref)(jsdisp_t*);
-    ULONG (*release)(jsdisp_t*);
+    IWineJSDispatchHost *(*get_host_disp)(jsdisp_t*);
     void (*on_put)(jsdisp_t*,const WCHAR*);
     HRESULT (*lookup_prop)(jsdisp_t*,const WCHAR*,unsigned,struct property_info*);
     HRESULT (*prop_get)(jsdisp_t*,unsigned,jsval_t*);
@@ -274,6 +273,7 @@ HRESULT jsdisp_delete_idx(jsdisp_t*,DWORD);
 HRESULT jsdisp_get_own_property(jsdisp_t*,const WCHAR*,BOOL,property_desc_t*);
 HRESULT jsdisp_define_property(jsdisp_t*,const WCHAR*,property_desc_t*);
 HRESULT jsdisp_define_data_property(jsdisp_t*,const WCHAR*,unsigned,jsval_t);
+HRESULT jsdisp_replace_builtin_property(jsdisp_t*,const WCHAR*,jsval_t);
 HRESULT jsdisp_next_prop(jsdisp_t*,DISPID,enum jsdisp_enum_type,DISPID*);
 HRESULT jsdisp_get_prop_name(jsdisp_t*,DISPID,jsstr_t**);
 HRESULT jsdisp_change_prototype(jsdisp_t*,jsdisp_t*);

@@ -1878,16 +1878,16 @@ static HRESULT decodebin_parser_source_get_media_type(struct parser_source *pin,
     return VFW_S_NO_MORE_ITEMS;
 }
 
-static HRESULT parser_create(BOOL output_compressed, struct parser **parser)
+static HRESULT parser_create(UINT32 flags, struct parser **parser)
 {
     struct parser *object;
 
     if (!(object = calloc(1, sizeof(*object))))
         return E_OUTOFMEMORY;
 
-    object->output_compressed = output_compressed;
+    object->output_compressed = flags & WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED;
 
-    if (!(object->wg_parser = wg_parser_create(output_compressed)))
+    if (!(object->wg_parser = wg_parser_create(flags)))
     {
         free(object);
         return E_OUTOFMEMORY;
@@ -1907,7 +1907,7 @@ HRESULT decodebin_parser_create(IUnknown *outer, IUnknown **out)
     struct parser *object;
     HRESULT hr;
 
-    if (FAILED(hr = parser_create(FALSE, &object)))
+    if (FAILED(hr = parser_create(WG_PARSER_CREATE_FLAG_NONE, &object)))
         return hr;
 
     strmbase_filter_init(&object->filter, outer, &CLSID_decodebin_parser, &filter_ops);
@@ -2481,7 +2481,7 @@ HRESULT wave_parser_create(IUnknown *outer, IUnknown **out)
     struct parser *object;
     HRESULT hr;
 
-    if (FAILED(hr = parser_create(TRUE, &object)))
+    if (FAILED(hr = parser_create(WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED, &object)))
         return hr;
 
     strmbase_filter_init(&object->filter, outer, &CLSID_WAVEParser, &filter_ops);
@@ -2590,7 +2590,7 @@ HRESULT avi_splitter_create(IUnknown *outer, IUnknown **out)
     struct parser *object;
     HRESULT hr;
 
-    if (FAILED(hr = parser_create(TRUE, &object)))
+    if (FAILED(hr = parser_create(WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED, &object)))
         return hr;
 
     strmbase_filter_init(&object->filter, outer, &CLSID_AviSplitter, &filter_ops);
@@ -2752,7 +2752,8 @@ HRESULT mpeg_splitter_create(IUnknown *outer, IUnknown **out)
     struct parser *object;
     HRESULT hr;
 
-    if (FAILED(hr = parser_create(TRUE, &object)))
+    if (FAILED(hr = parser_create(WG_PARSER_CREATE_FLAG_OUTPUT_COMPRESSED |
+                                  WG_PARSER_CREATE_FLAG_PTS_REBASED, &object)))
         return hr;
 
     strmbase_filter_init(&object->filter, outer, &CLSID_MPEG1Splitter, &mpeg_splitter_ops);

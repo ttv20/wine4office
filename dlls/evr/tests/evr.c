@@ -2449,6 +2449,59 @@ static void test_presenter_ar_mode(void)
     IMFVideoDisplayControl_Release(display_control);
 }
 
+static void test_presenter_rendering_prefs(void)
+{
+    IMFVideoDisplayControl *display_control;
+    HRESULT hr;
+    DWORD flags;
+
+    hr = MFCreateVideoPresenter(NULL, &IID_IDirect3DDevice9, &IID_IMFVideoDisplayControl, (void **)&display_control);
+    ok(hr == S_OK, "Failed to create default presenter, hr %#lx.\n", hr);
+
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, NULL);
+    ok(hr == E_POINTER, "Unexpected hr %#lx.\n", hr);
+
+    flags = 123;
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &flags);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!flags, "Unexpected rendering flags %#lx.\n", flags);
+
+    hr = IMFVideoDisplayControl_SetRenderingPrefs(display_control, MFVideoRenderPrefs_DoNotRepaintOnStop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    flags = 0;
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &flags);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(flags == MFVideoRenderPrefs_DoNotRepaintOnStop, "Unexpected rendering flags %#lx.\n", flags);
+
+    hr = IMFVideoDisplayControl_SetRenderingPrefs(display_control, 0x200);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    /* confirm nothing moved */
+    flags = 0;
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &flags);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(flags == MFVideoRenderPrefs_DoNotRepaintOnStop, "Unexpected rendering flags %#lx.\n", flags);
+
+    hr = IMFVideoDisplayControl_SetRenderingPrefs(display_control, MFVideoRenderPrefs_Mask);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    flags = 0;
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &flags);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(flags == MFVideoRenderPrefs_Mask, "Unexpected rendering flags %#lx.\n", flags);
+
+    hr = IMFVideoDisplayControl_SetRenderingPrefs(display_control, 0);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    flags = 123;
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &flags);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!flags, "Unexpected rendering flags %#lx.\n", flags);
+
+    IMFVideoDisplayControl_Release(display_control);
+}
+
 static void test_presenter_video_window(void)
 {
     D3DDEVICE_CREATION_PARAMETERS device_params = { 0 };
@@ -2817,6 +2870,12 @@ static void test_presenter_shutdown(void)
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     hr = IMFVideoDisplayControl_GetAspectRatioMode(display_control, &mode);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IMFVideoDisplayControl_SetRenderingPrefs(display_control, MFVideoRenderPrefs_DoNotRepaintOnStop);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IMFVideoDisplayControl_GetRenderingPrefs(display_control, &mode);
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     hr = IMFVideoDisplayControl_SetVideoWindow(display_control, window);
@@ -3922,6 +3981,7 @@ START_TEST(evr)
     test_presenter_native_video_size();
     test_presenter_ar_mode();
     test_presenter_video_window();
+    test_presenter_rendering_prefs();
     test_presenter_quality_control();
     test_presenter_media_type();
     test_presenter_orientation(&MFVideoFormat_NV12);

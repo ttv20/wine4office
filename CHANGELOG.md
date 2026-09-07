@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Restore Outlook account setup after Office repairs its Click-to-Run registry data.
