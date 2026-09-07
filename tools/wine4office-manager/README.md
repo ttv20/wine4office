@@ -86,8 +86,10 @@ The manager defaults to:
 Office desktop files do not restart the standalone manager. Creating or updating
 a shortcut atomically writes a manager-owned launcher under
 `${XDG_DATA_HOME:-~/.local/share}/wine4office/shortcut-launchers/`. The launcher
-applies the selected display mode and Office-specific setup before replacing
-itself with Wine. Removing the shortcut also removes its generated launcher.
+applies the active display mode and renderer plus Office-specific setup before
+replacing itself with Wine. Pending graphics choices are not used until the
+apply action stops Wine successfully. Removing the shortcut also removes its
+generated launcher.
 
 The **Office settings** page keeps policy controls out of the already dense
 environment page. Compatibility controls can disable animations or hardware

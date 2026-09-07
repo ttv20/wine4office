@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import importlib.machinery
+import importlib.util
 import os
 import sys
 import tempfile
@@ -14,6 +16,15 @@ import wine4office_backend as backend
 import wine4office_manager as manager
 import wine4office_post_install as post_install
 import wine4office_preload as preload_helper
+
+_launcher_loader = importlib.machinery.SourceFileLoader(
+    "wine4office_launcher", str(MANAGER_DIR / "wine4office-launcher")
+)
+_launcher_spec = importlib.util.spec_from_loader(
+    _launcher_loader.name, _launcher_loader
+)
+launcher = importlib.util.module_from_spec(_launcher_spec)
+_launcher_loader.exec_module(launcher)
 
 
 class ManagerTests(unittest.TestCase):
@@ -76,10 +87,6 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(backend.load_config()["use_x11"])
         self.assertTrue(backend.load_config()["use_vulkan"])
 
-        applied = state.mark_graphics_settings_applied()
-        self.assertFalse(applied["graphics_restart_required"])
-        self.assertFalse(applied["graphics_active_use_x11"])
-        self.assertTrue(applied["graphics_active_use_vulkan"])
         self.assertTrue(snapshot["status"]["prefix_exists"])
 
     def test_graphics_update_persists_without_reconciling_office_policies(self):
@@ -121,6 +128,73 @@ class ManagerTests(unittest.TestCase):
             str(prefix), state.config["wine"], True,
             remove_managed=False, use_x11=True,
         )
+
+    def test_apply_graphics_stops_active_session_and_rebinds_preload(self):
+        state = manager.ManagerState()
+        state.update_graphics_settings(False, True)
+        paused = {"binding": {}, "enabled": True, "active": True}
+        progress = mock.Mock()
+
+        with mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=paused
+        ) as prepare, mock.patch.object(
+            backend, "stop_wine"
+        ) as stop, mock.patch.object(
+            backend, "finish_preload_graphics_update"
+        ) as finish:
+            applied = state.apply_graphics_settings(progress)
+
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args, (
+            state.config["prefix"], True,
+        ))
+        self.assertEqual(prepare.call_args.kwargs["wine_value"], state.config["wine"])
+        deadline = prepare.call_args.kwargs["_deadline"]
+        stop.assert_called_once_with(
+            state.config["prefix"], state.config["wine"], True,
+            _deadline=deadline, progress_callback=progress,
+        )
+        finish.assert_called_once_with(paused, False, True)
+        self.assertFalse(applied["graphics_restart_required"])
+        self.assertFalse(applied["graphics_active_use_x11"])
+        self.assertTrue(applied["graphics_active_use_vulkan"])
+
+    def test_apply_graphics_restores_config_when_preload_rebind_fails(self):
+        state = manager.ManagerState()
+        previous = state.update_graphics_settings(False, True)
+        paused = {"binding": {}, "enabled": True, "active": True}
+
+        with mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=paused
+        ), mock.patch.object(
+            backend, "stop_wine"
+        ), mock.patch.object(
+            backend, "finish_preload_graphics_update",
+            side_effect=RuntimeError("rebind failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rebind failed"):
+                state.apply_graphics_settings()
+
+        self.assertEqual(state.config, previous)
+        self.assertEqual(backend.load_config(), previous)
+
+    def test_apply_graphics_resumes_preload_when_wine_stop_fails(self):
+        state = manager.ManagerState()
+        previous = state.update_graphics_settings(False, True)
+        paused = {"binding": {}, "enabled": True, "active": True}
+
+        with mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=paused
+        ), mock.patch.object(
+            backend, "stop_wine", side_effect=RuntimeError("stop failed")
+        ), mock.patch.object(
+            backend, "restore_preload_after_runner_update"
+        ) as restore:
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                state.apply_graphics_settings()
+
+        restore.assert_called_once_with(paused)
+        self.assertEqual(state.config, previous)
 
     def test_state_enables_and_disables_automatic_update_schedule(self):
         state = manager.ManagerState()
@@ -388,10 +462,13 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": str(root)}):
             self.assertEqual(backend.installed_root(), root.resolve())
 
-    def test_standalone_manager_launcher_uses_current_display_mode(self):
+    def test_standalone_manager_launcher_uses_active_pending_graphics(self):
         config = backend.default_config()
         config["use_x11"] = False
         config["use_vulkan"] = True
+        config["graphics_restart_required"] = True
+        config["graphics_active_use_x11"] = True
+        config["graphics_active_use_vulkan"] = False
         with mock.patch.object(backend, "load_config", return_value=config), \
              mock.patch.object(manager.incident, "monitoring_enabled", return_value=False), \
              mock.patch.object(backend, "launch_app") as launch, \
@@ -399,8 +476,70 @@ class ManagerTests(unittest.TestCase):
             result = manager.main()
 
         self.assertEqual(result, 0)
-        self.assertFalse(launch.call_args.kwargs["use_x11"])
-        self.assertTrue(launch.call_args.kwargs["use_vulkan"])
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
+        self.assertFalse(launch.call_args.kwargs["use_vulkan"])
+
+    def test_standalone_manager_stop_uses_active_display_mode(self):
+        config = backend.default_config()
+        config.update({
+            "use_x11": False,
+            "graphics_restart_required": True,
+            "graphics_active_use_x11": True,
+        })
+        with mock.patch.object(
+            backend, "load_config", return_value=config
+        ), mock.patch.object(
+            backend, "launch_tool"
+        ) as launch, mock.patch.object(
+            sys, "argv", ["Wine4OfficeManager", "stop"]
+        ):
+            result = manager.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
+
+    def test_desktop_launcher_uses_active_graphics_while_change_is_pending(self):
+        config = backend.default_config()
+        config.update({
+            "use_x11": False,
+            "use_vulkan": True,
+            "graphics_restart_required": True,
+            "graphics_active_use_x11": True,
+            "graphics_active_use_vulkan": False,
+        })
+        with mock.patch.object(
+            launcher.backend, "load_config", return_value=config
+        ), mock.patch.object(
+            launcher.incident, "monitoring_enabled", return_value=False
+        ), mock.patch.object(
+            launcher.backend, "launch_app"
+        ) as launch, mock.patch.object(
+            sys, "argv", ["wine4office-launcher", "word"]
+        ):
+            result = launcher.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
+        self.assertFalse(launch.call_args.kwargs["use_vulkan"])
+
+    def test_desktop_launcher_stop_uses_active_display_mode(self):
+        config = backend.default_config()
+        config.update({
+            "use_x11": False,
+            "graphics_restart_required": True,
+            "graphics_active_use_x11": True,
+        })
+        with mock.patch.object(
+            launcher.backend, "load_config", return_value=config
+        ), mock.patch.object(
+            launcher.backend, "launch_tool"
+        ) as launch, mock.patch.object(
+            sys, "argv", ["wine4office-launcher", "stop"]
+        ):
+            result = launcher.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
 
     def test_post_update_cli_runs_new_version_hooks_with_explicit_paths(self):
         prefix = str(self.home / "selected-prefix")
@@ -798,7 +937,9 @@ class ManagerTests(unittest.TestCase):
             state.start_preload_action("enable-start")
             self._wait(state)
 
-        install.assert_called_once()
+        install.assert_called_once_with(
+            state.config["prefix"], state.config["wine"], True, False
+        )
         manage.assert_called_once_with(
             "start", state.config["prefix"], state.config["wine"],
             state.config.get("use_x11", True),

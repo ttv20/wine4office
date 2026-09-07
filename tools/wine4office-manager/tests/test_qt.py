@@ -889,16 +889,25 @@ class QtManagerTests(unittest.TestCase):
         self.window.use_wayland.click()
         self.assertTrue(self.state.snapshot()["config"]["graphics_restart_required"])
 
+        def apply(progress_callback=None):
+            self.assertEqual(progress_callback, self.state.set_progress)
+            with self.state.lock:
+                saved = dict(self.state.config)
+                saved["graphics_restart_required"] = False
+                saved["graphics_active_use_x11"] = False
+                saved["graphics_active_use_vulkan"] = False
+                self.state.config = saved
+                return dict(saved)
+
         with mock.patch.object(
             QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes
-        ), mock.patch.object(backend, "launch_tool") as stop:
+        ), mock.patch.object(
+            self.state, "apply_graphics_settings", side_effect=apply
+        ) as apply_settings:
             self.window.apply_graphics_settings()
             self._wait_task()
 
-        self.assertEqual(stop.call_args.args[:3], (
-            self.config["prefix"], self.config["wine"], "stop",
-        ))
-        self.assertTrue(stop.call_args.kwargs["use_x11"])
+        apply_settings.assert_called_once()
         applied = self.state.snapshot()["config"]
         self.assertFalse(applied["graphics_restart_required"])
         self.assertFalse(applied["graphics_active_use_x11"])
@@ -1237,8 +1246,9 @@ class QtManagerTests(unittest.TestCase):
         )
         self.assertFalse(self.state.config["use_x11"])
 
-    def test_wine_tool_launch_propagates_native_wayland_choice(self):
+    def test_wine_tool_launch_keeps_active_graphics_while_change_is_pending(self):
         self.window.use_wayland.click()
+        self.window.use_vulkan.click()
         with mock.patch.object(backend, "launch_tool", return_value=5678) as launch:
             self.window.launch_tool("winecfg")
             deadline = time.monotonic() + 2
@@ -1246,11 +1256,12 @@ class QtManagerTests(unittest.TestCase):
                 time.sleep(0.01)
 
         launch.assert_called_once()
-        self.assertFalse(launch.call_args.kwargs["use_x11"])
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
         self.assertFalse(launch.call_args.kwargs["use_vulkan"])
 
     def test_stop_wine_shows_persistent_progress_dialog(self):
         dialog_visible_during_stop = []
+        self.window.use_wayland.click()
 
         def stop_with_phase_updates(*_args, **kwargs):
             dialog_visible_during_stop.append(
@@ -1279,10 +1290,14 @@ class QtManagerTests(unittest.TestCase):
             mock.call("Force-killing remaining Wine processes…", None),
         ])
         self.assertIs(launch.call_args.kwargs["progress_callback"], set_progress)
-        show_message.assert_any_call("Stopping Wine environment…", 0)
+        self.assertTrue(launch.call_args.kwargs["use_x11"])
+        show_message.assert_any_call(
+            self.window._tr("Stopping Wine environment…"), 0
+        )
         self.assertTrue(self.window.update_progress_dialog.isVisible())
         self.assertEqual(
-            self.window.update_progress_dialog.windowTitle(), "Stopping Wine"
+            self.window.update_progress_dialog.windowTitle(),
+            self.window._tr("Stopping Wine"),
         )
         self.assertEqual(self.window.update_progress_task_kind, "wine-stop")
         self.assertFalse(self.window.update_progress_button.isEnabled())

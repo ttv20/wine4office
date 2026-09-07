@@ -784,6 +784,7 @@ class ManagerWindow(QMainWindow):
         config = self.save_config()
         if not config:
             return
+        use_x11, _use_vulkan = backend.active_graphics_settings(config)
         try:
             self.state.start_task(
                 "teams-install",
@@ -794,7 +795,7 @@ class ManagerWindow(QMainWindow):
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     progress_callback=self.state.set_progress,
-                    use_x11=config.get("use_x11", True),
+                    use_x11=use_x11,
                 ),
             )
             self._show_task_progress(
@@ -1492,27 +1493,13 @@ class ManagerWindow(QMainWindow):
         )
         if result != QMessageBox.StandardButton.Yes:
             return
-        with self.state.lock:
-            config = dict(self.state.config)
-        stop_use_x11 = bool(config.get(
-            "graphics_active_use_x11", config.get("use_x11", True)
-        ))
-
-        def stop() -> str:
-            backend.launch_tool(
-                config["prefix"], config["wine"], "stop",
-                use_x11=stop_use_x11,
-                progress_callback=self.state.set_progress,
+        def stop() -> dict:
+            return self.state.apply_graphics_settings(
+                progress_callback=self.state.set_progress
             )
-            return "Wine processes stopped."
 
-        def completed(_result, error) -> None:
+        def completed(saved, error) -> None:
             if error is not None:
-                return
-            try:
-                saved = self.state.mark_graphics_settings_applied()
-            except Exception as apply_error:
-                self.show_error(f"Could not record graphics settings: {apply_error}")
                 return
             self._set_config_fields(saved)
             self.notify("Graphics settings applied. They will be used on the next launch.")
@@ -1855,11 +1842,12 @@ class ManagerWindow(QMainWindow):
         config = self.save_config()
         if not config:
             return
+        use_x11, use_vulkan = backend.active_graphics_settings(config)
 
         def launch() -> str:
             pid = backend.launch_tool(
-                config["prefix"], config["wine"], tool, use_x11=config["use_x11"],
-                use_vulkan=config.get("use_vulkan", False),
+                config["prefix"], config["wine"], tool, use_x11=use_x11,
+                use_vulkan=use_vulkan,
                 progress_callback=(self.state.set_progress if tool == "stop" else None),
             )
             return (
@@ -1905,12 +1893,13 @@ class ManagerWindow(QMainWindow):
         if not executable:
             self.show_error("Choose a local .exe file first.")
             return
+        use_x11, use_vulkan = backend.active_graphics_settings(config)
         try:
             pid = backend.launch_executable(
                 config["prefix"], config["wine"], executable, self.arguments_edit.text(),
                 working_directory=self.working_directory_edit.text().strip() or None,
-                use_x11=config["use_x11"],
-                use_vulkan=config.get("use_vulkan", False),
+                use_x11=use_x11,
+                use_vulkan=use_vulkan,
             )
             self.notify(f"Executable started (PID {pid}).")
         except Exception as error:

@@ -202,13 +202,14 @@ class TranslationTests(unittest.TestCase):
             "environment. Save open documents before continuing.",
             "OK", "Cancel", "Yes", "No",
         )
+        translatable_texts = texts[:-4]
         for language in i18n.SUPPORTED_LANGUAGES:
             catalog = i18n.CATALOGS[language]
             with self.subTest(language=language):
                 self.assertTrue(all(catalog.get(source) for source in texts))
                 if language != "en":
-                    self.assertGreaterEqual(
-                        sum(catalog[source] != source for source in texts), 12
+                    self.assertTrue(
+                        all(catalog[source] != source for source in translatable_texts)
                     )
                 for source in texts:
                     if "Wine" in source:

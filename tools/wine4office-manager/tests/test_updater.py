@@ -391,7 +391,9 @@ class UpdaterTests(unittest.TestCase):
             self._wait_for(lambda: not state.snapshot()["task"]["running"])
 
         new_wine = str(new_runner / "bin/wine")
-        prepare.assert_called_once_with(config["prefix"], True)
+        prepare.assert_called_once_with(
+            config["prefix"], True, wine_value=config["wine"]
+        )
         wineboot.assert_called_once_with(
             config["prefix"], new_wine, True, state.output,
             state.cancel_event, state.set_process,

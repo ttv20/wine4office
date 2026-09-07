@@ -471,6 +471,16 @@ def load_config() -> dict:
     return result
 
 
+def active_graphics_settings(config: dict) -> tuple[bool, bool]:
+    """Return the graphics settings that the current Wine session uses."""
+    use_x11 = bool(config.get("use_x11", True))
+    use_vulkan = bool(config.get("use_vulkan", False))
+    if config.get("graphics_restart_required") is True:
+        use_x11 = bool(config.get("graphics_active_use_x11", use_x11))
+        use_vulkan = bool(config.get("graphics_active_use_vulkan", use_vulkan))
+    return use_x11, use_vulkan
+
+
 def save_config(config: dict) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2001,14 +2011,27 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         'host_wayland_display=${WAYLAND_DISPLAY-}',
         "use_x11=true",
         "use_vulkan=false",
+        "graphics_restart_required=false",
+        "graphics_active_use_x11=true",
+        "graphics_active_use_vulkan=false",
         'if [[ -r "$config_file" ]]; then',
         "    while IFS= read -r config_line; do",
         r'        if [[ $config_line =~ ^[[:space:]]*\"use_x11\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
         '            use_x11=${BASH_REMATCH[1]}',
         r'        elif [[ $config_line =~ ^[[:space:]]*\"use_vulkan\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
         '            use_vulkan=${BASH_REMATCH[1]}',
+        r'        elif [[ $config_line =~ ^[[:space:]]*\"graphics_restart_required\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
+        '            graphics_restart_required=${BASH_REMATCH[1]}',
+        r'        elif [[ $config_line =~ ^[[:space:]]*\"graphics_active_use_x11\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
+        '            graphics_active_use_x11=${BASH_REMATCH[1]}',
+        r'        elif [[ $config_line =~ ^[[:space:]]*\"graphics_active_use_vulkan\"[[:space:]]*:[[:space:]]*(true|false) ]]; then',
+        '            graphics_active_use_vulkan=${BASH_REMATCH[1]}',
         "        fi",
         '    done < "$config_file"',
+        "fi",
+        'if [[ $graphics_restart_required == true ]]; then',
+        '    use_x11=$graphics_active_use_x11',
+        '    use_vulkan=$graphics_active_use_vulkan',
         "fi",
         'if [[ $managed_prefix == true && $use_x11 == true ]]; then',
         "    unset WAYLAND_DISPLAY",
@@ -4131,7 +4154,7 @@ def _preload_json_write(path: Path, payload: dict, mode: int = 0o600) -> None:
 
 
 def _preload_snapshot(prefix_value: str, wine_value: str,
-                      use_x11: bool = True) -> dict:
+                      use_x11: bool = True, use_vulkan: bool = False) -> dict:
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     if not has_wine_prefix_layout(prefix):
@@ -4141,6 +4164,7 @@ def _preload_snapshot(prefix_value: str, wine_value: str,
         "prefix": str(prefix),
         "wine": str(wine.resolve()),
         "use_x11": bool(use_x11),
+        "use_vulkan": bool(use_vulkan),
         "components": list(PRELOAD_COMPONENTS),
     }
 
@@ -4148,8 +4172,13 @@ def _preload_snapshot(prefix_value: str, wine_value: str,
 def _validate_preload_binding(payload: object) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("The preload binding must be a JSON object.")
-    expected_keys = {"schema", "prefix", "wine", "use_x11", "components"}
-    if set(payload) != expected_keys or payload.get("schema") != _PRELOAD_SCHEMA:
+    legacy_keys = {"schema", "prefix", "wine", "use_x11", "components"}
+    expected_keys = legacy_keys | {"use_vulkan"}
+    payload_keys = frozenset(payload)
+    if (
+        payload_keys not in {frozenset(legacy_keys), frozenset(expected_keys)}
+        or payload.get("schema") != _PRELOAD_SCHEMA
+    ):
         raise ValueError("The preload binding schema is invalid.")
     components = payload.get("components")
     if (
@@ -4162,6 +4191,8 @@ def _validate_preload_binding(payload: object) -> dict:
         raise ValueError("The preload component binding is invalid.")
     if not isinstance(payload.get("use_x11"), bool):
         raise ValueError("The preload display binding is invalid.")
+    if "use_vulkan" in payload and not isinstance(payload.get("use_vulkan"), bool):
+        raise ValueError("The preload renderer binding is invalid.")
     prefix = validate_prefix(payload.get("prefix", ""))
     wine = normalize_path(payload.get("wine", ""))
     if str(prefix) != payload["prefix"] or str(wine) != payload["wine"]:
@@ -4171,6 +4202,7 @@ def _validate_preload_binding(payload: object) -> dict:
         "prefix": str(prefix),
         "wine": str(wine),
         "use_x11": payload["use_x11"],
+        "use_vulkan": payload.get("use_vulkan", False),
         "components": list(PRELOAD_COMPONENTS),
     }
 
@@ -4224,7 +4256,7 @@ def systemd_user_available() -> bool:
 
 def _preload_selected_matches(binding: dict, prefix_value: str | None,
                               wine_value: str | None, _use_x11: bool | None) -> bool:
-    """Match the Wine environment; display mode is a foreground-app choice."""
+    """Match the stable Wine environment while graphics fields are rebound in place."""
     if prefix_value is None and wine_value is None:
         return True
     if prefix_value is None or wine_value is None:
@@ -4645,11 +4677,12 @@ def _restore_file(path: Path, snapshot: tuple[bytes, int] | None) -> None:
 
 
 def install_preload_service(prefix_value: str, wine_value: str,
-                            use_x11: bool = True) -> dict:
+                            use_x11: bool = True,
+                            use_vulkan: bool = False) -> dict:
     supported, reason = _systemd_user_capability()
     if not supported:
         raise RuntimeError(reason)
-    binding = _preload_snapshot(prefix_value, wine_value, use_x11)
+    binding = _preload_snapshot(prefix_value, wine_value, use_x11, use_vulkan)
     binding_path = preload_binding_path()
     unit_path = preload_unit_path()
     if unit_path.exists() and not _owned_preload_unit():
@@ -4704,7 +4737,9 @@ def install_preload_service(prefix_value: str, wine_value: str,
     return preload_service_status(prefix_value, wine_value, use_x11)
 
 
-def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> dict | None:
+def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True, *,
+                                  wine_value: str | None = None,
+                                  _deadline: float | None = None) -> dict | None:
     """Pause an owned service bound to this prefix before replacing its runner."""
     supported, _ = _systemd_user_capability()
     if not supported or not _owned_preload_unit():
@@ -4716,6 +4751,8 @@ def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> di
     prefix = validate_prefix(prefix_value)
     if not paths_equivalent(binding["prefix"], str(prefix)):
         return None
+    if wine_value is not None and not paths_equivalent(binding["wine"], wine_value):
+        return None
     enabled, _ = _systemctl_property("is-enabled")
     active, _ = _systemctl_property("is-active")
     state = {
@@ -4724,16 +4761,14 @@ def prepare_preload_runner_update(prefix_value: str, use_x11: bool = True) -> di
         "active": active,
     }
     if active:
-        _stop_preload_unit_and_wait()
+        _stop_preload_unit_and_wait(binding=binding, _deadline=_deadline)
     return state
 
 
-def finish_preload_runner_update(state: dict, wine_value: str) -> None:
-    """Rebind a paused preload service and restore its previous running state."""
-    old_binding = _validate_preload_binding(state.get("binding"))
-    new_binding = _preload_snapshot(
-        old_binding["prefix"], wine_value, old_binding["use_x11"]
-    )
+def _finish_preload_binding_update(state: dict, new_binding: dict) -> None:
+    """Commit a paused preload binding change or restore the previous service."""
+    _validate_preload_binding(state.get("binding"))
+    new_binding = _validate_preload_binding(new_binding)
     binding_path = preload_binding_path()
     unit_path = preload_unit_path()
     snapshots = {
@@ -4758,6 +4793,26 @@ def finish_preload_runner_update(state: dict, wine_value: str) -> None:
         except RuntimeError:
             pass
         raise
+
+
+def finish_preload_runner_update(state: dict, wine_value: str) -> None:
+    """Rebind a paused preload service and restore its previous running state."""
+    old_binding = _validate_preload_binding(state.get("binding"))
+    new_binding = _preload_snapshot(
+        old_binding["prefix"], wine_value, old_binding["use_x11"],
+        old_binding["use_vulkan"],
+    )
+    _finish_preload_binding_update(state, new_binding)
+
+
+def finish_preload_graphics_update(state: dict, use_x11: bool,
+                                   use_vulkan: bool) -> None:
+    """Rebind paused preload workers to newly active graphics settings."""
+    old_binding = _validate_preload_binding(state.get("binding"))
+    new_binding = _preload_snapshot(
+        old_binding["prefix"], old_binding["wine"], use_x11, use_vulkan
+    )
+    _finish_preload_binding_update(state, new_binding)
 
 
 def refresh_preload_worker_service() -> bool:
@@ -5022,7 +5077,8 @@ def _preload_component_state(binding: dict, component: str) -> tuple[str, str]:
         completed = subprocess.run(
             [binding["wine"], "sc.exe", "query", component],
             env=wine_environment(
-                binding["prefix"], binding["wine"], binding["use_x11"]
+                binding["prefix"], binding["wine"], binding["use_x11"],
+                binding["use_vulkan"],
             ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -5050,7 +5106,8 @@ def _preload_component_action(binding: dict, action: str, component: str) -> tup
         completed = subprocess.run(
             [binding["wine"], "sc.exe", action, component],
             env=wine_environment(
-                binding["prefix"], binding["wine"], binding["use_x11"]
+                binding["prefix"], binding["wine"], binding["use_x11"],
+                binding["use_vulkan"],
             ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -5118,7 +5175,8 @@ def _start_preload_helper(
         return None, f"The selected Wine runner does not contain {binary}."
 
     environment = wine_environment(
-        binding["prefix"], binding["wine"], binding["use_x11"]
+        binding["prefix"], binding["wine"], binding["use_x11"],
+        binding["use_vulkan"],
     )
     environment["WINEDEBUG"] = "-all"
     try:

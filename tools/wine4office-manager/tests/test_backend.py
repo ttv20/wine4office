@@ -100,6 +100,20 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
         self.assertTrue(backend.load_config()["use_vulkan"])
 
+    def test_pending_graphics_keep_active_settings_for_launches(self):
+        config = backend.default_config()
+        config.update({
+            "use_x11": False,
+            "use_vulkan": True,
+            "graphics_restart_required": True,
+            "graphics_active_use_x11": True,
+            "graphics_active_use_vulkan": False,
+        })
+
+        self.assertEqual(backend.active_graphics_settings(config), (True, False))
+        config["graphics_restart_required"] = False
+        self.assertEqual(backend.active_graphics_settings(config), (False, True))
+
     def test_automatic_update_checks_are_opt_in_by_default(self):
         config = backend.default_config()
         self.assertFalse(config["automatic_update_checks"])
@@ -1182,7 +1196,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 )
                 self.assertEqual(backend.APP_META[app]["compatibility"], "Not tested")
 
-    def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
+    def test_generated_launcher_uses_active_graphics_until_pending_change_is_applied(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
@@ -1206,6 +1220,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         config = backend.default_config()
         config["use_x11"] = False
         config["use_vulkan"] = True
+        config["graphics_restart_required"] = True
+        config["graphics_active_use_x11"] = True
+        config["graphics_active_use_vulkan"] = False
         backend.save_config(config)
 
         backend.create_app_shortcuts(["word"], prefix, self.wine, False)
@@ -1220,9 +1237,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         subprocess.run([str(launcher), str(document)], env=environment, check=True)
 
         output = log.read_text()
-        self.assertIn("DISPLAY=unset", output)
-        self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
-        self.assertIn("D3D=renderer=vulkan", output)
+        self.assertIn("DISPLAY=:77", output)
+        self.assertIn("WAYLAND_DISPLAY=unset", output)
+        self.assertIn("D3D=renderer=gl", output)
         self.assertIn(
             "WINAPPSDK=C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\",
             output,
@@ -2432,6 +2449,14 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         normalized = backend._validate_preload_binding(legacy)
         self.assertEqual(normalized["components"], ["ClickToRunSvc"])
 
+    def test_legacy_preload_binding_defaults_to_opengl(self):
+        legacy = self._preload_binding()
+        legacy.pop("use_vulkan")
+
+        normalized = backend._validate_preload_binding(legacy)
+
+        self.assertFalse(normalized["use_vulkan"])
+
     def test_preload_unit_is_exact_safe_and_enable_does_not_start(self):
         binding = self._preload_binding()
         commands = []
@@ -3031,6 +3056,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
 
     def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
         binding = self._preload_binding()
+        binding["use_vulkan"] = True
         helper = (
             Path(binding["wine"]).resolve().parent.parent
             / "lib/wine/x86_64-windows"
@@ -3057,6 +3083,9 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
             [binding["wine"], str(helper)],
         )
         self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["WINE_D3D_CONFIG"], "renderer=vulkan"
+        )
         self.assertTrue(process.stdout.closed)
 
     def test_voip_broker_waits_for_name_ownership_and_uses_managed_prefix(self):
@@ -3581,6 +3610,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
     def test_runner_update_rebinds_and_restarts_owned_background_service(self):
         old = self._preload_binding()
         old["use_x11"] = False
+        old["use_vulkan"] = True
         backend._preload_json_write(backend.preload_binding_path(), old)
         backend._preload_atomic_write(
             backend.preload_unit_path(),
@@ -3623,6 +3653,79 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(updated["prefix"], old["prefix"])
         self.assertEqual(updated["wine"], str(new_wine.resolve()))
         self.assertFalse(updated["use_x11"])
+        self.assertTrue(updated["use_vulkan"])
+
+    def test_graphics_update_rebinds_renderer_before_restarting_preload(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(),
+            backend._preload_unit_text(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            ),
+            0o644,
+        )
+        commands = []
+
+        def systemctl(command, check=True):
+            if command[0] == "start":
+                binding = backend._read_preload_binding()
+                self.assertFalse(binding["use_x11"])
+                self.assertTrue(binding["use_vulkan"])
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[
+                (True, "enabled"), (True, "active"), (False, "inactive")
+            ],
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            state = backend.prepare_preload_runner_update(
+                old["prefix"], wine_value=old["wine"]
+            )
+            self.assertIsNotNone(state)
+            backend.finish_preload_graphics_update(state, False, True)
+
+        self.assertEqual(commands, [
+            ["stop", "--no-block", backend.PRELOAD_UNIT],
+            ["daemon-reload"],
+            ["start", backend.PRELOAD_UNIT],
+        ])
+
+    def test_failed_graphics_rebind_restores_old_preload_binding(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        old_unit = backend._preload_unit_text(
+            backend.preload_binding_path(), backend.preload_runtime_status_path()
+        )
+        backend._preload_atomic_write(backend.preload_unit_path(), old_unit, 0o644)
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append((list(command), check))
+            if command == ["daemon-reload"] and check:
+                raise RuntimeError("reload failed")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        state = {"binding": old, "enabled": True, "active": True}
+        with mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reload failed"):
+                backend.finish_preload_graphics_update(state, False, True)
+
+        self.assertEqual(backend._read_preload_binding(), old)
+        self.assertEqual(backend.preload_unit_path().read_text(), old_unit)
+        self.assertEqual(commands, [
+            (["daemon-reload"], True),
+            (["daemon-reload"], False),
+            (["start", backend.PRELOAD_UNIT], False),
+        ])
 
     def test_manager_update_replaces_legacy_preload_executor(self):
         binding = self._preload_binding()

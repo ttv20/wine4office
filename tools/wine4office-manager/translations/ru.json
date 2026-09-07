@@ -118,7 +118,7 @@
 "Wine environment operation was cancelled.": "Операция со средой Wine отменена.",
 "Wine environment operation failed. Review the details below.": "Операция со средой Wine завершилась ошибкой. См. подробности ниже.",
 "Graphics backend": "Графическая подсистема",
-"Choose how Wine presents windows and renders Direct3D applications.": "Выберите, как Wine отображает окна и обрабатывает приложения Direct3D.",
+"Choose how Wine presents windows and renders Direct3D applications.": "Выберите, как Wine отображает окна и отрисовывает приложения Direct3D.",
 "Direct3D renderer:": "Средство отрисовки Direct3D:",
 "Display system:": "Система отображения:",
 "Graphics settings applied.": "Настройки графики применены.",
