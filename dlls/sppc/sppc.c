@@ -1351,7 +1351,7 @@ HRESULT WINAPI SLGetInstalledProductKeyIds(HSLC handle, const SLID *product_sku_
         return E_INVALIDARG;
 
     profile = get_installed_profile();
-    if (!grace_license_present() || !profile || !profile->pkey_valid ||
+    if (!profile || !profile->pkey_valid ||
             !IsEqualGUID(product_sku_id, &profile->sku_id) ||
             !IsEqualGUID(selected_grace_id(), &profile->sku_id))
         return SL_E_VALUE_NOT_FOUND;

@@ -24,6 +24,8 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "winreg.h"
+#include "objbase.h"
 
 #include "slpublic.h"
 #include "slerror.h"
@@ -33,8 +35,6 @@
 HRESULT WINAPI SLClose(HSLC handle);
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         UINT return_type, UINT *count, SLID **ids);
-HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE **license);
-HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
 
 enum
@@ -341,6 +341,79 @@ static void test_service_information(void)
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
 }
 
+static void test_installed_pkey_without_active_grace(HSLC handle, const SLID *sku,
+        const SLID *expected_pkey)
+{
+    static const WCHAR grace_key[] = L"Software\\Wine\\SPPC\\GracePeriods";
+    BYTE saved_value[64];
+    DWORD saved_size = sizeof(saved_value), saved_type = 0;
+    SLID *ids = NULL;
+    ULONGLONG expired;
+    FILETIME now;
+    WCHAR name[39];
+    UINT count;
+    LSTATUS status;
+    HKEY key;
+    HRESULT hr;
+    BOOL saved;
+    int length;
+
+    if (!winetest_platform_is_wine) return;
+
+    status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, grace_key, 0, NULL, 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL);
+    ok(!status, "Failed to open the GracePeriods key, status %lu.\n", status);
+    if (status) return;
+
+    length = StringFromGUID2(sku, name, ARRAY_SIZE(name));
+    ok(length == ARRAY_SIZE(name), "Failed to format the Grace SKU, length %d.\n", length);
+    if (length != ARRAY_SIZE(name)) goto done;
+    status = RegQueryValueExW(key, name, NULL, &saved_type, saved_value, &saved_size);
+    saved = !status;
+    ok(!status || status == ERROR_FILE_NOT_FOUND,
+            "Failed to save the Grace timer, status %lu.\n", status);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) goto done;
+
+    status = RegDeleteValueW(key, name);
+    ok(!status || status == ERROR_FILE_NOT_FOUND,
+            "Failed to remove the Grace timer, status %lu.\n", status);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) goto restore;
+
+    count = 0;
+    hr = SLGetInstalledProductKeyIds(handle, sku, &count, &ids);
+    ok(hr == S_OK, "Installed PKEY query without a Grace timer failed, hr %#lx.\n", hr);
+    ok(count == 1 && ids && IsEqualGUID(expected_pkey, &ids[0]),
+            "Unexpected installed PKEY without a Grace timer.\n");
+    LocalFree(ids);
+    ids = NULL;
+
+    GetSystemTimeAsFileTime(&now);
+    expired = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    expired -= 6ULL * 24 * 60 * 60 * 10000000;
+    status = RegSetValueExW(key, name, 0, REG_QWORD, (const BYTE *)&expired, sizeof(expired));
+    ok(!status, "Failed to set an expired Grace timer, status %lu.\n", status);
+    if (status) goto restore;
+
+    count = 0;
+    hr = SLGetInstalledProductKeyIds(handle, sku, &count, &ids);
+    ok(hr == S_OK, "Installed PKEY query with an expired Grace timer failed, hr %#lx.\n", hr);
+    ok(count == 1 && ids && IsEqualGUID(expected_pkey, &ids[0]),
+            "Unexpected installed PKEY with an expired Grace timer.\n");
+
+restore:
+    LocalFree(ids);
+    if (saved)
+        status = RegSetValueExW(key, name, 0, saved_type, saved_value, saved_size);
+    else
+    {
+        status = RegDeleteValueW(key, name);
+        if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+    }
+    ok(!status, "Failed to restore the Grace timer, status %lu.\n", status);
+done:
+    RegCloseKey(key);
+}
+
 static void test_dynamic_grace_pkey(void)
 {
     SLID *skus = NULL, *pkeys = NULL, *candidate = NULL, *second = NULL;
@@ -406,6 +479,8 @@ static void test_dynamic_grace_pkey(void)
     if (installed_count == 1 && installed_pkeys)
         ok(IsEqualGUID(&pkeys[0], &installed_pkeys[0]),
                 "Installed PKEY did not match the SKU PKEY.\n");
+    if (installed_count == 1 && installed_pkeys)
+        test_installed_pkey_without_active_grace(handle, &grace_sku, &installed_pkeys[0]);
 
     type = SL_DATA_NONE;
     size = 0;
