@@ -46,10 +46,6 @@ enum
 
 static const SLID office_app_id =
         {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
-static const SLID word2024_grace_id =
-        {0xa2f3ec88, 0x2d6b, 0x4546, {0x87, 0xf1, 0xe7, 0xec, 0x5f, 0x81, 0x8f, 0xa9}};
-static const SLID o365_proplus_grace_id =
-        {0x3ad61e22, 0xe4fe, 0x497f, {0xbd, 0xb1, 0x3e, 0x51, 0xbd, 0x87, 0x21, 0x73}};
 
 static void test_SLGetSLIDList(void)
 {
@@ -302,10 +298,11 @@ static void test_service_information(void)
 
 static void test_dynamic_grace_pkey(void)
 {
-    SLID *skus = NULL, *pkeys = NULL, *second = NULL;
+    SLID *skus = NULL, *pkeys = NULL, *candidate = NULL, *second = NULL;
+    SLID grace_sku;
     BYTE *value = NULL;
     SLDATATYPE type;
-    UINT sku_count = 0, pkey_count = 0, second_count = 0, size;
+    UINT sku_count = 0, pkey_count = 0, second_count = 0, size, i, found = 0;
     HSLC handle = NULL;
     HRESULT hr;
 
@@ -315,28 +312,41 @@ static void test_dynamic_grace_pkey(void)
 
     hr = SLGetSLIDList(handle, SL_ID_APPLICATION, &office_app_id,
             SL_ID_PRODUCT_SKU, &sku_count, &skus);
-    if (hr != S_OK || sku_count != 1 || !skus)
+    if (hr != S_OK || !sku_count || !skus)
     {
-        skip("No single installed Office Grace profile is available.\n");
-        goto done;
-    }
-    if (IsEqualGUID(&skus[0], &word2024_grace_id) ||
-            IsEqualGUID(&skus[0], &o365_proplus_grace_id))
-    {
-        skip("The installed Office profile uses a captured legacy PKEY.\n");
+        skip("No installed Office Grace profile is available.\n");
         goto done;
     }
 
-    hr = SLConsumeRight(handle, &office_app_id, &skus[0], NULL, NULL);
-    ok(hr == S_OK, "SLConsumeRight failed, hr %#lx.\n", hr);
-    hr = SLGetSLIDList(handle, SL_ID_PRODUCT_SKU, &skus[0], SL_ID_PKEY,
-            &pkey_count, &pkeys);
-    ok(hr == S_OK, "SKU to PKEY query failed, hr %#lx.\n", hr);
-    ok(pkey_count == 1, "Expected one dynamic PKEY, got %u.\n", pkey_count);
-    ok(pkeys != NULL, "Expected an allocated PKEY ID.\n");
-    if (hr != S_OK || pkey_count != 1 || !pkeys) goto done;
+    for (i = 0; i < sku_count; ++i)
+    {
+        hr = SLConsumeRight(handle, &office_app_id, &skus[i], NULL, NULL);
+        ok(hr == S_OK, "SLConsumeRight failed for SKU %u, hr %#lx.\n", i, hr);
+        pkey_count = 0;
+        candidate = NULL;
+        hr = SLGetSLIDList(handle, SL_ID_PRODUCT_SKU, &skus[i], SL_ID_PKEY,
+                &pkey_count, &candidate);
+        ok(hr == S_OK, "SKU %u to PKEY query failed, hr %#lx.\n", i, hr);
+        if (hr == S_OK && pkey_count)
+        {
+            ok(pkey_count == 1, "Expected one dynamic PKEY for SKU %u, got %u.\n",
+                    i, pkey_count);
+            ok(candidate != NULL, "Expected an allocated PKEY for SKU %u.\n", i);
+            ok(!found, "More than one SKU exposed a Grace PKEY.\n");
+            if (!found && pkey_count == 1 && candidate)
+            {
+                grace_sku = skus[i];
+                pkeys = candidate;
+                candidate = NULL;
+                found = 1;
+            }
+        }
+        LocalFree(candidate);
+    }
+    ok(found, "No installed SKU exposed a dynamic Grace PKEY.\n");
+    if (!found) goto done;
 
-    hr = SLGetSLIDList(handle, SL_ID_PRODUCT_SKU, &skus[0], SL_ID_PKEY,
+    hr = SLGetSLIDList(handle, SL_ID_PRODUCT_SKU, &grace_sku, SL_ID_PKEY,
             &second_count, &second);
     ok(hr == S_OK, "Second SKU to PKEY query failed, hr %#lx.\n", hr);
     ok(second_count == 1 && second && IsEqualGUID(&pkeys[0], &second[0]),

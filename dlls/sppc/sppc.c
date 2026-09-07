@@ -43,12 +43,6 @@ static const SLID o365_proplus_grace_id =
     {0x3ad61e22, 0xe4fe, 0x497f, {0xbd, 0xb1, 0x3e, 0x51, 0xbd, 0x87, 0x21, 0x73}};
 static const SLID office_app_id =
     {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
-/* Product-key SLIDs observed through SLGetSLIDList(SKU → PKEY) on native
- * Windows after each Grace product completed its first Office launch. */
-static const SLID word2024_grace_pkey_id =
-    {0x8dd5c488, 0xa99b, 0x0ab1, {0xb2, 0x89, 0x03, 0x34, 0x9b, 0x2c, 0xae, 0x56}};
-static const SLID o365_proplus_grace_pkey_id =
-    {0xa82b4eda, 0xc8b9, 0xa341, {0x8e, 0xa3, 0xd8, 0xf2, 0xcf, 0xbf, 0xb4, 0x11}};
 /* licenseId values from native SLGetSLIDList(SKU → LICENSE) and the Grace
  * UL-OOB XRM. Order matches the native probe. */
 static const SLID word2024_grace_binding_license_id =
@@ -661,11 +655,11 @@ static BOOL get_configured_product_ids(WCHAR *product_ids, DWORD size)
     DWORD capacity = size;
 
     if (!RegGetValueW(HKEY_LOCAL_MACHINE, configuration_key, L"ProductReleaseIds",
-            RRF_RT_REG_SZ, NULL, product_ids, &size))
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, product_ids, &size))
         return TRUE;
     size = capacity;
     return !RegGetValueW(HKEY_LOCAL_MACHINE, inventory_key, L"OfficeProductReleaseIds",
-            RRF_RT_REG_SZ, NULL, product_ids, &size);
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, product_ids, &size);
 }
 
 static unsigned int hex_digit(char ch)
@@ -839,8 +833,8 @@ static BOOL get_office_license_root(WCHAR *root, UINT count)
     for (i = 0; i < ARRAY_SIZE(values); i++)
     {
         size = sizeof(installation);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, values[i], RRF_RT_REG_SZ,
-                NULL, installation, &size)) continue;
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, config_key, values[i],
+                RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, installation, &size)) continue;
         length = lstrlenW(installation);
         while (length && (installation[length - 1] == '\\' || installation[length - 1] == '/'))
             installation[--length] = 0;
@@ -1300,19 +1294,8 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
 HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR name,
         SLDATATYPE *type, UINT *size, BYTE **value)
 {
-    /* Values captured from native SLGetPKeyInformation for each Grace PKEY. */
-    static const WCHAR word_digital_pid[] =
-        L"03612-05125-000-000000-00-1033-19044.0000-1912026";
-    static const WCHAR word_digital_pid2[] = L"00512-50000-00000-AA762";
-    static const WCHAR word_partial[] = L"WMC37";
-    static const WCHAR o365_digital_pid[] =
-        L"03612-02023-000-000000-00-1033-19044.0000-2052026";
-    static const WCHAR o365_digital_pid2[] = L"00202-30000-00000-AA478";
-    static const WCHAR o365_partial[] = L"VMFTK";
-    static const WCHAR channel[] = L"Retail";
     const struct installed_grace_profile *profile = get_installed_profile();
-    const WCHAR *digital_pid = NULL, *digital_pid2 = NULL, *partial = NULL;
-    const WCHAR *string = NULL, *pkey_channel = channel;
+    const WCHAR *string = NULL;
     UINT bytes;
 
     FIXME("(%p, %s, %s, %p, %p, %p) semi-stub\n", handle, wine_dbgstr_guid(pkey_id),
@@ -1321,29 +1304,14 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (grace_license_present() && IsEqualGUID(selected_grace_id(), &word2024_grace_id) &&
-        IsEqualGUID(pkey_id, &word2024_grace_pkey_id))
-    {
-        digital_pid = word_digital_pid;
-        digital_pid2 = word_digital_pid2;
-        partial = word_partial;
-    }
-    else if (grace_license_present() &&
-        IsEqualGUID(selected_grace_id(), &o365_proplus_grace_id) &&
-        IsEqualGUID(pkey_id, &o365_proplus_grace_pkey_id))
-    {
-        digital_pid = o365_digital_pid;
-        digital_pid2 = o365_digital_pid2;
-        partial = o365_partial;
-    }
-    else if (grace_license_present() && profile && profile->pkey_valid &&
+    if (grace_license_present() && profile && profile->pkey_valid &&
         IsEqualGUID(selected_grace_id(), &profile->sku_id) &&
         IsEqualGUID(pkey_id, &profile->pkey_id))
     {
-        digital_pid = profile->digital_pid;
-        digital_pid2 = profile->digital_pid2;
-        partial = profile->pkey_partial;
-        pkey_channel = profile->pkey_channel;
+        if (!wcsicmp(name, L"DigitalPID")) string = profile->digital_pid;
+        else if (!wcsicmp(name, L"DigitalPID2")) string = profile->digital_pid2;
+        else if (!wcsicmp(name, L"PartialProductKey")) string = profile->pkey_partial;
+        else if (!wcsicmp(name, L"Channel")) string = profile->pkey_channel;
     }
     else
     {
@@ -1353,15 +1321,6 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
         /* Native returns SL_E_PKEY_NOT_INSTALLED (0xC004F014) for unknown pkeys. */
         return 0xC004F014;
     }
-
-    if (!wcsicmp(name, L"DigitalPID"))
-        string = digital_pid;
-    else if (!wcsicmp(name, L"DigitalPID2"))
-        string = digital_pid2;
-    else if (!wcsicmp(name, L"PartialProductKey"))
-        string = partial;
-    else if (!wcsicmp(name, L"Channel"))
-        string = pkey_channel;
 
     if (!string)
     {
@@ -2909,14 +2868,10 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
                 &word2024_grace_binding_license_id;
         ul_id = o365 ? &o365_proplus_grace_ul_license_id : &word2024_grace_ul_license_id;
     }
-    if (IsEqualGUID(grace_id, &word2024_grace_id))
-        pkey_id = &word2024_grace_pkey_id;
-    else if (IsEqualGUID(grace_id, &o365_proplus_grace_id))
-        pkey_id = &o365_proplus_grace_pkey_id;
-    else if (profile && profile->pkey_valid && IsEqualGUID(grace_id, &profile->sku_id))
+    if (profile && profile->pkey_valid && IsEqualGUID(grace_id, &profile->sku_id))
         pkey_id = &profile->pkey_id;
 
-    /* SKU → PKEY: expose only product-key SLIDs captured for this exact SKU. */
+    /* SKU → PKEY: expose only the product-key SLID derived for this exact SKU. */
     if (pkey_id && return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU &&
         query_id && IsEqualGUID(query_id, grace_id))
     {
