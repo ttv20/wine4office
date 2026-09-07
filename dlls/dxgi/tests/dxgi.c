@@ -29,6 +29,7 @@
 #include "winternl.h"
 #include "ddk/d3dkmthk.h"
 #include "wine/test.h"
+#include "wine/wined3d.h"
 
 enum frame_latency
 {
@@ -6893,6 +6894,143 @@ static BOOL wait_present1_benchmark_query(ID3D11DeviceContext *context, ID3D11Qu
     return hr == S_OK;
 }
 
+static void test_swapchain_present_storage(void)
+{
+    HRESULT (WINAPI *get_result)(IDXGISwapChain1 *, struct wined3d_swapchain_present_result *);
+    struct wined3d_swapchain_present_result previous, result;
+    struct present1_lifetime_swapchain state;
+    ID3D11DeviceContext *context;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *device;
+    ID3D11Texture2D *texture;
+    DWORD pixels[16 * 16];
+    unsigned int count, round, frame, i, j, k;
+    uint64_t retired[4] = {0};
+    uint64_t retired_generation = 0;
+    HRESULT hr;
+
+    get_result = (void *)GetProcAddress(GetModuleHandleA("dxgi.dll"), "__wine_dxgi_get_test_present_result");
+    if (!get_result)
+    {
+        win_skip("Wine backend completion observation is unavailable.\n");
+        return;
+    }
+    if (!(dxgi_device = create_d3d11_device()))
+    {
+        skip("D3D11 device is unavailable for storage rotation tests.\n");
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Failed to get device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done_dxgi;
+    ID3D11Device_GetImmediateContext(device, &context);
+    get_factory((IUnknown *)dxgi_device, FALSE, &factory);
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr))
+        goto done_device;
+
+    for (count = 2; count <= 4; ++count)
+    {
+        memset(&state, 0, sizeof(state));
+        state.width = state.height = 16;
+        state.buffer_count = count;
+        state.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        state.name = "physical-storage";
+        if (!init_present1_lifetime_swapchain(device, factory2, &state))
+        {
+            cleanup_present1_lifetime_swapchain(&state);
+            break;
+        }
+
+        for (round = 0; round < 2; ++round)
+        {
+            memset(&previous, 0, sizeof(previous));
+            for (i = 0; i < count; ++i)
+            {
+                for (j = 0; j < ARRAY_SIZE(pixels); ++j)
+                    pixels[j] = 0xff000000 | ((i + 1) * 0x10203);
+                hr = IDXGISwapChain1_GetBuffer(state.swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
+                ok(hr == S_OK, "GetBuffer(%u) failed, hr %#lx.\n", i, hr);
+                if (FAILED(hr))
+                    goto done_state;
+                ID3D11DeviceContext_UpdateSubresource(context, (ID3D11Resource *)texture, 0, NULL,
+                        pixels, 16 * sizeof(*pixels), 0);
+                ID3D11Texture2D_Release(texture);
+                hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+                ok(hr == S_OK, "Seeding Present failed, hr %#lx.\n", hr);
+            }
+            for (frame = 0; frame < 2 * count; ++frame)
+            {
+                winetest_push_context("buffers %u, round %u, frame %u", count, round, frame);
+                hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+                ok(hr == S_OK, "Present failed, hr %#lx.\n", hr);
+                hr = get_result(state.swapchain, &result);
+                ok(hr == S_OK, "Completion query failed, hr %#lx.\n", hr);
+                if (FAILED(hr))
+                {
+                    winetest_pop_context();
+                    goto done_state;
+                }
+                ok(result.result == S_OK, "Backend failed, hr %#lx.\n", result.result);
+                ok(!!result.identity_generation, "Completion has no generation.\n");
+                if (round)
+                    ok(result.identity_generation != retired_generation, "Recreation kept the old generation.\n");
+                ok(result.physical_identity_count == count, "Got %u identities.\n", result.physical_identity_count);
+                for (i = 0; i < count; ++i)
+                {
+                    ok(!!result.physical_identities[i], "Buffer %u has no storage serial.\n", i);
+                    for (j = 0; j < i; ++j)
+                        ok(result.physical_identities[i] != result.physical_identities[j], "Aliased buffers %u/%u.\n", i, j);
+                    if (round)
+                        for (j = 0; j < count; ++j)
+                            ok(result.physical_identities[i] != retired[j], "Recreated buffer %u reused serial.\n", i);
+                    if (frame)
+                        ok(result.physical_identities[i] == previous.physical_identities[(i + 1) % count],
+                                "Serial for buffer %u did not follow storage rotation.\n", i);
+                    hr = IDXGISwapChain1_GetBuffer(state.swapchain, i, &IID_ID3D11Texture2D, (void **)&texture);
+                    ok(hr == S_OK, "GetBuffer(%u) failed, hr %#lx.\n", i, hr);
+                    if (SUCCEEDED(hr))
+                    {
+                        for (k = 0; k < ARRAY_SIZE(pixels); ++k)
+                            pixels[k] = 0xff000000 | ((((frame + 1 + i) % count) + 1) * 0x10203);
+                        check_present1_d3d11_frame_size(context, texture, state.staging, pixels, 16, 16, "rotation");
+                        ID3D11Texture2D_Release(texture);
+                    }
+                }
+                ok(result.presented_physical_identity == result.physical_identities[count - 1],
+                        "Presented serial does not identify the last buffer.\n");
+                ok(result.current_physical_identity == result.physical_identities[0], "Current serial mismatch.\n");
+                if (frame)
+                    ok(result.identity_generation == previous.identity_generation, "Rotation changed generation.\n");
+                previous = result;
+                winetest_pop_context();
+            }
+            memcpy(retired, result.physical_identities, count * sizeof(*retired));
+            retired_generation = result.identity_generation;
+            /* Change dimensions to require a new storage set. */
+            hr = IDXGISwapChain1_ResizeBuffers(state.swapchain, count, round ? 16 : 17, 16, state.format, 0);
+            ok(hr == S_OK, "ResizeBuffers failed, hr %#lx.\n", hr);
+            if (!round)
+            {
+                hr = IDXGISwapChain1_ResizeBuffers(state.swapchain, count, 16, 16, state.format, 0);
+                ok(hr == S_OK, "Restoring dimensions failed, hr %#lx.\n", hr);
+            }
+        }
+done_state:
+        cleanup_present1_lifetime_swapchain(&state);
+    }
+    IDXGIFactory2_Release(factory2);
+done_device:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+done_dxgi:
+    IDXGIDevice_Release(dxgi_device);
+}
+
 static void test_swapchain_present1_benchmark(void)
 {
     enum
@@ -11249,6 +11387,7 @@ START_TEST(dxgi)
         run_on_d3d10(test_swapchain_present1_history);
         test_swapchain_present1_scroll();
         test_swapchain_present1_lifetime();
+        test_swapchain_present_storage();
         return;
     }
 
@@ -11292,6 +11431,7 @@ START_TEST(dxgi)
     run_on_d3d10(test_swapchain_present1_history);
     test_swapchain_present1_scroll();
     test_swapchain_present1_lifetime();
+    test_swapchain_present_storage();
     run_on_d3d10(test_swapchain_backbuffer_index);
     run_on_d3d10(test_swapchain_formats);
     run_on_d3d10(test_output_ownership);

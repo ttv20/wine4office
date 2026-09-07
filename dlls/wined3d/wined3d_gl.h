@@ -946,6 +946,7 @@ struct gl_texture
 {
     struct wined3d_sampler_desc sampler_desc;
     GLuint name;
+    uint64_t storage_serial;
 };
 
 struct wined3d_renderbuffer_entry
@@ -964,6 +965,7 @@ struct wined3d_texture_gl
     GLenum target;
 
     GLuint rb_multisample;
+    uint64_t rb_multisample_serial;
     GLuint rb_resolved;
 
     struct list renderbuffers;

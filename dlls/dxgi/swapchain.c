@@ -291,6 +291,32 @@ HRESULT WINAPI __wine_dxgi_set_composition_description(IDXGISwapChain1 *iface,
 }
 
 
+/* Wine-only observation of the real backend completion, including diagnostic
+ * identities on backends that do not advertise sparse preservation. */
+HRESULT WINAPI __wine_dxgi_get_test_present_result(IDXGISwapChain1 *iface,
+        struct wined3d_swapchain_present_result *result)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *swapchain4;
+    HRESULT hr;
+
+    if (result)
+        memset(result, 0, sizeof(*result));
+    if (!iface || !result)
+        return E_INVALIDARG;
+    if (FAILED(hr = IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4, (void **)&swapchain4)))
+        return hr;
+    if (swapchain4->lpVtbl != &d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(swapchain4);
+        return E_NOINTERFACE;
+    }
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+    hr = wined3d_swapchain_wait_present_result(swapchain->wined3d_swapchain, swapchain->last_present_id, result);
+    IDXGISwapChain4_Release(swapchain4);
+    return hr;
+}
+
 /* IUnknown methods */
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)

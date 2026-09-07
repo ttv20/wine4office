@@ -759,6 +759,7 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
     struct wined3d_texture_sub_resource *sub_resource;
     struct wined3d_texture_gl *texture, *texture_prev;
     struct gl_texture tex0;
+    uint64_t rb_serial0;
     GLuint rb0;
     DWORD locations0;
     unsigned int i;
@@ -772,6 +773,7 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
     /* Back buffer 0 is already in the draw binding. */
     tex0 = texture_prev->texture_rgb;
     rb0 = texture_prev->rb_multisample;
+    rb_serial0 = texture_prev->rb_multisample_serial;
     locations0 = texture_prev->t.sub_resources[0].locations;
 
     for (i = 1; i < swapchain->state.desc.backbuffer_count; ++i)
@@ -784,6 +786,7 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
 
         texture_prev->texture_rgb = texture->texture_rgb;
         texture_prev->rb_multisample = texture->rb_multisample;
+        texture_prev->rb_multisample_serial = texture->rb_multisample_serial;
 
         wined3d_texture_validate_location(&texture_prev->t, 0, sub_resource->locations & supported_locations);
         wined3d_texture_invalidate_location(&texture_prev->t, 0, ~(sub_resource->locations & supported_locations));
@@ -793,6 +796,7 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
 
     texture_prev->texture_rgb = tex0;
     texture_prev->rb_multisample = rb0;
+    texture_prev->rb_multisample_serial = rb_serial0;
 
     wined3d_texture_validate_location(&texture_prev->t, 0, locations0 & supported_locations);
     wined3d_texture_invalidate_location(&texture_prev->t, 0, ~(locations0 & supported_locations));
@@ -837,9 +841,9 @@ static uint64_t wined3d_swapchain_gl_get_physical_identity(struct wined3d_swapch
             wined3d_texture_gl(swapchain->back_buffers[backbuffer_idx]);
 
     if (texture_gl->texture_rgb.name)
-        return texture_gl->texture_rgb.name;
+        return texture_gl->texture_rgb.storage_serial;
     if (texture_gl->rb_multisample)
-        return (1ULL << 32) | texture_gl->rb_multisample;
+        return texture_gl->rb_multisample_serial;
     return 0;
 }
 
@@ -1893,7 +1897,7 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
     else
     {
         wined3d_texture_load_location(back_buffer, 0, &context_vk->c, back_buffer->resource.draw_binding);
-        presented_identity = (uint64_t)wined3d_texture_vk(back_buffer)->image.vk_image;
+        presented_identity = wined3d_texture_vk(back_buffer)->image.storage_serial;
 
         vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval,
                 &presentation_identity, &presentation_generation);
@@ -1949,8 +1953,8 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
         {
             for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)
             {
-                if (!(result->physical_identities[i] = (uint64_t)
-                        wined3d_texture_vk(swapchain->back_buffers[i])->image.vk_image))
+                if (!(result->physical_identities[i] =
+                        wined3d_texture_vk(swapchain->back_buffers[i])->image.storage_serial))
                     break;
             }
             if (i != swapchain->state.desc.backbuffer_count)

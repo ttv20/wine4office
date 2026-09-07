@@ -405,6 +405,7 @@ void wined3d_bo_slab_vk_unmap(struct wined3d_bo_slab_vk *slab_vk,
 struct wined3d_image_vk
 {
     VkImage vk_image;
+    uint64_t storage_serial;
     struct wined3d_allocator_block *memory;
     VkDeviceMemory vk_memory;
     uint64_t command_buffer_id;
