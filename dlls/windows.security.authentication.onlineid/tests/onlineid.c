@@ -39,6 +39,8 @@
 
 static void test_office_licensing_scopes(void)
 {
+    WCHAR puid[17];
+
     ok(is_office_licensing_scope(L"service::officeapps.live.com"), "legacy licensing scope not recognized.\n");
     ok(is_office_licensing_scope(L"SERVICE::OFFICEAPPS.LIVE.COM::MBI_SSL"),
        "legacy licensing scope with policy not recognized.\n");
@@ -53,6 +55,25 @@ static void test_office_licensing_scopes(void)
        "lookalike URI licensing scope recognized.\n");
     ok(!is_office_licensing_scope(L"xservice::officeapps.live.com"),
        "embedded legacy licensing scope recognized.\n");
+
+    ok(onlineid_scope_has_rps_service(L"service::ssl.live.com::MBI_SSL_SHORT openid profile"),
+       "leading RPS service scope not recognized.\n");
+    ok(!onlineid_scope_has_rps_service(L"openid service::officeapps.live.com::MBI_SSL_SHORT profile"),
+       "embedded service token recognized as an RPS ticket request.\n");
+    ok(!onlineid_scope_has_rps_service(L"https://officeapps.live.com/.default openid profile"),
+       "OAuth resource scope recognized as an RPS service scope.\n");
+    ok(!onlineid_scope_has_rps_service(L"xservice::officeapps.live.com::MBI_SSL_SHORT"),
+       "partial RPS service prefix recognized.\n");
+
+    ok(onlineid_msa_puid_from_oid(L"00000000-0000-0000-ca52-51d2bbf7d062", puid),
+       "failed to derive the consumer PUID.\n");
+    ok(!wcscmp(puid, L"CA5251D2BBF7D062"), "got PUID %s.\n", wine_dbgstr_w(puid));
+    ok(onlineid_msa_puid_from_oid(L"00000000-0000-0000-CA52-51D2BBF7D062", puid),
+       "failed to accept an uppercase consumer OID.\n");
+    ok(!onlineid_msa_puid_from_oid(L"00000001-0000-0000-ca52-51d2bbf7d062", puid),
+       "accepted an organizational OID.\n");
+    ok(!onlineid_msa_puid_from_oid(L"00000000-0000-0000-ca52-51d2bbf7d06z", puid),
+       "accepted a non-hexadecimal consumer OID.\n");
 }
 
 static void check_interface_( unsigned int line, void *obj, const IID *iid )
@@ -75,6 +96,8 @@ static const GUID test_iid_IWebAccountProvider =
     {0x29dcc8c3, 0x7ab9, 0x4a7c, {0xa3, 0x36, 0xb9, 0x42, 0xf9, 0xdb, 0xf7, 0xc7}};
 static const GUID test_iid_IWebAccountProvider2 =
     {0x4a01eb05, 0x4e42, 0x41d4, {0xb5, 0x18, 0xe0, 0x08, 0xa5, 0x16, 0x36, 0x14}};
+static const GUID test_iid_IWebAccount =
+    {0x69473eb2, 0x8031, 0x49be, {0x80, 0xbb, 0x96, 0xcb, 0x46, 0xd9, 0x9a, 0xba}};
 static const GUID test_iid_IAsyncOperation_WebTokenRequestResult =
     {0x0a815852, 0x7c44, 0x5674, {0xb3, 0xd2, 0xfa, 0x2e, 0x4c, 0x1e, 0x46, 0xc9}};
 static const GUID test_iid_IAsyncOperation_WebAccount =
@@ -151,6 +174,23 @@ struct test_token_request_factory_vtbl
 };
 struct test_token_request_factory { const struct test_token_request_factory_vtbl *lpVtbl; };
 
+struct test_token_request;
+struct test_token_request_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(struct test_token_request *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct test_token_request *);
+    ULONG (WINAPI *Release)(struct test_token_request *);
+    HRESULT (WINAPI *GetIids)(struct test_token_request *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(struct test_token_request *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(struct test_token_request *, TrustLevel *);
+    HRESULT (WINAPI *get_WebAccountProvider)(struct test_token_request *, IInspectable **);
+    HRESULT (WINAPI *get_Scope)(struct test_token_request *, HSTRING *);
+    HRESULT (WINAPI *get_ClientId)(struct test_token_request *, HSTRING *);
+    HRESULT (WINAPI *get_PromptType)(struct test_token_request *, INT32 *);
+    HRESULT (WINAPI *get_Properties)(struct test_token_request *, IInspectable **);
+};
+struct test_token_request { const struct test_token_request_vtbl *lpVtbl; };
+
 struct test_provider;
 struct test_provider_vtbl
 {
@@ -180,6 +220,21 @@ struct test_provider2_vtbl
 };
 struct test_provider2 { const struct test_provider2_vtbl *lpVtbl; };
 
+struct test_account;
+struct test_account_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(struct test_account *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct test_account *);
+    ULONG (WINAPI *Release)(struct test_account *);
+    HRESULT (WINAPI *GetIids)(struct test_account *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(struct test_account *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(struct test_account *, TrustLevel *);
+    HRESULT (WINAPI *get_WebAccountProvider)(struct test_account *, IInspectable **);
+    HRESULT (WINAPI *get_UserName)(struct test_account *, HSTRING *);
+    HRESULT (WINAPI *get_State)(struct test_account *, INT32 *);
+};
+struct test_account { const struct test_account_vtbl *lpVtbl; };
+
 struct test_find_result;
 struct test_find_result_vtbl
 {
@@ -206,6 +261,22 @@ struct test_token_result_vtbl
     HRESULT (WINAPI *InvalidateCacheAsync)(struct test_token_result *, IInspectable **);
 };
 struct test_token_result { const struct test_token_result_vtbl *lpVtbl; };
+
+struct test_token_response;
+struct test_token_response_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(struct test_token_response *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct test_token_response *);
+    ULONG (WINAPI *Release)(struct test_token_response *);
+    HRESULT (WINAPI *GetIids)(struct test_token_response *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(struct test_token_response *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(struct test_token_response *, TrustLevel *);
+    HRESULT (WINAPI *get_Token)(struct test_token_response *, HSTRING *);
+    HRESULT (WINAPI *get_ProviderError)(struct test_token_response *, IInspectable **);
+    HRESULT (WINAPI *get_WebAccount)(struct test_token_response *, IInspectable **);
+    HRESULT (WINAPI *get_Properties)(struct test_token_response *, IInspectable **);
+};
+struct test_token_response { const struct test_token_response_vtbl *lpVtbl; };
 
 struct test_find_result { const struct test_find_result_vtbl *lpVtbl; };
 
@@ -403,6 +474,90 @@ static void test_account_vector(IInspectable *vector_obj)
         typed->lpVtbl->Release(typed);
     }
     IUnknown_Release(identity);
+}
+
+static void test_account_provider(IInspectable *account_obj, IInspectable *expected_provider)
+{
+    struct test_account *account = NULL;
+    IInspectable *provider = NULL;
+    IUnknown *actual_identity = NULL, *expected_identity = NULL;
+    HRESULT hr;
+
+    hr = IInspectable_QueryInterface(account_obj, &test_iid_IWebAccount, (void **)&account);
+    ok(hr == S_OK && account, "account QI got %#lx, iface %p.\n", hr, account);
+    if (!account) return;
+    hr = account->lpVtbl->get_WebAccountProvider(account, &provider);
+    ok(hr == S_OK && provider, "account provider got %#lx, provider %p.\n", hr, provider);
+    if (provider)
+    {
+        hr = IInspectable_QueryInterface(provider, &IID_IUnknown, (void **)&actual_identity);
+        ok(hr == S_OK && actual_identity, "account provider identity got %#lx.\n", hr);
+        hr = IInspectable_QueryInterface(expected_provider, &IID_IUnknown, (void **)&expected_identity);
+        ok(hr == S_OK && expected_identity, "expected provider identity got %#lx.\n", hr);
+        ok(actual_identity == expected_identity, "account did not preserve its requested provider, %p != %p.\n",
+           actual_identity, expected_identity);
+    }
+    if (actual_identity) IUnknown_Release(actual_identity);
+    if (expected_identity) IUnknown_Release(expected_identity);
+    if (provider) IInspectable_Release(provider);
+    account->lpVtbl->Release(account);
+}
+
+static void test_enable_consumer_batch(IInspectable *request_obj)
+{
+    struct test_token_request *request = (struct test_token_request *)request_obj;
+    IInspectable *properties_obj = NULL;
+    IMap_HSTRING_HSTRING *properties = NULL;
+    HSTRING key = NULL, value = NULL;
+    boolean replaced = TRUE;
+    HRESULT hr;
+
+    hr = request->lpVtbl->get_Properties(request, &properties_obj);
+    ok(hr == S_OK && properties_obj, "request properties got %#lx, %p.\n", hr, properties_obj);
+    if (!properties_obj) return;
+    hr = IInspectable_QueryInterface(properties_obj, &IID_IMap_HSTRING_HSTRING, (void **)&properties);
+    ok(hr == S_OK && properties, "request properties map QI got %#lx, %p.\n", hr, properties);
+    WindowsCreateString(L"oauth2_batch", 12, &key);
+    WindowsCreateString(L"1", 1, &value);
+    if (properties)
+    {
+        hr = IMap_HSTRING_HSTRING_Insert(properties, key, value, &replaced);
+        ok(hr == S_OK && !replaced, "consumer batch property insert got %#lx, replaced %u.\n",
+           hr, replaced);
+        IMap_HSTRING_HSTRING_Release(properties);
+    }
+    WindowsDeleteString(key);
+    WindowsDeleteString(value);
+    IInspectable_Release(properties_obj);
+}
+
+static void test_nonempty_account_vector(IInspectable *vector_obj, IInspectable *expected_provider)
+{
+    struct test_vector *vector = (void *)vector_obj;
+    IInspectable *item = NULL, *many = NULL;
+    boolean found = FALSE;
+    UINT32 size = 0, index = 0xdeadbeef, count = 0xdeadbeef;
+    HRESULT hr;
+
+    hr = vector->lpVtbl->get_Size(vector, &size);
+    ok(hr == S_OK && size == 1, "account vector size got %#lx, %u.\n", hr, size);
+    hr = vector->lpVtbl->GetAt(vector, 0, &item);
+    ok(hr == S_OK && item, "account vector GetAt got %#lx, %p.\n", hr, item);
+    if (item) test_account_provider(item, expected_provider);
+    hr = vector->lpVtbl->IndexOf(vector, item, &index, &found);
+    ok(hr == S_OK && found && !index, "account vector IndexOf got %#lx, %u, %u.\n",
+       hr, index, found);
+    hr = vector->lpVtbl->GetMany(vector, 0, 1, &many, &count);
+    ok(hr == S_OK && count == 1 && many == item,
+       "account vector GetMany got %#lx, count %u, item %p.\n", hr, count, many);
+    if (many) IInspectable_Release(many);
+    many = (void *)0xdeadbeef;
+    count = 0xdeadbeef;
+    hr = vector->lpVtbl->GetMany(vector, 1, 1, &many, &count);
+    ok(hr == E_BOUNDS && !count, "account vector out-of-bounds GetMany got %#lx, count %u.\n",
+       hr, count);
+    if (item) IInspectable_Release(item);
+    IInspectable_Release(vector_obj);
 }
 
 static void test_AuthenticatorStatics(void)
@@ -937,6 +1092,7 @@ static void test_delete_token_files(void)
     DeleteFileW( L"C:\\wam-account-display-name.txt" );
     DeleteFileW( L"C:\\wam-client-info.txt" );
     DeleteFileW( L"C:\\wam-id-token.txt" );
+    DeleteFileW( L"C:\\wam-scope-9838a88e0e66ec67.txt" );
 }
 
 static BOOL test_write_refresh_token(void)
@@ -963,9 +1119,23 @@ static BOOL test_write_account_fixture(void)
 {
     return test_write_file( L"C:\\wam-account-username.txt", "plan01@example.invalid" ) &&
            test_write_file( L"C:\\wam-account-id.txt", "plan01-account-id" ) &&
-           test_write_file( L"C:\\wam-account-oid.txt", "11111111-1111-1111-1111-111111111111" ) &&
-           test_write_file( L"C:\\wam-account-tenant-id.txt", "22222222-2222-2222-2222-222222222222" ) &&
-           test_write_file( L"C:\\wam-account-authority.txt", "https://login.microsoftonline.com/organizations/" );
+           test_write_file( L"C:\\wam-account-oid.txt", "00000000-0000-0000-ca52-51d2bbf7d062" ) &&
+           test_write_file( L"C:\\wam-account-tenant-id.txt", "9188040d-6c67-4c5b-b112-36a304b66dad" ) &&
+           test_write_file( L"C:\\wam-account-authority.txt", "https://login.microsoftonline.com/consumers/" );
+}
+
+static BOOL test_write_scoped_consumer_fixture(void)
+{
+    char value[96];
+    FILETIME time;
+    ULONGLONG expires;
+
+    GetSystemTimeAsFileTime( &time );
+    expires = (((ULONGLONG)time.dwHighDateTime << 32) | time.dwLowDateTime) /
+              10000000 - 11644473600ULL + 600;
+    snprintf( value, ARRAY_SIZE(value), "%llu|plan01-scope-token", expires );
+    /* FNV-1a("plan01-account-id\\nservice::officeapps.live.com"). */
+    return test_write_file( L"C:\\wam-scope-9838a88e0e66ec67.txt", value );
 }
 
 static void test_silent_environment( const WCHAR *mode )
@@ -1068,6 +1238,61 @@ static void test_silent_check_response_status( IAsyncOperation_IInspectable *typ
             hr, status, expected );
         token_result->lpVtbl->Release( token_result );
     }
+    IInspectable_Release( result );
+}
+
+static void test_silent_check_response_provider( IAsyncOperation_IInspectable *typed,
+                                                 IInspectable *expected_provider )
+{
+    struct test_token_result *token_result = NULL;
+    struct test_token_response *response;
+    struct test_vector *responses;
+    IInspectable *result = NULL, *responses_obj = NULL, *response_obj = NULL, *account = NULL;
+    HRESULT hr;
+
+    hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+    ok( hr == S_OK && result, "provider response result got %#lx, %p.\n", hr, result );
+    if (!result) return;
+    hr = IInspectable_QueryInterface( result, &test_iid_IWebTokenRequestResult, (void **)&token_result );
+    ok( hr == S_OK && token_result, "provider response result QI got %#lx, %p.\n", hr, token_result );
+    if (!token_result) goto done;
+    hr = token_result->lpVtbl->get_ResponseData( token_result, &responses_obj );
+    ok( hr == S_OK && responses_obj, "provider response data got %#lx, %p.\n", hr, responses_obj );
+    if (!responses_obj) goto done;
+    responses = (struct test_vector *)responses_obj;
+    hr = responses->lpVtbl->GetAt( responses, 0, &response_obj );
+    ok( hr == S_OK && response_obj, "provider token response got %#lx, %p.\n", hr, response_obj );
+    if (!response_obj) goto done;
+    response = (struct test_token_response *)response_obj;
+    {
+        HSTRING token = NULL;
+        const WCHAR *value, *expires;
+        WCHAR *end;
+        unsigned long expires_in;
+
+        hr = response->lpVtbl->get_Token(response, &token);
+        ok(hr == S_OK && token, "consumer batch token got %#lx.\n", hr);
+        value = WindowsGetStringRawBuffer(token, NULL);
+        ok(value && !wcsncmp(value, L"access_token=t%3Dplan01-scope-token",
+                             wcslen(L"access_token=t%3Dplan01-scope-token")),
+           "consumer response did not use the scoped MSA batch token.\n");
+        ok(value && wcsstr(value, L"&expires_in=") && wcsstr(value, L"&client_info=") &&
+           wcsstr(value, L"&id_token="), "consumer batch response is incomplete.\n");
+        expires = value ? wcsstr(value, L"&expires_in=") : NULL;
+        expires_in = expires ? wcstoul(expires + 12, &end, 10) : 0;
+        ok(expires && expires_in && expires_in <= 600 && end && *end == '&',
+           "consumer batch response used the wrong scoped expiration, got %lu.\n", expires_in);
+        WindowsDeleteString(token);
+    }
+    hr = response->lpVtbl->get_WebAccount( response, &account );
+    ok( hr == S_OK && account, "token response account got %#lx, %p.\n", hr, account );
+    if (account) test_account_provider( account, expected_provider );
+
+done:
+    if (account) IInspectable_Release( account );
+    if (response_obj) IInspectable_Release( response_obj );
+    if (responses_obj) IInspectable_Release( responses_obj );
+    if (token_result) token_result->lpVtbl->Release( token_result );
     IInspectable_Release( result );
 }
 
@@ -1368,7 +1593,7 @@ done:
 }
 
 static void test_silent_projection_snapshot( struct test_manager_statics *manager, IInspectable *request,
-                                             struct test_silent_events *events )
+                                             IInspectable *provider, struct test_silent_events *events )
 {
     static const WCHAR cache_mutex_name[] = L"Local\\Wine4OfficeWamCache";
     IInspectable *operation = NULL;
@@ -1383,6 +1608,7 @@ static void test_silent_projection_snapshot( struct test_manager_statics *manage
     test_silent_events_reset( events );
     test_silent_environment( L"success" );
     ok( test_write_success_fixture(), "failed to write projection snapshot fixture.\n" );
+    ok( test_write_scoped_consumer_fixture(), "failed to write scoped consumer fixture.\n" );
     cache_mutex = CreateMutexW( NULL, FALSE, cache_mutex_name );
     ok( !!cache_mutex, "failed to create projection cache mutex, error %lu.\n", GetLastError() );
     if (!cache_mutex) goto done;
@@ -1416,7 +1642,11 @@ static void test_silent_projection_snapshot( struct test_manager_statics *manage
         hr = IAsyncInfo_get_Status( info, &status );
         ok( hr == S_OK && status == Completed, "projection snapshot final status got %#lx, %u.\n", hr, status );
     }
-    if (typed) test_silent_check_response_status( typed, 0 );
+    if (typed)
+    {
+        test_silent_check_response_status( typed, 0 );
+        test_silent_check_response_provider( typed, provider );
+    }
     if (typed && info) test_silent_postclose( typed, info );
 
 done:
@@ -1561,10 +1791,12 @@ static void test_silent_token_operations(void)
         L"Windows.Security.Authentication.OnlineId.OnlineIdSystemAuthenticator";
     static const WCHAR resource_scope_name[] = L"https://graph.microsoft.com/.default";
     struct test_manager_statics *manager = NULL;
+    struct test_manager_statics4 *manager4 = NULL;
     struct test_token_request_factory *request_factory = NULL;
     struct test_silent_events events;
     IActivationFactory *factory = NULL;
     IInspectable *provider = NULL, *request = NULL, *resource_request = NULL;
+    IInspectable *find_operation_result = NULL, *accounts = NULL;
     IInspectable *account = NULL, *operation = NULL;
     HSTRING class = NULL, id = NULL, authority = NULL, client_id = NULL, scope = NULL;
     HSTRING resource_scope = NULL, account_id = NULL;
@@ -1590,14 +1822,17 @@ static void test_silent_token_operations(void)
     hr = IActivationFactory_QueryInterface( factory, &test_iid_IWebAuthenticationCoreManagerStatics,
                                             (void **)&manager );
     ok( hr == S_OK && manager, "silent manager QI got %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &test_iid_IWebAuthenticationCoreManagerStatics4,
+                                            (void **)&manager4 );
+    ok( hr == S_OK && manager4, "silent manager4 QI got %#lx.\n", hr );
     hr = IActivationFactory_QueryInterface( factory, &test_iid_IWebTokenRequestFactory,
                                             (void **)&request_factory );
     ok( hr == S_OK && request_factory, "silent request factory QI got %#lx.\n", hr );
-    if (!manager || !request_factory) goto done;
+    if (!manager || !manager4 || !request_factory) goto done;
 
     WindowsCreateString( L"https://login.microsoft.com", 26, &id );
-    WindowsCreateString( L"organizations", 13, &authority );
-    WindowsCreateString( L"d3590ed6-52b3-4102-aeff-aad2292ab01c", 36, &client_id );
+    WindowsCreateString( L"consumers", 9, &authority );
+    WindowsCreateString( L"00000000480728C5", 16, &client_id );
     WindowsCreateString( L"service::officeapps.live.com", 28, &scope );
     hr = manager->lpVtbl->FindAccountProviderWithAuthorityAsync( manager, id, authority, &operation );
     ok( hr == S_OK && operation, "silent provider start got %#lx, %p.\n", hr, operation );
@@ -1611,6 +1846,7 @@ static void test_silent_token_operations(void)
     hr = request_factory->lpVtbl->Create( request_factory, provider, scope, client_id, &request );
     ok( hr == S_OK && request, "silent request create got %#lx, %p.\n", hr, request );
     if (!request) goto done;
+    test_enable_consumer_batch( request );
     WindowsCreateString( resource_scope_name, ARRAY_SIZE(resource_scope_name) - 1, &resource_scope );
     hr = request_factory->lpVtbl->Create( request_factory, provider, resource_scope, client_id,
                                           &resource_request );
@@ -1619,7 +1855,26 @@ static void test_silent_token_operations(void)
 
     test_silent_environment( L"success" );
     ok( test_write_account_fixture(), "failed to write account fixture.\n" );
-    WindowsCreateString( L"plan01-account-id", 17, &account_id );
+    hr = manager4->lpVtbl->FindAllAccountsWithClientIdAsync( manager4, provider, client_id, &operation );
+    ok( hr == S_OK && operation, "silent account enumeration got %#lx, %p.\n", hr, operation );
+    if (operation)
+    {
+        test_async_operation( operation, &test_iid_IAsyncOperation_FindAllAccountsResult,
+                              &test_iid_IAsyncOperation_WebAccount, &find_operation_result );
+        operation = NULL;
+    }
+    if (find_operation_result)
+    {
+        struct test_find_result *find_result = (void *)find_operation_result;
+
+        hr = find_result->lpVtbl->get_Accounts( find_result, &accounts );
+        ok( hr == S_OK && accounts, "silent account result got %#lx, %p.\n", hr, accounts );
+        if (accounts) test_nonempty_account_vector( accounts, provider );
+        accounts = NULL;
+        find_result->lpVtbl->Release( find_result );
+        find_operation_result = NULL;
+    }
+    WindowsCreateString( L"CA5251D2BBF7D062", 16, &account_id );
     hr = manager->lpVtbl->FindAccountAsync( manager, provider, account_id, &operation );
     ok( hr == S_OK && operation, "silent account start got %#lx, %p.\n", hr, operation );
     if (operation)
@@ -1629,6 +1884,7 @@ static void test_silent_token_operations(void)
         operation = NULL;
     }
     ok( !!account, "silent account fixture did not produce a WebAccount.\n" );
+    if (account) test_account_provider( account, provider );
 
     /* Both public entry points use the same pending operation and helper
      * handshake. The account overload is completed after its caller-owned
@@ -1640,7 +1896,7 @@ static void test_silent_token_operations(void)
         account = NULL;
     }
     test_silent_cancel_before_mutex( manager, request, &events );
-    test_silent_projection_snapshot( manager, request, &events );
+    test_silent_projection_snapshot( manager, request, provider, &events );
     IInspectable_Release( provider );
     provider = NULL;
     if (resource_request) test_silent_completion_before_handler( manager, resource_request, &events );
@@ -1658,6 +1914,7 @@ done:
     if (account) IInspectable_Release( account );
     if (provider) IInspectable_Release( provider );
     if (request_factory) request_factory->lpVtbl->Release( request_factory );
+    if (manager4) manager4->lpVtbl->Release( manager4 );
     if (manager) manager->lpVtbl->Release( manager );
     if (factory) IActivationFactory_Release( factory );
     WindowsDeleteString( class );

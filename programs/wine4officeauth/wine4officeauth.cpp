@@ -53,8 +53,10 @@ static const char teams_nested_client_id[] = "f4060917-6abe-40d7-baa6-f634c0eda4
 static const char office_scope[] = "https://officeapps.live.com/.default offline_access openid profile";
 static const char licensing_scope[] = "https://licensing.m365.svc.cloud.microsoft/.default";
 /* A consumer subscription is licensed through Live ID, which cannot serve the
- * AAD licensing scope above. */
-static const char consumer_licensing_scope[] = "service::officeapps.live.com::MBI_SSL";
+ * AAD licensing scope above. Request the same RPS service ticket that Office
+ * asks OnlineId to return. */
+static const char consumer_licensing_scope[] =
+    "service::officeapps.live.com::MBI_SSL_SHORT";
 static const char redirect_uri[] =
     "ms-appx-web://Microsoft.AAD.BrokerPlugin/d3590ed6-52b3-4102-aeff-aad2292ab01c";
 static const WCHAR redirect_prefix[] = L"ms-appx-web://Microsoft.AAD.BrokerPlugin/";
@@ -74,11 +76,13 @@ static std::string oauth_consumer_client_id, oauth_consumer_scope;
  * which refuse them outright. Office requests them with this Live ID
  * application; matching the exact id keeps unrelated clients on the AAD path. */
 static const char consumer_client_id[] = "00000000480728C5";
+/* The same first-party Office application is represented as a GUID by the AAD
+ * broker.  The /consumers token endpoint accepts the legacy Live ID client id
+ * but returns this canonical value in the ID token audience. */
+static const char consumer_aad_client_id[] = "00000000-0000-0000-0000-0000480728C5";
 
 /* Live ID serves RPS scopes ("service::<host>::MBI_SSL*") plus the OpenID
- * scopes. An AAD resource scope such as
- * https://consentservice.microsoft.com/... has no Live ID equivalent, and
- * asking for one renders a Microsoft error page inside the sign-in window. */
+ * scopes. URL resource scopes are served by the AAD /consumers endpoint. */
 static bool consumer_scope_supported(const std::string &scope)
 {
     size_t pos = 0;
@@ -98,6 +102,13 @@ static bool is_consumer_identity(const std::string &client_id, const std::string
 {
     (void)scope;
     return client_id == consumer_client_id;
+}
+
+static bool client_id_matches_audience(const std::string &requested_client_id,
+                                       const std::string &audience)
+{
+    return audience == requested_client_id ||
+           (requested_client_id == consumer_client_id && audience == consumer_aad_client_id);
 }
 static std::vector<BYTE> pending_auth_post;
 static std::wstring pending_auth_path;
@@ -858,7 +869,9 @@ static bool discover_tenant(const std::string &domain, std::string &tenant)
 static bool token_request(const std::string &body, std::string &response,
                           const std::string &tenant = "organizations")
 {
-    if (oauth_consumer)
+    /* Personal-account RPS requests use Live ID.  A URL resource scope still
+     * uses the AAD /consumers endpoint even when it follows a Live ID login. */
+    if (oauth_consumer && tenant != "consumers")
         return http_post(L"login.live.com", L"/oauth20_token.srf", body, response);
     std::wstring path = utf8_to_wide("/" + tenant + "/oauth2/v2.0/token");
     return http_post(L"login.microsoftonline.com", path.c_str(), body, response);
@@ -901,13 +914,15 @@ static bool parse_token_set(const std::string &response, token_set &tokens,
 
 static bool refresh_scope(const std::string &refresh_token, const char *scope,
                           token_set &tokens, const token_set *previous = NULL,
-                          const char *requested_client_id = client_id)
+                          const char *requested_client_id = client_id,
+                          const std::string &tenant = "organizations")
 {
     std::string response;
     std::string body = "client_id=" + std::string(requested_client_id) +
         "&grant_type=refresh_token&refresh_token=" + url_encode(refresh_token) +
         "&scope=" + url_encode(scope);
-    bool success = token_request(body, response) && parse_token_set(response, tokens, previous);
+    bool success = token_request(body, response, tenant) &&
+                   parse_token_set(response, tokens, previous);
     secure_clear(body);
     secure_clear(response);
     return success;
@@ -1618,14 +1633,14 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     /* An RPS scope is already in its final form; the /.default normalisation
      * only applies to AAD resource scopes. */
     bool consumer = is_consumer_identity(requested_client_id, requested_scope);
-    if (consumer && !consumer_scope_supported(requested_scope)) return false;
-    std::string scope = consumer ? requested_scope : normalize_resource_scope(requested_scope);
+    bool consumer_live = consumer && consumer_scope_supported(requested_scope);
+    std::string scope = consumer_live ? requested_scope : normalize_resource_scope(requested_scope);
     bool success = !scope.empty() &&
         (consumer || requested_client_id == client_id || requested_client_id == teams_client_id ||
          requested_client_id == teams_nested_client_id) &&
         cache_record_load(login_hint, account);
 
-    if (consumer)
+    if (consumer_live)
     {
         oauth_consumer = true;
         oauth_consumer_client_id = requested_client_id;
@@ -1633,17 +1648,21 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     }
     if (success)
     {
-        std::string oidc_scope = consumer ? scope : scope + " offline_access openid profile";
-        success = refresh_scope(account.office.refresh_token, oidc_scope.c_str(), resource, NULL,
-                                requested_client_id.c_str());
+        std::string oidc_scope = consumer_live ? scope : scope + " offline_access openid profile";
+        success = refresh_scope(account.office.refresh_token, oidc_scope.c_str(), resource,
+                                consumer_live ? &account.office : NULL,
+                                requested_client_id.c_str(), consumer ? "consumers" : "organizations");
         secure_clear(oidc_scope);
     }
-    if (success && !consumer)
+    if (success && !consumer_live)
     {
         std::string payload, audience;
-        success = jwt_payload(resource.id_token, payload) &&
-                  json_string(payload, "aud", audience) && audience == requested_client_id &&
-                  cache_record_identity_valid(account, login_hint);
+        bool payload_valid = jwt_payload(resource.id_token, payload);
+        bool audience_present = payload_valid && json_string(payload, "aud", audience);
+        bool audience_matches = audience_present &&
+                                client_id_matches_audience(requested_client_id, audience);
+        bool identity_valid = cache_record_identity_valid(account, login_hint);
+        success = payload_valid && audience_present && audience_matches && identity_valid;
         secure_clear(payload);
         secure_clear(audience);
     }
@@ -1659,10 +1678,16 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     }
     if (success)
     {
-        account.office.access_token = resource.access_token;
-        account.office.id_token = resource.id_token;
-        if (!resource.refresh_token.empty()) account.office.refresh_token = resource.refresh_token;
-        account.expires = unix_time() + resource.expires_in;
+        /* AAD and Live ID issue different refresh-token families for the same
+         * consumer account.  Keep the primary Live ID generation intact while
+         * publishing the requested AAD access token in its scope slot. */
+        if (!consumer || consumer_live)
+        {
+            account.office.access_token = resource.access_token;
+            account.office.id_token = resource.id_token;
+            if (!resource.refresh_token.empty()) account.office.refresh_token = resource.refresh_token;
+            account.expires = unix_time() + resource.expires_in;
+        }
         success = cache_record_save(account);
     }
     secure_clear(scope);
@@ -2694,26 +2719,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
     OleInitialize(NULL);
     bool resource_mode = !resource_scope.empty() && !resource_client_id.empty() &&
                          !resource_redirect_uri.empty();
+    bool consumer_resource_mode;
     /* A consumer request must keep the app identity Office asked with; the
      * hardcoded work/school client is rejected for personal accounts. */
     oauth_consumer = !resource_mode && is_consumer_identity(request_client_id, request_scope);
+    consumer_resource_mode = oauth_consumer && !consumer_scope_supported(request_scope);
     if (oauth_consumer)
     {
-        if (!consumer_scope_supported(request_scope))
-        {
-            /* Report "no token" rather than opening a browser that can only
-             * render a Microsoft error page for this scope. */
-            OleUninitialize();
-            CoUninitialize();
-            return 3;
-        }
         oauth_consumer_client_id = request_client_id;
-        oauth_consumer_scope = request_scope;
+        /* URL resource scopes are refreshed through AAD after establishing
+         * the personal account with a Live ID RPS request. */
+        oauth_consumer_scope = consumer_resource_mode ? consumer_licensing_scope : request_scope;
     }
     if (cached_account_matches(login_hint))
     {
-        success = resource_mode ? refresh_resource_and_save(resource_scope, resource_client_id, login_hint) :
-                                  refresh_and_save(login_hint);
+        if (resource_mode)
+            success = refresh_resource_and_save(resource_scope, resource_client_id, login_hint);
+        else if (consumer_resource_mode)
+            success = refresh_resource_and_save(request_scope, request_client_id, login_hint);
+        else
+            success = refresh_and_save(login_hint);
         if (success)
         {
             OleUninitialize();
@@ -2725,7 +2750,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
                               resource_mode ? resource_client_id :
                                   oauth_consumer ? request_client_id : client_id,
                               resource_mode ? resource_scope + " offline_access openid profile" :
-                                  oauth_consumer ? request_scope : office_scope,
+                                  oauth_consumer ? oauth_consumer_scope : office_scope,
                               resource_mode ? resource_redirect_uri :
                                   oauth_consumer ? consumer_redirect_uri : redirect_uri, verifier);
     if (success)
@@ -2733,6 +2758,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
                                                               resource_client_id, resource_redirect_uri,
                                                               login_hint) :
                                   exchange_and_save(oauth_code, verifier, login_hint);
+    if (success && consumer_resource_mode)
+        success = refresh_resource_and_save(request_scope, request_client_id, login_hint);
     SecureZeroMemory((void *)oauth_code.data(), oauth_code.size());
     SecureZeroMemory((void *)verifier.data(), verifier.size());
     secure_clear(resource_scope);

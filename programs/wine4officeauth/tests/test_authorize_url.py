@@ -21,6 +21,55 @@ class AuthorizeUrlSourceTest(unittest.TestCase):
         self.assertLess(validate, allocate)
         self.assertLess(allocate, navigate)
 
+    def test_legacy_consumer_client_id_accepts_the_aad_audience_alias(self):
+        source = (pathlib.Path(__file__).parents[1] / "wine4officeauth.cpp").read_text()
+
+        self.assertIn(
+            'consumer_aad_client_id[] = "00000000-0000-0000-0000-0000480728C5"',
+            source,
+        )
+        self.assertIn(
+            "requested_client_id == consumer_client_id && audience == consumer_aad_client_id",
+            source,
+        )
+
+    def test_consumer_url_scopes_use_the_aad_consumers_endpoint(self):
+        source = (pathlib.Path(__file__).parents[1] / "wine4officeauth.cpp").read_text()
+        refresh = source[source.index("static bool refresh_resource_and_save") :]
+
+        live_route = refresh.index(
+            "bool consumer_live = consumer && consumer_scope_supported(requested_scope);"
+        )
+        normalize = refresh.index(
+            "std::string scope = consumer_live ? requested_scope : normalize_resource_scope(requested_scope);"
+        )
+        tenant = refresh.index('consumer ? "consumers" : "organizations"')
+        preserve_liveid = refresh.index("if (!consumer || consumer_live)")
+
+        self.assertIn('if (oauth_consumer && tenant != "consumers")', source)
+        self.assertLess(live_route, normalize)
+        self.assertLess(normalize, tenant)
+        self.assertLess(tenant, preserve_liveid)
+
+    def test_consumer_url_scope_interactive_fallback_bootstraps_live_id(self):
+        source = (pathlib.Path(__file__).parents[1] / "wine4officeauth.cpp").read_text()
+        main = source[source.index("int WINAPI wWinMain") :]
+
+        classify = main.index(
+            "consumer_resource_mode = oauth_consumer && !consumer_scope_supported(request_scope);"
+        )
+        bootstrap = main.index(
+            "oauth_consumer_scope = consumer_resource_mode ? consumer_licensing_scope : request_scope;"
+        )
+        browser_scope = main.index("oauth_consumer ? oauth_consumer_scope : office_scope")
+        resource_refresh = main.rindex(
+            "success = refresh_resource_and_save(request_scope, request_client_id, login_hint);"
+        )
+
+        self.assertLess(classify, bootstrap)
+        self.assertLess(bootstrap, browser_scope)
+        self.assertLess(browser_scope, resource_refresh)
+
 
 if __name__ == "__main__":
     unittest.main()
