@@ -77,6 +77,22 @@ sync_test("date_now", function() {
     Date.now(1, 2, 3);
 });
 
+sync_test("intl number format", function() {
+    if(typeof Intl === "undefined") {
+        win_skip("Intl is not available");
+        return;
+    }
+
+    var formatter = new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+    var format = formatter.format;
+    var result = format(1.2);
+
+    ok(result === "1.20", "detached NumberFormat.format returned " + result);
+});
+
 sync_test("toISOString", function() {
     function expect(date, expected) {
         var s = date.toISOString();
