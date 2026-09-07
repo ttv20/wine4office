@@ -11431,6 +11431,7 @@ START_TEST(dxgi)
     run_on_d3d10(test_swapchain_present1_history);
     test_swapchain_present1_scroll();
     test_swapchain_present1_lifetime();
+    test_swapchain_present_storage();
     run_on_d3d10(test_swapchain_backbuffer_index);
     run_on_d3d10(test_swapchain_formats);
     run_on_d3d10(test_output_ownership);
