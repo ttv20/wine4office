@@ -296,8 +296,8 @@ static void create_file_test(void)
         "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
 
     status = pNtQueryFullAttributesFile( &attr, &info );
-    todo_wine ok( status == STATUS_OBJECT_NAME_INVALID,
-                  "query %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    ok( status == STATUS_OBJECT_NAME_INVALID,
+        "query %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
 
     pRtlInitUnicodeString( &nameW, pathInvalidNt2W );
     status = pNtCreateFile( &dir, GENERIC_READ|SYNCHRONIZE, &attr, &io, NULL, 0,
@@ -320,6 +320,46 @@ static void create_file_test(void)
     status = pNtQueryFullAttributesFile( &attr, &info );
     ok( status == STATUS_OBJECT_NAME_INVALID,
         "query %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+}
+
+static void test_query_missing_object_attributes(void)
+{
+    static const struct
+    {
+        const WCHAR *path;
+        NTSTATUS status;
+    } tests[] =
+    {
+        { L"\\??\\wine-test-missing-device", STATUS_OBJECT_NAME_NOT_FOUND },
+        { L"\\Device\\wine-test-missing-device", STATUS_OBJECT_NAME_NOT_FOUND },
+        { L"\\??\\wine-test-missing-device\\child", STATUS_OBJECT_PATH_NOT_FOUND },
+    };
+    FILE_NETWORK_OPEN_INFORMATION full;
+    FILE_BASIC_INFORMATION basic;
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name;
+    NTSTATUS status;
+    BOOL ret;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        pRtlInitUnicodeString( &name, tests[i].path );
+        InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+        status = pNtQueryFullAttributesFile( &attr, &full );
+        ok( status == tests[i].status, "%s: full attributes returned %#lx\n",
+            wine_dbgstr_w(tests[i].path), status );
+        status = pNtQueryAttributesFile( &attr, &basic );
+        ok( status == tests[i].status, "%s: basic attributes returned %#lx\n",
+            wine_dbgstr_w(tests[i].path), status );
+    }
+    SetLastError( 0xdeadbeef );
+    ret = GetFileAttributesExW( L"\\\\?\\wine-test-missing-device", GetFileExInfoStandard, &data );
+    ok( !ret && GetLastError() == ERROR_FILE_NOT_FOUND, "got %d, error %lu\n", ret, GetLastError() );
+    SetLastError( 0xdeadbeef );
+    ret = GetFileAttributesExW( L"\\\\?\\NUL", GetFileExInfoStandard, &data );
+    ok( !ret && GetLastError() == ERROR_INVALID_PARAMETER, "got %d, error %lu\n", ret, GetLastError() );
 }
 
 static void open_file_test(void)
@@ -7570,6 +7610,7 @@ START_TEST(file)
     test_read_write();
     test_NtCreateFile();
     create_file_test();
+    test_query_missing_object_attributes();
     open_file_test();
     delete_file_test();
     read_file_test();

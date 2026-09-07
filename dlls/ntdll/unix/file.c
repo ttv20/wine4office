@@ -5035,6 +5035,37 @@ NTSTATUS WINAPI NtDeleteFile( OBJECT_ATTRIBUTES *attr )
 }
 
 
+static NTSTATUS query_object_attributes( OBJECT_ATTRIBUTES *attr, void *info, FILE_INFORMATION_CLASS class )
+{
+    int fd, needs_close;
+    unsigned int options;
+    struct stat st;
+    ULONG attributes;
+    HANDLE handle;
+    NTSTATUS status;
+
+    status = server_open_file_object( &handle, FILE_READ_ATTRIBUTES, attr,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     FILE_OPEN_REPARSE_POINT );
+    if (!status)
+    {
+        status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
+        if (!status)
+        {
+            if (fd_get_file_info( handle, fd, options, &st, &attributes, NULL ) == -1)
+                status = errno_to_status( errno );
+            else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
+                status = STATUS_INVALID_PARAMETER;
+            else
+                status = fill_file_info( &st, attributes, info, class );
+            if (needs_close) close( fd );
+        }
+        else if (status == STATUS_BAD_DEVICE_TYPE) status = STATUS_INVALID_PARAMETER;
+        NtClose( handle );
+    }
+    return status;
+}
+
 /******************************************************************************
  *              NtQueryFullAttributesFile   (NTDLL.@)
  */
@@ -5068,6 +5099,8 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
         else
             fill_file_info( &st, attributes, info, FileNetworkOpenInformation );
     }
+    else if (status == STATUS_BAD_DEVICE_TYPE)
+        status = query_object_attributes( &new_attr, info, FileNetworkOpenInformation );
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
     free( nt_name.Buffer );
@@ -5104,6 +5137,8 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
         else
             status = fill_file_info( &st, attributes, info, FileBasicInformation );
     }
+    else if (status == STATUS_BAD_DEVICE_TYPE)
+        status = query_object_attributes( &new_attr, info, FileBasicInformation );
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
     free( nt_name.Buffer );

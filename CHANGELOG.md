@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
+- Restore Outlook account setup after Office repairs its Click-to-Run registry data.
 - Restore Excel worksheets and formula bars when using Vulkan on Wayland.
 - Prevent a Wayland window-restacking deadlock when resizing Excel.
 - Fix distorted rounded selection borders around PowerPoint slide thumbnails.
