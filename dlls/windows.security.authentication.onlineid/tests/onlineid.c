@@ -1076,8 +1076,48 @@ static BOOL test_write_file( const WCHAR *path, const char *value )
     return TRUE;
 }
 
+static BOOL test_scoped_token_path( WCHAR path[64], const WCHAR *client_id, const WCHAR *scope )
+{
+    static const char account_id[] = "plan01-account-id";
+    unsigned long long hash = 1469598103934665603ULL;
+    char utf8[2048];
+    const char *cursor;
+    int length, i;
+
+    for (cursor = account_id; *cursor; ++cursor)
+    {
+        hash ^= (unsigned char)*cursor;
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
+    if (!(length = WideCharToMultiByte( CP_UTF8, 0, client_id, -1, utf8, sizeof(utf8), NULL, NULL )))
+        return FALSE;
+    for (i = 0; i < length - 1; ++i)
+    {
+        hash ^= (unsigned char)utf8[i];
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
+    if (!(length = WideCharToMultiByte( CP_UTF8, 0, scope, -1, utf8, sizeof(utf8), NULL, NULL )))
+        return FALSE;
+    for (i = 0; i < length - 1; ++i)
+    {
+        hash ^= (unsigned char)utf8[i];
+        hash *= 1099511628211ULL;
+    }
+    return swprintf( path, 64, L"C:\\wam-scope-%016I64x.txt", hash ) >= 0;
+}
+
 static void test_delete_token_files(void)
 {
+    static const WCHAR consumer_client[] = L"00000000480728C5";
+    static const WCHAR office_client[] = L"d3590ed6-52b3-4102-aeff-aad2292ab01c";
+    static const WCHAR consumer_scope[] = L"service::officeapps.live.com";
+    static const WCHAR resource_scope[] = L"https://graph.microsoft.com/.default";
+    WCHAR path[64];
+
     DeleteFileW( L"C:\\wam-refresh-token.txt" );
     DeleteFileW( L"C:\\wam-access-token.txt" );
     DeleteFileW( L"C:\\wam-licensing-token.txt" );
@@ -1092,7 +1132,12 @@ static void test_delete_token_files(void)
     DeleteFileW( L"C:\\wam-account-display-name.txt" );
     DeleteFileW( L"C:\\wam-client-info.txt" );
     DeleteFileW( L"C:\\wam-id-token.txt" );
+    if (test_scoped_token_path( path, consumer_client, consumer_scope )) DeleteFileW( path );
+    if (test_scoped_token_path( path, consumer_client, resource_scope )) DeleteFileW( path );
+    if (test_scoped_token_path( path, office_client, consumer_scope )) DeleteFileW( path );
+    /* Remove the pre-client-keying slot as well; fixed readers must ignore it. */
     DeleteFileW( L"C:\\wam-scope-9838a88e0e66ec67.txt" );
+    DeleteFileW( L"C:\\wam-scope-825e574a1cf9e083.txt" );
 }
 
 static BOOL test_write_refresh_token(void)
@@ -1124,18 +1169,19 @@ static BOOL test_write_account_fixture(void)
            test_write_file( L"C:\\wam-account-authority.txt", "https://login.microsoftonline.com/consumers/" );
 }
 
-static BOOL test_write_scoped_consumer_fixture(void)
+static BOOL test_write_scoped_fixture( const WCHAR *client_id, const WCHAR *scope,
+                                       const char *token )
 {
-    char value[96];
+    WCHAR path[64];
+    char value[192];
     FILETIME time;
     ULONGLONG expires;
 
     GetSystemTimeAsFileTime( &time );
     expires = (((ULONGLONG)time.dwHighDateTime << 32) | time.dwLowDateTime) /
               10000000 - 11644473600ULL + 600;
-    snprintf( value, ARRAY_SIZE(value), "%llu|plan01-scope-token", expires );
-    /* FNV-1a("plan01-account-id\\nservice::officeapps.live.com"). */
-    return test_write_file( L"C:\\wam-scope-9838a88e0e66ec67.txt", value );
+    snprintf( value, ARRAY_SIZE(value), "%llu|%s", expires, token );
+    return test_scoped_token_path( path, client_id, scope ) && test_write_file( path, value );
 }
 
 static void test_silent_environment( const WCHAR *mode )
@@ -1238,6 +1284,43 @@ static void test_silent_check_response_status( IAsyncOperation_IInspectable *typ
             hr, status, expected );
         token_result->lpVtbl->Release( token_result );
     }
+    IInspectable_Release( result );
+}
+
+static void test_silent_check_response_token( IAsyncOperation_IInspectable *typed, const WCHAR *expected )
+{
+    struct test_token_result *token_result = NULL;
+    struct test_token_response *response;
+    struct test_vector *responses;
+    IInspectable *result = NULL, *responses_obj = NULL, *response_obj = NULL;
+    HSTRING token = NULL;
+    HRESULT hr;
+
+    hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
+    ok( hr == S_OK && result, "token response result got %#lx, %p.\n", hr, result );
+    if (!result) return;
+    hr = IInspectable_QueryInterface( result, &test_iid_IWebTokenRequestResult, (void **)&token_result );
+    ok( hr == S_OK && token_result, "token response result QI got %#lx, %p.\n", hr, token_result );
+    if (!token_result) goto done;
+    hr = token_result->lpVtbl->get_ResponseData( token_result, &responses_obj );
+    ok( hr == S_OK && responses_obj, "token response data got %#lx, %p.\n", hr, responses_obj );
+    if (!responses_obj) goto done;
+    responses = (struct test_vector *)responses_obj;
+    hr = responses->lpVtbl->GetAt( responses, 0, &response_obj );
+    ok( hr == S_OK && response_obj, "token response got %#lx, %p.\n", hr, response_obj );
+    if (!response_obj) goto done;
+    response = (struct test_token_response *)response_obj;
+    hr = response->lpVtbl->get_Token( response, &token );
+    ok( hr == S_OK && token, "response token got %#lx.\n", hr );
+    ok( token && !wcscmp( WindowsGetStringRawBuffer( token, NULL ), expected ),
+        "response token %s, expected %s.\n",
+        wine_dbgstr_w( WindowsGetStringRawBuffer( token, NULL ) ), wine_dbgstr_w( expected ) );
+
+done:
+    WindowsDeleteString( token );
+    if (response_obj) IInspectable_Release( response_obj );
+    if (responses_obj) IInspectable_Release( responses_obj );
+    if (token_result) token_result->lpVtbl->Release( token_result );
     IInspectable_Release( result );
 }
 
@@ -1539,6 +1622,8 @@ done:
 static void test_silent_completion_before_handler( struct test_manager_statics *manager, IInspectable *request,
                                                    struct test_silent_events *events )
 {
+    static const WCHAR client_id[] = L"00000000480728C5";
+    static const WCHAR scope[] = L"https://graph.microsoft.com/.default";
     IInspectable *operation = NULL, *result = NULL;
     IAsyncOperation_IInspectable *typed = NULL;
     IAsyncInfo *info = NULL;
@@ -1548,14 +1633,19 @@ static void test_silent_completion_before_handler( struct test_manager_statics *
     HRESULT hr;
 
     test_silent_events_reset( events );
-    test_silent_environment( L"success" );
+    test_silent_environment( L"block" );
     ok( test_write_success_fixture(), "failed to write silent completion fixture.\n" );
+    ok( test_write_file( L"C:\\wam-token-expires-on.txt", "1" ),
+        "failed to expire the primary token fixture.\n" );
     hr = test_silent_start( manager, request, NULL, &operation );
     ok( hr == S_OK && operation, "completion-before-handler start got %#lx, %p.\n", hr, operation );
     if (!operation) goto done;
     worker_exists = TRUE;
     ok( test_wait_event( events->started, "fresh resource helper start" ),
         "fresh resource token was reused without proving its scope and client.\n" );
+    ok( test_write_scoped_fixture( client_id, scope, "plan01-refreshed-scope-token" ),
+        "failed to publish the refreshed scoped token fixture.\n" );
+    SetEvent( events->helper_release );
     ok( test_wait_event( events->helper_completed, "fresh resource helper completion" ),
         "fresh resource helper did not complete.\n" );
     ok( test_wait_event( events->operation_completed, "operation completion" ),
@@ -1576,6 +1666,7 @@ static void test_silent_completion_before_handler( struct test_manager_statics *
         "late callback status %u, status hr %#lx, results hr %#lx.\n",
         handler->status, handler->status_hr, handler->result_hr );
     test_silent_check_response_status( typed, 0 );
+    test_silent_check_response_token( typed, L"plan01-refreshed-scope-token" );
     result = NULL;
     hr = IAsyncOperation_IInspectable_GetResults( typed, &result );
     ok( hr == S_OK && result, "late results got %#lx, %p.\n", hr, result );
@@ -1595,6 +1686,8 @@ done:
 static void test_silent_projection_snapshot( struct test_manager_statics *manager, IInspectable *request,
                                              IInspectable *provider, struct test_silent_events *events )
 {
+    static const WCHAR client_id[] = L"00000000480728C5";
+    static const WCHAR scope[] = L"service::officeapps.live.com";
     static const WCHAR cache_mutex_name[] = L"Local\\Wine4OfficeWamCache";
     IInspectable *operation = NULL;
     IAsyncOperation_IInspectable *typed = NULL;
@@ -1608,7 +1701,8 @@ static void test_silent_projection_snapshot( struct test_manager_statics *manage
     test_silent_events_reset( events );
     test_silent_environment( L"success" );
     ok( test_write_success_fixture(), "failed to write projection snapshot fixture.\n" );
-    ok( test_write_scoped_consumer_fixture(), "failed to write scoped consumer fixture.\n" );
+    ok( test_write_scoped_fixture( client_id, scope, "plan01-scope-token" ),
+        "failed to write scoped consumer fixture.\n" );
     cache_mutex = CreateMutexW( NULL, FALSE, cache_mutex_name );
     ok( !!cache_mutex, "failed to create projection cache mutex, error %lu.\n", GetLastError() );
     if (!cache_mutex) goto done;
@@ -1785,6 +1879,45 @@ done:
     if (operation) IInspectable_Release( operation );
 }
 
+static void test_silent_scoped_client_isolation( struct test_manager_statics *manager,
+                                                 IInspectable *request,
+                                                 struct test_silent_events *events )
+{
+    static const WCHAR other_client[] = L"d3590ed6-52b3-4102-aeff-aad2292ab01c";
+    static const WCHAR scope[] = L"https://graph.microsoft.com/.default";
+    IInspectable *operation = NULL;
+    IAsyncOperation_IInspectable *typed = NULL;
+    IAsyncInfo *info = NULL;
+    HRESULT hr;
+
+    test_silent_events_reset( events );
+    test_silent_environment( L"fail" );
+    ok( test_write_success_fixture(), "failed to write client-isolation fixture.\n" );
+    ok( test_write_scoped_fixture( other_client, scope, "plan01-other-client-token" ),
+        "failed to write the other-client scoped fixture.\n" );
+    ok( test_write_file( L"C:\\wam-scope-825e574a1cf9e083.txt",
+                         "4102444800|plan01-legacy-scope-token" ),
+        "failed to write the legacy scope-only fixture.\n" );
+
+    hr = test_silent_start( manager, request, NULL, &operation );
+    ok( hr == S_OK && operation, "client-isolation start got %#lx, %p.\n", hr, operation );
+    if (!operation) goto done;
+    ok( test_wait_event( events->operation_completed, "client-isolation operation" ),
+        "client-isolation operation did not finish.\n" );
+    ok( test_wait_event( events->worker_finished, "client-isolation worker" ),
+        "client-isolation worker did not finish.\n" );
+    ok( WaitForSingleObject( events->started, 0 ) == WAIT_OBJECT_0,
+        "a scoped token from another client bypassed resource refresh.\n" );
+    ok( test_silent_get_abi( operation, &typed, &info ), "client-isolation ABI setup failed.\n" );
+    if (typed) test_silent_check_response_status( typed, 3 );
+    if (typed && info) test_silent_postclose( typed, info );
+
+done:
+    if (typed) IAsyncOperation_IInspectable_Release( typed );
+    if (info) IAsyncInfo_Release( info );
+    if (operation) IInspectable_Release( operation );
+}
+
 static void test_silent_token_operations(void)
 {
     static const WCHAR class_name[] =
@@ -1899,6 +2032,7 @@ static void test_silent_token_operations(void)
     test_silent_projection_snapshot( manager, request, provider, &events );
     IInspectable_Release( provider );
     provider = NULL;
+    if (resource_request) test_silent_scoped_client_isolation( manager, resource_request, &events );
     if (resource_request) test_silent_completion_before_handler( manager, resource_request, &events );
     test_silent_helper_outcomes( manager, request, &events );
     if (resource_request) test_silent_resource_refresh_failure( manager, resource_request, &events );

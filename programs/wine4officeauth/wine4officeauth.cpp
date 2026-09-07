@@ -956,17 +956,23 @@ static void secure_clear(cache_record &record)
     record.expires = 0;
 }
 
-/* Office requests several scopes and the projection stores a single access
- * token, so each refresh overwrote the previous scope's token and Office kept
- * rejecting the mismatched result. Key each token by its scope instead. */
-static std::wstring scope_projection_name(const std::string &scope, const std::string &account_id)
+/* Office requests several scopes and clients, so each token must retain the
+ * complete identity that determines whether it may satisfy a later request. */
+static std::wstring scope_projection_name(const std::string &scope, const std::string &client_id,
+                                          const std::string &account_id)
 {
     unsigned long long hash = 1469598103934665603ULL;
     WCHAR name[48];
 
-    /* Key on the account as well as the scope: a token minted for one account
-     * must never be handed to another that later asks for the same scope. */
+    /* Keep this byte sequence in sync with load_scoped_wam_token(). */
     for (unsigned char ch : account_id)
+    {
+        hash ^= ch;
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
+    for (unsigned char ch : client_id)
     {
         hash ^= ch;
         hash *= 1099511628211ULL;
@@ -978,7 +984,7 @@ static std::wstring scope_projection_name(const std::string &scope, const std::s
         hash ^= ch;
         hash *= 1099511628211ULL;
     }
-    swprintf(name, ARRAYSIZE(name), L"wam-scope-%016llx.dat", hash);
+    swprintf(name, ARRAYSIZE(name), L"wam-scope-%016I64x.dat", hash);
     return name;
 }
 
@@ -1707,7 +1713,8 @@ static bool refresh_resource_and_save(const std::string &requested_scope,
     {
         std::string scoped = std::to_string(unix_time() + resource.expires_in) + "|" +
                              resource.access_token;
-        success = protected_write(scope_projection_name(requested_scope, account.account_id).c_str(),
+        success = protected_write(scope_projection_name(requested_scope, requested_client_id,
+                                                         account.account_id).c_str(),
                                   scoped);
         secure_clear(scoped);
     }
@@ -2633,6 +2640,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, WCHAR *command_line,
         DeleteFileW(cache_file(first_bundle.c_str()).c_str());
         DeleteFileW(cache_file(second_bundle.c_str()).c_str());
         success = recovered && cache_record_save(first) && cache_record_save(second);
+        if (success) success = scope_projection_name("scope", "client-a", first.account_id) !=
+                               scope_projection_name("scope", "client-b", first.account_id);
         if (success) success = cache_record_load(first.username, loaded) &&
                                loaded.office.refresh_token == first.office.refresh_token;
         if (success) success = cache_record_load(second.username, loaded) &&

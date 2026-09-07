@@ -2949,10 +2949,10 @@ static const struct web_token_request_result_vtbl token_result_vtbl =
 };
 
 
-/* Office requests several scopes and the projection stores a single access
- * token, so each refresh overwrote the previous scope's token and Office kept
- * rejecting the mismatched result. Key each token by its scope instead. */
-static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
+/* A scoped token is valid only for the account and OAuth client that obtained
+ * it, in addition to the requested scope. */
+static WCHAR *load_scoped_wam_token( const WCHAR *scopes, const WCHAR *client_id,
+                                     ULONGLONG *expires )
 {
     unsigned long long hash = 1469598103934665603ULL;
     char utf8[2048];
@@ -2961,14 +2961,23 @@ static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
     int length;
 
     if (expires) *expires = 0;
-    if (!scopes || !*scopes) return NULL;
+    if (!scopes || !*scopes || !client_id || !*client_id) return NULL;
 
-    /* Must match scope_projection_name() in wine4officeauth: the token is keyed
-     * by account as well as scope so one account never receives another's. */
+    /* Must match scope_projection_name() in wine4officeauth. */
     if (!(account_id = load_wam_token_file( L"C:\\wam-account-id.txt" ))) return NULL;
     length = WideCharToMultiByte( CP_UTF8, 0, account_id, -1, utf8, sizeof(utf8), NULL, NULL );
     free( account_id );
     if (!length) return NULL;
+    for (int i = 0; i < length - 1; i++)
+    {
+        hash ^= (unsigned char)utf8[i];
+        hash *= 1099511628211ULL;
+    }
+    hash ^= '\n';
+    hash *= 1099511628211ULL;
+
+    if (!(length = WideCharToMultiByte( CP_UTF8, 0, client_id, -1, utf8, sizeof(utf8), NULL, NULL )))
+        return NULL;
     for (int i = 0; i < length - 1; i++)
     {
         hash ^= (unsigned char)utf8[i];
@@ -2987,7 +2996,7 @@ static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
     /* load_wam_token_file() converts this logical legacy .txt name to the
      * encrypted .dat projection and retains the .txt path only as a test and
      * pre-DPAPI compatibility fallback. */
-    swprintf( name, ARRAY_SIZE(name), L"C:\\wam-scope-%016llx.txt", hash );
+    swprintf( name, ARRAY_SIZE(name), L"C:\\wam-scope-%016I64x.txt", hash );
     if (!(stored = load_wam_token_file( name ))) return NULL;
     if (!(separator = wcschr( stored, '|' )))
     {
@@ -3001,6 +3010,7 @@ static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
 }
 
 static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scopes,
+                                                const WCHAR *client_id,
                                                 IInspectable *account, IInspectable *provider,
                                                 BOOL consumer_batch, IInspectable **out )
 {
@@ -3023,7 +3033,7 @@ static HRESULT web_token_request_result_create( INT32 status, const WCHAR *scope
         consumer = wam_projection_is_consumer();
         path = is_office_licensing_scope( scopes ) ?
                L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
-        token = load_scoped_wam_token( scopes, &token_expires );
+        token = load_scoped_wam_token( scopes, client_id, &token_expires );
         if (!token) token = load_wam_token_file( path );
         if (!token) { token_result_Release( impl ); return HRESULT_FROM_WIN32( ERROR_NOT_FOUND ); }
         if (consumer && onlineid_scope_has_rps_service( scopes ) &&
@@ -3443,6 +3453,12 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
 {
     struct interactive_token_context *context = parameter;
     IInspectable *result = NULL;
+    const WCHAR *scope = WindowsGetStringRawBuffer( context->scopes, NULL );
+    const WCHAR *request_client = WindowsGetStringRawBuffer( context->client_id, NULL );
+    const WCHAR *resource_client = WindowsGetStringRawBuffer( context->resource_client_id, NULL );
+    const WCHAR *resource_redirect = WindowsGetStringRawBuffer( context->resource_redirect_uri, NULL );
+    const WCHAR *effective_client = scope && *scope && resource_client && *resource_client &&
+                                    resource_redirect && *resource_redirect ? resource_client : request_client;
     DWORD exit_code = 3;
     INT32 response_status = 4;
     HRESULT hr;
@@ -3454,11 +3470,10 @@ static DWORD WINAPI interactive_token_worker( void *parameter )
         if (!exit_code) response_status = 0;
         else if (exit_code == 2) response_status = 1;
     }
-    hr = web_token_request_result_create( response_status,
-            WindowsGetStringRawBuffer( context->scopes, NULL ), context->account,
+    hr = web_token_request_result_create( response_status, scope, effective_client, context->account,
             context->provider, context->consumer_batch, &result );
     if (FAILED(hr) && !response_status)
-        hr = web_token_request_result_create( 4, WindowsGetStringRawBuffer( context->scopes, NULL ),
+        hr = web_token_request_result_create( 4, scope, effective_client,
                                               context->account, context->provider,
                                               context->consumer_batch, &result );
     if (SUCCEEDED(hr)) provider_operation_complete( context->operation, result, Completed, S_OK );
@@ -3990,6 +4005,8 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
                                       const WCHAR *request_client_id, HANDLE cancel_event,
                                       BOOL *canceled )
 {
+    const WCHAR *effective_client = is_consumer_wam_client( request_client_id ) ?
+                                    request_client_id : client_id;
     const WCHAR *token_path = scopes && is_office_licensing_scope( scopes ) ?
                               L"C:\\wam-licensing-token.txt" : L"C:\\wam-access-token.txt";
     HANDLE cache_mutex = NULL;
@@ -4003,7 +4020,7 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
     TRACE( "silent request scopes %s resource_client %s request_client %s.\n",
            debugstr_w( scopes ), debugstr_w( client_id ), debugstr_w( request_client_id ) );
     if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
-    if ((token = load_scoped_wam_token( scopes, &scoped_expires )))
+    if ((token = load_scoped_wam_token( scopes, effective_client, &scoped_expires )))
     {
         WCHAR buffer[32];
         swprintf( buffer, ARRAY_SIZE(buffer), L"%I64u", scoped_expires );
@@ -4027,13 +4044,10 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
     }
     if (scopes && *scopes && !is_office_licensing_scope( scopes ) && !(have_token && scoped_expires))
     {
-        /* The projection does not retain the resource scope or client which
-         * produced its access token.  A fresh token therefore cannot prove
-         * that it is usable for this request; preserve the resource refresh
-         * until that identity is published transactionally with the token. */
+        /* A primary token cannot prove that it belongs to this exact scope and
+         * client. Refresh until that identity is published with the token. */
         have_token = FALSE;
-        helper = run_wine365_resource_refresh( scopes,
-                                              is_consumer_wam_client( request_client_id ) ? request_client_id : client_id,
+        helper = run_wine365_resource_refresh( scopes, effective_client,
                                               cancel_event, timeout, &exit_code );
         if (helper == HELPER_CANCELED)
         {
@@ -4051,8 +4065,13 @@ static BOOL prepare_silent_wam_token( const WCHAR *scopes, const WCHAR *client_i
         free( expires );
         expires = NULL;
         if (!(cache_mutex = silent_acquire_cache_mutex( cancel_event, canceled ))) goto done;
-        token = load_wam_token_file( token_path );
-        expires = load_wam_token_file( L"C:\\wam-token-expires-on.txt" );
+        scoped_expires = 0;
+        if ((token = load_scoped_wam_token( scopes, effective_client, &scoped_expires )))
+        {
+            WCHAR buffer[32];
+            swprintf( buffer, ARRAY_SIZE(buffer), L"%I64u", scoped_expires );
+            expires = wcsdup( buffer );
+        }
         silent_release_cache_mutex( cache_mutex );
         cache_mutex = NULL;
         have_token = silent_token_is_usable( token, expires );
@@ -4551,8 +4570,13 @@ finish_refresh:
         hr = canceled ? E_ABORT : E_FAIL;
     else
     {
+        const WCHAR *request_client = WindowsGetStringRawBuffer( impl->client_id, NULL );
+        const WCHAR *resource_client = WindowsGetStringRawBuffer( impl->resource_client_id, NULL );
+        const WCHAR *effective_client = is_consumer_wam_client( request_client ) ?
+                                        request_client : resource_client;
+
         hr = web_token_request_result_create( response_status,
-                WindowsGetStringRawBuffer( impl->scopes, NULL ), impl->account,
+                WindowsGetStringRawBuffer( impl->scopes, NULL ), effective_client, impl->account,
                 impl->provider, impl->consumer_batch, &result );
         silent_release_cache_mutex( cache_mutex );
         cache_mutex = NULL;

@@ -91,6 +91,14 @@ sync_test("intl number format", function() {
     var result = format(1.2);
 
     ok(result === "1.20", "detached NumberFormat.format returned " + result);
+
+    formatter = new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 4
+    });
+    ok(formatter.format(1.2) === "1.20", "NumberFormat did not pad to the minimum");
+    ok(formatter.format(1.2345) === "1.2345", "NumberFormat discarded permitted precision");
+    ok(formatter.format(1.23456) === "1.2346", "NumberFormat did not round to the maximum");
 });
 
 sync_test("toISOString", function() {
