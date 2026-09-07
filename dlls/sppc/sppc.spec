@@ -36,7 +36,7 @@
 @ stdcall SLGetAuthenticationResult(ptr ptr ptr)
 @ stub SLGetEncryptedPIDEx
 @ stub SLGetGenuineInformation
-@ stub SLGetInstalledProductKeyIds
+@ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr)
 @ stdcall SLGetLicense(ptr ptr ptr ptr)
 @ stdcall SLGetLicenseFileId(ptr long ptr ptr)
 @ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr)

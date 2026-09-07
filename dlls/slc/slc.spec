@@ -13,6 +13,7 @@
 @ stub SLFireEvent
 @ stub SLGenerateOfflineInstallationId
 @ stub SLGetInstalledSAMLicenseApplications
+@ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr) sppc.SLGetInstalledProductKeyIds
 @ stdcall SLGetLicense(ptr ptr ptr ptr) sppc.SLGetLicense
 @ stdcall SLGetLicenseFileId(ptr long ptr ptr) sppc.SLGetLicenseFileId
 @ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetLicenseInformation

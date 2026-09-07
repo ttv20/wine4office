@@ -24,6 +24,8 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "winreg.h"
+#include "objbase.h"
 
 #include "slpublic.h"
 #include "slerror.h"
@@ -33,8 +35,6 @@
 HRESULT WINAPI SLClose(HSLC handle);
 HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         UINT return_type, UINT *count, SLID **ids);
-HRESULT WINAPI SLGetLicense(HSLC handle, const SLID *file_id, UINT *size, BYTE **license);
-HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
 
 enum
@@ -78,6 +78,51 @@ static void test_SLGetSLIDList(void)
 
     hr = SLClose(handle);
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
+}
+
+static void test_SLGetInstalledProductKeyIds(void)
+{
+    static const SLID missing_sku =
+            {0x6f82ad40, 0xd4e2, 0x46cc, {0xa7, 0xc4, 0x42, 0xb9, 0x37, 0xf4, 0x21, 0x70}};
+    SLID *ids = (SLID *)0xdeadbeef;
+    UINT count = 0xdeadbeef;
+    HSLC handle = NULL;
+    HRESULT hr;
+
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
+    if (FAILED(hr)) return;
+
+    hr = SLGetInstalledProductKeyIds(NULL, &missing_sku, &count, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    count = 0xdeadbeef;
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, NULL, &count, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, NULL, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    count = 0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, &count, NULL);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+
+    count = 0xdeadbeef;
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, &count, &ids);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "Expected SL_E_VALUE_NOT_FOUND, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    SLClose(handle);
 }
 
 static void test_SLGetLicensingStatusInformation(void)
@@ -296,13 +341,88 @@ static void test_service_information(void)
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
 }
 
+static void test_installed_pkey_without_active_grace(HSLC handle, const SLID *sku,
+        const SLID *expected_pkey)
+{
+    static const WCHAR grace_key[] = L"Software\\Wine\\SPPC\\GracePeriods";
+    BYTE saved_value[64];
+    DWORD saved_size = sizeof(saved_value), saved_type = 0;
+    SLID *ids = NULL;
+    ULONGLONG expired;
+    FILETIME now;
+    WCHAR name[39];
+    UINT count;
+    LSTATUS status;
+    HKEY key;
+    HRESULT hr;
+    BOOL saved;
+    int length;
+
+    if (!winetest_platform_is_wine) return;
+
+    status = RegCreateKeyExW(HKEY_LOCAL_MACHINE, grace_key, 0, NULL, 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL);
+    ok(!status, "Failed to open the GracePeriods key, status %lu.\n", status);
+    if (status) return;
+
+    length = StringFromGUID2(sku, name, ARRAY_SIZE(name));
+    ok(length == ARRAY_SIZE(name), "Failed to format the Grace SKU, length %d.\n", length);
+    if (length != ARRAY_SIZE(name)) goto done;
+    status = RegQueryValueExW(key, name, NULL, &saved_type, saved_value, &saved_size);
+    saved = !status;
+    ok(!status || status == ERROR_FILE_NOT_FOUND,
+            "Failed to save the Grace timer, status %lu.\n", status);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) goto done;
+
+    status = RegDeleteValueW(key, name);
+    ok(!status || status == ERROR_FILE_NOT_FOUND,
+            "Failed to remove the Grace timer, status %lu.\n", status);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) goto restore;
+
+    count = 0;
+    hr = SLGetInstalledProductKeyIds(handle, sku, &count, &ids);
+    ok(hr == S_OK, "Installed PKEY query without a Grace timer failed, hr %#lx.\n", hr);
+    ok(count == 1 && ids && IsEqualGUID(expected_pkey, &ids[0]),
+            "Unexpected installed PKEY without a Grace timer.\n");
+    LocalFree(ids);
+    ids = NULL;
+
+    GetSystemTimeAsFileTime(&now);
+    expired = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    expired -= 6ULL * 24 * 60 * 60 * 10000000;
+    status = RegSetValueExW(key, name, 0, REG_QWORD, (const BYTE *)&expired, sizeof(expired));
+    ok(!status, "Failed to set an expired Grace timer, status %lu.\n", status);
+    if (status) goto restore;
+
+    count = 0;
+    hr = SLGetInstalledProductKeyIds(handle, sku, &count, &ids);
+    ok(hr == S_OK, "Installed PKEY query with an expired Grace timer failed, hr %#lx.\n", hr);
+    ok(count == 1 && ids && IsEqualGUID(expected_pkey, &ids[0]),
+            "Unexpected installed PKEY with an expired Grace timer.\n");
+
+restore:
+    LocalFree(ids);
+    if (saved)
+        status = RegSetValueExW(key, name, 0, saved_type, saved_value, saved_size);
+    else
+    {
+        status = RegDeleteValueW(key, name);
+        if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+    }
+    ok(!status, "Failed to restore the Grace timer, status %lu.\n", status);
+done:
+    RegCloseKey(key);
+}
+
 static void test_dynamic_grace_pkey(void)
 {
     SLID *skus = NULL, *pkeys = NULL, *candidate = NULL, *second = NULL;
+    SLID *installed_pkeys = NULL;
     SLID grace_sku;
     BYTE *value = NULL;
     SLDATATYPE type;
-    UINT sku_count = 0, pkey_count = 0, second_count = 0, size, i, found = 0;
+    UINT sku_count = 0, pkey_count = 0, second_count = 0, installed_count = 0;
+    UINT size, i, found = 0;
     HSLC handle = NULL;
     HRESULT hr;
 
@@ -352,6 +472,16 @@ static void test_dynamic_grace_pkey(void)
     ok(second_count == 1 && second && IsEqualGUID(&pkeys[0], &second[0]),
             "Dynamic PKEY ID was not stable.\n");
 
+    hr = SLGetInstalledProductKeyIds(handle, &grace_sku, &installed_count, &installed_pkeys);
+    ok(hr == S_OK, "Installed PKEY query failed, hr %#lx.\n", hr);
+    ok(installed_count == 1, "Expected one installed PKEY, got %u.\n", installed_count);
+    ok(installed_pkeys != NULL, "Expected an allocated installed PKEY.\n");
+    if (installed_count == 1 && installed_pkeys)
+        ok(IsEqualGUID(&pkeys[0], &installed_pkeys[0]),
+                "Installed PKEY did not match the SKU PKEY.\n");
+    if (installed_count == 1 && installed_pkeys)
+        test_installed_pkey_without_active_grace(handle, &grace_sku, &installed_pkeys[0]);
+
     type = SL_DATA_NONE;
     size = 0;
     hr = SLGetPKeyInformation(handle, &pkeys[0], L"PartialProductKey", &type, &size, &value);
@@ -377,6 +507,7 @@ static void test_dynamic_grace_pkey(void)
 
 done:
     LocalFree(value);
+    LocalFree(installed_pkeys);
     LocalFree(second);
     LocalFree(pkeys);
     LocalFree(skus);
@@ -385,6 +516,7 @@ done:
 
 START_TEST(sppc)
 {
+    test_SLGetInstalledProductKeyIds();
     test_SLGetSLIDList();
     test_SLGetLicensingStatusInformation();
     test_SLInstallLicense();
