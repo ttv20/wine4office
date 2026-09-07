@@ -3811,6 +3811,103 @@ static void test_RtlValidSecurityDescriptor(void)
     free(sd);
 }
 
+static void test_RtlValidRelativeSecurityDescriptor(void)
+{
+    union { SECURITY_DESCRIPTOR_RELATIVE sd; BYTE bytes[256]; } buffer;
+    SECURITY_DESCRIPTOR_RELATIVE *sd = &buffer.sd;
+    SID *sid = (SID *)(buffer.bytes + 32);
+    ACL *acl = (ACL *)(buffer.bytes + 128);
+    ACE_HEADER *ace = (ACE_HEADER *)(acl + 1);
+    ULONG i, field;
+    BOOLEAN ret;
+
+    memset( &buffer, 0, sizeof(buffer) );
+    sd->Revision = SECURITY_DESCRIPTOR_REVISION;
+    sd->Control = SE_SELF_RELATIVE;
+    for (i = 0; i <= sizeof(*sd); ++i)
+    {
+        ret = RtlValidRelativeSecurityDescriptor( sd, i, 0 );
+        ok( ret == (i == sizeof(*sd)), "length %lu: got %u\n", i, ret );
+    }
+    for (i = 1; i <= 0x100; i <<= 1)
+    {
+        ret = RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), i );
+        ok( ret == (i != OWNER_SECURITY_INFORMATION && i != GROUP_SECURITY_INFORMATION),
+            "required information %#lx: got %u\n", i, ret );
+    }
+    sd->Control = 0;
+    ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted absolute descriptor\n" );
+    sd->Control = SE_SELF_RELATIVE;
+    sd->Revision = 2;
+    ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted invalid revision\n" );
+    sd->Revision = 1;
+
+    for (field = 0; field < 2; ++field)
+    {
+        DWORD *offset = field ? &sd->Group : &sd->Owner;
+        *offset = 32;
+        sid->Revision = SID_REVISION;
+        for (i = 0; i <= SID_MAX_SUB_AUTHORITIES + 1; ++i)
+        {
+            sid->SubAuthorityCount = i;
+            ret = RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 );
+            ok( ret == (i <= SID_MAX_SUB_AUTHORITIES), "field %lu SID count %lu: got %u\n", field, i, ret );
+        }
+        sid->SubAuthorityCount = 1;
+        ok( RtlValidRelativeSecurityDescriptor( sd, 44, field ? GROUP_SECURITY_INFORMATION : OWNER_SECURITY_INFORMATION ),
+            "rejected complete SID\n" );
+        ok( !RtlValidRelativeSecurityDescriptor( sd, 43, 0 ), "accepted truncated SID\n" );
+        ok( !RtlValidRelativeSecurityDescriptor( sd, 39, 0 ), "accepted truncated SID header\n" );
+        sid->Revision = 2;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted invalid SID revision\n" );
+        sid->Revision = 1;
+        *offset = 0xfffffff0;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted overflowing offset\n" );
+        *offset = 4;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted header offset\n" );
+        *offset = 33;
+        buffer.bytes[33] = 1;
+        buffer.bytes[34] = 1;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted unaligned SID\n" );
+        *offset = 0;
+    }
+    for (field = 0; field < 2; ++field)
+    {
+        DWORD *offset = field ? &sd->Sacl : &sd->Dacl;
+        sd->Control = SE_SELF_RELATIVE | (field ? SE_SACL_PRESENT : SE_DACL_PRESENT);
+        ok( RtlValidRelativeSecurityDescriptor( sd, sizeof(*sd), DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION ),
+            "rejected null ACL\n" );
+        *offset = 128;
+        acl->AclRevision = ACL_REVISION;
+        acl->AclSize = sizeof(*acl);
+        acl->AceCount = 0;
+        ok( RtlValidRelativeSecurityDescriptor( sd, 136, 0 ), "rejected empty ACL\n" );
+        ok( !RtlValidRelativeSecurityDescriptor( sd, 135, 0 ), "accepted truncated ACL\n" );
+        acl->AclSize = 7;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted short ACL\n" );
+        acl->AclSize = 0xffff;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted oversized ACL\n" );
+        acl->AclSize = sizeof(*acl);
+        for (i = 0; i <= 5; ++i)
+        {
+            acl->AclRevision = i;
+            ret = RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 );
+            ok( ret == (i >= 2 && i <= 4), "ACL revision %lu: got %u\n", i, ret );
+        }
+        acl->AclRevision = ACL_REVISION;
+        acl->AceCount = 1;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted missing ACE\n" );
+        acl->AclSize = sizeof(*acl) + sizeof(*ace);
+        ace->AceSize = 0;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted zero-size ACE\n" );
+        ace->AceSize = 8;
+        ok( !RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "accepted oversized ACE\n" );
+        sd->Control = SE_SELF_RELATIVE;
+        ok( RtlValidRelativeSecurityDescriptor( sd, sizeof(buffer), 0 ), "checked non-present ACL\n" );
+        *offset = 0;
+    }
+}
+
 static void test_RtlFindExportedRoutineByName(void)
 {
     void *proc;
@@ -5590,6 +5687,7 @@ START_TEST(rtl)
     test_RtlFirstFreeAce();
     test_RtlInitializeSid();
     test_RtlValidSecurityDescriptor();
+    test_RtlValidRelativeSecurityDescriptor();
     test_RtlFindExportedRoutineByName();
     test_RtlGetDeviceFamilyInfoEnum();
     test_RtlConvertDeviceFamilyInfoToString();

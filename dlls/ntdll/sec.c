@@ -555,14 +555,66 @@ BOOLEAN WINAPI RtlValidSecurityDescriptor(PSECURITY_DESCRIPTOR descriptor)
     return sd && sd->Revision == SECURITY_DESCRIPTOR_REVISION;
 }
 
+static BOOLEAN valid_relative_sid( const SECURITY_DESCRIPTOR_RELATIVE *sd, ULONG length, ULONG offset )
+{
+    const SID *sid;
+
+    if ((offset & 3) || offset < sizeof(*sd) || offset > length ||
+        length - offset < offsetof(SID, SubAuthority)) return FALSE;
+    sid = (const SID *)((const char *)sd + offset);
+    return sid->Revision == SID_REVISION && sid->SubAuthorityCount <= SID_MAX_SUB_AUTHORITIES &&
+           offsetof(SID, SubAuthority[sid->SubAuthorityCount]) <= length - offset;
+}
+
+static BOOLEAN valid_relative_acl( const SECURITY_DESCRIPTOR_RELATIVE *sd, ULONG length, ULONG offset )
+{
+    const ACL *acl;
+    const ACE_HEADER *ace;
+    ULONG pos, i;
+
+    if ((offset & 3) || offset < sizeof(*sd) || offset > length || length - offset < sizeof(*acl))
+        return FALSE;
+    acl = (const ACL *)((const char *)sd + offset);
+    if (acl->AclSize < sizeof(*acl) || acl->AclSize > length - offset) return FALSE;
+
+    /* Check every header before passing the ACL to the unbounded validator. */
+    for (i = 0, pos = sizeof(*acl); i < acl->AceCount; ++i)
+    {
+        if (acl->AclSize - pos < sizeof(*ace)) return FALSE;
+        ace = (const ACE_HEADER *)((const char *)acl + pos);
+        if (ace->AceSize < sizeof(*ace) || (ace->AceSize & 3) || ace->AceSize > acl->AclSize - pos)
+            return FALSE;
+        pos += ace->AceSize;
+    }
+    return RtlValidAcl( (ACL *)acl );
+}
+
 /**************************************************************************
  * RtlValidRelativeSecurityDescriptor		[NTDLL.@]
  */
 BOOLEAN WINAPI RtlValidRelativeSecurityDescriptor(PSECURITY_DESCRIPTOR descriptor,
     ULONG length, SECURITY_INFORMATION info)
 {
-    FIXME("%p,%lu,%ld: semi-stub\n", descriptor, length, info);
-    return RtlValidSecurityDescriptor(descriptor) == STATUS_SUCCESS;
+    const SECURITY_DESCRIPTOR_RELATIVE *sd = descriptor;
+
+    TRACE("%p,%lu,%ld\n", descriptor, length, info);
+    if (!sd || length < sizeof(*sd) || sd->Revision != SECURITY_DESCRIPTOR_REVISION ||
+        !(sd->Control & SE_SELF_RELATIVE)) return FALSE;
+    if (sd->Owner)
+    {
+        if (!valid_relative_sid( sd, length, sd->Owner )) return FALSE;
+    }
+    else if (info & OWNER_SECURITY_INFORMATION) return FALSE;
+    if (sd->Group)
+    {
+        if (!valid_relative_sid( sd, length, sd->Group )) return FALSE;
+    }
+    else if (info & GROUP_SECURITY_INFORMATION) return FALSE;
+    if ((sd->Control & SE_SACL_PRESENT) && sd->Sacl && !valid_relative_acl( sd, length, sd->Sacl ))
+        return FALSE;
+    if ((sd->Control & SE_DACL_PRESENT) && sd->Dacl && !valid_relative_acl( sd, length, sd->Dacl ))
+        return FALSE;
+    return TRUE;
 }
 
 /**************************************************************************
