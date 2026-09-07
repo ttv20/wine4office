@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
+- Restore Outlook account setup after Office repairs its Click-to-Run registry data.
 - Create Office grace product-key metadata dynamically for every installed retail SKU.
 - Fix personal Microsoft account sign-in, Office entitlement retrieval, and Account page repair.
 - Preserve requested decimal precision in Office web content.
