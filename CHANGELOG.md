@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Track graphics buffer allocations reliably when drivers reuse resource identifiers.
+
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Restore Outlook account setup after Office repairs its Click-to-Run registry data.
