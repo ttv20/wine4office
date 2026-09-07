@@ -5292,6 +5292,67 @@ static void test_memory_map( HDC hdc)
     wglMakeCurrent( hdc, old_rc );
 }
 
+/* Creating a drawable while another context is current must preserve its state,
+ * including when the driver uses an internal context to allocate framebuffers. */
+static void test_surface_context_restore(void)
+{
+    PIXELFORMATDESCRIPTOR pfd = {sizeof(pfd), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL |
+            PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 24};
+    HWND windows[2] = {0};
+    HDC dcs[2] = {0};
+    HGLRC contexts[2] = {0};
+    GLfloat color[4];
+    unsigned int i;
+    int format;
+    BOOL ret;
+
+    for (i = 0; i < 2; ++i)
+    {
+        windows[i] = CreateWindowW( L"static", NULL, WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                10 + i * 220, 10, 200, 200, NULL, NULL, NULL, NULL );
+        ok( !!windows[i], "Failed to create window %u.\n", i );
+        if (!windows[i]) goto done;
+        dcs[i] = GetDC( windows[i] );
+        format = ChoosePixelFormat( dcs[i], &pfd );
+        if (!format)
+        {
+            win_skip( "No OpenGL pixel format.\n" );
+            goto done;
+        }
+        ret = SetPixelFormat( dcs[i], format, &pfd );
+        ok( ret, "Failed to set pixel format %u.\n", i );
+        if (!ret) goto done;
+        contexts[i] = wglCreateContext( dcs[i] );
+        ok( !!contexts[i], "Failed to create context %u.\n", i );
+        if (!contexts[i]) goto done;
+        ret = wglMakeCurrent( dcs[i], contexts[i] );
+        ok( ret, "Failed to bind context %u.\n", i );
+        if (!ret) goto done;
+        glClearColor( i, 1 - i, 0, 1 );
+    }
+    for (i = 0; i < 8; ++i)
+    {
+        unsigned int index = i % 2;
+        ret = wglMakeCurrent( dcs[index], contexts[index] );
+        ok( ret, "Failed to switch context, iteration %u.\n", i );
+        if (!ret) goto done;
+        ok( wglGetCurrentContext() == contexts[index], "Wrong current context.\n" );
+        ok( wglGetCurrentDC() == dcs[index], "Wrong current DC.\n" );
+        glGetFloatv( GL_COLOR_CLEAR_VALUE, color );
+        ok( color[0] == index && color[1] == 1 - index && color[2] == 0 && color[3] == 1,
+                "Wrong clear color %f, %f, %f, %f.\n", color[0], color[1], color[2], color[3] );
+        ok( glGetError() == GL_NO_ERROR, "OpenGL error after context switch.\n" );
+    }
+done:
+    if (wglGetCurrentContext()) wglMakeCurrent( NULL, NULL );
+    for (i = 0; i < 2; ++i)
+    {
+        if (contexts[i]) wglDeleteContext( contexts[i] );
+        if (dcs[i]) ReleaseDC( windows[i], dcs[i] );
+        if (windows[i]) DestroyWindow( windows[i] );
+    }
+}
+
 START_TEST(opengl)
 {
     const PIXELFORMATDESCRIPTOR pfd =
@@ -5304,11 +5365,19 @@ START_TEST(opengl)
     };
 
     HMODULE gdi32 = GetModuleHandleA( "gdi32.dll" );
-    int format, res;
+    int format, res, argc;
+    char **argv;
     const char *tmp;
     HGLRC hglrc;
     HWND hwnd;
     HDC hdc;
+
+    argc = winetest_get_mainargs( &argv );
+    if (argc > 2 && !strcmp( argv[2], "--surface-context" ))
+    {
+        test_surface_context_restore();
+        return;
+    }
 
     pD3DKMTCreateDCFromMemory = (void *)GetProcAddress( gdi32, "D3DKMTCreateDCFromMemory" );
     pD3DKMTDestroyDCFromMemory = (void *)GetProcAddress( gdi32, "D3DKMTDestroyDCFromMemory" );
@@ -5342,6 +5411,7 @@ START_TEST(opengl)
     test_minimized();
     test_window_dc();
     test_message_window();
+    test_surface_context_restore();
     test_dc( hwnd, hdc );
 
     hglrc = wglCreateContext( hdc );

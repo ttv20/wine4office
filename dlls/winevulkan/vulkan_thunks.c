@@ -30467,6 +30467,7 @@ static void convert_VkPhysicalDeviceGroupProperties_win32_to_unwrapped_host(cons
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->physicalDeviceCount = in->physicalDeviceCount;
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -31487,6 +31488,8 @@ static void convert_VkDeviceFaultDebugInfoKHR_win32_to_host(struct conversion_co
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->vendorBinarySize = in->vendorBinarySize;
+    out->pVendorBinaryData = UlongToPtr(in->pVendorBinaryData);
 
     for (in_header = UlongToPtr(in->pNext); in_header; in_header = UlongToPtr(in_header->pNext))
     {
@@ -31495,8 +31498,11 @@ static void convert_VkDeviceFaultDebugInfoKHR_win32_to_host(struct conversion_co
         case VK_STRUCTURE_TYPE_DEVICE_FAULT_SHADER_ABORT_MESSAGE_INFO_KHR:
         {
             VkDeviceFaultShaderAbortMessageInfoKHR *out_ext = conversion_context_alloc(ctx, sizeof(*out_ext));
+            const VkDeviceFaultShaderAbortMessageInfoKHR32 *in_ext = (const VkDeviceFaultShaderAbortMessageInfoKHR32 *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_SHADER_ABORT_MESSAGE_INFO_KHR;
             out_ext->pNext = NULL;
+            out_ext->messageDataSize = in_ext->messageDataSize;
+            out_ext->pMessageData = UlongToPtr(in_ext->pMessageData);
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -31579,6 +31585,7 @@ static void convert_VkDeviceFaultInfoEXT_win32_to_host(struct conversion_context
     out->pNext = NULL;
     out->pAddressInfos = convert_VkDeviceFaultAddressInfoKHR_array_win32_to_host(ctx, (VkDeviceFaultAddressInfoKHR32 *)UlongToPtr(in->pAddressInfos), 1);
     out->pVendorInfos = convert_VkDeviceFaultVendorInfoKHR_array_win32_to_host(ctx, (VkDeviceFaultVendorInfoKHR32 *)UlongToPtr(in->pVendorInfos), 1);
+    out->pVendorBinaryData = UlongToPtr(in->pVendorBinaryData);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -32637,6 +32644,7 @@ static void convert_VkPastPresentationTimingEXT_win32_to_host(struct conversion_
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->presentStageCount = in->presentStageCount;
     out->pPresentStages = convert_VkPresentStageTimeEXT_array_win32_to_host(ctx, (VkPresentStageTimeEXT32 *)UlongToPtr(in->pPresentStages), in->presentStageCount);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
@@ -32664,6 +32672,7 @@ static void convert_VkPastPresentationTimingPropertiesEXT_win32_to_host(struct c
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->presentationTimingCount = in->presentationTimingCount;
     out->pPresentationTimings = convert_VkPastPresentationTimingEXT_array_win32_to_host(ctx, (VkPastPresentationTimingEXT32 *)UlongToPtr(in->pPresentationTimings), in->presentationTimingCount);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
@@ -40399,8 +40408,11 @@ static void convert_VkPhysicalDeviceProperties2_win64_to_host(struct conversion_
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_AMD:
         {
             VkPhysicalDeviceGpaPropertiesAMD *out_ext = conversion_context_alloc(ctx, sizeof(*out_ext));
+            const VkPhysicalDeviceGpaPropertiesAMD *in_ext = (const VkPhysicalDeviceGpaPropertiesAMD *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_AMD;
             out_ext->pNext = NULL;
+            out_ext->perfBlockCount = in_ext->perfBlockCount;
+            out_ext->pPerfBlocks = in_ext->pPerfBlocks;
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -41128,31 +41140,10 @@ static void convert_VkPhysicalDeviceProperties2_win64_to_host(struct conversion_
             const VkPhysicalDeviceVulkan14Properties *in_ext = (const VkPhysicalDeviceVulkan14Properties *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
             out_ext->pNext = NULL;
-            out_ext->lineSubPixelPrecisionBits = in_ext->lineSubPixelPrecisionBits;
-            out_ext->maxVertexAttribDivisor = in_ext->maxVertexAttribDivisor;
-            out_ext->supportsNonZeroFirstInstance = in_ext->supportsNonZeroFirstInstance;
-            out_ext->maxPushDescriptors = in_ext->maxPushDescriptors;
-            out_ext->dynamicRenderingLocalReadDepthStencilAttachments = in_ext->dynamicRenderingLocalReadDepthStencilAttachments;
-            out_ext->dynamicRenderingLocalReadMultisampledAttachments = in_ext->dynamicRenderingLocalReadMultisampledAttachments;
-            out_ext->earlyFragmentMultisampleCoverageAfterSampleCounting = in_ext->earlyFragmentMultisampleCoverageAfterSampleCounting;
-            out_ext->earlyFragmentSampleMaskTestBeforeSampleCounting = in_ext->earlyFragmentSampleMaskTestBeforeSampleCounting;
-            out_ext->depthStencilSwizzleOneSupport = in_ext->depthStencilSwizzleOneSupport;
-            out_ext->polygonModePointSize = in_ext->polygonModePointSize;
-            out_ext->nonStrictSinglePixelWideLinesUseParallelogram = in_ext->nonStrictSinglePixelWideLinesUseParallelogram;
-            out_ext->nonStrictWideLinesUseParallelogram = in_ext->nonStrictWideLinesUseParallelogram;
-            out_ext->blockTexelViewCompatibleMultipleLayers = in_ext->blockTexelViewCompatibleMultipleLayers;
-            out_ext->maxCombinedImageSamplerDescriptorCount = in_ext->maxCombinedImageSamplerDescriptorCount;
-            out_ext->fragmentShadingRateClampCombinerInputs = in_ext->fragmentShadingRateClampCombinerInputs;
-            out_ext->defaultRobustnessStorageBuffers = in_ext->defaultRobustnessStorageBuffers;
-            out_ext->defaultRobustnessUniformBuffers = in_ext->defaultRobustnessUniformBuffers;
-            out_ext->defaultRobustnessVertexInputs = in_ext->defaultRobustnessVertexInputs;
-            out_ext->defaultRobustnessImages = in_ext->defaultRobustnessImages;
             out_ext->copySrcLayoutCount = in_ext->copySrcLayoutCount;
             out_ext->pCopySrcLayouts = in_ext->pCopySrcLayouts;
             out_ext->copyDstLayoutCount = in_ext->copyDstLayoutCount;
             out_ext->pCopyDstLayouts = in_ext->pCopyDstLayouts;
-            memcpy(out_ext->optimalTilingLayoutUUID, in_ext->optimalTilingLayoutUUID, VK_UUID_SIZE * sizeof(uint8_t));
-            out_ext->identicalMemoryTypeRequirements = in_ext->identicalMemoryTypeRequirements;
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -43202,8 +43193,11 @@ static void convert_VkPhysicalDeviceProperties2_win32_to_host(struct conversion_
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_AMD:
         {
             VkPhysicalDeviceGpaPropertiesAMD *out_ext = conversion_context_alloc(ctx, sizeof(*out_ext));
+            const VkPhysicalDeviceGpaPropertiesAMD32 *in_ext = (const VkPhysicalDeviceGpaPropertiesAMD32 *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GPA_PROPERTIES_AMD;
             out_ext->pNext = NULL;
+            out_ext->perfBlockCount = in_ext->perfBlockCount;
+            out_ext->pPerfBlocks = UlongToPtr(in_ext->pPerfBlocks);
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -43931,31 +43925,10 @@ static void convert_VkPhysicalDeviceProperties2_win32_to_host(struct conversion_
             const VkPhysicalDeviceVulkan14Properties32 *in_ext = (const VkPhysicalDeviceVulkan14Properties32 *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
             out_ext->pNext = NULL;
-            out_ext->lineSubPixelPrecisionBits = in_ext->lineSubPixelPrecisionBits;
-            out_ext->maxVertexAttribDivisor = in_ext->maxVertexAttribDivisor;
-            out_ext->supportsNonZeroFirstInstance = in_ext->supportsNonZeroFirstInstance;
-            out_ext->maxPushDescriptors = in_ext->maxPushDescriptors;
-            out_ext->dynamicRenderingLocalReadDepthStencilAttachments = in_ext->dynamicRenderingLocalReadDepthStencilAttachments;
-            out_ext->dynamicRenderingLocalReadMultisampledAttachments = in_ext->dynamicRenderingLocalReadMultisampledAttachments;
-            out_ext->earlyFragmentMultisampleCoverageAfterSampleCounting = in_ext->earlyFragmentMultisampleCoverageAfterSampleCounting;
-            out_ext->earlyFragmentSampleMaskTestBeforeSampleCounting = in_ext->earlyFragmentSampleMaskTestBeforeSampleCounting;
-            out_ext->depthStencilSwizzleOneSupport = in_ext->depthStencilSwizzleOneSupport;
-            out_ext->polygonModePointSize = in_ext->polygonModePointSize;
-            out_ext->nonStrictSinglePixelWideLinesUseParallelogram = in_ext->nonStrictSinglePixelWideLinesUseParallelogram;
-            out_ext->nonStrictWideLinesUseParallelogram = in_ext->nonStrictWideLinesUseParallelogram;
-            out_ext->blockTexelViewCompatibleMultipleLayers = in_ext->blockTexelViewCompatibleMultipleLayers;
-            out_ext->maxCombinedImageSamplerDescriptorCount = in_ext->maxCombinedImageSamplerDescriptorCount;
-            out_ext->fragmentShadingRateClampCombinerInputs = in_ext->fragmentShadingRateClampCombinerInputs;
-            out_ext->defaultRobustnessStorageBuffers = in_ext->defaultRobustnessStorageBuffers;
-            out_ext->defaultRobustnessUniformBuffers = in_ext->defaultRobustnessUniformBuffers;
-            out_ext->defaultRobustnessVertexInputs = in_ext->defaultRobustnessVertexInputs;
-            out_ext->defaultRobustnessImages = in_ext->defaultRobustnessImages;
             out_ext->copySrcLayoutCount = in_ext->copySrcLayoutCount;
             out_ext->pCopySrcLayouts = UlongToPtr(in_ext->pCopySrcLayouts);
             out_ext->copyDstLayoutCount = in_ext->copyDstLayoutCount;
             out_ext->pCopyDstLayouts = UlongToPtr(in_ext->pCopyDstLayouts);
-            memcpy(out_ext->optimalTilingLayoutUUID, in_ext->optimalTilingLayoutUUID, VK_UUID_SIZE * sizeof(uint8_t));
-            out_ext->identicalMemoryTypeRequirements = in_ext->identicalMemoryTypeRequirements;
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -45787,8 +45760,10 @@ static void convert_VkQueueFamilyProperties2_win32_to_host(struct conversion_con
         case VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES:
         {
             VkQueueFamilyGlobalPriorityProperties *out_ext = conversion_context_alloc(ctx, sizeof(*out_ext));
+            const VkQueueFamilyGlobalPriorityProperties32 *in_ext = (const VkQueueFamilyGlobalPriorityProperties32 *)in_header;
             out_ext->sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES;
             out_ext->pNext = NULL;
+            out_ext->priorityCount = in_ext->priorityCount;
             out_header->pNext = (void *)out_ext;
             out_header = (void *)out_ext;
             break;
@@ -47209,6 +47184,8 @@ static void convert_VkPipelineExecutableInternalRepresentationKHR_win32_to_host(
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->dataSize = in->dataSize;
+    out->pData = UlongToPtr(in->pData);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -47391,6 +47368,7 @@ static void convert_VkCheckpointData2NV_win32_to_host(const VkCheckpointData2NV3
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->pCheckpointMarker = UlongToPtr(in->pCheckpointMarker);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -47437,6 +47415,7 @@ static void convert_VkCheckpointDataNV_win32_to_host(const VkCheckpointDataNV32 
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->pCheckpointMarker = UlongToPtr(in->pCheckpointMarker);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -47521,6 +47500,7 @@ static void convert_VkShaderModuleIdentifierEXT_win32_to_host(const VkShaderModu
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->identifierSize = in->identifierSize;
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }
@@ -47539,6 +47519,9 @@ static void convert_VkSwapchainTimeDomainPropertiesEXT_win32_to_host(const VkSwa
 
     out->sType = in->sType;
     out->pNext = NULL;
+    out->timeDomainCount = in->timeDomainCount;
+    out->pTimeDomains = UlongToPtr(in->pTimeDomains);
+    out->pTimeDomainIds = UlongToPtr(in->pTimeDomainIds);
     if (in->pNext)
         FIXME("Unexpected pNext\n");
 }

@@ -85,6 +85,7 @@ static BOOL (WINAPI *pSetUserGeoName)(PWSTR);
 static BOOL (WINAPI *pEnumSystemGeoID)(GEOCLASS, GEOID, GEO_ENUMPROC);
 static BOOL (WINAPI *pGetSystemPreferredUILanguages)(DWORD, ULONG*, WCHAR*, ULONG*);
 static BOOL (WINAPI *pGetThreadPreferredUILanguages)(DWORD, ULONG*, WCHAR*, ULONG*);
+static BOOL (WINAPI *pSetThreadPreferredUILanguages)(DWORD, const WCHAR*, ULONG*);
 static BOOL (WINAPI *pGetUserPreferredUILanguages)(DWORD, ULONG*, WCHAR*, ULONG*);
 static WCHAR (WINAPI *pRtlUpcaseUnicodeChar)(WCHAR);
 static INT (WINAPI *pGetNumberFormatEx)(LPCWSTR, DWORD, LPCWSTR, const NUMBERFMTW *, LPWSTR, int);
@@ -144,6 +145,7 @@ static void InitFunctionPointers(void)
   X(GetUserPreferredUILanguages);
   X(GetNumberFormatEx);
   X(FindNLSStringEx);
+  X(SetThreadPreferredUILanguages);
   X(SetThreadUILanguage);
   X(GetThreadUILanguage);
   X(NormalizeString);
@@ -418,23 +420,11 @@ static void test_GetLocaleInfoW(void)
 
       ret = GetLocaleInfoW(lcid_en_neut, LOCALE_SCOUNTRY, bufferW, ARRAY_SIZE(bufferW));
       ok(ret, "got %ld\n", ret);
-      if ((PRIMARYLANGID(LANGIDFROMLCID(GetSystemDefaultLCID())) != LANG_ENGLISH) ||
-          (PRIMARYLANGID(LANGIDFROMLCID(GetThreadLocale())) != LANG_ENGLISH))
-      {
-          skip("Non-English locale\n");
-      }
-      else
-          ok(!lstrcmpW(statesW, bufferW), "got wrong name %s\n", wine_dbgstr_w(bufferW));
+      ok(!lstrcmpW(statesW, bufferW), "got wrong name %s\n", wine_dbgstr_w(bufferW));
 
       ret = GetLocaleInfoW(lcid_en_neut, LOCALE_SLANGUAGE, bufferW, ARRAY_SIZE(bufferW));
       ok(ret, "got %ld\n", ret);
-      if ((PRIMARYLANGID(LANGIDFROMLCID(GetSystemDefaultLCID())) != LANG_ENGLISH) ||
-          (PRIMARYLANGID(LANGIDFROMLCID(GetThreadLocale())) != LANG_ENGLISH))
-      {
-          skip("Non-English locale\n");
-      }
-      else
-          ok(!lstrcmpW(slangW, bufferW), "got wrong name %s\n", wine_dbgstr_w(bufferW));
+      ok(!lstrcmpW(slangW, bufferW), "got wrong name %s\n", wine_dbgstr_w(bufferW));
 
       while (*ptr->name)
       {
@@ -5863,13 +5853,7 @@ static void test_GetLocaleInfoEx(void)
 
         ret = pGetLocaleInfoEx(enW, LOCALE_SCOUNTRY, bufferW, ARRAY_SIZE(bufferW));
         ok(ret == lstrlenW(bufferW)+1, "got %d\n", ret);
-        if ((PRIMARYLANGID(LANGIDFROMLCID(GetSystemDefaultLCID())) != LANG_ENGLISH) ||
-            (PRIMARYLANGID(LANGIDFROMLCID(GetThreadLocale())) != LANG_ENGLISH))
-        {
-            skip("Non-English locale\n");
-        }
-        else
-            ok(!lstrcmpW(bufferW, statesW), "got %s\n", wine_dbgstr_w(bufferW));
+        ok(!lstrcmpW(bufferW, statesW), "got %s\n", wine_dbgstr_w(bufferW));
 
         bufferW[0] = 0;
         SetLastError(0xdeadbeef);
@@ -6289,20 +6273,16 @@ static void test_GetGeoInfo(void)
     ok(!ret, "GetGeoInfoA succeeded %d.\n", ret);
     ok(GetLastError() == ERROR_INVALID_PARAMETER, "wrong error %ld\n", GetLastError() );
 
-    if (GetUserDefaultLangID() == MAKELANGID( LANG_ENGLISH, SUBLANG_ENGLISH_US ))
-    {
-        GetLocaleInfoA( 0x419, LOCALE_SENGCOUNTRY, expect, sizeof(expect) );
-        buffA[0] = 0;
-        ret = pGetGeoInfoA(203, GEO_FRIENDLYNAME, buffA, 20, 0);
-        ok(ret == strlen(expect) + 1, "GetGeoInfoA succeeded %d.\n", ret);
-        ok(!strcmp(buffA, expect), "got %s / %s\n", buffA, expect);
-        GetLocaleInfoA( 0x411, LOCALE_SENGCOUNTRY, expect, sizeof(expect) );
-        buffA[0] = 0;
-        ret = pGetGeoInfoA(122, GEO_FRIENDLYNAME, buffA, 20, 0);
-        ok(ret == strlen(expect) + 1, "GetGeoInfoA succeeded %d.\n", ret);
-        ok(!strcmp(buffA, expect), "got %s / %s\n", buffA, expect);
-    }
-    else skip( "localized geo names not tested\n" );
+    GetLocaleInfoA( 0x419, LOCALE_SENGCOUNTRY, expect, sizeof(expect) );
+    buffA[0] = 0;
+    ret = pGetGeoInfoA(203, GEO_FRIENDLYNAME, buffA, 20, 0);
+    ok(ret == strlen(expect) + 1, "GetGeoInfoA succeeded %d.\n", ret);
+    ok(!strcmp(buffA, expect), "got %s / %s\n", buffA, expect);
+    GetLocaleInfoA( 0x411, LOCALE_SENGCOUNTRY, expect, sizeof(expect) );
+    buffA[0] = 0;
+    ret = pGetGeoInfoA(122, GEO_FRIENDLYNAME, buffA, 20, 0);
+    ok(ret == strlen(expect) + 1, "GetGeoInfoA succeeded %d.\n", ret);
+    ok(!strcmp(buffA, expect), "got %s / %s\n", buffA, expect);
 
     SetLastError(0xdeadbeef);
     ret = pGetGeoInfoA(203, GEO_TIMEZONES, buffA, 20, 0);
@@ -6568,6 +6548,13 @@ static const struct invariant_entry invariant_list[] = {
 
 static void test_invariant(void)
 {
+    /* some locales translate these */
+    static const char lang[]  = "Invariant Language (Invariant Country)";
+    static const char cntry[] = "Invariant Country";
+    static const char sortm[] = "Math Alphanumerics";
+    static const char sortms[] = "Maths Alphanumerics";
+    static const char sortd[] = "Default"; /* win2k3 */
+
   int ret;
   int len;
   char buffer[BUFFER_SIZE];
@@ -6598,20 +6585,6 @@ static void test_invariant(void)
     ptr++;
   }
 
- if ((LANGIDFROMLCID(GetSystemDefaultLCID()) != MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)) ||
-     (LANGIDFROMLCID(GetThreadLocale()) != MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)))
-  {
-      skip("Non US-English locale\n");
-  }
-  else
-  {
-    /* some locales translate these */
-    static const char lang[]  = "Invariant Language (Invariant Country)";
-    static const char cntry[] = "Invariant Country";
-    static const char sortm[] = "Math Alphanumerics";
-    static const char sortms[] = "Maths Alphanumerics";
-    static const char sortd[] = "Default"; /* win2k3 */
-
     ret = GetLocaleInfoA(LOCALE_INVARIANT, NUO|LOCALE_SLANGUAGE, buffer, sizeof(buffer));
     len = lstrlenA(lang) + 1;
     ok(ret == len, "Expected ret == %d, got %d, error %ld\n", len, ret, GetLastError());
@@ -6625,7 +6598,6 @@ static void test_invariant(void)
     ret = GetLocaleInfoA(LOCALE_INVARIANT, NUO|LOCALE_SSORTNAME, buffer, sizeof(buffer));
     ok(ret, "Failed err %ld\n", GetLastError());
     ok(!strcmp(buffer, sortm) || !strcmp(buffer, sortd) || !strcmp(buffer, sortms), "Got '%s'\n", buffer);
-  }
 }
 
 static void test_GetSystemPreferredUILanguages(void)
@@ -6778,6 +6750,18 @@ static void test_GetSystemPreferredUILanguages(void)
            buffer[size -2], buffer[size -1]);
 
     count = 0;
+    size = size_buffer;
+    SetLastError(0xdeadbeef);
+    ret = pGetSystemPreferredUILanguages(0, &count, buffer, &size);
+    ok(ret, "Expected GetSystemPreferredUILanguages to succeed\n");
+    ok(count, "Expected count > 0\n");
+    ok(size % 6 == 1, "Expected size (%ld) %% 6 == 1\n", size);
+    if (ret && size % 5 == 1)
+        ok(!buffer[size -2] && !buffer[size -1],
+           "Expected last two WCHARs being empty, got 0x%x 0x%x\n",
+           buffer[size -2], buffer[size -1]);
+
+    count = 0;
     size = 0;
     SetLastError(0xdeadbeef);
     ret = pGetSystemPreferredUILanguages(MUI_MACHINE_LANGUAGE_SETTINGS, &count, NULL, &size);
@@ -6849,15 +6833,6 @@ static void test_GetSystemPreferredUILanguages(void)
        "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
     ok(size == size_id, "expected %lu, got %lu\n", size_id, size);
 
-    size = size_id -2;
-    memset(buffer, 0x5a, size_buffer * sizeof(WCHAR));
-    SetLastError(0xdeadbeef);
-    ret = pGetSystemPreferredUILanguages(0, &count, buffer, &size);
-    ok(!ret, "Expected GetSystemPreferredUILanguages to fail\n");
-    ok(ERROR_INSUFFICIENT_BUFFER == GetLastError(),
-       "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
-    ok(size == size_id + 2 || size == size_id + 1 /* before win10 1809 */, "expected %lu, got %lu\n", size_id + 2, size);
-
     HeapFree(GetProcessHeap(), 0, buffer);
 }
 
@@ -6866,7 +6841,8 @@ static void test_GetThreadPreferredUILanguages(void)
     BOOL ret;
     NTSTATUS status;
     ULONG count, size, size_id;
-    WCHAR *buf;
+    LANGID lang;
+    WCHAR buf[1024];
 
     if (!pGetThreadPreferredUILanguages)
     {
@@ -6881,7 +6857,6 @@ static void test_GetThreadPreferredUILanguages(void)
     ok(size, "expected size > 0\n");
 
     count = 0;
-    buf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size * sizeof(WCHAR));
     ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_ID|MUI_UI_FALLBACK, &count, buf, &size);
     ok(ret, "got %lu\n", GetLastError());
     ok(count, "expected count > 0\n");
@@ -6925,16 +6900,61 @@ static void test_GetThreadPreferredUILanguages(void)
        "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
     ok(size == size_id, "expected %lu, got %lu\n", size_id, size);
 
-    size = size_id - 2;
-    SetLastError(0xdeadbeef);
-    ret = pGetThreadPreferredUILanguages(0, &count, buf, &size);
-    ok(!ret, "Expected GetThreadPreferredUILanguages to fail\n");
-    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
-       "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
-    todo_wine
-    ok(size == size_id || size == size_id - 1 /* before win10 1809 */, "expected %lu, got %lu\n", size_id, size);
+    lang = pGetThreadUILanguage();
+    count = 0xdeadbeef;
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"fr-BE\0en-US\0fr-BE\0en-GB\0", &count );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( count == 3, "wrong count %lu\n", count );
 
-    HeapFree(GetProcessHeap(), 0, buf);
+    size = ARRAYSIZE(buf);
+    count = 0xdeadbeef;
+    ret = pGetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES, &count, buf, &size );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( !memcmp( buf, L"fr-BE\0en-US\0en-GB\0", size ), "wrong result %s\n", debugstr_wn(buf,size) );
+    ok( pGetThreadUILanguage() == MAKELANGID( LANG_FRENCH, SUBLANG_FRENCH_BELGIAN ),
+        "wrong ui language %x\n", pGetThreadUILanguage() );
+
+    count = 0xdeadbeef;
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"aa-BB\0cc-DD\0en-GB\0", &count );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( count == 1, "wrong count %lu\n", count );
+    size = ARRAYSIZE(buf);
+    ret = pGetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES, &count, buf, &size );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( !memcmp( buf, L"en-GB\0", size ), "wrong result %s\n", debugstr_wn(buf,size) );
+
+    count = 0xdeadbeef;
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-GB\0en-US\0fr-FR\0fr-BE\0de-DE\0de-AT\0it-IT\0", &count );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( count == 5, "wrong count %lu\n", count );
+    size = ARRAYSIZE(buf);
+    ret = pGetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES, &count, buf, &size );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( !memcmp( buf, L"en-GB\0en-US\0fr-FR\0fr-BE\0de-DE\0", size ),
+        "wrong result %s\n", debugstr_wn(buf,size) );
+
+    SetLastError(0xdeadbeef);
+    count = 0xdeadbeef;
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"aa-BB\0cc-DD\0", &count );
+    ok( !ret, "succeded\n" );
+    ok( GetLastError() == ERROR_GEN_FAILURE, "wrong error %lu\n", GetLastError() );
+    ok( count == 0xdeadbeef, "wrong count %lu\n", count );
+
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, NULL, &count );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( count == 0xdeadbeef, "wrong count %lu\n", count );
+
+    ret = pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"\0", &count );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( count == 0xdeadbeef, "wrong count %lu\n", count );
+
+    size = ARRAYSIZE(buf);
+    SetLastError(0xdeadbeef);
+    ret = pGetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES, &count, buf, &size );
+    ok( ret, "failed %lu\n", GetLastError() );
+    ok( size == 2, "wrong size %lu\n", size );
+    ok( !memcmp( buf, L"\0\0", size ), "wrong result %s\n", debugstr_wn(buf,size) );
+    ok( pGetThreadUILanguage() == lang, "wrong ui language %x / %x\n", pGetThreadUILanguage(), lang );
 }
 
 static void test_GetUserPreferredUILanguages(void)
@@ -7050,6 +7070,18 @@ static void test_GetUserPreferredUILanguages(void)
            "Expected last two WCHARs being empty, got 0x%x 0x%x\n",
            buffer[size -2], buffer[size -1]);
 
+    count = 0;
+    size = size_buffer;
+    SetLastError(0xdeadbeef);
+    ret = pGetUserPreferredUILanguages(0, &count, buffer, &size);
+    ok(ret, "Expected GetUserPreferredUILanguages to succeed\n");
+    ok(count, "Expected count > 0\n");
+    ok(size % 6 == 1, "Expected size (%ld) %% 6 == 1\n", size);
+    if (ret && size % 5 == 1)
+        ok(!buffer[size -2] && !buffer[size -1],
+           "Expected last two WCHARs being empty, got 0x%x 0x%x\n",
+           buffer[size -2], buffer[size -1]);
+
     size = 1;
     SetLastError(0xdeadbeef);
     ret = pGetUserPreferredUILanguages(MUI_LANGUAGE_ID, &count, buffer, &size);
@@ -7061,15 +7093,6 @@ static void test_GetUserPreferredUILanguages(void)
     memset(buffer, 0x5a, size_buffer * sizeof(WCHAR));
     SetLastError(0xdeadbeef);
     ret = pGetUserPreferredUILanguages(MUI_LANGUAGE_ID, &count, buffer, &size);
-    ok(!ret, "Expected GetUserPreferredUILanguages to fail\n");
-    ok(ERROR_INSUFFICIENT_BUFFER == GetLastError(),
-       "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
-
-    count = 0;
-    size = size_id -2;
-    memset(buffer, 0x5a, size_buffer * sizeof(WCHAR));
-    SetLastError(0xdeadbeef);
-    ret = pGetUserPreferredUILanguages(0, &count, buffer, &size);
     ok(!ret, "Expected GetUserPreferredUILanguages to fail\n");
     ok(ERROR_INSUFFICIENT_BUFFER == GetLastError(),
        "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
@@ -7241,12 +7264,6 @@ static void test_SetThreadUILanguage(void)
 {
     LANGID res;
 
-    if (!pGetThreadUILanguage)
-    {
-        win_skip("GetThreadUILanguage isn't implemented, skipping SetThreadUILanguage tests for version < Vista\n");
-        return;   /* BTW SetThreadUILanguage is present on winxp/2003 but doesn`t set the LANGID anyway when tested */
-    }
-
     res = pSetThreadUILanguage(0);
     ok(res == pGetThreadUILanguage(), "expected %d got %d\n", pGetThreadUILanguage(), res);
 
@@ -7255,7 +7272,7 @@ static void test_SetThreadUILanguage(void)
     "expected %d got %d\n", MAKELANGID(LANG_DUTCH, SUBLANG_DUTCH_BELGIAN), res);
 
     res = pSetThreadUILanguage(0);
-    todo_wine ok(res == MAKELANGID(LANG_DUTCH, SUBLANG_DUTCH_BELGIAN),
+    ok(res == MAKELANGID(LANG_DUTCH, SUBLANG_DUTCH_BELGIAN),
     "expected %d got %d\n", MAKELANGID(LANG_DUTCH, SUBLANG_DUTCH_BELGIAN), res);
 }
 
@@ -8766,9 +8783,16 @@ START_TEST(locale)
   test_EnumTimeFormatsA();
   test_EnumTimeFormatsW();
   test_EnumDateFormatsA();
+
+  /* some tests need an English locale */
+  pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
   test_GetLocaleInfoA();
   test_GetLocaleInfoW();
   test_GetLocaleInfoEx();
+  test_GetGeoInfo();
+  test_invariant();
+  pSetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, NULL, NULL );
+
   test_GetTimeFormatA();
   test_GetTimeFormatEx();
   test_GetDateFormatA();
@@ -8800,9 +8824,7 @@ START_TEST(locale)
   test_IsValidLocaleName();
   test_ResolveLocaleName();
   test_CompareStringOrdinal();
-  test_GetGeoInfo();
   test_EnumSystemGeoID();
-  test_invariant();
   test_GetSystemPreferredUILanguages();
   test_GetThreadPreferredUILanguages();
   test_GetUserPreferredUILanguages();

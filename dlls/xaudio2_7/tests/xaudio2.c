@@ -37,6 +37,8 @@
 #include "ks.h"
 #include "ksmedia.h"
 
+static const GUID KSDATAFORMAT_SUBTYPE_WMAUDIO2 = {0x00000161, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+
 static const GUID IID_IXAudio27 =            {0x8bcf1f58, 0x9fe7, 0x4583, {0x8a, 0xc6, 0xe2, 0xad, 0xc4, 0x65, 0xc8, 0xbb}};
 static const GUID IID_IXAudio28 =            {0x60d8dac8, 0x5aa1, 0x4e8e, {0xb5, 0x97, 0x2f, 0x5e, 0x28, 0x83, 0xd4, 0x84}};
 static const GUID IID_IXAudio29 =            {0x2b02e3cf, 0x2e0b, 0x4ec3, {0xbe, 0x45, 0x1b, 0x2a, 0x3f, 0xe7, 0x21, 0x0d}};
@@ -1463,6 +1465,57 @@ static void test_XAudio2CreateWithVersionInfo(void)
 }
 #endif
 
+struct wma_voice_params
+{
+    IXAudio2 *audio;
+    HRESULT hr;
+};
+
+static DWORD WINAPI wma_voice_thread(void *arg)
+{
+    struct wma_voice_params *params = arg;
+    IXAudio2SourceVoice *voice = NULL;
+    WAVEFORMATEXTENSIBLE fmt;
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    fmt.Format.nChannels = 2;
+    fmt.Format.nSamplesPerSec = 44100;
+    fmt.Format.nAvgBytesPerSec = 20000;
+    fmt.Format.nBlockAlign = 2230;
+    fmt.Format.wBitsPerSample = 16;
+    fmt.Format.cbSize = sizeof(fmt) - sizeof(WAVEFORMATEX);
+    fmt.Samples.wValidBitsPerSample = 16;
+    fmt.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    fmt.SubFormat = KSDATAFORMAT_SUBTYPE_WMAUDIO2;
+
+    params->hr = IXAudio2_CreateSourceVoice(params->audio, &voice,
+            (const WAVEFORMATEX *)&fmt, 0, 1.0f, NULL, NULL, NULL);
+    if (SUCCEEDED(params->hr))
+        IXAudio2SourceVoice_DestroyVoice(voice);
+    return 0;
+}
+
+static void test_wma_voice_without_com(IXAudio2 *audio)
+{
+    struct wma_voice_params params = { audio, E_FAIL };
+    IXAudio2MasteringVoice *master;
+    HANDLE thread;
+    HRESULT hr;
+
+    hr = create_mastering_voice(audio, 2, &master);
+    ok(hr == S_OK, "CreateMasteringVoice failed: %08lx\n", hr);
+
+    thread = CreateThread(NULL, 0, wma_voice_thread, &params, 0, NULL);
+    ok(thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+
+    ok(params.hr == S_OK, "got %#lx\n", params.hr);
+
+    IXAudio2MasteringVoice_DestroyVoice(master);
+}
+
 static UINT32 check_has_devices(IXAudio2 *xa)
 {
     HRESULT hr;
@@ -1504,6 +1557,7 @@ START_TEST(xaudio2)
         test_submix(audio);
         test_flush(audio);
         test_setchannelvolumes(audio);
+        test_wma_voice_without_com(audio);
     }
 
     ref = IXAudio2_Release(audio);

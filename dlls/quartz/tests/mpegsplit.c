@@ -1084,6 +1084,7 @@ struct testfilter
     HANDLE eos_event;
     unsigned int sample_count, eos_count, new_segment_count, byte_count;
     REFERENCE_TIME segment_start, segment_end_min, segment_end_max, seek_start, seek_end;
+    REFERENCE_TIME sample_start;
     LONGLONG read_position;
 };
 
@@ -1211,6 +1212,9 @@ static HRESULT WINAPI testsink_Receive(struct strmbase_sink *iface, IMediaSample
 
     if (winetest_debug > 1)
         trace("%04lx: Got sample with timestamps %I64d-%I64d.\n", GetCurrentThreadId(), start, end);
+
+    if (filter->sample_count == 0 && filter->byte_count == 0)
+        filter->sample_start = start;
 
     ok(filter->new_segment_count, "Expected NewSegment() before Receive().\n");
 
@@ -2101,6 +2105,11 @@ static void test_video_file(void)
     /* Native also supports subtype MEDIASUBTYPE_MPEG1Packet, yielding 1230 and 8828 bytes, respectively */
     ok(testsink_video.byte_count == 1214, "Video sink got %u bytes.\n", testsink_video.byte_count);
     ok(testsink_audio.byte_count == 8777, "Audio sink got %u bytes.\n", testsink_audio.byte_count);
+
+    /* Native uses 55 for the first sample timestamp, but there's no need to copy the exact value. */
+    ok(min(testsink_video.sample_start, testsink_audio.sample_start) < 100,
+       "The first sample timestamp is off by more 100, video %I64d and audio %I64d.\n",
+       testsink_video.sample_start, testsink_audio.sample_start);
 
     IAMStreamSelect_Release(sel);
     IPin_Release(source_video);

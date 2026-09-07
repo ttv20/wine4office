@@ -98,7 +98,12 @@ static UINT get_signature( MSIPACKAGE *package, struct signature *sig, const WCH
     }
 
     /* get properties */
-    sig->File = msi_dup_record_field(row,2);
+    if (!(sig->File = msi_dup_record_field(row, 2)))
+    {
+        msiobj_release( &row->hdr );
+        return ERROR_SUCCESS;
+    }
+
     if ((p = wcschr(sig->File, '|')))
     {
         p++;
@@ -143,7 +148,6 @@ static UINT get_signature( MSIPACKAGE *package, struct signature *sig, const WCH
     TRACE("Languages is %s\n", debugstr_w(sig->Languages));
 
     msiobj_release( &row->hdr );
-
     return ERROR_SUCCESS;
 }
 

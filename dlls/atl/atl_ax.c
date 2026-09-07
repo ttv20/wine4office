@@ -1115,7 +1115,7 @@ HRESULT WINAPI AtlAxCreateControlLicEx(LPCOLESTR lpszName, HWND hWnd,
     {
         IWebBrowser2 *browser;
 
-        hRes = IOleObject_QueryInterface( pControl, &IID_IWebBrowser2, (void**) &browser );
+        hRes = IUnknown_QueryInterface( pUnkControl, &IID_IWebBrowser2, (void**) &browser );
         if ( !browser )
             WARN( "Cannot query IWebBrowser2 interface: %08lx\n", hRes );
         else {

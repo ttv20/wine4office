@@ -776,7 +776,7 @@ ATOM WINAPI NtUserGetClassInfoEx( HINSTANCE instance, UNICODE_STRING *name, WNDC
  */
 ULONG WINAPI NtUserGetAtomName( ATOM atom, UNICODE_STRING *name )
 {
-    WCHAR buffer[MAX_ATOM_LEN];
+    WCHAR buffer[MAX_ATOM_LEN + 1];
     UINT size = 0;
 
     if (atom < MAXINTATOM)

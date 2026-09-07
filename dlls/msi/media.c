@@ -398,8 +398,7 @@ static INT_PTR cabinet_next_cabinet_stream( FDINOTIFICATIONTYPE fdint,
     return 0;
 }
 
-static INT_PTR cabinet_copy_file(FDINOTIFICATIONTYPE fdint,
-                                 PFDINOTIFICATION pfdin)
+static INT_PTR cabinet_copy_file(FDINOTIFICATIONTYPE fdint, FDINOTIFICATION *pfdin)
 {
     MSICABDATA *data = pfdin->pv;
     HANDLE handle = 0;
@@ -448,13 +447,18 @@ static INT_PTR cabinet_copy_file(FDINOTIFICATIONTYPE fdint,
 
             TRACE("file in use, scheduling rename operation\n");
 
-            if (!(tmppathW = wcsdup(path))) return ERROR_OUTOFMEMORY;
+            if (!(tmppathW = wcsdup(path)))
+            {
+                free( path );
+                return -1;
+            }
             if ((p = wcsrchr(tmppathW, '\\'))) *p = 0;
             len = lstrlenW( tmppathW ) + 16;
             if (!(tmpfileW = malloc(len * sizeof(WCHAR))))
             {
                 free( tmppathW );
-                return ERROR_OUTOFMEMORY;
+                free( path );
+                return -1;
             }
             if (!msi_get_temp_file_name( data->package, tmppathW, L"msi", tmpfileW )) tmpfileW[0] = 0;
             free( tmppathW );
@@ -479,7 +483,6 @@ static INT_PTR cabinet_copy_file(FDINOTIFICATIONTYPE fdint,
 
 done:
     free(path);
-
     return (INT_PTR)handle;
 }
 

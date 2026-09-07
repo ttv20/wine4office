@@ -1437,7 +1437,7 @@ static HRESULT opentype_ttc_analyzer(IDWriteFontFileStream *stream, UINT32 *font
     void *context;
     HRESULT hr;
 
-    hr = IDWriteFontFileStream_ReadFileFragment(stream, (const void**)&header, 0, sizeof(header), &context);
+    hr = IDWriteFontFileStream_ReadFileFragment(stream, (const void **)&header, 0, sizeof(*header), &context);
     if (FAILED(hr))
         return hr;
 

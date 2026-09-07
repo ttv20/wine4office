@@ -1468,6 +1468,7 @@ static void wg_stepper_class_init(WgStepperClass *klass)
     gst_element_class_set_metadata(GST_ELEMENT_CLASS(klass), "winegstreamer buffer stepper", "Connector",
         "Hold incoming buffer for manual pushing", "Yuxuan Shui <yshui@codeweavers.com>");
     klass->parent_class.change_state = wg_stepper_change_state;
+    (void)wg_stepper_parent_class; /* silence unused variable warning */
 }
 
 static GstFlowReturn wg_stepper_chain_cb(GstPad *pad, GstObject *parent, GstBuffer *buf)

@@ -63,6 +63,7 @@ enum vkd3d_shader_api_version
     VKD3D_SHADER_API_VERSION_1_18,
     VKD3D_SHADER_API_VERSION_1_19,
     VKD3D_SHADER_API_VERSION_2_0,
+    VKD3D_SHADER_API_VERSION_2_1,
 
     VKD3D_FORCE_32_BIT_ENUM(VKD3D_SHADER_API_VERSION),
 };
@@ -240,6 +241,17 @@ enum vkd3d_shader_compile_option_backward_compatibility
      *  \since 2.0
      */
     VKD3D_SHADER_COMPILE_OPTION_CONST_GLOBAL_UNIFORMS = 0x00000004,
+    /**
+     *  Causes all 'half' globals to be handled as 'float'. This option
+     *  applies to HLSL sources with shader model 1-5 target profiles. Without
+     *  this option using the 'half' type on globals produces compilation
+     *  errors in these target profiles.
+     *
+     *  This option is disabled by default.
+     *
+     *  \since 2.1
+     */
+    VKD3D_SHADER_COMPILE_OPTION_BACKCOMPAT_ALLOW_HALF_GLOBALS = 0x00000008,
 
     VKD3D_FORCE_32_BIT_ENUM(VKD3D_SHADER_COMPILE_OPTION_BACKWARD_COMPATIBILITY),
 };

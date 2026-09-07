@@ -75,7 +75,6 @@ _ACRTIMP wint_t   __cdecl fgetwc(FILE*);
 _ACRTIMP wchar_t* __cdecl fgetws(wchar_t*,int,FILE*);
 _ACRTIMP wint_t   __cdecl fputwc(wint_t,FILE*);
 _ACRTIMP int      __cdecl fputws(const wchar_t*,FILE*);
-_ACRTIMP int      __cdecl fputws(const wchar_t*,FILE*);
 _ACRTIMP wint_t   __cdecl getwc(FILE*);
 _ACRTIMP wint_t   __cdecl getwchar(void);
 _ACRTIMP wchar_t* __cdecl getws(wchar_t*);
@@ -578,35 +577,35 @@ static inline int __cdecl vwscanf(const wchar_t *format, va_list args)
     return __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS, stdin, format, NULL, args);
 }
 
-static inline int __cdecl wscanf(FILE *file, const wchar_t *format, ...)
+static inline int __cdecl wscanf(const wchar_t *format, ...)
 {
     int ret;
     va_list args;
 
     va_start(args, format);
-    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS, file, format, NULL, args);
+    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS, stdin, format, NULL, args);
     va_end(args);
     return ret;
 }
 
-static inline int __cdecl wscanf_s(FILE *file, const wchar_t *format, ...)
+static inline int __cdecl wscanf_s(const wchar_t *format, ...)
 {
     int ret;
     va_list args;
 
     va_start(args, format);
-    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS | _CRT_INTERNAL_SCANF_SECURECRT, file, format, NULL, args);
+    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS | _CRT_INTERNAL_SCANF_SECURECRT, stdin, format, NULL, args);
     va_end(args);
     return ret;
 }
 
-static inline int __cdecl _wscanf_s_l(FILE *file, const wchar_t *format, _locale_t locale, ...)
+static inline int __cdecl _wscanf_s_l(const wchar_t *format, _locale_t locale, ...)
 {
     int ret;
     va_list args;
 
     va_start(args, locale);
-    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS | _CRT_INTERNAL_SCANF_SECURECRT, file, format, locale, args);
+    ret = __stdio_common_vfwscanf(_CRT_INTERNAL_LOCAL_SCANF_OPTIONS | _CRT_INTERNAL_SCANF_SECURECRT, stdin, format, locale, args);
     va_end(args);
     return ret;
 }

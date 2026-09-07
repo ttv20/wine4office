@@ -60,7 +60,7 @@ typedef struct
     IXSLProcessor IXSLProcessor_iface;
     LONG ref;
 
-    xsltemplate *stylesheet;
+    xsltemplate *template;
     IXMLDOMNode *input;
 
     struct
@@ -220,13 +220,20 @@ static HRESULT WINAPI xsltemplate_putref_stylesheet( IXSLTemplate *iface,
     return S_OK;
 }
 
-static HRESULT WINAPI xsltemplate_get_stylesheet( IXSLTemplate *iface,
-    IXMLDOMNode **node)
+static HRESULT WINAPI xsltemplate_get_stylesheet(IXSLTemplate *iface, IXMLDOMNode **node)
 {
-    xsltemplate *This = impl_from_IXSLTemplate( iface );
+    xsltemplate *template = impl_from_IXSLTemplate(iface);
 
-    FIXME("(%p)->(%p): stub\n", This, node);
-    return E_NOTIMPL;
+    TRACE("%p, %p.\n", iface, node);
+
+    if (!node)
+        return E_INVALIDARG;
+
+    *node = template->node;
+    if (*node)
+        IXMLDOMNode_AddRef(*node);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI xsltemplate_createProcessor( IXSLTemplate *iface,
@@ -347,7 +354,7 @@ static ULONG WINAPI xslprocessor_Release( IXSLProcessor *iface )
         LIST_FOR_EACH_ENTRY_SAFE(par, par2, &This->params.list, struct xslprocessor_par, entry)
             xslprocessor_par_free(&This->params, par);
 
-        IXSLTemplate_Release(&This->stylesheet->IXSLTemplate_iface);
+        IXSLTemplate_Release(&This->template->IXSLTemplate_iface);
         free(This);
     }
 
@@ -437,14 +444,19 @@ static HRESULT WINAPI xslprocessor_get_input( IXSLProcessor *iface, VARIANT *inp
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI xslprocessor_get_ownerTemplate(
-    IXSLProcessor *iface,
-    IXSLTemplate **template)
+static HRESULT WINAPI xslprocessor_get_ownerTemplate(IXSLProcessor *iface, IXSLTemplate **template)
 {
-    xslprocessor *This = impl_from_IXSLProcessor( iface );
+    xslprocessor *processor = impl_from_IXSLProcessor(iface);
 
-    FIXME("(%p)->(%p): stub\n", This, template);
-    return E_NOTIMPL;
+    TRACE("%p, %p.\n", iface, template);
+
+    if (!template)
+        return E_INVALIDARG;
+
+    *template = &processor->template->IXSLTemplate_iface;
+    IXSLTemplate_AddRef(*template);
+
+    return S_OK;
 }
 
 static HRESULT WINAPI xslprocessor_setStartMode(
@@ -628,7 +640,7 @@ static HRESULT WINAPI xslprocessor_transform(
 
     SysFreeString(This->outstr);
 
-    hr = node_transform_node_params(get_node_obj(This->input), This->stylesheet->node,
+    hr = node_transform_node_params(get_node_obj(This->input), This->template->node,
             &This->outstr, stream, &This->params);
     if (SUCCEEDED(hr))
     {
@@ -871,7 +883,7 @@ HRESULT XSLProcessor_create(xsltemplate *template, IXSLProcessor **ret)
     object->ref = 1;
     object->output.type = PROCESSOR_OUTPUT_NOT_SET;
     list_init(&object->params.list);
-    object->stylesheet = template;
+    object->template = template;
     IXSLTemplate_AddRef(&template->IXSLTemplate_iface);
     init_dispex(&object->dispex, (IUnknown *)&object->IXSLProcessor_iface, &xslprocessor_dispex);
 

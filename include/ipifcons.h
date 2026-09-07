@@ -191,7 +191,7 @@
 #define IF_TYPE_POS                              171
 #define IF_TYPE_DVB_ASI_IN                       172
 #define IF_TYPE_DVB_ASI_OUT                      173
-#define IF_TYPE_PLC                              175
+#define IF_TYPE_PLC                              174
 #define IF_TYPE_NFAS                             175
 #define IF_TYPE_TR008                            176
 #define IF_TYPE_GR303_RDT                        177

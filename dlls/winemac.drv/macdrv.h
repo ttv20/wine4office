@@ -83,8 +83,6 @@ extern const char* debugstr_cf(CFTypeRef t);
 
 extern CGRect macdrv_get_desktop_rect(void);
 extern void macdrv_reset_device_metrics(void);
-extern BOOL macdrv_GetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
-extern BOOL macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
 
 
 /**************************************************************************
@@ -129,8 +127,8 @@ extern void macdrv_Beep(void);
 extern LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWND hwnd, DWORD flags, LPVOID lpvoid);
 extern LRESULT macdrv_ClipboardWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 extern UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager, void *param);
-extern BOOL macdrv_GetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
-extern BOOL macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
+extern UINT macdrv_GetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
+extern UINT macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp);
 extern BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset);
 extern LRESULT macdrv_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data);
 extern void macdrv_CleanupIcons(HWND hwnd);
@@ -150,7 +148,7 @@ extern void macdrv_UpdateLayeredWindow(HWND hwnd, BYTE alpha, UINT flags);
 extern LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 extern BOOL macdrv_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const struct window_rects *rects);
 extern BOOL macdrv_GetWindowStyleMasks(HWND hwnd, UINT style, UINT ex_style, UINT *style_mask, UINT *ex_style_mask);
-extern struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format);
+extern struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format, BOOL raw);
 extern BOOL macdrv_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect, struct window_surface **surface);
 extern void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                                     const struct window_rects *new_rects, struct window_surface *surface);

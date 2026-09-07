@@ -405,6 +405,7 @@ extern HRESULT node_get_value(struct domnode *node, VARIANT *value);
 extern HRESULT node_select_nodes(struct domnode*,BSTR,IXMLDOMNodeList**);
 extern HRESULT node_select_singlenode(struct domnode *,BSTR,IXMLDOMNode**);
 extern HRESULT node_transform_node(struct domnode*,IXMLDOMNode*,BSTR*);
+extern HRESULT node_transform_node_to_object(struct domnode*,IXMLDOMNode*,const VARIANT*);
 extern HRESULT node_transform_node_params(struct domnode*,IXMLDOMNode*,BSTR*,ISequentialStream*,
     const struct xslprocessor_params*);
 extern HRESULT node_create_supporterrorinfo(const tid_t*,void**);

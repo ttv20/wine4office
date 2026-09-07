@@ -376,7 +376,7 @@ static struct hlsl_ir_node *add_implicit_conversion(struct hlsl_ctx *ctx, struct
     {
         if (hlsl_is_numeric_type(dst_type) && hlsl_is_numeric_type(src_type)
                 && dst_type->e.numeric.dimx * dst_type->e.numeric.dimy < src_type->e.numeric.dimx * src_type->e.numeric.dimy
-                && ctx->warn_implicit_truncation)
+                && ctx->compile_info.warn_implicit_truncation)
             hlsl_warning(ctx, loc, VKD3D_SHADER_WARNING_HLSL_IMPLICIT_TRUNCATION, "Implicit truncation of %s type.",
                     src_type->class == HLSL_CLASS_VECTOR ? "vector" : "matrix");
     }
@@ -947,7 +947,7 @@ struct hlsl_ir_node *hlsl_add_load_component(struct hlsl_ctx *ctx, struct hlsl_b
 
     hlsl_block_add_simple_store(ctx, block, var, var_instr);
 
-    hlsl_init_simple_deref_from_var(&src, var);
+    hlsl_deref_init_simple(&src, var);
     return hlsl_block_add_load_component(ctx, block, &src, comp, loc);
 }
 
@@ -1658,7 +1658,7 @@ static struct hlsl_ir_node *add_expr(struct hlsl_ctx *ctx, struct hlsl_block *bl
 
         if (!(var = hlsl_new_synthetic_var(ctx, "split_op", type, loc)))
             return NULL;
-        hlsl_init_simple_deref_from_var(&var_deref, var);
+        hlsl_deref_init_simple(&var_deref, var);
 
         for (i = 0; i < type->e.numeric.dimy * type->e.numeric.dimx; ++i)
         {
@@ -2186,7 +2186,7 @@ static bool add_assignment(struct hlsl_ctx *ctx, struct hlsl_block *block, struc
         struct hlsl_deref deref;
         unsigned int i, j, k = 0;
 
-        hlsl_init_deref_from_index_chain(ctx, &deref, lhs);
+        hlsl_deref_init_from_index_chain(&deref, lhs, ctx);
 
         for (i = 0; i < lhs->data_type->e.numeric.dimy; ++i)
         {
@@ -2204,7 +2204,7 @@ static bool add_assignment(struct hlsl_ctx *ctx, struct hlsl_block *block, struc
             }
         }
 
-        hlsl_cleanup_deref(&deref);
+        hlsl_deref_cleanup(&deref);
     }
     else if (lhs->type == HLSL_IR_INDEX && hlsl_index_is_noncontiguous(hlsl_ir_index(lhs)))
     {
@@ -2227,22 +2227,22 @@ static bool add_assignment(struct hlsl_ctx *ctx, struct hlsl_block *block, struc
             cell = hlsl_block_add_index(ctx, block, &row->node, c, &lhs->loc);
             load = hlsl_add_load_component(ctx, block, rhs, k++, &rhs->loc);
 
-            if (!hlsl_init_deref_from_index_chain(ctx, &deref, cell))
+            if (!hlsl_deref_init_from_index_chain(&deref, cell, ctx))
                 return false;
 
             hlsl_block_add_store_index(ctx, block, &deref, NULL, load, 0, &rhs->loc);
-            hlsl_cleanup_deref(&deref);
+            hlsl_deref_cleanup(&deref);
         }
     }
     else
     {
         struct hlsl_deref deref;
 
-        if (!hlsl_init_deref_from_index_chain(ctx, &deref, lhs))
+        if (!hlsl_deref_init_from_index_chain(&deref, lhs, ctx))
             return false;
 
         hlsl_block_add_store_index(ctx, block, &deref, NULL, rhs, writemask, &rhs->loc);
-        hlsl_cleanup_deref(&deref);
+        hlsl_deref_cleanup(&deref);
     }
 
     block->value = rhs;
@@ -2291,7 +2291,7 @@ static void initialize_var_components(struct hlsl_ctx *ctx, struct hlsl_block *i
     struct hlsl_deref dst_deref;
     unsigned int k;
 
-    hlsl_init_simple_deref_from_var(&dst_deref, dst);
+    hlsl_deref_init_simple(&dst_deref, dst);
 
     for (k = 0; k < src_comp_count; ++k)
     {
@@ -2498,6 +2498,14 @@ static void declare_var(struct hlsl_ctx *ctx, struct parse_variable_def *v)
 
     type = basic_type;
 
+    if (basic_type->class <= HLSL_CLASS_LAST_NUMERIC && basic_type->e.numeric.type == HLSL_TYPE_HALF
+            && !v->arrays.count && ctx->cur_scope == ctx->globals && !ctx->compile_info.allow_half_globals
+            && ctx->profile->type != VKD3D_SHADER_TYPE_EFFECT)
+    {
+        hlsl_error(ctx, &v->loc, VKD3D_SHADER_ERROR_HLSL_INVALID_TYPE,
+                "The half type is not allowed for global variables.");
+    }
+
     if (hlsl_version_ge(ctx, 5, 1) && hlsl_type_is_resource(type))
     {
         for (i = 0; i < v->arrays.count; ++i)
@@ -2597,7 +2605,7 @@ static void declare_var(struct hlsl_ctx *ctx, struct parse_variable_def *v)
         modifiers |= HLSL_STORAGE_UNIFORM;
 
     if (ctx->cur_scope == ctx->globals && (modifiers & HLSL_STORAGE_UNIFORM)
-            && (ctx->compatibility_flags & VKD3D_SHADER_COMPILE_OPTION_CONST_GLOBAL_UNIFORMS))
+            && ctx->compile_info.const_global_uniforms)
         type = hlsl_type_clone(ctx, type, 0, HLSL_MODIFIER_CONST);
 
     if (!(var = hlsl_new_var(ctx, var_name, type, &v->loc, &new_semantic, modifiers, &v->reg_reservation)))
@@ -3085,9 +3093,7 @@ static bool parse_function_call_arguments(struct hlsl_ctx *ctx, const struct hls
 
         if (param->storage_modifiers & HLSL_STORAGE_IN)
         {
-            if (!hlsl_types_are_equal(arg->data_type, param->data_type))
-                arg = add_cast(ctx, args->instrs, arg, param->data_type, &arg->loc);
-
+            arg = add_cast(ctx, args->instrs, arg, param->data_type, &arg->loc);
             hlsl_block_add_simple_store(ctx, args->instrs, param, arg);
         }
 
@@ -3106,7 +3112,7 @@ static bool parse_function_call_arguments(struct hlsl_ctx *ctx, const struct hls
         if (is_compile && !(param->storage_modifiers & HLSL_STORAGE_UNIFORM))
             continue;
 
-        hlsl_init_simple_deref_from_var(&param_deref, param);
+        hlsl_deref_init_simple(&param_deref, param);
 
         for (j = 0; j < comp_count; ++j)
         {
@@ -4466,7 +4472,7 @@ static bool intrinsic_mul(struct hlsl_ctx *ctx,
 
     if (!(var = hlsl_new_synthetic_var(ctx, "mul", matrix_type, loc)))
         return false;
-    hlsl_init_simple_deref_from_var(&var_deref, var);
+    hlsl_deref_init_simple(&var_deref, var);
 
     for (i = 0; i < matrix_type->e.numeric.dimx; ++i)
     {
@@ -5119,7 +5125,7 @@ static bool intrinsic_transpose(struct hlsl_ctx *ctx,
 
     if (!(var = hlsl_new_synthetic_var(ctx, "transpose", mat_type, loc)))
         return false;
-    hlsl_init_simple_deref_from_var(&var_deref, var);
+    hlsl_deref_init_simple(&var_deref, var);
 
     for (i = 0; i < arg_type->e.numeric.dimx; ++i)
     {
@@ -5298,7 +5304,7 @@ static bool intrinsic_interlocked(struct hlsl_ctx *ctx, enum hlsl_interlocked_op
         c = hlsl_block_add_uint_constant(ctx, params->instrs, component, &lhs->loc);
         cell = hlsl_block_add_index(ctx, params->instrs, lhs, c, &lhs->loc);
 
-        if (!hlsl_init_deref_from_index_chain(ctx, &dst_deref, cell))
+        if (!hlsl_deref_init_from_index_chain(&dst_deref, cell, ctx))
             return false;
     }
     else
@@ -5306,18 +5312,18 @@ static bool intrinsic_interlocked(struct hlsl_ctx *ctx, enum hlsl_interlocked_op
         struct hlsl_block component_path_block;
         struct hlsl_deref dst_deref_prefix;
 
-        if (!hlsl_init_deref_from_index_chain(ctx, &dst_deref_prefix, lhs))
+        if (!hlsl_deref_init_from_index_chain(&dst_deref_prefix, lhs, ctx))
             return false;
-        if (!hlsl_init_deref_from_component_index(ctx, &component_path_block, &dst_deref,
-                &dst_deref_prefix, component, &lhs->loc))
+        if (!hlsl_deref_init_from_component_index(&dst_deref, &component_path_block,
+                &dst_deref_prefix, component, &lhs->loc, ctx))
             return false;
 
         hlsl_block_add_block(params->instrs, &component_path_block);
-        hlsl_cleanup_deref(&dst_deref_prefix);
+        hlsl_deref_cleanup(&dst_deref_prefix);
     }
 
     interlocked = hlsl_new_interlocked(ctx, op, ret_type, &dst_deref, NULL, cmp_val, val, loc);
-    hlsl_cleanup_deref(&dst_deref);
+    hlsl_deref_cleanup(&dst_deref);
     if (!interlocked)
         return false;
     hlsl_block_add_instr(params->instrs, interlocked);
@@ -6637,12 +6643,12 @@ static bool add_store_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block
             hlsl_get_vector_type(ctx, HLSL_TYPE_UINT, value_dim), loc);
     writemask = vkd3d_write_mask_from_component_count(value_dim);
 
-    if (!hlsl_init_deref_from_index_chain(ctx, &resource_deref, object))
+    if (!hlsl_deref_init_from_index_chain(&resource_deref, object, ctx))
         return false;
 
     hlsl_block_add_resource_store(ctx, block, HLSL_RESOURCE_STORE,
             &resource_deref, NULL, offset, rhs, writemask, loc);
-    hlsl_cleanup_deref(&resource_deref);
+    hlsl_deref_cleanup(&resource_deref);
 
     return true;
 }
@@ -6660,14 +6666,14 @@ static bool add_so_append_method_call(struct hlsl_ctx *ctx, struct hlsl_block *b
         return false;
     }
 
-    if (!hlsl_init_deref_from_index_chain(ctx, &so_deref, object))
+    if (!hlsl_deref_init_from_index_chain(&so_deref, object, ctx))
         return false;
 
     if (!(rhs = add_implicit_conversion(ctx, block, params->args[0], object->data_type->e.so.type, loc)))
         return false;
 
     hlsl_block_add_resource_store(ctx, block, HLSL_RESOURCE_STREAM_APPEND, &so_deref, NULL, NULL, rhs, 0, loc);
-    hlsl_cleanup_deref(&so_deref);
+    hlsl_deref_cleanup(&so_deref);
 
     return true;
 }
@@ -6684,11 +6690,11 @@ static bool add_so_restartstrip_method_call(struct hlsl_ctx *ctx, struct hlsl_bl
         return false;
     }
 
-    if (!hlsl_init_deref_from_index_chain(ctx, &so_deref, object))
+    if (!hlsl_deref_init_from_index_chain(&so_deref, object, ctx))
         return false;
 
     hlsl_block_add_resource_store(ctx, block, HLSL_RESOURCE_STREAM_RESTART, &so_deref, NULL, NULL, NULL, 0, loc);
-    hlsl_cleanup_deref(&so_deref);
+    hlsl_deref_cleanup(&so_deref);
 
     return true;
 }
@@ -9540,15 +9546,9 @@ primary_expr:
         }
     | boolean
         {
-            struct hlsl_ir_node *c;
-
-            if (!(c = hlsl_new_bool_constant(ctx, $1, &@1)))
+            if (!($$ = make_empty_block(ctx)))
                 YYABORT;
-            if (!($$ = make_block(ctx, c)))
-            {
-                hlsl_free_instr(c);
-                YYABORT;
-            }
+            hlsl_block_add_bool_constant(ctx, $$, $1, &@1);
         }
     | STRING
         {

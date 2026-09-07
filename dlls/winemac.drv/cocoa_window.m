@@ -21,7 +21,6 @@
 #include "config.h"
 
 #define GL_SILENCE_DEPRECATION
-#import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #include <dlfcn.h>
@@ -191,147 +190,6 @@ static inline BOOL stage_manager_enabled(void)
 
 @interface NSWindow (WineAccessPrivateMethods)
     - (id) _displayChanged;
-@end
-
-
-@interface WineDisplayLink : NSObject
-{
-    CGDirectDisplayID _displayID;
-    CVDisplayLinkRef _link;
-    NSMutableSet* _windows;
-
-    NSTimeInterval _actualRefreshPeriod;
-    NSTimeInterval _nominalRefreshPeriod;
-
-    NSTimeInterval _lastDisplayTime;
-}
-
-    - (id) initWithDisplayID:(CGDirectDisplayID)displayID;
-
-    - (void) addWindow:(WineWindow*)window;
-    - (void) removeWindow:(WineWindow*)window;
-
-    - (NSTimeInterval) refreshPeriod;
-
-    - (void) start;
-
-@end
-
-@implementation WineDisplayLink
-
-static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeStamp* inNow, const CVTimeStamp* inOutputTime, CVOptionFlags flagsIn, CVOptionFlags* flagsOut, void* displayLinkContext);
-
-    - (id) initWithDisplayID:(CGDirectDisplayID)displayID
-    {
-        self = [super init];
-        if (self)
-        {
-            CVReturn status = CVDisplayLinkCreateWithCGDisplay(displayID, &_link);
-            if (status == kCVReturnSuccess && !_link)
-                status = kCVReturnError;
-            if (status == kCVReturnSuccess)
-                status = CVDisplayLinkSetOutputCallback(_link, WineDisplayLinkCallback, self);
-            if (status != kCVReturnSuccess)
-            {
-                [self release];
-                return nil;
-            }
-
-            _displayID = displayID;
-            _windows = [[NSMutableSet alloc] init];
-        }
-        return self;
-    }
-
-    - (void) dealloc
-    {
-        if (_link)
-        {
-            CVDisplayLinkStop(_link);
-            CVDisplayLinkRelease(_link);
-        }
-        [_windows release];
-        [super dealloc];
-    }
-
-    - (void) addWindow:(WineWindow*)window
-    {
-        BOOL firstWindow;
-        @synchronized(self) {
-            firstWindow = !_windows.count;
-            [_windows addObject:window];
-        }
-        if (firstWindow || !CVDisplayLinkIsRunning(_link))
-            [self start];
-    }
-
-    - (void) removeWindow:(WineWindow*)window
-    {
-        BOOL lastWindow = FALSE;
-        @synchronized(self) {
-            BOOL hadWindows = _windows.count > 0;
-            [_windows removeObject:window];
-            if (hadWindows && !_windows.count)
-                lastWindow = TRUE;
-        }
-        if (lastWindow && CVDisplayLinkIsRunning(_link))
-            CVDisplayLinkStop(_link);
-    }
-
-    - (void) fire
-    {
-        NSSet* windows;
-        @synchronized(self) {
-            windows = [_windows copy];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            BOOL anyDisplayed = FALSE;
-            for (WineWindow* window in windows)
-            {
-                if ([window viewsNeedDisplay])
-                {
-                    [window displayIfNeeded];
-                    anyDisplayed = YES;
-                }
-            }
-
-            NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
-            if (anyDisplayed)
-                _lastDisplayTime = now;
-            else if (_lastDisplayTime + 2.0 < now)
-                CVDisplayLinkStop(_link);
-        });
-        [windows release];
-    }
-
-    - (NSTimeInterval) refreshPeriod
-    {
-        if (_actualRefreshPeriod || (_actualRefreshPeriod = CVDisplayLinkGetActualOutputVideoRefreshPeriod(_link)))
-            return _actualRefreshPeriod;
-
-        if (_nominalRefreshPeriod)
-            return _nominalRefreshPeriod;
-
-        CVTime time = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(_link);
-        if (time.flags & kCVTimeIsIndefinite)
-            return 1.0 / 60.0;
-        _nominalRefreshPeriod = time.timeValue / (double)time.timeScale;
-        return _nominalRefreshPeriod;
-    }
-
-    - (void) start
-    {
-        _lastDisplayTime = [[NSProcessInfo processInfo] systemUptime];
-        CVDisplayLinkStart(_link);
-    }
-
-static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeStamp* inNow, const CVTimeStamp* inOutputTime, CVOptionFlags flagsIn, CVOptionFlags* flagsOut, void* displayLinkContext)
-{
-    WineDisplayLink* link = displayLinkContext;
-    [link fire];
-    return kCVReturnSuccess;
-}
-
 @end
 
 
@@ -1084,7 +942,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         [window setHidesOnDeactivate:NO];
         [window setReleasedWhenClosed:NO];
 
-        [window setOneShot:YES];
         [window disableCursorRects];
         [window setShowsResizeIndicator:NO];
         [window setHasShadow:wf->shadow];
@@ -1097,9 +954,8 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         window->savedContentMinSize = NSZeroSize;
         window->savedContentMaxSize = NSMakeSize(FLT_MAX, FLT_MAX);
         window->resizable = wf->resizable;
-        window->_lastDisplayTime = [[NSDate distantPast] timeIntervalSinceReferenceDate];
 
-        [window registerForDraggedTypes:@[(NSString*)kUTTypeData, (NSString*)kUTTypeContent]];
+        [window registerForDraggedTypes:@[@"public.data" /* UTTypeData */, @"public.content" /* UTTypeContent */]];
 
         contentView = [[[WineContentView alloc] initWithFrame:NSZeroRect] autorelease];
         if (!contentView)
@@ -1134,11 +990,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                selector:@selector(applicationDidUnhide)
                    name:NSApplicationDidUnhideNotification
                  object:NSApp];
-
-        [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:window
-                                                              selector:@selector(checkWineDisplayLink)
-                                                                  name:NSWorkspaceActiveSpaceDidChangeNotification
-                                                                object:[NSWorkspace sharedWorkspace]];
 
         [window setFrameAndWineFrame:[window frameRectForContentRect:window_frame]];
 
@@ -1467,10 +1318,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         {
             if ([self level] > [child level])
                 [child setLevel:[self level]];
-            if (![child isVisible])
-                [child setAutodisplay:YES];
             [self addChildWindow:child ordered:NSWindowAbove];
-            [child checkWineDisplayLink];
             [latentChildWindows removeObjectIdenticalTo:child];
             child.latentParentWindow = nil;
             reordered = TRUE;
@@ -1816,7 +1664,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                     [self getSiblingWindowsForWindow:other ancestor:&ancestor ancestorOfOther:&ancestorOfOther];
                     if (ancestor)
                     {
-                        [self setAutodisplay:YES];
                         if (ancestorOfOther)
                         {
                             // This window level may not be right for this window based
@@ -1846,7 +1693,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                             }
                         }
 
-                        [self checkWineDisplayLink];
                         needAdjustWindowLevels = TRUE;
                     }
                 }
@@ -1865,9 +1711,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                 next = [controller frontWineWindow];
                 if (next && [self level] < [next level])
                     [self setLevel:[next level]];
-                [self setAutodisplay:YES];
                 [self orderFront:nil];
-                [self checkWineDisplayLink];
                 needAdjustWindowLevels = TRUE;
             }
             pendingOrderOut = FALSE;
@@ -1941,7 +1785,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         }
         else
             [self orderOut:nil];
-        [self checkWineDisplayLink];
         [self setBackgroundColor:[NSColor clearColor]];
         [self setOpaque:NO];
         drawnSinceShown = NO;
@@ -2286,68 +2129,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         }
     }
 
-    - (NSMutableDictionary*) displayIDToDisplayLinkMap
-    {
-        static NSMutableDictionary* displayIDToDisplayLinkMap;
-        if (!displayIDToDisplayLinkMap)
-        {
-            displayIDToDisplayLinkMap = [[NSMutableDictionary alloc] init];
-
-            [[NSNotificationCenter defaultCenter] addObserverForName:WineDisplayConfigurationChangedNotification
-                                                              object:NSApp
-                                                               queue:nil
-                                                          usingBlock:^(NSNotification *note){
-                NSMutableSet* badDisplayIDs = [NSMutableSet setWithArray:displayIDToDisplayLinkMap.allKeys];
-                NSSet* validDisplayIDs = [NSSet setWithArray:[[NSScreen screens] valueForKeyPath:@"deviceDescription.NSScreenNumber"]];
-                [badDisplayIDs minusSet:validDisplayIDs];
-                [displayIDToDisplayLinkMap removeObjectsForKeys:[badDisplayIDs allObjects]];
-            }];
-        }
-        return displayIDToDisplayLinkMap;
-    }
-
-    - (WineDisplayLink*) wineDisplayLink
-    {
-        if (!_lastDisplayID)
-            return nil;
-
-        return [self displayIDToDisplayLinkMap][@(_lastDisplayID)];
-    }
-
-    - (void) checkWineDisplayLink
-    {
-        NSScreen* screen = self.screen;
-        if (![self isVisible] || ![self isOnActiveSpace] || [self isMiniaturized] || [self isEmptyShaped])
-            screen = nil;
-        if (!(self.occlusionState & NSWindowOcclusionStateVisible))
-            screen = nil;
-
-        NSNumber* displayIDNumber = screen.deviceDescription[@"NSScreenNumber"];
-        CGDirectDisplayID displayID = [displayIDNumber unsignedIntValue];
-        if (displayID == _lastDisplayID)
-            return;
-
-        NSMutableDictionary* displayIDToDisplayLinkMap = [self displayIDToDisplayLinkMap];
-
-        if (_lastDisplayID)
-        {
-            WineDisplayLink* link = displayIDToDisplayLinkMap[@(_lastDisplayID)];
-            [link removeWindow:self];
-        }
-        if (displayID)
-        {
-            WineDisplayLink* link = displayIDToDisplayLinkMap[displayIDNumber];
-            if (!link)
-            {
-                link = [[[WineDisplayLink alloc] initWithDisplayID:displayID] autorelease];
-                [displayIDToDisplayLinkMap setObject:link forKey:displayIDNumber];
-            }
-            [link addWindow:self];
-            [self displayIfNeeded];
-        }
-        _lastDisplayID = displayID;
-    }
-
     - (BOOL) isEmptyShaped
     {
         CAShapeLayer* mask = (CAShapeLayer*)[[self contentView] layer].mask;
@@ -2433,7 +2214,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         NSImage* dockIcon = [[[NSImage alloc] initWithSize:NSMakeSize(256, 256)] autorelease];
         [dockIcon lockFocus];
 
-        CGContextRef cgcontext = [[NSGraphicsContext currentContext] graphicsPort];
+        CGContextRef cgcontext = [[NSGraphicsContext currentContext] CGContext];
 
         CGRect rect = CGRectMake(8, 8, 240, 240);
         size_t width = CGImageGetWidth(windowImage);
@@ -2480,7 +2261,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
             self.dockTile.contentView = nil;
             lastDockIconSnapshot = 0;
         }
-        [self checkWineDisplayLink];
     }
 
 
@@ -2700,58 +2480,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     {
         if (!self.disabled && !maximized)
             [super toggleFullScreen:sender];
-    }
-
-    - (void) setViewsNeedDisplay:(BOOL)value
-    {
-        if (value && ![self viewsNeedDisplay])
-        {
-            WineDisplayLink* link = [self wineDisplayLink];
-            if (link)
-            {
-                NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
-                if (_lastDisplayTime + [link refreshPeriod] < now)
-                    [self setAutodisplay:YES];
-                else
-                {
-                    [link start];
-                    _lastDisplayTime = now;
-                }
-            }
-            else
-                [self setAutodisplay:YES];
-        }
-        [super setViewsNeedDisplay:value];
-    }
-
-    - (void) display
-    {
-        _lastDisplayTime = [[NSProcessInfo processInfo] systemUptime];
-        [super display];
-        if (_lastDisplayID)
-            [self setAutodisplay:NO];
-    }
-
-    - (void) displayIfNeeded
-    {
-        _lastDisplayTime = [[NSProcessInfo processInfo] systemUptime];
-        [super displayIfNeeded];
-        if (_lastDisplayID)
-            [self setAutodisplay:NO];
-    }
-
-    - (void) setFrame:(NSRect)frameRect display:(BOOL)flag
-    {
-        if (flag)
-            [self setAutodisplay:YES];
-        [super setFrame:frameRect display:flag];
-    }
-
-    - (void) setFrame:(NSRect)frameRect display:(BOOL)displayFlag animate:(BOOL)animateFlag
-    {
-        if (displayFlag)
-            [self setAutodisplay:YES];
-        [super setFrame:frameRect display:displayFlag animate:animateFlag];
     }
 
     - (void) windowDidDrawContent
@@ -2997,16 +2725,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         [controller windowGotFocus:self];
     }
 
-    - (void) windowDidChangeOcclusionState:(NSNotification*)notification
-    {
-        [self checkWineDisplayLink];
-    }
-
-    - (void) windowDidChangeScreen:(NSNotification*)notification
-    {
-        [self checkWineDisplayLink];
-    }
-
     - (void)windowDidDeminiaturize:(NSNotification *)notification
     {
         WineApplicationController* controller = [WineApplicationController sharedController];
@@ -3033,7 +2751,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         }
 
         [self windowDidResize:notification];
-        [self checkWineDisplayLink];
     }
 
     - (void) windowDidEndLiveResize:(NSNotification *)notification
@@ -3085,8 +2802,6 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
         if (fullscreen && [self isOnActiveSpace])
             [[WineApplicationController sharedController] updateFullscreenWindows];
-
-        [self checkWineDisplayLink];
 
         event = macdrv_create_event(WINDOW_DID_MINIMIZE, self);
         [queue postEvent:event];

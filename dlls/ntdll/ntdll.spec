@@ -1167,6 +1167,7 @@
 @ stdcall RtlpNtOpenKey(ptr long ptr)
 @ stdcall RtlpNtQueryValueKey(long ptr ptr ptr ptr)
 @ stdcall RtlpNtSetValueKey(ptr long ptr long)
+@ stdcall RtlpQueryDefaultUILanguage(ptr long)
 @ stdcall RtlpUnWaitCriticalSection(ptr)
 @ stdcall RtlpWaitForCriticalSection(ptr)
 @ stdcall RtlxAnsiStringToUnicodeSize(ptr) RtlAnsiStringToUnicodeSize
@@ -1201,6 +1202,7 @@
 @ stdcall TpSetPoolMinThreads(ptr long)
 @ stdcall TpSetPoolStackInformation(ptr ptr)
 @ stdcall TpSetTimer(ptr ptr long long)
+@ stdcall TpSetTimerEx(ptr ptr long long)
 @ stdcall TpSetWait(ptr long ptr)
 @ stdcall TpSimpleTryPost(ptr ptr ptr)
 @ stdcall TpStartAsyncIoOperation(ptr)

@@ -256,10 +256,8 @@ int sqliteGetToken(const WCHAR *z, int *tokenType, int *skip){
       *tokenType = TK_ID;
       return i;
     default:
-      if( !isIdChar[*z] ){
-        break;
-      }
-      for(i=1; isIdChar[z[i]]; i++){}
+      if (*z < sizeof(isIdChar) && !isIdChar[*z] ) break;
+      for (i = 1; z[i] < sizeof(isIdChar) && isIdChar[z[i]]; i++) {}
       *tokenType = sqliteKeywordCode(z, i);
       if( *tokenType == TK_ID && z[i] == '`' ) *skip = 1;
       return i;

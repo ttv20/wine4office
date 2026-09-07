@@ -559,7 +559,7 @@ static void RegExp_destructor(jsdisp_t *dispex)
 
 static HRESULT RegExp_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, jsdisp_t *dispex)
 {
-    return gc_process_linked_val(gc_ctx, op, dispex, &regexp_from_jsdisp(dispex)->last_index_val);
+    return gc_process_linked_val(gc_ctx, op, &regexp_from_jsdisp(dispex)->last_index_val);
 }
 
 static const builtin_prop_t RegExp_props[] = {

@@ -231,7 +231,7 @@ static HRESULT WINAPI rowsetex_Hash(IRowsetExactScroll *iface, HCHAPTER chapter,
 
     TRACE("%p, %Id, %Iu, %p, %p, %p, %p\n", rowset, chapter, bookmark_cnt,
             bookmark_size, bookmark, hash, status);
-    return IRowsetLocate_GetRowsByBookmark(rowset->rowset_loc, chapter, bookmark_cnt,
+    return IRowsetLocate_Hash(rowset->rowset_loc, chapter, bookmark_cnt,
             bookmark_size, bookmark, hash, status);
 }
 
@@ -758,7 +758,7 @@ done:
         if (count && !*hrows)
         {
             *hrows = CoTaskMemAlloc(sizeof(**hrows));
-            if (*hrows) hr = E_OUTOFMEMORY;
+            if (!*hrows) hr = E_OUTOFMEMORY;
         }
         if (count && *hrows)
         {

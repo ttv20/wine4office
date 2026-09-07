@@ -144,6 +144,7 @@ HRESULT WINAPI GetConvertStg(IStorage *stg)
     DWORD header[2];
     IStream *stream;
     HRESULT hr;
+    ULONG bytesread;
 
     TRACE("%p\n", stg);
 
@@ -152,9 +153,15 @@ HRESULT WINAPI GetConvertStg(IStorage *stg)
     hr = IStorage_OpenStream(stg, L"\1Ole", NULL, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &stream);
     if (FAILED(hr)) return hr;
 
-    hr = IStream_Read(stream, header, sizeof(header), NULL);
+    hr = IStream_Read(stream, header, sizeof(header), &bytesread);
     IStream_Release(stream);
     if (FAILED(hr)) return hr;
+
+    if (bytesread != sizeof(header))
+    {
+        ERR("got truncated 1Ole stream (%lx bytes)\n", bytesread);
+        return E_FAIL;
+    }
 
     if (header[0] != version_magic)
     {

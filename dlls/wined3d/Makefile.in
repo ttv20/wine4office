@@ -1,7 +1,7 @@
 MODULE    = wined3d.dll
 UNIXLIB   = wined3d.so
 IMPORTLIB = wined3d
-IMPORTS   = $(VKD3D_PE_LIBS) dxguid opengl32 user32 gdi32 advapi32
+IMPORTS   = $(VKD3D_PE_LIBS) opengl32 user32 gdi32 advapi32
 EXTRAINCL = $(VKD3D_PE_CFLAGS)
 UNIX_CFLAGS = $(VA_CFLAGS)
 UNIX_LIBS = -lwin32u

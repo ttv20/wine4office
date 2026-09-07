@@ -50,6 +50,7 @@ static VOID     (WINAPI *pTpReleaseWork)(TP_WORK *);
 static VOID     (WINAPI *pTpSetPoolMaxThreads)(TP_POOL *,DWORD);
 static NTSTATUS (WINAPI *pTpSetPoolStackInformation)(TP_POOL *,TP_POOL_STACK_INFORMATION *);
 static VOID     (WINAPI *pTpSetTimer)(TP_TIMER *,LARGE_INTEGER *,LONG,LONG);
+static BOOL     (WINAPI *pTpSetTimerEx)(TP_TIMER *,LARGE_INTEGER *,LONG,LONG);
 static VOID     (WINAPI *pTpSetWait)(TP_WAIT *,HANDLE,LARGE_INTEGER *);
 static NTSTATUS (WINAPI *pTpSimpleTryPost)(PTP_SIMPLE_CALLBACK,PVOID,TP_CALLBACK_ENVIRON *);
 static void     (WINAPI *pTpStartAsyncIoOperation)(TP_IO *);
@@ -98,6 +99,7 @@ static BOOL init_threadpool(void)
     GET_PROC(TpSetPoolMaxThreads);
     GET_PROC(TpSetPoolStackInformation);
     GET_PROC(TpSetTimer);
+    GET_PROC(TpSetTimerEx);
     GET_PROC(TpSetWait);
     GET_PROC(TpSimpleTryPost);
     GET_PROC(TpStartAsyncIoOperation);
@@ -1504,6 +1506,27 @@ static void test_tp_timer(void)
     pTpSetTimer(timer, NULL, 0, 0);
     success = pTpIsTimerSet(timer);
     ok(!success, "TpIsTimerSet returned TRUE\n");
+    pTpWaitForTimer(timer, TRUE);
+    pTpReleaseTimer(timer);
+
+    /* TpSetTimerEx */
+    status = pTpAllocTimer(&timer, timer_cb, semaphore, &environment);
+    ok(!status, "TpAllocTimer failed with status %lx\n", status);
+    ok(!!timer, "Expected timer != NULL\n");
+
+    success = pTpIsTimerSet(timer);
+    ok(!success, "Unexpected value %d.\n", success);
+    when.QuadPart = (ULONGLONG)200 * -10000;
+    success = pTpSetTimerEx(timer, &when, 200, 0);
+    ok(!success, "Unexpected value %d.\n", success);
+    success = pTpIsTimerSet(timer);
+    ok(success, "Unexpected value %d.\n", success);
+
+    /* unset the timer */
+    success = pTpSetTimerEx(timer, NULL, 0, 0);
+    ok(success, "Unexpected value %d.\n", success);
+    success = pTpIsTimerSet(timer);
+    ok(!success, "Unexpected value %d.\n", success);
     pTpWaitForTimer(timer, TRUE);
 
     /* cleanup */

@@ -547,7 +547,7 @@ unsigned int dxgi_swapchain_flags_from_wined3d(unsigned int wined3d_flags)
     }
 
     if (wined3d_flags)
-        FIXME("Unhandled flags %#x.\n", flags);
+        FIXME("Unhandled flags %#x.\n", wined3d_flags);
 
     return flags;
 }

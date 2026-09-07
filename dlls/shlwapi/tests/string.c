@@ -204,29 +204,6 @@ static const StrFromTimeIntervalResult StrFromTimeInterval_results[] = {
 };
 
 
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
-
 /* Returns true if the dates, numbers, etc. are formatted using English
  * conventions.
  */
@@ -1950,6 +1927,8 @@ START_TEST(string)
   pStrToInt64ExA = (void *)GetProcAddress(hShlwapi, "StrToInt64ExA");
   pStrToInt64ExW = (void *)GetProcAddress(hShlwapi, "StrToInt64ExW");
 
+  SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
+
   test_StrChrA();
   test_StrChrW();
   test_StrChrIA();
@@ -1966,21 +1945,17 @@ START_TEST(string)
   test_StrToInt64ExW();
   test_StrDupA();
 
-  /* language-dependent test */
-  if (is_lang_english() && is_locale_english())
+  /* locale-dependent test */
+  if (is_locale_english())
   {
     test_StrFormatByteSize64A();
     test_StrFormatByteSizeEx();
     test_StrFormatKBSizeA();
     test_StrFormatKBSizeW();
   }
-  else
-    skip("An English UI and locale is required for the StrFormat*Size tests\n");
-  if (is_lang_english())
-    test_StrFromTimeIntervalA();
-  else
-    skip("An English UI is required for the StrFromTimeInterval tests\n");
+  else skip("An English locale is required for the StrFormat*Size tests\n");
 
+  test_StrFromTimeIntervalA();
   test_StrCmpA();
   test_StrCmpW();
   test_StrRetToBSTR();

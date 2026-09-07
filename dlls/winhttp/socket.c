@@ -990,7 +990,7 @@ static DWORD send_socket_shutdown( struct socket *socket, USHORT status, const v
     if (!(socket->hdr.flags & WINHTTP_FLAG_ASYNC))
         return send_frame( socket, SOCKET_OPCODE_CLOSE, status, reason, len, TRUE, NULL );
 
-    if (!(s = malloc( sizeof(*s) ))) return FALSE;
+    if (!(s = malloc( sizeof(*s) ))) return ERROR_OUTOFMEMORY;
 
     AcquireSRWLockExclusive( &socket->send_lock );
     async_send = InterlockedIncrement( &socket->pending_sends ) > 1 || socket->hdr.recursion_count >= 3;

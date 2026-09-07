@@ -2059,6 +2059,8 @@ static HRESULT pipeline_state_desc_from_d3d12_stream_desc(struct d3d12_pipeline_
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_HS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, hs),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, gs),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, cs),
+        [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, as),
+        [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS]              = DCL_SUBOBJECT_INFO(D3D12_SHADER_BYTECODE, ms),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT]   = DCL_SUBOBJECT_INFO(D3D12_STREAM_OUTPUT_DESC, stream_output),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND]           = DCL_SUBOBJECT_INFO(D3D12_BLEND_DESC, blend_state),
         [D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK]     = DCL_SUBOBJECT_INFO(UINT, sample_mask),
@@ -2141,6 +2143,12 @@ static HRESULT pipeline_state_desc_from_d3d12_stream_desc(struct d3d12_pipeline_
             && desc->cs.BytecodeLength && desc->cs.pShaderBytecode)
     {
         WARN("Invalid combination of shader stages VS and CS.\n");
+        return E_INVALIDARG;
+    }
+
+    if (desc->as.BytecodeLength || desc->ms.BytecodeLength)
+    {
+        WARN("Amplification and mesh shaders are not supported.\n");
         return E_INVALIDARG;
     }
 

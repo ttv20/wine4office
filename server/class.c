@@ -370,7 +370,7 @@ DECL_HANDLER(set_class_info)
             break;
         default:
             if (req->size > sizeof(req->new_info) || req->offset < 0 ||
-                req->offset > class->shared->info.cls_extra - (int)req->size)
+                req->offset > (int)(class->shared->info.cls_extra - req->size))
             {
                 set_win32_error( ERROR_INVALID_INDEX );
                 return;

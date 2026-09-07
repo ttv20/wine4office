@@ -2008,6 +2008,7 @@ static GpStatus metafile_deserialize_image(const BYTE *record_data, UINT data_si
 static GpStatus metafile_deserialize_path(const BYTE *record_data, UINT data_size, GpPath **path)
 {
     EmfPlusPath *data = (EmfPlusPath *)record_data;
+    GpStatus status;
     BYTE *types;
     UINT size;
     DWORD i;
@@ -2050,8 +2051,9 @@ static GpStatus metafile_deserialize_path(const BYTE *record_data, UINT data_siz
             }
 
             types = (BYTE *)(points + i);
-            GdipCreatePath2(temp, types, data->PathPointCount, FillModeAlternate, path);
+            status = GdipCreatePath2(temp, types, data->PathPointCount, FillModeAlternate, path);
             free(temp);
+            return status;
         }
         else
         {
@@ -2064,8 +2066,6 @@ static GpStatus metafile_deserialize_path(const BYTE *record_data, UINT data_siz
     {
         return GdipCreatePath(FillModeAlternate, path);
     }
-
-    return Ok;
 }
 
 static GpStatus metafile_read_region_node(struct memory_buffer *mbuf, GpRegion *region, region_element *node, UINT *count)
@@ -5067,7 +5067,7 @@ static GpStatus METAFILE_AddPenObject(GpMetafile *metafile, GpPen *pen, DWORD *i
     }
     if (data_flags & PenDataNonCenter)
     {
-        *(REAL*)(pen_data->OptionalData + i) = pen->align;
+        *(DWORD*)(pen_data->OptionalData + i) = pen->align;
         i += sizeof(DWORD);
     }
     if (data_flags & PenDataCustomStartCap)

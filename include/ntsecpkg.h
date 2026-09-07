@@ -59,6 +59,9 @@ extern "C" {
 #define SECPKG_CALL_BUFFER_MARSHAL                   0x10000
 #define SECPKG_CALL_UNLOCK                           0x20000
 
+#define SECBUFFER_UNMAPPED                        0x40000000
+#define SECBUFFER_KERNEL_MAP                      0x20000000
+
 /* enum definitions for Secure Service Provider/Authentication Packages */
 typedef enum _LSA_TOKEN_INFORMATION_TYPE {
     LsaTokenInformationNull,

@@ -778,7 +778,7 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
                 sizeof(aperture), NULL)))
         {
             width = aperture.OffsetX.value + aperture.Area.cx;
-            height = aperture.OffsetX.value + aperture.Area.cy;
+            height = aperture.OffsetY.value + aperture.Area.cy;
         }
         else
         {

@@ -981,7 +981,7 @@ HRESULT WINAPI SafeArrayGetElement(SAFEARRAY *psa, LONG *rgIndices, void *pvData
         if (*lpBstr)
         {
           *lpDest = SysAllocStringByteLen((char*)*lpBstr, SysStringByteLen(*lpBstr));
-          if (!*lpBstr)
+          if (!*lpDest)
             hRet = E_OUTOFMEMORY;
         }
         else

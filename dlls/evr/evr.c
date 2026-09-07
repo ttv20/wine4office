@@ -796,13 +796,20 @@ static HRESULT WINAPI filter_service_lookup_LookupService(IMFTopologyServiceLook
     EnterCriticalSection(&filter->renderer.filter.filter_cs);
 
     if (!(filter->flags & EVR_INIT_SERVICES))
+    {
         hr = MF_E_NOTACCEPTING;
+    }
     else if (IsEqualGUID(service, &MR_VIDEO_RENDER_SERVICE))
     {
         if (IsEqualIID(riid, &IID_IMediaEventSink))
         {
             *objects = &filter->IMediaEventSink_iface;
             IUnknown_AddRef((IUnknown *)*objects);
+        }
+        else
+        {
+            WARN("Unsupported interface %s for MR_VIDEO_RENDER_SERVICE.\n", debugstr_guid(riid));
+            hr = E_NOINTERFACE;
         }
     }
     else if (IsEqualGUID(service, &MR_VIDEO_MIXER_SERVICE))

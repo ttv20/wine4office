@@ -368,13 +368,14 @@ static BOOL uses_default_port( INTERNET_SCHEME scheme, INTERNET_PORT port )
     return FALSE;
 }
 
-static DWORD get_comp_length( DWORD len, DWORD flags, WCHAR *comp )
+static DWORD get_comp_length( DWORD len, DWORD flags, const WCHAR *comp )
 {
-    DWORD ret;
-    unsigned int i;
+    DWORD ret, i;
 
-    ret = len ? len : lstrlenW( comp );
-    if (!(flags & ICU_ESCAPE)) return ret;
+    if (!len) len = wcslen( comp );
+    if (!(flags & ICU_ESCAPE)) return len;
+
+    ret = len;
     for (i = 0; i < len; i++) if (need_escape( comp[i] )) ret += 2;
     return ret;
 }

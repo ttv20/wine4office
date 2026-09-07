@@ -220,9 +220,9 @@ static BOOL needs_client_window_clipping( HWND hwnd )
     return ret > 0;
 }
 
-BOOL needs_offscreen_rendering( HWND hwnd )
+static BOOL needs_offscreen_rendering( HWND hwnd, BOOL raw )
 {
-    if (NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )) return TRUE; /* needs DPI scaling */
+    if (!raw && NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )) return TRUE; /* needs DPI scaling */
     if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
     if (NtUserGetWindowRelative( hwnd, GW_CHILD )) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
     return FALSE;
@@ -289,8 +289,8 @@ static void x11drv_client_surface_detach( struct client_surface *client )
 
 static void client_surface_update_geometry( HWND hwnd, struct x11drv_client_surface *surface )
 {
+    RECT rect = surface->client.raw ? surface->client.monitor_rect : surface->client.virtual_rect;
     XWindowChanges changes = surface->changes;
-    RECT rect = surface->client.virtual_rect;
     int mask = 0;
 
     changes.x = rect.left;
@@ -312,7 +312,7 @@ static void client_surface_update_geometry( HWND hwnd, struct x11drv_client_surf
 
 static void client_surface_update_offscreen( HWND hwnd, struct x11drv_client_surface *surface )
 {
-    BOOL offscreen = needs_offscreen_rendering( hwnd );
+    BOOL offscreen = needs_offscreen_rendering( hwnd, surface->client.raw );
     struct x11drv_win_data *data;
 
     if (InterlockedExchange( &surface->client.offscreen, offscreen ) == offscreen)
@@ -385,7 +385,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     struct x11drv_win_data *data;
     BOOL have_visual = FALSE;
     XVisualInfo dst_visual;
-    RECT rect_dst = client->monitor_rect, rect_src = client->virtual_rect, rect = {0};
+    RECT rect_dst = client->monitor_rect, rect_src, rect = {0};
     Drawable window;
     HRGN region;
 
@@ -402,6 +402,7 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     if (hwnd == toplevel && NtUserGetPresentRect( toplevel, &rect, -1 /* raw dpi */ )) region = 0;
     else region = get_dc_monitor_region( hwnd, hdc );
 
+    rect_src = surface->client.raw ? surface->client.monitor_rect : surface->client.virtual_rect;
     TRACE( "hwnd %p %s to toplevel %p %s region %p\n", hwnd, wine_dbgstr_rect(&rect_src),
            toplevel, wine_dbgstr_rect(&rect_dst), region );
 
@@ -449,11 +450,12 @@ struct x11drv_client_surface *impl_from_client_surface( struct client_surface *c
     return CONTAINING_RECORD( client, struct x11drv_client_surface, client );
 }
 
-struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format )
+struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL raw )
 {
     struct x11drv_client_surface *surface;
     XVisualInfo visual = default_visual;
     Colormap colormap;
+    RECT rect;
 
     if (format && !visual_from_pixel_format( format, &visual )) return NULL;
 
@@ -461,10 +463,11 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format )
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );
     if (!colormap) return NULL;
 
-    if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd, format ))) goto failed;
+    if (!(surface = client_surface_create( sizeof(*surface), &x11drv_client_surface_funcs, hwnd, format, raw ))) goto failed;
     surface->colormap = colormap;
     surface->visual = visual;
-    if (!(surface->window = create_client_window( hwnd, surface->client.virtual_rect, &visual, colormap ))) goto failed;
+    rect = raw ? surface->client.monitor_rect : surface->client.virtual_rect;
+    if (!(surface->window = create_client_window( hwnd, rect, &visual, colormap ))) goto failed;
 
     TRACE( "Created %s for client window %lx\n", debugstr_client_surface( &surface->client ), surface->window );
     return &surface->client;
@@ -604,7 +607,6 @@ static const struct user_driver_funcs x11drv_funcs =
     .dc_funcs.pExtFloodFill = X11DRV_ExtFloodFill,
     .dc_funcs.pFillPath = X11DRV_FillPath,
     .dc_funcs.pGetDeviceCaps = X11DRV_GetDeviceCaps,
-    .dc_funcs.pGetDeviceGammaRamp = X11DRV_GetDeviceGammaRamp,
     .dc_funcs.pGetImage = X11DRV_GetImage,
     .dc_funcs.pGetNearestColor = X11DRV_GetNearestColor,
     .dc_funcs.pGetSystemPaletteEntries = X11DRV_GetSystemPaletteEntries,
@@ -627,7 +629,6 @@ static const struct user_driver_funcs x11drv_funcs =
     .dc_funcs.pSetDCBrushColor = X11DRV_SetDCBrushColor,
     .dc_funcs.pSetDCPenColor = X11DRV_SetDCPenColor,
     .dc_funcs.pSetDeviceClipping = X11DRV_SetDeviceClipping,
-    .dc_funcs.pSetDeviceGammaRamp = X11DRV_SetDeviceGammaRamp,
     .dc_funcs.pSetPixel = X11DRV_SetPixel,
     .dc_funcs.pStretchBlt = X11DRV_StretchBlt,
     .dc_funcs.pStrokeAndFillPath = X11DRV_StrokeAndFillPath,
