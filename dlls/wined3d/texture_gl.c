@@ -1267,6 +1267,7 @@ static void gltexture_delete(struct wined3d_device *device, const struct wined3d
     context_gl_resource_released(device, tex->name, FALSE);
     gl_info->gl_ops.gl.p_glDeleteTextures(1, &tex->name);
     tex->name = 0;
+    tex->storage_serial = 0;
 }
 
 /* The caller is responsible for binding the correct texture. */
@@ -2381,6 +2382,14 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
         wined3d_texture_gl_allocate_immutable_storage(texture_gl, internal, gl_info);
     else
         wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
+    /* Refresh on every storage specification, even if the GL name is kept.
+     * A serial alone does not certify allocation or preservation success. */
+    if (!needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t))
+        srgb = false;
+    wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->storage_serial = wined3d_allocate_storage_serial();
+    TRACE("Specified texture %u storage, serial %s.\n",
+            wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->name,
+            wine_dbgstr_longlong(wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->storage_serial));
     texture_gl->t.flags |= alloc_flag;
 }
 
@@ -2401,6 +2410,7 @@ static void wined3d_texture_gl_prepare_rb(struct wined3d_texture_gl *texture_gl,
                 wined3d_resource_get_sample_count(&texture_gl->t.resource),
                 format_gl->internal, texture_gl->t.resource.width, texture_gl->t.resource.height);
         checkGLcall("glRenderbufferStorageMultisample()");
+        texture_gl->rb_multisample_serial = wined3d_allocate_storage_serial();
         TRACE("Created multisample rb %u.\n", texture_gl->rb_multisample);
     }
     else
@@ -2659,6 +2669,7 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
                 context_gl_resource_released(texture_gl->t.resource.device, texture_gl->rb_multisample, TRUE);
                 context_gl->gl_info->fbo_ops.glDeleteRenderbuffers(1, &texture_gl->rb_multisample);
                 texture_gl->rb_multisample = 0;
+                texture_gl->rb_multisample_serial = 0;
             }
             break;
 

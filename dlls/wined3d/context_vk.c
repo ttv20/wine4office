@@ -680,6 +680,7 @@ bool wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk,
 
     create_info = *desc;
     image->vk_image = VK_NULL_HANDLE;
+    image->storage_serial = 0;
     image->vk_memory = VK_NULL_HANDLE;
     image->memory = NULL;
     image->command_buffer_id = 0;
@@ -840,6 +841,9 @@ bool wined3d_context_vk_create_image(struct wined3d_context_vk *context_vk,
         }
     }
 
+    image->storage_serial = wined3d_allocate_storage_serial();
+    TRACE("Created image %s, storage serial %s.\n", wine_dbgstr_longlong(image->vk_image),
+            wine_dbgstr_longlong(image->storage_serial));
     return true;
 }
 
@@ -1322,6 +1326,7 @@ void wined3d_context_vk_destroy_va_decoder(struct wined3d_context_vk *context_vk
 
 void wined3d_context_vk_destroy_image(struct wined3d_context_vk *context_vk, struct wined3d_image_vk *image)
 {
+    image->storage_serial = 0;
     wined3d_context_vk_destroy_vk_image(context_vk, image->vk_image, image->command_buffer_id);
     if (image->memory)
         wined3d_context_vk_destroy_allocator_block(context_vk, image->memory,

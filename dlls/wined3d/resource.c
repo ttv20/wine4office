@@ -28,6 +28,27 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
+uint64_t wined3d_allocate_storage_serial(void)
+{
+    static DECLSPEC_ALIGN(8) LONG64 counter;
+    uint64_t previous;
+
+    /* Resource wrappers and backend object names may both be reused. Never
+     * recycle a serial, including on exhaustion; zero disables history. */
+    previous = InterlockedCompareExchange64(&counter, 0, 0);
+    for (;;)
+    {
+        uint64_t observed;
+
+        if (previous == UINT64_MAX)
+            return 0;
+        observed = InterlockedCompareExchange64(&counter, previous + 1, previous);
+        if (observed == previous)
+            return previous + 1;
+        previous = observed;
+    }
+}
+
 static void resource_check_usage(uint32_t usage, unsigned int access)
 {
     static const uint32_t handled = WINED3DUSAGE_DYNAMIC

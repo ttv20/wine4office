@@ -3358,6 +3358,7 @@ HRESULT resource_init(struct wined3d_resource *resource, struct wined3d_device *
 void *resource_offset_map_pointer(struct wined3d_resource *resource, unsigned int sub_resource_idx,
         uint8_t *base_memory, const struct wined3d_box *box);
 void resource_unload(struct wined3d_resource *resource);
+uint64_t wined3d_allocate_storage_serial(void);
 HRESULT wined3d_resource_check_box_dimensions(struct wined3d_resource *resource,
         unsigned int sub_resource_idx, const struct wined3d_box *box);
 void wined3d_resource_free_sysmem(struct wined3d_resource *resource);
