@@ -116,5 +116,21 @@
 "Wine environment is ready": "Wine ortamı hazır",
 "Wine environment is ready.": "Wine ortamı hazır.",
 "Wine environment operation was cancelled.": "Wine ortamı işlemi iptal edildi.",
-"Wine environment operation failed. Review the details below.": "Wine ortamı işlemi başarısız oldu. Aşağıdaki ayrıntıları inceleyin."
+"Wine environment operation failed. Review the details below.": "Wine ortamı işlemi başarısız oldu. Aşağıdaki ayrıntıları inceleyin.",
+"Graphics backend": "Grafik arka ucu",
+"Choose how Wine presents windows and renders Direct3D applications.": "Wine’ın pencereleri nasıl sunacağını ve Direct3D uygulamalarını nasıl işleyeceğini seçin.",
+"Direct3D renderer:": "Direct3D işleyicisi:",
+"Display system:": "Görüntüleme sistemi:",
+"Graphics settings applied.": "Grafik ayarları uygulandı.",
+"Graphics settings applied. They will be used on the next launch.": "Grafik ayarları uygulandı. Bir sonraki başlatmada kullanılacak.",
+"Graphics settings restored to the active values.": "Grafik ayarları etkin değerlere geri döndürüldü.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafik ayarları kaydedildi. Değişikliği uygulamak için Wine’ı yeniden başlatın.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafik ayarları kaydedildi. Wine hâlâ önceki ayarları kullanıyor.",
+"Stop Wine and apply": "Wine’ı durdur ve uygula",
+"Stop Wine to apply graphics settings": "Grafik ayarlarını uygulamak için Wine’ı durdur",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Bu işlem, seçili Wine ortamındaki tüm Office uygulamalarını kapatır. Devam etmeden önce açık belgeleri kaydedin.",
+"OK": "Tamam",
+"Cancel": "İptal",
+"Yes": "Evet",
+"No": "Hayır"
 }

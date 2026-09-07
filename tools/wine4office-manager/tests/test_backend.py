@@ -72,6 +72,7 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         self.assertEqual(config["prefix"], str(self.home / ".wine4office"))
         self.assertEqual(config["update_url"], backend.DEFAULT_METADATA_URL)
         self.assertTrue(config["use_x11"])
+        self.assertFalse(config["use_vulkan"])
 
     def test_config_without_use_x11_loads_x11_default(self):
         path = backend.config_path()
@@ -90,6 +91,28 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         backend.save_config(config)
 
         self.assertFalse(backend.load_config()["use_x11"])
+
+    def test_vulkan_renderer_choice_is_persisted(self):
+        config = backend.default_config()
+        config["use_vulkan"] = True
+
+        backend.save_config(config)
+
+        self.assertTrue(backend.load_config()["use_vulkan"])
+
+    def test_pending_graphics_keep_active_settings_for_launches(self):
+        config = backend.default_config()
+        config.update({
+            "use_x11": False,
+            "use_vulkan": True,
+            "graphics_restart_required": True,
+            "graphics_active_use_x11": True,
+            "graphics_active_use_vulkan": False,
+        })
+
+        self.assertEqual(backend.active_graphics_settings(config), (True, False))
+        config["graphics_restart_required"] = False
+        self.assertEqual(backend.active_graphics_settings(config), (False, True))
 
     def test_automatic_update_checks_are_opt_in_by_default(self):
         config = backend.default_config()
@@ -399,23 +422,33 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
                 "DISPLAY": ":7",
                 "WAYLAND_DISPLAY": "wayland-7",
                 "WINEDLLOVERRIDES": "user32=b",
+                "WINE_D3D_CONFIG": "csmt=0x1;renderer=no3d",
             }
         ):
             marked_x11 = backend.wine_environment(marked, self.wine, True)
             unmarked_x11 = backend.wine_environment(unmarked, self.wine, True)
             marked_wayland = backend.wine_environment(marked, self.wine, False)
+            marked_vulkan = backend.wine_environment(marked, self.wine, False, True)
             unmarked_wayland = backend.wine_environment(unmarked, self.wine, False)
 
         self.assertEqual(marked_x11["DISPLAY"], ":7")
         self.assertNotIn("WAYLAND_DISPLAY", marked_x11)
         self.assertEqual(marked_x11["WINEARCH"], "win64")
         self.assertEqual(marked_x11["WINEDLLOVERRIDES"], "user32=b")
+        self.assertEqual(
+            marked_x11["WINE_D3D_CONFIG"],
+            "renderer=gl;csmt=0x1;renderer=no3d",
+        )
         self.assertEqual(marked_wayland["WAYLAND_DISPLAY"], "wayland-7")
         self.assertNotIn("DISPLAY", marked_wayland)
         self.assertNotIn("WINEARCH", unmarked_x11)
         self.assertEqual(unmarked_x11["WINEDLLOVERRIDES"], "user32=b")
         self.assertIn("WAYLAND_DISPLAY", unmarked_wayland)
         self.assertIn("DISPLAY", unmarked_wayland)
+        self.assertEqual(
+            marked_vulkan["WINE_D3D_CONFIG"],
+            "renderer=vulkan;csmt=0x1;renderer=no3d",
+        )
 
     def test_managed_environment_keeps_builtin_mscoree_enabled(self):
         marked = self._make_prefix(self.home / "marked-prefix")
@@ -967,10 +1000,17 @@ exit 0
         ), mock.patch.object(
             backend.subprocess, "Popen", return_value=mock.Mock(pid=4321)
         ) as popen:
-            backend.launch_app(str(prefix), str(self.wine), "excel", use_x11=False)
-            backend.launch_tool(str(prefix), str(self.wine), "winecfg", use_x11=False)
+            backend.launch_app(
+                str(prefix), str(self.wine), "excel",
+                use_x11=False, use_vulkan=True,
+            )
+            backend.launch_tool(
+                str(prefix), str(self.wine), "winecfg",
+                use_x11=False, use_vulkan=True,
+            )
             backend.launch_executable(
-                str(prefix), str(self.wine), str(executable), use_x11=False
+                str(prefix), str(self.wine), str(executable),
+                use_x11=False, use_vulkan=True,
             )
 
         self.assertEqual(len(popen.call_args_list), 3)
@@ -978,6 +1018,7 @@ exit 0
             environment = call.kwargs["env"]
             self.assertEqual(environment["WAYLAND_DISPLAY"], "wayland-8")
             self.assertNotIn("DISPLAY", environment)
+            self.assertEqual(environment["WINE_D3D_CONFIG"], "renderer=vulkan")
 
     def test_executable_launcher_forwards_valid_working_directory(self):
         prefix = self.home / ".wine4office"
@@ -1183,7 +1224,7 @@ exit 0
                 )
                 self.assertEqual(backend.APP_META[app]["compatibility"], "Not tested")
 
-    def test_generated_launcher_uses_current_configured_display_mode_and_documents(self):
+    def test_generated_launcher_uses_active_graphics_until_pending_change_is_applied(self):
         prefix = self._make_prefix(self.home / ".wine4office")
         office = prefix / "drive_c/Program Files/Microsoft Office/root/Office16"
         office.mkdir(parents=True)
@@ -1196,6 +1237,7 @@ exit 0
             "#!/bin/bash\n"
             "printf 'DISPLAY=%s\\n' \"${DISPLAY-unset}\" > \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'WAYLAND_DISPLAY=%s\\n' \"${WAYLAND_DISPLAY-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
+            "printf 'D3D=%s\\n' \"${WINE_D3D_CONFIG-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'WINAPPSDK=%s\\n' \"${OFFICE_WINAPPSDK_RUNTIME_DIR-unset}\" >> \"$WINE4OFFICE_TEST_LOG\"\n"
             "printf 'ARG=%s\\n' \"$@\" >> \"$WINE4OFFICE_TEST_LOG\"\n",
         )
@@ -1205,6 +1247,10 @@ exit 0
         icon.write_bytes(b"cached icon")
         config = backend.default_config()
         config["use_x11"] = False
+        config["use_vulkan"] = True
+        config["graphics_restart_required"] = True
+        config["graphics_active_use_x11"] = True
+        config["graphics_active_use_vulkan"] = False
         backend.save_config(config)
 
         backend.create_app_shortcuts(["word"], prefix, self.wine, False)
@@ -1219,8 +1265,9 @@ exit 0
         subprocess.run([str(launcher), str(document)], env=environment, check=True)
 
         output = log.read_text()
-        self.assertIn("DISPLAY=unset", output)
-        self.assertIn("WAYLAND_DISPLAY=wayland-77", output)
+        self.assertIn("DISPLAY=:77", output)
+        self.assertIn("WAYLAND_DISPLAY=unset", output)
+        self.assertIn("D3D=renderer=gl", output)
         self.assertIn(
             "WINAPPSDK=C:\\Program Files\\Microsoft Office\\root\\Office16\\WinAppSDK\\",
             output,
@@ -2430,6 +2477,14 @@ exit 0
         normalized = backend._validate_preload_binding(legacy)
         self.assertEqual(normalized["components"], ["ClickToRunSvc"])
 
+    def test_legacy_preload_binding_defaults_to_opengl(self):
+        legacy = self._preload_binding()
+        legacy.pop("use_vulkan")
+
+        normalized = backend._validate_preload_binding(legacy)
+
+        self.assertFalse(normalized["use_vulkan"])
+
     def test_preload_unit_is_exact_safe_and_enable_does_not_start(self):
         binding = self._preload_binding()
         commands = []
@@ -2798,8 +2853,7 @@ exit 0
             backend, "_systemctl_user"
         ) as systemctl:
             result = backend.launch_tool(
-                str(prefix), str(self.wine), "stop", False,
-                progress_callback=progress,
+                str(prefix), str(self.wine), "stop", False, progress,
             )
 
         self.assertIsNone(result)
@@ -3030,6 +3084,7 @@ exit 0
 
     def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
         binding = self._preload_binding()
+        binding["use_vulkan"] = True
         helper = (
             Path(binding["wine"]).resolve().parent.parent
             / "lib/wine/x86_64-windows"
@@ -3056,6 +3111,9 @@ exit 0
             [binding["wine"], str(helper)],
         )
         self.assertEqual(popen.call_args.kwargs["env"]["WINEDEBUG"], "-all")
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["WINE_D3D_CONFIG"], "renderer=vulkan"
+        )
         self.assertTrue(process.stdout.closed)
 
     def test_voip_broker_waits_for_name_ownership_and_uses_managed_prefix(self):
@@ -3580,6 +3638,7 @@ exit 0
     def test_runner_update_rebinds_and_restarts_owned_background_service(self):
         old = self._preload_binding()
         old["use_x11"] = False
+        old["use_vulkan"] = True
         backend._preload_json_write(backend.preload_binding_path(), old)
         backend._preload_atomic_write(
             backend.preload_unit_path(),
@@ -3622,6 +3681,79 @@ exit 0
         self.assertEqual(updated["prefix"], old["prefix"])
         self.assertEqual(updated["wine"], str(new_wine.resolve()))
         self.assertFalse(updated["use_x11"])
+        self.assertTrue(updated["use_vulkan"])
+
+    def test_graphics_update_rebinds_renderer_before_restarting_preload(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        backend._preload_atomic_write(
+            backend.preload_unit_path(),
+            backend._preload_unit_text(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            ),
+            0o644,
+        )
+        commands = []
+
+        def systemctl(command, check=True):
+            if command[0] == "start":
+                binding = backend._read_preload_binding()
+                self.assertFalse(binding["use_x11"])
+                self.assertTrue(binding["use_vulkan"])
+            commands.append(list(command))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(
+            backend, "_systemd_user_capability", return_value=(True, "")
+        ), mock.patch.object(
+            backend, "_systemctl_property",
+            side_effect=[
+                (True, "enabled"), (True, "active"), (False, "inactive")
+            ],
+        ), mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            state = backend.prepare_preload_runner_update(
+                old["prefix"], wine_value=old["wine"]
+            )
+            self.assertIsNotNone(state)
+            backend.finish_preload_graphics_update(state, False, True)
+
+        self.assertEqual(commands, [
+            ["stop", "--no-block", backend.PRELOAD_UNIT],
+            ["daemon-reload"],
+            ["start", backend.PRELOAD_UNIT],
+        ])
+
+    def test_failed_graphics_rebind_restores_old_preload_binding(self):
+        old = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), old)
+        old_unit = backend._preload_unit_text(
+            backend.preload_binding_path(), backend.preload_runtime_status_path()
+        )
+        backend._preload_atomic_write(backend.preload_unit_path(), old_unit, 0o644)
+        commands = []
+
+        def systemctl(command, check=True):
+            commands.append((list(command), check))
+            if command == ["daemon-reload"] and check:
+                raise RuntimeError("reload failed")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        state = {"binding": old, "enabled": True, "active": True}
+        with mock.patch.object(
+            backend, "_systemctl_user", side_effect=systemctl
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reload failed"):
+                backend.finish_preload_graphics_update(state, False, True)
+
+        self.assertEqual(backend._read_preload_binding(), old)
+        self.assertEqual(backend.preload_unit_path().read_text(), old_unit)
+        self.assertEqual(commands, [
+            (["daemon-reload"], True),
+            (["daemon-reload"], False),
+            (["start", backend.PRELOAD_UNIT], False),
+        ])
 
     def test_manager_update_replaces_legacy_preload_executor(self):
         binding = self._preload_binding()

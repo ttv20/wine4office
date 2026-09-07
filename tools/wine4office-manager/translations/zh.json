@@ -116,5 +116,21 @@
 "Wine environment is ready": "Wine 环境已准备就绪",
 "Wine environment is ready.": "Wine 环境已准备就绪。",
 "Wine environment operation was cancelled.": "Wine 环境操作已取消。",
-"Wine environment operation failed. Review the details below.": "Wine 环境操作失败。请查看下面的详细信息。"
+"Wine environment operation failed. Review the details below.": "Wine 环境操作失败。请查看下面的详细信息。",
+"Graphics backend": "图形后端",
+"Choose how Wine presents windows and renders Direct3D applications.": "选择 Wine 显示窗口和渲染 Direct3D 应用程序的方式。",
+"Direct3D renderer:": "Direct3D 渲染器：",
+"Display system:": "显示系统：",
+"Graphics settings applied.": "已应用图形设置。",
+"Graphics settings applied. They will be used on the next launch.": "已应用图形设置。下次启动时将使用这些设置。",
+"Graphics settings restored to the active values.": "图形设置已恢复为当前生效值。",
+"Graphics settings saved. Restart Wine to apply the change.": "图形设置已保存。请重启 Wine 以应用更改。",
+"Graphics settings saved. Wine is still using the previous settings.": "图形设置已保存。Wine 仍在使用以前的设置。",
+"Stop Wine and apply": "停止 Wine 并应用",
+"Stop Wine to apply graphics settings": "停止 Wine 以应用图形设置",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "这将关闭所选 Wine 环境中的所有 Office 应用程序。请先保存打开的文档，然后再继续。",
+"OK": "确定",
+"Cancel": "取消",
+"Yes": "是",
+"No": "否"
 }

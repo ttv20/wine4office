@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Create Office grace product-key metadata dynamically for every installed retail SKU.
 - Fix personal Microsoft account sign-in, Office entitlement retrieval, and Account page repair.
 - Restore Excel worksheets and formula bars when using Vulkan on Wayland.

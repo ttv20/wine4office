@@ -177,5 +177,21 @@
 "Wine environment is ready": "סביבת Wine מוכנה",
 "Wine environment is ready.": "סביבת Wine מוכנה.",
 "Wine environment operation was cancelled.": "פעולת סביבת Wine בוטלה.",
-"Wine environment operation failed. Review the details below.": "פעולת סביבת Wine נכשלה. יש לעיין בפרטים שלהלן."
+"Wine environment operation failed. Review the details below.": "פעולת סביבת Wine נכשלה. יש לעיין בפרטים שלהלן.",
+"Graphics backend": "מנגנון גרפי",
+"Choose how Wine presents windows and renders Direct3D applications.": "בחרו כיצד Wine מציג חלונות ומעבד יישומי Direct3D.",
+"Direct3D renderer:": "מנוע Direct3D:",
+"Display system:": "מערכת תצוגה:",
+"Graphics settings applied.": "הגדרות הגרפיקה הוחלו.",
+"Graphics settings applied. They will be used on the next launch.": "הגדרות הגרפיקה הוחלו וישמשו בהפעלה הבאה.",
+"Graphics settings restored to the active values.": "הגדרות הגרפיקה הוחזרו לערכים הפעילים.",
+"Graphics settings saved. Restart Wine to apply the change.": "הגדרות הגרפיקה נשמרו. הפעילו את Wine מחדש כדי להחיל את השינוי.",
+"Graphics settings saved. Wine is still using the previous settings.": "הגדרות הגרפיקה נשמרו. Wine עדיין משתמש בהגדרות הקודמות.",
+"Stop Wine and apply": "עצירת Wine והחלה",
+"Stop Wine to apply graphics settings": "עצירת Wine לצורך החלת הגדרות הגרפיקה",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "הפעולה תסגור את כל יישומי Office בסביבת Wine שנבחרה. שמרו מסמכים פתוחים לפני שתמשיכו.",
+"OK": "אישור",
+"Cancel": "ביטול",
+"Yes": "כן",
+"No": "לא"
 }

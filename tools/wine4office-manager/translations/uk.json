@@ -116,5 +116,21 @@
 "Wine environment is ready": "Середовище Wine готове",
 "Wine environment is ready.": "Середовище Wine готове.",
 "Wine environment operation was cancelled.": "Операцію із середовищем Wine скасовано.",
-"Wine environment operation failed. Review the details below.": "Операція із середовищем Wine завершилася помилкою. Перегляньте подробиці нижче."
+"Wine environment operation failed. Review the details below.": "Операція із середовищем Wine завершилася помилкою. Перегляньте подробиці нижче.",
+"Graphics backend": "Графічна підсистема",
+"Choose how Wine presents windows and renders Direct3D applications.": "Виберіть, як Wine показує вікна та обробляє програми Direct3D.",
+"Direct3D renderer:": "Засіб промальовування Direct3D:",
+"Display system:": "Система відображення:",
+"Graphics settings applied.": "Налаштування графіки застосовано.",
+"Graphics settings applied. They will be used on the next launch.": "Налаштування графіки застосовано. Їх буде використано під час наступного запуску.",
+"Graphics settings restored to the active values.": "Налаштування графіки відновлено до активних значень.",
+"Graphics settings saved. Restart Wine to apply the change.": "Налаштування графіки збережено. Перезапустіть Wine, щоб застосувати зміну.",
+"Graphics settings saved. Wine is still using the previous settings.": "Налаштування графіки збережено. Wine усе ще використовує попередні налаштування.",
+"Stop Wine and apply": "Зупинити Wine і застосувати",
+"Stop Wine to apply graphics settings": "Зупинити Wine, щоб застосувати налаштування графіки",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Це закриє всі програми Office у вибраному середовищі Wine. Збережіть відкриті документи, перш ніж продовжити.",
+"OK": "Гаразд",
+"Cancel": "Скасувати",
+"Yes": "Так",
+"No": "Ні"
 }

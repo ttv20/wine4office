@@ -264,9 +264,25 @@ class ManagerState:
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
-        for key in ("desktop_copy", "use_x11", "include_prereleases"):
+        graphics_changed = "use_x11" in payload or "use_vulkan" in payload
+        if graphics_changed:
+            if candidate.get("graphics_restart_required") is not True:
+                candidate["graphics_active_use_x11"] = bool(
+                    candidate.get("use_x11", True)
+                )
+                candidate["graphics_active_use_vulkan"] = bool(
+                    candidate.get("use_vulkan", False)
+                )
+        for key in ("desktop_copy", "use_x11", "use_vulkan", "include_prereleases"):
             if key in payload:
                 candidate[key] = bool(payload[key])
+        if graphics_changed:
+            candidate["graphics_restart_required"] = (
+                bool(candidate.get("use_x11", True))
+                != bool(candidate.get("graphics_active_use_x11", True))
+                or bool(candidate.get("use_vulkan", False))
+                != bool(candidate.get("graphics_active_use_vulkan", False))
+            )
         if "disable_office_telemetry" in payload:
             candidate = backend.set_office_telemetry_disabled(
                 candidate, candidate["prefix"], bool(payload["disable_office_telemetry"])
@@ -284,6 +300,90 @@ class ManagerState:
     def configured_prefix(self) -> str:
         with self.lock:
             return str(self.config["prefix"])
+
+    def apply_graphics_settings(self, progress_callback=None) -> dict:
+        """Stop the active session and atomically promote pending graphics settings."""
+        with self.lock:
+            previous = dict(self.config)
+        if previous.get("graphics_restart_required") is not True:
+            raise RuntimeError("Graphics settings are no longer pending.")
+
+        prefix = str(previous["prefix"])
+        wine = str(previous["wine"])
+        active_use_x11, _active_use_vulkan = backend.active_graphics_settings(previous)
+        selected_use_x11 = bool(previous.get("use_x11", True))
+        selected_use_vulkan = bool(previous.get("use_vulkan", False))
+        deadline = time.monotonic() + backend.STOP_GRACE_SECONDS
+        preload_update = backend.prepare_preload_runner_update(
+            prefix, active_use_x11, wine_value=wine, _deadline=deadline
+        )
+        config_saved = False
+        try:
+            backend.stop_wine(
+                prefix, wine, active_use_x11, _deadline=deadline,
+                progress_callback=progress_callback,
+            )
+            with self.lock:
+                current = self.config
+                expected = (
+                    prefix, wine, selected_use_x11, selected_use_vulkan, True
+                )
+                actual = (
+                    str(current["prefix"]), str(current["wine"]),
+                    bool(current.get("use_x11", True)),
+                    bool(current.get("use_vulkan", False)),
+                    current.get("graphics_restart_required") is True,
+                )
+                if actual != expected:
+                    raise RuntimeError(
+                        "Graphics settings changed while Wine was stopping; "
+                        "the previous settings remain active."
+                    )
+                candidate = dict(current)
+                candidate["graphics_restart_required"] = False
+                candidate["graphics_active_use_x11"] = selected_use_x11
+                candidate["graphics_active_use_vulkan"] = selected_use_vulkan
+                backend.save_config(candidate)
+                config_saved = True
+
+            if preload_update is not None:
+                backend.finish_preload_graphics_update(
+                    preload_update, selected_use_x11, selected_use_vulkan
+                )
+                preload_update = None
+            with self.lock:
+                self.config = candidate
+                return dict(candidate)
+        except BaseException as error:
+            if config_saved:
+                try:
+                    with self.lock:
+                        backend.save_config(previous)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        f"{error} Additionally, the previous graphics settings "
+                        f"could not be restored: {rollback_error}"
+                    ) from error
+            if preload_update is not None:
+                try:
+                    backend.restore_preload_after_runner_update(preload_update)
+                except RuntimeError as restore_error:
+                    raise RuntimeError(
+                        f"{error} Additionally, background services could not be "
+                        f"resumed: {restore_error}"
+                    ) from error
+            raise
+
+    def update_graphics_settings(self, use_x11: bool, use_vulkan: bool) -> dict:
+        """Persist a pending graphics selection without launching Wine."""
+        with self.lock:
+            candidate = self._candidate_config({
+                "use_x11": use_x11,
+                "use_vulkan": use_vulkan,
+            })
+            backend.save_config(candidate)
+            self.config = candidate
+            return dict(candidate)
 
     def update_config(self, payload: dict) -> dict:
         with self.lock:
@@ -306,6 +406,11 @@ class ManagerState:
                 {"cancel_event": self.cancel_event, "process_callback": self.set_process}
                 if self.task["running"] else {}
             )
+            policy_use_x11 = bool(candidate.get(
+                "graphics_active_use_x11", candidate.get("use_x11", True)
+            )) if candidate.get("graphics_restart_required") is True else bool(
+                candidate.get("use_x11", True)
+            )
         policy_applied = False
         compatibility_changed: list[str] = []
         try:
@@ -313,14 +418,14 @@ class ManagerState:
                 policy_applied = backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_disabled,
                     remove_managed=policy_was_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             if compatibility_after != compatibility_before and valid_prefix:
                 compatibility_changed = backend.apply_office_compatibility_policies(
                     candidate["prefix"], candidate["wine"],
                     compatibility_after, compatibility_before,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             backend.save_config(candidate)
@@ -333,7 +438,7 @@ class ManagerState:
                     backend.apply_office_compatibility_policies(
                         candidate["prefix"], candidate["wine"],
                         rollback_settings, compatibility_after,
-                        use_x11=candidate.get("use_x11", True),
+                        use_x11=policy_use_x11,
                         **policy_callbacks,
                     )
                 except Exception:
@@ -342,7 +447,7 @@ class ManagerState:
                 backend.apply_office_telemetry_policy(
                     candidate["prefix"], candidate["wine"], policy_was_disabled,
                     remove_managed=policy_disabled,
-                    use_x11=candidate.get("use_x11", True),
+                    use_x11=policy_use_x11,
                     **policy_callbacks,
                 )
             raise
@@ -661,6 +766,7 @@ class ManagerState:
                 raise ValueError("Select at least one offered update.")
             metadata = offer["metadata"]
             config = dict(self.config)
+            active_use_x11, _active_use_vulkan = backend.active_graphics_settings(config)
 
         def install() -> str:
             preload_update = None
@@ -668,11 +774,12 @@ class ManagerState:
                 if "wine" in selected:
                     self.set_progress("Stopping background services", None)
                     preload_update = backend.prepare_preload_runner_update(
-                        config["prefix"], config.get("use_x11", True)
+                        config["prefix"], active_use_x11,
+                        wine_value=config["wine"],
                     )
                     stop_wine_confirmed(
                         config["prefix"], config["wine"],
-                        use_x11=config.get("use_x11", True),
+                        use_x11=active_use_x11,
                     )
                     self.output("Stopped the selected Wine environment before updating.")
                 result = backend.install_release_updates(
@@ -690,7 +797,7 @@ class ManagerState:
                     self.output(
                         backend.update_wine_prefix(
                             config["prefix"], new_wine,
-                            config.get("use_x11", True), self.output,
+                            active_use_x11, self.output,
                             self.cancel_event, self.set_process,
                         )
                     )
@@ -754,8 +861,9 @@ class ManagerState:
             )
 
     def _preload_status(self, config: dict) -> dict:
+        use_x11, _use_vulkan = backend.active_graphics_settings(config)
         status = backend.preload_service_status(
-            config["prefix"], config["wine"], config.get("use_x11", True)
+            config["prefix"], config["wine"], use_x11
         )
         status["checking"] = False
         try:
@@ -767,10 +875,11 @@ class ManagerState:
     def _refresh_preload_status_async(self, force: bool = False) -> bool:
         with self.lock:
             config = dict(self.config)
+            use_x11, _use_vulkan = backend.active_graphics_settings(config)
             key = (
                 str(config["prefix"]),
                 str(config["wine"]),
-                bool(config.get("use_x11", True)),
+                use_x11,
             )
             now = time.monotonic()
             if not force:
@@ -816,9 +925,10 @@ class ManagerState:
     def _refresh_preload_memory_async(self) -> bool:
         with self.lock:
             config = dict(self.config)
+            use_x11, _use_vulkan = backend.active_graphics_settings(config)
             key = (
                 str(config["prefix"]), str(config["wine"]),
-                bool(config.get("use_x11", True)),
+                use_x11,
             )
             if key != self._preload_request_key:
                 return self._refresh_preload_status_async(force=True)
@@ -854,13 +964,14 @@ class ManagerState:
             if self.task["running"]:
                 raise RuntimeError("Another operation is already running.")
             config = dict(self.config)
+            use_x11, use_vulkan = backend.active_graphics_settings(config)
             self.preload["checking"] = True
             self._preload_generation += 1
             generation = self._preload_generation
             self._preload_request_key = (
                 str(config["prefix"]),
                 str(config["wine"]),
-                bool(config.get("use_x11", True)),
+                use_x11,
             )
 
         def operation() -> str:
@@ -870,18 +981,18 @@ class ManagerState:
                 was_active = bool(current.get("active"))
                 if action == "enable-start":
                     backend.install_preload_service(
-                        config["prefix"], config["wine"], config.get("use_x11", True)
+                        config["prefix"], config["wine"], use_x11, use_vulkan
                     )
                     try:
                         backend.manage_preload_service(
                             "start", config["prefix"], config["wine"],
-                            config.get("use_x11", True),
+                            use_x11,
                         )
                     except Exception:
                         if not was_enabled:
                             backend.manage_preload_service(
                                 "disable", config["prefix"], config["wine"],
-                                config.get("use_x11", True),
+                                use_x11,
                             )
                         raise
                     return "Background services enabled and started."
@@ -889,18 +1000,18 @@ class ManagerState:
                 if was_active:
                     backend.manage_preload_service(
                         "stop", config["prefix"], config["wine"],
-                        config.get("use_x11", True),
+                        use_x11,
                     )
                 try:
                     backend.manage_preload_service(
                         "disable", config["prefix"], config["wine"],
-                        config.get("use_x11", True),
+                        use_x11,
                     )
                 except Exception:
                     if was_active:
                         backend.manage_preload_service(
                             "start", config["prefix"], config["wine"],
-                            config.get("use_x11", True),
+                            use_x11,
                         )
                     raise
                 return "Background services stopped and disabled."
@@ -1202,9 +1313,10 @@ def main() -> int:
             backend.uninstall_automatic_update_schedule()
             if remove_prefix is not None:
                 config = backend.load_config()
+                use_x11, _use_vulkan = backend.active_graphics_settings(config)
                 remove_prefix = stop_and_remove_owned_prefix(
                     remove_prefix, config["wine"],
-                    use_x11=config.get("use_x11", True),
+                    use_x11=use_x11,
                 )
                 print(f"Removed Wine environment: {remove_prefix}")
             backend.remove_app_shortcuts(backend.APP_META)
@@ -1273,13 +1385,14 @@ def main() -> int:
         config = backend.load_config()
         prefix = args.prefix or config["prefix"]
         wine = args.wine or config["wine"]
+        use_x11, _use_vulkan = backend.active_graphics_settings(config)
         was_disabled = backend.office_telemetry_disabled(config, prefix)
         disable = args.disable_office_telemetry
         try:
             if disable or was_disabled:
                 backend.apply_office_telemetry_policy(
                     prefix, wine, disable, remove_managed=was_disabled,
-                    use_x11=config.get("use_x11", True),
+                    use_x11=use_x11,
                 )
             updated = backend.set_office_telemetry_disabled(config, prefix, disable)
             backend.save_config(updated)
@@ -1298,14 +1411,16 @@ def main() -> int:
         defaults = backend.load_config()
         prefix = args.prefix or defaults["prefix"]
         wine = args.wine or defaults["wine"]
-        use_x11 = defaults.get("use_x11", True)
+        use_x11, use_vulkan = backend.active_graphics_settings(defaults)
         try:
             if args.preload_service == "status":
                 status = backend.preload_service_status(prefix, wine, use_x11)
                 print(__import__("json").dumps(status, sort_keys=True))
                 return 0 if status["supported"] else 3
             if args.preload_service == "enable":
-                status = backend.install_preload_service(prefix, wine, use_x11)
+                status = backend.install_preload_service(
+                    prefix, wine, use_x11, use_vulkan
+                )
             else:
                 status = backend.manage_preload_service(
                     args.preload_service, prefix, wine, use_x11
@@ -1320,12 +1435,13 @@ def main() -> int:
         defaults = backend.load_config()
         prefix = args.prefix or defaults["prefix"]
         wine = args.wine or defaults["wine"]
-        use_x11 = defaults["use_x11"]
+        use_x11, use_vulkan = backend.active_graphics_settings(defaults)
         if args.target in backend.APP_META:
             if incident.monitoring_enabled(defaults):
                 process = backend.launch_app_process(
                     prefix, wine, args.target, FONT_HELPER, args.documents,
-                    use_x11=use_x11, capture_diagnostics=True,
+                    use_x11=use_x11, use_vulkan=use_vulkan,
+                    capture_diagnostics=True,
                 )
                 return incident.supervise_process(
                     process, app=args.target, prefix=Path(prefix), use_x11=use_x11,
@@ -1334,11 +1450,14 @@ def main() -> int:
                     review_command=MANAGER_RESTART_COMMAND,
                 )
             backend.launch_app(prefix, wine, args.target, FONT_HELPER, args.documents,
-                               use_x11=use_x11)
+                               use_x11=use_x11, use_vulkan=use_vulkan)
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")
-            backend.launch_tool(prefix, wine, args.target, use_x11=use_x11)
+            backend.launch_tool(
+                prefix, wine, args.target, use_x11=use_x11,
+                use_vulkan=use_vulkan,
+            )
         return 0
 
     if args.install_shortcut:

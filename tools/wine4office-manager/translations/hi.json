@@ -82,5 +82,21 @@
 "Wine environment is ready": "Wine वातावरण तैयार है",
 "Wine environment is ready.": "Wine वातावरण तैयार है।",
 "Wine environment operation was cancelled.": "Wine वातावरण का ऑपरेशन रद्द कर दिया गया।",
-"Wine environment operation failed. Review the details below.": "Wine वातावरण का ऑपरेशन विफल हुआ। नीचे दिए गए विवरण देखें।"
+"Wine environment operation failed. Review the details below.": "Wine वातावरण का ऑपरेशन विफल हुआ। नीचे दिए गए विवरण देखें।",
+"Graphics backend": "ग्राफ़िक्स बैकएंड",
+"Choose how Wine presents windows and renders Direct3D applications.": "चुनें कि Wine विंडो को कैसे दिखाए और Direct3D अनुप्रयोगों को कैसे रेंडर करे।",
+"Direct3D renderer:": "Direct3D रेंडरर:",
+"Display system:": "डिस्प्ले सिस्टम:",
+"Graphics settings applied.": "ग्राफ़िक्स सेटिंग लागू की गईं।",
+"Graphics settings applied. They will be used on the next launch.": "ग्राफ़िक्स सेटिंग लागू की गईं। अगली बार शुरू करने पर इनका उपयोग होगा।",
+"Graphics settings restored to the active values.": "ग्राफ़िक्स सेटिंग सक्रिय मानों पर वापस कर दी गईं।",
+"Graphics settings saved. Restart Wine to apply the change.": "ग्राफ़िक्स सेटिंग सहेजी गईं। बदलाव लागू करने के लिए Wine को फिर से शुरू करें।",
+"Graphics settings saved. Wine is still using the previous settings.": "ग्राफ़िक्स सेटिंग सहेजी गईं। Wine अभी भी पिछली सेटिंग का उपयोग कर रहा है।",
+"Stop Wine and apply": "Wine रोकें और लागू करें",
+"Stop Wine to apply graphics settings": "ग्राफ़िक्स सेटिंग लागू करने के लिए Wine रोकें",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "यह चुने गए Wine परिवेश में सभी Office अनुप्रयोग बंद कर देगा। आगे बढ़ने से पहले खुले दस्तावेज़ सहेजें।",
+"OK": "ठीक है",
+"Cancel": "रद्द करें",
+"Yes": "हाँ",
+"No": "नहीं"
 }
