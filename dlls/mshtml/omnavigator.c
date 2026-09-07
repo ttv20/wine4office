@@ -2427,10 +2427,62 @@ static HRESULT WINAPI console_dirxml(IWineMSHTMLConsole *iface, VARIANT *object)
     return S_OK;
 }
 
+
+/* Unhandled promise rejections surface only through console.error; the stub
+ * discarded them, which is why script failures showed up as a blank page with
+ * no diagnosable error. Log the argument, including Error.name/.message. */
+static void console_report_value(VARIANT *value)
+{
+    static const WCHAR *const props[] = { L"name", L"message", L"stack" };
+    VARIANT converted;
+    unsigned i;
+
+    if(!value) {
+        WARN("console.error: (no argument)\n");
+        return;
+    }
+    while(V_VT(value) == (VT_BYREF|VT_VARIANT) && V_VARIANTREF(value))
+        value = V_VARIANTREF(value);
+
+    if(V_VT(value) == VT_DISPATCH && V_DISPATCH(value)) {
+        IDispatch *disp = V_DISPATCH(value);
+
+        for(i = 0; i < ARRAY_SIZE(props); i++) {
+            DISPPARAMS dp = { NULL, NULL, 0, 0 };
+            VARIANT res;
+            DISPID id;
+            WCHAR *name = (WCHAR *)props[i];
+
+            if(FAILED(IDispatch_GetIDsOfNames(disp, &IID_NULL, &name, 1,
+                                              LOCALE_USER_DEFAULT, &id)))
+                continue;
+            VariantInit(&res);
+            if(FAILED(IDispatch_Invoke(disp, id, &IID_NULL, LOCALE_USER_DEFAULT,
+                                       DISPATCH_PROPERTYGET, &dp, &res, NULL, NULL)))
+                continue;
+            VariantInit(&converted);
+            if(SUCCEEDED(VariantChangeType(&converted, &res, 0, VT_BSTR)))
+                WARN("console.error: .%s = %s\n", debugstr_w(props[i]),
+                     debugstr_w(V_BSTR(&converted)));
+            VariantClear(&converted);
+            VariantClear(&res);
+        }
+        return;
+    }
+
+    VariantInit(&converted);
+    if(SUCCEEDED(VariantChangeType(&converted, value, 0, VT_BSTR)))
+        WARN("console.error: %s\n", debugstr_w(V_BSTR(&converted)));
+    else
+        WARN("console.error: unprintable value, vt %u\n", V_VT(value));
+    VariantClear(&converted);
+}
+
 static HRESULT WINAPI console_error(IWineMSHTMLConsole *iface, VARIANT *vararg_start)
 {
-    FIXME("iface %p, vararg_start %p stub.\n", iface, vararg_start);
+    TRACE("iface %p, vararg_start %p.\n", iface, vararg_start);
 
+    console_report_value(vararg_start);
     return S_OK;
 }
 

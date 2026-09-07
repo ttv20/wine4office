@@ -578,6 +578,34 @@ touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
         )
         self.assertIn(str(prefix), message)
 
+    def test_create_environment_flushes_registry_without_sibling_wineserver(self):
+        prefix = self.home / ".wine4office"
+        (self.runner / "wineserver").unlink()
+        self._script("wineboot", """#!/bin/sh
+mkdir -p "$WINEPREFIX/drive_c" "$WINEPREFIX/dosdevices"
+""")
+        self._script("wine", """#!/bin/sh
+if [ "$1" = wineboot.exe ] && [ "$2" = --end-session ]; then
+    touch "$WINEPREFIX/system.reg" "$WINEPREFIX/user.reg"
+fi
+exit 0
+""")
+        commands = []
+        stream_command = backend._stream_command
+
+        def capture(command, *args, **kwargs):
+            commands.append(command)
+            return stream_command(command, *args, **kwargs)
+
+        with mock.patch.object(backend, "_stream_command", side_effect=capture):
+            backend.create_environment(str(prefix), str(self.wine), False, lambda line: None)
+
+        self.assertEqual(commands[-1], [
+            str(self.wine), "wineboot.exe", "--end-session", "--force", "--kill", "--shutdown",
+        ])
+        self.assertTrue(backend.has_wine_prefix_layout(prefix))
+        self.assertTrue(backend.is_prefix_owned(prefix))
+
     def test_stream_command_does_not_wait_for_wine_child_stdout(self):
         """A detached Wine child must not hold the command worker open."""
         command = self.root / "holds-stdout"

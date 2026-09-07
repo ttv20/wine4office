@@ -174,6 +174,11 @@ OFFICE_PRODUCTS = (
         "channel": "Current",
     },
     {
+        "label": "Microsoft 365 Personal/Family (consumer subscription)",
+        "product_id": "O365HomePremRetail",
+        "channel": "Current",
+    },
+    {
         "label": "Microsoft 365 Apps for business",
         "product_id": "O365BusinessRetail",
         "channel": "Current",
@@ -1323,6 +1328,29 @@ def stop_wine(prefix_value: str, wine_value: str, use_x11: bool = True,
         raise RuntimeError("Wine processes remained after ownership-verified forced shutdown.")
 
 
+def finalize_new_prefix(prefix: Path, wine: Path, output: Output,
+                        cancel_event=None, process_callback=None,
+                        progress_callback: Callable[[str, int | None], None] | None = None) -> None:
+    """Stop a newly initialized prefix so Wine flushes its registry files."""
+    if sibling_tool(wine, "wineserver"):
+        stop_wine(str(prefix), str(wine), progress_callback=progress_callback)
+        return
+
+    # Some packages expose only the Wine loader. wineboot can still end the
+    # new session through that loader, which releases the server and flushes
+    # system.reg/user.reg without requiring a sibling Unix wineserver binary.
+    _stream_command(
+        [str(wine), "wineboot.exe", "--end-session", "--force", "--kill", "--shutdown"],
+        wine_environment(prefix, wine, _manager_create=True), output,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
+    deadline = time.monotonic() + STOP_GRACE_SECONDS
+    while not has_wine_prefix_layout(prefix) and time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        time.sleep(0.1)
+
+
 def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
                        output: Output, cancel_event=None, process_callback=None) -> str:
     """Update and start an existing prefix with a newly installed Wine runner."""
@@ -1452,6 +1480,11 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
             "/d", "x11,wayland", "/f",
         ], wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback)
+        # Wine writes system.reg and user.reg only when the server shuts down.
+        finalize_new_prefix(
+            prefix, wine, output, cancel_event=cancel_event,
+            process_callback=process_callback, progress_callback=progress_callback,
+        )
         if classify_prefix(str(prefix)) != "valid":
             raise RuntimeError(f"Wine initialization did not create a valid prefix at: {prefix}")
         ensure_safe_x11_defaults(

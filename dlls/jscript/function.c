@@ -485,7 +485,9 @@ static HRESULT Function_apply(script_ctx_t *ctx, jsval_t vthis, WORD flags, unsi
         }
     }
 
-    if(argc >= 2) {
+    /* ECMA-262 15.3.4.3: a null or undefined argArray means an empty argument
+     * list, not an error. */
+    if(argc >= 2 && !is_undefined(argv[1]) && !is_null(argv[1])) {
         IDispatch *obj = NULL;
         jsdisp_t *arg_array;
 
