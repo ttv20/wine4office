@@ -2345,7 +2345,7 @@ static bool wined3d_texture_use_immutable_storage(const struct wined3d_texture *
 void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
         struct wined3d_context_gl *context_gl, bool srgb)
 {
-    uint32_t alloc_flag = srgb ? WINED3D_TEXTURE_SRGB_ALLOCATED : WINED3D_TEXTURE_RGB_ALLOCATED;
+    uint32_t alloc_flag;
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct wined3d_resource *resource = &texture_gl->t.resource;
     const struct wined3d_format *format = resource->format;
@@ -2355,6 +2355,9 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
     TRACE("texture_gl %p, context_gl %p, srgb %d, format %s.\n",
             texture_gl, context_gl, srgb, debug_d3dformat(format->id));
 
+    if (!needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t))
+        srgb = false;
+    alloc_flag = srgb ? WINED3D_TEXTURE_SRGB_ALLOCATED : WINED3D_TEXTURE_RGB_ALLOCATED;
     if (texture_gl->t.flags & alloc_flag)
         return;
 
@@ -2384,8 +2387,6 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
         wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
     /* Refresh on every storage specification, even if the GL name is kept.
      * A serial alone does not certify allocation or preservation success. */
-    if (!needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t))
-        srgb = false;
     wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->storage_serial = wined3d_allocate_storage_serial();
     TRACE("Specified texture %u storage, serial %s.\n",
             wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->name,
