@@ -67,6 +67,38 @@ static inline BOOL is_office_licensing_scope( const WCHAR *scopes )
     return FALSE;
 }
 
+static inline BOOL onlineid_scope_has_rps_service( const WCHAR *scopes )
+{
+    static const WCHAR prefix[] = L"service::";
+    const WCHAR *start;
+
+    if (!scopes) return FALSE;
+    for (start = scopes; *start && *start <= ' '; ++start);
+    return !wcsnicmp( start, prefix, ARRAY_SIZE(prefix) - 1 ) &&
+           start[ARRAY_SIZE(prefix) - 1];
+}
+
+static inline BOOL onlineid_msa_puid_from_oid( const WCHAR *oid, WCHAR puid[17] )
+{
+    static const WCHAR prefix[] = L"00000000-0000-0000-";
+    unsigned int i, j;
+
+    if (!oid || !puid || wcslen( oid ) != 36 || wcsncmp( oid, prefix, ARRAY_SIZE(prefix) - 1 ) ||
+        oid[23] != '-') return FALSE;
+    for (i = ARRAY_SIZE(prefix) - 1, j = 0; oid[i]; ++i)
+    {
+        WCHAR ch = oid[i];
+
+        if (ch == '-') continue;
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) || j == 16)
+            return FALSE;
+        puid[j++] = ch >= 'a' && ch <= 'f' ? ch - ('a' - 'A') : ch;
+    }
+    if (j != 16) return FALSE;
+    puid[j] = 0;
+    return TRUE;
+}
+
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
     {                                                                                              \
