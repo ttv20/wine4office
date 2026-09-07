@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine சூழல் தயாராக உள்ளது",
 "Wine environment is ready.": "Wine சூழல் தயாராக உள்ளது.",
 "Wine environment operation was cancelled.": "Wine சூழல் செயல்பாடு ரத்து செய்யப்பட்டது.",
-"Wine environment operation failed. Review the details below.": "Wine சூழல் செயல்பாடு தோல்வியடைந்தது. கீழே உள்ள விவரங்களைப் பார்க்கவும்."
+"Wine environment operation failed. Review the details below.": "Wine சூழல் செயல்பாடு தோல்வியடைந்தது. கீழே உள்ள விவரங்களைப் பார்க்கவும்.",
+"Graphics backend": "வரைகலை பின்தளம்",
+"Choose how Wine presents windows and renders Direct3D applications.": "Wine சாளரங்களைக் காட்டும் மற்றும் Direct3D பயன்பாடுகளை வரையும் முறையைத் தேர்ந்தெடுக்கவும்.",
+"Direct3D renderer:": "Direct3D வரைவி:",
+"Display system:": "காட்சியமைப்பு:",
+"Graphics settings applied.": "வரைகலை அமைப்புகள் பயன்படுத்தப்பட்டன.",
+"Graphics settings applied. They will be used on the next launch.": "வரைகலை அமைப்புகள் பயன்படுத்தப்பட்டன. அடுத்த தொடக்கத்தில் அவை பயன்படுத்தப்படும்.",
+"Graphics settings restored to the active values.": "வரைகலை அமைப்புகள் செயலில் உள்ள மதிப்புகளுக்கு மீட்டமைக்கப்பட்டன.",
+"Graphics settings saved. Restart Wine to apply the change.": "வரைகலை அமைப்புகள் சேமிக்கப்பட்டன. மாற்றத்தைப் பயன்படுத்த Wine-ஐ மறுதொடக்கம் செய்யவும்.",
+"Graphics settings saved. Wine is still using the previous settings.": "வரைகலை அமைப்புகள் சேமிக்கப்பட்டன. Wine இன்னும் முந்தைய அமைப்புகளைப் பயன்படுத்துகிறது.",
+"Stop Wine and apply": "Wine-ஐ நிறுத்திப் பயன்படுத்தவும்",
+"Stop Wine to apply graphics settings": "வரைகலை அமைப்புகளைப் பயன்படுத்த Wine-ஐ நிறுத்தவும்",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "தேர்ந்தெடுக்கப்பட்ட Wine சூழலில் உள்ள அனைத்து Office பயன்பாடுகளும் மூடப்படும். தொடர்வதற்கு முன் திறந்த ஆவணங்களைச் சேமிக்கவும்.",
+"OK": "சரி",
+"Cancel": "ரத்துசெய்",
+"Yes": "ஆம்",
+"No": "இல்லை"
 }

@@ -82,5 +82,21 @@
 "Wine environment is ready": "Prostredie Wine je pripravené",
 "Wine environment is ready.": "Prostredie Wine je pripravené.",
 "Wine environment operation was cancelled.": "Operácia prostredia Wine bola zrušená.",
-"Wine environment operation failed. Review the details below.": "Operácia prostredia Wine zlyhala. Podrobnosti nájdete nižšie."
+"Wine environment operation failed. Review the details below.": "Operácia prostredia Wine zlyhala. Podrobnosti nájdete nižšie.",
+"Graphics backend": "Grafický backend",
+"Choose how Wine presents windows and renders Direct3D applications.": "Vyberte, ako Wine zobrazuje okná a vykresľuje aplikácie Direct3D.",
+"Direct3D renderer:": "Vykresľovanie Direct3D:",
+"Display system:": "Zobrazovací systém:",
+"Graphics settings applied.": "Nastavenia grafiky boli použité.",
+"Graphics settings applied. They will be used on the next launch.": "Nastavenia grafiky boli použité. Použijú sa pri ďalšom spustení.",
+"Graphics settings restored to the active values.": "Nastavenia grafiky boli obnovené na aktívne hodnoty.",
+"Graphics settings saved. Restart Wine to apply the change.": "Nastavenia grafiky boli uložené. Zmenu použijete reštartovaním Wine.",
+"Graphics settings saved. Wine is still using the previous settings.": "Nastavenia grafiky boli uložené. Wine stále používa predchádzajúce nastavenia.",
+"Stop Wine and apply": "Zastaviť Wine a použiť",
+"Stop Wine to apply graphics settings": "Zastaviť Wine a použiť nastavenia grafiky",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Týmto sa zatvoria všetky aplikácie Office vo vybranom prostredí Wine. Pred pokračovaním uložte otvorené dokumenty.",
+"OK": "OK",
+"Cancel": "Zrušiť",
+"Yes": "Áno",
+"No": "Nie"
 }

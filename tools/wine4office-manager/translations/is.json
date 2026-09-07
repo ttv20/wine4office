@@ -78,5 +78,21 @@
 "Wine environment is ready": "Wine-umhverfið er tilbúið",
 "Wine environment is ready.": "Wine-umhverfið er tilbúið.",
 "Wine environment operation was cancelled.": "Hætt var við aðgerð Wine-umhverfis.",
-"Wine environment operation failed. Review the details below.": "Aðgerð Wine-umhverfis mistókst. Skoðaðu upplýsingarnar hér að neðan."
+"Wine environment operation failed. Review the details below.": "Aðgerð Wine-umhverfis mistókst. Skoðaðu upplýsingarnar hér að neðan.",
+"Graphics backend": "Grafíkbakendi",
+"Choose how Wine presents windows and renders Direct3D applications.": "Veldu hvernig Wine birtir glugga og teiknar Direct3D-forrit.",
+"Direct3D renderer:": "Direct3D-teiknari:",
+"Display system:": "Skjákerfi:",
+"Graphics settings applied.": "Grafíkstillingum beitt.",
+"Graphics settings applied. They will be used on the next launch.": "Grafíkstillingum beitt. Þær verða notaðar við næstu ræsingu.",
+"Graphics settings restored to the active values.": "Grafíkstillingar endurstilltar á virk gildi.",
+"Graphics settings saved. Restart Wine to apply the change.": "Grafíkstillingar vistaðar. Endurræstu Wine til að beita breytingunni.",
+"Graphics settings saved. Wine is still using the previous settings.": "Grafíkstillingar vistaðar. Wine notar enn fyrri stillingar.",
+"Stop Wine and apply": "Stöðva Wine og beita",
+"Stop Wine to apply graphics settings": "Stöðva Wine til að beita grafíkstillingum",
+"This will close every Office application in the selected Wine environment. Save open documents before continuing.": "Þetta lokar öllum Office-forritum í völdu Wine-umhverfi. Vistaðu opin skjöl áður en haldið er áfram.",
+"OK": "Í lagi",
+"Cancel": "Hætta við",
+"Yes": "Já",
+"No": "Nei"
 }

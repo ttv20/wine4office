@@ -73,6 +73,9 @@ The manager defaults to:
 - Optionally start Office Click-to-Run and App-V background services at login
   to make Office apps open 2–3× faster. They typically use 300–600 MB of RAM.
 - Open Wine configuration and maintenance utilities.
+- Choose X11 or native Wayland and OpenGL or Vulkan from the environment page.
+  Graphics choices are saved immediately, with a visible action to stop Wine
+  before the new backend is used.
 - Download and atomically install separately verified Wine4Office Manager and
   Wine runner updates. Runner updates refresh the prefix with `wineboot -u`,
   then restore any background services that were running.
@@ -83,8 +86,10 @@ The manager defaults to:
 Office desktop files do not restart the standalone manager. Creating or updating
 a shortcut atomically writes a manager-owned launcher under
 `${XDG_DATA_HOME:-~/.local/share}/wine4office/shortcut-launchers/`. The launcher
-applies the selected display mode and Office-specific setup before replacing
-itself with Wine. Removing the shortcut also removes its generated launcher.
+applies the active display mode and renderer plus Office-specific setup before
+replacing itself with Wine. Pending graphics choices are not used until the
+apply action stops Wine successfully. Removing the shortcut also removes its
+generated launcher.
 
 The **Office settings** page keeps policy controls out of the already dense
 environment page. Compatibility controls can disable animations or hardware
