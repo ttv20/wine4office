@@ -1339,6 +1339,31 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     return S_OK;
 }
 
+HRESULT WINAPI SLGetInstalledProductKeyIds(HSLC handle, const SLID *product_sku_id,
+        UINT *count, SLID **ids)
+{
+    const struct installed_grace_profile *profile;
+    SLID *list;
+
+    TRACE("(%p, %s, %p, %p)\n", handle, wine_dbgstr_guid(product_sku_id), count, ids);
+
+    if (!get_slc_context(handle) || !product_sku_id || !count || !ids)
+        return E_INVALIDARG;
+
+    profile = get_installed_profile();
+    if (!grace_license_present() || !profile || !profile->pkey_valid ||
+            !IsEqualGUID(product_sku_id, &profile->sku_id) ||
+            !IsEqualGUID(selected_grace_id(), &profile->sku_id))
+        return SL_E_VALUE_NOT_FOUND;
+
+    if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
+        return E_OUTOFMEMORY;
+    *list = profile->pkey_id;
+    *count = 1;
+    *ids = list;
+    return S_OK;
+}
+
 HRESULT WINAPI SLGetServiceInformation(HSLC handle, LPCWSTR name, SLDATATYPE *type,
         UINT *size, BYTE **value)
 {

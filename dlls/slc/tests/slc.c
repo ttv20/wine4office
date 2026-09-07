@@ -109,10 +109,34 @@ static void test_SLGetLicenseInformation(void)
     ok(res == S_OK, "expected S_OK, got %08lx\n", res);
 }
 
+static void test_SLGetInstalledProductKeyIds(void)
+{
+    static const SLID missing_sku =
+            {0x6f82ad40, 0xd4e2, 0x46cc, {0xa7, 0xc4, 0x42, 0xb9, 0x37, 0xf4, 0x21, 0x70}};
+    SLID *ids = (SLID *)0xdeadbeef;
+    UINT count = 0xdeadbeef;
+    HSLC handle = NULL;
+    HRESULT res;
+
+    res = SLOpen(&handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+    if (FAILED(res))
+        return;
+
+    res = SLGetInstalledProductKeyIds(handle, &missing_sku, &count, &ids);
+    ok(res == SL_E_VALUE_NOT_FOUND, "expected SL_E_VALUE_NOT_FOUND, got %08lx\n", res);
+    ok(count == 0xdeadbeef, "expected count = 0xdeadbeef, got %u\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "expected IDs = 0xdeadbeef, got %p\n", ids);
+
+    res = SLClose(handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+}
+
 
 START_TEST(slc)
 {
     test_SLGetWindowsInformationDWORD();
     test_SLInstallLicense();
     test_SLGetLicenseInformation();
+    test_SLGetInstalledProductKeyIds();
 }

@@ -80,6 +80,51 @@ static void test_SLGetSLIDList(void)
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
 }
 
+static void test_SLGetInstalledProductKeyIds(void)
+{
+    static const SLID missing_sku =
+            {0x6f82ad40, 0xd4e2, 0x46cc, {0xa7, 0xc4, 0x42, 0xb9, 0x37, 0xf4, 0x21, 0x70}};
+    SLID *ids = (SLID *)0xdeadbeef;
+    UINT count = 0xdeadbeef;
+    HSLC handle = NULL;
+    HRESULT hr;
+
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
+    if (FAILED(hr)) return;
+
+    hr = SLGetInstalledProductKeyIds(NULL, &missing_sku, &count, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    count = 0xdeadbeef;
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, NULL, &count, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, NULL, &ids);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    count = 0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, &count, NULL);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+
+    count = 0xdeadbeef;
+    ids = (SLID *)0xdeadbeef;
+    hr = SLGetInstalledProductKeyIds(handle, &missing_sku, &count, &ids);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "Expected SL_E_VALUE_NOT_FOUND, got %#lx.\n", hr);
+    ok(count == 0xdeadbeef, "Unexpected count %u.\n", count);
+    ok(ids == (SLID *)0xdeadbeef, "Unexpected IDs pointer %p.\n", ids);
+
+    SLClose(handle);
+}
+
 static void test_SLGetLicensingStatusInformation(void)
 {
     static const BYTE malformed_grace[] = "<grace expiry=\"not-a-time\">";
@@ -299,10 +344,12 @@ static void test_service_information(void)
 static void test_dynamic_grace_pkey(void)
 {
     SLID *skus = NULL, *pkeys = NULL, *candidate = NULL, *second = NULL;
+    SLID *installed_pkeys = NULL;
     SLID grace_sku;
     BYTE *value = NULL;
     SLDATATYPE type;
-    UINT sku_count = 0, pkey_count = 0, second_count = 0, size, i, found = 0;
+    UINT sku_count = 0, pkey_count = 0, second_count = 0, installed_count = 0;
+    UINT size, i, found = 0;
     HSLC handle = NULL;
     HRESULT hr;
 
@@ -352,6 +399,14 @@ static void test_dynamic_grace_pkey(void)
     ok(second_count == 1 && second && IsEqualGUID(&pkeys[0], &second[0]),
             "Dynamic PKEY ID was not stable.\n");
 
+    hr = SLGetInstalledProductKeyIds(handle, &grace_sku, &installed_count, &installed_pkeys);
+    ok(hr == S_OK, "Installed PKEY query failed, hr %#lx.\n", hr);
+    ok(installed_count == 1, "Expected one installed PKEY, got %u.\n", installed_count);
+    ok(installed_pkeys != NULL, "Expected an allocated installed PKEY.\n");
+    if (installed_count == 1 && installed_pkeys)
+        ok(IsEqualGUID(&pkeys[0], &installed_pkeys[0]),
+                "Installed PKEY did not match the SKU PKEY.\n");
+
     type = SL_DATA_NONE;
     size = 0;
     hr = SLGetPKeyInformation(handle, &pkeys[0], L"PartialProductKey", &type, &size, &value);
@@ -377,6 +432,7 @@ static void test_dynamic_grace_pkey(void)
 
 done:
     LocalFree(value);
+    LocalFree(installed_pkeys);
     LocalFree(second);
     LocalFree(pkeys);
     LocalFree(skus);
@@ -385,6 +441,7 @@ done:
 
 START_TEST(sppc)
 {
+    test_SLGetInstalledProductKeyIds();
     test_SLGetSLIDList();
     test_SLGetLicensingStatusInformation();
     test_SLInstallLicense();
