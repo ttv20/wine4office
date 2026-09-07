@@ -2984,6 +2984,9 @@ static WCHAR *load_scoped_wam_token( const WCHAR *scopes, ULONGLONG *expires )
         hash ^= (unsigned char)utf8[i];
         hash *= 1099511628211ULL;
     }
+    /* load_wam_token_file() converts this logical legacy .txt name to the
+     * encrypted .dat projection and retains the .txt path only as a test and
+     * pre-DPAPI compatibility fallback. */
     swprintf( name, ARRAY_SIZE(name), L"C:\\wam-scope-%016llx.txt", hash );
     if (!(stored = load_wam_token_file( name ))) return NULL;
     if (!(separator = wcschr( stored, '|' )))
