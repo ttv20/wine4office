@@ -159,7 +159,7 @@ class ManagerTests(unittest.TestCase):
         self.assertFalse(applied["graphics_active_use_x11"])
         self.assertTrue(applied["graphics_active_use_vulkan"])
 
-    def test_apply_graphics_restores_config_when_preload_rebind_fails(self):
+    def test_apply_graphics_restores_config_and_preload_when_rebind_validation_fails(self):
         state = manager.ManagerState()
         previous = state.update_graphics_settings(False, True)
         paused = {"binding": {}, "enabled": True, "active": True}
@@ -170,11 +170,14 @@ class ManagerTests(unittest.TestCase):
             backend, "stop_wine"
         ), mock.patch.object(
             backend, "finish_preload_graphics_update",
-            side_effect=RuntimeError("rebind failed"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "rebind failed"):
+            side_effect=FileNotFoundError("Wine executable unavailable"),
+        ), mock.patch.object(
+            backend, "restore_preload_after_runner_update"
+        ) as restore:
+            with self.assertRaisesRegex(FileNotFoundError, "unavailable"):
                 state.apply_graphics_settings()
 
+        restore.assert_called_once_with(paused)
         self.assertEqual(state.config, previous)
         self.assertEqual(backend.load_config(), previous)
 

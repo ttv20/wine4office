@@ -347,11 +347,10 @@ class ManagerState:
                 config_saved = True
 
             if preload_update is not None:
-                paused_preload = preload_update
-                preload_update = None
                 backend.finish_preload_graphics_update(
-                    paused_preload, selected_use_x11, selected_use_vulkan
+                    preload_update, selected_use_x11, selected_use_vulkan
                 )
+                preload_update = None
             with self.lock:
                 self.config = candidate
                 return dict(candidate)
