@@ -2520,7 +2520,13 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
     }
 
     if (previous == context && new_draw == context->draw && new_read == context->read) ret = TRUE;
-    else if (previous) context_exchange_drawables( previous, &old_draw, &old_read ); /* take ownership of the previous context drawables */
+    else if (previous)
+    {
+        /* Surface creation may switch to the internal context and then restore the
+         * current client context. Keep its drawables attached until that is done. */
+        old_draw = previous->draw;
+        old_read = previous->read;
+    }
 
     if (!ret && !opengl_drawables_try_reserve( new_draw, new_read, old_draw, old_read ))
     {
@@ -2559,40 +2565,43 @@ static BOOL context_sync_drawables( struct opengl_context *context, HDC draw_hdc
             }
         }
         if (!new_draw || !new_read ||
-            !opengl_drawables_try_reserve( new_draw, new_read, old_draw, old_read )) goto restore;
+            !opengl_drawables_try_reserve( new_draw, new_read, old_draw, old_read )) goto done;
     }
 
     if (!ret && (ret = driver_funcs->p_make_current( get_target( new_draw ), get_target( new_read ), context->driver_private )))
     {
+        struct opengl_drawable *draw = new_draw, *read = new_read;
+
+        if (previous)
+        {
+            old_draw = old_read = NULL;
+            context_exchange_drawables( previous, &old_draw, &old_read );
+        }
+        /* Publish the complete binding before releasing surfaces: framebuffer
+         * destruction and flushing may also restore the client context. */
+        context_exchange_drawables( context, &new_draw, &new_read );
         NtCurrentTeb()->glContext = context;
 
-        opengl_drawables_release_reservation( old_draw, old_read, new_draw, new_read );
+        opengl_drawables_release_reservation( old_draw, old_read, draw, read );
 
-        if (old_draw && old_draw != new_draw && old_draw != new_read && old_draw->client)
+        if (old_draw && old_draw != draw && old_draw != read && old_draw->client)
             set_window_opengl_drawable( old_draw->client->hwnd, old_draw, FALSE );
-        if (old_read && old_read != new_draw && old_read != new_read && old_read->client)
+        if (old_read && old_read != draw && old_read != read && old_read->client)
             set_window_opengl_drawable( old_read->client->hwnd, old_read, FALSE );
 
         /* all good, release previous context drawables if any */
         if (old_draw) opengl_drawable_release( old_draw );
         if (old_read) opengl_drawable_release( old_read );
 
-        opengl_drawable_flush( new_read, new_read->interval, 0 );
-        opengl_drawable_flush( new_draw, new_draw->interval, 0 );
+        opengl_drawable_flush( read, read->interval, 0 );
+        opengl_drawable_flush( draw, draw->interval, 0 );
     }
     else if (!ret) opengl_drawables_release_reservation( new_draw, new_read, old_draw, old_read );
 
     if (ret)
     {
         /* update the current window drawable to the last used draw surface */
-        if (new_draw->client) set_window_opengl_drawable( new_draw->client->hwnd, new_draw, TRUE );
-        context_exchange_drawables( context, &new_draw, &new_read );
-    }
-restore:
-    if (!ret && previous)
-    {
-        context_exchange_drawables( previous, &old_draw, &old_read ); /* give back ownership of the previous drawables */
-        assert( !old_draw && !old_read );
+        if (context->draw->client) set_window_opengl_drawable( context->draw->client->hwnd, context->draw, TRUE );
     }
 
 done:
