@@ -1770,20 +1770,77 @@ int get_window_pixel_format( HWND hwnd )
  * NOTE Native allows only ATOMs as the second argument. We allow strings
  *      to save extra server call in GetPropW.
  */
+/* Cache only negative property lookups. The server advances the shared window
+ * sequence on every property mutation, including writes from another process.
+ * The object id prevents a recycled HWND from inheriting a cached result. */
+static struct
+{
+    struct object_lock version;
+    ATOM atom;
+} missing_properties[16];
+static unsigned int next_missing_property;
+static pthread_mutex_t missing_properties_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static BOOL get_window_property_version( HWND hwnd, struct object_lock *version )
+{
+    const window_shm_t *shared = NULL;
+    NTSTATUS status;
+
+    while ((status = get_shared_window( hwnd, version, &shared )) == STATUS_PENDING) {}
+    return !status;
+}
+
 HANDLE WINAPI NtUserGetProp( HWND hwnd, const WCHAR *str )
 {
+    struct object_lock before = OBJECT_LOCK_INIT, after = OBJECT_LOCK_INIT;
+    unsigned int i;
+    ATOM atom = IS_INTRESOURCE(str) ? LOWORD(str) : 0;
+    BOOL cacheable, success = FALSE, found = FALSE;
     ULONG_PTR ret = 0;
+
+    /* String queries also depend on the global atom table, whose mapping
+     * can change independently of this window. Only cache integer queries. */
+    cacheable = IS_INTRESOURCE(str) && get_window_property_version( hwnd, &before );
+    if (cacheable)
+    {
+        pthread_mutex_lock( &missing_properties_lock );
+        for (i = 0; i < ARRAY_SIZE(missing_properties); ++i)
+        {
+            if (missing_properties[i].version.id == before.id
+                    && missing_properties[i].version.seq == before.seq
+                    && missing_properties[i].atom == atom)
+            {
+                found = TRUE;
+                break;
+            }
+        }
+        pthread_mutex_unlock( &missing_properties_lock );
+        if (found) return 0;
+    }
 
     SERVER_START_REQ( get_window_property )
     {
         req->window = wine_server_user_handle( hwnd );
         if (IS_INTRESOURCE(str)) req->atom = LOWORD(str);
         else wine_server_add_data( req, str, lstrlenW(str) * sizeof(WCHAR) );
-        if (!wine_server_call_err( req )) ret = reply->data;
+        if ((success = !wine_server_call_err( req ))) ret = reply->data;
     }
     SERVER_END_REQ;
+
+    /* A concurrent mutation between the snapshot and the reply prevents caching.
+     * Errors must still take the server path to preserve their last-error value. */
+    if (cacheable && success && !ret && get_window_property_version( hwnd, &after )
+            && before.id == after.id && before.seq == after.seq)
+    {
+        pthread_mutex_lock( &missing_properties_lock );
+        i = next_missing_property++ % ARRAY_SIZE(missing_properties);
+        missing_properties[i].version = after;
+        missing_properties[i].atom = atom;
+        pthread_mutex_unlock( &missing_properties_lock );
+    }
     return (HANDLE)ret;
 }
+
 BOOL update_window_broadcast_exclusion( HWND hwnd, HWND target, BOOL add )
 {
     BOOL ret;

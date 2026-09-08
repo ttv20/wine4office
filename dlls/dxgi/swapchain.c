@@ -531,7 +531,8 @@ static BOOL d3d11_composition_window_get_rect(HWND window, HWND target, RECT *re
 static void d3d11_swapchain_update_composition_window(struct d3d11_swapchain *swapchain)
 {
     HWND window = d3d11_swapchain_get_hwnd(swapchain);
-    HWND target = GetPropW(window, L"__wine_dcomp_detached_window");
+    HWND target = GetPropW(window, swapchain->detached_window_atom
+            ? MAKEINTRESOURCEW(swapchain->detached_window_atom) : L"__wine_dcomp_detached_window");
     ATOM foreign_atom, old_foreign_atom;
     HWND base, foreign_parent, root;
     RECT rect;
@@ -622,7 +623,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     }
 
     window = d3d11_swapchain_get_hwnd(swapchain);
-    if (GetPropW(window, L"__wine_dcomp_clip_enabled")
+    if (GetPropW(window, swapchain->clip_enabled_atom
+            ? MAKEINTRESOURCEW(swapchain->clip_enabled_atom) : L"__wine_dcomp_clip_enabled")
             && !GetPropW(window, L"__wine_dcomp_bounds_enabled"))
     {
         source_rect.left = (LONG)HandleToULong(GetPropW(window, L"__wine_dcomp_clip_left"));
@@ -2161,6 +2163,8 @@ static void STDMETHODCALLTYPE d3d11_swapchain_wined3d_object_released(void *pare
     struct d3d11_swapchain *swapchain = parent;
 
     wined3d_private_store_cleanup(&swapchain->private_store);
+    if (swapchain->detached_window_atom) GlobalDeleteAtom(swapchain->detached_window_atom);
+    if (swapchain->clip_enabled_atom) GlobalDeleteAtom(swapchain->clip_enabled_atom);
     free(parent);
 }
 
@@ -2300,6 +2304,10 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     }
     wined3d_mutex_unlock();
 
+    /* Retain the names while using their atom values for per-frame queries.
+     * This also lets win32u validate cached misses without string atom lookup. */
+    swapchain->detached_window_atom = GlobalAddAtomW(L"__wine_dcomp_detached_window");
+    swapchain->clip_enabled_atom = GlobalAddAtomW(L"__wine_dcomp_clip_enabled");
     return S_OK;
 
 cleanup:
