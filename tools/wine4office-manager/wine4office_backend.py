@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import http.client
 import io
 import fcntl
 import hashlib
@@ -248,6 +249,7 @@ MAX_OFFICE_XML_SIZE = 1024 * 1024
 MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
 MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
+ODT_RETRY_DELAY_SECONDS = 2.0
 MAX_TEAMS_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 MAX_TEAMS_MSIX_SIZE = 512 * 1024 * 1024
 MAX_WEBVIEW2_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
@@ -3222,7 +3224,7 @@ def _acquire_odt(output: Output, cancel_event=None) -> Path:
             output(f"Downloading Office Deployment Tool (attempt {attempt}/2).")
             download_url = _resolve_latest_odt_url(cancel_event)
             return _download_odt(download_url, output, cancel_event)
-        except (OSError, ValueError, RuntimeError) as error:
+        except (http.client.HTTPException, OSError, ValueError, RuntimeError) as error:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.") from error
             output(f"Office Deployment Tool download attempt {attempt}/2 failed: {error}")
@@ -3231,6 +3233,11 @@ def _acquire_odt(output: Output, cancel_event=None) -> Path:
                     "Office Deployment Tool could not be downloaded after two attempts.",
                     download_url,
                 ) from error
+            if cancel_event is not None:
+                if cancel_event.wait(ODT_RETRY_DELAY_SECONDS):
+                    raise RuntimeError("Operation cancelled.") from error
+            else:
+                time.sleep(ODT_RETRY_DELAY_SECONDS)
     raise AssertionError("Unreachable")
 
 
@@ -3253,12 +3260,12 @@ def _snapshot_local_odt(source, destination: Path) -> Path:
 def _microsoft_authenticode_store():
     from signify.authenticode.cert_store import (
         LEGACY_TRUSTED_CERTIFICATE_STORE,
-        TRUSTED_CERTIFICATE_STORE_NO_CTL,
+        TRUSTED_CERTIFICATE_STORE_WITH_CTL,
     )
     from signify.x509 import CertificateStore
 
     certificates = []
-    for certificate in TRUSTED_CERTIFICATE_STORE_NO_CTL:
+    for certificate in TRUSTED_CERTIFICATE_STORE_WITH_CTL:
         try:
             certificate.subject_public_algorithm
         except (KeyError, NotImplementedError, ValueError):
@@ -3266,32 +3273,52 @@ def _microsoft_authenticode_store():
             # signify cannot validate. They cannot establish a usable chain.
             continue
         certificates.append(certificate)
-    return CertificateStore(certificates, trusted=True) | LEGACY_TRUSTED_CERTIFICATE_STORE
+    current_store = CertificateStore(
+        certificates, trusted=True, ctl=TRUSTED_CERTIFICATE_STORE_WITH_CTL.ctl
+    )
+    return current_store | LEGACY_TRUSTED_CERTIFICATE_STORE
 
 
 def _authenticode_verification_results(path: Path):
-    from signify.authenticode.signed_file import SignedPEFile
+    try:
+        from signify.exceptions import SignifyError
+        from signify.authenticode.signed_file import SignedPEFile
+    except ImportError as error:
+        raise RuntimeError(
+            "Wine4Office Manager is missing the Authenticode verifier."
+        ) from error
 
-    with path.open("rb") as stream:
-        return SignedPEFile(stream).verify(
-            signature_types="embedded",
-            multi_verify_mode="any",
-            trusted_certificate_store=_microsoft_authenticode_store(),
-        )
+    try:
+        with path.open("rb") as stream:
+            return SignedPEFile(stream).verify(
+                signature_types="embedded",
+                multi_verify_mode="any",
+                trusted_certificate_store=_microsoft_authenticode_store(),
+            )
+    except SignifyError as error:
+        raise OdtSignatureError from error
+
+
+class OdtSignatureError(ValueError):
+    """The selected executable failed Authenticode verification."""
 
 
 def _verify_microsoft_signed_pe(path: Path) -> None:
     try:
         results = _authenticode_verification_results(path)
-        chains = [chain for _signed, _data, result in results for chain in result]
-    except Exception as error:
+    except OdtSignatureError as error:
         raise ValueError(
             "Office Deployment Tool file does not have a valid trusted signature."
         ) from error
-    for chain in chains:
-        if (chain and "Microsoft Corporation"
-                in chain[-1].subject.get_components("O")):
-            return
+    for signed_data, _indirect_data, chains in results:
+        signer = signed_data.signer_info
+        for chain in chains:
+            for certificate in chain:
+                if (certificate.issuer == signer.issuer
+                        and certificate.serial_number == signer.serial_number
+                        and "Microsoft Corporation"
+                        in certificate.subject.get_components("O")):
+                    return
     raise ValueError("Office Deployment Tool file is not signed by Microsoft.")
 
 
@@ -3322,6 +3349,7 @@ def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
                 raise ValueError("Office Deployment Tool download is not a valid Windows executable.")
             target.flush()
             os.fsync(target.fileno())
+        _verify_microsoft_signed_pe(temporary_path)
         os.replace(temporary_path, destination)
         temporary_path = None
         return destination
