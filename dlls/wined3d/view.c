@@ -219,7 +219,11 @@ static void create_texture_view(struct wined3d_gl_view *view, GLenum view_target
         return;
     }
 
-    wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false);
+    if (!wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false))
+    {
+        context_release(context);
+        return;
+    }
     texture_name = wined3d_texture_gl_get_texture_name(texture_gl, context, FALSE);
 
     level_idx = desc->u.texture.level_idx;

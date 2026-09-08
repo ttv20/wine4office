@@ -49,6 +49,7 @@
 
 #include "objbase.h"
 #include "wine/wined3d.h"
+#include "wine/wined3d_test.h"
 #include "wine/wined3d_completion.h"
 #include "wine/dcomp.h"
 #include "wine/list.h"
@@ -4191,6 +4192,7 @@ struct wined3d_swapchain
     uint64_t last_submitted_present_id;
     uint64_t last_completed_present_id;
     uint64_t present_identity_generation;
+    bool present_storage_invalidated;
     struct wined3d_swapchain_present_record present_results[WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
 
     /* Performance tracking */

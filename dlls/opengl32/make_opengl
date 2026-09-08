@@ -189,6 +189,7 @@ sub manual_unix_thunks($)
     return "glFlush"                        if $name =~ /^glFlush$/;
     return "glViewport"                     if $name =~ /^glViewport$/;
     return "glGetError"                     if $name =~ /^glGetError$/;
+    return "glGetGraphicsResetStatus"       if $name =~ /^glGetGraphicsResetStatus/;
 
     return "glGetBooleanv"                  if $name =~ /^glGetBooleanv/;
     return "glGetDoublev"                   if $name =~ /^glGetDoublev/;
@@ -1303,6 +1304,7 @@ sub get_integer_call($)
     return 0 if !$pname;
     return 0 if $name !~ /^glGet/;
 
+    $to_val = "!!" if $name =~ /^glGetBoolean/;
     my $hook = "if (get_integer( $pname, $index, $to_int*$params, &integer )) *$params = $to_val" . "integer;";
     return $hook if $name =~ /^glGet(Boolean|Double|Fixed|Float|Integer|Pointer|UnsignedByte)/;
     return $hook if $name =~ /^glGet(Multi)?Tex(ture)?LevelParameter/;

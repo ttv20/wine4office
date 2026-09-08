@@ -30,6 +30,8 @@
 #include "ddk/d3dkmthk.h"
 #include "wine/test.h"
 #include "wine/wined3d.h"
+#include "wine/wined3d_test.h"
+#include "wine/dcomp.h"
 
 enum frame_latency
 {
@@ -7031,6 +7033,203 @@ done_dxgi:
     IDXGIDevice_Release(dxgi_device);
 }
 
+static void test_swapchain_present_gl(void)
+{
+    HRESULT (WINAPI *test_gl)(IDXGISwapChain1 *, enum wined3d_gl_present_test,
+            unsigned int, struct wined3d_gl_storage_test_result *);
+    HRESULT (WINAPI *get_result)(IDXGISwapChain1 *, struct wined3d_swapchain_present_result *);
+    HRESULT (WINAPI *peek_result)(IDXGISwapChain1 *, struct wined3d_swapchain_present_result *);
+    HRESULT (WINAPI *set_composition)(IDXGISwapChain1 *, const struct wine_dcomp_visual_desc *);
+    struct wine_dcomp_visual_desc composition = {0};
+    struct wined3d_gl_storage_test_result before, after;
+    struct wined3d_swapchain_present_result result;
+    struct present1_lifetime_swapchain state = {0}, shared_state = {0}, other_state = {0};
+    struct wined3d_gl_storage_test_result shared_before, shared_after;
+    DWORD shared_expected[16 * 16], other_expected[16 * 16];
+    IDXGIDevice *other_dxgi_device = NULL;
+    ID3D11Device *other_device = NULL;
+    ID3D11DeviceContext *other_context = NULL;
+    ID3D11DeviceContext *context;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIDevice *dxgi_device;
+    ID3D11Device *device;
+    DWORD pixels[16 * 16], expected[16 * 16];
+    unsigned int action, i;
+    HRESULT hr;
+
+    test_gl = (void *)GetProcAddress(GetModuleHandleA("dxgi.dll"), "__wine_dxgi_test_gl");
+    get_result = (void *)GetProcAddress(GetModuleHandleA("dxgi.dll"), "__wine_dxgi_get_test_present_result");
+    peek_result = (void *)GetProcAddress(GetModuleHandleA("dxgi.dll"), "__wine_dxgi_peek_test_present_result");
+    set_composition = (void *)GetProcAddress(GetModuleHandleA("dxgi.dll"), "__wine_dxgi_set_composition_description");
+    if (!test_gl || !get_result || !peek_result || !set_composition)
+    {
+        win_skip("Wine GL presentation hooks are unavailable.\n");
+        return;
+    }
+    if (!(dxgi_device = create_d3d11_device())) return;
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Failed to get D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done_dxgi;
+    ID3D11Device_GetImmediateContext(device, &context);
+    get_factory((IUnknown *)dxgi_device, FALSE, &factory);
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr)) goto done_device;
+    state.width = state.height = 16;
+    state.buffer_count = 2;
+    state.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    state.name = "GL-storage-lifecycle";
+    state.expected = expected;
+    if (!init_present1_lifetime_swapchain(device, factory2, &state)) goto done_state;
+    hr = test_gl(state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &before);
+    if (hr == WINED3DERR_NOTAVAILABLE) goto done_state; /* Other renderer control. */
+    ok(hr == S_OK, "GL observation failed, hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done_state;
+
+    for (i = 0; i < state.buffer_count; ++i)
+    {
+        hr = test_gl(state.swapchain, WINED3D_GL_TEST_MUTABLE_STORAGE, i, &after);
+        ok(hr == S_OK, "Mutable storage setup failed, hr %#lx.\n", hr);
+    }
+    if (!seed_present1_lifetime_swapchain(context, &state, 0xff123456, pixels)) goto done_state;
+    for (action = WINED3D_GL_TEST_REUSE_NAME; action <= WINED3D_GL_TEST_REDEFINE_STORAGE; ++action)
+    {
+        hr = test_gl(state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &before);
+        ok(hr == S_OK, "Observation failed, hr %#lx.\n", hr);
+        hr = test_gl(state.swapchain, action, 0, &after);
+        ok(hr == S_OK, "Storage action %u failed, hr %#lx.\n", action, hr);
+        ok(after.name == before.name, "Action %u changed numeric name %u to %u.\n", action, before.name, after.name);
+        ok(after.storage_serial && after.storage_serial != before.storage_serial,
+                "Action %u reused allocation serial.\n", action);
+        ok(after.identity_generation == before.identity_generation + 1,
+                "Action %u did not invalidate exactly one generation.\n", action);
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Post-replacement Present failed, hr %#lx.\n", hr);
+        hr = get_result(state.swapchain, &result);
+        ok(hr == S_OK && result.result == S_OK, "Post-replacement completion failed, hr %#lx / %#lx.\n",
+                hr, result.result);
+        ok(result.presented_physical_identity == after.storage_serial, "Presented allocation mismatch.\n");
+        check_present1_lifetime_swapchain(context, &state, "replacement pixels");
+    }
+    for (action = WINED3D_GL_TEST_SWAP_FAILURE; action <= WINED3D_GL_TEST_STALE_COMPLETION; ++action)
+    {
+        hr = test_gl(state.swapchain, action, 0, &before);
+        ok(hr == S_OK, "Failed to arm action %u, hr %#lx.\n", action, hr);
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Asynchronous Present returned %#lx.\n", hr);
+        hr = get_result(state.swapchain, &result);
+        if (action == WINED3D_GL_TEST_STALE_COMPLETION)
+            ok(hr == WINED3DERR_NOTAVAILABLE, "Stale completion survived invalidation, hr %#lx.\n", hr);
+        else
+        {
+            ok(hr == S_OK, "Completion query failed, hr %#lx.\n", hr);
+            if (action != WINED3D_GL_TEST_BACKUP_DC)
+                ok(FAILED(result.result), "Action %u published successful completion.\n", action);
+        }
+        ok(!result.capabilities, "Action %u published sparse capabilities %#x.\n", action, result.capabilities);
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Recovery Present failed, hr %#lx.\n", hr);
+        hr = get_result(state.swapchain, &result);
+        ok(hr == S_OK && result.result == S_OK, "Recovery completion failed, hr %#lx / %#lx.\n", hr, result.result);
+    }
+
+    hr = test_gl(state.swapchain, WINED3D_GL_TEST_PENDING, 0, &after);
+    ok(hr == S_OK && after.completion_gate, "Failed to arm pending completion, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr) && after.completion_gate)
+    {
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Queued Present failed, hr %#lx.\n", hr);
+        hr = peek_result(state.swapchain, &result);
+        ok(hr == S_FALSE, "Blocked completion returned %#lx.\n", hr);
+        ok(!result.capabilities, "Pending completion exposed capabilities.\n");
+        SetEvent(after.completion_gate);
+        CloseHandle(after.completion_gate);
+        hr = get_result(state.swapchain, &result);
+        ok(hr == S_OK && result.result == S_OK, "Unblocked completion failed, hr %#lx / %#lx.\n", hr, result.result);
+    }
+    composition.version = WINE_DCOMP_VISUAL_DESC_VERSION;
+    composition.flags = WINE_DCOMP_VISUAL_RENDERER_ACTIVE;
+    hr = set_composition(state.swapchain, &composition);
+    ok(hr == S_OK, "Failed to activate composition, hr %#lx.\n", hr);
+    hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+    ok(hr == S_OK, "Composition Present failed, hr %#lx.\n", hr);
+    hr = get_result(state.swapchain, &result);
+    ok(hr == S_OK, "Composition completion query failed, hr %#lx.\n", hr);
+    ok(!result.capabilities, "Composition exposed sparse capabilities.\n");
+    hr = set_composition(state.swapchain, NULL);
+    ok(hr == S_OK, "Failed to clear composition, hr %#lx.\n", hr);
+
+    shared_state.width = shared_state.height = 16;
+    shared_state.buffer_count = 2;
+    shared_state.format = state.format;
+    shared_state.expected = shared_expected;
+    shared_state.name = "GL-shared-reset";
+    if (!init_present1_lifetime_swapchain(device, factory2, &shared_state)) goto done_state;
+    if (!seed_present1_lifetime_swapchain(context, &shared_state, 0xff654321, pixels)) goto done_state;
+    hr = test_gl(shared_state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &shared_before);
+    ok(hr == S_OK, "Shared observation failed, hr %#lx.\n", hr);
+    /* Separate D3D devices still share win32u's native GL storage domain. */
+    if (!(other_dxgi_device = create_d3d11_device())) goto done_state;
+    hr = IDXGIDevice_QueryInterface(other_dxgi_device, &IID_ID3D11Device, (void **)&other_device);
+    ok(hr == S_OK, "Failed to get independent device, hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done_state;
+    ID3D11Device_GetImmediateContext(other_device, &other_context);
+    other_state.width = other_state.height = 16;
+    other_state.buffer_count = 2;
+    other_state.format = state.format;
+    other_state.expected = other_expected;
+    other_state.name = "GL-other-device-reset";
+    if (!init_present1_lifetime_swapchain(other_device, factory2, &other_state)) goto done_state;
+    if (!seed_present1_lifetime_swapchain(other_context, &other_state, 0xff112233, pixels)) goto done_state;
+    hr = test_gl(state.swapchain, WINED3D_GL_TEST_RESET, 0, &before);
+    if (hr != WINED3DERR_NOTAVAILABLE)
+    {
+        ok(hr == S_OK, "Failed to arm reset, hr %#lx.\n", hr);
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Asynchronous reset Present failed, hr %#lx.\n", hr);
+        hr = get_result(state.swapchain, &result);
+        ok(hr == WINED3DERR_NOTAVAILABLE && !result.capabilities,
+                "Reset completion was published, hr %#lx, caps %#x.\n", hr, result.capabilities);
+        hr = get_result(shared_state.swapchain, &result);
+        ok(hr == WINED3DERR_NOTAVAILABLE, "Shared swapchain retained its old completion, hr %#lx.\n", hr);
+        hr = test_gl(shared_state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &shared_after);
+        ok(hr == S_OK, "Shared post-reset observation failed, hr %#lx.\n", hr);
+        ok(shared_after.identity_generation == shared_before.identity_generation + 1,
+                "Reset did not invalidate the other swapchain exactly once.\n");
+        hr = IDXGISwapChain1_Present(state.swapchain, 0, 0);
+        ok(hr == S_OK, "Post-reset submission failed, hr %#lx.\n", hr);
+        hr = get_result(state.swapchain, &result);
+        ok(hr == S_OK && FAILED(result.result) && !result.capabilities,
+                "Lost storage became successful again, hr %#lx, result %#lx.\n", hr, result.result);
+        hr = get_result(other_state.swapchain, &result);
+        ok(hr == WINED3DERR_NOTAVAILABLE && !result.capabilities,
+                "Independent device retained old completion, hr %#lx.\n", hr);
+        hr = IDXGISwapChain1_Present(other_state.swapchain, 0, 0);
+        ok(hr == S_OK, "Independent lost-device submission failed, hr %#lx.\n", hr);
+        hr = get_result(other_state.swapchain, &result);
+        ok(hr == S_OK && FAILED(result.result) && !result.capabilities,
+                "Independent device revived lost storage, hr %#lx, result %#lx.\n", hr, result.result);
+        trace("GL reset notification handler exercised across devices.\n");
+    }
+    else
+        trace("GL reset notification unavailable; reset-injection lane not executed.\n");
+
+done_state:
+    cleanup_present1_lifetime_swapchain(&other_state);
+    if (other_context) ID3D11DeviceContext_Release(other_context);
+    if (other_device) ID3D11Device_Release(other_device);
+    if (other_dxgi_device) IDXGIDevice_Release(other_dxgi_device);
+    cleanup_present1_lifetime_swapchain(&shared_state);
+    cleanup_present1_lifetime_swapchain(&state);
+    IDXGIFactory2_Release(factory2);
+done_device:
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+done_dxgi:
+    IDXGIDevice_Release(dxgi_device);
+}
+
 static void test_swapchain_present1_benchmark(void)
 {
     enum
@@ -11330,6 +11529,7 @@ START_TEST(dxgi)
     HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module, kernelbase_module;
     BOOL enable_debug_layer = FALSE;
     BOOL present1_history_only = FALSE;
+    BOOL present1_gl_only = FALSE;
     BOOL present1_benchmark = FALSE;
     unsigned int argc, i;
     ID3D12Debug *debug;
@@ -11373,6 +11573,8 @@ START_TEST(dxgi)
             use_mt = FALSE;
         else if (!strcmp(argv[i], "--present1-history-only"))
             present1_history_only = TRUE;
+        else if (!strcmp(argv[i], "--present1-gl-only"))
+            present1_gl_only = TRUE;
         else if (!strcmp(argv[i], "--present1-benchmark"))
             present1_benchmark = TRUE;
     }
@@ -11382,12 +11584,19 @@ START_TEST(dxgi)
         test_swapchain_present1_benchmark();
         return;
     }
+    if (present1_gl_only)
+    {
+        test_swapchain_present_gl();
+        return;
+    }
+
     if (present1_history_only)
     {
         run_on_d3d10(test_swapchain_present1_history);
         test_swapchain_present1_scroll();
         test_swapchain_present1_lifetime();
         test_swapchain_present_storage();
+        test_swapchain_present_gl();
         return;
     }
 
@@ -11445,6 +11654,10 @@ START_TEST(dxgi)
     run_on_d3d10(test_resize_target_wndproc);
     run_on_d3d10(test_swapchain_window_messages);
     run_on_d3d10(test_zero_size);
+
+    /* Reset injection permanently loses the native GL share group, so this
+     * must be the last test using WineD3D OpenGL in this process. */
+    test_swapchain_present_gl();
 
     if (!(d3d12_module = LoadLibraryA("d3d12.dll")))
     {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevent OpenGL presentation from using released buffers or retaining history after context loss.
+
 - Track graphics buffer allocations reliably when drivers reuse resource identifiers.
 
 - Prevent Office licensing repair from crashing while querying installed product keys.

@@ -941,7 +941,7 @@ void WINAPI glGetBooleanv( GLenum pname, GLboolean *data )
     int integer;
     TRACE( "pname %d, data %p\n", pname, data );
     if ((status = UNIX_CALL( glGetBooleanv, &args ))) WARN( "glGetBooleanv returned %#lx\n", status );
-    else if (get_integer( pname, 0, *data, &integer )) *data = integer;
+    else if (get_integer( pname, 0, *data, &integer )) *data = !!integer;
 }
 
 void WINAPI glGetClipPlane( GLenum plane, GLdouble *equation )
@@ -9181,7 +9181,7 @@ static void WINAPI glGetBooleanIndexedvEXT( GLenum target, GLuint index, GLboole
     int integer;
     TRACE( "target %d, index %d, data %p\n", target, index, data );
     if ((status = UNIX_CALL( glGetBooleanIndexedvEXT, &args ))) WARN( "glGetBooleanIndexedvEXT returned %#lx\n", status );
-    else if (get_integer( target, index, *data, &integer )) *data = integer;
+    else if (get_integer( target, index, *data, &integer )) *data = !!integer;
 }
 
 static void WINAPI glGetBooleani_v( GLenum target, GLuint index, GLboolean *data )
@@ -9191,7 +9191,7 @@ static void WINAPI glGetBooleani_v( GLenum target, GLuint index, GLboolean *data
     int integer;
     TRACE( "target %d, index %d, data %p\n", target, index, data );
     if ((status = UNIX_CALL( glGetBooleani_v, &args ))) WARN( "glGetBooleani_v returned %#lx\n", status );
-    else if (get_integer( target, index, *data, &integer )) *data = integer;
+    else if (get_integer( target, index, *data, &integer )) *data = !!integer;
 }
 
 static void WINAPI glGetBufferParameteri64v( GLenum target, GLenum pname, GLint64 *params )
