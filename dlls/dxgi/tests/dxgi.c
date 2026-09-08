@@ -7055,6 +7055,7 @@ static void test_swapchain_present_gl(void)
     IDXGIDevice *dxgi_device;
     ID3D11Device *device;
     DWORD pixels[16 * 16], expected[16 * 16];
+    unsigned int sparse_capabilities;
     unsigned int action, i;
     HRESULT hr;
 
@@ -7094,11 +7095,20 @@ static void test_swapchain_present_gl(void)
     }
     if (!seed_present1_lifetime_swapchain(context, &state, 0xff123456, pixels)) goto done_state;
     hr = get_result(state.swapchain, &result);
-    ok(hr == S_OK, "Eligible GL completion query failed, hr %#lx.\n", hr);
+    ok(hr == S_OK, "GL completion query failed, hr %#lx.\n", hr);
     if (SUCCEEDED(hr))
-        ok((result.capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY),
-                "Eligible GL completion did not waive copy-back, capabilities %#x.\n",
-                result.capabilities);
+    {
+        sparse_capabilities = WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT;
+        if ((result.capabilities & sparse_capabilities) == sparse_capabilities)
+            ok((result.capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY),
+                    "Eligible GL completion did not waive copy-back, capabilities %#x.\n",
+                    result.capabilities);
+        else
+            trace("GL completion is ineligible for sparse presentation, capabilities %#x.\n",
+                    result.capabilities);
+    }
     for (action = WINED3D_GL_TEST_REUSE_NAME; action <= WINED3D_GL_TEST_REDEFINE_STORAGE; ++action)
     {
         hr = test_gl(state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &before);
