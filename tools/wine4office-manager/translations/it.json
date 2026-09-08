@@ -132,5 +132,7 @@
 "OK": "OK",
 "Cancel": "Annulla",
 "Yes": "Sì",
-"No": "No"
+"No": "No",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Il download automatico non è riuscito due volte. Apri o copia il collegamento di download Microsoft, scarica Office Deployment Tool, quindi scegli il file scaricato.",
+  "Copy link": "Copia collegamento"
 }

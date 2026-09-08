@@ -3204,6 +3204,49 @@ def _resolve_latest_odt_url(cancel_event=None) -> str:
 
 
 
+class OdtDownloadError(RuntimeError):
+    """Both automatic attempts failed; the UI may offer a local installer."""
+
+    def __init__(self, message: str, download_url: str) -> None:
+        super().__init__(message)
+        self.download_url = download_url
+
+
+def _acquire_odt(output: Output, cancel_event=None) -> Path:
+    download_url = _ODT_DOWNLOAD_PAGE
+    for attempt in range(1, 3):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        try:
+            output(f"Downloading Office Deployment Tool (attempt {attempt}/2).")
+            download_url = _resolve_latest_odt_url(cancel_event)
+            return _download_odt(download_url, output, cancel_event)
+        except (OSError, ValueError, RuntimeError) as error:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.") from error
+            output(f"Office Deployment Tool download attempt {attempt}/2 failed: {error}")
+            if attempt == 2:
+                raise OdtDownloadError(
+                    "Office Deployment Tool could not be downloaded after two attempts.",
+                    download_url,
+                ) from error
+    raise AssertionError("Unreachable")
+
+
+def _snapshot_local_odt(source, destination: Path) -> Path:
+    # Extract our private copy, never delete or execute a changing user file.
+    source = Path(source)
+    if not source.is_file():
+        raise ValueError("Choose an Office Deployment Tool file.")
+    with source.open("rb") as stream, destination.open("xb") as target:
+        size, signature = _copy_bounded_response(
+            stream, target, MAX_ODT_DOWNLOAD_SIZE, "Office Deployment Tool file"
+        )
+    if size < 1024 or signature != b"MZ":
+        raise ValueError("Office Deployment Tool file is not a valid Windows executable.")
+    return destination
+
+
 def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
     url = _trusted_microsoft_url(url, _ODT_DOWNLOAD_HOSTS, "Office Deployment Tool download")
     download_dir = cache_home() / "wine4office/odt"
@@ -3534,7 +3577,7 @@ def install_office_with_odt(prefix, wine, config_path, output,
                             cancel_event=None, process_callback=None, *,
                             configuration_payload=None,
                             installer_launching_callback=None,
-                            installer_process_callback=None) -> str:
+                            installer_process_callback=None, local_odt=None) -> str:
     """Snapshot configuration, fetch current ODT, then run setup /configure."""
     prefix_path = validate_prefix(prefix)
     if not (prefix_path / "system.reg").is_file():
@@ -3555,9 +3598,12 @@ def install_office_with_odt(prefix, wine, config_path, output,
             extraction_directory.mkdir(mode=0o700)
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
-            output("Resolving the latest Office Deployment Tool from Microsoft.")
-            odt_url = _resolve_latest_odt_url(cancel_event)
-            odt = _download_odt(odt_url, output, cancel_event)
+            if local_odt is None:
+                output("Resolving the latest Office Deployment Tool from Microsoft.")
+                odt = _acquire_odt(output, cancel_event)
+            else:
+                output("Using the selected Office Deployment Tool file.")
+                odt = _snapshot_local_odt(local_odt, work_directory / "odt.exe")
             windows_extraction_directory = _windows_document_path(
                 str(extraction_directory), wine_path, environment
             )

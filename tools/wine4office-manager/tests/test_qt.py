@@ -1892,6 +1892,51 @@ class QtManagerTests(unittest.TestCase):
             (configuration.resolve(), configuration_payload, config_digest),
         )
 
+    def test_odt_manual_download_dialog_resumes_original_selection(self):
+        payload = b"<Configuration><Add /></Configuration>"
+        config = dict(self.config)
+        filename = str(self.home / "downloaded odt.exe")
+        download_url = (
+            "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+        )
+
+        def interact(dialog):
+            buttons = dialog.findChildren(qt_module.QPushButton)
+            next(b for b in buttons if b.text() == "Copy link").click()
+            self.assertEqual(self.application.clipboard().text(), download_url)
+            next(b for b in buttons if b.text() == "Open").click()
+            next(b for b in buttons if b.text() == "Choose a file").click()
+            return 1
+
+        with mock.patch.object(self.window, "refresh_state"), mock.patch.object(
+            self.window, "ensure_idle", return_value=True
+        ), mock.patch.object(self.window, "_translate_ui"), mock.patch.object(
+            qt_module.QDialog, "exec", new=interact
+        ), mock.patch.object(qt_module.QDesktopServices, "openUrl", return_value=True) as open_url, mock.patch.object(
+            qt_module.QFileDialog, "getOpenFileName", return_value=(filename, "")
+        ), mock.patch.object(self.window, "_start_office_install_payload") as start:
+            self.window._office_download_completed(
+                backend.OdtDownloadError("failed", download_url),
+                payload, None, None, config,
+            )
+        open_url.assert_called_once()
+        self.assertEqual(open_url.call_args.args[0].toString(), download_url)
+        start.assert_called_once_with(
+            payload, None, None, local_odt=Path(filename), install_config=config
+        )
+
+    def test_odt_manual_download_not_offered_for_other_errors_or_cancellation(self):
+        with mock.patch.object(qt_module.QDialog, "exec") as dialog:
+            self.window._office_download_completed(
+                ValueError("extraction failed"), b"", None, None, {}
+            )
+            self.state.cancel_event.set()
+            self.window._office_download_completed(
+                backend.OdtDownloadError("failed", backend._ODT_DOWNLOAD_PAGE),
+                b"", None, None, {},
+            )
+        dialog.assert_not_called()
+
     def test_completed_odt_install_offers_xml_cleanup_once(self):
         configuration = self.home / "completed deployment.xml"
         configuration.write_text("<Configuration />", encoding="utf-8")

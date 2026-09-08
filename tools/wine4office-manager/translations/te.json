@@ -94,5 +94,7 @@
 "OK": "సరే",
 "Cancel": "రద్దు",
 "Yes": "అవును",
-"No": "కాదు"
+"No": "కాదు",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "ఆటోమేటిక్ డౌన్‌లోడ్ రెండుసార్లు విఫలమైంది. Microsoft డౌన్‌లోడ్ లింక్‌ను తెరవండి లేదా కాపీ చేయండి, Office Deployment Toolను డౌన్‌లోడ్ చేసి, ఆపై డౌన్‌లోడ్ చేసిన ఫైల్‌ను ఎంచుకోండి.",
+  "Copy link": "లింక్‌ను కాపీ చేయండి"
 }

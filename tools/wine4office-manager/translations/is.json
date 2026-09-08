@@ -94,5 +94,7 @@
 "OK": "Í lagi",
 "Cancel": "Hætta við",
 "Yes": "Já",
-"No": "Nei"
+"No": "Nei",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Sjálfvirka niðurhalið mistókst tvisvar. Opnaðu eða afritaðu niðurhalstengil Microsoft, sæktu Office Deployment Tool og veldu síðan skrána sem var sótt.",
+  "Copy link": "Afrita tengil"
 }

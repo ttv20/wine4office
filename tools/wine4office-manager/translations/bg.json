@@ -94,5 +94,7 @@
 "OK": "Добре",
 "Cancel": "Отказ",
 "Yes": "Да",
-"No": "Не"
+"No": "Не",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Автоматичното изтегляне се провали два пъти. Отворете или копирайте връзката за изтегляне от Microsoft, изтеглете Office Deployment Tool и след това изберете изтегления файл.",
+  "Copy link": "Копиране на връзката"
 }

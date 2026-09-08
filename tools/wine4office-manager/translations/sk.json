@@ -98,5 +98,7 @@
 "OK": "OK",
 "Cancel": "Zrušiť",
 "Yes": "Áno",
-"No": "Nie"
+"No": "Nie",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Automatické stiahnutie dvakrát zlyhalo. Otvorte alebo skopírujte odkaz na stiahnutie od Microsoftu, stiahnite Office Deployment Tool a potom vyberte stiahnutý súbor.",
+  "Copy link": "Kopírovať odkaz"
 }

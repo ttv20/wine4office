@@ -132,5 +132,7 @@
 "OK": "ОК",
 "Cancel": "Отмена",
 "Yes": "Да",
-"No": "Нет"
+"No": "Нет",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Автоматическая загрузка дважды завершилась сбоем. Откройте или скопируйте ссылку Microsoft, загрузите Office Deployment Tool, затем выберите загруженный файл.",
+  "Copy link": "Копировать ссылку"
 }

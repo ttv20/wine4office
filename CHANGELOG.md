@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry Office installer downloads once, then offer manual download and file selection.
+
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Restore Outlook account setup after Office repairs its Click-to-Run registry data.

@@ -94,5 +94,7 @@
 "OK": "ठीक",
 "Cancel": "रद्द करा",
 "Yes": "होय",
-"No": "नाही"
+"No": "नाही",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "स्वयंचलित डाउनलोड दोनदा अयशस्वी झाले. Microsoft डाउनलोड दुवा उघडा किंवा कॉपी करा, Office Deployment Tool डाउनलोड करा आणि नंतर डाउनलोड केलेली फाइल निवडा.",
+  "Copy link": "दुवा कॉपी करा"
 }

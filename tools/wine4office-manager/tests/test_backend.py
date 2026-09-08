@@ -9,6 +9,7 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -2311,6 +2312,86 @@ exit 0
             backend.install_teams_with_bootstrapper(
                 str(prefix), str(self.wine), lambda line: None
             )
+
+    def test_odt_download_retries_then_succeeds(self):
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", return_value="url"
+        ) as resolve, mock.patch.object(
+            backend, "_download_odt",
+            side_effect=[OSError("offline"), Path("odt.exe")],
+        ) as download:
+            self.assertEqual(backend._acquire_odt(mock.Mock()), Path("odt.exe"))
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(download.call_count, 2)
+
+    def test_odt_resolution_failure_stops_after_two_attempts(self):
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url",
+            side_effect=ValueError("missing link"),
+        ) as resolve:
+            with self.assertRaises(backend.OdtDownloadError) as caught:
+                backend._acquire_odt(mock.Mock())
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(caught.exception.download_url, backend._ODT_DOWNLOAD_PAGE)
+
+    def test_odt_download_failure_preserves_direct_url_for_manual_download(self):
+        url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", return_value=url
+        ), mock.patch.object(
+            backend, "_download_odt", side_effect=OSError("offline")
+        ):
+            with self.assertRaises(backend.OdtDownloadError) as caught:
+                backend._acquire_odt(mock.Mock())
+        self.assertEqual(caught.exception.download_url, url)
+
+    def test_odt_cancel_does_not_retry_or_offer_manual_download(self):
+        cancel = threading.Event()
+
+        def fail(event):
+            event.set()
+            raise OSError("cancelled request")
+
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", side_effect=fail
+        ) as resolve:
+            with self.assertRaisesRegex(RuntimeError, "Operation cancelled"):
+                backend._acquire_odt(mock.Mock(), cancel)
+        self.assertEqual(resolve.call_count, 1)
+
+    def test_manual_odt_install_skips_network_and_preserves_source(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        source = self.root / "downloaded odt.exe"
+        payload = b"MZ" + bytes(2048)
+        source.write_bytes(payload)
+
+        def command(args, *unused, **kwargs):
+            if "/quiet" in args:
+                self.assertNotEqual(Path(args[1]), source)
+                self.assertEqual(Path(args[1]).read_bytes(), payload)
+
+        with mock.patch.object(backend, "_acquire_odt") as download, mock.patch.object(
+            backend, "wine_environment", return_value={}
+        ), mock.patch.object(
+            backend, "_windows_document_path", side_effect=lambda path, *args: path
+        ), mock.patch.object(
+            backend, "_require_extracted_setup", return_value=self.root / "setup.exe"
+        ), mock.patch.object(backend, "_stream_command", side_effect=command) as stream:
+            backend.install_office_with_odt(
+                prefix, self.wine, None, mock.Mock(),
+                configuration_payload=b"<Configuration><Add /></Configuration>",
+                local_odt=source,
+            )
+        download.assert_not_called()
+        self.assertEqual(stream.call_count, 2)
+        self.assertEqual(source.read_bytes(), payload)
+
+    def test_manual_odt_rejects_html_download(self):
+        source = self.root / "download.exe"
+        source.write_bytes(b"<html>" + bytes(2048))
+        with self.assertRaisesRegex(ValueError, "not a valid Windows executable"):
+            backend._snapshot_local_odt(source, self.root / "snapshot.exe")
 
     def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
         prefix = self.home / ".wine4office"

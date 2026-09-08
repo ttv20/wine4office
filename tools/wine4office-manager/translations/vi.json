@@ -98,5 +98,7 @@
 "OK": "OK",
 "Cancel": "Hủy",
 "Yes": "Có",
-"No": "Không"
+"No": "Không",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Tải xuống tự động đã thất bại hai lần. Hãy mở hoặc sao chép liên kết tải xuống của Microsoft, tải Office Deployment Tool xuống, rồi chọn tệp đã tải xuống.",
+  "Copy link": "Sao chép liên kết"
 }

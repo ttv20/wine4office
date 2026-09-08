@@ -132,5 +132,7 @@
 "OK": "확인",
 "Cancel": "취소",
 "Yes": "예",
-"No": "아니요"
+"No": "아니요",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "자동 다운로드가 두 번 실패했습니다. Microsoft 다운로드 링크를 열거나 복사하여 Office Deployment Tool을 다운로드한 다음, 다운로드한 파일을 선택하세요.",
+  "Copy link": "링크 복사"
 }

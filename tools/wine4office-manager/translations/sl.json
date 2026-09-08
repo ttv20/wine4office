@@ -94,5 +94,7 @@
 "OK": "V redu",
 "Cancel": "Prekliči",
 "Yes": "Da",
-"No": "Ne"
+"No": "Ne",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Samodejni prenos dvakrat ni uspel. Odprite ali kopirajte Microsoftovo povezavo za prenos, prenesite Office Deployment Tool in nato izberite preneseno datoteko.",
+  "Copy link": "Kopiraj povezavo"
 }

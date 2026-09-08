@@ -77,6 +77,21 @@ class DesktopIntegrationTests(unittest.TestCase):
 
 
 class TranslationTests(unittest.TestCase):
+    def test_manual_odt_download_text_is_translated_in_every_catalog(self):
+        sources = (
+            "The automatic download failed twice. Open or copy the Microsoft "
+            "download link, download Office Deployment Tool, then choose the "
+            "downloaded file.",
+            "Copy link",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            for source in sources:
+                with self.subTest(language=language, source=source):
+                    translated = i18n.CATALOGS[language].get(source)
+                    self.assertIsNotNone(translated)
+                    if language != "en":
+                        self.assertNotEqual(translated, source)
+
     def test_each_supported_language_has_its_own_json_catalog(self):
         expected = {
             f"{language}.json" for language in i18n.SUPPORTED_LANGUAGES

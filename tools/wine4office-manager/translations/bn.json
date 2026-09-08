@@ -94,5 +94,7 @@
 "OK": "ঠিক আছে",
 "Cancel": "বাতিল",
 "Yes": "হ্যাঁ",
-"No": "না"
+"No": "না",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "স্বয়ংক্রিয় ডাউনলোড দুবার ব্যর্থ হয়েছে। Microsoft-এর ডাউনলোড লিঙ্কটি খুলুন বা কপি করুন, Office Deployment Tool ডাউনলোড করুন, তারপর ডাউনলোড করা ফাইলটি বেছে নিন।",
+  "Copy link": "লিঙ্ক কপি করুন"
 }

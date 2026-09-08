@@ -98,5 +98,7 @@
 "OK": "OK",
 "Cancel": "Mégse",
 "Yes": "Igen",
-"No": "Nem"
+"No": "Nem",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Az automatikus letöltés kétszer meghiúsult. Nyissa meg vagy másolja ki a Microsoft letöltési hivatkozását, töltse le az Office Deployment Tool eszközt, majd válassza ki a letöltött fájlt.",
+  "Copy link": "Hivatkozás másolása"
 }

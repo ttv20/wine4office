@@ -132,5 +132,7 @@
 "OK": "确定",
 "Cancel": "取消",
 "Yes": "是",
-"No": "否"
+"No": "否",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "自动下载两次均失败。请打开或复制 Microsoft 下载链接，下载 Office Deployment Tool，然后选择已下载的文件。",
+  "Copy link": "复制链接"
 }

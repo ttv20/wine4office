@@ -94,5 +94,7 @@
 "OK": "Labi",
 "Cancel": "Atcelt",
 "Yes": "Jā",
-"No": "Nē"
+"No": "Nē",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Automātiskā lejupielāde divreiz neizdevās. Atveriet vai nokopējiet Microsoft lejupielādes saiti, lejupielādējiet Office Deployment Tool un pēc tam izvēlieties lejupielādēto failu.",
+  "Copy link": "Kopēt saiti"
 }

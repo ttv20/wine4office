@@ -132,5 +132,7 @@
 "OK": "Tamam",
 "Cancel": "İptal",
 "Yes": "Evet",
-"No": "Hayır"
+"No": "Hayır",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Otomatik indirme iki kez başarısız oldu. Microsoft indirme bağlantısını açın veya kopyalayın, Office Deployment Tool'u indirin ve ardından indirilen dosyayı seçin.",
+  "Copy link": "Bağlantıyı kopyala"
 }

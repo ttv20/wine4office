@@ -98,5 +98,7 @@
 "OK": "OK",
 "Cancel": "Anulează",
 "Yes": "Da",
-"No": "Nu"
+"No": "Nu",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Descărcarea automată a eșuat de două ori. Deschideți sau copiați linkul de descărcare Microsoft, descărcați Office Deployment Tool, apoi alegeți fișierul descărcat.",
+  "Copy link": "Copiază linkul"
 }

@@ -132,5 +132,7 @@
 "OK": "OK",
 "Cancel": "キャンセル",
 "Yes": "はい",
-"No": "いいえ"
+"No": "いいえ",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "自動ダウンロードに2回失敗しました。Microsoft のダウンロードリンクを開くかコピーし、Office Deployment Tool をダウンロードしてから、ダウンロードしたファイルを選択してください。",
+  "Copy link": "リンクをコピー"
 }

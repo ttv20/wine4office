@@ -98,5 +98,7 @@
 "OK": "OK",
 "Cancel": "Avbryt",
 "Yes": "Ja",
-"No": "Nej"
+"No": "Nej",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Den automatiska hämtningen misslyckades två gånger. Öppna eller kopiera Microsofts hämtningslänk, hämta Office Deployment Tool och välj sedan den hämtade filen.",
+  "Copy link": "Kopiera länk"
 }

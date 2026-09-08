@@ -132,5 +132,7 @@
 "OK": "Гаразд",
 "Cancel": "Скасувати",
 "Yes": "Так",
-"No": "Ні"
+"No": "Ні",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Автоматичне завантаження двічі завершилося помилкою. Відкрийте або скопіюйте посилання Microsoft, завантажте Office Deployment Tool, а потім виберіть завантажений файл.",
+  "Copy link": "Копіювати посилання"
 }

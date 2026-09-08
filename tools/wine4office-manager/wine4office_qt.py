@@ -873,8 +873,9 @@ class ManagerWindow(QMainWindow):
     def _start_office_install_payload(
             self, configuration_payload: bytes,
             config_path: Path | None = None,
-            config_digest: str | None = None) -> None:
-        config = self.save_config()
+            config_digest: str | None = None, *,
+            local_odt: Path | None = None, install_config: dict | None = None) -> None:
+        config = install_config if install_config is not None else self.save_config()
         if not config:
             return
         try:
@@ -890,6 +891,12 @@ class ManagerWindow(QMainWindow):
                     configuration_payload=payload,
                     installer_launching_callback=self.state.mark_foreground_pending,
                     installer_process_callback=self.state.set_foreground_process,
+                    **({"local_odt": local_odt} if local_odt is not None else {}),
+                ),
+                completion=self._task_completion(
+                    lambda _result, error: self._office_download_completed(
+                        error, configuration_payload, config_path, config_digest, config
+                    )
                 ),
             )
             self.pending_odt_xml = (
@@ -905,6 +912,66 @@ class ManagerWindow(QMainWindow):
             self.refresh_state()
         except Exception as error:
             self.show_error(error)
+
+    def _office_download_completed(self, error, payload, config_path,
+                                   config_digest, config) -> None:
+        if (not isinstance(error, backend.OdtDownloadError)
+                or self._close_when_idle or self._automatic_close
+                or self.state.cancel_event.is_set()):
+            return
+        self.refresh_state()
+        if not self.ensure_idle():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Download and install")
+        dialog.setMinimumWidth(620)
+        layout = QVBoxLayout(dialog)
+        label = QLabel(
+            "The automatic download failed twice. Open or copy the Microsoft download "
+            "link, download Office Deployment Tool, then choose the downloaded file."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        download_url = error.download_url
+        link = QLineEdit(download_url)
+        link.setReadOnly(True)
+        link.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        link.setCursorPosition(0)
+        layout.addWidget(link)
+        actions = QHBoxLayout()
+        open_link = QPushButton("Open")
+        open_link.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(download_url))
+        )
+        copy_link = QPushButton("Copy link")
+        copy_link.clicked.connect(
+            lambda: QApplication.clipboard().setText(download_url)
+        )
+        choose = QPushButton("Choose a file")
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dialog.reject)
+
+        def select_file():
+            filename, _ = QFileDialog.getOpenFileName(
+                dialog, self._tr("Choose a file"),
+                str(Path.home()), "Windows executable (*.exe);;All files (*)",
+            )
+            if not filename:
+                return
+            if not self.ensure_idle():
+                return
+            dialog.accept()
+            self._start_office_install_payload(
+                payload, config_path, config_digest,
+                local_odt=Path(filename), install_config=config,
+            )
+
+        choose.clicked.connect(select_file)
+        for button in (open_link, copy_link, choose, cancel):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        self._translate_ui(dialog)
+        dialog.exec()
 
     def _show_office_startup_progress(self) -> None:
         if self.office_startup_dialog is not None:

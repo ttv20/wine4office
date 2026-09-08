@@ -94,5 +94,7 @@
 "OK": "OK",
 "Cancel": "Kanselahin",
 "Yes": "Oo",
-"No": "Hindi"
+"No": "Hindi",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "Dalawang beses na nabigo ang awtomatikong pag-download. Buksan o kopyahin ang link sa pag-download ng Microsoft, i-download ang Office Deployment Tool, at pagkatapos ay piliin ang na-download na file.",
+  "Copy link": "Kopyahin ang link"
 }

@@ -193,5 +193,7 @@
 "OK": "موافق",
 "Cancel": "إلغاء",
 "Yes": "نعم",
-"No": "لا"
+"No": "لا",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "فشل التنزيل التلقائي مرتين. افتح رابط التنزيل من Microsoft أو انسخه، ونزّل Office Deployment Tool، ثم اختر الملف الذي تم تنزيله.",
+  "Copy link": "نسخ الرابط"
 }

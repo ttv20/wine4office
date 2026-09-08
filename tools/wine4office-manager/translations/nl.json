@@ -132,5 +132,7 @@
 "OK": "OK",
 "Cancel": "Annuleren",
 "Yes": "Ja",
-"No": "Nee"
+"No": "Nee",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "De automatische download is twee keer mislukt. Open of kopieer de downloadlink van Microsoft, download Office Deployment Tool en kies daarna het gedownloade bestand.",
+  "Copy link": "Link kopiëren"
 }

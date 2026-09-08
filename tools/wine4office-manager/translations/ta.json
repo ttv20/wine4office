@@ -94,5 +94,7 @@
 "OK": "சரி",
 "Cancel": "ரத்துசெய்",
 "Yes": "ஆம்",
-"No": "இல்லை"
+"No": "இல்லை",
+  "The automatic download failed twice. Open or copy the Microsoft download link, download Office Deployment Tool, then choose the downloaded file.": "தானியங்கி பதிவிறக்கம் இருமுறை தோல்வியடைந்தது. Microsoft பதிவிறக்க இணைப்பைத் திறக்கவும் அல்லது நகலெடுக்கவும், Office Deployment Tool-ஐ பதிவிறக்கி, பின்னர் பதிவிறக்கப்பட்ட கோப்பைத் தேர்ந்தெடுக்கவும்.",
+  "Copy link": "இணைப்பை நகலெடு"
 }
