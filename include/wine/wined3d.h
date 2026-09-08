@@ -2336,13 +2336,15 @@ struct wined3d_swapchain_state_parent_ops
             BOOL windowed);
 };
 
-/* A backend must report all of these facts before a caller may use bounded
- * Present1 history.  A zero capability set is an authoritative statement
- * that the backend cannot prove the contract.  In particular, these values
- * must not be synthesized from a logical buffer index or presentation count. */
+/* A backend must report the first three facts before a caller may use bounded
+ * Present1 history. A zero capability set is an authoritative statement that
+ * the backend cannot prove the contract. In particular, these values must not
+ * be synthesized from a logical buffer index or presentation count. */
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY  0x00000001u
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS 0x00000002u
 #define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT 0x00000004u
+/* The backend does not need a write to the active back buffer before Present. */
+#define WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY 0x00000008u
 #define WINED3D_SWAPCHAIN_PRESENT_IDENTITY_COUNT 16
 
 struct wined3d_swapchain_present_result

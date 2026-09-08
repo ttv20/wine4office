@@ -7093,6 +7093,12 @@ static void test_swapchain_present_gl(void)
         ok(hr == S_OK, "Mutable storage setup failed, hr %#lx.\n", hr);
     }
     if (!seed_present1_lifetime_swapchain(context, &state, 0xff123456, pixels)) goto done_state;
+    hr = get_result(state.swapchain, &result);
+    ok(hr == S_OK, "Eligible GL completion query failed, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        ok((result.capabilities & WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY),
+                "Eligible GL completion did not waive copy-back, capabilities %#x.\n",
+                result.capabilities);
     for (action = WINED3D_GL_TEST_REUSE_NAME; action <= WINED3D_GL_TEST_REDEFINE_STORAGE; ++action)
     {
         hr = test_gl(state.swapchain, WINED3D_GL_TEST_OBSERVE, 0, &before);

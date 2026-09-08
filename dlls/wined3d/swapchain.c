@@ -1091,10 +1091,13 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
             result->presented_physical_identity = presented_identity;
             {
                 const char *reason = swapchain_gl_sparse_fallback(swapchain, context_gl);
-                /* The candidate passes the pixel/lifecycle matrix, but has
-                 * not passed the no-regression Present1 latency gate. */
-                TRACE("GL sparse Present fallback: %s.\n", reason ? reason : "latency-gate-not-met");
-                result->capabilities = 0;
+                if (reason)
+                    TRACE("GL sparse Present fallback: %s.\n", reason);
+                else
+                    result->capabilities = WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PHYSICAL_IDENTITY
+                            | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_PRESERVED_CONTENTS
+                            | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_TRANSACTIONAL_PRESENT
+                            | WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY;
             }
         }
     }

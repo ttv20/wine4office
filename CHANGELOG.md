@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid a redundant OpenGL buffer copy after partial Office redraws.
+
 - Reduce repeated window-property lookup overhead during graphics presentation.
 
 - Prevent OpenGL presentation from using released buffers or retaining history after context loss.
