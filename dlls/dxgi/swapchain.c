@@ -1711,7 +1711,7 @@ done:
 }
 
 static HRESULT d3d11_swapchain_update_present1_shadow_sparse(struct d3d11_swapchain *swapchain,
-        const DXGI_PRESENT_PARAMETERS *parameters)
+        const DXGI_PRESENT_PARAMETERS *parameters, BOOL copy_back)
 {
     ID3D11DeviceContext *context = NULL;
     ID3D11Texture2D *back = NULL;
@@ -1736,10 +1736,9 @@ static HRESULT d3d11_swapchain_update_present1_shadow_sparse(struct d3d11_swapch
     {
         ID3D11DeviceContext_CopyResource(context,
                 (ID3D11Resource *)swapchain->present1_shadow, (ID3D11Resource *)back);
-        /* This pixel-identical copy-back preserves the Present1 resource-state
-         * ordering expected by WineD3D and must not be optimized away. */
-        ID3D11DeviceContext_CopyResource(context,
-                (ID3D11Resource *)back, (ID3D11Resource *)swapchain->present1_shadow);
+        if (copy_back)
+            ID3D11DeviceContext_CopyResource(context,
+                    (ID3D11Resource *)back, (ID3D11Resource *)swapchain->present1_shadow);
         goto done;
     }
 
@@ -1760,12 +1759,10 @@ static HRESULT d3d11_swapchain_update_present1_shadow_sparse(struct d3d11_swapch
         ID3D11DeviceContext_CopySubresourceRegion(context,
                 (ID3D11Resource *)swapchain->present1_shadow, 0,
                 box.left, box.top, 0, (ID3D11Resource *)back, 0, &box);
-        /* Restore only the application-owned region, rather than the full
-         * frame restored by the fallback. This is required for the active
-         * back buffer to retain the original Present1 resource-state ordering. */
-        ID3D11DeviceContext_CopySubresourceRegion(context,
-                (ID3D11Resource *)back, 0, box.left, box.top, 0,
-                (ID3D11Resource *)swapchain->present1_shadow, 0, &box);
+        if (copy_back)
+            ID3D11DeviceContext_CopySubresourceRegion(context,
+                    (ID3D11Resource *)back, 0, box.left, box.top, 0,
+                    (ID3D11Resource *)swapchain->present1_shadow, 0, &box);
     }
 
 done:
@@ -1908,7 +1905,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
                         desc.backbuffer_width, desc.backbuffer_height,
                         physical_identity, identity_generation) == S_OK
                 && d3d11_swapchain_update_present1_shadow_sparse(
-                        swapchain, present_parameters) == S_OK)
+                        swapchain, present_parameters,
+                        !(capabilities &
+                                WINED3D_SWAPCHAIN_PRESENT_CAPABILITY_COPY_BACK_UNNECESSARY)) == S_OK)
             sparse = TRUE;
     }
 
