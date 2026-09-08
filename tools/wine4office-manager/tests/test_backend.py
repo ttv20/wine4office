@@ -2372,6 +2372,8 @@ exit 0
                 self.assertEqual(Path(args[1]).read_bytes(), payload)
 
         with mock.patch.object(backend, "_acquire_odt") as download, mock.patch.object(
+            backend, "_verify_microsoft_signed_pe"
+        ) as verify_signature, mock.patch.object(
             backend, "wine_environment", return_value={}
         ), mock.patch.object(
             backend, "_windows_document_path", side_effect=lambda path, *args: path
@@ -2384,6 +2386,7 @@ exit 0
                 local_odt=source,
             )
         download.assert_not_called()
+        verify_signature.assert_called_once()
         self.assertEqual(stream.call_count, 2)
         self.assertEqual(source.read_bytes(), payload)
 
@@ -2392,6 +2395,39 @@ exit 0
         source.write_bytes(b"<html>" + bytes(2048))
         with self.assertRaisesRegex(ValueError, "not a valid Windows executable"):
             backend._snapshot_local_odt(source, self.root / "snapshot.exe")
+
+    def test_manual_odt_requires_a_trusted_microsoft_publisher(self):
+        class Subject:
+            def __init__(self, organization):
+                self.organization = organization
+
+            def get_components(self, component):
+                return iter((self.organization,)) if component == "O" else iter(())
+
+        class Certificate:
+            def __init__(self, organization):
+                self.subject = Subject(organization)
+
+        path = self.root / "odt.exe"
+        microsoft_chain = [[Certificate("Trusted Root"), Certificate("Microsoft Corporation")]]
+        other_chain = [[Certificate("Trusted Root"), Certificate("Other Publisher")]]
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            return_value=[(None, None, microsoft_chain)],
+        ):
+            backend._verify_microsoft_signed_pe(path)
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            return_value=[(None, None, other_chain)],
+        ), self.assertRaisesRegex(ValueError, "not signed by Microsoft"):
+            backend._verify_microsoft_signed_pe(path)
+
+    def test_manual_odt_rejects_an_invalid_authenticode_signature(self):
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            side_effect=ValueError("bad digest"),
+        ), self.assertRaisesRegex(ValueError, "valid trusted signature"):
+            backend._verify_microsoft_signed_pe(self.root / "odt.exe")
 
     def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
         prefix = self.home / ".wine4office"

@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from contextlib import contextmanager
+from functools import lru_cache
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
@@ -3244,7 +3245,54 @@ def _snapshot_local_odt(source, destination: Path) -> Path:
         )
     if size < 1024 or signature != b"MZ":
         raise ValueError("Office Deployment Tool file is not a valid Windows executable.")
+    _verify_microsoft_signed_pe(destination)
     return destination
+
+
+@lru_cache(maxsize=1)
+def _microsoft_authenticode_store():
+    from signify.authenticode.cert_store import (
+        LEGACY_TRUSTED_CERTIFICATE_STORE,
+        TRUSTED_CERTIFICATE_STORE_NO_CTL,
+    )
+    from signify.x509 import CertificateStore
+
+    certificates = []
+    for certificate in TRUSTED_CERTIFICATE_STORE_NO_CTL:
+        try:
+            certificate.subject_public_algorithm
+        except (KeyError, NotImplementedError, ValueError):
+            # Current certificate bundles include experimental algorithms that
+            # signify cannot validate. They cannot establish a usable chain.
+            continue
+        certificates.append(certificate)
+    return CertificateStore(certificates, trusted=True) | LEGACY_TRUSTED_CERTIFICATE_STORE
+
+
+def _authenticode_verification_results(path: Path):
+    from signify.authenticode.signed_file import SignedPEFile
+
+    with path.open("rb") as stream:
+        return SignedPEFile(stream).verify(
+            signature_types="embedded",
+            multi_verify_mode="any",
+            trusted_certificate_store=_microsoft_authenticode_store(),
+        )
+
+
+def _verify_microsoft_signed_pe(path: Path) -> None:
+    try:
+        results = _authenticode_verification_results(path)
+        chains = [chain for _signed, _data, result in results for chain in result]
+    except Exception as error:
+        raise ValueError(
+            "Office Deployment Tool file does not have a valid trusted signature."
+        ) from error
+    for chain in chains:
+        if (chain and "Microsoft Corporation"
+                in chain[-1].subject.get_components("O")):
+            return
+    raise ValueError("Office Deployment Tool file is not signed by Microsoft.")
 
 
 def _download_odt(url: str, output: Output, cancel_event=None) -> Path:

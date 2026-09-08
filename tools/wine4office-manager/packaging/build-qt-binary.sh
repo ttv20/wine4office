@@ -9,8 +9,8 @@ VERSION=${2:-${VERSION:-development}}
 CHANNEL=${3:-${CHANNEL:-stable}}
 PYTHON=${PYTHON:-python3}
 
-"$PYTHON" -c 'import certifi, PyInstaller, PySide6, pefile, zstandard' >/dev/null 2>&1 || {
-    echo "certifi, PyInstaller, PySide6, pefile, and zstandard are required; install requirements-build.txt" >&2
+"$PYTHON" -c 'import certifi, PyInstaller, PySide6, pefile, signify, zstandard' >/dev/null 2>&1 || {
+    echo "certifi, PyInstaller, PySide6, pefile, signify, and zstandard are required; install requirements-build.txt" >&2
     exit 1
 }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
@@ -39,6 +39,8 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --specpath "$BUILD/helper-spec" \
     --paths "$HERE" \
     --exclude-module PySide6 \
+    --exclude-module mscerts \
+    --exclude-module signify \
     --exclude-module wine4office_qt \
     --hidden-import wine4office_backend \
     --hidden-import wine4office_incident \
@@ -56,6 +58,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --paths "$HERE" \
     --add-data "$HERE/icons:icons" \
     --add-data "$HERE/translations:translations" \
+    --collect-data mscerts \
     --add-data "$HERE/register-office-cloud-fonts.sh:." \
     --add-data "$BUILD/VERSION:." \
     --add-data "$BUILD/CHANNEL:." \
