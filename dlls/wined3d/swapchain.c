@@ -1189,6 +1189,7 @@ HRESULT CDECL wined3d_swapchain_test_gl(struct wined3d_swapchain *swapchain,
 
     if (result) memset(result, 0, sizeof(*result));
     if (!swapchain || !result || action > WINED3D_GL_TEST_RESET
+            || !swapchain->back_buffers
             || buffer_idx >= swapchain->state.desc.backbuffer_count)
         return E_INVALIDARG;
     if (swapchain->swapchain_ops != &swapchain_gl_ops) return WINED3DERR_NOTAVAILABLE;
