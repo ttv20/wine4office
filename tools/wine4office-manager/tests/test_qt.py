@@ -544,9 +544,71 @@ class QtManagerTests(unittest.TestCase):
             single_shot.assert_called_once()
             single_shot.call_args.args[1]()
 
-        finish.assert_called_once_with(True, True, False)
+        finish.assert_called_once_with(True, True, False, snapshot["task"]["generation"])
         self.assertTrue(self.window.restart_prompted)
         self.assertFalse(self.window.pending_runner_update_repair)
+
+    def test_update_prompts_wait_for_newer_task_and_its_dialog(self):
+        with self.state.lock:
+            self.state._task_generation = 1
+            self.state.task = {
+                **self.state.task,
+                "generation": 1,
+                "running": False,
+                "kind": "update",
+                "status": "completed",
+                "restart_required": True,
+                "wine_update_completed": True,
+            }
+        snapshot = self._preload_snapshot(task=dict(self.state.task))
+        self.window.pending_runner_update_repair = True
+        self.window.last_task_state = "True:running"
+        with mock.patch.object(
+            self.state, "snapshot", return_value=snapshot
+        ), mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            self.window, "prompt_office_upgrade_repair", return_value=False
+        ) as repair, mock.patch.object(
+            self.window, "prompt_manager_restart"
+        ) as restart:
+            self.window.refresh_state()
+            self.assertEqual(single_shot.call_count, 1)
+            update_callback = single_shot.call_args.args[1]
+
+            with self.state.lock:
+                self.state._task_generation = 2
+                self.state.task = {
+                    **self.state.task,
+                    "generation": 2,
+                    "running": True,
+                    "kind": "office-quick-repair",
+                    "status": "running",
+                }
+            update_callback()
+            repair.assert_not_called()
+            restart.assert_not_called()
+            self.assertEqual(single_shot.call_count, 2)
+
+            newer_progress = mock.Mock()
+            self.window.update_progress_dialog = newer_progress
+            self.window.update_progress_task_kind = "office-quick-repair"
+            self.window.update_progress_task_generation = 2
+            with self.state.lock:
+                self.state.task["running"] = False
+                self.state.task["status"] = "completed"
+            single_shot.call_args.args[1]()
+            repair.assert_not_called()
+            restart.assert_not_called()
+            newer_progress.accept.assert_not_called()
+            self.assertEqual(single_shot.call_count, 3)
+
+            self.window.update_progress_dialog = None
+            self.window.update_progress_task_generation = None
+            single_shot.call_args.args[1]()
+
+        repair.assert_called_once_with(self.config)
+        restart.assert_called_once_with(True)
 
     def test_manager_restart_waits_for_upgrade_repair(self):
         progress = mock.Mock()

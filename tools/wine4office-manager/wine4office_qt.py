@@ -213,6 +213,7 @@ class ManagerWindow(QMainWindow):
         self.update_progress_button: QPushButton | None = None
         self.update_progress_finished = False
         self.update_progress_task_kind = "update"
+        self.update_progress_task_generation: int | None = None
         self.update_progress_fallback = "Updating Wine4Office…"
         self.update_progress_messages = {
             "completed": "Update completed.",
@@ -1227,9 +1228,29 @@ class ManagerWindow(QMainWindow):
 
     def _finish_update_prompts(
             self, repair_required: bool, restart_required: bool,
-            update_succeeded: bool) -> None:
+            update_succeeded: bool, update_generation: int | None = None) -> None:
+        with self.state.lock:
+            task = dict(self.state.task)
+        if update_generation is None:
+            update_generation = int(task.get("generation", 0))
+        current_generation = int(task.get("generation", 0))
+        if (task.get("running")
+                or (current_generation != update_generation
+                    and self.update_progress_dialog is not None)):
+            QTimer.singleShot(
+                100,
+                lambda repair=repair_required, restart=restart_required,
+                succeeded=update_succeeded, generation=update_generation:
+                self._finish_update_prompts(
+                    repair, restart, succeeded, generation
+                ),
+            )
+            return
         if (self.update_progress_dialog is not None
-                and self.update_progress_task_kind == "update"):
+                and self.update_progress_task_kind == "update"
+                and current_generation == update_generation
+                and self.update_progress_task_generation
+                in (None, update_generation)):
             self.update_progress_dialog.accept()
         repair_started = False
         if repair_required:
@@ -2760,6 +2781,10 @@ class ManagerWindow(QMainWindow):
         self.update_progress_button = cancel
         self.update_progress_finished = False
         self.update_progress_task_kind = task_kind
+        with self.state.lock:
+            self.update_progress_task_generation = int(
+                self.state.task.get("generation", 0)
+            )
         self.update_progress_fallback = preparing_text
         self.update_progress_messages = dict(messages)
         dialog.finished.connect(
@@ -2778,12 +2803,17 @@ class ManagerWindow(QMainWindow):
         self.update_progress_button = None
         self.update_progress_finished = False
         self.update_progress_task_kind = "update"
+        self.update_progress_task_generation = None
         self.update_progress_fallback = "Updating Wine4Office…"
         self.update_progress_messages = {}
 
     def _refresh_update_progress(self, task: dict) -> None:
         dialog = self.update_progress_dialog
-        if dialog is None or task.get("kind") != self.update_progress_task_kind:
+        if (dialog is None or task.get("kind") != self.update_progress_task_kind
+                or (self.update_progress_task_generation is not None
+                    and "generation" in task
+                    and task.get("generation")
+                    != self.update_progress_task_generation)):
             return
         label = self._tr(str(
             task.get("progress_label") or self.update_progress_fallback
@@ -3078,8 +3108,11 @@ class ManagerWindow(QMainWindow):
                     QTimer.singleShot(
                         delay,
                         lambda repair=repair_required, restart=restart_required,
-                        succeeded=update_succeeded:
-                        self._finish_update_prompts(repair, restart, succeeded),
+                        succeeded=update_succeeded,
+                        generation=int(task.get("generation", 0)):
+                        self._finish_update_prompts(
+                            repair, restart, succeeded, generation
+                        ),
                     )
         self.last_task_state = task_state
         if self._close_when_idle and not task["running"] and not self._automatic_close:

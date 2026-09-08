@@ -448,16 +448,19 @@ class ManagerTests(unittest.TestCase):
 
     def test_background_task_completion_and_failure_are_visible(self):
         state = manager.ManagerState()
+        self.assertEqual(state.snapshot()["task"]["generation"], 0)
         state.start_task("success", lambda: "native task completed")
         self._wait(state)
         snapshot = state.snapshot()["task"]
         self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["generation"], 1)
         self.assertIn("native task completed", snapshot["log"])
 
         state.start_task("failure", lambda: (_ for _ in ()).throw(RuntimeError("visible failure")))
         self._wait(state)
         snapshot = state.snapshot()["task"]
         self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["generation"], 2)
         self.assertIn("ERROR: visible failure", snapshot["log"])
 
     def test_installed_root_honors_standalone_binary_environment(self):

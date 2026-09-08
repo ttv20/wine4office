@@ -212,8 +212,10 @@ class ManagerState:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.config = backend.load_config()
+        self._task_generation = 0
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
+            "generation": self._task_generation,
             "restart_required": False, "progress_label": "", "progress_value": None,
             "wine_update_completed": False,
             "foreground_pending": False, "foreground_ready": False,
@@ -1133,8 +1135,10 @@ class ManagerState:
         with self.lock:
             if self.task["running"]:
                 raise RuntimeError("Another operation is already running.")
+            self._task_generation += 1
             self.task = {
                 "running": True, "kind": kind, "status": "running", "log": "",
+                "generation": self._task_generation,
                 "restart_required": False,
                 "progress_label": "Preparing operation", "progress_value": None,
                 "wine_update_completed": False,

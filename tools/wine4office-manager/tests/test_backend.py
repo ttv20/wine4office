@@ -2586,6 +2586,46 @@ exit 0
         ), self.assertRaisesRegex(ValueError, "valid trusted signature"):
             backend._verify_microsoft_signed_pe(self.root / "odt.exe")
 
+    def test_authenticode_results_are_read_before_executable_closes(self):
+        path = self.root / "odt.exe"
+        path.write_bytes(b"MZ")
+
+        with mock.patch(
+            "signify.authenticode.signed_file.SignedPEFile"
+        ) as signed_file, mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=object()
+        ):
+            def lazy_results():
+                self.assertFalse(signed_file.call_args.args[0].closed)
+                yield ("signed data", "indirect data", "chains")
+
+            signed_file.return_value.verify.return_value = lazy_results()
+            results = backend._authenticode_verification_results(path)
+
+        self.assertEqual(
+            results, [("signed data", "indirect data", "chains")]
+        )
+        self.assertTrue(signed_file.call_args.args[0].closed)
+
+    def test_lazy_authenticode_failure_is_reported_as_signature_error(self):
+        from signify.exceptions import SignifyError
+
+        path = self.root / "odt.exe"
+        path.write_bytes(b"MZ")
+
+        def lazy_failure():
+            raise SignifyError("invalid signature")
+            yield
+
+        with mock.patch(
+            "signify.authenticode.signed_file.SignedPEFile"
+        ) as signed_file, mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=object()
+        ):
+            signed_file.return_value.verify.return_value = lazy_failure()
+            with self.assertRaises(backend.OdtSignatureError):
+                backend._authenticode_verification_results(path)
+
     def test_manual_odt_reports_authenticode_verifier_failures_separately(self):
         with mock.patch.object(
             backend, "_authenticode_verification_results",

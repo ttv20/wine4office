@@ -3391,10 +3391,12 @@ def _authenticode_verification_results(path: Path):
 
     try:
         with path.open("rb") as stream:
-            return SignedPEFile(stream).verify(
-                signature_types="embedded",
-                multi_verify_mode="any",
-                trusted_certificate_store=_microsoft_authenticode_store(),
+            return list(
+                SignedPEFile(stream).verify(
+                    signature_types="embedded",
+                    multi_verify_mode="any",
+                    trusted_certificate_store=_microsoft_authenticode_store(),
+                )
             )
     except SignifyError as error:
         raise OdtSignatureError from error
