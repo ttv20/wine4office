@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Pred začatím opravy zatvorte každú Office aplikáciu.",
   "Online Repair required after upgrade": "Po inovácii je potrebná online oprava",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Táto inovácia Wine4Office zmenila prostredie kompatibility, ktoré používa existujúca inštalácia balíka Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pred použitím aplikácie Outlook spustite online opravu. Kým sa oprava nedokončí, aplikácia Outlook nemusí fungovať a výkon balíka Office môže byť nižší. Online oprava aktualizuje existujúcu inštaláciu balíka Office pre novú verziu Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pred použitím aplikácie Outlook spustite online opravu. Kým sa oprava nedokončí, aplikácia Outlook nemusí fungovať a výkon balíka Office môže byť nižší. Online oprava aktualizuje existujúcu inštaláciu balíka Office pre novú verziu Wine4Office.",
+  "Manage installations and download Office": "Správa inštalácií a stiahnutie Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Otvorte webovú lokalitu Microsoftu, kde môžete spravovať počítače prepojené s vaším predplatným alebo organizáciou alebo stiahnuť online inštalátor Office. Vyžaduje sa prihlásenie.",
+  "Work or school account": "Pracovné alebo školské konto",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — správa inštalácií a stiahnutie online inštalátora.",
+  "Personal or family account": "Osobné alebo rodinné konto",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — správa predplatného a zariadení a stiahnutie online inštalátora.",
+  "Could not open the Microsoft 365 account page:": "Nepodarilo sa otvoriť stránku konta Microsoft 365:"
 }

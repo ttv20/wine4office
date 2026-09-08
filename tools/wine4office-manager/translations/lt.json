@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Uždarykite kiekvieną Office paraišką prieš pradėdami remontą.",
   "Online Repair required after upgrade": "Po naujinimo būtinas taisymas internetu",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Šis Wine4Office naujinimas pakeitė suderinamumo aplinką, kurią naudoja esamas Office diegimas.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Prieš naudodami Outlook, paleiskite taisymą internetu. Kol taisymas nebus baigtas, Outlook gali neveikti, o Office našumas gali būti mažesnis. Taisymas internetu atnaujina esamą Office diegimą naujajai Wine4Office versijai."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Prieš naudodami Outlook, paleiskite taisymą internetu. Kol taisymas nebus baigtas, Outlook gali neveikti, o Office našumas gali būti mažesnis. Taisymas internetu atnaujina esamą Office diegimą naujajai Wine4Office versijai.",
+  "Manage installations and download Office": "Diegimų valdymas ir Office atsisiuntimas",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Atidarykite Microsoft svetainę, kad galėtumėte valdyti su prenumerata ar organizacija susietus kompiuterius arba atsisiųsti internetinę Office diegimo programą. Būtina prisijungti.",
+  "Work or school account": "Darbo arba mokymo įstaigos paskyra",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — valdykite diegimus ir atsisiųskite internetinę diegimo programą.",
+  "Personal or family account": "Asmeninė arba šeimos paskyra",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — valdykite prenumeratą bei įrenginius ir atsisiųskite internetinę diegimo programą.",
+  "Could not open the Microsoft 365 account page:": "Nepavyko atidaryti Microsoft 365 paskyros puslapio:"
 }

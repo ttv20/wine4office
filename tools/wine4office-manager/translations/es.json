@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Cierra cada Office aplicación antes de comenzar una reparación.",
   "Online Repair required after upgrade": "Se requiere una reparación en línea después de la actualización",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Esta actualización de Wine4Office cambió el entorno de compatibilidad que usa la instalación existente de Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Ejecute la reparación en línea antes de usar Outlook. Hasta que finalice la reparación, es posible que Outlook no funcione y que el rendimiento de Office sea menor. La reparación en línea actualiza la instalación existente de Office para la nueva versión de Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Ejecute la reparación en línea antes de usar Outlook. Hasta que finalice la reparación, es posible que Outlook no funcione y que el rendimiento de Office sea menor. La reparación en línea actualiza la instalación existente de Office para la nueva versión de Wine4Office.",
+  "Manage installations and download Office": "Administrar instalaciones y descargar Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Abre el sitio web de Microsoft para administrar los equipos vinculados a tu suscripción u organización, o para descargar el instalador en línea de Office. Es necesario iniciar sesión.",
+  "Work or school account": "Cuenta profesional o educativa",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — administra las instalaciones y descarga el instalador en línea.",
+  "Personal or family account": "Cuenta personal o familiar",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — administra tu suscripción y tus dispositivos, y descarga el instalador en línea.",
+  "Could not open the Microsoft 365 account page:": "No se pudo abrir la página de la cuenta de Microsoft 365:"
 }

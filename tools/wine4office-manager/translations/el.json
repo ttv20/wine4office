@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Κλείστε κάθε Office εφαρμογή πριν ξεκινήσετε μια επισκευή.",
   "Online Repair required after upgrade": "Απαιτείται ηλεκτρονική επιδιόρθωση μετά την αναβάθμιση",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Αυτή η αναβάθμιση του Wine4Office άλλαξε το περιβάλλον συμβατότητας που χρησιμοποιεί η υπάρχουσα εγκατάσταση του Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Εκτελέστε ηλεκτρονική επιδιόρθωση πριν χρησιμοποιήσετε το Outlook. Μέχρι να ολοκληρωθεί η επιδιόρθωση, το Outlook ενδέχεται να μην λειτουργεί και οι επιδόσεις του Office να είναι χαμηλότερες. Η ηλεκτρονική επιδιόρθωση ενημερώνει την υπάρχουσα εγκατάσταση του Office για τη νέα έκδοση του Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Εκτελέστε ηλεκτρονική επιδιόρθωση πριν χρησιμοποιήσετε το Outlook. Μέχρι να ολοκληρωθεί η επιδιόρθωση, το Outlook ενδέχεται να μην λειτουργεί και οι επιδόσεις του Office να είναι χαμηλότερες. Η ηλεκτρονική επιδιόρθωση ενημερώνει την υπάρχουσα εγκατάσταση του Office για τη νέα έκδοση του Wine4Office.",
+  "Manage installations and download Office": "Διαχείριση εγκαταστάσεων και λήψη του Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Ανοίξτε την τοποθεσία της Microsoft για να διαχειριστείτε τους υπολογιστές που συνδέονται με τη συνδρομή ή τον οργανισμό σας ή για να κάνετε λήψη του ηλεκτρονικού προγράμματος εγκατάστασης του Office. Απαιτείται είσοδος.",
+  "Work or school account": "Εταιρικός ή σχολικός λογαριασμός",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — διαχείριση εγκαταστάσεων και λήψη του ηλεκτρονικού προγράμματος εγκατάστασης.",
+  "Personal or family account": "Προσωπικός ή οικογενειακός λογαριασμός",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — διαχείριση της συνδρομής και των συσκευών σας και λήψη του ηλεκτρονικού προγράμματος εγκατάστασης.",
+  "Could not open the Microsoft 365 account page:": "Δεν ήταν δυνατό το άνοιγμα της σελίδας λογαριασμού Microsoft 365:"
 }

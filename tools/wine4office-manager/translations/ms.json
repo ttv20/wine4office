@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulakan pembaikan.",
   "Online Repair required after upgrade": "Pembaikan Dalam Talian diperlukan selepas naik taraf",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Naik taraf Wine4Office ini telah mengubah persekitaran keserasian yang digunakan oleh pemasangan Office sedia ada.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Pembaikan Dalam Talian sebelum menggunakan Outlook. Sehingga pembaikan selesai, Outlook mungkin tidak berfungsi dan prestasi Office mungkin lebih rendah. Pembaikan Dalam Talian mengemas kini pemasangan Office sedia ada untuk versi Wine4Office yang baharu."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Pembaikan Dalam Talian sebelum menggunakan Outlook. Sehingga pembaikan selesai, Outlook mungkin tidak berfungsi dan prestasi Office mungkin lebih rendah. Pembaikan Dalam Talian mengemas kini pemasangan Office sedia ada untuk versi Wine4Office yang baharu.",
+  "Manage installations and download Office": "Urus pemasangan dan muat turun Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Buka laman web Microsoft untuk mengurus komputer yang dipautkan kepada langganan atau organisasi anda, atau untuk memuat turun pemasang dalam talian Office. Daftar masuk diperlukan.",
+  "Work or school account": "Akaun kerja atau sekolah",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — urus pemasangan dan muat turun pemasang dalam talian.",
+  "Personal or family account": "Akaun peribadi atau keluarga",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — urus langganan dan peranti anda, serta muat turun pemasang dalam talian.",
+  "Could not open the Microsoft 365 account page:": "Tidak dapat membuka halaman akaun Microsoft 365:"
 }

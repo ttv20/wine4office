@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Isara ang bawat aplikasyon ng Office bago simulan ang pagkukumpuni.",
   "Online Repair required after upgrade": "Kailangan ng online na pag-aayos pagkatapos ng pag-upgrade",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Binago ng pag-upgrade na ito ng Wine4Office ang compatibility environment na ginagamit ng kasalukuyang installation ng Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Patakbuhin ang online na pag-aayos bago gamitin ang Outlook. Hangga't hindi natatapos ang pag-aayos, maaaring hindi gumana ang Outlook at maaaring mas mababa ang performance ng Office. Ina-update ng online na pag-aayos ang kasalukuyang installation ng Office para sa bagong bersyon ng Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Patakbuhin ang online na pag-aayos bago gamitin ang Outlook. Hangga't hindi natatapos ang pag-aayos, maaaring hindi gumana ang Outlook at maaaring mas mababa ang performance ng Office. Ina-update ng online na pag-aayos ang kasalukuyang installation ng Office para sa bagong bersyon ng Wine4Office.",
+  "Manage installations and download Office": "Pamahalaan ang mga installation at i-download ang Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Buksan ang website ng Microsoft upang pamahalaan ang mga computer na naka-link sa iyong subscription o organisasyon, o upang i-download ang online installer ng Office. Kailangang mag-sign in.",
+  "Work or school account": "Account sa trabaho o paaralan",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — pamahalaan ang mga installation at i-download ang online installer.",
+  "Personal or family account": "Personal o pampamilyang account",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — pamahalaan ang iyong subscription at mga device, at i-download ang online installer.",
+  "Could not open the Microsoft 365 account page:": "Hindi mabuksan ang pahina ng Microsoft 365 account:"
 }

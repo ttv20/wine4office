@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulai perbaikan.",
   "Online Repair required after upgrade": "Perbaikan Online diperlukan setelah peningkatan",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Peningkatan Wine4Office ini mengubah lingkungan kompatibilitas yang digunakan oleh instalasi Office yang ada.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Perbaikan Online sebelum menggunakan Outlook. Sampai perbaikan selesai, Outlook mungkin tidak berfungsi dan performa Office mungkin lebih rendah. Perbaikan Online memperbarui instalasi Office yang ada untuk versi Wine4Office yang baru."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Perbaikan Online sebelum menggunakan Outlook. Sampai perbaikan selesai, Outlook mungkin tidak berfungsi dan performa Office mungkin lebih rendah. Perbaikan Online memperbarui instalasi Office yang ada untuk versi Wine4Office yang baru.",
+  "Manage installations and download Office": "Kelola penginstalan dan unduh Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Buka situs web Microsoft untuk mengelola komputer yang terhubung ke langganan atau organisasi Anda, atau untuk mengunduh penginstal online Office. Anda harus masuk.",
+  "Work or school account": "Akun kerja atau sekolah",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — kelola penginstalan dan unduh penginstal online.",
+  "Personal or family account": "Akun pribadi atau keluarga",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — kelola langganan dan perangkat Anda, lalu unduh penginstal online.",
+  "Could not open the Microsoft 365 account page:": "Tidak dapat membuka halaman akun Microsoft 365:"
 }

@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Před zahájením opravy uzavřete každou Office aplikaci.",
   "Online Repair required after upgrade": "Po upgradu je nutná online oprava",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Tento upgrade Wine4Office změnil prostředí kompatibility, které používá stávající instalace Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Před použitím aplikace Outlook spusťte online opravu. Dokud oprava neskončí, nemusí aplikace Outlook fungovat a výkon Office může být nižší. Online oprava aktualizuje stávající instalaci Office pro novou verzi Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Před použitím aplikace Outlook spusťte online opravu. Dokud oprava neskončí, nemusí aplikace Outlook fungovat a výkon Office může být nižší. Online oprava aktualizuje stávající instalaci Office pro novou verzi Wine4Office.",
+  "Manage installations and download Office": "Správa instalací a stažení Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Otevřete web Microsoftu, kde můžete spravovat počítače propojené s vaším předplatným nebo organizací nebo stáhnout online instalační program Office. Je vyžadováno přihlášení.",
+  "Work or school account": "Pracovní nebo školní účet",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — správa instalací a stažení online instalačního programu.",
+  "Personal or family account": "Osobní nebo rodinný účet",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — správa předplatného a zařízení a stažení online instalačního programu.",
+  "Could not open the Microsoft 365 account page:": "Nepodařilo se otevřít stránku účtu Microsoft 365:"
 }

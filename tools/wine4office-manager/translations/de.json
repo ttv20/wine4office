@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Schließen Sie jede Office Anwendung, bevor Sie mit der Reparatur beginnen.",
   "Online Repair required after upgrade": "Onlinereparatur nach dem Upgrade erforderlich",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Durch dieses Wine4Office-Upgrade wurde die Kompatibilitätsumgebung geändert, die von der vorhandenen Office-Installation verwendet wird.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Führen Sie eine Onlinereparatur durch, bevor Sie Outlook verwenden. Bis die Reparatur abgeschlossen ist, funktioniert Outlook möglicherweise nicht und die Office-Leistung kann geringer sein. Die Onlinereparatur aktualisiert die vorhandene Office-Installation für die neue Wine4Office-Version."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Führen Sie eine Onlinereparatur durch, bevor Sie Outlook verwenden. Bis die Reparatur abgeschlossen ist, funktioniert Outlook möglicherweise nicht und die Office-Leistung kann geringer sein. Die Onlinereparatur aktualisiert die vorhandene Office-Installation für die neue Wine4Office-Version.",
+  "Manage installations and download Office": "Installationen verwalten und Office herunterladen",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Öffnen Sie die Microsoft-Website, um Computer zu verwalten, die mit Ihrem Abonnement oder Ihrer Organisation verknüpft sind, oder um das Online-Installationsprogramm für Office herunterzuladen. Eine Anmeldung ist erforderlich.",
+  "Work or school account": "Geschäfts-, Schul- oder Unikonto",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — Installationen verwalten und das Online-Installationsprogramm herunterladen.",
+  "Personal or family account": "Persönliches Konto oder Familienkonto",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — Abonnement und Geräte verwalten und das Online-Installationsprogramm herunterladen.",
+  "Could not open the Microsoft 365 account page:": "Die Microsoft 365-Kontoseite konnte nicht geöffnet werden:"
 }

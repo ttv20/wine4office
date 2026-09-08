@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Sulje kaikki Office hakemukset ennen korjauksen aloittamista.",
   "Online Repair required after upgrade": "Online-korjaus vaaditaan päivityksen jälkeen",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Tämä Wine4Office-päivitys muutti yhteensopivuusympäristöä, jota nykyinen Office-asennus käyttää.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Suorita online-korjaus ennen Outlookin käyttöä. Ennen kuin korjaus on valmis, Outlook ei ehkä toimi ja Officen suorituskyky voi olla heikompi. Online-korjaus päivittää nykyisen Office-asennuksen uutta Wine4Office-versiota varten."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Suorita online-korjaus ennen Outlookin käyttöä. Ennen kuin korjaus on valmis, Outlook ei ehkä toimi ja Officen suorituskyky voi olla heikompi. Online-korjaus päivittää nykyisen Office-asennuksen uutta Wine4Office-versiota varten.",
+  "Manage installations and download Office": "Hallitse asennuksia ja lataa Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Avaa Microsoftin sivusto, jos haluat hallita tilaukseesi tai organisaatioosi liitettyjä tietokoneita tai ladata Officen verkkoasennusohjelman. Kirjautuminen vaaditaan.",
+  "Work or school account": "Työpaikan tai oppilaitoksen tili",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — hallitse asennuksia ja lataa verkkoasennusohjelma.",
+  "Personal or family account": "Henkilökohtainen tili tai perhetili",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — hallitse tilausta ja laitteita sekä lataa verkkoasennusohjelma.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 -tilisivua ei voitu avata:"
 }

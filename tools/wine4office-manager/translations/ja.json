@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "修理を始める前に、すべてのOfficeの塗布を閉じてください。",
   "Online Repair required after upgrade": "アップグレード後にオンライン修復が必要です",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "この Wine4Office のアップグレードにより、既存の Office インストールが使用する互換性環境が変更されました。",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook を使用する前にオンライン修復を実行してください。修復が完了するまで、Outlook が動作しない場合や Office のパフォーマンスが低下する場合があります。オンライン修復では、既存の Office インストールが新しい Wine4Office バージョン向けに更新されます。"
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook を使用する前にオンライン修復を実行してください。修復が完了するまで、Outlook が動作しない場合や Office のパフォーマンスが低下する場合があります。オンライン修復では、既存の Office インストールが新しい Wine4Office バージョン向けに更新されます。",
+  "Manage installations and download Office": "インストールの管理と Office のダウンロード",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Microsoft の Web サイトを開いて、サブスクリプションまたは組織に関連付けられたコンピューターを管理するか、Office のオンライン インストーラーをダウンロードします。サインインが必要です。",
+  "Work or school account": "職場または学校のアカウント",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — インストールを管理し、オンライン インストーラーをダウンロードします。",
+  "Personal or family account": "個人または家族のアカウント",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — サブスクリプションとデバイスを管理し、オンライン インストーラーをダウンロードします。",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 アカウント ページを開けませんでした:"
 }

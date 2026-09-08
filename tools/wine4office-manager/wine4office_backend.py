@@ -176,6 +176,10 @@ APP_META = {
 }
 
 OFFICE_CUSTOMIZATION_URL = "https://config.office.com/deploymentsettings"
+OFFICE_WORK_SCHOOL_ACCOUNT_URL = "https://portal.office.com/account/?ref=Harmony#"
+OFFICE_PERSONAL_ACCOUNT_URL = (
+    "https://account.microsoft.com/services/microsoft365/details"
+)
 OFFICE_PRODUCTS = (
     {
         "label": "Microsoft 365 Apps for enterprise",

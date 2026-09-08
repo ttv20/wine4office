@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Lokaðu öllum Office forritum áður en þú byrjar viðgerð.",
   "Online Repair required after upgrade": "Netviðgerð er nauðsynleg eftir uppfærslu",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Þessi Wine4Office-uppfærsla breytti samhæfisumhverfinu sem núverandi Office-uppsetning notar.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Keyrðu netviðgerð áður en þú notar Outlook. Þar til viðgerðinni lýkur getur verið að Outlook virki ekki og að afköst Office séu lakari. Netviðgerð uppfærir núverandi Office-uppsetningu fyrir nýju Wine4Office-útgáfuna."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Keyrðu netviðgerð áður en þú notar Outlook. Þar til viðgerðinni lýkur getur verið að Outlook virki ekki og að afköst Office séu lakari. Netviðgerð uppfærir núverandi Office-uppsetningu fyrir nýju Wine4Office-útgáfuna.",
+  "Manage installations and download Office": "Stjórna uppsetningum og sækja Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Opnaðu vefsvæði Microsoft til að stjórna tölvum sem tengjast áskriftinni þinni eða fyrirtækinu, eða til að sækja netuppsetningarforrit Office. Innskráningar er krafist.",
+  "Work or school account": "Vinnu- eða skólareikningur",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — stjórnaðu uppsetningum og sæktu netuppsetningarforritið.",
+  "Personal or family account": "Einka- eða fjölskyldureikningur",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — stjórnaðu áskriftinni og tækjunum þínum og sæktu netuppsetningarforritið.",
+  "Could not open the Microsoft 365 account page:": "Ekki tókst að opna Microsoft 365 reikningssíðuna:"
 }

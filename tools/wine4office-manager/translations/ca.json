@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Tanca cada Office aplicació abans de començar una reparació.",
   "Online Repair required after upgrade": "Cal fer una reparació en línia després de l'actualització",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Aquesta actualització de Wine4Office ha canviat l'entorn de compatibilitat que utilitza la instal·lació d'Office existent.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Executeu la reparació en línia abans d'utilitzar Outlook. Fins que la reparació no finalitzi, és possible que Outlook no funcioni i que el rendiment d'Office sigui inferior. La reparació en línia actualitza la instal·lació d'Office existent per a la nova versió de Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Executeu la reparació en línia abans d'utilitzar Outlook. Fins que la reparació no finalitzi, és possible que Outlook no funcioni i que el rendiment d'Office sigui inferior. La reparació en línia actualitza la instal·lació d'Office existent per a la nova versió de Wine4Office.",
+  "Manage installations and download Office": "Gestiona les instal·lacions i baixa l'Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Obre el web de Microsoft per gestionar els ordinadors vinculats a la teva subscripció o organització, o per baixar l'instal·lador en línia de l'Office. Cal iniciar la sessió.",
+  "Work or school account": "Compte de la feina o del centre educatiu",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — gestiona les instal·lacions i baixa l'instal·lador en línia.",
+  "Personal or family account": "Compte personal o familiar",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — gestiona la subscripció i els dispositius, i baixa l'instal·lador en línia.",
+  "Could not open the Microsoft 365 account page:": "No s'ha pogut obrir la pàgina del compte de Microsoft 365:"
 }

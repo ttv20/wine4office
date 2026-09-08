@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "开始维修前，每次使用Office都关闭。",
   "Online Repair required after upgrade": "升级后需要进行联机修复",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "此 Wine4Office 升级更改了现有 Office 安装所使用的兼容性环境。",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "使用 Outlook 之前请运行联机修复。在修复完成之前，Outlook 可能无法正常工作，Office 的性能也可能下降。联机修复会针对新的 Wine4Office 版本更新现有的 Office 安装。"
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "使用 Outlook 之前请运行联机修复。在修复完成之前，Outlook 可能无法正常工作，Office 的性能也可能下降。联机修复会针对新的 Wine4Office 版本更新现有的 Office 安装。",
+  "Manage installations and download Office": "管理安装并下载 Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "打开 Microsoft 网站，以管理与你的订阅或组织关联的计算机，或下载 Office 联机安装程序。需要登录。",
+  "Work or school account": "工作或学校帐户",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — 管理安装并下载联机安装程序。",
+  "Personal or family account": "个人或家庭帐户",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — 管理你的订阅和设备，并下载联机安装程序。",
+  "Could not open the Microsoft 365 account page:": "无法打开 Microsoft 365 帐户页面："
 }

@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Luk alle Office applikationer, før du starter en reparation.",
   "Online Repair required after upgrade": "Onlinereparation er påkrævet efter opgraderingen",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Denne Wine4Office-opgradering har ændret det kompatibilitetsmiljø, som den eksisterende Office-installation bruger.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Kør Onlinereparation, før du bruger Outlook. Indtil reparationen er fuldført, fungerer Outlook muligvis ikke, og Office-ydeevnen kan være lavere. Onlinereparation opdaterer den eksisterende Office-installation til den nye Wine4Office-version."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Kør Onlinereparation, før du bruger Outlook. Indtil reparationen er fuldført, fungerer Outlook muligvis ikke, og Office-ydeevnen kan være lavere. Onlinereparation opdaterer den eksisterende Office-installation til den nye Wine4Office-version.",
+  "Manage installations and download Office": "Administrer installationer, og download Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Åbn Microsofts websted for at administrere computere, der er knyttet til dit abonnement eller din organisation, eller for at downloade onlineinstallationsprogrammet til Office. Du skal logge ind.",
+  "Work or school account": "Arbejds- eller skolekonto",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — administrer installationer, og download onlineinstallationsprogrammet.",
+  "Personal or family account": "Personlig konto eller familiekonto",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — administrer dit abonnement og dine enheder, og download onlineinstallationsprogrammet.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365-kontosiden kunne ikke åbnes:"
 }

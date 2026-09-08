@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "ปิดทุก Office แอปพลิเคชันก่อนเริ่มซ่อมแซม",
   "Online Repair required after upgrade": "ต้องซ่อมแซมแบบออนไลน์หลังจากการอัปเกรด",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "การอัปเกรด Wine4Office นี้ได้เปลี่ยนสภาพแวดล้อมความเข้ากันได้ที่การติดตั้ง Office ที่มีอยู่ใช้งาน",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "เรียกใช้การซ่อมแซมแบบออนไลน์ก่อนใช้งาน Outlook จนกว่าการซ่อมแซมจะเสร็จสิ้น Outlook อาจไม่ทำงานและประสิทธิภาพของ Office อาจลดลง การซ่อมแซมแบบออนไลน์จะอัปเดตการติดตั้ง Office ที่มีอยู่ให้รองรับ Wine4Office เวอร์ชันใหม่"
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "เรียกใช้การซ่อมแซมแบบออนไลน์ก่อนใช้งาน Outlook จนกว่าการซ่อมแซมจะเสร็จสิ้น Outlook อาจไม่ทำงานและประสิทธิภาพของ Office อาจลดลง การซ่อมแซมแบบออนไลน์จะอัปเดตการติดตั้ง Office ที่มีอยู่ให้รองรับ Wine4Office เวอร์ชันใหม่",
+  "Manage installations and download Office": "จัดการการติดตั้งและดาวน์โหลด Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "เปิดเว็บไซต์ของ Microsoft เพื่อจัดการคอมพิวเตอร์ที่เชื่อมโยงกับการสมัครใช้งานหรือองค์กรของคุณ หรือดาวน์โหลดตัวติดตั้ง Office แบบออนไลน์ จำเป็นต้องลงชื่อเข้าใช้",
+  "Work or school account": "บัญชีที่ทำงานหรือโรงเรียน",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — จัดการการติดตั้งและดาวน์โหลดตัวติดตั้งแบบออนไลน์",
+  "Personal or family account": "บัญชีส่วนบุคคลหรือครอบครัว",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — จัดการการสมัครใช้งานและอุปกรณ์ของคุณ และดาวน์โหลดตัวติดตั้งแบบออนไลน์",
+  "Could not open the Microsoft 365 account page:": "ไม่สามารถเปิดหน้าบัญชี Microsoft 365 ได้:"
 }

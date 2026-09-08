@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "在開始維修前，請關閉每個Office的應用程式。",
   "Online Repair required after upgrade": "升級後需要執行線上修復",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "此 Wine4Office 升級變更了現有 Office 安裝所使用的相容性環境。",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "使用 Outlook 前請先執行線上修復。在修復完成之前，Outlook 可能無法運作，Office 效能也可能較低。線上修復會針對新的 Wine4Office 版本更新現有的 Office 安裝。"
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "使用 Outlook 前請先執行線上修復。在修復完成之前，Outlook 可能無法運作，Office 效能也可能較低。線上修復會針對新的 Wine4Office 版本更新現有的 Office 安裝。",
+  "Manage installations and download Office": "管理安裝並下載 Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "開啟 Microsoft 網站，以管理與你的訂閱或組織連結的電腦，或下載 Office 線上安裝程式。需要登入。",
+  "Work or school account": "公司或學校帳戶",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — 管理安裝並下載線上安裝程式。",
+  "Personal or family account": "個人或家庭帳戶",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — 管理你的訂閱與裝置，並下載線上安裝程式。",
+  "Could not open the Microsoft 365 account page:": "無法開啟 Microsoft 365 帳戶頁面："
 }

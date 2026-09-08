@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Закривайте всі Office додатки перед початком ремонту.",
   "Online Repair required after upgrade": "Після оновлення потрібне відновлення через Інтернет",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Це оновлення Wine4Office змінило середовище сумісності, яке використовує наявна інсталяція Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Виконайте відновлення через Інтернет, перш ніж користуватися Outlook. Доки відновлення не завершиться, Outlook може не працювати, а продуктивність Office може бути нижчою. Відновлення через Інтернет оновлює наявну інсталяцію Office для нової версії Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Виконайте відновлення через Інтернет, перш ніж користуватися Outlook. Доки відновлення не завершиться, Outlook може не працювати, а продуктивність Office може бути нижчою. Відновлення через Інтернет оновлює наявну інсталяцію Office для нової версії Wine4Office.",
+  "Manage installations and download Office": "Керування інсталяціями та завантаження Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Відкрийте вебсайт Microsoft, щоб керувати комп’ютерами, пов’язаними з вашою передплатою чи організацією, або завантажити онлайн-інсталятор Office. Потрібно ввійти в обліковий запис.",
+  "Work or school account": "Робочий або навчальний обліковий запис",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — керування інсталяціями та завантаження онлайн-інсталятора.",
+  "Personal or family account": "Особистий або сімейний обліковий запис",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — керування передплатою та пристроями й завантаження онлайн-інсталятора.",
+  "Could not open the Microsoft 365 account page:": "Не вдалося відкрити сторінку облікового запису Microsoft 365:"
 }

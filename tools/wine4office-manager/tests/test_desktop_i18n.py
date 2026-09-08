@@ -92,10 +92,20 @@ class TranslationTests(unittest.TestCase):
                     if language != "en":
                         self.assertNotEqual(translated, source)
 
-    def test_office_repair_text_is_translated_in_every_catalog(self):
+    def test_office_install_and_repair_text_is_translated_in_every_catalog(self):
         sources = (
             "Install Office",
             "Install or repair Microsoft Office in the selected Wine environment.",
+            "Manage installations and download Office",
+            "Open Microsoft's website to manage computers linked to your subscription or "
+            "organization, or download the online Office installer. Sign-in is required.",
+            "Work or school account",
+            "Microsoft 365 Enterprise / Education — manage installations and download the "
+            "online installer.",
+            "Personal or family account",
+            "Microsoft 365 Personal / Family — manage your subscription, devices, and "
+            "download the online installer.",
+            "Could not open the Microsoft 365 account page:",
             "Repair Office",
             "Quick Repair uses the Office files already on this computer and works offline. "
             "Online Repair downloads and reinstalls Office; use it after an update when Outlook "

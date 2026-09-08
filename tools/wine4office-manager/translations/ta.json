@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "பழுதுபார்க்கத் தொடங்குவதற்கு முன் ஒவ்வொரு Office பயன்பாட்டையும் மூடவும்.",
   "Online Repair required after upgrade": "மேம்படுத்தலுக்குப் பிறகு ஆன்லைன் பழுதுபார்ப்பு தேவை",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "இந்த Wine4Office மேம்படுத்தல், தற்போதுள்ள Office நிறுவல் பயன்படுத்தும் இணக்கத்தன்மை சூழலை மாற்றியுள்ளது.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ஐப் பயன்படுத்தும் முன் ஆன்லைன் பழுதுபார்ப்பை இயக்கவும். பழுதுபார்ப்பு முடியும் வரை Outlook வேலை செய்யாமல் போகலாம், Office செயல்திறனும் குறையலாம். ஆன்லைன் பழுதுபார்ப்பு, தற்போதுள்ள Office நிறுவலைப் புதிய Wine4Office பதிப்பிற்கு ஏற்ப புதுப்பிக்கிறது."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ஐப் பயன்படுத்தும் முன் ஆன்லைன் பழுதுபார்ப்பை இயக்கவும். பழுதுபார்ப்பு முடியும் வரை Outlook வேலை செய்யாமல் போகலாம், Office செயல்திறனும் குறையலாம். ஆன்லைன் பழுதுபார்ப்பு, தற்போதுள்ள Office நிறுவலைப் புதிய Wine4Office பதிப்பிற்கு ஏற்ப புதுப்பிக்கிறது.",
+  "Manage installations and download Office": "நிறுவல்களை நிர்வகித்து Office-ஐப் பதிவிறக்கவும்",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "உங்கள் சந்தா அல்லது நிறுவனத்துடன் இணைக்கப்பட்ட கணினிகளை நிர்வகிக்க அல்லது Office இணைய நிறுவியைப் பதிவிறக்க Microsoft இணையதளத்தைத் திறக்கவும். உள்நுழைவு தேவை.",
+  "Work or school account": "பணி அல்லது பள்ளிக் கணக்கு",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — நிறுவல்களை நிர்வகித்து இணைய நிறுவியைப் பதிவிறக்கவும்.",
+  "Personal or family account": "தனிப்பட்ட அல்லது குடும்பக் கணக்கு",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — உங்கள் சந்தா மற்றும் சாதனங்களை நிர்வகித்து இணைய நிறுவியைப் பதிவிறக்கவும்.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 கணக்குப் பக்கத்தைத் திறக்க முடியவில்லை:"
 }

@@ -1838,6 +1838,22 @@ class QtManagerTests(unittest.TestCase):
             self.window.online_repair_button.accessibleName(),
             "Run Office Online Repair",
         )
+        self.assertEqual(
+            self.window.office_work_school_account_button.text(),
+            "Work or school account",
+        )
+        self.assertIn(
+            "Enterprise / Education",
+            self.window.office_work_school_account_button.description(),
+        )
+        self.assertEqual(
+            self.window.office_personal_account_button.text(),
+            "Personal or family account",
+        )
+        self.assertIn(
+            "Personal / Family",
+            self.window.office_personal_account_button.description(),
+        )
         self.assertEqual(self.window.office_languages_edit.text(), "en-US")
         self.assertEqual(
             self.window.office_product_combo.count(),
@@ -1864,6 +1880,35 @@ class QtManagerTests(unittest.TestCase):
                 details = self.window.office_product_details.text()
                 self.assertIn(product["product_id"], details)
                 self.assertIn(product["channel"], details)
+
+    def test_office_account_links_open_official_microsoft_pages(self):
+        opened = []
+
+        def capture(url):
+            opened.append(url.toString())
+            return True
+
+        with mock.patch.object(
+            qt_module.QDesktopServices, "openUrl", side_effect=capture
+        ):
+            self.window.office_work_school_account_button.click()
+            self.window.office_personal_account_button.click()
+
+        self.assertEqual(opened, [
+            "https://portal.office.com/account/?ref=Harmony#",
+            "https://account.microsoft.com/services/microsoft365/details",
+        ])
+
+    def test_office_account_link_failure_shows_the_exact_address(self):
+        with mock.patch.object(
+            qt_module.QDesktopServices, "openUrl", return_value=False
+        ), mock.patch.object(self.window, "show_error") as show_error:
+            self.window.open_office_account(backend.OFFICE_PERSONAL_ACCOUNT_URL)
+
+        show_error.assert_called_once()
+        message = str(show_error.call_args.args[0])
+        self.assertIn("Could not open the Microsoft 365 account page", message)
+        self.assertIn(backend.OFFICE_PERSONAL_ACCOUNT_URL, message)
 
     def test_office_repair_actions_run_the_selected_click_to_run_repair(self):
         for repair_type, label in (("quick", "Quick"), ("online", "Online")):

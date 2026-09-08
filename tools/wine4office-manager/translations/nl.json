@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Sluit elke Office applicatie voordat je met een reparatie begint.",
   "Online Repair required after upgrade": "Online reparatie vereist na de upgrade",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Deze Wine4Office-upgrade heeft de compatibiliteitsomgeving gewijzigd die door de bestaande Office-installatie wordt gebruikt.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Voer een online reparatie uit voordat u Outlook gebruikt. Totdat de reparatie is voltooid, werkt Outlook mogelijk niet en kunnen de prestaties van Office lager zijn. Met online reparatie wordt de bestaande Office-installatie bijgewerkt voor de nieuwe Wine4Office-versie."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Voer een online reparatie uit voordat u Outlook gebruikt. Totdat de reparatie is voltooid, werkt Outlook mogelijk niet en kunnen de prestaties van Office lager zijn. Met online reparatie wordt de bestaande Office-installatie bijgewerkt voor de nieuwe Wine4Office-versie.",
+  "Manage installations and download Office": "Installaties beheren en Office downloaden",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Open de website van Microsoft om computers te beheren die aan uw abonnement of organisatie zijn gekoppeld, of om het online installatieprogramma van Office te downloaden. Aanmelden is vereist.",
+  "Work or school account": "Werk- of schoolaccount",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — beheer installaties en download het online installatieprogramma.",
+  "Personal or family account": "Persoonlijk of gezinsaccount",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — beheer uw abonnement en apparaten en download het online installatieprogramma.",
+  "Could not open the Microsoft 365 account page:": "De Microsoft 365-accountpagina kan niet worden geopend:"
 }

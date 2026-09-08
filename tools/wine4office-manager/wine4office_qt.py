@@ -281,6 +281,8 @@ class ManagerWindow(QMainWindow):
         for widget in root.findChildren(QWidget):
             if isinstance(widget, QAbstractButton):
                 widget.setText(self._tr(widget.text()))
+                if isinstance(widget, QCommandLinkButton):
+                    widget.setDescription(self._tr(widget.description()))
             elif isinstance(widget, QLabel):
                 widget.setText(self._tr(widget.text()))
             elif isinstance(widget, QGroupBox):
@@ -756,6 +758,40 @@ class ManagerWindow(QMainWindow):
         installer_layout.addLayout(buttons)
         layout.addWidget(installer)
 
+        accounts = QGroupBox("Manage installations and download Office")
+        accounts_layout = QVBoxLayout(accounts)
+        accounts_explanation = QLabel(
+            "Open Microsoft's website to manage computers linked to your subscription or "
+            "organization, or download the online Office installer. Sign-in is required."
+        )
+        accounts_explanation.setWordWrap(True)
+        accounts_layout.addWidget(accounts_explanation)
+        self.office_work_school_account_button = QCommandLinkButton(
+            "Work or school account",
+            "Microsoft 365 Enterprise / Education — manage installations and download the "
+            "online installer.",
+        )
+        self.office_work_school_account_button.setIcon(
+            self._standard_icon(QStyle.StandardPixmap.SP_ComputerIcon)
+        )
+        self.office_work_school_account_button.clicked.connect(
+            lambda: self.open_office_account(backend.OFFICE_WORK_SCHOOL_ACCOUNT_URL)
+        )
+        accounts_layout.addWidget(self.office_work_school_account_button)
+        self.office_personal_account_button = QCommandLinkButton(
+            "Personal or family account",
+            "Microsoft 365 Personal / Family — manage your subscription, devices, and "
+            "download the online installer.",
+        )
+        self.office_personal_account_button.setIcon(
+            self._standard_icon(QStyle.StandardPixmap.SP_ComputerIcon)
+        )
+        self.office_personal_account_button.clicked.connect(
+            lambda: self.open_office_account(backend.OFFICE_PERSONAL_ACCOUNT_URL)
+        )
+        accounts_layout.addWidget(self.office_personal_account_button)
+        layout.addWidget(accounts)
+
         repair = QGroupBox("Repair Office")
         repair_layout = QVBoxLayout(repair)
         repair_explanation = QLabel(
@@ -890,6 +926,12 @@ class ManagerWindow(QMainWindow):
         if not QDesktopServices.openUrl(QUrl(backend.OFFICE_CUSTOMIZATION_URL)):
             self.show_error(
                 f"Could not open the Office Customization Tool:\n{backend.OFFICE_CUSTOMIZATION_URL}"
+            )
+
+    def open_office_account(self, url: str) -> None:
+        if not QDesktopServices.openUrl(QUrl(url)):
+            self.show_error(
+                f"{self._tr('Could not open the Microsoft 365 account page:')}\n{url}"
             )
 
     def install_office_from_generated_xml(self) -> None:

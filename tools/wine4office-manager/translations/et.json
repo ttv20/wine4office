@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Sulge iga Office taotlus enne remondi alustamist.",
   "Online Repair required after upgrade": "Pärast uuendust on vaja teha võrguparandus",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "See Wine4Office'i uuendus muutis ühilduvuskeskkonda, mida kasutab olemasolev Office'i install.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Enne Outlooki kasutamist käivitage võrguparandus. Kuni parandus pole lõpule jõudnud, ei pruugi Outlook töötada ja Office'i jõudlus võib olla väiksem. Võrguparandus värskendab olemasolevat Office'i installi uue Wine4Office'i versiooni jaoks."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Enne Outlooki kasutamist käivitage võrguparandus. Kuni parandus pole lõpule jõudnud, ei pruugi Outlook töötada ja Office'i jõudlus võib olla väiksem. Võrguparandus värskendab olemasolevat Office'i installi uue Wine4Office'i versiooni jaoks.",
+  "Manage installations and download Office": "Installide haldamine ja Office'i allalaadimine",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Avage Microsofti veebisait, et hallata oma tellimuse või organisatsiooniga seotud arvuteid või laadida alla Office'i veebipõhine installer. Sisselogimine on nõutav.",
+  "Work or school account": "Töö- või koolikonto",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — installide haldamine ja veebipõhise installeri allalaadimine.",
+  "Personal or family account": "Isiklik või perekonto",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — tellimuse ja seadmete haldamine ning veebipõhise installeri allalaadimine.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 konto lehte ei saanud avada:"
 }

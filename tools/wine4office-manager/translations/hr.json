@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Zatvorite svaku Office aplikaciju prije nego što započnete popravak.",
   "Online Repair required after upgrade": "Nakon nadogradnje potreban je mrežni popravak",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Ova nadogradnja programa Wine4Office promijenila je okruženje kompatibilnosti koje koristi postojeća instalacija sustava Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pokrenite mrežni popravak prije korištenja programa Outlook. Dok se popravak ne dovrši, Outlook možda neće raditi, a performanse sustava Office mogu biti slabije. Mrežni popravak ažurira postojeću instalaciju sustava Office za novu verziju programa Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pokrenite mrežni popravak prije korištenja programa Outlook. Dok se popravak ne dovrši, Outlook možda neće raditi, a performanse sustava Office mogu biti slabije. Mrežni popravak ažurira postojeću instalaciju sustava Office za novu verziju programa Wine4Office.",
+  "Manage installations and download Office": "Upravljanje instalacijama i preuzimanje Officea",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Otvorite Microsoftovo web-mjesto da biste upravljali računalima povezanima s pretplatom ili organizacijom ili preuzeli mrežni instalacijski program za Office. Potrebna je prijava.",
+  "Work or school account": "Poslovni ili školski račun",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — upravljajte instalacijama i preuzmite mrežni instalacijski program.",
+  "Personal or family account": "Osobni ili obiteljski račun",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — upravljajte pretplatom i uređajima te preuzmite mrežni instalacijski program.",
+  "Could not open the Microsoft 365 account page:": "Nije moguće otvoriti stranicu računa Microsoft 365:"
 }

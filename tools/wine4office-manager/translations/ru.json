@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Закройте все Office приложения перед началом ремонта.",
   "Online Repair required after upgrade": "После обновления требуется восстановление по сети",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Это обновление Wine4Office изменило среду совместимости, используемую существующей установкой Office.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Выполните восстановление по сети перед использованием Outlook. Пока восстановление не завершится, Outlook может не работать, а производительность Office может быть ниже. Восстановление по сети обновляет существующую установку Office для новой версии Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Выполните восстановление по сети перед использованием Outlook. Пока восстановление не завершится, Outlook может не работать, а производительность Office может быть ниже. Восстановление по сети обновляет существующую установку Office для новой версии Wine4Office.",
+  "Manage installations and download Office": "Управление установками и скачивание Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Откройте сайт Microsoft, чтобы управлять компьютерами, связанными с вашей подпиской или организацией, либо скачать веб-установщик Office. Требуется вход в учетную запись.",
+  "Work or school account": "Рабочая или учебная учетная запись",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — управление установками и скачивание веб-установщика.",
+  "Personal or family account": "Личная или семейная учетная запись",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — управление подпиской и устройствами и скачивание веб-установщика.",
+  "Could not open the Microsoft 365 account page:": "Не удалось открыть страницу учетной записи Microsoft 365:"
 }

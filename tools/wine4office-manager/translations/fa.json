@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "قبل از شروع تعمیر، همه Office درخواست ها را ببندید.",
   "Online Repair required after upgrade": "پس از ارتقا، تعمیر آنلاین لازم است",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "این ارتقای Wine4Office محیط سازگاری مورد استفادهٔ نصب فعلی Office را تغییر داد.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "پیش از استفاده از Outlook، تعمیر آنلاین را اجرا کنید. تا زمانی که تعمیر کامل نشود، ممکن است Outlook کار نکند و کارایی Office پایین‌تر باشد. تعمیر آنلاین نصب فعلی Office را برای نسخهٔ جدید Wine4Office به‌روزرسانی می‌کند."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "پیش از استفاده از Outlook، تعمیر آنلاین را اجرا کنید. تا زمانی که تعمیر کامل نشود، ممکن است Outlook کار نکند و کارایی Office پایین‌تر باشد. تعمیر آنلاین نصب فعلی Office را برای نسخهٔ جدید Wine4Office به‌روزرسانی می‌کند.",
+  "Manage installations and download Office": "مدیریت نصب‌ها و دانلود Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "برای مدیریت رایانه‌های متصل به اشتراک یا سازمان خود، یا دانلود نصب‌کننده آنلاین Office، وب‌سایت Microsoft را باز کنید. ورود به حساب الزامی است.",
+  "Work or school account": "حساب کاری یا تحصیلی",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — مدیریت نصب‌ها و دانلود نصب‌کننده آنلاین.",
+  "Personal or family account": "حساب شخصی یا خانوادگی",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — مدیریت اشتراک و دستگاه‌ها و دانلود نصب‌کننده آنلاین.",
+  "Could not open the Microsoft 365 account page:": "صفحه حساب Microsoft 365 باز نشد:"
 }

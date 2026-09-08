@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Minden Office alkalmazást zárj be a javítás előtt.",
   "Online Repair required after upgrade": "Online javítás szükséges a frissítés után",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Ez a Wine4Office-frissítés módosította a meglévő Office-telepítés által használt kompatibilitási környezetet.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Futtasson online javítást az Outlook használata előtt. A javítás befejezéséig előfordulhat, hogy az Outlook nem működik, és az Office teljesítménye alacsonyabb lehet. Az online javítás frissíti a meglévő Office-telepítést az új Wine4Office-verzióhoz."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Futtasson online javítást az Outlook használata előtt. A javítás befejezéséig előfordulhat, hogy az Outlook nem működik, és az Office teljesítménye alacsonyabb lehet. Az online javítás frissíti a meglévő Office-telepítést az új Wine4Office-verzióhoz.",
+  "Manage installations and download Office": "Telepítések kezelése és az Office letöltése",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Nyissa meg a Microsoft webhelyét az előfizetéséhez vagy szervezetéhez kapcsolt számítógépek kezeléséhez, illetve az Office online telepítőjének letöltéséhez. Bejelentkezés szükséges.",
+  "Work or school account": "Munkahelyi vagy iskolai fiók",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — telepítések kezelése és az online telepítő letöltése.",
+  "Personal or family account": "Személyes vagy családi fiók",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — előfizetés és eszközök kezelése, valamint az online telepítő letöltése.",
+  "Could not open the Microsoft 365 account page:": "Nem sikerült megnyitni a Microsoft 365-fiók oldalát:"
 }

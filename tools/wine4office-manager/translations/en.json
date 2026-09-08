@@ -221,5 +221,12 @@
   "Close every Office application before starting a repair.": "Close every Office application before starting a repair.",
   "Online Repair required after upgrade": "Online Repair required after upgrade",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.",
+  "Manage installations and download Office": "Manage installations and download Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.",
+  "Work or school account": "Work or school account",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — manage installations and download the online installer.",
+  "Personal or family account": "Personal or family account",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.",
+  "Could not open the Microsoft 365 account page:": "Could not open the Microsoft 365 account page:"
 }

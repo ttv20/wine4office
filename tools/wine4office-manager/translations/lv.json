@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "Aizveriet katru Office pieteikumu pirms remonta uzsākšanas.",
   "Online Repair required after upgrade": "Pēc jaunināšanas nepieciešama labošana tiešsaistē",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Šis Wine4Office jauninājums mainīja saderības vidi, ko izmanto esošā Office instalācija.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pirms Outlook lietošanas veiciet labošanu tiešsaistē. Kamēr labošana nav pabeigta, Outlook var nedarboties un Office veiktspēja var būt zemāka. Labošana tiešsaistē atjaunina esošo Office instalāciju atbilstoši jaunajai Wine4Office versijai."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pirms Outlook lietošanas veiciet labošanu tiešsaistē. Kamēr labošana nav pabeigta, Outlook var nedarboties un Office veiktspēja var būt zemāka. Labošana tiešsaistē atjaunina esošo Office instalāciju atbilstoši jaunajai Wine4Office versijai.",
+  "Manage installations and download Office": "Instalāciju pārvaldība un Office lejupielāde",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Atveriet Microsoft vietni, lai pārvaldītu ar abonementu vai organizāciju saistītos datorus vai lejupielādētu Office tiešsaistes instalētāju. Ir jāpierakstās.",
+  "Work or school account": "Darba vai mācību iestādes konts",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — pārvaldiet instalācijas un lejupielādējiet tiešsaistes instalētāju.",
+  "Personal or family account": "Personiskais vai ģimenes konts",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — pārvaldiet abonementu un ierīces un lejupielādējiet tiešsaistes instalētāju.",
+  "Could not open the Microsoft 365 account page:": "Neizdevās atvērt Microsoft 365 konta lapu:"
 }

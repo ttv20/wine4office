@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "मरम्मत शुरू करने से पहले प्रत्येक Office एप्लिकेशन को बंद कर दें।",
   "Online Repair required after upgrade": "अपग्रेड के बाद ऑनलाइन मरम्मत आवश्यक है",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "इस Wine4Office अपग्रेड ने मौजूदा Office इंस्टॉलेशन द्वारा उपयोग किए जाने वाले संगतता परिवेश को बदल दिया है।",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook का उपयोग करने से पहले ऑनलाइन मरम्मत चलाएँ। मरम्मत पूरी होने तक Outlook काम नहीं कर सकता और Office का प्रदर्शन कम हो सकता है। ऑनलाइन मरम्मत मौजूदा Office इंस्टॉलेशन को नए Wine4Office संस्करण के लिए अपडेट करती है।"
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook का उपयोग करने से पहले ऑनलाइन मरम्मत चलाएँ। मरम्मत पूरी होने तक Outlook काम नहीं कर सकता और Office का प्रदर्शन कम हो सकता है। ऑनलाइन मरम्मत मौजूदा Office इंस्टॉलेशन को नए Wine4Office संस्करण के लिए अपडेट करती है।",
+  "Manage installations and download Office": "इंस्टॉलेशन प्रबंधित करें और Office डाउनलोड करें",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "अपनी सदस्यता या संगठन से जुड़े कंप्यूटर प्रबंधित करने या ऑनलाइन Office इंस्टॉलर डाउनलोड करने के लिए Microsoft की वेबसाइट खोलें। साइन इन करना आवश्यक है।",
+  "Work or school account": "कार्यस्थल या विद्यालय का खाता",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — इंस्टॉलेशन प्रबंधित करें और ऑनलाइन इंस्टॉलर डाउनलोड करें।",
+  "Personal or family account": "व्यक्तिगत या पारिवारिक खाता",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — अपनी सदस्यता और डिवाइस प्रबंधित करें और ऑनलाइन इंस्टॉलर डाउनलोड करें।",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 खाता पृष्ठ नहीं खोला जा सका:"
 }

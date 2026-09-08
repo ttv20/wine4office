@@ -220,5 +220,12 @@
   "Close every Office application before starting a repair.": "أغلق كل Office الطلب قبل بدء الإصلاح.",
   "Online Repair required after upgrade": "الإصلاح عبر الإنترنت مطلوب بعد الترقية",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "غيَّرت ترقية Wine4Office هذه بيئة التوافق التي يستخدمها تثبيت Office الحالي.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "شغِّل الإصلاح عبر الإنترنت قبل استخدام Outlook. وإلى أن يكتمل الإصلاح، قد لا يعمل Outlook وقد يكون أداء Office أقل. يعمل الإصلاح عبر الإنترنت على تحديث تثبيت Office الحالي ليتوافق مع إصدار Wine4Office الجديد."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "شغِّل الإصلاح عبر الإنترنت قبل استخدام Outlook. وإلى أن يكتمل الإصلاح، قد لا يعمل Outlook وقد يكون أداء Office أقل. يعمل الإصلاح عبر الإنترنت على تحديث تثبيت Office الحالي ليتوافق مع إصدار Wine4Office الجديد.",
+  "Manage installations and download Office": "إدارة عمليات التثبيت وتنزيل Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "افتح موقع Microsoft لإدارة أجهزة الكمبيوتر المرتبطة باشتراكك أو مؤسستك، أو لتنزيل مثبت Office عبر الإنترنت. يلزم تسجيل الدخول.",
+  "Work or school account": "حساب العمل أو المؤسسة التعليمية",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — إدارة عمليات التثبيت وتنزيل المثبت عبر الإنترنت.",
+  "Personal or family account": "حساب شخصي أو عائلي",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — إدارة اشتراكك وأجهزتك وتنزيل المثبت عبر الإنترنت.",
+  "Could not open the Microsoft 365 account page:": "تعذر فتح صفحة حساب Microsoft 365:"
 }

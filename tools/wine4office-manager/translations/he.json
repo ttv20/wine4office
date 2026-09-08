@@ -220,5 +220,12 @@
   "Close every Office application before starting a repair.": "סגור את כל יישומי Office לפני התחלת תיקון.",
   "Online Repair required after upgrade": "נדרש תיקון מקוון לאחר השדרוג",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "השדרוג של Wine4Office שינה את סביבת התאימות שבה משתמשת התקנת Office הקיימת.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "הפעל תיקון מקוון לפני השימוש ב-Outlook. עד להשלמת התיקון, ייתכן ש-Outlook לא יעבוד וביצועי Office יהיו נמוכים יותר. התיקון המקוון מתאים את התקנת Office הקיימת לגרסה החדשה של Wine4Office."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "הפעל תיקון מקוון לפני השימוש ב-Outlook. עד להשלמת התיקון, ייתכן ש-Outlook לא יעבוד וביצועי Office יהיו נמוכים יותר. התיקון המקוון מתאים את התקנת Office הקיימת לגרסה החדשה של Wine4Office.",
+  "Manage installations and download Office": "ניהול התקנות והורדת Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "פתח את אתר Microsoft כדי לנהל מחשבים המשויכים למינוי או לארגון, או כדי להוריד את מתקין Office המקוון. נדרשת התחברות לחשבון Microsoft.",
+  "Work or school account": "חשבון עבודה או לימודים",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — ניהול התקנות והורדת המתקין המקוון.",
+  "Personal or family account": "חשבון אישי או משפחתי",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — ניהול המינוי, המכשירים והורדת המתקין המקוון.",
+  "Could not open the Microsoft 365 account page:": "לא ניתן לפתוח את דף החשבון של Microsoft 365:"
 }

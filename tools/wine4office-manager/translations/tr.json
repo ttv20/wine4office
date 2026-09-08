@@ -160,5 +160,12 @@
   "Close every Office application before starting a repair.": "Tamir yapmadan önce her Office uygulamayı kapatın.",
   "Online Repair required after upgrade": "Yükseltmeden sonra Çevrimiçi Onarım gerekiyor",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Bu Wine4Office yükseltmesi, mevcut Office yüklemesinin kullandığı uyumluluk ortamını değiştirdi.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook'u kullanmadan önce Çevrimiçi Onarım'ı çalıştırın. Onarım tamamlanana kadar Outlook çalışmayabilir ve Office performansı düşük olabilir. Çevrimiçi Onarım, mevcut Office yüklemesini yeni Wine4Office sürümü için güncelleştirir."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook'u kullanmadan önce Çevrimiçi Onarım'ı çalıştırın. Onarım tamamlanana kadar Outlook çalışmayabilir ve Office performansı düşük olabilir. Çevrimiçi Onarım, mevcut Office yüklemesini yeni Wine4Office sürümü için güncelleştirir.",
+  "Manage installations and download Office": "Yüklemeleri yönetin ve Office'i indirin",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Aboneliğinize veya kuruluşunuza bağlı bilgisayarları yönetmek ya da çevrimiçi Office yükleyicisini indirmek için Microsoft'un web sitesini açın. Oturum açmanız gerekir.",
+  "Work or school account": "İş veya okul hesabı",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — yüklemeleri yönetin ve çevrimiçi yükleyiciyi indirin.",
+  "Personal or family account": "Kişisel hesap veya aile hesabı",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — aboneliğinizi ve cihazlarınızı yönetin ve çevrimiçi yükleyiciyi indirin.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 hesap sayfası açılamadı:"
 }

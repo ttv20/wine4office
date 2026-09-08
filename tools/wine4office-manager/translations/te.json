@@ -122,5 +122,12 @@
   "Close every Office application before starting a repair.": "రిపేర్ ప్రారంభించడానికి ముందు ప్రతి Office అప్లికేషన్ ను మూసివేయండి.",
   "Online Repair required after upgrade": "అప్‌గ్రేడ్ తర్వాత ఆన్‌లైన్ మరమ్మతు అవసరం",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "ఈ Wine4Office అప్‌గ్రేడ్ ప్రస్తుత Office ఇన్‌స్టాలేషన్ ఉపయోగించే అనుకూలత వాతావరణాన్ని మార్చింది.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ఉపయోగించే ముందు ఆన్‌లైన్ మరమ్మతును అమలు చేయండి. మరమ్మతు పూర్తయ్యే వరకు Outlook పని చేయకపోవచ్చు మరియు Office పనితీరు తక్కువగా ఉండవచ్చు. ఆన్‌లైన్ మరమ్మతు ప్రస్తుత Office ఇన్‌స్టాలేషన్‌ను కొత్త Wine4Office వెర్షన్ కోసం అప్‌డేట్ చేస్తుంది."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ఉపయోగించే ముందు ఆన్‌లైన్ మరమ్మతును అమలు చేయండి. మరమ్మతు పూర్తయ్యే వరకు Outlook పని చేయకపోవచ్చు మరియు Office పనితీరు తక్కువగా ఉండవచ్చు. ఆన్‌లైన్ మరమ్మతు ప్రస్తుత Office ఇన్‌స్టాలేషన్‌ను కొత్త Wine4Office వెర్షన్ కోసం అప్‌డేట్ చేస్తుంది.",
+  "Manage installations and download Office": "ఇన్‌స్టాలేషన్‌లను నిర్వహించి Officeను డౌన్‌లోడ్ చేయండి",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "మీ సబ్‌స్క్రిప్షన్ లేదా సంస్థకు అనుసంధానించిన కంప్యూటర్‌లను నిర్వహించడానికి లేదా Office ఆన్‌లైన్ ఇన్‌స్టాలర్‌ను డౌన్‌లోడ్ చేయడానికి Microsoft వెబ్‌సైట్‌ను తెరవండి. సైన్ ఇన్ అవసరం.",
+  "Work or school account": "పని లేదా పాఠశాల ఖాతా",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — ఇన్‌స్టాలేషన్‌లను నిర్వహించి ఆన్‌లైన్ ఇన్‌స్టాలర్‌ను డౌన్‌లోడ్ చేయండి.",
+  "Personal or family account": "వ్యక్తిగత లేదా కుటుంబ ఖాతా",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — మీ సబ్‌స్క్రిప్షన్ మరియు పరికరాలను నిర్వహించి ఆన్‌లైన్ ఇన్‌స్టాలర్‌ను డౌన్‌లోడ్ చేయండి.",
+  "Could not open the Microsoft 365 account page:": "Microsoft 365 ఖాతా పేజీని తెరవడం సాధ్యం కాలేదు:"
 }

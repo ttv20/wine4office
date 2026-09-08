@@ -126,5 +126,12 @@
   "Close every Office application before starting a repair.": "Đóng tất cả các ứng dụng Office trước khi bắt đầu sửa chữa.",
   "Online Repair required after upgrade": "Cần Sửa chữa Trực tuyến sau khi nâng cấp",
   "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Bản nâng cấp Wine4Office này đã thay đổi môi trường tương thích mà bản cài đặt Office hiện có đang sử dụng.",
-  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Hãy chạy Sửa chữa Trực tuyến trước khi dùng Outlook. Cho đến khi quá trình sửa chữa hoàn tất, Outlook có thể không hoạt động và hiệu suất của Office có thể thấp hơn. Sửa chữa Trực tuyến sẽ cập nhật bản cài đặt Office hiện có cho phiên bản Wine4Office mới."
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Hãy chạy Sửa chữa Trực tuyến trước khi dùng Outlook. Cho đến khi quá trình sửa chữa hoàn tất, Outlook có thể không hoạt động và hiệu suất của Office có thể thấp hơn. Sửa chữa Trực tuyến sẽ cập nhật bản cài đặt Office hiện có cho phiên bản Wine4Office mới.",
+  "Manage installations and download Office": "Quản lý bản cài đặt và tải xuống Office",
+  "Open Microsoft's website to manage computers linked to your subscription or organization, or download the online Office installer. Sign-in is required.": "Mở trang web của Microsoft để quản lý các máy tính được liên kết với gói đăng ký hoặc tổ chức của bạn, hoặc để tải xuống trình cài đặt Office trực tuyến. Bạn cần đăng nhập.",
+  "Work or school account": "Tài khoản cơ quan hoặc trường học",
+  "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — quản lý bản cài đặt và tải xuống trình cài đặt trực tuyến.",
+  "Personal or family account": "Tài khoản cá nhân hoặc gia đình",
+  "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — quản lý gói đăng ký và thiết bị của bạn, đồng thời tải xuống trình cài đặt trực tuyến.",
+  "Could not open the Microsoft 365 account page:": "Không thể mở trang tài khoản Microsoft 365:"
 }
