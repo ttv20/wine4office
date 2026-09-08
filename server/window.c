@@ -495,8 +495,13 @@ static void set_property( struct window *win, atom_t atom, lparam_t data, enum p
         }
         if (win->properties[i].atom == atom)
         {
-            win->properties[i].type = type;
-            win->properties[i].data = data;
+            /* Also invalidate clients' negative property lookup caches. */
+            SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+            {
+                win->properties[i].type = type;
+                win->properties[i].data = data;
+            }
+            SHARED_WRITE_END;
             return;
         }
     }
@@ -521,9 +526,13 @@ static void set_property( struct window *win, atom_t atom, lparam_t data, enum p
         }
         free = win->prop_inuse++;
     }
-    win->properties[free].atom = atom;
-    win->properties[free].type = type;
-    win->properties[free].data = data;
+    SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+    {
+        win->properties[free].atom = atom;
+        win->properties[free].type = type;
+        win->properties[free].data = data;
+    }
+    SHARED_WRITE_END;
 }
 
 /* remove a window property */
@@ -539,7 +548,11 @@ static lparam_t remove_property( struct window *win, atom_t atom )
         if (prop->atom == atom)
         {
             if (prop->type == PROP_TYPE_STRING) release_atom( table, atom );
-            prop->type = PROP_TYPE_FREE;
+            SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+            {
+                prop->type = PROP_TYPE_FREE;
+            }
+            SHARED_WRITE_END;
             return prop->data;
         }
     }

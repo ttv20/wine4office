@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduce repeated window-property lookup overhead during graphics presentation.
+
 - Prevent OpenGL presentation from using released buffers or retaining history after context loss.
 
 - Track graphics buffer allocations reliably when drivers reuse resource identifiers.

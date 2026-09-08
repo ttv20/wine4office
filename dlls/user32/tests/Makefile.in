@@ -22,6 +22,7 @@ SOURCES = \
 	msg.c \
 	resource.c \
 	popup.c \
+	property.c \
 	scroll.c \
 	static.c \
 	sysparams.c \

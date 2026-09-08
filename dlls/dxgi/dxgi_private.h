@@ -214,6 +214,8 @@ struct d3d11_swapchain
     ID3D11Texture2D *present1_scratch;
     BOOL present1_shadow_valid;
     HWND composition_window;
+    ATOM detached_window_atom;
+    ATOM clip_enabled_atom;
 
     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc;
     IDXGIOutput *target;
