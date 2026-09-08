@@ -203,6 +203,7 @@ class ManagerWindow(QMainWindow):
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
+        self.pending_office_update: tuple[bool, dict] | None = None
         self.preload_rebind: tuple[str, str] | None = None
         self.update_progress_dialog: QDialog | None = None
         self.update_progress_status: QLabel | None = None
@@ -334,7 +335,7 @@ class ManagerWindow(QMainWindow):
 
         sections = [
             ("Environment", QStyle.StandardPixmap.SP_DriveHDIcon, self._environment_page()),
-            ("Install Office & Teams", QStyle.StandardPixmap.SP_ArrowDown,
+            ("Install Office", QStyle.StandardPixmap.SP_ArrowDown,
              self._office_install_page()),
             ("Applications", QStyle.StandardPixmap.SP_FileDialogListView, self._applications_page()),
             ("Office settings", QStyle.StandardPixmap.SP_FileDialogContentsView,
@@ -693,9 +694,8 @@ class ManagerWindow(QMainWindow):
 
     def _office_install_page(self) -> QWidget:
         page, layout = self._new_page(
-            "Install Office & Teams",
-            "Install Office with Microsoft's deployment tool or install Microsoft Teams "
-            "with its standalone bootstrapper.",
+            "Install Office",
+            "Install or repair Microsoft Office in the selected Wine environment.",
         )
         installer = QGroupBox("Office Deployment Tool")
         installer_layout = QVBoxLayout(installer)
@@ -755,28 +755,85 @@ class ManagerWindow(QMainWindow):
         installer_layout.addLayout(buttons)
         layout.addWidget(installer)
 
-        teams = QGroupBox("Microsoft Teams")
-        teams_layout = QVBoxLayout(teams)
-        teams_explanation = QLabel(
-            "Install Teams separately from Office with Microsoft's standalone bootstrapper. "
-            "The installer is downloaded automatically; Teams support in Wine is experimental."
+        repair = QGroupBox("Repair Office")
+        repair_layout = QVBoxLayout(repair)
+        repair_explanation = QLabel(
+            "Quick Repair uses the Office files already on this computer and works offline. "
+            "Online Repair downloads and reinstalls Office; use it after an update when Outlook "
+            "does not work correctly. It may also improve Office performance."
         )
-        teams_explanation.setWordWrap(True)
-        teams_layout.addWidget(teams_explanation)
-        teams_buttons = QHBoxLayout()
-        teams_buttons.addStretch()
-        self.teams_install_button = self._action_button(
-            "Install Teams", self.install_teams,
-            QStyle.StandardPixmap.SP_ArrowDown,
+        repair_explanation.setWordWrap(True)
+        repair_layout.addWidget(repair_explanation)
+        repair_warning = QLabel(
+            "Close every Office application before starting a repair."
         )
-        self.teams_install_button.setAccessibleName(
-            "Install Microsoft Teams with the standalone installer"
+        repair_warning.setWordWrap(True)
+        repair_layout.addWidget(repair_warning)
+        repair_buttons = QHBoxLayout()
+        repair_buttons.addStretch()
+        self.quick_repair_button = self._action_button(
+            "Run Quick Repair", self.run_quick_office_repair,
+            QStyle.StandardPixmap.SP_DialogApplyButton,
         )
-        teams_buttons.addWidget(self.teams_install_button)
-        teams_layout.addLayout(teams_buttons)
-        layout.addWidget(teams)
+        self.quick_repair_button.setAccessibleName(
+            "Run Office Quick Repair using local files"
+        )
+        repair_buttons.addWidget(self.quick_repair_button)
+        self.online_repair_button = self._action_button(
+            "Run Online Repair", self.run_online_office_repair,
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
+        self.online_repair_button.setAccessibleName(
+            "Run Office Online Repair"
+        )
+        repair_buttons.addWidget(self.online_repair_button)
+        repair_layout.addLayout(repair_buttons)
+        layout.addWidget(repair)
         layout.addStretch()
         return page
+
+    def run_quick_office_repair(self) -> None:
+        self._start_office_repair("quick")
+
+    def run_online_office_repair(self) -> None:
+        self._start_office_repair("online")
+
+    def _start_office_repair(self, repair_type: str,
+                             install_config: dict | None = None) -> None:
+        if not self.ensure_idle():
+            return
+        config = install_config if install_config is not None else self.save_config()
+        if not config:
+            return
+        repair_label = "Quick" if repair_type == "quick" else "Online"
+        task_kind = f"office-{repair_type}-repair"
+        use_x11, _use_vulkan = backend.active_graphics_settings(config)
+        try:
+            self.state.start_task(
+                task_kind,
+                lambda: backend.repair_office(
+                    config["prefix"], config["wine"], repair_type,
+                    self.state.output,
+                    cancel_event=self.state.cancel_event,
+                    process_callback=self.state.set_process,
+                    use_x11=use_x11,
+                ),
+            )
+            self._show_task_progress(
+                task_kind,
+                f"Running Office {repair_label} Repair",
+                "Microsoft Office",
+                f"Preparing Office {repair_label} Repair…",
+                {
+                    "completed": f"Office {repair_label} Repair completed.",
+                    "cancelled": f"Office {repair_label} Repair cancelled.",
+                    "failed": f"Office {repair_label} Repair failed. Review the details below.",
+                },
+            )
+            self.notify(f"Office {repair_label} Repair started.")
+            self.refresh_state()
+        except Exception as error:
+            self.show_error(error)
 
     def install_teams(self) -> None:
         if not self.ensure_idle():
@@ -879,6 +936,7 @@ class ManagerWindow(QMainWindow):
         if not config:
             return
         try:
+            office_was_installed = backend.office_installation_exists(config["prefix"])
             self.state.start_task(
                 "odt-install",
                 lambda payload=configuration_payload: backend.install_office_with_odt(
@@ -904,6 +962,7 @@ class ManagerWindow(QMainWindow):
                 if config_path is not None and config_digest is not None
                 else None
             )
+            self.pending_office_update = (office_was_installed, dict(config))
             self.last_task_state = "True:running"
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
@@ -911,6 +970,7 @@ class ManagerWindow(QMainWindow):
             self.notify("Preparing Office installer…", 0)
             self.refresh_state()
         except Exception as error:
+            self.pending_office_update = None
             self.show_error(error)
 
     def _office_download_completed(self, error, payload, config_path,
@@ -1089,6 +1149,37 @@ class ManagerWindow(QMainWindow):
             f"The XML changed or could not be safely removed, so no further deletion was attempted.\n\n"
             f"{location}",
         )
+
+    def prompt_office_update_repair(self, config: dict) -> None:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("Office repair recommended")
+        dialog.setText(
+            "Office was already installed, so this operation updated the existing installation."
+        )
+        dialog.setInformativeText(
+            "Run Online Repair before using Outlook. Outlook may not work correctly until the "
+            "repair completes. It refreshes Office Click-to-Run registration and may also improve "
+            "Office startup and application performance."
+        )
+        online_button = dialog.addButton(
+            "Run Online Repair", QMessageBox.ButtonRole.AcceptRole
+        )
+        later_button = dialog.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(online_button)
+        dialog.setEscapeButton(later_button)
+        self._translate_ui(dialog)
+        dialog.exec()
+        if dialog.clickedButton() is online_button:
+            self._start_office_repair("online", install_config=config)
+
+    def _finish_completed_office_install(
+            self, office_was_installed: bool, config: dict | None,
+            config_path: Path | None, expected_digest: str | None) -> None:
+        if config_path is not None and expected_digest is not None:
+            self.prompt_office_xml_cleanup(config_path, expected_digest)
+        if office_was_installed and config is not None:
+            self.prompt_office_update_repair(config)
 
     def _applications_page(self) -> QWidget:
         page, layout = self._new_page(
@@ -2822,15 +2913,24 @@ class ManagerWindow(QMainWindow):
         task = snapshot["task"]
         self._refresh_update_progress(task)
         self._refresh_office_startup_progress(task)
-        if (self.pending_odt_xml is not None
+        if ((self.pending_odt_xml is not None or self.pending_office_update is not None)
                 and task["kind"] == "odt-install" and not task["running"]):
-            config_path, _configuration_payload, expected_digest = self.pending_odt_xml
+            pending_xml = self.pending_odt_xml
+            pending_update = self.pending_office_update
             self.pending_odt_xml = None
+            self.pending_office_update = None
             if task["status"] == "completed":
+                config_path = pending_xml[0] if pending_xml is not None else None
+                expected_digest = pending_xml[2] if pending_xml is not None else None
+                office_was_installed = pending_update[0] if pending_update is not None else False
+                install_config = pending_update[1] if pending_update is not None else None
                 QTimer.singleShot(
                     700 if self.update_progress_dialog is not None else 0,
-                    lambda current=config_path, digest=expected_digest:
-                    self.prompt_office_xml_cleanup(current, digest),
+                    lambda updated=office_was_installed, current=install_config,
+                    path=config_path, digest=expected_digest:
+                    self._finish_completed_office_install(
+                        updated, current, path, digest
+                    ),
                 )
         task_text = (
             f"{self._tr(task['kind'])}: {self._tr('running')}"

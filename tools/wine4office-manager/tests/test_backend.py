@@ -1169,6 +1169,82 @@ exit 0
         self.assertFalse(launcher.exists())
         self.assertFalse(installed_helper.exists())
 
+    def test_office_installation_detection_requires_an_office_application(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        client = (
+            prefix / "drive_c/Program Files/Common Files/Microsoft Shared"
+            / "ClickToRun/OfficeClickToRun.exe"
+        )
+        client.parent.mkdir(parents=True)
+        client.write_bytes(b"client")
+
+        self.assertEqual(
+            backend.find_office_click_to_run(str(prefix)), client
+        )
+        self.assertFalse(backend.office_installation_exists(str(prefix)))
+        word = prefix / "drive_c/Program Files/Microsoft Office/root/Office16/WINWORD.EXE"
+        word.parent.mkdir(parents=True)
+        word.write_bytes(b"word")
+        self.assertTrue(backend.office_installation_exists(str(prefix)))
+
+    def test_office_repair_uses_installed_platform_and_culture(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        client = (
+            prefix / "drive_c/Program Files/Common Files/Microsoft Shared"
+            / "ClickToRun/OfficeClickToRun.exe"
+        )
+        client.parent.mkdir(parents=True)
+        client.write_bytes(b"client")
+        environment = {"WINEPREFIX": str(prefix)}
+        registry_results = [
+            mock.Mock(
+                returncode=0,
+                stdout="    Platform    REG_SZ    x64\n",
+                stderr="",
+            ),
+            mock.Mock(
+                returncode=0,
+                stdout="    ClientCulture    REG_SZ    he-il\n",
+                stderr="",
+            ),
+        ]
+
+        for requested, click_to_run_value in (
+                ("quick", "QuickRepair"), ("online", "FullRepair")):
+            with self.subTest(requested=requested), mock.patch.object(
+                backend, "wine_environment", return_value=environment
+            ), mock.patch.object(
+                backend.subprocess, "run", side_effect=list(registry_results)
+            ) as run, mock.patch.object(
+                backend, "_stream_command"
+            ) as stream:
+                result = backend.repair_office(
+                    str(prefix), str(self.wine), requested, lambda _line: None
+                )
+
+            self.assertIn("completed successfully", result)
+            self.assertEqual(run.call_count, 2)
+            command = stream.call_args.args[0]
+            self.assertEqual(command[:2], [str(self.wine.resolve()), str(client)])
+            self.assertIn("scenario=Repair", command)
+            self.assertIn("platform=x64", command)
+            self.assertIn("culture=he-il", command)
+            self.assertIn(f"RepairType={click_to_run_value}", command)
+            self.assertIn("forceappshutdown=False", command)
+            self.assertIn("DisplayLevel=True", command)
+            self.assertEqual(stream.call_args.kwargs["cwd"], client.parent)
+
+    def test_office_repair_rejects_missing_client_and_unknown_type(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with self.assertRaisesRegex(ValueError, "Unknown Office repair type"):
+            backend.repair_office(
+                str(prefix), str(self.wine), "factory", lambda _line: None
+            )
+        with self.assertRaisesRegex(FileNotFoundError, "Click-to-Run is not installed"):
+            backend.repair_office(
+                str(prefix), str(self.wine), "online", lambda _line: None
+            )
+
     def test_teams_detection_prefers_newest_windowsapps_package_and_creates_shortcut(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix)

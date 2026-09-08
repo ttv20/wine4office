@@ -46,6 +46,13 @@ OFFICE_X11_EXECUTABLES = (
     "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE",
     "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
 )
+OFFICE_CLICK_TO_RUN_CONFIGURATION_KEY = (
+    r"HKLM\Software\Microsoft\Office\ClickToRun\Configuration"
+)
+OFFICE_REPAIR_TYPES = {
+    "quick": "QuickRepair",
+    "online": "FullRepair",
+}
 STOP_GRACE_SECONDS = 10.0
 STOP_DETECTION_SECONDS = 4.0
 OFFICE_COMPATIBILITY_POLICIES = {
@@ -1560,6 +1567,96 @@ def find_office_app(prefix_value: str, app: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def find_office_click_to_run(prefix_value: str) -> Path | None:
+    """Return the installed Office Click-to-Run repair client, if present."""
+    prefix = validate_prefix(prefix_value)
+    candidates = (
+        prefix / "drive_c/Program Files/Common Files/Microsoft Shared/ClickToRun/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files (x86)/Common Files/Microsoft Shared/ClickToRun/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files/Microsoft Office 15/ClientX64/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files/Microsoft Office 15/ClientX86/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files (x86)/Microsoft Office 15/ClientX86/OfficeClickToRun.exe",
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def office_installation_exists(prefix_value: str) -> bool:
+    """Return whether the prefix contains an existing Office installation."""
+    return any(
+        find_office_app(prefix_value, app) is not None
+        for app in APP_META
+        if app != "teams"
+    )
+
+
+def _office_click_to_run_configuration_value(
+        wine: Path, environment: dict[str, str], value_name: str) -> str:
+    result = subprocess.run(
+        [str(wine), "reg", "query", OFFICE_CLICK_TO_RUN_CONFIGURATION_KEY,
+         "/v", value_name],
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False,
+    )
+    match = re.search(
+        rf"^\s*{re.escape(value_name)}\s+REG_[A-Z0-9_]+\s+(.+?)\s*$",
+        result.stdout,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if result.returncode or match is None:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f"\n{detail}" if detail else ""
+        raise RuntimeError(
+            f"Office Click-to-Run configuration is missing {value_name}.{suffix}"
+        )
+    return match.group(1).strip()
+
+
+def repair_office(prefix_value: str, wine_value: str, repair_type: str,
+                  output: Output, cancel_event=None, process_callback=None,
+                  use_x11: bool = True) -> str:
+    """Run Microsoft's visible Quick or Online Click-to-Run repair."""
+    selected_repair = OFFICE_REPAIR_TYPES.get(repair_type)
+    if selected_repair is None:
+        raise ValueError(f"Unknown Office repair type: {repair_type}")
+    prefix = validate_prefix(prefix_value)
+    if not (prefix / "system.reg").is_file():
+        raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
+    wine = require_wine(wine_value)
+    click_to_run = find_office_click_to_run(str(prefix))
+    if click_to_run is None:
+        raise FileNotFoundError(
+            "Office Click-to-Run is not installed in the selected Wine environment."
+        )
+    environment = wine_environment(prefix, wine, use_x11)
+    platform = _office_click_to_run_configuration_value(
+        wine, environment, "Platform"
+    ).lower()
+    culture = _office_click_to_run_configuration_value(
+        wine, environment, "ClientCulture"
+    ).lower()
+    if platform not in {"x86", "x64"}:
+        raise RuntimeError(
+            f"Office Click-to-Run reported an unsupported platform: {platform}"
+        )
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})+", culture):
+        raise RuntimeError(
+            f"Office Click-to-Run reported an invalid language: {culture}"
+        )
+    repair_label = "Quick" if repair_type == "quick" else "Online"
+    output(f"Starting Microsoft Office {repair_label} Repair.")
+    _stream_command(
+        [
+            str(wine), str(click_to_run), "scenario=Repair",
+            f"platform={platform}", f"culture={culture}",
+            "forceappshutdown=False", f"RepairType={selected_repair}",
+            "DisplayLevel=True",
+        ],
+        environment, output, cwd=click_to_run.parent,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
+    return f"Microsoft Office {repair_label} Repair completed successfully."
 
 
 def environment_status(prefix_value: str, wine_value: str) -> dict:

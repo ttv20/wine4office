@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Retry Office installer downloads once, then offer manual download and file selection.
+- Add Quick and Online Office repairs to the Manager and recommend Online Repair after updating an existing installation.
+- Hide the Teams installer from the Manager while Teams support is unavailable.
 
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.

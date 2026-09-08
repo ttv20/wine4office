@@ -1663,11 +1663,22 @@ class QtManagerTests(unittest.TestCase):
     def test_office_install_page_defaults_and_product_metadata(self):
         self.assertEqual(
             self.window.navigation.item(self.window.INSTALL_PAGE).text(),
-            "Install Office & Teams",
+            "Install Office",
+        )
+        self.assertFalse(hasattr(self.window, "teams_install_button"))
+        self.assertNotIn(
+            "Microsoft Teams",
+            {group.title() for group in self.window.pages.widget(
+                self.window.INSTALL_PAGE
+            ).findChildren(qt_module.QGroupBox)},
         )
         self.assertEqual(
-            self.window.teams_install_button.accessibleName(),
-            "Install Microsoft Teams with the standalone installer",
+            self.window.quick_repair_button.accessibleName(),
+            "Run Office Quick Repair using local files",
+        )
+        self.assertEqual(
+            self.window.online_repair_button.accessibleName(),
+            "Run Office Online Repair",
         )
         self.assertEqual(self.window.office_languages_edit.text(), "en-US")
         self.assertEqual(
@@ -1696,39 +1707,36 @@ class QtManagerTests(unittest.TestCase):
                 self.assertIn(product["product_id"], details)
                 self.assertIn(product["channel"], details)
 
-    def test_teams_install_downloads_and_runs_without_save_dialog(self):
-        original_page = self.window.pages.currentIndex()
-        with mock.patch.object(
-            qt_module.QFileDialog, "getSaveFileName"
-        ) as save_dialog, mock.patch.object(
-            self.window, "save_config", return_value=dict(self.config)
-        ), mock.patch.object(
-            backend, "install_teams_with_bootstrapper", return_value="installed"
-        ) as install, mock.patch.object(
-            self.state, "start_task"
-        ) as start:
-            self.window.install_teams()
-            start.call_args.args[1]()
+    def test_office_repair_actions_run_the_selected_click_to_run_repair(self):
+        for repair_type, label in (("quick", "Quick"), ("online", "Online")):
+            with self.subTest(repair_type=repair_type), mock.patch.object(
+                self.window, "save_config", return_value=dict(self.config)
+            ), mock.patch.object(
+                backend, "repair_office", return_value="repaired"
+            ) as repair, mock.patch.object(
+                self.state, "start_task"
+            ) as start:
+                self.window._start_office_repair(repair_type)
+                start.call_args.args[1]()
 
-        save_dialog.assert_not_called()
-        start.assert_called_once()
-        self.assertEqual(start.call_args.args[0], "teams-install")
-        install.assert_called_once_with(
-            self.config["prefix"],
-            self.config["wine"],
-            self.state.output,
-            cancel_event=self.state.cancel_event,
-            process_callback=self.state.set_process,
-            progress_callback=self.state.set_progress,
-            use_x11=True,
-        )
-        self.assertEqual(self.window.pages.currentIndex(), original_page)
-        self.assertTrue(self.window.update_progress_dialog.isVisible())
-        self.assertEqual(
-            self.window.update_progress_dialog.windowTitle(),
-            "Installing Microsoft Teams",
-        )
-        self.assertEqual(self.window.update_progress_task_kind, "teams-install")
+            start.assert_called_once()
+            self.assertEqual(
+                start.call_args.args[0], f"office-{repair_type}-repair"
+            )
+            repair.assert_called_once_with(
+                self.config["prefix"], self.config["wine"], repair_type,
+                self.state.output,
+                cancel_event=self.state.cancel_event,
+                process_callback=self.state.set_process,
+                use_x11=True,
+            )
+            self.assertTrue(self.window.update_progress_dialog.isVisible())
+            self.assertEqual(
+                self.window.update_progress_dialog.windowTitle(),
+                f"Running Office {label} Repair",
+            )
+            self.window.update_progress_dialog.close()
+            self.window.update_progress_dialog = None
 
     def test_generated_office_install_starts_without_save_dialog(self):
         generated_xml = "<Configuration><Add /></Configuration>\n"
@@ -1767,6 +1775,9 @@ class QtManagerTests(unittest.TestCase):
             installer_process_callback=self.state.set_foreground_process,
         )
         self.assertIsNone(self.window.pending_odt_xml)
+        self.assertEqual(
+            self.window.pending_office_update, (False, self.config)
+        )
 
     def test_office_startup_popup_is_indeterminate_until_installer_starts(self):
         self.window._show_office_startup_progress()
@@ -1967,6 +1978,58 @@ class QtManagerTests(unittest.TestCase):
         cleanup.assert_called_once_with(configuration, config_digest)
         self.assertIsNone(self.window.pending_odt_xml)
         self.assertTrue(configuration.exists())
+
+    def test_completed_office_update_recommends_repair_once(self):
+        self.window.pending_office_update = (True, dict(self.config))
+        with self.state.lock:
+            self.state.task = {
+                "running": False,
+                "kind": "odt-install",
+                "status": "completed",
+                "log": "Office installation completed successfully.\n",
+            }
+
+        with mock.patch.object(
+            qt_module.QTimer, "singleShot"
+        ) as single_shot, mock.patch.object(
+            self.window, "prompt_office_update_repair"
+        ) as repair_prompt:
+            self.window.refresh_state()
+            self.window.refresh_state()
+            single_shot.assert_called_once()
+            single_shot.call_args.args[1]()
+
+        repair_prompt.assert_called_once_with(self.config)
+        self.assertIsNone(self.window.pending_office_update)
+
+    def test_update_repair_prompt_starts_the_selected_repair(self):
+        for selected, repair_type in (
+                ("Run Online Repair", "online"),
+                ("Later", None)):
+            with self.subTest(selected=selected):
+                dialog = mock.Mock()
+                buttons = [object(), object()]
+                dialog.addButton.side_effect = buttons
+                dialog.clickedButton.return_value = buttons[
+                    ("Run Online Repair", "Later").index(selected)
+                ]
+                with mock.patch.object(
+                    qt_module, "QMessageBox", return_value=dialog
+                ) as message_box, mock.patch.object(
+                    self.window, "_translate_ui"
+                ), mock.patch.object(
+                    self.window, "_start_office_repair"
+                ) as start:
+                    message_box.Icon = QMessageBox.Icon
+                    message_box.ButtonRole = QMessageBox.ButtonRole
+                    self.window.prompt_office_update_repair(dict(self.config))
+
+                if repair_type is None:
+                    start.assert_not_called()
+                else:
+                    start.assert_called_once_with(
+                        repair_type, install_config=self.config
+                    )
 
     def test_office_xml_cleanup_defaults_to_keep_and_deletes_only_on_explicit_choice(self):
         for choice in ("Keep", "Delete"):
