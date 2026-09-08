@@ -78,6 +78,7 @@ struct opengl_client_context
     GLenum                      last_error;
     GLint                       context_flags;
     GLint                       profile_mask;
+    GLint                       reset_notification;
     int                         major_version;
     int                         minor_version;
     char                        version_str[64];
@@ -119,7 +120,7 @@ struct __GLsync
 #include "wine/gdi_driver.h"
 
 /* Wine internal opengl driver version, needs to be bumped upon opengl_funcs changes. */
-#define WINE_OPENGL_DRIVER_VERSION 39
+#define WINE_OPENGL_DRIVER_VERSION 40
 
 struct opengl_drawable;
 

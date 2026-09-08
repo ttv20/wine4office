@@ -241,6 +241,7 @@ static const struct wined3d_extension_map gl_extension_map[] =
 
 static const struct wined3d_extension_map wgl_extension_map[] =
 {
+    {"WGL_ARB_create_context_robustness",   WGL_ARB_CREATE_CONTEXT_ROBUSTNESS},
     {"WGL_ARB_pixel_format",                WGL_ARB_PIXEL_FORMAT             },
     {"WGL_EXT_swap_control",                WGL_EXT_SWAP_CONTROL             },
     {"WGL_WINE_pixel_format_passthrough",   WGL_WINE_PIXEL_FORMAT_PASSTHROUGH},
@@ -2065,6 +2066,9 @@ static void enumerate_gl_extensions(struct wined3d_gl_info *gl_info,
 static void load_gl_funcs(struct wined3d_gl_info *gl_info)
 {
 #define USE_GL_FUNC(pfn) gl_info->gl_ops.ext.p_##pfn = (void *)wglGetProcAddress(#pfn);
+    /* GL_ARB_robustness / GL_KHR_robustness */
+    USE_GL_FUNC(glGetGraphicsResetStatus)
+    USE_GL_FUNC(glGetGraphicsResetStatusARB)
     /* GL_APPLE_fence */
     USE_GL_FUNC(glDeleteFencesAPPLE)
     USE_GL_FUNC(glFinishFenceAPPLE)
@@ -4094,6 +4098,8 @@ static HRESULT adapter_gl_create_device(struct wined3d *wined3d, const struct wi
         return E_OUTOFMEMORY;
 
     device_gl->current_fence_id = 1;
+    InitializeSRWLock(&device_gl->present_swapchains_lock);
+    list_init(&device_gl->present_swapchains);
 
     if (FAILED(hr = wined3d_device_init(&device_gl->d, wined3d, adapter->ordinal, device_type, focus_window,
             flags, surface_alignment, levels, level_count,
@@ -4105,6 +4111,7 @@ static HRESULT adapter_gl_create_device(struct wined3d *wined3d, const struct wi
     }
 
     wined3d_lock_init(&device_gl->allocator_cs, "wined3d_device_gl.allocator_cs");
+    wined3d_device_gl_register_present(device_gl);
 
     *device = &device_gl->d;
     return WINED3D_OK;
@@ -4115,6 +4122,7 @@ static void adapter_gl_destroy_device(struct wined3d_device *device)
     struct wined3d_device_gl *device_gl = wined3d_device_gl(device);
 
     wined3d_device_cleanup(&device_gl->d);
+    wined3d_device_gl_unregister_present(device_gl);
     wined3d_lock_cleanup(&device_gl->allocator_cs);
 
     free(device_gl->retired_blocks);

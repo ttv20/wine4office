@@ -84,6 +84,8 @@ static struct list devices_egl = LIST_INIT( devices_egl );
 static struct egl_platform display_egl;
 static struct opengl_funcs display_funcs;
 static struct opengl_context *global_context;
+static GLint native_reset_strategy = WGL_NO_RESET_NOTIFICATION_ARB;
+static BOOL native_reset_verified;
 
 static BOOLEAN global_extensions[GL_EXTENSION_COUNT];
 static struct wgl_pixel_format *pixel_formats;
@@ -264,11 +266,15 @@ static BOOL opengl_drawable_swap( struct opengl_drawable *drawable )
 
 static struct opengl_context *internal_context_create(void)
 {
-    static const int attribs[] = { WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB, 0 };
+    int attribs[] = { WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+            WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB, native_reset_strategy, 0 };
     struct opengl_context *context, *share = global_context ? global_context->driver_private : NULL;
     BOOL shared = TRUE, doublebuffer;
     int format;
 
+    /* NO_RESET is the native default. Drivers without the robustness
+     * extension may reject the attribute even when it requests that default. */
+    if (native_reset_strategy != WGL_LOSE_CONTEXT_ON_RESET_ARB) attribs[2] = 0;
     if (!(context = calloc( 1, sizeof(*context) ))) return NULL;
 
     for (format = 1; format <= formats_count; format++)
@@ -829,6 +835,8 @@ static BOOL egldrv_describe_pixel_format( int format, struct wgl_pixel_format *d
 
 static void egldrv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )
 {
+    /* EGL_KHR_create_context is required by init_egl_platform(). */
+    extensions[WGL_ARB_create_context_robustness] = 1;
 }
 
 static BOOL egldrv_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
@@ -928,13 +936,12 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
 
     for (; attribs && attribs[0] != 0; attribs += 2)
     {
-        EGLint name;
+        EGLint name, value = attribs[1];
 
         TRACE( "%#x %#x\n", attribs[0], attribs[1] );
 
         /* Find the EGL attribute names corresponding to the WGL names.
-         * For all of the attributes below, the values match between the two
-         * systems, so we can use them directly. */
+         * Reset notification values also need translation. */
         switch (attribs[0])
         {
         case WGL_CONTEXT_MAJOR_VERSION_ARB:
@@ -948,6 +955,16 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
             break;
         case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
             name = EGL_CONTEXT_OPENGL_NO_ERROR_KHR;
+            break;
+        case WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB:
+            name = EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_KHR;
+            if (value == WGL_LOSE_CONTEXT_ON_RESET_ARB) value = EGL_LOSE_CONTEXT_ON_RESET_KHR;
+            else if (value == WGL_NO_RESET_NOTIFICATION_ARB) value = EGL_NO_RESET_NOTIFICATION_KHR;
+            else
+            {
+                RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+                return FALSE;
+            }
             break;
         case WGL_CONTEXT_PROFILE_MASK_ARB:
             if (attribs[1] & WGL_CONTEXT_ES2_PROFILE_BIT_EXT)
@@ -971,7 +988,7 @@ static BOOL egldrv_context_create( int format, void *share, const int *attribs, 
              * attributes we support (we merge repetitions), plus EGL_NONE. */
             assert( dst - egl_attribs <= ARRAY_SIZE(egl_attribs) - 3 );
             dst[0] = name;
-            dst[1] = attribs[1];
+            dst[1] = value;
             if (dst == attribs_end) attribs_end += 2;
         }
     }
@@ -2462,9 +2479,55 @@ static struct opengl_context *win32u_context_create( HDC hdc, const int *attribs
 {
     struct opengl_context *context, *share = global_context ? global_context->driver_private : NULL;
     BOOL shared = TRUE, doublebuffer;
-    int format;
+    int format, native_attribs[17], *dst = native_attribs;
+    const int *src;
 
     TRACE( "hdc %p, attribs %p\n", hdc, attribs );
+
+    /* Client reset notification is virtualized by opengl32. All native
+     * contexts, including drawable helpers, must use the same policy. */
+    for (src = attribs; src && src[0]; src += 2)
+    {
+        int *entry;
+        if (src[0] == WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB)
+        {
+            if (src[1] != WGL_NO_RESET_NOTIFICATION_ARB && src[1] != WGL_LOSE_CONTEXT_ON_RESET_ARB)
+            {
+                RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+                return NULL;
+            }
+            if (src[1] == WGL_LOSE_CONTEXT_ON_RESET_ARB
+                    && !native_reset_verified)
+            {
+                RtlSetLastWin32Error( ERROR_NOT_SUPPORTED );
+                return NULL;
+            }
+            continue;
+        }
+        switch (src[0])
+        {
+        case WGL_CONTEXT_MAJOR_VERSION_ARB:
+        case WGL_CONTEXT_MINOR_VERSION_ARB:
+        case WGL_CONTEXT_LAYER_PLANE_ARB:
+        case WGL_CONTEXT_FLAGS_ARB:
+        case WGL_CONTEXT_PROFILE_MASK_ARB:
+        case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
+            break;
+        default:
+            RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
+            return NULL;
+        }
+        for (entry = native_attribs; entry != dst && entry[0] != src[0]; entry += 2) continue;
+        entry[0] = src[0];
+        entry[1] = src[1];
+        if (entry == dst) dst += 2;
+    }
+    if (native_reset_strategy == WGL_LOSE_CONTEXT_ON_RESET_ARB)
+    {
+        *dst++ = WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB;
+        *dst++ = native_reset_strategy;
+    }
+    *dst = 0;
 
     if ((format = get_dc_pixel_format( hdc )) <= 0 &&
         (format = get_window_pixel_format( NtUserWindowFromDC( hdc ) )) <= 0)
@@ -2480,7 +2543,7 @@ static struct opengl_context *win32u_context_create( HDC hdc, const int *attribs
         RtlSetLastWin32Error( ERROR_OUTOFMEMORY );
         return NULL;
     }
-    if (!driver_funcs->p_context_create( format, share, attribs, &context->driver_private, &shared ))
+    if (!driver_funcs->p_context_create( format, share, native_attribs, &context->driver_private, &shared ))
     {
         WARN( "Failed to create driver context for context %p\n", context );
         free( context );
@@ -2968,7 +3031,35 @@ static void display_funcs_init(void)
             init_device_info( egl, &display_funcs );
     }
 
-    global_context = internal_context_create();
+    if (global_extensions[WGL_ARB_create_context_robustness])
+    {
+        native_reset_strategy = WGL_LOSE_CONTEXT_ON_RESET_ARB;
+        global_context = internal_context_create();
+        if (!global_context || !global_context->driver_private)
+        {
+            free( global_context );
+            global_context = NULL;
+            native_reset_strategy = WGL_NO_RESET_NOTIFICATION_ARB;
+            global_extensions[WGL_ARB_create_context_robustness] = 0;
+        }
+    }
+    if (!global_context) global_context = internal_context_create();
+    if (global_context && global_context->driver_private
+            && native_reset_strategy == WGL_LOSE_CONTEXT_ON_RESET_ARB)
+    {
+        struct opengl_drawable *surface = get_null_surface( global_context );
+        GLint actual = 0;
+
+        if (driver_funcs->p_make_current( surface, surface, global_context->driver_private ))
+        {
+            display_funcs.p_glGetIntegerv( GL_RESET_NOTIFICATION_STRATEGY_ARB, &actual );
+            native_reset_verified = actual == GL_LOSE_CONTEXT_ON_RESET_ARB
+                    && display_funcs.p_glGetError() == GL_NO_ERROR;
+            TRACE( "Native reset strategy %#x, verified %u.\n", actual, native_reset_verified );
+            driver_funcs->p_make_current( NULL, NULL, NULL );
+        }
+    }
+    global_extensions[WGL_ARB_create_context_robustness] = native_reset_verified;
 }
 
 /***********************************************************************

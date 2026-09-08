@@ -697,7 +697,7 @@ static bool fbo_blitter_supported(enum wined3d_blit_op blit_op, const struct win
 
 /* Blit between surface locations. Onscreen on different swapchains is not supported.
  * Depth / stencil is not supported. Context activation is done by the caller. */
-static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_context *context,
+static bool texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_context *context,
         enum wined3d_blit_op blit_op, enum wined3d_texture_filter_type filter, struct wined3d_texture *src_texture,
         unsigned int src_sub_resource_idx, DWORD src_location, const RECT *src_rect,
         struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx, DWORD dst_location,
@@ -705,7 +705,7 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
 {
     struct wined3d_texture *required_texture, *restore_texture, *dst_save_texture = dst_texture;
     unsigned int restore_idx, dst_save_sub_resource_idx = dst_sub_resource_idx;
-    bool resolve, scaled_resolve, restore_context = false;
+    bool resolve, scaled_resolve, restore_context = false, success = false;
     struct wined3d_texture *src_staging_texture = NULL;
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
@@ -843,11 +843,18 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
      * surface isn't required if the entire surface is overwritten. (And is
      * in fact harmful if we're being called by surface_load_location() with
      * the purpose of loading the destination surface.) */
-    wined3d_texture_load_location(src_texture, src_sub_resource_idx, context, src_location);
+    if (!wined3d_texture_load_location(src_texture, src_sub_resource_idx, context, src_location))
+        goto done;
     if (!wined3d_texture_is_full_rect(dst_texture, dst_sub_resource_idx % dst_texture->level_count, dst_rect))
-        wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_location);
+    {
+        if (!wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_location))
+            goto done;
+    }
     else
-        wined3d_texture_prepare_location(dst_texture, dst_sub_resource_idx, context, dst_location);
+    {
+        if (!wined3d_texture_prepare_location(dst_texture, dst_sub_resource_idx, context, dst_location))
+            goto done;
+    }
 
     /* Acquire a context for the front-buffer, even though we may be blitting
      * to/from a back-buffer. Since context_acquire() doesn't take the
@@ -871,9 +878,7 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
     context_gl = wined3d_context_gl(context);
     if (!context_gl->valid)
     {
-        context_release(context);
         WARN("Invalid context, skipping blit.\n");
-        restore_context = false;
         goto done;
     }
 
@@ -896,10 +901,13 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
     wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_READ_FRAMEBUFFER,
             &src_texture->resource, src_sub_resource_idx, NULL, 0, src_location);
     gl_info->gl_ops.gl.p_glReadBuffer(buffer);
-    checkGLcall("glReadBuffer()");
-    wined3d_context_gl_check_fbo_status(context_gl, GL_READ_FRAMEBUFFER);
+    if (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR
+            || gl_info->fbo_ops.glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        goto done;
 
     context_gl_apply_texture_draw_state(context_gl, dst_texture, dst_sub_resource_idx, dst_location);
+    if (gl_info->fbo_ops.glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        goto done;
 
     if (dst_location == WINED3D_LOCATION_DRAWABLE)
     {
@@ -916,7 +924,8 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
 
     gl_info->fbo_ops.glBlitFramebuffer(src_rect->left, src_rect->top, src_rect->right, src_rect->bottom,
             dst_rect->left, dst_rect->top, dst_rect->right, dst_rect->bottom, GL_COLOR_BUFFER_BIT, gl_filter);
-    checkGLcall("glBlitFramebuffer()");
+    if (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR) goto done;
+    success = true;
 
     if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain->front_buffer == dst_texture)
         gl_info->gl_ops.gl.p_glFlush();
@@ -941,6 +950,7 @@ done:
 
     if (restore_context)
         context_restore(context, restore_texture, restore_idx);
+    return success;
 }
 
 static void texture2d_depth_blt_fbo(const struct wined3d_device *device, struct wined3d_context *context,
@@ -1107,8 +1117,14 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
     if (blit_op == WINED3D_BLIT_OP_COLOR_BLIT || blit_op == WINED3D_BLIT_OP_RAW_BLIT)
     {
         TRACE("Colour blit.\n");
-        texture2d_blt_fbo(device, context, blit_op, filter, src_texture, src_sub_resource_idx, src_location,
-                src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, resolve_format);
+        if (!texture2d_blt_fbo(device, context, blit_op, filter, src_texture, src_sub_resource_idx, src_location,
+                src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, resolve_format))
+            return 0;
+        /* Only this path checks storage loads, framebuffer completeness and
+         * the copy's GL error before attesting to a presentation blit. */
+        if (dst_location == WINED3D_LOCATION_DRAWABLE && dst_texture->swapchain
+                && src_texture == dst_texture && !src_sub_resource_idx && !dst_sub_resource_idx)
+            wined3d_swapchain_gl(dst_texture->swapchain)->present_blit_verified = true;
         return dst_location;
     }
 
@@ -1271,7 +1287,7 @@ static void gltexture_delete(struct wined3d_device *device, const struct wined3d
 }
 
 /* The caller is responsible for binding the correct texture. */
-static void wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_gl *texture_gl,
+static bool wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_gl *texture_gl,
         GLenum gl_internal_format, const struct wined3d_format_gl *format,
         const struct wined3d_gl_info *gl_info)
 {
@@ -1286,7 +1302,7 @@ static void wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_g
         layer_count = texture_gl->t.layer_count;
 
     GL_EXTCALL(glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0));
-    checkGLcall("glBindBuffer");
+    if (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR) return false;
 
     for (unsigned int layer = 0; layer < layer_count; ++layer)
     {
@@ -1311,7 +1327,6 @@ static void wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_g
                 GL_EXTCALL(glTexImage3D(target, level, gl_internal_format, width, height,
                         target == GL_TEXTURE_2D_ARRAY ? texture_gl->t.layer_count : depth, 0,
                         format->format, format->type, NULL));
-                checkGLcall("glTexImage3D");
             }
             else if (target == GL_TEXTURE_1D)
             {
@@ -1323,14 +1338,15 @@ static void wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_g
                 gl_info->gl_ops.gl.p_glTexImage2D(target, level, gl_internal_format, width,
                         target == GL_TEXTURE_1D_ARRAY ? texture_gl->t.layer_count : height, 0,
                         format->format, format->type, NULL);
-                checkGLcall("glTexImage2D");
             }
+            if (gl_info->gl_ops.gl.p_glGetError() != GL_NO_ERROR) return false;
         }
     }
+    return true;
 }
 
 /* The caller is responsible for binding the correct texture. */
-static void wined3d_texture_gl_allocate_immutable_storage(struct wined3d_texture_gl *texture_gl,
+static bool wined3d_texture_gl_allocate_immutable_storage(struct wined3d_texture_gl *texture_gl,
         GLenum gl_internal_format, const struct wined3d_gl_info *gl_info)
 {
     unsigned int samples = wined3d_resource_get_sample_count(&texture_gl->t.resource);
@@ -1370,7 +1386,7 @@ static void wined3d_texture_gl_allocate_immutable_storage(struct wined3d_texture
             break;
     }
 
-    checkGLcall("allocate immutable storage");
+    return gl_info->gl_ops.gl.p_glGetError() == GL_NO_ERROR;
 }
 
 static void wined3d_texture_gl_upload_bo(const struct wined3d_format *src_format, GLenum target,
@@ -2342,10 +2358,11 @@ static bool wined3d_texture_use_immutable_storage(const struct wined3d_texture *
             && !(texture->resource.format_attrs & WINED3D_FORMAT_ATTR_HEIGHT_SCALE);
 }
 
-void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
+bool wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
         struct wined3d_context_gl *context_gl, bool srgb)
 {
     uint32_t alloc_flag;
+    bool allocated;
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct wined3d_resource *resource = &texture_gl->t.resource;
     const struct wined3d_format *format = resource->format;
@@ -2355,11 +2372,11 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
     TRACE("texture_gl %p, context_gl %p, srgb %d, format %s.\n",
             texture_gl, context_gl, srgb, debug_d3dformat(format->id));
 
-    if (!needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t))
-        srgb = false;
+    if (!needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t)) srgb = false;
     alloc_flag = srgb ? WINED3D_TEXTURE_SRGB_ALLOCATED : WINED3D_TEXTURE_RGB_ALLOCATED;
     if (texture_gl->t.flags & alloc_flag)
-        return;
+        return true;
+    if (!context_gl->valid) return false;
 
     if (resource->format_caps & WINED3D_FORMAT_CAP_DECOMPRESS)
     {
@@ -2381,17 +2398,30 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
 
     TRACE("internal %#x, format %#x, type %#x.\n", internal, format_gl->format, format_gl->type);
 
-    if (wined3d_texture_use_immutable_storage(&texture_gl->t, gl_info))
-        wined3d_texture_gl_allocate_immutable_storage(texture_gl, internal, gl_info);
+    /* A mutable texture can retain its name while replacing the allocation.
+     * Initial allocation has no prior history to invalidate. */
+    if (texture_gl->t.swapchain && &texture_gl->t != texture_gl->t.swapchain->front_buffer
+            && wined3d_texture_gl_get_gl_texture(texture_gl,
+            srgb && needs_separate_srgb_gl_texture(&context_gl->c, &texture_gl->t))->storage_serial)
+        wined3d_swapchain_invalidate_present_results(texture_gl->t.swapchain);
+
+    if (!texture_gl->test_mutable_storage && wined3d_texture_use_immutable_storage(&texture_gl->t, gl_info))
+        allocated = wined3d_texture_gl_allocate_immutable_storage(texture_gl, internal, gl_info);
     else
-        wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
-    /* Refresh on every storage specification, even if the GL name is kept.
-     * A serial alone does not certify allocation or preservation success. */
+        allocated = wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
+    if (!allocated)
+    {
+        WARN("Failed to allocate texture %p storage.\n", texture_gl);
+        gltexture_delete(resource->device, gl_info, wined3d_texture_gl_get_gl_texture(texture_gl, srgb));
+        return false;
+    }
+    /* Only a successful storage specification receives an identity. */
     wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->storage_serial = wined3d_allocate_storage_serial();
     TRACE("Specified texture %u storage, serial %s.\n",
             wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->name,
             wine_dbgstr_longlong(wined3d_texture_gl_get_gl_texture(texture_gl, srgb)->storage_serial));
     texture_gl->t.flags |= alloc_flag;
+    return true;
 }
 
 static void wined3d_texture_gl_prepare_rb(struct wined3d_texture_gl *texture_gl,
@@ -2445,12 +2475,10 @@ static BOOL wined3d_texture_gl_prepare_location(struct wined3d_texture *texture,
             return TRUE;
 
         case WINED3D_LOCATION_TEXTURE_RGB:
-            wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false);
-            return TRUE;
+            return wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false);
 
         case WINED3D_LOCATION_TEXTURE_SRGB:
-            wined3d_texture_gl_prepare_texture(texture_gl, context_gl, true);
-            return TRUE;
+            return wined3d_texture_gl_prepare_texture(texture_gl, context_gl, true);
 
         case WINED3D_LOCATION_DRAWABLE:
             if (!texture->swapchain)
@@ -2641,6 +2669,14 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
     unsigned int sub_count;
 
     TRACE("texture %p, context %p, location %s.\n", texture, context, wined3d_debug_location(location));
+
+    /* Invalidate before deleting a back-buffer allocation, including callers
+     * which unload only one GPU location rather than the entire resource. */
+    if (texture->swapchain && texture != texture->swapchain->front_buffer
+            && ((location == WINED3D_LOCATION_TEXTURE_RGB && texture_gl->texture_rgb.name)
+            || (location == WINED3D_LOCATION_TEXTURE_SRGB && texture_gl->texture_srgb.name)
+            || (location == WINED3D_LOCATION_RB_MULTISAMPLE && texture_gl->rb_multisample)))
+        wined3d_swapchain_invalidate_present_results(texture->swapchain);
 
     switch (location)
     {
@@ -2836,7 +2872,13 @@ void wined3d_texture_gl_bind(struct wined3d_texture_gl *texture_gl,
         return;
     }
 
-    gl_info->gl_ops.gl.p_glGenTextures(1, &gl_tex->name);
+    if (texture_gl->test_reuse_name)
+    {
+        gl_tex->name = texture_gl->test_reuse_name;
+        texture_gl->test_reuse_name = 0;
+    }
+    else
+        gl_info->gl_ops.gl.p_glGenTextures(1, &gl_tex->name);
     checkGLcall("glGenTextures");
     TRACE("Generated texture %d.\n", gl_tex->name);
 
@@ -3125,4 +3167,54 @@ void wined3d_texture_gl_set_compatible_renderbuffer(struct wined3d_texture_gl *t
     }
 
     checkGLcall("set compatible renderbuffer");
+}
+
+/* CS-only deterministic storage replacement, used by Wine's DXGI tests. */
+bool wined3d_texture_gl_test_storage(struct wined3d_texture_gl *texture_gl,
+        struct wined3d_context_gl *context_gl, enum wined3d_gl_present_test action)
+{
+    struct wined3d_texture *texture = &texture_gl->t;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    GLuint old_name;
+
+    if (texture_gl->target != GL_TEXTURE_2D || texture->level_count != 1 || texture->layer_count != 1)
+        return false;
+    if (!wined3d_texture_load_location(texture, 0, &context_gl->c, WINED3D_LOCATION_TEXTURE_RGB)
+            || !wined3d_texture_load_location(texture, 0, &context_gl->c, WINED3D_LOCATION_SYSMEM))
+        return false;
+    old_name = texture_gl->texture_rgb.name;
+    if (action == WINED3D_GL_TEST_REDEFINE_STORAGE && !texture_gl->test_mutable_storage) return false;
+    texture->flags &= ~(WINED3D_TEXTURE_RGB_ALLOCATED | WINED3D_TEXTURE_RGB_VALID);
+    wined3d_texture_invalidate_location(texture, 0, ~WINED3D_LOCATION_SYSMEM);
+    if (action != WINED3D_GL_TEST_REDEFINE_STORAGE)
+    {
+        wined3d_texture_gl_unload_location(texture, &context_gl->c, WINED3D_LOCATION_TEXTURE_RGB);
+        if (action == WINED3D_GL_TEST_REUSE_NAME)
+        {
+            GLint attribs[] = {WGL_CONTEXT_MAJOR_VERSION_ARB, 2, WGL_CONTEXT_MINOR_VERSION_ARB, 1,
+                    WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB,
+                    gl_info->supported[WGL_ARB_CREATE_CONTEXT_ROBUSTNESS]
+                    ? WGL_LOSE_CONTEXT_ON_RESET_ARB : WGL_NO_RESET_NOTIFICATION_ARB, 0};
+            HGLRC compat;
+            bool rebound = false;
+
+            /* Core contexts require generated names. A sharing compatibility
+             * context can legally recreate this exact deleted numeric name. */
+            if (!gl_info->p_wglCreateContextAttribsARB
+                    || !(compat = gl_info->p_wglCreateContextAttribsARB(context_gl->dc, context_gl->gl_ctx, attribs)))
+                return false;
+            if (wglMakeCurrent(context_gl->dc, compat))
+            {
+                gl_info->gl_ops.gl.p_glBindTexture(texture_gl->target, old_name);
+                rebound = gl_info->gl_ops.gl.p_glGetError() == GL_NO_ERROR;
+            }
+            if (!wglMakeCurrent(context_gl->dc, context_gl->gl_ctx)) rebound = false;
+            if (!wglDeleteContext(compat)) rebound = false;
+            if (!rebound) return false;
+            texture_gl->test_reuse_name = old_name;
+        }
+        if (action == WINED3D_GL_TEST_MUTABLE_STORAGE) texture_gl->test_mutable_storage = true;
+    }
+    if (!wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false)) return false;
+    return wined3d_texture_load_location(texture, 0, &context_gl->c, WINED3D_LOCATION_TEXTURE_RGB);
 }

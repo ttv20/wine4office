@@ -685,7 +685,9 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
     result.present_id = op->present_id;
     result.result = E_FAIL;
     AcquireSRWLockShared(&swapchain->present_result_lock);
-    result.identity_generation = swapchain->present_identity_generation;
+    record = &swapchain->present_results[op->present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    if (record->result.present_id == op->present_id)
+        result.identity_generation = record->result.identity_generation;
     ReleaseSRWLockShared(&swapchain->present_result_lock);
     desc = &swapchain->state.desc;
     back_buffer = swapchain->back_buffers[0];
@@ -773,7 +775,10 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
 
     AcquireSRWLockExclusive(&swapchain->present_result_lock);
     record = &swapchain->present_results[result.present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
-    if (record->result.present_id == result.present_id)
+    if (record->result.present_id == result.present_id
+            && result.identity_generation
+            && record->result.identity_generation == result.identity_generation
+            && swapchain->present_identity_generation == result.identity_generation)
     {
         record->result = result;
         record->completed = true;

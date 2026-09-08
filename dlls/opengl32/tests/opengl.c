@@ -5292,6 +5292,104 @@ static void test_memory_map( HDC hdc)
     wglMakeCurrent( hdc, old_rc );
 }
 
+static void test_reset_notification( HDC hdc )
+{
+    static const GLint strategies[] = {WGL_NO_RESET_NOTIFICATION_ARB, WGL_LOSE_CONTEXT_ON_RESET_ARB};
+    GLenum (WINAPI *get_reset_status)(void);
+    HGLRC old = wglGetCurrentContext(), context, shared, incompatible;
+    const char *extensions;
+    GLint actual, attribs[] = {WGL_CONTEXT_MAJOR_VERSION_ARB, 2,
+            WGL_CONTEXT_MINOR_VERSION_ARB, 1, WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB, 0, 0};
+    GLuint texture;
+    unsigned int pixel, expected = 0xff4080c0;
+    GLfloat value_float;
+    GLdouble value_double;
+    GLboolean value_boolean;
+    unsigned int i;
+
+    if (!ext.wglGetExtensionsStringARB || !ext.wglCreateContextAttribsARB
+            || !(extensions = ext.wglGetExtensionsStringARB( hdc ))
+            || !strstr( extensions, "WGL_ARB_create_context_robustness" ))
+    {
+        win_skip( "WGL_ARB_create_context_robustness is unavailable.\n" );
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(strategies); ++i)
+    {
+        winetest_push_context( "strategy %#x", strategies[i] );
+        attribs[5] = strategies[i];
+        context = ext.wglCreateContextAttribsARB( hdc, NULL, attribs );
+        ok( !!context, "Failed to create context, error %lu.\n", GetLastError() );
+        if (!context)
+        {
+            winetest_pop_context();
+            continue;
+        }
+        ok( wglMakeCurrent( hdc, context ), "Failed to make context current.\n" );
+        actual = 0;
+        glGetIntegerv( GL_RESET_NOTIFICATION_STRATEGY_ARB, &actual );
+        ok( glGetError() == GL_NO_ERROR, "Reset strategy query failed.\n" );
+        ok( actual == strategies[i], "Got strategy %#x, expected %#x.\n", actual, strategies[i] );
+        value_float = value_double = 0;
+        glGetFloatv( GL_RESET_NOTIFICATION_STRATEGY_ARB, &value_float );
+        glGetDoublev( GL_RESET_NOTIFICATION_STRATEGY_ARB, &value_double );
+        ok( value_float == strategies[i], "Float reset strategy %f.\n", value_float );
+        ok( value_double == strategies[i], "Double reset strategy %f.\n", value_double );
+        value_boolean = GL_FALSE;
+        glGetBooleanv( GL_RESET_NOTIFICATION_STRATEGY_ARB, &value_boolean );
+        ok( value_boolean == GL_TRUE, "Boolean reset strategy %#x.\n", value_boolean );
+        glGenTextures( 1, &texture );
+        glBindTexture( GL_TEXTURE_2D, texture );
+        glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &expected );
+        ok( glGetError() == GL_NO_ERROR, "Texture allocation failed.\n" );
+
+        get_reset_status = (void *)wglGetProcAddress( "glGetGraphicsResetStatusARB" );
+        ok( !!get_reset_status, "Reset status function is unavailable.\n" );
+        if (get_reset_status)
+            ok( get_reset_status() == GL_NO_ERROR, "Fresh context reports a reset.\n" );
+
+        attribs[5] = strategies[!i];
+        incompatible = ext.wglCreateContextAttribsARB( hdc, context, attribs );
+        ok( !incompatible, "Created a context sharing a different reset strategy.\n" );
+        if (incompatible) wglDeleteContext( incompatible );
+        incompatible = ext.wglCreateContextAttribsARB( hdc, NULL, attribs );
+        ok( !!incompatible, "Failed to create independent context with different strategy.\n" );
+        if (incompatible)
+        {
+            ok( !wglShareLists( context, incompatible ), "Shared lists between different reset strategies.\n" );
+            wglDeleteContext( incompatible );
+        }
+        attribs[5] = strategies[i];
+
+        shared = ext.wglCreateContextAttribsARB( hdc, context, attribs );
+        ok( !!shared, "Failed to create a context with the same sharing strategy.\n" );
+        if (shared)
+        {
+            ok( wglMakeCurrent( hdc, shared ), "Failed to make shared context current.\n" );
+            actual = 0;
+            glGetIntegerv( GL_RESET_NOTIFICATION_STRATEGY_ARB, &actual );
+            ok( actual == strategies[i], "Shared context has strategy %#x.\n", actual );
+            ok( glGetError() == GL_NO_ERROR, "Shared reset query failed.\n" );
+            glBindTexture( GL_TEXTURE_2D, texture );
+            pixel = 0;
+            glGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, &pixel );
+            ok( pixel == expected, "Shared texture has pixel %#x, expected %#x.\n", pixel, expected );
+            ok( glGetError() == GL_NO_ERROR, "Shared texture read failed.\n" );
+            glClearColor( 1.0f, 0.0f, 0.0f, 1.0f );
+            glClear( GL_COLOR_BUFFER_BIT );
+            ok( SwapBuffers( hdc ), "Failed to present with reset strategy %#x.\n", strategies[i] );
+            glDeleteTextures( 1, &texture );
+            ok( wglMakeCurrent( hdc, old ), "Failed to restore original context.\n" );
+            ok( wglDeleteContext( shared ), "Failed to delete shared context.\n" );
+        }
+        else
+            wglMakeCurrent( hdc, old );
+        ok( wglDeleteContext( context ), "Failed to delete context.\n" );
+        winetest_pop_context();
+    }
+}
+
 START_TEST(opengl)
 {
     const PIXELFORMATDESCRIPTOR pfd =
@@ -5309,6 +5407,13 @@ START_TEST(opengl)
     HGLRC hglrc;
     HWND hwnd;
     HDC hdc;
+    char **argv;
+    int argc, i;
+    BOOL reset_only = FALSE;
+
+    argc = winetest_get_mainargs( &argv );
+    for (i = 2; i < argc; ++i)
+        if (!strcmp( argv[i], "--reset-notification-only" )) reset_only = TRUE;
 
     pD3DKMTCreateDCFromMemory = (void *)GetProcAddress( gdi32, "D3DKMTCreateDCFromMemory" );
     pD3DKMTDestroyDCFromMemory = (void *)GetProcAddress( gdi32, "D3DKMTDestroyDCFromMemory" );
@@ -5334,6 +5439,21 @@ START_TEST(opengl)
     ok_ptr( glGetString( GL_RENDERER ), ==, NULL );
     ok_ptr( glGetString( GL_VERSION ), ==, NULL );
     ok_ptr( glGetString( GL_VENDOR ), ==, NULL );
+
+    if (reset_only)
+    {
+        hglrc = wglCreateContext( hdc );
+        ok( !!hglrc, "Failed to create initial context.\n" );
+        if (hglrc)
+        {
+            ok( wglMakeCurrent( hdc, hglrc ), "Failed to make initial context current.\n" );
+            init_functions();
+            test_reset_notification( hdc );
+            wglMakeCurrent( NULL, NULL );
+            wglDeleteContext( hglrc );
+        }
+        goto cleanup;
+    }
 
     test_bitmap_rendering( TRUE );
     test_bitmap_rendering( FALSE );
@@ -5405,6 +5525,7 @@ START_TEST(opengl)
     {
         test_wglCreateContextAttribsARB( hdc );
         test_object_creation( hdc );
+        test_reset_notification( hdc );
     }
 
     if (strstr( wgl_extensions, "WGL_ARB_make_current_read" ))

@@ -167,6 +167,7 @@ typedef XID GLXPbuffer;
 #define GLX_CONTEXT_OPENGL_NO_ERROR_ARB   0x31B3
 /** GLX_ARB_create_context_profile */
 #define GLX_CONTEXT_PROFILE_MASK_ARB      0x9126
+#define GLX_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB 0x8256
 /** GLX_ATI_pixel_format_float */
 #define GLX_RGBA_FLOAT_ATI_BIT            0x00000100
 /** GLX_ARB_pixel_format_float */
@@ -1201,7 +1202,7 @@ static void x11drv_surface_flush( struct opengl_drawable *base, UINT flags )
  */
 static BOOL x11drv_context_create( int format, void *share, const int *attribList, void **context, BOOL *shared )
 {
-    int glx_attribs[16] = {0}, *pContextAttribList = glx_attribs;
+    int glx_attribs[16] = {0}, *attribs_end = glx_attribs;
     int err = 0;
 
     TRACE("(%d %p %p)\n", format, share, attribList);
@@ -1211,38 +1212,42 @@ static BOOL x11drv_context_create( int format, void *share, const int *attribLis
         /* attribList consists of pairs {token, value] terminated with 0 */
         while(attribList[0] != 0)
         {
+            int name = 0, *dst;
+
             TRACE("%#x %#x\n", attribList[0], attribList[1]);
             switch(attribList[0])
             {
             case WGL_CONTEXT_MAJOR_VERSION_ARB:
-                pContextAttribList[0] = GLX_CONTEXT_MAJOR_VERSION_ARB;
-                pContextAttribList[1] = attribList[1];
-                pContextAttribList += 2;
+                name = GLX_CONTEXT_MAJOR_VERSION_ARB;
                 break;
             case WGL_CONTEXT_MINOR_VERSION_ARB:
-                pContextAttribList[0] = GLX_CONTEXT_MINOR_VERSION_ARB;
-                pContextAttribList[1] = attribList[1];
-                pContextAttribList += 2;
+                name = GLX_CONTEXT_MINOR_VERSION_ARB;
                 break;
             case WGL_CONTEXT_LAYER_PLANE_ARB:
                 break;
             case WGL_CONTEXT_FLAGS_ARB:
-                pContextAttribList[0] = GLX_CONTEXT_FLAGS_ARB;
-                pContextAttribList[1] = attribList[1];
-                pContextAttribList += 2;
+                name = GLX_CONTEXT_FLAGS_ARB;
                 break;
             case WGL_CONTEXT_OPENGL_NO_ERROR_ARB:
-                pContextAttribList[0] = GLX_CONTEXT_OPENGL_NO_ERROR_ARB;
-                pContextAttribList[1] = attribList[1];
-                pContextAttribList += 2;
+                name = GLX_CONTEXT_OPENGL_NO_ERROR_ARB;
                 break;
             case WGL_CONTEXT_PROFILE_MASK_ARB:
-                pContextAttribList[0] = GLX_CONTEXT_PROFILE_MASK_ARB;
-                pContextAttribList[1] = attribList[1];
-                pContextAttribList += 2;
+                name = GLX_CONTEXT_PROFILE_MASK_ARB;
+                break;
+            case WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB:
+                name = GLX_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB;
                 break;
             default:
                 ERR("Unhandled attribList pair: %#x %#x\n", attribList[0], attribList[1]);
+            }
+            if (name)
+            {
+                /* Merge repetitions instead of overflowing the fixed list. */
+                for (dst = glx_attribs; dst != attribs_end && *dst != name; dst += 2) continue;
+                assert( dst - glx_attribs <= ARRAY_SIZE(glx_attribs) - 3 );
+                dst[0] = name;
+                dst[1] = attribList[1];
+                if (dst == attribs_end) attribs_end += 2;
             }
             attribList += 2;
         }
@@ -1379,6 +1384,9 @@ static void x11drv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensio
 {
     /* ARB Extensions */
 
+    if (has_extension( glxExtensions, "GLX_ARB_create_context_robustness" ))
+        extensions[WGL_ARB_create_context_robustness] = 1;
+
     if (has_extension( glxExtensions, "GLX_ARB_multisample"))
         extensions[WGL_ARB_multisample] = 1;
 
@@ -1498,7 +1506,7 @@ static BOOL x11drv_egl_surface_swap( struct opengl_drawable *base )
 
     TRACE( "%s\n", debugstr_opengl_drawable( base ) );
 
-    funcs->p_eglSwapBuffers( egl->display, gl->base.surface );
+    if (!funcs->p_eglSwapBuffers( egl->display, gl->base.surface )) return FALSE;
 
     if (InterlockedCompareExchange( &base->client->offscreen, 0, 0 ))
         XFlush( gdi_display );

@@ -18,6 +18,7 @@
  */
 
 #include "dxgi_private.h"
+#include "wine/wined3d_test.h"
 #include "wine/dcomp.h"
 
 #define VKD3D_NO_VULKAN_H
@@ -313,6 +314,54 @@ HRESULT WINAPI __wine_dxgi_get_test_present_result(IDXGISwapChain1 *iface,
     }
     swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
     hr = wined3d_swapchain_wait_present_result(swapchain->wined3d_swapchain, swapchain->last_present_id, result);
+    IDXGISwapChain4_Release(swapchain4);
+    return hr;
+}
+
+HRESULT WINAPI __wine_dxgi_peek_test_present_result(IDXGISwapChain1 *iface,
+        struct wined3d_swapchain_present_result *result)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *swapchain4;
+    HRESULT hr;
+
+    if (result)
+        memset(result, 0, sizeof(*result));
+    if (!iface || !result)
+        return E_INVALIDARG;
+    if (FAILED(hr = IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4, (void **)&swapchain4)))
+        return hr;
+    if (swapchain4->lpVtbl != &d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(swapchain4);
+        return E_NOINTERFACE;
+    }
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+    hr = wined3d_swapchain_get_present_result(swapchain->wined3d_swapchain, swapchain->last_present_id, result);
+    IDXGISwapChain4_Release(swapchain4);
+    return hr;
+}
+
+HRESULT WINAPI __wine_dxgi_test_gl(IDXGISwapChain1 *iface, enum wined3d_gl_present_test action,
+        unsigned int buffer_idx, struct wined3d_gl_storage_test_result *result)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *swapchain4;
+    HRESULT hr;
+
+    if (result) memset(result, 0, sizeof(*result));
+    if (!iface || !result) return E_INVALIDARG;
+    if (FAILED(hr = IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4, (void **)&swapchain4)))
+        return hr;
+    if (swapchain4->lpVtbl != &d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(swapchain4);
+        return E_NOINTERFACE;
+    }
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+    wined3d_mutex_lock();
+    hr = wined3d_swapchain_test_gl(swapchain->wined3d_swapchain, action, buffer_idx, result);
+    wined3d_mutex_unlock();
     IDXGISwapChain4_Release(swapchain4);
     return hr;
 }

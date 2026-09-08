@@ -1020,6 +1020,10 @@ HGLRC wrap_wglCreateContextAttribsARB( TEB *teb, HDC hdc, HGLRC client_shared, c
     opengl_client_context_init( client_context, context, funcs );
     context->client_context = client_context;
     client->format = context->format;
+    client->reset_notification = WGL_NO_RESET_NOTIFICATION_ARB;
+    for (const int *attr = attribs; attr && attr[0]; attr += 2)
+        if (attr[0] == WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB)
+            client->reset_notification = attr[1];
 
     return client_context;
 }
@@ -1420,6 +1424,15 @@ void wrap_glGetFramebufferParameterivEXT( TEB *teb, GLuint fbo, GLenum pname, GL
     }
 
     p_glGetFramebufferParameterivEXT( fbo, pname, params );
+}
+
+GLenum wrap_glGetGraphicsResetStatus( TEB *teb, PFN_glGetGraphicsResetStatus get_status )
+{
+    struct opengl_client_context *client;
+
+    if (!get_current_context( teb, NULL, NULL, &client )) return GL_NO_ERROR;
+    if (client->reset_notification == WGL_NO_RESET_NOTIFICATION_ARB) return GL_NO_ERROR;
+    return get_status();
 }
 
 GLenum wrap_glGetError( TEB *teb, PFN_glGetError p_glGetError )

@@ -7,3 +7,6 @@
 @ stdcall __wine_dxgi_bind_composition_window(long long)
 @ stdcall __wine_dxgi_set_composition_description(ptr ptr)
 @ stdcall -private __wine_dxgi_get_test_present_result(ptr ptr)
+
+@ stdcall -private __wine_dxgi_test_gl(ptr long long ptr)
+@ stdcall -private __wine_dxgi_peek_test_present_result(ptr ptr)

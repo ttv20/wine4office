@@ -223,6 +223,7 @@ enum wined3d_gl_extension
     NV_VERTEX_PROGRAM3,
     NV_TEXTURE_BARRIER,
     /* WGL extensions */
+    WGL_ARB_CREATE_CONTEXT_ROBUSTNESS,
     WGL_ARB_PIXEL_FORMAT,
     WGL_EXT_SWAP_CONTROL,
     WGL_WINE_PIXEL_FORMAT_PASSTHROUGH,
@@ -619,6 +620,8 @@ struct fbo_entry
 struct wined3d_context_gl
 {
     struct wined3d_context c;
+    bool reset_notification;
+    GLenum test_reset_status;
 
     const struct wined3d_gl_info *gl_info;
 
@@ -868,6 +871,9 @@ struct wined3d_device_gl
     struct wined3d_dummy_textures dummy_textures;
 
     CRITICAL_SECTION allocator_cs;
+    struct list present_device_entry;
+    SRWLOCK present_swapchains_lock;
+    struct list present_swapchains;
     struct wined3d_allocator allocator;
     uint64_t completed_fence_id;
     uint64_t current_fence_id;
@@ -961,6 +967,8 @@ struct wined3d_texture_gl
     struct wined3d_texture t;
 
     struct gl_texture texture_rgb, texture_srgb;
+    GLuint test_reuse_name;
+    bool test_mutable_storage;
 
     GLenum target;
 
@@ -1040,7 +1048,9 @@ void wined3d_texture_gl_bind_and_dirtify(struct wined3d_texture_gl *texture_gl,
 HRESULT wined3d_texture_gl_init(struct wined3d_texture_gl *texture_gl, struct wined3d_device *device,
         const struct wined3d_resource_desc *desc, unsigned int layer_count, unsigned int level_count,
         uint32_t flags, void *parent, const struct wined3d_parent_ops *parent_ops);
-void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
+bool wined3d_texture_gl_test_storage(struct wined3d_texture_gl *texture_gl,
+        struct wined3d_context_gl *context_gl, enum wined3d_gl_present_test action);
+bool wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
         struct wined3d_context_gl *context_gl, bool srgb);
 void wined3d_texture_gl_set_compatible_renderbuffer(struct wined3d_texture_gl *texture_gl,
         struct wined3d_context_gl *context_gl, unsigned int level, const struct wined3d_rendertarget_info *rt);
@@ -1145,6 +1155,11 @@ void wined3d_unordered_access_view_gl_update(struct wined3d_unordered_access_vie
 struct wined3d_swapchain_gl
 {
     struct wined3d_swapchain s;
+    struct list present_entry;
+    enum wined3d_gl_present_test test_present_action;
+    uint64_t test_present_generation;
+    HANDLE test_present_gate;
+    bool present_blit_verified;
 };
 
 static inline struct wined3d_swapchain_gl *wined3d_swapchain_gl(struct wined3d_swapchain *swapchain)
@@ -1153,6 +1168,10 @@ static inline struct wined3d_swapchain_gl *wined3d_swapchain_gl(struct wined3d_s
 }
 
 void wined3d_swapchain_gl_cleanup(struct wined3d_swapchain_gl *swapchain_gl);
+void wined3d_device_gl_invalidate_present_results(struct wined3d_device_gl *device_gl);
+bool wined3d_context_gl_check_reset(struct wined3d_context_gl *context_gl);
+void wined3d_device_gl_register_present(struct wined3d_device_gl *device_gl);
+void wined3d_device_gl_unregister_present(struct wined3d_device_gl *device_gl);
 struct wined3d_context_gl *wined3d_swapchain_gl_get_context(struct wined3d_swapchain_gl *swapchain_gl);
 HRESULT wined3d_swapchain_gl_init(struct wined3d_swapchain_gl *swapchain_gl, struct wined3d_device *device,
         const struct wined3d_swapchain_desc *desc, struct wined3d_swapchain_state_parent *state_parent,

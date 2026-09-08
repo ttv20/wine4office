@@ -978,12 +978,21 @@ HGLRC WINAPI wglCreateContextAttribsARB( HDC hdc, HGLRC share, const int *attrib
 {
     struct wglCreateContextAttribsARB_params args = { .teb = NtCurrentTeb(), .hDC = hdc, .attribList = attribs };
     struct context *share_context = NULL;
+    GLint reset_notification = WGL_NO_RESET_NOTIFICATION_ARB;
+    const int *attr;
     struct handle_entry *ptr;
     NTSTATUS status;
 
     TRACE( "hdc %p, share %p, attribs %p\n", hdc, share, attribs );
 
     if (share && !(share_context = context_from_handle( share )))
+    {
+        SetLastError( ERROR_INVALID_OPERATION );
+        return NULL;
+    }
+    for (attr = attribs; attr && attr[0]; attr += 2)
+        if (attr[0] == WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB) reset_notification = attr[1];
+    if (share_context && share_context->base.reset_notification != reset_notification)
     {
         SetLastError( ERROR_INVALID_OPERATION );
         return NULL;
@@ -1089,6 +1098,11 @@ BOOL WINAPI wglShareLists( HGLRC src_handle, HGLRC dst_handle )
 
     if (!(src_context = context_from_handle( src_handle ))) return FALSE;
     if (!(dst_context = context_from_handle( dst_handle ))) return FALSE;
+    if (src_context->base.reset_notification != dst_context->base.reset_notification)
+    {
+        SetLastError( ERROR_INVALID_OPERATION );
+        return FALSE;
+    }
     if (ReadNoFence( &dst_context->lists->modified )) return FALSE;
 
     if (src_context->base.broken_sharing || dst_context->base.broken_sharing)
@@ -2909,6 +2923,9 @@ BOOL get_integer( GLenum name, GLuint index, GLint value, GLint *data )
 
     switch (name)
     {
+    case GL_RESET_NOTIFICATION_STRATEGY_ARB:
+        *data = ctx->base.reset_notification;
+        return TRUE;
     case GL_CONTEXT_FLAGS:
         *data = ctx->base.context_flags;
         return TRUE;

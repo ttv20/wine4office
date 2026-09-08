@@ -9613,7 +9613,7 @@ static NTSTATUS ext_glGetGraphicsResetStatus( void *args )
     struct glGetGraphicsResetStatus_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glGetGraphicsResetStatus) return STATUS_NOT_IMPLEMENTED;
-    params->ret = funcs->p_glGetGraphicsResetStatus();
+    params->ret = wrap_glGetGraphicsResetStatus( params->teb, funcs->p_glGetGraphicsResetStatus );
     return STATUS_SUCCESS;
 }
 
@@ -9622,7 +9622,7 @@ static NTSTATUS ext_glGetGraphicsResetStatusARB( void *args )
     struct glGetGraphicsResetStatusARB_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glGetGraphicsResetStatusARB) return STATUS_NOT_IMPLEMENTED;
-    params->ret = funcs->p_glGetGraphicsResetStatusARB();
+    params->ret = wrap_glGetGraphicsResetStatus( params->teb, funcs->p_glGetGraphicsResetStatusARB );
     return STATUS_SUCCESS;
 }
 
@@ -48200,7 +48200,7 @@ static NTSTATUS wow64_ext_glGetGraphicsResetStatus( void *args )
     TEB *teb = get_teb64( params->teb );
     const struct opengl_funcs *funcs = teb->glTable;
     if (!funcs->p_glGetGraphicsResetStatus) return STATUS_NOT_IMPLEMENTED;
-    params->ret = funcs->p_glGetGraphicsResetStatus();
+    params->ret = wrap_glGetGraphicsResetStatus( teb, funcs->p_glGetGraphicsResetStatus );
     return STATUS_SUCCESS;
 }
 
@@ -48214,7 +48214,7 @@ static NTSTATUS wow64_ext_glGetGraphicsResetStatusARB( void *args )
     TEB *teb = get_teb64( params->teb );
     const struct opengl_funcs *funcs = teb->glTable;
     if (!funcs->p_glGetGraphicsResetStatusARB) return STATUS_NOT_IMPLEMENTED;
-    params->ret = funcs->p_glGetGraphicsResetStatusARB();
+    params->ret = wrap_glGetGraphicsResetStatus( teb, funcs->p_glGetGraphicsResetStatusARB );
     return STATUS_SUCCESS;
 }
 

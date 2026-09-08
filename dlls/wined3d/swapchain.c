@@ -101,9 +101,55 @@ void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
     }
 }
 
+static void swapchain_gl_detach_contexts(void *object)
+{
+    struct wined3d_swapchain *swapchain = object;
+    struct wined3d_device *device = swapchain->device;
+    unsigned int i;
+
+    /* Contexts are shared by the device and can outlive an explicit
+     * swapchain. Drop their borrowed pointer on the CS before freeing it. */
+    for (i = 0; i < device->context_count; ++i)
+    {
+        struct wined3d_context_gl *context_gl = wined3d_context_gl(device->contexts[i]);
+
+        if (context_gl->c.swapchain != swapchain) continue;
+        context_gl->c.swapchain = NULL;
+        context_gl->window = NULL;
+        context_gl->dc = wined3d_device_gl_get_backup_dc(wined3d_device_gl(device));
+        context_gl->dc_is_private = TRUE;
+        context_gl->dc_has_format = FALSE;
+        context_gl->internal_format_set = 0;
+        context_gl->needs_set = 1;
+        context_gl->valid = !!context_gl->dc;
+    }
+}
+
 void wined3d_swapchain_gl_cleanup(struct wined3d_swapchain_gl *swapchain_gl)
 {
+    struct wined3d_device_gl *device_gl = wined3d_device_gl(swapchain_gl->s.device);
+
+    /* Removal pins every entry against a concurrent share-group walk without
+     * making the registry own a reference cycle through the device. */
+    AcquireSRWLockExclusive(&device_gl->present_swapchains_lock);
+    list_remove(&swapchain_gl->present_entry);
+    ReleaseSRWLockExclusive(&device_gl->present_swapchains_lock);
+    wined3d_cs_init_object(swapchain_gl->s.device->cs, swapchain_gl_detach_contexts, &swapchain_gl->s);
+    wined3d_cs_finish(swapchain_gl->s.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    if (swapchain_gl->test_present_gate) CloseHandle(swapchain_gl->test_present_gate);
     wined3d_swapchain_cleanup(&swapchain_gl->s);
+}
+
+void wined3d_device_gl_invalidate_present_results(struct wined3d_device_gl *device_gl)
+{
+    struct wined3d_swapchain_gl *swapchain_gl;
+
+    /* Never acquire the global WineD3D mutex or wait for the CS here. The
+     * only nested lock is the individual swapchain's result lock. */
+    AcquireSRWLockShared(&device_gl->present_swapchains_lock);
+    LIST_FOR_EACH_ENTRY(swapchain_gl, &device_gl->present_swapchains, struct wined3d_swapchain_gl, present_entry)
+        wined3d_swapchain_invalidate_present_results(&swapchain_gl->s);
+    ReleaseSRWLockShared(&device_gl->present_swapchains_lock);
 }
 
 static void wined3d_swapchain_vk_destroy_vulkan_swapchain(struct wined3d_swapchain_vk *swapchain_vk)
@@ -307,6 +353,7 @@ HRESULT CDECL wined3d_swapchain_present_with_token(struct wined3d_swapchain *swa
     AcquireSRWLockExclusive(&swapchain->present_result_lock);
     if (!(id = ++swapchain->next_present_id))
         id = ++swapchain->next_present_id;
+    swapchain->present_storage_invalidated = false;
     record = &swapchain->present_results[id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
     memset(record, 0, sizeof(*record));
     record->result.present_id = id;
@@ -465,6 +512,14 @@ void CDECL wined3d_swapchain_invalidate_present_results(struct wined3d_swapchain
     TRACE("swapchain %p.\n", swapchain);
 
     AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    /* Unloading several back buffers and then destroying their share group
+     * is one transition. Coalesce until another submission can own a result. */
+    if (swapchain->present_storage_invalidated)
+    {
+        ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+        return;
+    }
+    swapchain->present_storage_invalidated = true;
     memset(swapchain->present_results, 0, sizeof(swapchain->present_results));
     swapchain->last_submitted_present_id = 0;
     swapchain->last_completed_present_id = 0;
@@ -665,7 +720,8 @@ static HRESULT swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
         return WINED3DERR_NOTAVAILABLE;
     }
 
-    wined3d_texture_load_location(back_buffer, 0, context, WINED3D_LOCATION_SYSMEM);
+    if (!wined3d_texture_load_location(back_buffer, 0, context, WINED3D_LOCATION_SYSMEM))
+        return E_FAIL;
     wined3d_texture_get_pitch(back_buffer, 0, &row_pitch, &slice_pitch);
 
     create_desc.pMemory = back_buffer->resource.heap_memory;
@@ -704,13 +760,13 @@ static HRESULT swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
 }
 
 /* A GL context is provided by the caller */
-static void swapchain_blit(const struct wined3d_swapchain *swapchain,
+static bool swapchain_blit(struct wined3d_swapchain *swapchain,
         struct wined3d_context *context, const RECT *src_rect, const RECT *dst_rect)
 {
     struct wined3d_texture *texture = swapchain->back_buffers[0];
     struct wined3d_device *device = swapchain->device;
     enum wined3d_texture_filter_type filter;
-    DWORD location;
+    DWORD location, copied;
 
     TRACE("swapchain %p, context %p, src_rect %s, dst_rect %s.\n",
             swapchain, context, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect));
@@ -727,9 +783,11 @@ static void swapchain_blit(const struct wined3d_swapchain *swapchain,
         location = WINED3D_LOCATION_RB_RESOLVED;
 
     wined3d_texture_validate_location(texture, 0, WINED3D_LOCATION_DRAWABLE);
-    device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_COLOR_BLIT, context, texture, 0,
+    wined3d_swapchain_gl(swapchain)->present_blit_verified = false;
+    copied = device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_COLOR_BLIT, context, texture, 0,
             location, src_rect, texture, 0, WINED3D_LOCATION_DRAWABLE, dst_rect, NULL, filter, NULL);
     wined3d_texture_invalidate_location(texture, 0, WINED3D_LOCATION_DRAWABLE);
+    return !!(copied & WINED3D_LOCATION_DRAWABLE);
 }
 
 static void swapchain_gl_set_swap_interval(struct wined3d_swapchain *swapchain,
@@ -754,7 +812,7 @@ static void swapchain_gl_set_swap_interval(struct wined3d_swapchain *swapchain,
 }
 
 /* Context activation is done by the caller. */
-static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+static bool wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
 {
     struct wined3d_texture_sub_resource *sub_resource;
     struct wined3d_texture_gl *texture, *texture_prev;
@@ -766,7 +824,16 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
     static const DWORD supported_locations = WINED3D_LOCATION_TEXTURE_RGB | WINED3D_LOCATION_RB_MULTISAMPLE;
 
     if (swapchain->state.desc.backbuffer_count < 2)
-        return;
+        return true;
+
+    /* Prepare every allocation before changing any wrapper mapping. */
+    for (i = 1; i < swapchain->state.desc.backbuffer_count; ++i)
+    {
+        struct wined3d_texture *buffer = swapchain->back_buffers[i];
+        if (!(buffer->sub_resources[0].locations & supported_locations)
+                && !wined3d_texture_load_location(buffer, 0, context, buffer->resource.draw_binding))
+            return false;
+    }
 
     texture_prev = wined3d_texture_gl(swapchain->back_buffers[0]);
 
@@ -780,9 +847,6 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
     {
         texture = wined3d_texture_gl(swapchain->back_buffers[i]);
         sub_resource = &texture->t.sub_resources[0];
-
-        if (!(sub_resource->locations & supported_locations))
-            wined3d_texture_load_location(&texture->t, 0, context, texture->t.resource.draw_binding);
 
         texture_prev->texture_rgb = texture->texture_rgb;
         texture_prev->rb_multisample = texture->rb_multisample;
@@ -802,6 +866,7 @@ static void wined3d_swapchain_gl_rotate(struct wined3d_swapchain *swapchain, str
     wined3d_texture_invalidate_location(&texture_prev->t, 0, ~(locations0 & supported_locations));
 
     device_invalidate_state(swapchain->device, STATE_FRAMEBUFFER);
+    return true;
 }
 
 static bool swapchain_present_is_partial_copy(struct wined3d_swapchain *swapchain, const RECT *dst_rect)
@@ -847,11 +912,46 @@ static uint64_t wined3d_swapchain_gl_get_physical_identity(struct wined3d_swapch
     return 0;
 }
 
+static const char *swapchain_gl_sparse_fallback(struct wined3d_swapchain *swapchain,
+        const struct wined3d_context_gl *context_gl)
+{
+    unsigned int i;
+
+    if (!context_gl->reset_notification) return "reset-notification-unavailable";
+    if (!wined3d_swapchain_gl(swapchain)->present_blit_verified)
+        return "unproven-presentation-blit";
+    if (swapchain->composition_desc.flags & WINE_DCOMP_VISUAL_RENDERER_ACTIVE) return "dcomp-renderer-active";
+    if (swapchain->state.desc.backbuffer_count < 2 || swapchain->state.desc.backbuffer_count > 4)
+        return "unproven-buffer-count";
+    for (i = 0; i < swapchain->state.desc.backbuffer_count; ++i)
+    {
+        const struct wined3d_texture *texture = swapchain->back_buffers[i];
+        const struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(swapchain->back_buffers[i]);
+
+        if (texture->resource.multisample_type) return "unproven-multisample-storage";
+        if (texture->resource.draw_binding != WINED3D_LOCATION_TEXTURE_RGB
+                || !(texture->sub_resources[0].locations & WINED3D_LOCATION_TEXTURE_RGB))
+            return "unproven-storage-location";
+        if (texture_gl->target != GL_TEXTURE_2D || texture->level_count != 1 || texture->layer_count != 1)
+            return "unproven-texture-layout";
+        if (!(texture->resource.format_caps & WINED3D_FORMAT_CAP_FBO_ATTACHABLE)
+                || (texture->resource.format->id != WINED3DFMT_R8G8B8A8_UNORM
+                && texture->resource.format->id != WINED3DFMT_B8G8R8A8_UNORM))
+            return "unproven-texture-format";
+        if ((texture->flags & WINED3D_TEXTURE_CONVERTED) || !texture_gl->texture_rgb.storage_serial
+                || !(texture->flags & WINED3D_TEXTURE_RGB_ALLOCATED))
+            return "undefined-texture-storage";
+    }
+    return NULL;
+}
+
 static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags,
         struct wined3d_swapchain_present_result *result)
 {
     struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
+    struct wined3d_swapchain_gl *swapchain_gl = wined3d_swapchain_gl(swapchain);
+    enum wined3d_gl_present_test test_action = WINED3D_GL_TEST_OBSERVE;
     const struct wined3d_pixel_format *pixel_format;
     const struct wined3d_gl_info *gl_info;
     struct wined3d_context_gl *context_gl;
@@ -862,19 +962,44 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
     HRESULT hr = WINED3D_OK;
     unsigned int i;
 
+    swapchain_gl->present_blit_verified = false;
+    AcquireSRWLockShared(&swapchain->present_result_lock);
+    if (swapchain_gl->test_present_generation == swapchain->present_identity_generation)
+        test_action = swapchain_gl->test_present_action;
+    ReleaseSRWLockShared(&swapchain->present_result_lock);
+    swapchain_gl->test_present_action = WINED3D_GL_TEST_OBSERVE;
+    if (swapchain_gl->test_present_gate)
+    {
+        DWORD wait_result = WAIT_OBJECT_0;
+        if (test_action == WINED3D_GL_TEST_PENDING)
+            wait_result = WaitForSingleObject(swapchain_gl->test_present_gate, 10000);
+        CloseHandle(swapchain_gl->test_present_gate);
+        swapchain_gl->test_present_gate = NULL;
+        if (wait_result != WAIT_OBJECT_0) return E_FAIL;
+    }
+
     context = context_acquire(swapchain->device, swapchain->front_buffer, 0);
     context_gl = wined3d_context_gl(context);
-    if (!context_gl->valid)
+    if (!context_gl->valid || test_action == WINED3D_GL_TEST_INVALID_CONTEXT)
     {
         context_release(context);
         WARN("Invalid context, skipping present.\n");
         return E_FAIL;
     }
 
+    if (test_action == WINED3D_GL_TEST_RESET)
+        context_gl->test_reset_status = GL_UNKNOWN_CONTEXT_RESET_ARB;
+    if (!wined3d_context_gl_check_reset(context_gl))
+    {
+        context_release(context);
+        return E_FAIL;
+    }
+
     TRACE("Presenting DC %p.\n", context_gl->dc);
 
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
-    if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
+    if (test_action == WINED3D_GL_TEST_BACKUP_DC
+            || context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
             || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
             && swapchain_present_is_partial_copy(swapchain, dst_rect)))
     {
@@ -886,10 +1011,18 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
         swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
 
-        wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
+        if (!wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding))
+        {
+            hr = E_FAIL;
+            goto done;
+        }
         presented_identity = wined3d_swapchain_gl_get_physical_identity(swapchain, 0);
 
-        swapchain_blit(swapchain, context, src_rect, dst_rect);
+        if (!swapchain_blit(swapchain, context, src_rect, dst_rect))
+        {
+            hr = E_FAIL;
+            goto done;
+        }
 
         if (swapchain->device->context_count > 1)
         {
@@ -898,7 +1031,8 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
         }
 
         /* call wglSwapBuffers through the gl table to avoid confusing the Steam overlay */
-        if (!gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc))
+        if (!gl_info->gl_ops.wgl.p_wglSwapBuffers(
+                test_action == WINED3D_GL_TEST_SWAP_FAILURE ? NULL : context_gl->dc))
         {
             DWORD error = GetLastError();
 
@@ -919,8 +1053,17 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
     if (advance_frame && context->d3d_info->fences)
         wined3d_context_gl_submit_command_fence(context_gl);
 
-    if (advance_frame)
-        wined3d_swapchain_gl_rotate(swapchain, context);
+    if (advance_frame && !wined3d_swapchain_gl_rotate(swapchain, context))
+    {
+        hr = E_FAIL;
+        goto done;
+    }
+
+    if (native_swap && !wined3d_context_gl_check_reset(context_gl))
+    {
+        hr = E_FAIL;
+        goto done;
+    }
 
     if (advance_frame)
         TRACE("SwapBuffers called, starting new frame.\n");
@@ -946,13 +1089,19 @@ static HRESULT swapchain_gl_present(struct wined3d_swapchain *swapchain,
             result->physical_identity_count = i;
             result->current_physical_identity = result->physical_identities[0];
             result->presented_physical_identity = presented_identity;
-            /* A GL context-loss generation is not exposed yet. Keep the
-             * identity record diagnostic-only until that lifecycle is wired. */
-            result->capabilities = 0;
+            {
+                const char *reason = swapchain_gl_sparse_fallback(swapchain, context_gl);
+                /* The candidate passes the pixel/lifecycle matrix, but has
+                 * not passed the no-regression Present1 latency gate. */
+                TRACE("GL sparse Present fallback: %s.\n", reason ? reason : "latency-gate-not-met");
+                result->capabilities = 0;
+            }
         }
     }
 
 done:
+    if (test_action == WINED3D_GL_TEST_STALE_COMPLETION)
+        wined3d_swapchain_invalidate_present_results(swapchain);
     context_release(context);
     return hr;
 }
@@ -973,6 +1122,80 @@ static const struct wined3d_swapchain_ops swapchain_gl_ops =
     swapchain_gl_present,
     swapchain_frontbuffer_updated,
 };
+
+struct swapchain_gl_test_data
+{
+    struct wined3d_swapchain *swapchain;
+    enum wined3d_gl_present_test action;
+    unsigned int buffer_idx;
+    struct wined3d_gl_storage_test_result *result;
+    HRESULT hr;
+};
+
+static void swapchain_gl_test_cb(void *object)
+{
+    struct swapchain_gl_test_data *data = object;
+    struct wined3d_swapchain *swapchain = data->swapchain;
+    struct wined3d_swapchain_gl *swapchain_gl = wined3d_swapchain_gl(swapchain);
+    struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(swapchain->back_buffers[data->buffer_idx]);
+    struct wined3d_context *context = context_acquire(swapchain->device, swapchain->front_buffer, 0);
+    struct wined3d_context_gl *context_gl = wined3d_context_gl(context);
+
+    data->hr = E_FAIL;
+    if (!context_gl->valid) goto done;
+    if (data->action == WINED3D_GL_TEST_RESET && !context_gl->reset_notification)
+    {
+        data->hr = WINED3DERR_NOTAVAILABLE;
+        goto done;
+    }
+    if (data->action >= WINED3D_GL_TEST_MUTABLE_STORAGE && data->action <= WINED3D_GL_TEST_REDEFINE_STORAGE)
+    {
+        if (!wined3d_texture_gl_test_storage(texture_gl, context_gl, data->action)) goto done;
+    }
+    else if (!wined3d_texture_load_location(&texture_gl->t, 0, context, WINED3D_LOCATION_TEXTURE_RGB))
+        goto done;
+
+    if (data->action == WINED3D_GL_TEST_PENDING)
+    {
+        HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!event) goto done;
+        if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(),
+                &data->result->completion_gate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            CloseHandle(event);
+            goto done;
+        }
+        if (swapchain_gl->test_present_gate) CloseHandle(swapchain_gl->test_present_gate);
+        swapchain_gl->test_present_gate = event;
+    }
+
+    AcquireSRWLockShared(&swapchain->present_result_lock);
+    data->result->identity_generation = swapchain->present_identity_generation;
+    swapchain_gl->test_present_generation = swapchain->present_identity_generation;
+    ReleaseSRWLockShared(&swapchain->present_result_lock);
+    if (data->action >= WINED3D_GL_TEST_SWAP_FAILURE)
+        swapchain_gl->test_present_action = data->action;
+    data->result->name = texture_gl->texture_rgb.name;
+    data->result->storage_serial = texture_gl->texture_rgb.storage_serial;
+    data->hr = S_OK;
+done:
+    context_release(context);
+}
+
+HRESULT CDECL wined3d_swapchain_test_gl(struct wined3d_swapchain *swapchain,
+        enum wined3d_gl_present_test action, unsigned int buffer_idx, struct wined3d_gl_storage_test_result *result)
+{
+    struct swapchain_gl_test_data data = {swapchain, action, buffer_idx, result, E_FAIL};
+
+    if (result) memset(result, 0, sizeof(*result));
+    if (!swapchain || !result || action > WINED3D_GL_TEST_RESET
+            || buffer_idx >= swapchain->state.desc.backbuffer_count)
+        return E_INVALIDARG;
+    if (swapchain->swapchain_ops != &swapchain_gl_ops) return WINED3DERR_NOTAVAILABLE;
+    wined3d_cs_init_object(swapchain->device->cs, swapchain_gl_test_cb, &data);
+    wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    return data.hr;
+}
 
 static bool wined3d_swapchain_vk_present_mode_supported(struct wined3d_swapchain_vk *swapchain_vk,
         VkPresentModeKHR vk_present_mode)
@@ -2546,11 +2769,19 @@ HRESULT wined3d_swapchain_gl_init(struct wined3d_swapchain_gl *swapchain_gl, str
         const struct wined3d_swapchain_desc *desc, struct wined3d_swapchain_state_parent *state_parent,
         void *parent, const struct wined3d_parent_ops *parent_ops)
 {
+    struct wined3d_device_gl *device_gl = wined3d_device_gl(device);
+    HRESULT hr;
+
     TRACE("swapchain_gl %p, device %p, desc %p, state_parent %p, parent %p, parent_ops %p.\n",
             swapchain_gl, device, desc, state_parent, parent, parent_ops);
 
-    return wined3d_swapchain_init(&swapchain_gl->s, device, desc, state_parent, parent,
-            parent_ops, &swapchain_gl_ops);
+    if (FAILED(hr = wined3d_swapchain_init(&swapchain_gl->s, device, desc, state_parent, parent,
+            parent_ops, &swapchain_gl_ops)))
+        return hr;
+    AcquireSRWLockExclusive(&device_gl->present_swapchains_lock);
+    list_add_tail(&device_gl->present_swapchains, &swapchain_gl->present_entry);
+    ReleaseSRWLockExclusive(&device_gl->present_swapchains_lock);
+    return hr;
 }
 
 HRESULT wined3d_swapchain_vk_init(struct wined3d_swapchain_vk *swapchain_vk, struct wined3d_device *device,

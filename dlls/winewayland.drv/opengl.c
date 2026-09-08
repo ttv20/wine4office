@@ -313,7 +313,10 @@ static BOOL wayland_drawable_swap(struct opengl_drawable *base)
 
     TRACE("drawable %p presenting at interval %u\n", gl, interval);
     if (!funcs->p_eglSwapBuffers(egl->display, gl->base.surface))
+    {
         wayland_drawable_cancel_frame_callback(gl);
+        return FALSE;
+    }
 
     return TRUE;
 }

@@ -1238,6 +1238,8 @@ static BOOL wined3d_context_gl_set_gl_context(struct wined3d_context_gl *context
         WARN("Failed to make GL context %p current on device context %p, last error %#lx.\n",
                 context_gl->gl_ctx, context_gl->dc, GetLastError());
         context_gl->valid = 0;
+        if (context_gl->c.swapchain)
+            wined3d_swapchain_invalidate_present_results(context_gl->c.swapchain);
         WARN("Trying fallback to the backup window.\n");
 
         if (context_gl->c.destroyed)
@@ -1304,6 +1306,7 @@ static void wined3d_context_gl_update_window(struct wined3d_context_gl *context_
      * instead of replacing a valid context DC with NULL on every acquire. */
     if (!(dc = swapchain->dc))
     {
+        wined3d_swapchain_invalidate_present_results(swapchain);
         if (!(dc = wined3d_device_gl_get_backup_dc(wined3d_device_gl(context_gl->c.device))))
         {
             WARN("Failed to retrieve a device context.\n");
@@ -1856,7 +1859,7 @@ HGLRC context_create_wgl_attribs(const struct wined3d_gl_info *gl_info, HDC hdc,
 {
     HGLRC ctx;
     unsigned int ctx_attrib_idx = 0;
-    GLint ctx_attribs[7], ctx_flags = 0;
+    GLint ctx_attribs[9], ctx_flags = 0;
 
     if (context_debug_output_enabled(gl_info))
         ctx_flags = WGL_CONTEXT_DEBUG_BIT_ARB;
@@ -1864,6 +1867,11 @@ HGLRC context_create_wgl_attribs(const struct wined3d_gl_info *gl_info, HDC hdc,
     ctx_attribs[ctx_attrib_idx++] = gl_info->selected_gl_version >> 16;
     ctx_attribs[ctx_attrib_idx++] = WGL_CONTEXT_MINOR_VERSION_ARB;
     ctx_attribs[ctx_attrib_idx++] = gl_info->selected_gl_version & 0xffff;
+    if (gl_info->supported[WGL_ARB_CREATE_CONTEXT_ROBUSTNESS])
+    {
+        ctx_attribs[ctx_attrib_idx++] = WGL_CONTEXT_RESET_NOTIFICATION_STRATEGY_ARB;
+        ctx_attribs[ctx_attrib_idx++] = WGL_LOSE_CONTEXT_ON_RESET_ARB;
+    }
     if (ctx_flags)
     {
         ctx_attribs[ctx_attrib_idx++] = WGL_CONTEXT_FLAGS_ARB;
@@ -2103,6 +2111,17 @@ HRESULT wined3d_context_gl_init(struct wined3d_context_gl *context_gl, struct wi
         goto fail;
     }
 
+    if (gl_info->supported[WGL_ARB_CREATE_CONTEXT_ROBUSTNESS]
+            && (gl_info->gl_ops.ext.p_glGetGraphicsResetStatus
+            || gl_info->gl_ops.ext.p_glGetGraphicsResetStatusARB))
+    {
+        GLint strategy = 0;
+        gl_info->gl_ops.gl.p_glGetIntegerv(GL_RESET_NOTIFICATION_STRATEGY_ARB, &strategy);
+        context_gl->reset_notification = strategy == GL_LOSE_CONTEXT_ON_RESET_ARB
+                && gl_info->gl_ops.gl.p_glGetError() == GL_NO_ERROR;
+        TRACE("Reset notification strategy %#x, verified %u.\n", strategy, context_gl->reset_notification);
+    }
+
     if (context_debug_output_enabled(gl_info))
     {
         GL_EXTCALL(glDebugMessageCallback(wined3d_debug_callback, context));
@@ -2277,6 +2296,55 @@ fail:
     return E_FAIL;
 }
 
+/* win32u shares all native contexts with its process-wide global context.
+ * Keep this registry alive across device recreation; a new device cannot
+ * recover storage while that native share group remains lost. Lock order:
+ * device registry -> device swapchain registry -> swapchain result lock. */
+static SRWLOCK present_devices_lock = SRWLOCK_INIT;
+static struct list present_devices = LIST_INIT(present_devices);
+static LONG present_share_group_lost;
+
+void wined3d_device_gl_register_present(struct wined3d_device_gl *device_gl)
+{
+    AcquireSRWLockExclusive(&present_devices_lock);
+    list_add_tail(&present_devices, &device_gl->present_device_entry);
+    ReleaseSRWLockExclusive(&present_devices_lock);
+}
+
+void wined3d_device_gl_unregister_present(struct wined3d_device_gl *device_gl)
+{
+    AcquireSRWLockExclusive(&present_devices_lock);
+    list_remove(&device_gl->present_device_entry);
+    ReleaseSRWLockExclusive(&present_devices_lock);
+}
+
+bool wined3d_context_gl_check_reset(struct wined3d_context_gl *context_gl)
+{
+    struct wined3d_device_gl *device_gl = wined3d_device_gl(context_gl->c.device);
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    GLenum status;
+
+    if (InterlockedCompareExchange(&present_share_group_lost, 0, 0)) return false;
+    if (!context_gl->reset_notification) return true;
+    if ((status = context_gl->test_reset_status))
+        context_gl->test_reset_status = 0;
+    else if (gl_info->gl_ops.ext.p_glGetGraphicsResetStatus)
+        status = GL_EXTCALL(glGetGraphicsResetStatus());
+    else
+        status = GL_EXTCALL(glGetGraphicsResetStatusARB());
+    if (status == GL_NO_ERROR) return true;
+
+    WARN("Graphics context reset %#x on device %p.\n", status, device_gl);
+    /* Reset completion does not restore the old objects. Never publish their
+     * contents again, even if a subsequent reset query returns NO_ERROR. */
+    AcquireSRWLockExclusive(&present_devices_lock);
+    if (!InterlockedExchange(&present_share_group_lost, 1))
+        LIST_FOR_EACH_ENTRY(device_gl, &present_devices, struct wined3d_device_gl, present_device_entry)
+            wined3d_device_gl_invalidate_present_results(device_gl);
+    ReleaseSRWLockExclusive(&present_devices_lock);
+    return false;
+}
+
 void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl)
 {
     struct wined3d_device *device = context_gl->c.device;
@@ -2284,6 +2352,9 @@ void wined3d_context_gl_destroy(struct wined3d_context_gl *context_gl)
     TRACE("Destroying context %p.\n", context_gl);
 
     wined3d_from_cs(device->cs);
+
+    if (device->context_count == 1)
+        wined3d_device_gl_invalidate_present_results(wined3d_device_gl(device));
 
     /* We delay destroying a context when it is active. The context_release()
      * function invokes wined3d_context_gl_destroy() again while leaving the
