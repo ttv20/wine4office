@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office Reparo Online cancelado.",
   "Office Online Repair failed. Review the details below.": "Office Reparo Online falhou. Confira os detalhes abaixo.",
   "Office Online Repair started.": "Office Reparo Online iniciado.",
-  "Office repair recommended": "Office reparo recomendado",
-  "Office was already installed, so this operation updated the existing installation.": "Office já estava instalado, então essa operação atualizou a instalação existente.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Execute o Reparo Online antes de usar Outlook. Outlook pode não funcionar corretamente até que o reparo seja concluído. Ele atualiza Office Click-to-Run registro e também pode melhorar Office desempenho de inicialização e de aplicação.",
   "office-quick-repair": "Office Reparo Rápido",
   "office-online-repair": "Office Reparo Online",
-  "Close every Office application before starting a repair.": "Feche toda Office aplicação antes de iniciar o reparo."
+  "Close every Office application before starting a repair.": "Feche toda Office aplicação antes de iniciar o reparo.",
+  "Online Repair required after upgrade": "Reparação Online necessária após a atualização",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Esta atualização do Wine4Office alterou o ambiente de compatibilidade utilizado pela instalação existente do Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Execute a Reparação Online antes de utilizar o Outlook. Até a reparação estar concluída, o Outlook poderá não funcionar e o desempenho do Office poderá ser inferior. A Reparação Online atualiza a instalação existente do Office para a nova versão do Wine4Office."
 }

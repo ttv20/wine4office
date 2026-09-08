@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Online Repair kansellert.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair feilet. Les detaljene nedenfor.",
   "Office Online Repair started.": "Office Nettreparasjon startet.",
-  "Office repair recommended": "Office anbefalt reparasjon",
-  "Office was already installed, so this operation updated the existing installation.": "Office var allerede installert, så denne operasjonen oppdaterte den eksisterende installasjonen.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Kjør nettreparasjon før du bruker Outlook. Outlook fungerer kanskje ikke riktig før reparasjonen er fullført. Den oppdaterer registreringen Office Click-to-Run og kan også forbedre Office oppstarts- og applikasjonsytelse.",
   "office-quick-repair": "Office Rask reparasjon",
   "office-online-repair": "Office Nettreparasjon",
-  "Close every Office application before starting a repair.": "Lukk alle Office applikasjoner før du starter en reparasjon."
+  "Close every Office application before starting a repair.": "Lukk alle Office applikasjoner før du starter en reparasjon.",
+  "Online Repair required after upgrade": "Nettreparasjon kreves etter oppgraderingen",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Denne Wine4Office-oppgraderingen endret kompatibilitetsmiljøet som den eksisterende Office-installasjonen bruker.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Kjør Nettreparasjon før du bruker Outlook. Til reparasjonen er fullført, kan det hende at Outlook ikke fungerer, og at Office-ytelsen blir lavere. Nettreparasjon oppdaterer den eksisterende Office-installasjonen for den nye Wine4Office-versjonen."
 }

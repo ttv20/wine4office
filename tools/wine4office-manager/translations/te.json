@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office ఆన్ లైన్ మరమ్మత్తు రద్దు చేయబడింది.",
   "Office Online Repair failed. Review the details below.": "Office ఆన్ లైన్ రిపేర్ విఫలమైంది. దిగువ వివరాలను సమీక్షించండి.",
   "Office Online Repair started.": "Office ఆన్ లైన్ రిపేర్ ప్రారంభమైంది.",
-  "Office repair recommended": "Office రిపేర్ సిఫారసు చేయబడింది",
-  "Office was already installed, so this operation updated the existing installation.": "Office ఇప్పటికే వ్యవస్థాపించబడింది, కాబట్టి ఈ ఆపరేషన్ ఇప్పటికే ఉన్న వ్యవస్థాపనను నవీకరించింది.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook ఉపయోగించడానికి ముందు ఆన్ లైన్ మరమ్మత్తును అమలు చేయండి. మరమ్మత్తు పూర్తయ్యే వరకు Outlook సరిగ్గా పని చేయకపోవచ్చు. ఇది Office Click-to-Run రిజిస్ట్రేషన్ ను రిఫ్రెష్ చేస్తుంది మరియు Office స్టార్టప్ మరియు అప్లికేషన్ పనితీరును కూడా మెరుగుపరుస్తుంది.",
   "office-quick-repair": "Office శీఘ్ర మరమ్మత్తు",
   "office-online-repair": "Office ఆన్ లైన్ మరమ్మత్తు",
-  "Close every Office application before starting a repair.": "రిపేర్ ప్రారంభించడానికి ముందు ప్రతి Office అప్లికేషన్ ను మూసివేయండి."
+  "Close every Office application before starting a repair.": "రిపేర్ ప్రారంభించడానికి ముందు ప్రతి Office అప్లికేషన్ ను మూసివేయండి.",
+  "Online Repair required after upgrade": "అప్‌గ్రేడ్ తర్వాత ఆన్‌లైన్ మరమ్మతు అవసరం",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "ఈ Wine4Office అప్‌గ్రేడ్ ప్రస్తుత Office ఇన్‌స్టాలేషన్ ఉపయోగించే అనుకూలత వాతావరణాన్ని మార్చింది.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ఉపయోగించే ముందు ఆన్‌లైన్ మరమ్మతును అమలు చేయండి. మరమ్మతు పూర్తయ్యే వరకు Outlook పని చేయకపోవచ్చు మరియు Office పనితీరు తక్కువగా ఉండవచ్చు. ఆన్‌లైన్ మరమ్మతు ప్రస్తుత Office ఇన్‌స్టాలేషన్‌ను కొత్త Wine4Office వెర్షన్ కోసం అప్‌డేట్ చేస్తుంది."
 }

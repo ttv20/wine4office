@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Online oprava zrušená.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair zlyhal. Podrobnosti si môžete prečítať nižšie.",
   "Office Online Repair started.": "Office Online Repair spustený.",
-  "Office repair recommended": "Office odporúčaná oprava",
-  "Office was already installed, so this operation updated the existing installation.": "Office už bola nainštalovaná, takže táto operácia aktualizovala existujúcu inštaláciu.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Pred použitím Outlook spúšťajte online opravu. Outlook nemusí fungovať správne, kým oprava nebude dokončená. Obnovuje Office Click-to-Run registráciu a môže tiež zlepšiť Office štart a výkon aplikácie.",
   "office-quick-repair": "Office Rýchla oprava",
   "office-online-repair": "Office Online oprava",
-  "Close every Office application before starting a repair.": "Pred začatím opravy zatvorte každú Office aplikáciu."
+  "Close every Office application before starting a repair.": "Pred začatím opravy zatvorte každú Office aplikáciu.",
+  "Online Repair required after upgrade": "Po inovácii je potrebná online oprava",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Táto inovácia Wine4Office zmenila prostredie kompatibility, ktoré používa existujúca inštalácia balíka Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pred použitím aplikácie Outlook spustite online opravu. Kým sa oprava nedokončí, aplikácia Outlook nemusí fungovať a výkon balíka Office môže byť nižší. Online oprava aktualizuje existujúcu inštaláciu balíka Office pre novú verziu Wine4Office."
 }

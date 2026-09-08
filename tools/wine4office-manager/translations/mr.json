@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office ऑनलाईन दुरुस्ती रद्द करण्यात आली आहे.",
   "Office Online Repair failed. Review the details below.": "Office ऑनलाइन दुरुस्ती अयशस्वी झाली. खालील तपशीलांचे पुनरावलोकन करा.",
   "Office Online Repair started.": "Office ऑनलाइन दुरुस्ती सुरू झाली.",
-  "Office repair recommended": "Office दुरुस्तीची शिफारस केली",
-  "Office was already installed, so this operation updated the existing installation.": "Office आधीच स्थापित केले गेले होते, म्हणून या ऑपरेशनने विद्यमान स्थापना अद्यतनित केली.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook वापरण्यापूर्वी ऑनलाइन दुरुस्ती चालवा Outlook दुरुस्ती पूर्ण होईपर्यंत योग्यरित्या कार्य करू शकत नाही. हे Office Click-to-Run नोंदणी रीफ्रेश करते आणि Office स्टार्टअप आणि अनुप्रयोगाची कार्यक्षमता देखील सुधारू शकते.",
   "office-quick-repair": "Office त्वरित दुरुस्ती करा",
   "office-online-repair": "Office ऑनलाइन दुरुस्ती",
-  "Close every Office application before starting a repair.": "दुरुस्ती सुरू करण्यापूर्वी प्रत्येक Office अनुप्रयोग बंद करा."
+  "Close every Office application before starting a repair.": "दुरुस्ती सुरू करण्यापूर्वी प्रत्येक Office अनुप्रयोग बंद करा.",
+  "Online Repair required after upgrade": "अपग्रेडनंतर ऑनलाइन दुरुस्ती आवश्यक आहे",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "या Wine4Office अपग्रेडमुळे विद्यमान Office इंस्टॉलेशन वापरत असलेले सुसंगतता वातावरण बदलले आहे.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook वापरण्यापूर्वी ऑनलाइन दुरुस्ती चालवा. दुरुस्ती पूर्ण होईपर्यंत Outlook कार्य करणार नाही आणि Office ची कार्यक्षमता कमी असू शकते. ऑनलाइन दुरुस्ती विद्यमान Office इंस्टॉलेशन नवीन Wine4Office आवृत्तीसाठी अद्ययावत करते."
 }

@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office ऑनलाइन मरम्मत रद्द कर दी गई।",
   "Office Online Repair failed. Review the details below.": "Office ऑनलाइन सुधार विफल रहा। नीचे दिए गए विवरण की समीक्षा करें।",
   "Office Online Repair started.": "Office ऑनलाइन मरम्मत शुरू हुई।",
-  "Office repair recommended": "Office मरम्मत की सिफारिश की",
-  "Office was already installed, so this operation updated the existing installation.": "Office पहले से ही स्थापित किया गया था, इसलिए इस कार्रवाई ने मौजूदा स्थापना को अद्यतन किया।",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook का उपयोग करने से पहले ऑनलाइन सुधार चलाएँ। हो सकता है कि मरम्मत पूरी होने तक Outlook ठीक से काम न करे। यह Office Click-to-Run पंजीकरण को ताज़ा करता है और Office स्टार्टअप और एप्लिकेशन प्रदर्शन में भी सुधार कर सकता है।",
   "office-quick-repair": "Office त्वरित मरम्मत",
   "office-online-repair": "Office ऑनलाइन मरम्मत",
-  "Close every Office application before starting a repair.": "मरम्मत शुरू करने से पहले प्रत्येक Office एप्लिकेशन को बंद कर दें।"
+  "Close every Office application before starting a repair.": "मरम्मत शुरू करने से पहले प्रत्येक Office एप्लिकेशन को बंद कर दें।",
+  "Online Repair required after upgrade": "अपग्रेड के बाद ऑनलाइन मरम्मत आवश्यक है",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "इस Wine4Office अपग्रेड ने मौजूदा Office इंस्टॉलेशन द्वारा उपयोग किए जाने वाले संगतता परिवेश को बदल दिया है।",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook का उपयोग करने से पहले ऑनलाइन मरम्मत चलाएँ। मरम्मत पूरी होने तक Outlook काम नहीं कर सकता और Office का प्रदर्शन कम हो सकता है। ऑनलाइन मरम्मत मौजूदा Office इंस्टॉलेशन को नए Wine4Office संस्करण के लिए अपडेट करती है।"
 }

@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Officeオンライン修理がキャンセルされました。",
   "Office Online Repair failed. Review the details below.": "Officeオンライン修理は失敗しました。以下の詳細を確認してください。",
   "Office Online Repair started.": "Officeオンライン修理が始まりました。",
-  "Office repair recommended": "Office修理を推奨します",
-  "Office was already installed, so this operation updated the existing installation.": "Officeすでにインストールされていたため、この操作で既存のインストールが更新されました。",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlookを使う前にオンライン修理を実行してください。Outlook修理が完了するまで正しく動作しない場合があります。登録Office Click-to-Run更新され、起動やアプリケーションのパフォーマンスOffice向上する可能性もあります。",
   "office-quick-repair": "Officeクイックリペア",
   "office-online-repair": "Office オンライン修理",
-  "Close every Office application before starting a repair.": "修理を始める前に、すべてのOfficeの塗布を閉じてください。"
+  "Close every Office application before starting a repair.": "修理を始める前に、すべてのOfficeの塗布を閉じてください。",
+  "Online Repair required after upgrade": "アップグレード後にオンライン修復が必要です",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "この Wine4Office のアップグレードにより、既存の Office インストールが使用する互換性環境が変更されました。",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook を使用する前にオンライン修復を実行してください。修復が完了するまで、Outlook が動作しない場合や Office のパフォーマンスが低下する場合があります。オンライン修復では、既存の Office インストールが新しい Wine4Office バージョン向けに更新されます。"
 }

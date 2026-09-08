@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Online oprava zrušena.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair selhal. Podrobnosti si prohlédněte níže.",
   "Office Online Repair started.": "Office Online Repair zahájen.",
-  "Office repair recommended": "Office doporučená oprava",
-  "Office was already installed, so this operation updated the existing installation.": "Office už byla nainstalována, takže tato operace aktualizovala stávající instalaci.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Před použitím Outlook spusťte online opravu. Outlook nemusí fungovat správně, dokud oprava nebude dokončena. Obnovuje Office Click-to-Run registraci a může také zlepšit Office spuštění a výkon aplikací.",
   "office-quick-repair": "Office Rychlá oprava",
   "office-online-repair": "Office Online opravy",
-  "Close every Office application before starting a repair.": "Před zahájením opravy uzavřete každou Office aplikaci."
+  "Close every Office application before starting a repair.": "Před zahájením opravy uzavřete každou Office aplikaci.",
+  "Online Repair required after upgrade": "Po upgradu je nutná online oprava",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Tento upgrade Wine4Office změnil prostředí kompatibility, které používá stávající instalace Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Před použitím aplikace Outlook spusťte online opravu. Dokud oprava neskončí, nemusí aplikace Outlook fungovat a výkon Office může být nižší. Online oprava aktualizuje stávající instalaci Office pro novou verzi Wine4Office."
 }

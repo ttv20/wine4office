@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Kinansela ang Online Repair.",
   "Office Online Repair failed. Review the details below.": "Office Nabigo ang Online Repair. Suriin ang mga detalye sa ibaba.",
   "Office Online Repair started.": "Office Nagsimula ang Online Repair.",
-  "Office repair recommended": "Office inirerekomendang pagkukumpuni",
-  "Office was already installed, so this operation updated the existing installation.": "Office ay naka-install na, kaya in-update ng operasyong ito ang umiiral na installation.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Patakbuhin ang Online Repair bago gamitin ang Outlook. Maaaring hindi gumana nang tama ang Outlook hangga't hindi natatapos ang pagkukumpuni. Pinapa-refresh nito ang Office Click-to-Run registration at maaaring mapabuti rin ang Office startup at application performance.",
   "office-quick-repair": "Office Mabilis na Pagkukumpuni",
   "office-online-repair": "Office Online na Pagkukumpuni",
-  "Close every Office application before starting a repair.": "Isara ang bawat aplikasyon ng Office bago simulan ang pagkukumpuni."
+  "Close every Office application before starting a repair.": "Isara ang bawat aplikasyon ng Office bago simulan ang pagkukumpuni.",
+  "Online Repair required after upgrade": "Kailangan ng online na pag-aayos pagkatapos ng pag-upgrade",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Binago ng pag-upgrade na ito ng Wine4Office ang compatibility environment na ginagamit ng kasalukuyang installation ng Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Patakbuhin ang online na pag-aayos bago gamitin ang Outlook. Hangga't hindi natatapos ang pag-aayos, maaaring hindi gumana ang Outlook at maaaring mas mababa ang performance ng Office. Ina-update ng online na pag-aayos ang kasalukuyang installation ng Office para sa bagong bersyon ng Wine4Office."
 }

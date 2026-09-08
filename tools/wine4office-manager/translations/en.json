@@ -216,10 +216,10 @@
   "Office Online Repair cancelled.": "Office Online Repair cancelled.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair failed. Review the details below.",
   "Office Online Repair started.": "Office Online Repair started.",
-  "Office repair recommended": "Office repair recommended",
-  "Office was already installed, so this operation updated the existing installation.": "Office was already installed, so this operation updated the existing installation.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.",
   "office-quick-repair": "Office Quick Repair",
   "office-online-repair": "Office Online Repair",
-  "Close every Office application before starting a repair.": "Close every Office application before starting a repair."
+  "Close every Office application before starting a repair.": "Close every Office application before starting a repair.",
+  "Online Repair required after upgrade": "Online Repair required after upgrade",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version."
 }

@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Tiešsaistes remonts atcelts.",
   "Office Online Repair failed. Review the details below.": "Office tiešsaistes remonts neizdevās. Iepazīstieties ar detaļām zemāk.",
   "Office Online Repair started.": "Office sākās tiešsaistes remonts.",
-  "Office repair recommended": "Office ieteicams remonts",
-  "Office was already installed, so this operation updated the existing installation.": "Office jau bija uzstādīts, tāpēc šī operācija atjaunināja esošo instalāciju.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Palaidiet tiešsaistes remontu pirms Outlook. Outlook var nedarboties pareizi, kamēr remonts nav pabeigts. Tas atsvaidzina Office Click-to-Run reģistrāciju un var arī uzlabot Office starta un lietojumprogrammas veiktspēju.",
   "office-quick-repair": "Office Ātrais remonts",
   "office-online-repair": "Office Tiešsaistes remonts",
-  "Close every Office application before starting a repair.": "Aizveriet katru Office pieteikumu pirms remonta uzsākšanas."
+  "Close every Office application before starting a repair.": "Aizveriet katru Office pieteikumu pirms remonta uzsākšanas.",
+  "Online Repair required after upgrade": "Pēc jaunināšanas nepieciešama labošana tiešsaistē",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Šis Wine4Office jauninājums mainīja saderības vidi, ko izmanto esošā Office instalācija.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pirms Outlook lietošanas veiciet labošanu tiešsaistē. Kamēr labošana nav pabeigta, Outlook var nedarboties un Office veiktspēja var būt zemāka. Labošana tiešsaistē atjaunina esošo Office instalāciju atbilstoši jaunajai Wine4Office versijai."
 }

@@ -215,6 +215,7 @@ class ManagerState:
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
             "restart_required": False, "progress_label": "", "progress_value": None,
+            "wine_update_completed": False,
             "foreground_pending": False, "foreground_ready": False,
         }
         self.cancel_event = threading.Event()
@@ -811,6 +812,7 @@ class ManagerState:
                         backend.save_config(candidate)
                         self.config = candidate
                         config.update(candidate)
+                        self.task["wine_update_completed"] = True
             finally:
                 if preload_update is not None:
                     try:
@@ -1135,6 +1137,7 @@ class ManagerState:
                 "running": True, "kind": kind, "status": "running", "log": "",
                 "restart_required": False,
                 "progress_label": "Preparing operation", "progress_value": None,
+                "wine_update_completed": False,
                 "foreground_pending": False, "foreground_ready": False,
             }
             self.cancel_event.clear()

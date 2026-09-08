@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Retry Office installer downloads once, then offer manual download and file selection.
-- Add Quick and Online Office repairs to the Manager and recommend Online Repair after updating an existing installation.
+- Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.
 - Hide the Teams installer from the Manager while Teams support is unavailable.
 
 - Prevent Office licensing repair from crashing while querying installed product keys.

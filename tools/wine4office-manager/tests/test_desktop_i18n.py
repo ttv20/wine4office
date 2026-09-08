@@ -117,11 +117,12 @@ class TranslationTests(unittest.TestCase):
             "Office Online Repair cancelled.",
             "Office Online Repair failed. Review the details below.",
             "Office Online Repair started.",
-            "Office repair recommended",
-            "Office was already installed, so this operation updated the existing installation.",
-            "Run Online Repair before using Outlook. Outlook may not work correctly until the "
-            "repair completes. It refreshes Office Click-to-Run registration and may also improve "
-            "Office startup and application performance.",
+            "Online Repair required after upgrade",
+            "This Wine4Office upgrade changed the compatibility environment used by the "
+            "existing Office installation.",
+            "Run Online Repair before using Outlook. Until the repair completes, Outlook may "
+            "not work and Office performance may be lower. Online Repair updates the existing "
+            "Office installation for the new Wine4Office version.",
             "office-quick-repair",
             "office-online-repair",
         )

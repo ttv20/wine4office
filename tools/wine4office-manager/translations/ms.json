@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Pembaikan Dalam Talian dibatalkan.",
   "Office Online Repair failed. Review the details below.": "Office Pembaikan Dalam Talian gagal. Semak butiran di bawah.",
   "Office Online Repair started.": "Office Pembaikan Dalam Talian telah dimulakan.",
-  "Office repair recommended": "Office disyorkan pembaikan",
-  "Office was already installed, so this operation updated the existing installation.": "Office sudah dipasang, jadi operasi ini mengemas kini pemasangan sedia ada.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Jalankan Pembaikan Dalam Talian sebelum menggunakan Outlook. Outlook mungkin tidak berfungsi dengan betul sehingga pembaikan selesai. Ia menyegarkan Office Click-to-Run pendaftaran dan mungkin juga meningkatkan prestasi permulaan dan aplikasi Office.",
   "office-quick-repair": "Office Pembaikan Pantas",
   "office-online-repair": "Office Pembaikan Dalam Talian",
-  "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulakan pembaikan."
+  "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulakan pembaikan.",
+  "Online Repair required after upgrade": "Pembaikan Dalam Talian diperlukan selepas naik taraf",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Naik taraf Wine4Office ini telah mengubah persekitaran keserasian yang digunakan oleh pemasangan Office sedia ada.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Pembaikan Dalam Talian sebelum menggunakan Outlook. Sehingga pembaikan selesai, Outlook mungkin tidak berfungsi dan prestasi Office mungkin lebih rendah. Pembaikan Dalam Talian mengemas kini pemasangan Office sedia ada untuk versi Wine4Office yang baharu."
 }

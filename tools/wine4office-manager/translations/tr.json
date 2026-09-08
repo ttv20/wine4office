@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office Online Onarım iptal edildi.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair başarısız oldu. Aşağıdaki detayları inceleyebilirsiniz.",
   "Office Online Repair started.": "Office Online Repair başladı.",
-  "Office repair recommended": "Office tamir önerilir",
-  "Office was already installed, so this operation updated the existing installation.": "Office zaten kurulmuştu, bu yüzden bu işlem mevcut kurulumu güncelledi.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Online Repair'ı kullanmadan önce çalıştırın Outlook Outlook onarım tamamlanana kadar doğru çalışmayabilir. Kayıt Office Click-to-Run yeniler ve ayrıca Office başlatma ve uygulama performansını da iyileştirebilir.",
   "office-quick-repair": "Office Hızlı Onarım",
   "office-online-repair": "Office Online Onarım",
-  "Close every Office application before starting a repair.": "Tamir yapmadan önce her Office uygulamayı kapatın."
+  "Close every Office application before starting a repair.": "Tamir yapmadan önce her Office uygulamayı kapatın.",
+  "Online Repair required after upgrade": "Yükseltmeden sonra Çevrimiçi Onarım gerekiyor",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Bu Wine4Office yükseltmesi, mevcut Office yüklemesinin kullandığı uyumluluk ortamını değiştirdi.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook'u kullanmadan önce Çevrimiçi Onarım'ı çalıştırın. Onarım tamamlanana kadar Outlook çalışmayabilir ve Office performansı düşük olabilir. Çevrimiçi Onarım, mevcut Office yüklemesini yeni Wine4Office sürümü için güncelleştirir."
 }

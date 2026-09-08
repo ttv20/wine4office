@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office অনলাইন মেরামত বাতিল হয়েছে।",
   "Office Online Repair failed. Review the details below.": "Office অনলাইন মেরামত ব্যর্থ হয়েছে। নিচের বিস্তারিত পর্যালোচনা করুন।",
   "Office Online Repair started.": "Office অনলাইন মেরামত শুরু হয়েছে।",
-  "Office repair recommended": "Office মেরামত সুপারিশ করা হয়েছে",
-  "Office was already installed, so this operation updated the existing installation.": "Office ইতিমধ্যে ইনস্টল করা হয়েছে, তাই এই অপারেশনটি বিদ্যমান ইনস্টলেশন আপডেট করেছে।",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook ব্যবহার করার আগে অনলাইন মেরামত চালান। মেরামত সম্পূর্ণ না হওয়া অবধি Outlook সঠিকভাবে কাজ নাও করতে পারে। এটি Office Click-to-Run নিবন্ধনকে সতেজ করে এবং Office স্টার্টআপ এবং অ্যাপ্লিকেশন কর্মক্ষমতা উন্নত করতে পারে।",
   "office-quick-repair": "Office দ্রুত মেরামত",
   "office-online-repair": "Office অনলাইন মেরামত",
-  "Close every Office application before starting a repair.": "মেরামত শুরু করার আগে প্রতিটি Office অ্যাপ্লিকেশন বন্ধ করুন।"
+  "Close every Office application before starting a repair.": "মেরামত শুরু করার আগে প্রতিটি Office অ্যাপ্লিকেশন বন্ধ করুন।",
+  "Online Repair required after upgrade": "আপগ্রেডের পরে অনলাইন মেরামত প্রয়োজন",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "এই Wine4Office আপগ্রেড বিদ্যমান Office ইনস্টলেশন দ্বারা ব্যবহৃত সামঞ্জস্য পরিবেশ পরিবর্তন করেছে।",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ব্যবহার করার আগে অনলাইন মেরামত চালান। মেরামত সম্পূর্ণ না হওয়া পর্যন্ত Outlook কাজ নাও করতে পারে এবং Office-এর কর্মক্ষমতা কম হতে পারে। অনলাইন মেরামত নতুন Wine4Office সংস্করণের জন্য বিদ্যমান Office ইনস্টলেশন আপডেট করে।"
 }

@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office ยกเลิกการซ่อมแซมออนไลน์",
   "Office Online Repair failed. Review the details below.": "Office Online Repair ล้มเหลว ตรวจสอบรายละเอียดด้านล่าง",
   "Office Online Repair started.": "Office การซ่อมแซมออนไลน์เริ่มขึ้น",
-  "Office repair recommended": "แนะนําการซ่อมแซม Office",
-  "Office was already installed, so this operation updated the existing installation.": "Office ถูกติดตั้งไว้แล้ว ดังนั้นการดําเนินการนี้จึงอัปเดตการติดตั้งที่มีอยู่",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "รันการซ่อมแซมออนไลน์ก่อนใช้งาน Outlook Outlook อาจไม่ทํางานอย่างถูกต้องจนกว่าการซ่อมแซมจะเสร็จสิ้น มันรีเฟรชการลงทะเบียน Office Click-to-Run และอาจช่วยปรับปรุงประสิทธิภาพของการเริ่มต้นและแอปพลิเคชัน Office",
   "office-quick-repair": "Office ซ่อมแซมอย่างรวดเร็ว",
   "office-online-repair": "Office ซ่อมออนไลน์",
-  "Close every Office application before starting a repair.": "ปิดทุก Office แอปพลิเคชันก่อนเริ่มซ่อมแซม"
+  "Close every Office application before starting a repair.": "ปิดทุก Office แอปพลิเคชันก่อนเริ่มซ่อมแซม",
+  "Online Repair required after upgrade": "ต้องซ่อมแซมแบบออนไลน์หลังจากการอัปเกรด",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "การอัปเกรด Wine4Office นี้ได้เปลี่ยนสภาพแวดล้อมความเข้ากันได้ที่การติดตั้ง Office ที่มีอยู่ใช้งาน",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "เรียกใช้การซ่อมแซมแบบออนไลน์ก่อนใช้งาน Outlook จนกว่าการซ่อมแซมจะเสร็จสิ้น Outlook อาจไม่ทำงานและประสิทธิภาพของ Office อาจลดลง การซ่อมแซมแบบออนไลน์จะอัปเดตการติดตั้ง Office ที่มีอยู่ให้รองรับ Wine4Office เวอร์ชันใหม่"
 }

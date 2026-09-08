@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office ஆன்லைன் பழுதுபார்ப்பு ரத்து செய்யப்பட்டது.",
   "Office Online Repair failed. Review the details below.": "Office ஆன்லைன் பழுதுபார்ப்பு தோல்வியடைந்தது. கீழே உள்ள விவரங்களை மதிப்பாய்வு செய்யவும்.",
   "Office Online Repair started.": "Office ஆன்லைன் பழுதுபார்ப்பு தொடங்கியது.",
-  "Office repair recommended": "Office பழுதுபார்க்க பரிந்துரைக்கப்படுகிறது",
-  "Office was already installed, so this operation updated the existing installation.": "Office ஏற்கனவே நிறுவப்பட்டது, எனவே இந்த இயக்கம் தற்போதுள்ள நிறுவலை மேம்படுத்தியது.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook பயன்படுத்துவதற்கு முன் ஆன்லைன் பழுதுபார்ப்பை இயக்கவும். பழுதுபார்ப்பு முடிவடையும் வரை Outlook சரியாக வேலை செய்யாமல் போகலாம். இது Office Click-to-Run பதிவைப் புதுப்பிக்கிறது மற்றும் Office தொடக்க மற்றும் பயன்பாட்டு செயல்திறனையும் மேம்படுத்தலாம்.",
   "office-quick-repair": "Office விரைவான பழுதுபார்ப்பு",
   "office-online-repair": "Office ஆன்லைன் பழுதுபார்ப்பு",
-  "Close every Office application before starting a repair.": "பழுதுபார்க்கத் தொடங்குவதற்கு முன் ஒவ்வொரு Office பயன்பாட்டையும் மூடவும்."
+  "Close every Office application before starting a repair.": "பழுதுபார்க்கத் தொடங்குவதற்கு முன் ஒவ்வொரு Office பயன்பாட்டையும் மூடவும்.",
+  "Online Repair required after upgrade": "மேம்படுத்தலுக்குப் பிறகு ஆன்லைன் பழுதுபார்ப்பு தேவை",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "இந்த Wine4Office மேம்படுத்தல், தற்போதுள்ள Office நிறுவல் பயன்படுத்தும் இணக்கத்தன்மை சூழலை மாற்றியுள்ளது.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook ஐப் பயன்படுத்தும் முன் ஆன்லைன் பழுதுபார்ப்பை இயக்கவும். பழுதுபார்ப்பு முடியும் வரை Outlook வேலை செய்யாமல் போகலாம், Office செயல்திறனும் குறையலாம். ஆன்லைன் பழுதுபார்ப்பு, தற்போதுள்ள Office நிறுவலைப் புதிய Wine4Office பதிப்பிற்கு ஏற்ப புதுப்பிக்கிறது."
 }

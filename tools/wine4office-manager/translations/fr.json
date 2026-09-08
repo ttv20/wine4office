@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office Réparation en ligne annulée.",
   "Office Online Repair failed. Review the details below.": "Office Réparation en ligne échouée. Consultez les détails ci-dessous.",
   "Office Online Repair started.": "Office Réparation en ligne commencée.",
-  "Office repair recommended": "Office réparation recommandée",
-  "Office was already installed, so this operation updated the existing installation.": "Office était déjà installé, donc cette opération a mis à jour l’installation existante.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Lancez une réparation en ligne avant d’utiliser Outlook. Outlook peut ne pas fonctionner correctement tant que la réparation n’est pas terminée. Il rafraîchit Office Click-to-Run l’enregistrement et peut également améliorer Office démarrage et les performances de l’application.",
   "office-quick-repair": "Office Réparation rapide",
   "office-online-repair": "Office Réparation en ligne",
-  "Close every Office application before starting a repair.": "Fermez chaque Office application avant de commencer une réparation."
+  "Close every Office application before starting a repair.": "Fermez chaque Office application avant de commencer une réparation.",
+  "Online Repair required after upgrade": "Réparation en ligne requise après la mise à niveau",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Cette mise à niveau de Wine4Office a modifié l'environnement de compatibilité utilisé par l'installation Office existante.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Exécutez une réparation en ligne avant d'utiliser Outlook. Tant que la réparation n'est pas terminée, Outlook risque de ne pas fonctionner et les performances d'Office peuvent être réduites. La réparation en ligne met à jour l'installation Office existante pour la nouvelle version de Wine4Office."
 }

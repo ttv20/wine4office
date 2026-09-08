@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Sửa chữa trực tuyến đã bị hủy.",
   "Office Online Repair failed. Review the details below.": "Office sửa chữa trực tuyến thất bại. Xem chi tiết bên dưới.",
   "Office Online Repair started.": "Office Sửa chữa trực tuyến đã bắt đầu.",
-  "Office repair recommended": "Khuyến nghị sửa chữa Office",
-  "Office was already installed, so this operation updated the existing installation.": "Office đã được cài đặt, nên thao tác này đã cập nhật cài đặt hiện có.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Chạy Online Repair trước khi sử dụng Outlook. Outlook có thể không hoạt động đúng cho đến khi quá trình sửa chữa hoàn tất. Nó làm mới Office Click-to-Run đăng ký và cũng có thể cải thiện Office khởi động cũng như hiệu suất ứng dụng.",
   "office-quick-repair": "Office Sửa chữa nhanh",
   "office-online-repair": "Office sửa chữa trực tuyến",
-  "Close every Office application before starting a repair.": "Đóng tất cả các ứng dụng Office trước khi bắt đầu sửa chữa."
+  "Close every Office application before starting a repair.": "Đóng tất cả các ứng dụng Office trước khi bắt đầu sửa chữa.",
+  "Online Repair required after upgrade": "Cần Sửa chữa Trực tuyến sau khi nâng cấp",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Bản nâng cấp Wine4Office này đã thay đổi môi trường tương thích mà bản cài đặt Office hiện có đang sử dụng.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Hãy chạy Sửa chữa Trực tuyến trước khi dùng Outlook. Cho đến khi quá trình sửa chữa hoàn tất, Outlook có thể không hoạt động và hiệu suất của Office có thể thấp hơn. Sửa chữa Trực tuyến sẽ cập nhật bản cài đặt Office hiện có cho phiên bản Wine4Office mới."
 }

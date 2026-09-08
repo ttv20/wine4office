@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Verkkokorjaus peruutettu.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair epäonnistui. Lue alla olevat yksityiskohdat.",
   "Office Online Repair started.": "Office Online Repair alkoi.",
-  "Office repair recommended": "Office korjaus suositeltavaa",
-  "Office was already installed, so this operation updated the existing installation.": "Office oli jo asennettu, joten tämä operaatio päivitti olemassa olevan asennuksen.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Aja Online Repair ennen Outlook:n käyttöä. Outlook ei välttämättä toimi oikein ennen kuin korjaus on valmis. Se päivittää Office Click-to-Run rekisteröinnin ja voi myös parantaa Office käynnistyksen ja sovellusten suorituskykyä.",
   "office-quick-repair": "Office Nopea korjaus",
   "office-online-repair": "Office Verkkokorjaus",
-  "Close every Office application before starting a repair.": "Sulje kaikki Office hakemukset ennen korjauksen aloittamista."
+  "Close every Office application before starting a repair.": "Sulje kaikki Office hakemukset ennen korjauksen aloittamista.",
+  "Online Repair required after upgrade": "Online-korjaus vaaditaan päivityksen jälkeen",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Tämä Wine4Office-päivitys muutti yhteensopivuusympäristöä, jota nykyinen Office-asennus käyttää.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Suorita online-korjaus ennen Outlookin käyttöä. Ennen kuin korjaus on valmis, Outlook ei ehkä toimi ja Officen suorituskyky voi olla heikompi. Online-korjaus päivittää nykyisen Office-asennuksen uutta Wine4Office-versiota varten."
 }

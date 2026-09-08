@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Spletno popravilo preklicano.",
   "Office Online Repair failed. Review the details below.": "Office Spletno popravilo ni uspelo. Podrobnosti si oglejte spodaj.",
   "Office Online Repair started.": "Office Začetek spletnega popravila.",
-  "Office repair recommended": "Office priporočeno popravilo",
-  "Office was already installed, so this operation updated the existing installation.": "Office je bil že nameščen, zato je ta operacija posodobila obstoječo namestitev.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Pred uporabo Outlook zaženite spletno popravilo. Outlook morda ne bo delovalo pravilno, dokler popravilo ni končano. Osvežuje Office Click-to-Run registracijo in lahko izboljša tudi Office zagonsko in aplikacijsko zmogljivost.",
   "office-quick-repair": "Office Hitro popravilo",
   "office-online-repair": "Office Spletno popravilo",
-  "Close every Office application before starting a repair.": "Zaprite vsako Office aplikacijo, preden začnete s popravkom."
+  "Close every Office application before starting a repair.": "Zaprite vsako Office aplikacijo, preden začnete s popravkom.",
+  "Online Repair required after upgrade": "Po nadgradnji je potrebno spletno popravilo",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Ta nadgradnja Wine4Office je spremenila okolje združljivosti, ki ga uporablja obstoječa namestitev Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pred uporabo programa Outlook zaženite spletno popravilo. Dokler popravilo ni končano, Outlook morda ne bo deloval, zmogljivost Office pa je lahko nižja. Spletno popravilo posodobi obstoječo namestitev Office za novo različico Wine4Office."
 }

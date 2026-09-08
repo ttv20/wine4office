@@ -203,7 +203,8 @@ class ManagerWindow(QMainWindow):
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
         self.pending_odt_xml: tuple[Path, bytes, str] | None = None
-        self.pending_office_update: tuple[bool, dict] | None = None
+        self.pending_runner_update_repair = False
+        self.pending_manager_restart_after_repair: bool | None = None
         self.preload_rebind: tuple[str, str] | None = None
         self.update_progress_dialog: QDialog | None = None
         self.update_progress_status: QLabel | None = None
@@ -799,12 +800,12 @@ class ManagerWindow(QMainWindow):
         self._start_office_repair("online")
 
     def _start_office_repair(self, repair_type: str,
-                             install_config: dict | None = None) -> None:
+                             install_config: dict | None = None) -> bool:
         if not self.ensure_idle():
-            return
+            return False
         config = install_config if install_config is not None else self.save_config()
         if not config:
-            return
+            return False
         repair_label = "Quick" if repair_type == "quick" else "Online"
         task_kind = f"office-{repair_type}-repair"
         use_x11, _use_vulkan = backend.active_graphics_settings(config)
@@ -817,6 +818,9 @@ class ManagerWindow(QMainWindow):
                     cancel_event=self.state.cancel_event,
                     process_callback=self.state.set_process,
                     use_x11=use_x11,
+                ),
+                completion=self._task_completion(
+                    lambda _result, _error: self._finish_deferred_manager_restart()
                 ),
             )
             self._show_task_progress(
@@ -832,8 +836,10 @@ class ManagerWindow(QMainWindow):
             )
             self.notify(f"Office {repair_label} Repair started.")
             self.refresh_state()
+            return True
         except Exception as error:
             self.show_error(error)
+            return False
 
     def install_teams(self) -> None:
         if not self.ensure_idle():
@@ -936,7 +942,6 @@ class ManagerWindow(QMainWindow):
         if not config:
             return
         try:
-            office_was_installed = backend.office_installation_exists(config["prefix"])
             self.state.start_task(
                 "odt-install",
                 lambda payload=configuration_payload: backend.install_office_with_odt(
@@ -962,7 +967,6 @@ class ManagerWindow(QMainWindow):
                 if config_path is not None and config_digest is not None
                 else None
             )
-            self.pending_office_update = (office_was_installed, dict(config))
             self.last_task_state = "True:running"
             self.pages.setCurrentIndex(self.MAINTENANCE_PAGE)
             self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
@@ -970,7 +974,6 @@ class ManagerWindow(QMainWindow):
             self.notify("Preparing Office installer…", 0)
             self.refresh_state()
         except Exception as error:
-            self.pending_office_update = None
             self.show_error(error)
 
     def _office_download_completed(self, error, payload, config_path,
@@ -1150,17 +1153,18 @@ class ManagerWindow(QMainWindow):
             f"{location}",
         )
 
-    def prompt_office_update_repair(self, config: dict) -> None:
+    def prompt_office_upgrade_repair(self, config: dict) -> bool:
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setWindowTitle("Office repair recommended")
+        dialog.setWindowTitle("Online Repair required after upgrade")
         dialog.setText(
-            "Office was already installed, so this operation updated the existing installation."
+            "This Wine4Office upgrade changed the compatibility environment used by the "
+            "existing Office installation."
         )
         dialog.setInformativeText(
-            "Run Online Repair before using Outlook. Outlook may not work correctly until the "
-            "repair completes. It refreshes Office Click-to-Run registration and may also improve "
-            "Office startup and application performance."
+            "Run Online Repair before using Outlook. Until the repair completes, Outlook may "
+            "not work and Office performance may be lower. Online Repair updates the existing "
+            "Office installation for the new Wine4Office version."
         )
         online_button = dialog.addButton(
             "Run Online Repair", QMessageBox.ButtonRole.AcceptRole
@@ -1171,15 +1175,42 @@ class ManagerWindow(QMainWindow):
         self._translate_ui(dialog)
         dialog.exec()
         if dialog.clickedButton() is online_button:
-            self._start_office_repair("online", install_config=config)
+            return self._start_office_repair("online", install_config=config)
+        return False
 
     def _finish_completed_office_install(
-            self, office_was_installed: bool, config: dict | None,
-            config_path: Path | None, expected_digest: str | None) -> None:
+            self, config_path: Path | None, expected_digest: str | None) -> None:
         if config_path is not None and expected_digest is not None:
             self.prompt_office_xml_cleanup(config_path, expected_digest)
-        if office_was_installed and config is not None:
-            self.prompt_office_update_repair(config)
+
+    def _finish_update_prompts(
+            self, repair_required: bool, restart_required: bool,
+            update_succeeded: bool) -> None:
+        if (self.update_progress_dialog is not None
+                and self.update_progress_task_kind == "update"):
+            self.update_progress_dialog.accept()
+        repair_started = False
+        if repair_required:
+            with self.state.lock:
+                config = dict(self.state.config)
+            if restart_required:
+                self.pending_manager_restart_after_repair = update_succeeded
+            repair_started = self.prompt_office_upgrade_repair(config)
+        if restart_required and not repair_started:
+            self.pending_manager_restart_after_repair = None
+            self.prompt_manager_restart(update_succeeded)
+
+    def _finish_deferred_manager_restart(self) -> None:
+        update_succeeded = self.pending_manager_restart_after_repair
+        if update_succeeded is None:
+            return
+        self.pending_manager_restart_after_repair = None
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.accept()
+        QTimer.singleShot(
+            0, lambda succeeded=update_succeeded:
+            self.prompt_manager_restart(succeeded)
+        )
 
     def _applications_page(self) -> QWidget:
         page, layout = self._new_page(
@@ -2602,15 +2633,27 @@ class ManagerWindow(QMainWindow):
         elif disable_button is not None and clicked is disable_button:
             self._apply_automatic_update_checks(False, prompted=True)
         elif clicked is install_button:
+            update_started = False
             try:
                 if "manager" in selected:
                     self.restart_prompted = False
+                if "wine" in selected:
+                    with self.state.lock:
+                        prefix = self.state.config["prefix"]
+                    self.pending_runner_update_repair = (
+                        backend.office_installation_exists(prefix)
+                    )
+                else:
+                    self.pending_runner_update_repair = False
                 self.navigation.setCurrentRow(self.MAINTENANCE_PAGE)
                 self.state.start_offered_update(selected)
+                update_started = True
                 self._show_update_progress(offer, selected)
                 self.notify("Downloading the approved updates…")
                 self.refresh_state()
             except Exception as error:
+                if not update_started:
+                    self.pending_runner_update_repair = False
                 self.show_error(error)
 
     def _show_update_progress(self, offer: dict, selected: list[str]) -> None:
@@ -2913,24 +2956,15 @@ class ManagerWindow(QMainWindow):
         task = snapshot["task"]
         self._refresh_update_progress(task)
         self._refresh_office_startup_progress(task)
-        if ((self.pending_odt_xml is not None or self.pending_office_update is not None)
+        if (self.pending_odt_xml is not None
                 and task["kind"] == "odt-install" and not task["running"]):
             pending_xml = self.pending_odt_xml
-            pending_update = self.pending_office_update
             self.pending_odt_xml = None
-            self.pending_office_update = None
             if task["status"] == "completed":
-                config_path = pending_xml[0] if pending_xml is not None else None
-                expected_digest = pending_xml[2] if pending_xml is not None else None
-                office_was_installed = pending_update[0] if pending_update is not None else False
-                install_config = pending_update[1] if pending_update is not None else None
                 QTimer.singleShot(
                     700 if self.update_progress_dialog is not None else 0,
-                    lambda updated=office_was_installed, current=install_config,
-                    path=config_path, digest=expected_digest:
-                    self._finish_completed_office_install(
-                        updated, current, path, digest
-                    ),
+                    lambda path=pending_xml[0], digest=pending_xml[2]:
+                    self._finish_completed_office_install(path, digest),
                 )
         task_text = (
             f"{self._tr(task['kind'])}: {self._tr('running')}"
@@ -2984,15 +3018,27 @@ class ManagerWindow(QMainWindow):
                     QTimer.singleShot(
                         0, lambda current=failure: self.show_error(current)
                     )
-            if (task.get("kind") == "update"
-                    and task.get("restart_required")
-                    and not self.restart_prompted):
-                self.restart_prompted = True
-                QTimer.singleShot(
-                    0,
-                    lambda succeeded=task["status"] == "completed":
-                    self.prompt_manager_restart(succeeded),
+            if task.get("kind") == "update":
+                repair_required = (
+                    self.pending_runner_update_repair
+                    and task.get("wine_update_completed") is True
                 )
+                self.pending_runner_update_repair = False
+                restart_required = (
+                    task.get("restart_required") is True
+                    and not self.restart_prompted
+                )
+                if restart_required:
+                    self.restart_prompted = True
+                if repair_required or restart_required:
+                    update_succeeded = task["status"] == "completed"
+                    delay = 700 if self.update_progress_dialog is not None else 0
+                    QTimer.singleShot(
+                        delay,
+                        lambda repair=repair_required, restart=restart_required,
+                        succeeded=update_succeeded:
+                        self._finish_update_prompts(repair, restart, succeeded),
+                    )
         self.last_task_state = task_state
         if self._close_when_idle and not task["running"] and not self._automatic_close:
             self._close_when_idle = False

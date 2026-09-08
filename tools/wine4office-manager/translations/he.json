@@ -215,10 +215,10 @@
   "Office Online Repair cancelled.": "התיקון המקוון של Office בוטל.",
   "Office Online Repair failed. Review the details below.": "התיקון המקוון של Office נכשל. אפשר לעיין בפרטים למטה.",
   "Office Online Repair started.": "התיקון המקוון של Office התחיל.",
-  "Office repair recommended": "מומלץ לתקן את Office",
-  "Office was already installed, so this operation updated the existing installation.": "הייתה כבר התקנה של Office, ולכן פעולה זו עדכנה את ההתקנה הקיימת.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "הפעל תיקון מקוון לפני השימוש ב-Outlook. ייתכן ש-Outlook לא יפעל כראוי עד להשלמת התיקון. התיקון מרענן את רישום Click-to-Run של Office ועשוי גם לשפר את זמני ההפעלה ואת ביצועי יישומי Office.",
   "office-quick-repair": "תיקון מהיר של Office",
   "office-online-repair": "תיקון מקוון של Office",
-  "Close every Office application before starting a repair.": "סגור את כל יישומי Office לפני התחלת תיקון."
+  "Close every Office application before starting a repair.": "סגור את כל יישומי Office לפני התחלת תיקון.",
+  "Online Repair required after upgrade": "נדרש תיקון מקוון לאחר השדרוג",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "השדרוג של Wine4Office שינה את סביבת התאימות שבה משתמשת התקנת Office הקיימת.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "הפעל תיקון מקוון לפני השימוש ב-Outlook. עד להשלמת התיקון, ייתכן ש-Outlook לא יעבוד וביצועי Office יהיו נמוכים יותר. התיקון המקוון מתאים את התקנת Office הקיימת לגרסה החדשה של Wine4Office."
 }

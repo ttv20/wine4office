@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Reparații online anulate.",
   "Office Online Repair failed. Review the details below.": "Office Reparația online a eșuat. Consultați detaliile de mai jos.",
   "Office Online Repair started.": "Office Reparații online începute.",
-  "Office repair recommended": "Office reparație recomandată",
-  "Office was already installed, so this operation updated the existing installation.": "Office era deja instalat, așa că această operațiune a actualizat instalarea existentă.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Rulează reparația online înainte de a folosi Outlook. Outlook s-ar putea să nu funcționeze corect până când reparația nu se finalizează. Reîmprospătează Office Click-to-Run înregistrări și poate îmbunătăți, de asemenea, performanța Office la pornire și a aplicațiilor.",
   "office-quick-repair": "Office Reparație rapidă",
   "office-online-repair": "Office Reparații online",
-  "Close every Office application before starting a repair.": "Închide fiecare Office aplicare înainte de a începe reparația."
+  "Close every Office application before starting a repair.": "Închide fiecare Office aplicare înainte de a începe reparația.",
+  "Online Repair required after upgrade": "Reparare online necesară după upgrade",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Acest upgrade Wine4Office a modificat mediul de compatibilitate utilizat de instalarea Office existentă.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Executați repararea online înainte de a utiliza Outlook. Până la finalizarea reparării, este posibil ca Outlook să nu funcționeze, iar performanța Office să fie mai scăzută. Repararea online actualizează instalarea Office existentă pentru noua versiune Wine4Office."
 }

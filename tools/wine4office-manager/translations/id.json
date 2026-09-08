@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Perbaikan Online dibatalkan.",
   "Office Online Repair failed. Review the details below.": "Office Perbaikan Online gagal. Tinjau detailnya di bawah ini.",
   "Office Online Repair started.": "Office Perbaikan Online dimulai.",
-  "Office repair recommended": "Office perbaikan yang direkomendasikan",
-  "Office was already installed, so this operation updated the existing installation.": "Office sudah terpasang, jadi operasi ini memperbarui instalasi yang ada.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Jalankan Online Repair sebelum menggunakan Outlook. Outlook mungkin tidak berfungsi dengan benar sampai perbaikan selesai. Ini memperbarui registrasi Office Click-to-Run dan juga dapat meningkatkan kinerja startup dan aplikasi Office.",
   "office-quick-repair": "Office Perbaikan Cepat",
   "office-online-repair": "Office Perbaikan Online",
-  "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulai perbaikan."
+  "Close every Office application before starting a repair.": "Tutup setiap aplikasi Office sebelum memulai perbaikan.",
+  "Online Repair required after upgrade": "Perbaikan Online diperlukan setelah peningkatan",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Peningkatan Wine4Office ini mengubah lingkungan kompatibilitas yang digunakan oleh instalasi Office yang ada.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Jalankan Perbaikan Online sebelum menggunakan Outlook. Sampai perbaikan selesai, Outlook mungkin tidak berfungsi dan performa Office mungkin lebih rendah. Perbaikan Online memperbarui instalasi Office yang ada untuk versi Wine4Office yang baru."
 }

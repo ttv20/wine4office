@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Netviðgerð felld niður.",
   "Office Online Repair failed. Review the details below.": "Office Netviðgerð mistókst. Skoðaðu nánari upplýsingar hér að neðan.",
   "Office Online Repair started.": "Office Netviðgerð hófst.",
-  "Office repair recommended": "Office viðgerð mælt með",
-  "Office was already installed, so this operation updated the existing installation.": "Office var þegar komið upp, svo þessi aðgerð uppfærði núverandi uppsetningu.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Keyrðu viðgerð á netinu áður en þú notar Outlook. Outlook gæti ekki virkað rétt fyrr en viðgerðinni er lokið. Það endurnýjar skráningu Office Click-to-Run og getur einnig bætt ræsingar- og forritaframmistöðu Office.",
   "office-quick-repair": "Office Fljótleg viðgerð",
   "office-online-repair": "Office Viðgerð á netinu",
-  "Close every Office application before starting a repair.": "Lokaðu öllum Office forritum áður en þú byrjar viðgerð."
+  "Close every Office application before starting a repair.": "Lokaðu öllum Office forritum áður en þú byrjar viðgerð.",
+  "Online Repair required after upgrade": "Netviðgerð er nauðsynleg eftir uppfærslu",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Þessi Wine4Office-uppfærsla breytti samhæfisumhverfinu sem núverandi Office-uppsetning notar.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Keyrðu netviðgerð áður en þú notar Outlook. Þar til viðgerðinni lýkur getur verið að Outlook virki ekki og að afköst Office séu lakari. Netviðgerð uppfærir núverandi Office-uppsetningu fyrir nýju Wine4Office-útgáfuna."
 }

@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Internetinis remontas atšauktas.",
   "Office Online Repair failed. Review the details below.": "Office internetinis taisymas nepavyko. Peržiūrėkite detales žemiau.",
   "Office Online Repair started.": "Office Pradėtas internetinis remontas.",
-  "Office repair recommended": "Office rekomenduojamas remontas",
-  "Office was already installed, so this operation updated the existing installation.": "Office jau buvo įdiegta, todėl ši operacija atnaujino esamą įrangą.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Prieš naudodami Outlook. Outlook gali veikti netinkamai, kol remontas nebus baigtas. Jis atnaujina Office Click-to-Run registraciją ir gali pagerinti Office paleidimo bei programos veikimą.",
   "office-quick-repair": "Office Greitas remontas",
   "office-online-repair": "Office Internetinis remontas",
-  "Close every Office application before starting a repair.": "Uždarykite kiekvieną Office paraišką prieš pradėdami remontą."
+  "Close every Office application before starting a repair.": "Uždarykite kiekvieną Office paraišką prieš pradėdami remontą.",
+  "Online Repair required after upgrade": "Po naujinimo būtinas taisymas internetu",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Šis Wine4Office naujinimas pakeitė suderinamumo aplinką, kurią naudoja esamas Office diegimas.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Prieš naudodami Outlook, paleiskite taisymą internetu. Kol taisymas nebus baigtas, Outlook gali neveikti, o Office našumas gali būti mažesnis. Taisymas internetu atnaujina esamą Office diegimą naujajai Wine4Office versijai."
 }

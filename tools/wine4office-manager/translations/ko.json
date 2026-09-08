@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office 온라인 수리가 취소되었습니다.",
   "Office Online Repair failed. Review the details below.": "Office 온라인 수리가 실패했습니다. 아래의 세부 사항을 확인해 보세요.",
   "Office Online Repair started.": "Office 온라인 수리가 시작되었습니다.",
-  "Office repair recommended": "Office 수리 권장",
-  "Office was already installed, so this operation updated the existing installation.": "Office 이미 설치되어 있었기 때문에 이 작업이 기존 설치를 업데이트한 것입니다.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook 사용 전에 온라인 수리를 실행하세요. Outlook 수리가 완료될 때까지 제대로 작동하지 않을 수 있습니다. Office Click-to-Run 등록을 새로고침할 뿐만 아니라 Office 시작 및 애플리케이션 성능을 향상시킬 수도 있습니다.",
   "office-quick-repair": "Office 빠른 수리",
   "office-online-repair": "Office 온라인 수리",
-  "Close every Office application before starting a repair.": "수리를 시작하기 전에 모든 Office 작업을 종료하세요."
+  "Close every Office application before starting a repair.": "수리를 시작하기 전에 모든 Office 작업을 종료하세요.",
+  "Online Repair required after upgrade": "업그레이드 후 온라인 복구가 필요합니다",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "이 Wine4Office 업그레이드로 인해 기존 Office 설치에서 사용하는 호환성 환경이 변경되었습니다.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook을 사용하기 전에 온라인 복구를 실행하세요. 복구가 완료될 때까지 Outlook이 작동하지 않을 수 있으며 Office 성능이 저하될 수 있습니다. 온라인 복구는 새 Wine4Office 버전에 맞게 기존 Office 설치를 업데이트합니다."
 }

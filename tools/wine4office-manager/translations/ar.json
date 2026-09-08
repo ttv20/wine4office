@@ -215,10 +215,10 @@
   "Office Online Repair cancelled.": "Office تم إلغاء الإصلاح الإلكتروني.",
   "Office Online Repair failed. Review the details below.": "فشل Office الإصلاح عبر الإنترنت. راجع التفاصيل أدناه.",
   "Office Online Repair started.": "Office بدأ الإصلاح الإلكتروني.",
-  "Office repair recommended": "Office الإصلاح الموصى به",
-  "Office was already installed, so this operation updated the existing installation.": "Office كان مثبتا بالفعل، لذا حدثت هذه العملية التركيب الحالي.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "قم بتشغيل الإصلاح عبر الإنترنت قبل استخدام Outlook. قد لا يعمل Outlook بشكل صحيح حتى يكتمل الإصلاح. يقوم بتحديث Office Click-to-Run التسجيل وقد يحسن أيضا أداء Office بدء التشغيل والتطبيقات.",
   "office-quick-repair": "Office الإصلاح السريع",
   "office-online-repair": "Office الإصلاح عبر الإنترنت",
-  "Close every Office application before starting a repair.": "أغلق كل Office الطلب قبل بدء الإصلاح."
+  "Close every Office application before starting a repair.": "أغلق كل Office الطلب قبل بدء الإصلاح.",
+  "Online Repair required after upgrade": "الإصلاح عبر الإنترنت مطلوب بعد الترقية",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "غيَّرت ترقية Wine4Office هذه بيئة التوافق التي يستخدمها تثبيت Office الحالي.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "شغِّل الإصلاح عبر الإنترنت قبل استخدام Outlook. وإلى أن يكتمل الإصلاح، قد لا يعمل Outlook وقد يكون أداء Office أقل. يعمل الإصلاح عبر الإنترنت على تحديث تثبيت Office الحالي ليتوافق مع إصدار Wine4Office الجديد."
 }

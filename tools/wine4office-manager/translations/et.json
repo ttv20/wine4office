@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Veebipõhine remont tühistatud.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair ebaõnnestus. Vaata allpool üksikasju.",
   "Office Online Repair started.": "Office Online Repair algas.",
-  "Office repair recommended": "Office parandamine soovitatav",
-  "Office was already installed, so this operation updated the existing installation.": "Office oli juba paigaldatud, seega uuendas see operatsioon olemasolevat paigaldust.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Käivita Online Repair enne Outlook kasutamist. Outlook ei pruugi enne remondi lõppu korralikult töötada. See värskendab Office Click-to-Run registreerimist ning võib parandada Office käivitamise ja rakenduse jõudlust.",
   "office-quick-repair": "Office Kiire parandus",
   "office-online-repair": "Office Veebipõhine remont",
-  "Close every Office application before starting a repair.": "Sulge iga Office taotlus enne remondi alustamist."
+  "Close every Office application before starting a repair.": "Sulge iga Office taotlus enne remondi alustamist.",
+  "Online Repair required after upgrade": "Pärast uuendust on vaja teha võrguparandus",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "See Wine4Office'i uuendus muutis ühilduvuskeskkonda, mida kasutab olemasolev Office'i install.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Enne Outlooki kasutamist käivitage võrguparandus. Kuni parandus pole lõpule jõudnud, ei pruugi Outlook töötada ja Office'i jõudlus võib olla väiksem. Võrguparandus värskendab olemasolevat Office'i installi uue Wine4Office'i versiooni jaoks."
 }

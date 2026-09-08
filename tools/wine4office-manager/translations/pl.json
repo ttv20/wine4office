@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office Naprawa online została anulowana.",
   "Office Online Repair failed. Review the details below.": "Office Naprawa online się nie powiodła. Zapoznaj się ze szczegółami poniżej.",
   "Office Online Repair started.": "Office Rozpoczęto naprawę online.",
-  "Office repair recommended": "Office zalecana naprawa",
-  "Office was already installed, so this operation updated the existing installation.": "Office był już zainstalowany, więc ta operacja zaktualizowała istniejącą instalację.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Przed użyciem Outlook uruchom Naprawę online. Outlook może nie działać poprawnie, dopóki naprawa się nie zakończy. Odświeża Office Click-to-Run rejestrację i może również poprawić Office wydajność uruchamiania i aplikacji.",
   "office-quick-repair": "Office Szybka Naprawa",
   "office-online-repair": "Office Naprawa online",
-  "Close every Office application before starting a repair.": "Zamykaj każdą Office aplikację przed rozpoczęciem naprawy."
+  "Close every Office application before starting a repair.": "Zamykaj każdą Office aplikację przed rozpoczęciem naprawy.",
+  "Online Repair required after upgrade": "Po uaktualnieniu wymagana jest naprawa online",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "To uaktualnienie Wine4Office zmieniło środowisko zgodności używane przez istniejącą instalację pakietu Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Przed użyciem programu Outlook uruchom naprawę online. Do czasu ukończenia naprawy program Outlook może nie działać, a wydajność pakietu Office może być niższa. Naprawa online aktualizuje istniejącą instalację pakietu Office do nowej wersji Wine4Office."
 }

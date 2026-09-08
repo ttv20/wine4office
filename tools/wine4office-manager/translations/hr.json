@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office Online popravak otkazan.",
   "Office Online Repair failed. Review the details below.": "Office Online popravak nije uspio. Pogledajte detalje u nastavku.",
   "Office Online Repair started.": "Office Online Repair je započeo.",
-  "Office repair recommended": "Office preporučeni popravak",
-  "Office was already installed, so this operation updated the existing installation.": "Office je već bio instaliran, pa je ova operacija ažurirala postojeću instalaciju.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Pokrenite online popravak prije korištenja Outlook. Outlook možda neće raditi ispravno dok popravak ne završi. Osvježava Office Click-to-Run registraciju i može poboljšati Office pokretanje i performanse aplikacije.",
   "office-quick-repair": "Office Brza popravka",
   "office-online-repair": "Office Online popravak",
-  "Close every Office application before starting a repair.": "Zatvorite svaku Office aplikaciju prije nego što započnete popravak."
+  "Close every Office application before starting a repair.": "Zatvorite svaku Office aplikaciju prije nego što započnete popravak.",
+  "Online Repair required after upgrade": "Nakon nadogradnje potreban je mrežni popravak",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Ova nadogradnja programa Wine4Office promijenila je okruženje kompatibilnosti koje koristi postojeća instalacija sustava Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Pokrenite mrežni popravak prije korištenja programa Outlook. Dok se popravak ne dovrši, Outlook možda neće raditi, a performanse sustava Office mogu biti slabije. Mrežni popravak ažurira postojeću instalaciju sustava Office za novu verziju programa Wine4Office."
 }

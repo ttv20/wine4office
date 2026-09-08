@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Onlinereparation avbruten.",
   "Office Online Repair failed. Review the details below.": "Office Online-reparation misslyckades. Läs detaljerna nedan.",
   "Office Online Repair started.": "Office Online-reparation har startat.",
-  "Office repair recommended": "Office rekommenderad reparation",
-  "Office was already installed, so this operation updated the existing installation.": "Office var redan installerad, så denna operation uppdaterade den befintliga installationen.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Kör onlinereparation innan du använder Outlook. Outlook kanske inte fungerar korrekt förrän reparationen är klar. Den uppdaterar Office Click-to-Run registrering och kan även förbättra Office uppstarts- och applikationsprestanda.",
   "office-quick-repair": "Office Snabb reparation",
   "office-online-repair": "Office Onlinereparation",
-  "Close every Office application before starting a repair.": "Stäng varje Office applikation innan du påbörjar en reparation."
+  "Close every Office application before starting a repair.": "Stäng varje Office applikation innan du påbörjar en reparation.",
+  "Online Repair required after upgrade": "Onlinereparation krävs efter uppgraderingen",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Den här Wine4Office-uppgraderingen ändrade kompatibilitetsmiljön som den befintliga Office-installationen använder.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Kör Onlinereparation innan du använder Outlook. Tills reparationen är klar kanske Outlook inte fungerar och Office-prestandan kan vara sämre. Onlinereparation uppdaterar den befintliga Office-installationen för den nya Wine4Office-versionen."
 }

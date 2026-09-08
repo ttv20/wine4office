@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office在线维修取消了。",
   "Office Online Repair failed. Review the details below.": "Office在线修复失败了。请查看以下细节。",
   "Office Online Repair started.": "Office在线维修开始了。",
-  "Office repair recommended": "推荐Office维修",
-  "Office was already installed, so this operation updated the existing installation.": "Office已经安装好了，所以这个操作更新了现有安装。",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "在使用Outlook前先运行在线维修。Outlook在修复完成前可能无法正常工作。它刷新Office Click-to-Run注册，也可能提升Office启动和应用性能。",
   "office-quick-repair": "Office 快速修复",
   "office-online-repair": "Office 在线维修",
-  "Close every Office application before starting a repair.": "开始维修前，每次使用Office都关闭。"
+  "Close every Office application before starting a repair.": "开始维修前，每次使用Office都关闭。",
+  "Online Repair required after upgrade": "升级后需要进行联机修复",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "此 Wine4Office 升级更改了现有 Office 安装所使用的兼容性环境。",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "使用 Outlook 之前请运行联机修复。在修复完成之前，Outlook 可能无法正常工作，Office 的性能也可能下降。联机修复会针对新的 Wine4Office 版本更新现有的 Office 安装。"
 }

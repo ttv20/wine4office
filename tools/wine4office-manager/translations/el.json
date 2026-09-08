@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Η ηλεκτρονική επισκευή ακυρώθηκε.",
   "Office Online Repair failed. Review the details below.": "Office Η ηλεκτρονική επισκευή απέτυχε. Διαβάστε τις λεπτομέρειες παρακάτω.",
   "Office Online Repair started.": "Office Ξεκίνησε η ηλεκτρονική επισκευή.",
-  "Office repair recommended": "Office συνιστάται επισκευή",
-  "Office was already installed, so this operation updated the existing installation.": "Office ήταν ήδη εγκατεστημένο, επομένως αυτή η λειτουργία ενημέρωσε την υπάρχουσα εγκατάσταση.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Εκτελέστε το Online Repair πριν χρησιμοποιήσετε το Outlook. Outlook ενδέχεται να μην λειτουργεί σωστά μέχρι να ολοκληρωθεί η επισκευή. Ανανεώνει την εγγραφή Office Click-to-Run και μπορεί επίσης να βελτιώσει την εκκίνηση Office και την απόδοση της εφαρμογής.",
   "office-quick-repair": "Office Γρήγορη επισκευή",
   "office-online-repair": "Office Online Επισκευή",
-  "Close every Office application before starting a repair.": "Κλείστε κάθε Office εφαρμογή πριν ξεκινήσετε μια επισκευή."
+  "Close every Office application before starting a repair.": "Κλείστε κάθε Office εφαρμογή πριν ξεκινήσετε μια επισκευή.",
+  "Online Repair required after upgrade": "Απαιτείται ηλεκτρονική επιδιόρθωση μετά την αναβάθμιση",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Αυτή η αναβάθμιση του Wine4Office άλλαξε το περιβάλλον συμβατότητας που χρησιμοποιεί η υπάρχουσα εγκατάσταση του Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Εκτελέστε ηλεκτρονική επιδιόρθωση πριν χρησιμοποιήσετε το Outlook. Μέχρι να ολοκληρωθεί η επιδιόρθωση, το Outlook ενδέχεται να μην λειτουργεί και οι επιδόσεις του Office να είναι χαμηλότερες. Η ηλεκτρονική επιδιόρθωση ενημερώνει την υπάρχουσα εγκατάσταση του Office για τη νέα έκδοση του Wine4Office."
 }

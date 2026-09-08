@@ -155,10 +155,10 @@
   "Office Online Repair cancelled.": "Office Reparación online cancelada.",
   "Office Online Repair failed. Review the details below.": "Office Reparación online falló. Revisa los detalles a continuación.",
   "Office Online Repair started.": "Office Reparación en línea iniciada.",
-  "Office repair recommended": "Office reparación recomendada",
-  "Office was already installed, so this operation updated the existing installation.": "Office ya estaba instalado, así que esta operación actualizó la instalación existente.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Ejecuta la reparación online antes de usar Outlook. Outlook puede que no funcione correctamente hasta que la reparación se complete. Actualiza Office Click-to-Run registro y también puede mejorar Office rendimiento de inicio y aplicaciones.",
   "office-quick-repair": "Office Reparación rápida",
   "office-online-repair": "Office Reparación en línea",
-  "Close every Office application before starting a repair.": "Cierra cada Office aplicación antes de comenzar una reparación."
+  "Close every Office application before starting a repair.": "Cierra cada Office aplicación antes de comenzar una reparación.",
+  "Online Repair required after upgrade": "Se requiere una reparación en línea después de la actualización",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Esta actualización de Wine4Office cambió el entorno de compatibilidad que usa la instalación existente de Office.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Ejecute la reparación en línea antes de usar Outlook. Hasta que finalice la reparación, es posible que Outlook no funcione y que el rendimiento de Office sea menor. La reparación en línea actualiza la instalación existente de Office para la nueva versión de Wine4Office."
 }

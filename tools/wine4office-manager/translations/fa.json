@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office تعمیر آنلاین لغو شد.",
   "Office Online Repair failed. Review the details below.": "Office تعمیر آنلاین شکست خورد. جزئیات زیر را مرور کنید.",
   "Office Online Repair started.": "Office تعمیر آنلاین شروع شد.",
-  "Office repair recommended": "Office تعمیر توصیه شده است",
-  "Office was already installed, so this operation updated the existing installation.": "Office قبلا نصب شده بود، بنابراین این عملیات نصب موجود را به روزرسانی کرد.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "قبل از استفاده از Outlook، تعمیرات آنلاین را انجام دهید. ممکن است Outlook تا زمانی که تعمیر کامل نشود، به درستی کار نکند. این سیستم ثبت نام Office Click-to-Run تازه سازی می کند و ممکن است عملکرد راه اندازی و برنامه Office نیز بهبود یابد.",
   "office-quick-repair": "Office تعمیر سریع",
   "office-online-repair": "Office تعمیر آنلاین",
-  "Close every Office application before starting a repair.": "قبل از شروع تعمیر، همه Office درخواست ها را ببندید."
+  "Close every Office application before starting a repair.": "قبل از شروع تعمیر، همه Office درخواست ها را ببندید.",
+  "Online Repair required after upgrade": "پس از ارتقا، تعمیر آنلاین لازم است",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "این ارتقای Wine4Office محیط سازگاری مورد استفادهٔ نصب فعلی Office را تغییر داد.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "پیش از استفاده از Outlook، تعمیر آنلاین را اجرا کنید. تا زمانی که تعمیر کامل نشود، ممکن است Outlook کار نکند و کارایی Office پایین‌تر باشد. تعمیر آنلاین نصب فعلی Office را برای نسخهٔ جدید Wine4Office به‌روزرسانی می‌کند."
 }

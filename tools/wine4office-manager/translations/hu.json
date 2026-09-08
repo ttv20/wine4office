@@ -121,10 +121,10 @@
   "Office Online Repair cancelled.": "Office Online javítás törölve.",
   "Office Online Repair failed. Review the details below.": "Office Online Repair sikertelen volt. A részleteket lentebb olvasd el.",
   "Office Online Repair started.": "Office Online Repair elindult.",
-  "Office repair recommended": "Office javítás ajánlott",
-  "Office was already installed, so this operation updated the existing installation.": "Office már telepítve volt, így ez a művelet frissítette a meglévő telepítést.",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "A Outlook használat előtt indítsd el az Online Repair-ot. Outlook lehet, hogy nem működik megfelelően, amíg a javítás be nem fejeződik. Frissíti Office Click-to-Run regisztrációt, és javíthatja Office indítási és alkalmazási teljesítményt is.",
   "office-quick-repair": "Office Gyors javítás",
   "office-online-repair": "Office Online javítás",
-  "Close every Office application before starting a repair.": "Minden Office alkalmazást zárj be a javítás előtt."
+  "Close every Office application before starting a repair.": "Minden Office alkalmazást zárj be a javítás előtt.",
+  "Online Repair required after upgrade": "Online javítás szükséges a frissítés után",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "Ez a Wine4Office-frissítés módosította a meglévő Office-telepítés által használt kompatibilitási környezetet.",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Futtasson online javítást az Outlook használata előtt. A javítás befejezéséig előfordulhat, hogy az Outlook nem működik, és az Office teljesítménye alacsonyabb lehet. Az online javítás frissíti a meglévő Office-telepítést az új Wine4Office-verzióhoz."
 }

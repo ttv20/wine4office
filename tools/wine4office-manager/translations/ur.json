@@ -117,10 +117,10 @@
   "Office Online Repair cancelled.": "Office آن لائن مرمت منسوخ کر دی گئی۔",
   "Office Online Repair failed. Review the details below.": "Office آن لائن مرمت ناکام ہو گئی۔ نیچے تفصیلات کا جائزہ لیں۔",
   "Office Online Repair started.": "Office آن لائن مرمت شروع ہوئی۔",
-  "Office repair recommended": "Office مرمت کی سفارش کی گئی ہے",
-  "Office was already installed, so this operation updated the existing installation.": "Office پہلے ہی انسٹال ہو چکی تھی، اس لیے اس آپریشن نے موجودہ انسٹالیشن کو اپ ڈیٹ کیا۔",
-  "Run Online Repair before using Outlook. Outlook may not work correctly until the repair completes. It refreshes Office Click-to-Run registration and may also improve Office startup and application performance.": "Outlook استعمال کرنے سے پہلے آن لائن مرمت کریں۔ Outlook مرمت مکمل ہونے تک صحیح کام نہیں کر سکتا۔ یہ رجسٹریشن Office Click-to-Run ریفریش کرتا ہے اور اسٹارٹ اپ اور ایپلیکیشن کی کارکردگی Office بھی بہتر بنا سکتا ہے۔",
   "office-quick-repair": "Office فوری مرمت",
   "office-online-repair": "Office آن لائن مرمت",
-  "Close every Office application before starting a repair.": "مرمت شروع کرنے سے پہلے ہر Office درخواست بند کر لیں۔"
+  "Close every Office application before starting a repair.": "مرمت شروع کرنے سے پہلے ہر Office درخواست بند کر لیں۔",
+  "Online Repair required after upgrade": "اپ گریڈ کے بعد آن لائن مرمت درکار ہے",
+  "This Wine4Office upgrade changed the compatibility environment used by the existing Office installation.": "اس Wine4Office اپ گریڈ نے وہ مطابقت والا ماحول تبدیل کر دیا ہے جو موجودہ Office انسٹالیشن استعمال کرتی ہے۔",
+  "Run Online Repair before using Outlook. Until the repair completes, Outlook may not work and Office performance may be lower. Online Repair updates the existing Office installation for the new Wine4Office version.": "Outlook استعمال کرنے سے پہلے آن لائن مرمت چلائیں۔ جب تک مرمت مکمل نہیں ہوتی، ممکن ہے Outlook کام نہ کرے اور Office کی کارکردگی کم ہو۔ آن لائن مرمت موجودہ Office انسٹالیشن کو نئے Wine4Office ورژن کے لیے اپ ڈیٹ کرتی ہے۔"
 }
