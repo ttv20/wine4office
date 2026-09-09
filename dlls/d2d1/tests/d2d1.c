@@ -18594,6 +18594,8 @@ static HRESULT create_geometry_cache_pressure(ID2D1Factory *factory, ID2D1PathGe
         return hr;
     }
 
+    /* Coincident hollow curves exercise large simplified stroke entries without
+     * contributing to the geometry's fill or its self-intersection processing. */
     set_point(&point, 0.0f, 0.0f);
     ID2D1GeometrySink_BeginFigure(sink, point, D2D1_FIGURE_BEGIN_HOLLOW);
     for (i = 0; i < segment_count; ++i)
@@ -18615,6 +18617,11 @@ static HRESULT create_geometry_cache_pressure(ID2D1Factory *factory, ID2D1PathGe
     ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_OPEN);
     hr = ID2D1GeometrySink_Close(sink);
     ID2D1GeometrySink_Release(sink);
+    if (FAILED(hr))
+    {
+        ID2D1PathGeometry_Release(*geometry);
+        *geometry = NULL;
+    }
     return hr;
 }
 
