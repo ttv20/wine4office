@@ -33,13 +33,14 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 1
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 2
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
 #define WINE_WAYLAND_HOST_CAP_SHM            0x00000004
 #define WINE_WAYLAND_HOST_CAP_SEAT           0x00000008
 #define WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+#define WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT 0x00000020
 
 #define WINE_WAYLAND_SCENE_EMPTY          0x00000001
 #define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
@@ -8064,6 +8065,6 @@ union generic_reply
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 978
+#define SERVER_PROTOCOL_VERSION 979
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

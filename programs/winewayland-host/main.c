@@ -22,11 +22,13 @@
 #include "unixlib.h"
 
 C_ASSERT(sizeof(struct winewayland_host_startup) == 40);
+C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SEAT == WINE_WAYLAND_HOST_CAP_SEAT);
 C_ASSERT(WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS == WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS);
+C_ASSERT(WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT == WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT);
 
 static NTSTATUS get_backend_probe(struct winewayland_host_probe *probe)
 {
@@ -57,6 +59,8 @@ static int probe_backend(void)
     printf("endpoint=%s\n", probe.endpoint_path);
     printf("endpoint_device=%I64u\n", probe.endpoint_device);
     printf("endpoint_inode=%I64u\n", probe.endpoint_inode);
+    printf("device_uuid=%08x%08x%08x%08x\n", probe.device_uuid[0], probe.device_uuid[1],
+            probe.device_uuid[2], probe.device_uuid[3]);
     printf("seat_global=%u\n", probe.seat_global);
     printf("capabilities=%#x\n", probe.capabilities);
     return 0;

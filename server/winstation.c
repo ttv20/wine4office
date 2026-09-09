@@ -157,7 +157,8 @@ static int validate_wayland_host_context( unsigned int version, unsigned int cap
 {
     const unsigned int valid_caps = WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET |
             WINE_WAYLAND_HOST_CAP_COMPOSITOR | WINE_WAYLAND_HOST_CAP_SHM |
-            WINE_WAYLAND_HOST_CAP_SEAT | WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS;
+            WINE_WAYLAND_HOST_CAP_SEAT | WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS |
+            WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT;
     const unsigned int required_caps = WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET |
             WINE_WAYLAND_HOST_CAP_COMPOSITOR | WINE_WAYLAND_HOST_CAP_SEAT;
 

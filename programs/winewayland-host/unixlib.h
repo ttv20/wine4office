@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#define WINEWAYLAND_HOST_PROBE_VERSION 1
+#define WINEWAYLAND_HOST_PROBE_VERSION 2
 #define WINEWAYLAND_HOST_NAME_MAX 108
 
 #define WINEWAYLAND_HOST_CAP_LOCAL_SOCKET  0x00000001
@@ -22,6 +22,7 @@
 #define WINEWAYLAND_HOST_CAP_SHM           0x00000004
 #define WINEWAYLAND_HOST_CAP_SEAT          0x00000008
 #define WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+#define WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT 0x00000020
 
 struct winewayland_host_probe
 {
@@ -31,6 +32,7 @@ struct winewayland_host_probe
     uint32_t seat_global;
     uint64_t endpoint_device;
     uint64_t endpoint_inode;
+    uint32_t device_uuid[4];
     char display_name[WINEWAYLAND_HOST_NAME_MAX];
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };

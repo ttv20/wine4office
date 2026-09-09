@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 978.
+Generated server protocol version: 979.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -20,6 +20,14 @@ or transport fixture is not Outlook support.
   `--registration-test`; no application path launches a resident host yet.
   The host still does not create a native role, accept content or take window
   ownership.
+- The host now probes a native Vulkan device before advertising transport
+  support. Admission requires a graphics queue that can present to the probed
+  Wayland connection, opaque-FD import and export for the fixed BGRA8 transfer
+  image and semaphore type, timeline semaphores, swapchain support and a
+  nonzero device UUID. It also creates and destroys a logical Vulkan device
+  with that exact extension set. Failure leaves the transport capability off
+  and reports the rejected requirement; basic host registration and local
+  fallback remain available.
 - Wineserver now owns one host registration per Windows desktop. A 128-bit
   startup permit is bound to the requesting process, its direct child, the
   desktop/session and a verified endpoint/seat tuple. Successful registration
@@ -274,6 +282,15 @@ admitted.
   `/workspace/runner-dcomp-frame-authority`,
   `/workspace/artifacts/frame-authority-win32u-test-{x64,i386}.exe` and
   `/workspace/artifacts/dcomp-frame-authority-SHA256SUMS`.
+- The native Vulkan admission probe rebuilt without new warnings and the
+  protocol-979 authority fixture passed 457 checks with zero failures in both
+  x86-64 and i386, including positive server acceptance of the new transport
+  capability. The public DComp oracle remained at 36 checks with zero failures
+  in both architectures. On the task Radeon HD 5670 environment, both real
+  host probes correctly withheld transport capability because Vulkan reported
+  zero opaque-FD external-semaphore features; fallback host registration then
+  succeeded in both architectures with capabilities `0xf`. Logs are retained
+  as `/workspace/artifacts/dcomp-vulkan-{probe,registration,authority,oracle}-{x64,i386}.log`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

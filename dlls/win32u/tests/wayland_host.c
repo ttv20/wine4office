@@ -31,7 +31,8 @@
 #define TEST_SEAT 17
 #define TEST_CAPABILITIES (WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET | \
                            WINE_WAYLAND_HOST_CAP_COMPOSITOR | \
-                           WINE_WAYLAND_HOST_CAP_SHM | WINE_WAYLAND_HOST_CAP_SEAT)
+                           WINE_WAYLAND_HOST_CAP_SHM | WINE_WAYLAND_HOST_CAP_SEAT | \
+                           WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT)
 
 static const GUID dcomp_device_iid =
     {0xc37ea93a, 0xe7aa, 0x450d, {0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3}};
