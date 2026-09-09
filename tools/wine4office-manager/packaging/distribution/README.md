@@ -21,6 +21,10 @@ tree atomically under `https://packages.wine4office.org/`. Until a package serve
 and signing key exist, CI uploads the packages and unsigned repository trees as
 release artifacts for testing only.
 
+Published package filenames are immutable. Rebuilds with different bytes must
+use a new DEB version or RPM release so existing repository metadata never
+points to replaced content.
+
 Packaged installations use the distribution package source as their update
 authority. The Manager hides the standalone metadata URL, prerelease selector,
 and background release-feed controls. APT and DNF updates run as one combined

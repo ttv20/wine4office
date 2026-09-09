@@ -89,6 +89,20 @@ case $mode in
             "$tmp/repository/dists/stable/Release" \
             "$tmp/repository/dists/stable/InRelease" \
             "$tmp/repository/dists/stable/Release.gpg")
+        mkdir "$tmp/rebuilt-deb"
+        rebuilt_deb=$tmp/rebuilt-deb/$(basename "$deb")
+        cp "$deb" "$rebuilt_deb"
+        printf 'changed same-version bytes\n' >> "$rebuilt_deb"
+        if "$distribution/build-apt-repository.sh" \
+                "$tmp/repository" stable "$rebuilt_deb" >/dev/null 2>&1; then
+            echo "APT repository replaced an immutable published package" >&2
+            exit 1
+        fi
+        [[ $(sha256sum \
+            "$tmp/repository/dists/stable/Release" \
+            "$tmp/repository/dists/stable/InRelease" \
+            "$tmp/repository/dists/stable/Release.gpg") == "$apt_metadata_hash" ]]
+        cmp "$deb" "$tmp/repository/pool/main/w/wine4office/$(basename "$deb")"
         if WINE4OFFICE_TEST_GPG_FAIL=1 PATH="$fake_sign_bin:$PATH" \
                 WINE4OFFICE_GPG_KEY_ID=test \
                 "$distribution/build-apt-repository.sh" \
@@ -137,6 +151,22 @@ case $mode in
         rpm_metadata_hash=$(sha256sum \
             "$tmp/repository/rpm/x86_64/repodata/repomd.xml" \
             "$tmp/repository/rpm/x86_64/repodata/repomd.xml.asc")
+        mkdir "$tmp/rebuilt-rpm"
+        rebuilt_rpm=$tmp/rebuilt-rpm/$(basename "$rpm")
+        cp "$rpm" "$rebuilt_rpm"
+        printf 'changed same-release bytes\n' >> "$rebuilt_rpm"
+        if WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/rpmsign.log" \
+                PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
+                "$distribution/build-rpm-repository.sh" \
+                "$tmp/repository" "$rebuilt_rpm" >/dev/null 2>&1; then
+            echo "RPM repository replaced an immutable published package" >&2
+            exit 1
+        fi
+        [[ $(sha256sum \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml" \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml.asc") == \
+            "$rpm_metadata_hash" ]]
+        cmp "$rpm" "$tmp/repository/rpm/x86_64/Packages/$(basename "$rpm")"
         if WINE4OFFICE_TEST_GPG_FAIL=1 WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/rpmsign.log" \
                 PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
                 "$distribution/build-rpm-repository.sh" \

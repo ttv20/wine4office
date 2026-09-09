@@ -24,6 +24,7 @@ staged_pool=$staged_repository/pool/main/w/wine4office
 staged_distribution=$staged_repository/dists/$codename
 backup_distribution=
 package_commit_temp=
+committed_new_packages=()
 cleanup() {
     local status=$?
     [[ -z ${package_commit_temp:-} || ! -e $package_commit_temp ]] || \
@@ -33,6 +34,9 @@ cleanup() {
     if ((status != 0)) && [[ -n ${backup_distribution:-} \
             && -e $backup_distribution && ! -e $live_distribution ]]; then
         mv -- "$backup_distribution" "$live_distribution"
+    fi
+    if ((status != 0)); then
+        rm -f -- "${committed_new_packages[@]}"
     fi
 }
 trap cleanup EXIT
@@ -44,6 +48,11 @@ for package in "$@"; do
     staged_package=$staged_pool/$(basename "$package")
     rm -f -- "$staged_package"
     install -m 0644 "$package" "$staged_package"
+    live_package=$pool/$(basename "$package")
+    if [[ -e $live_package ]] && ! cmp -s "$staged_package" "$live_package"; then
+        echo "Refusing to replace published DEB; use a new package version: $live_package" >&2
+        exit 1
+    fi
 done
 if [[ -e $live_distribution ]]; then
     mkdir -p "$staged_distribution"
@@ -77,10 +86,13 @@ fi
 
 for package in "$@"; do
     package_name=$(basename "$package")
-    package_commit_temp=$(mktemp "$pool/.${package_name}.XXXXXX")
-    install -m 0644 "$staged_pool/$package_name" "$package_commit_temp"
-    mv -f -- "$package_commit_temp" "$pool/$package_name"
-    package_commit_temp=
+    if [[ ! -e $pool/$package_name ]]; then
+        package_commit_temp=$(mktemp "$pool/.${package_name}.XXXXXX")
+        install -m 0644 "$staged_pool/$package_name" "$package_commit_temp"
+        mv -- "$package_commit_temp" "$pool/$package_name"
+        package_commit_temp=
+        committed_new_packages+=("$pool/$package_name")
+    fi
 done
 if [[ -e $live_distribution ]]; then
     backup_distribution=$(mktemp -d "$distributions/.${codename}.backup.XXXXXX")
@@ -98,3 +110,4 @@ if [[ -n $backup_distribution ]]; then
     rm -rf -- "$backup_distribution"
     backup_distribution=
 fi
+committed_new_packages=()
