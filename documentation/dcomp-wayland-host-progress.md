@@ -13,8 +13,12 @@ or transport fixture is not Outlook support.
 - The first probe opens its own Wayland connection, verifies that the selected
   endpoint is a local Unix socket, protects against a path replacement during
   connection, and records compositor, shared-memory and seat globals.
-- The executable currently runs only with `--probe`. It does not register with
-  wineserver, create a native role, accept content, or take window ownership.
+- The executable can consume a startup permit through inherited handles,
+  independently re-probe the Wayland endpoint, register with wineserver and
+  publish Ready. The launcher/child path is currently exposed only by
+  `--registration-test`; no application path launches a resident host yet.
+  The host still does not create a native role, accept content or take window
+  ownership.
 - Wineserver now owns one host registration per Windows desktop. A 128-bit
   startup permit is bound to the requesting process, its direct child, the
   desktop/session and a verified endpoint/seat tuple. Successful registration
@@ -85,6 +89,15 @@ admitted.
   desktops. They cover startup contention, direct-child authentication,
   endpoint mismatch, readiness authority, peer-exit cleanup, replacement with
   a fresh epoch, stale-epoch rejection and startup cancellation.
+- The real host registration fixture passed in the task-owned KDE environment
+  for x86-64 and i386. In both runs the child host independently verified
+  endpoint device 60, inode 102742083 and seat 11, registered epoch 1 in its
+  isolated prefix, published Ready, and released its registration on exit.
+  Logs are retained as
+  `/workspace/artifacts/winewayland-host-registration-{x64,i386}.log`; the
+  coherent reflink runner and hashes are retained at
+  `/workspace/runner-dcomp-host-registration` and
+  `/workspace/artifacts/registration-runner-layout.sha256`.
 - Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe

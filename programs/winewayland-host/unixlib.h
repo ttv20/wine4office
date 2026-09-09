@@ -35,6 +35,19 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
+#define WINEWAYLAND_HOST_STARTUP_VERSION 1
+
+struct winewayland_host_startup
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t token_low;
+    uint64_t token_high;
+    volatile uint32_t status;
+    uint32_t process_id;
+    uint64_t host_epoch;
+};
+
 enum winewayland_host_unix_func
 {
     unix_probe_backend,
