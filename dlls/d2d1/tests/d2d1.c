@@ -391,6 +391,8 @@ static D2D1_COLOR_F (WINAPI *pD2D1ConvertColorSpace)(D2D1_COLOR_SPACE src_colour
         D2D1_COLOR_SPACE dst_colour_space, const D2D1_COLOR_F *colour);
 
 static BOOL use_mt = TRUE;
+static unsigned int test_batch_index;
+static unsigned int test_batch_count = 1;
 
 static struct test_entry
 {
@@ -539,10 +541,19 @@ static DWORD WINAPI thread_func(void *ctx)
 
 static void run_queued_tests(void)
 {
-    unsigned int thread_count, i;
+    unsigned int thread_count, i, dst;
     HANDLE *threads;
     SYSTEM_INFO si;
     LONG test_idx;
+
+    if (test_batch_count > 1)
+    {
+        for (i = test_batch_index, dst = 0; i < mt_test_count; i += test_batch_count)
+            mt_tests[dst++] = mt_tests[i];
+        trace("Running batch %u/%u: %u of %Iu queued tests.\n",
+                test_batch_index + 1, test_batch_count, dst, mt_test_count);
+        mt_test_count = dst;
+    }
 
     if (!use_mt)
     {
@@ -21049,6 +21060,21 @@ START_TEST(d2d1)
         }
         if (!strcmp(argv[i], "--single"))
             use_mt = FALSE;
+        else if (!strncmp(argv[i], "--batch=", 8))
+        {
+            unsigned int index, count;
+            char trailing;
+
+            if (sscanf(argv[i] + 8, "%u/%u%c", &index, &count, &trailing) != 2
+                    || !index || index > count)
+            {
+                ok(0, "Invalid batch specification %s.\n", argv[i] + 8);
+                return;
+            }
+            test_batch_index = index - 1;
+            test_batch_count = count;
+            use_mt = FALSE;
+        }
     }
 
     /* Keep a deterministic runtime entry point for the bounded geometry AA
