@@ -53,11 +53,13 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_IMPORT_PENDING  0
 #define WINE_WAYLAND_BUFFER_IMPORT_IMPORTED 1
 #define WINE_WAYLAND_BUFFER_IMPORT_FAILED   2
-#define WINE_WAYLAND_BUFFER_SLOT_INFO(registered,imported,failed) \
-    (((registered) & 0xff) | (((imported) & 0xff) << 8) | (((failed) & 0xff) << 16))
+#define WINE_WAYLAND_BUFFER_SLOT_INFO(registered,imported,failed,memory_type) \
+    (((registered) & 0xff) | (((imported) & 0xff) << 8) | (((failed) & 0xff) << 16) | \
+     (((memory_type) & 0xff) << 24))
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED(info) ((info) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED(info)   (((info) >> 8) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE(info) (((info) >> 24) & 0xff)
 
 #define WINE_WAYLAND_FRAME_RESULT_PENDING   0
 #define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
@@ -73,6 +75,7 @@ struct wayland_buffer_pool_metadata
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
     unsigned int     device_uuid[4];
+    unsigned int     memory_type_index;
     unsigned int     reserved;
 };
 
@@ -8071,6 +8074,6 @@ union generic_reply
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 980
+#define SERVER_PROTOCOL_VERSION 981
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

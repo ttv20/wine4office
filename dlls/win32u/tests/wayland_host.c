@@ -126,6 +126,7 @@ struct wayland_host_test_state
     DWORD pool_format;
     DWORD pool_slot_count;
     DWORD frame_credit_limit;
+    DWORD memory_type_index;
     DWORD registered_slots;
     DWORD imported_slots;
     DWORD failed_slots;
@@ -205,6 +206,7 @@ struct wayland_pool_info
     DWORD format;
     DWORD slot_count;
     DWORD frame_credit_limit;
+    DWORD memory_type_index;
     DWORD registered_slots;
     DWORD imported_slots;
     DWORD failed_slots;
@@ -522,6 +524,7 @@ static NTSTATUS create_pool_with_size( HWND root, struct wayland_host_test_state
     metadata.slot_count = state->pool_slot_count;
     metadata.frame_credit_limit = state->frame_credit_limit;
     memcpy( metadata.device_uuid, state->device_uuid, sizeof(metadata.device_uuid) );
+    metadata.memory_type_index = state->memory_type_index;
     SERVER_START_REQ( create_wayland_buffer_pool )
     {
         req->root = wine_server_user_handle( root );
@@ -588,6 +591,8 @@ static NTSTATUS get_pool( HWND root, UINT64 host_epoch, UINT64 contributor_id,
                     WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED( reply->slot_info );
             info->failed_slots =
                     WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED( reply->slot_info );
+            info->memory_type_index =
+                    WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE( reply->slot_info );
             info->device_uuid[0] = reply->device_uuid_0;
             info->device_uuid[1] = reply->device_uuid_1;
             info->device_uuid[2] = reply->device_uuid_2;
@@ -1029,6 +1034,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->pool_format = pool.format;
             state->pool_slot_count = pool.slot_count;
             state->frame_credit_limit = pool.frame_credit_limit;
+            state->memory_type_index = pool.memory_type_index;
             state->registered_slots = pool.registered_slots;
             state->imported_slots = pool.imported_slots;
             state->failed_slots = pool.failed_slots;
@@ -1932,6 +1938,7 @@ static void test_host_registration( const char *program, const char *test_name )
     state->pool_format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
     state->pool_slot_count = WINE_WAYLAND_BUFFER_POOL_SLOTS;
     state->frame_credit_limit = 3;
+    state->memory_type_index = 7;
     state->device_uuid[0] = TEST_DEVICE_UUID_0;
     state->device_uuid[1] = TEST_DEVICE_UUID_1;
     state->device_uuid[2] = TEST_DEVICE_UUID_2;
@@ -1955,6 +1962,10 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->producer_status == STATUS_NOT_SUPPORTED,
         "Mismatched pool GPU returned %#lx.\n", state->producer_status );
     state->device_uuid[0] ^= 1;
+    state->memory_type_index = 32;
+    status = create_pool( root, state );
+    ok( status == STATUS_INVALID_PARAMETER, "Invalid memory type returned %#lx.\n", status );
+    state->memory_type_index = 7;
     state->frame_credit_limit = WINE_WAYLAND_MAX_FRAME_CREDITS + 1;
     status = create_pool( root, state );
     ok( status == STATUS_INVALID_PARAMETER, "Excess pool credits returned %#lx.\n", status );
@@ -1987,13 +1998,15 @@ static void test_host_registration( const char *program, const char *test_name )
         state->pool_height == 64 &&
         state->pool_format == WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM &&
         state->pool_slot_count == WINE_WAYLAND_BUFFER_POOL_SLOTS &&
-        state->frame_credit_limit == 3 && state->device_uuid[0] == 0x11223344 &&
+        state->frame_credit_limit == 3 && state->memory_type_index == 7 &&
+        state->device_uuid[0] == 0x11223344 &&
         state->device_uuid[1] == 0x55667788 && state->device_uuid[2] == 0x99aabbcc &&
         state->device_uuid[3] == 0xddeeff00,
-        "Pool 1 query returned %#lx, generation %s, allocation %s, size %lux%lu, format %#lx, slots %lu, credits %lu.\n",
+        "Pool 1 query returned %#lx, generation %s, allocation %s, size %lux%lu, format %#lx, slots %lu, credits %lu, memory type %lu.\n",
         state->command_status, wine_dbgstr_longlong( state->pool_generation ),
         wine_dbgstr_longlong( state->allocation_size ), state->pool_width, state->pool_height,
-        state->pool_format, state->pool_slot_count, state->frame_credit_limit );
+        state->pool_format, state->pool_slot_count, state->frame_credit_limit,
+        state->memory_type_index );
     ok( state->registered_slots == 0, "New pool reported %lu registered slots.\n",
         state->registered_slots );
 

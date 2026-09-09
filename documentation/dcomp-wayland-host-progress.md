@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 980.
+Generated server protocol version: 981.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -69,6 +69,12 @@ or transport fixture is not Outlook support.
   retire an old generation without allowing generation reuse. This stage does
   not yet accept resource handles, acknowledge GPU import or submit frames;
   pool metadata alone never authorizes `HostedContent`.
+- Pool metadata now includes the producer's Vulkan memory-type index. Opaque-FD
+  memory deliberately cannot be queried with `vkGetMemoryFdPropertiesKHR`, so
+  the allocation size and GPU UUID are not enough to reconstruct a valid
+  `VkMemoryAllocateInfo` in the host. Wineserver bounds the index to Vulkan's
+  32 memory types and returns it in the unused high byte of the existing packed
+  pool-info field without enlarging the fixed server reply.
 - Each pool now has three resource slots. The authenticated producer registers
   one D3DKMT resource plus separate ready and reuse synchronization objects per
   slot. Wineserver validates the exact object types, pins the underlying
@@ -311,6 +317,14 @@ admitted.
   `/workspace/artifacts/dcomp-device-binding-{probe,registration,oracle}-{x64,i386}.log`,
   `/workspace/artifacts/device-binding-final-win32u-test-{x64,i386}.exe`, and the
   coherent runner is `/workspace/runner-dcomp-device-binding`.
+- The opaque-FD memory-type extension passed 467 checks with zero failures in
+  both x86-64 and i386 on protocol 981, including rejection of index 32 and
+  exact host enumeration of a valid index. Host probe/registration remained on
+  the Radeon fallback path and the public DComp oracle remained at 36 checks
+  with zero failures in both architectures. Logs and binaries are retained as
+  `/workspace/artifacts/dcomp-memory-type-{authority,probe,registration,oracle}-{x64,i386}.log`,
+  `/workspace/artifacts/memory-type-win32u-test-{x64,i386}.exe`, and
+  `/workspace/runner-dcomp-memory-type`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

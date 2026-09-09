@@ -100,6 +100,7 @@ struct wayland_buffer_pool
     unsigned int     imported_slots;
     unsigned int     failed_slots;
     unsigned int     device_uuid[4];
+    unsigned int     memory_type_index;
     struct wayland_buffer_slot slots[WINE_WAYLAND_BUFFER_POOL_SLOTS];
 };
 
@@ -4227,6 +4228,7 @@ DECL_HANDLER(create_wayland_buffer_pool)
         metadata.height > 16384 || metadata.format != WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM ||
         metadata.slot_count != WINE_WAYLAND_BUFFER_POOL_SLOTS || !metadata.frame_credit_limit ||
         metadata.frame_credit_limit > WINE_WAYLAND_MAX_FRAME_CREDITS ||
+        metadata.memory_type_index >= 32 ||
         metadata.reserved ||
         !(metadata.device_uuid[0] | metadata.device_uuid[1] |
           metadata.device_uuid[2] | metadata.device_uuid[3]))
@@ -4282,6 +4284,7 @@ DECL_HANDLER(create_wayland_buffer_pool)
             pool->slot_count = metadata.slot_count;
             pool->frame_credit_limit = metadata.frame_credit_limit;
             memcpy( pool->device_uuid, metadata.device_uuid, sizeof(pool->device_uuid) );
+            pool->memory_type_index = metadata.memory_type_index;
             contributor->latest_pool_generation = req->pool_generation;
             reply->registry_generation = ++root->wayland_scene_registry->generation;
         }
@@ -4370,7 +4373,8 @@ DECL_HANDLER(get_wayland_buffer_pool)
     reply->frame_credit_limit = pool->frame_credit_limit;
     reply->slot_info = WINE_WAYLAND_BUFFER_SLOT_INFO( pool->registered_slots,
                                                        pool->imported_slots,
-                                                       pool->failed_slots );
+                                                       pool->failed_slots,
+                                                       pool->memory_type_index );
     reply->device_uuid_0 = pool->device_uuid[0];
     reply->device_uuid_1 = pool->device_uuid[1];
     reply->device_uuid_2 = pool->device_uuid[2];
