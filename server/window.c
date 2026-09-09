@@ -96,6 +96,11 @@ struct window
     int              prop_alloc;      /* number of allocated window properties */
     struct property *properties;      /* window properties array */
     window_shm_t    *shared;          /* window in session shared memory */
+    unsigned __int64 wayland_scene_generation;
+    unsigned __int64 wayland_scene_owner_revision;
+    unsigned __int64 wayland_scene_applied_generation;
+    unsigned __int64 wayland_scene_host_epoch;
+    unsigned int     wayland_scene_disposition;
 };
 
 C_ASSERT( sizeof(window_shm_t) == offsetof(window_shm_t, extra[0]) );
@@ -686,6 +691,11 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->prop_alloc     = 0;
     win->properties     = NULL;
     win->shared         = NULL;
+    win->wayland_scene_generation = 0;
+    win->wayland_scene_owner_revision = 0;
+    win->wayland_scene_applied_generation = 0;
+    win->wayland_scene_host_epoch = 0;
+    win->wayland_scene_disposition = 0;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
     list_init( &win->children );
     list_init( &win->unlinked );
@@ -3453,4 +3463,102 @@ DECL_HANDLER(set_window_layered_info)
         if (!was_layered) redraw_window( win, 0, RDW_ALLCHILDREN | RDW_INVALIDATE | RDW_ERASE | RDW_FRAME, 0 );
     }
     else set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
+}
+
+DECL_HANDLER(publish_wayland_scene)
+{
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->scene_generation = 0;
+    if (req->disposition != WINE_WAYLAND_SCENE_EMPTY &&
+        req->disposition != WINE_WAYLAND_SCENE_HIDDEN)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!req->owner_revision)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+
+    if (root->desktop != desktop || root->parent != desktop->top_window)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!root->thread || root->thread->process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else if (req->expected_generation != root->wayland_scene_generation ||
+             req->owner_revision <= root->wayland_scene_owner_revision)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (root->wayland_scene_generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        root->wayland_scene_generation++;
+        root->wayland_scene_owner_revision = req->owner_revision;
+        root->wayland_scene_applied_generation = 0;
+        root->wayland_scene_host_epoch = desktop->wayland_host_epoch;
+        root->wayland_scene_disposition = req->disposition;
+        reply->scene_generation = root->wayland_scene_generation;
+    }
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_scene)
+{
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->owner_process_id = 0;
+    reply->disposition = 0;
+    reply->scene_generation = 0;
+    reply->owner_revision = 0;
+    reply->applied_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    desktop = root->desktop;
+
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else if (desktop->wayland_host_epoch != req->host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (desktop->wayland_host_process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else if (!root->wayland_scene_generation ||
+             root->wayland_scene_host_epoch != req->host_epoch)
+        set_error( STATUS_NOT_FOUND );
+    else
+    {
+        reply->owner_process_id = root->thread ? root->thread->process->id : 0;
+        reply->disposition = root->wayland_scene_disposition;
+        reply->scene_generation = root->wayland_scene_generation;
+        reply->owner_revision = root->wayland_scene_owner_revision;
+        reply->applied_generation = root->wayland_scene_applied_generation;
+    }
+}
+
+DECL_HANDLER(set_wayland_scene_applied)
+{
+    struct window *root;
+    struct desktop *desktop;
+
+    if (!(root = get_window( req->root ))) return;
+    desktop = root->desktop;
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else if (desktop->wayland_host_epoch != req->host_epoch ||
+             root->wayland_scene_host_epoch != req->host_epoch ||
+             root->wayland_scene_generation != req->scene_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (desktop->wayland_host_process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else
+        root->wayland_scene_applied_generation = req->scene_generation;
 }

@@ -3743,6 +3743,41 @@ static void dump_get_wayland_host_reply( const struct get_wayland_host_reply *re
     fprintf( stderr, ", ready=%08x", req->ready );
 }
 
+static void dump_publish_wayland_scene_request( const struct publish_wayland_scene_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", disposition=%08x", req->disposition );
+    dump_uint64( ", expected_generation=", &req->expected_generation );
+    dump_uint64( ", owner_revision=", &req->owner_revision );
+}
+
+static void dump_publish_wayland_scene_reply( const struct publish_wayland_scene_reply *req )
+{
+    dump_uint64( " scene_generation=", &req->scene_generation );
+}
+
+static void dump_get_wayland_scene_request( const struct get_wayland_scene_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+}
+
+static void dump_get_wayland_scene_reply( const struct get_wayland_scene_reply *req )
+{
+    fprintf( stderr, " owner_process_id=%04x", req->owner_process_id );
+    fprintf( stderr, ", disposition=%08x", req->disposition );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+    dump_uint64( ", owner_revision=", &req->owner_revision );
+    dump_uint64( ", applied_generation=", &req->applied_generation );
+}
+
+static void dump_set_wayland_scene_applied_request( const struct set_wayland_scene_applied_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4074,6 +4109,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_host_ready_request,
     (dump_func)dump_release_wayland_host_request,
     (dump_func)dump_get_wayland_host_request,
+    (dump_func)dump_publish_wayland_scene_request,
+    (dump_func)dump_get_wayland_scene_request,
+    (dump_func)dump_set_wayland_scene_applied_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4405,6 +4443,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     NULL,
     (dump_func)dump_get_wayland_host_reply,
+    (dump_func)dump_publish_wayland_scene_reply,
+    (dump_func)dump_get_wayland_scene_reply,
+    NULL,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4736,6 +4777,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_wayland_host_ready",
     "release_wayland_host",
     "get_wayland_host",
+    "publish_wayland_scene",
+    "get_wayland_scene",
+    "set_wayland_scene_applied",
 };
 
 static const struct

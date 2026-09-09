@@ -32,6 +32,9 @@
 #include <winbase.h>
 #include <ntuser.h>
 
+#define WINE_WAYLAND_SCENE_EMPTY  0x00000001
+#define WINE_WAYLAND_SCENE_HIDDEN 0x00000002
+
 typedef unsigned int obj_handle_t;
 typedef unsigned int user_handle_t;
 typedef unsigned int d3dkmt_handle_t;
@@ -4527,4 +4530,33 @@ enum inproc_sync_type
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
     unsigned int     ready;
+@END
+
+/* Publish a complete content-free scene for an owned top-level window. */
+@REQ(publish_wayland_scene)
+    user_handle_t    root;
+    unsigned int     disposition;
+    unsigned __int64 expected_generation;
+    unsigned __int64 owner_revision;
+@REPLY
+    unsigned __int64 scene_generation;
+@END
+
+/* Query a scene as the registered host for its desktop. */
+@REQ(get_wayland_scene)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+@REPLY
+    process_id_t     owner_process_id;
+    unsigned int     disposition;
+    unsigned __int64 scene_generation;
+    unsigned __int64 owner_revision;
+    unsigned __int64 applied_generation;
+@END
+
+/* Acknowledge application of the current scene from the registered host. */
+@REQ(set_wayland_scene_applied)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 scene_generation;
 @END

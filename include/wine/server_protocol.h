@@ -16,6 +16,9 @@
 #include <winbase.h>
 #include <ntuser.h>
 
+#define WINE_WAYLAND_SCENE_EMPTY  0x00000001
+#define WINE_WAYLAND_SCENE_HIDDEN 0x00000002
+
 typedef unsigned int obj_handle_t;
 typedef unsigned int user_handle_t;
 typedef unsigned int d3dkmt_handle_t;
@@ -6554,6 +6557,52 @@ struct get_wayland_host_reply
 };
 
 
+struct publish_wayland_scene_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     disposition;
+    char __pad_20[4];
+    unsigned __int64 expected_generation;
+    unsigned __int64 owner_revision;
+};
+struct publish_wayland_scene_reply
+{
+    struct reply_header __header;
+    unsigned __int64 scene_generation;
+};
+
+
+struct get_wayland_scene_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+};
+struct get_wayland_scene_reply
+{
+    struct reply_header __header;
+    process_id_t     owner_process_id;
+    unsigned int     disposition;
+    unsigned __int64 scene_generation;
+    unsigned __int64 owner_revision;
+    unsigned __int64 applied_generation;
+};
+
+
+struct set_wayland_scene_applied_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 scene_generation;
+};
+struct set_wayland_scene_applied_reply
+{
+    struct reply_header __header;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6883,6 +6932,9 @@ enum request
     REQ_set_wayland_host_ready,
     REQ_release_wayland_host,
     REQ_get_wayland_host,
+    REQ_publish_wayland_scene,
+    REQ_get_wayland_scene,
+    REQ_set_wayland_scene_applied,
     REQ_NB_REQUESTS
 };
 
@@ -7217,6 +7269,9 @@ union generic_request
     struct set_wayland_host_ready_request set_wayland_host_ready_request;
     struct release_wayland_host_request release_wayland_host_request;
     struct get_wayland_host_request get_wayland_host_request;
+    struct publish_wayland_scene_request publish_wayland_scene_request;
+    struct get_wayland_scene_request get_wayland_scene_request;
+    struct set_wayland_scene_applied_request set_wayland_scene_applied_request;
 };
 union generic_reply
 {
@@ -7549,8 +7604,11 @@ union generic_reply
     struct set_wayland_host_ready_reply set_wayland_host_ready_reply;
     struct release_wayland_host_reply release_wayland_host_reply;
     struct get_wayland_host_reply get_wayland_host_reply;
+    struct publish_wayland_scene_reply publish_wayland_scene_reply;
+    struct get_wayland_scene_reply get_wayland_scene_reply;
+    struct set_wayland_scene_applied_reply set_wayland_scene_applied_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 967
+#define SERVER_PROTOCOL_VERSION 968
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

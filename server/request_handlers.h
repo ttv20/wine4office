@@ -334,6 +334,9 @@ DECL_HANDLER(register_wayland_host);
 DECL_HANDLER(set_wayland_host_ready);
 DECL_HANDLER(release_wayland_host);
 DECL_HANDLER(get_wayland_host);
+DECL_HANDLER(publish_wayland_scene);
+DECL_HANDLER(get_wayland_scene);
+DECL_HANDLER(set_wayland_scene_applied);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -665,6 +668,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_wayland_host_ready,
     (req_handler)req_release_wayland_host,
     (req_handler)req_get_wayland_host,
+    (req_handler)req_publish_wayland_scene,
+    (req_handler)req_get_wayland_scene,
+    (req_handler)req_set_wayland_scene_applied,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2536,3 +2542,23 @@ C_ASSERT( offsetof(struct get_wayland_host_reply, endpoint_inode) == 32 );
 C_ASSERT( offsetof(struct get_wayland_host_reply, seat) == 40 );
 C_ASSERT( offsetof(struct get_wayland_host_reply, ready) == 44 );
 C_ASSERT( sizeof(struct get_wayland_host_reply) == 48 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, root) == 12 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, disposition) == 16 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, expected_generation) == 24 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, owner_revision) == 32 );
+C_ASSERT( sizeof(struct publish_wayland_scene_request) == 40 );
+C_ASSERT( offsetof(struct publish_wayland_scene_reply, scene_generation) == 8 );
+C_ASSERT( sizeof(struct publish_wayland_scene_reply) == 16 );
+C_ASSERT( offsetof(struct get_wayland_scene_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_scene_request, host_epoch) == 16 );
+C_ASSERT( sizeof(struct get_wayland_scene_request) == 24 );
+C_ASSERT( offsetof(struct get_wayland_scene_reply, owner_process_id) == 8 );
+C_ASSERT( offsetof(struct get_wayland_scene_reply, disposition) == 12 );
+C_ASSERT( offsetof(struct get_wayland_scene_reply, scene_generation) == 16 );
+C_ASSERT( offsetof(struct get_wayland_scene_reply, owner_revision) == 24 );
+C_ASSERT( offsetof(struct get_wayland_scene_reply, applied_generation) == 32 );
+C_ASSERT( sizeof(struct get_wayland_scene_reply) == 40 );
+C_ASSERT( offsetof(struct set_wayland_scene_applied_request, root) == 12 );
+C_ASSERT( offsetof(struct set_wayland_scene_applied_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct set_wayland_scene_applied_request, scene_generation) == 24 );
+C_ASSERT( sizeof(struct set_wayland_scene_applied_request) == 32 );

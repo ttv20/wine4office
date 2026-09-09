@@ -26,6 +26,13 @@ or transport fixture is not Outlook support.
   duplicate hosts and mismatched endpoints are rejected. Process exit clears
   startup permits and active registration, and unused permits expire after 30
   seconds, without unpinning the desktop's native-display identity.
+- Wineserver now also owns the first per-root scene transaction. Only the
+  logical top-level window owner can publish `Empty` or `Hidden`, publication
+  uses an expected generation and a strictly increasing owner revision, and
+  only the current Ready host can query or acknowledge that generation. A
+  replacement host cannot replay an old scene; the owner must publish it for
+  the replacement host epoch. This tranche carries no buffers and makes no GPU
+  transport claim.
 
 ## Contributor interception inventory
 
@@ -98,6 +105,16 @@ admitted.
   coherent reflink runner and hashes are retained at
   `/workspace/runner-dcomp-host-registration` and
   `/workspace/artifacts/registration-runner-layout.sha256`.
+- The minimum scene-authority regression passed on the same KDE desktop for
+  x86-64 and i386, with 66 checks and zero failures in each architecture. It
+  covers publication before host readiness, invalid dispositions, generation
+  compare-and-swap, monotonic owner revisions, foreign publication/query
+  rejection, stale/current application acknowledgements, `Empty`/`Hidden`, and
+  mandatory owner replay after host replacement. The focused headless build
+  could compile both tests but could not create their HWND; the same binaries
+  then passed with a real display. Logs and exact test binaries are retained at
+  `/workspace/artifacts/wayland-scene-{x64,i386-debug}.log` and
+  `/workspace/artifacts/scene-authority-runner`.
 - Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe
