@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 974.
+Generated server protocol version: 975.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -45,6 +45,15 @@ or transport fixture is not Outlook support.
   `Empty` generation when that stream supplied the current hosted scene.
   Revoked entries remain as tombstones until the current host acknowledges
   them, after which their bounded slots can be reused.
+- An authenticated producer can now reserve transport-pool metadata under its
+  bound stream. The server accepts only opaque BGRA8 pools with three slots, a
+  nonzero GPU UUID, bounded dimensions, allocation size and frame credits. It
+  retains at most two live pool generations per contributor and enforces
+  256 MiB per-root and 1 GiB per-desktop reservation budgets. The current host
+  can enumerate the metadata in generation order, while the producer can
+  retire an old generation without allowing generation reuse. This stage does
+  not yet accept resource handles, acknowledge GPU import or submit frames;
+  pool metadata alone never authorizes `HostedContent`.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -184,6 +193,19 @@ admitted.
   coherent runner and exact test binaries are retained at
   `/workspace/runner-dcomp-scene-replay` and
   `/workspace/artifacts/scene-replay-win32u-test-{x64,i386}.exe`.
+- The initial transport-pool authority passed 269 checks with zero failures in
+  both x86-64 and i386 on protocol 975. It covers producer-only registration,
+  host-only enumeration, fixed BGRA8/three-slot metadata, truncated metadata,
+  zero UUID, invalid dimensions, excessive frame credits and allocation size,
+  per-root budget exhaustion, the two-live-generation limit, monotonic
+  generation reuse prevention, retirement and ordered enumeration. The public
+  DComp oracle remained at 36 checks with zero failures in both architectures.
+  Logs are retained as
+  `/workspace/artifacts/dcomp-pool-authority-{x64c,i386c}.log` and
+  `/workspace/artifacts/dcomp-pool-authority-dcomp-host-{x64,i386}.log`; the
+  coherent runner and exact test binaries are retained at
+  `/workspace/runner-dcomp-pool-authority` and
+  `/workspace/artifacts/pool-authority-win32u-test-{x64,i386}.exe`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

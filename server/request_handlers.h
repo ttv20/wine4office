@@ -344,6 +344,9 @@ DECL_HANDLER(get_wayland_contributor);
 DECL_HANDLER(get_wayland_contributor_identity);
 DECL_HANDLER(ack_wayland_contributor_revoke);
 DECL_HANDLER(check_wayland_stream);
+DECL_HANDLER(create_wayland_buffer_pool);
+DECL_HANDLER(retire_wayland_buffer_pool);
+DECL_HANDLER(get_wayland_buffer_pool);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -685,6 +688,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_wayland_contributor_identity,
     (req_handler)req_ack_wayland_contributor_revoke,
     (req_handler)req_check_wayland_stream,
+    (req_handler)req_create_wayland_buffer_pool,
+    (req_handler)req_retire_wayland_buffer_pool,
+    (req_handler)req_get_wayland_buffer_pool,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2643,3 +2649,37 @@ C_ASSERT( sizeof(struct check_wayland_stream_request) == 40 );
 C_ASSERT( offsetof(struct check_wayland_stream_reply, host_epoch) == 8 );
 C_ASSERT( offsetof(struct check_wayland_stream_reply, registry_generation) == 16 );
 C_ASSERT( sizeof(struct check_wayland_stream_reply) == 24 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, root) == 12 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, binding_generation) == 32 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, pool_generation) == 40 );
+C_ASSERT( sizeof(struct create_wayland_buffer_pool_request) == 48 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_reply, registry_generation) == 8 );
+C_ASSERT( sizeof(struct create_wayland_buffer_pool_reply) == 16 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, root) == 12 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, binding_generation) == 32 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, pool_generation) == 40 );
+C_ASSERT( sizeof(struct retire_wayland_buffer_pool_request) == 48 );
+C_ASSERT( offsetof(struct retire_wayland_buffer_pool_reply, registry_generation) == 8 );
+C_ASSERT( sizeof(struct retire_wayland_buffer_pool_reply) == 16 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_request, contributor_id) == 24 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_request, previous_pool_generation) == 32 );
+C_ASSERT( sizeof(struct get_wayland_buffer_pool_request) == 40 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, pool_generation) == 8 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, allocation_size) == 16 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, registry_generation) == 24 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, width) == 32 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, height) == 36 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, format) == 40 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, slot_count) == 44 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, frame_credit_limit) == 48 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_0) == 52 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_1) == 56 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_2) == 60 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_3) == 64 );
+C_ASSERT( sizeof(struct get_wayland_buffer_pool_reply) == 72 );

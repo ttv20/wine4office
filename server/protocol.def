@@ -62,6 +62,22 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
 #define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
 
+#define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
+#define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
+#define WINE_WAYLAND_MAX_FRAME_CREDITS 16
+
+struct wayland_buffer_pool_metadata
+{
+    unsigned __int64 allocation_size;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     format;
+    unsigned int     slot_count;
+    unsigned int     frame_credit_limit;
+    unsigned int     device_uuid[4];
+    unsigned int     reserved;
+};
+
 #define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
 
 #define WINE_WAYLAND_TARGET_BELOW 0x00000001
@@ -4661,4 +4677,48 @@ enum inproc_sync_type
 @REPLY
     unsigned __int64 host_epoch;
     unsigned __int64 registry_generation;
+@END
+
+/* Reserve bounded transport-pool metadata under an authenticated stream. */
+@REQ(create_wayland_buffer_pool)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+    VARARG(metadata,bytes);
+@REPLY
+    unsigned __int64 registry_generation;
+@END
+
+/* Retire transport-pool metadata after producer-side resource retirement. */
+@REQ(retire_wayland_buffer_pool)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+@REPLY
+    unsigned __int64 registry_generation;
+@END
+
+/* Enumerate authenticated pool metadata as the current host. */
+@REQ(get_wayland_buffer_pool)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 previous_pool_generation;
+@REPLY
+    unsigned __int64 pool_generation;
+    unsigned __int64 allocation_size;
+    unsigned __int64 registry_generation;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     format;
+    unsigned int     slot_count;
+    unsigned int     frame_credit_limit;
+    unsigned int     device_uuid_0;
+    unsigned int     device_uuid_1;
+    unsigned int     device_uuid_2;
+    unsigned int     device_uuid_3;
 @END

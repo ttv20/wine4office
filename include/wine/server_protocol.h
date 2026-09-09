@@ -46,6 +46,22 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
 #define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
 
+#define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
+#define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
+#define WINE_WAYLAND_MAX_FRAME_CREDITS 16
+
+struct wayland_buffer_pool_metadata
+{
+    unsigned __int64 allocation_size;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     format;
+    unsigned int     slot_count;
+    unsigned int     frame_credit_limit;
+    unsigned int     device_uuid[4];
+    unsigned int     reserved;
+};
+
 #define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
 
 #define WINE_WAYLAND_TARGET_BELOW 0x00000001
@@ -6743,6 +6759,66 @@ struct check_wayland_stream_reply
 };
 
 
+struct create_wayland_buffer_pool_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+    /* VARARG(metadata,bytes); */
+};
+struct create_wayland_buffer_pool_reply
+{
+    struct reply_header __header;
+    unsigned __int64 registry_generation;
+};
+
+
+struct retire_wayland_buffer_pool_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+};
+struct retire_wayland_buffer_pool_reply
+{
+    struct reply_header __header;
+    unsigned __int64 registry_generation;
+};
+
+
+struct get_wayland_buffer_pool_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 previous_pool_generation;
+};
+struct get_wayland_buffer_pool_reply
+{
+    struct reply_header __header;
+    unsigned __int64 pool_generation;
+    unsigned __int64 allocation_size;
+    unsigned __int64 registry_generation;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     format;
+    unsigned int     slot_count;
+    unsigned int     frame_credit_limit;
+    unsigned int     device_uuid_0;
+    unsigned int     device_uuid_1;
+    unsigned int     device_uuid_2;
+    unsigned int     device_uuid_3;
+    char __pad_68[4];
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7082,6 +7158,9 @@ enum request
     REQ_get_wayland_contributor_identity,
     REQ_ack_wayland_contributor_revoke,
     REQ_check_wayland_stream,
+    REQ_create_wayland_buffer_pool,
+    REQ_retire_wayland_buffer_pool,
+    REQ_get_wayland_buffer_pool,
     REQ_NB_REQUESTS
 };
 
@@ -7426,6 +7505,9 @@ union generic_request
     struct get_wayland_contributor_identity_request get_wayland_contributor_identity_request;
     struct ack_wayland_contributor_revoke_request ack_wayland_contributor_revoke_request;
     struct check_wayland_stream_request check_wayland_stream_request;
+    struct create_wayland_buffer_pool_request create_wayland_buffer_pool_request;
+    struct retire_wayland_buffer_pool_request retire_wayland_buffer_pool_request;
+    struct get_wayland_buffer_pool_request get_wayland_buffer_pool_request;
 };
 union generic_reply
 {
@@ -7768,8 +7850,11 @@ union generic_reply
     struct get_wayland_contributor_identity_reply get_wayland_contributor_identity_reply;
     struct ack_wayland_contributor_revoke_reply ack_wayland_contributor_revoke_reply;
     struct check_wayland_stream_reply check_wayland_stream_reply;
+    struct create_wayland_buffer_pool_reply create_wayland_buffer_pool_reply;
+    struct retire_wayland_buffer_pool_reply retire_wayland_buffer_pool_reply;
+    struct get_wayland_buffer_pool_reply get_wayland_buffer_pool_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 974
+#define SERVER_PROTOCOL_VERSION 975
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

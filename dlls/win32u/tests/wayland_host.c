@@ -47,6 +47,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_CREATE_CONTRIBUTOR,
     HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE,
     HOST_CHILD_COMMAND_SET_READY,
+    HOST_CHILD_COMMAND_GET_POOL,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -55,6 +56,8 @@ enum producer_child_command
     PRODUCER_CHILD_COMMAND_NONE,
     PRODUCER_CHILD_COMMAND_BIND,
     PRODUCER_CHILD_COMMAND_CHECK,
+    PRODUCER_CHILD_COMMAND_CREATE_POOL,
+    PRODUCER_CHILD_COMMAND_RETIRE_POOL,
     PRODUCER_CHILD_COMMAND_EXIT,
 };
 
@@ -78,6 +81,8 @@ struct wayland_host_test_state
     UINT64 contributor_host_epoch;
     UINT64 contribution_revision;
     UINT64 revocation_scene_generation;
+    UINT64 pool_generation;
+    UINT64 allocation_size;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -90,6 +95,12 @@ struct wayland_host_test_state
     DWORD contributor_source;
     DWORD contributor_target_layer;
     DWORD contributor_state;
+    DWORD pool_width;
+    DWORD pool_height;
+    DWORD pool_format;
+    DWORD pool_slot_count;
+    DWORD frame_credit_limit;
+    DWORD device_uuid[4];
     NTSTATUS mismatch_status;
     NTSTATUS register_status;
     NTSTATUS ready_status;
@@ -132,6 +143,19 @@ struct wayland_contributor_info
     DWORD target_layer;
     DWORD state;
     UINT64 contribution_revision;
+};
+
+struct wayland_pool_info
+{
+    UINT64 pool_generation;
+    UINT64 allocation_size;
+    UINT64 registry_generation;
+    DWORD width;
+    DWORD height;
+    DWORD format;
+    DWORD slot_count;
+    DWORD frame_credit_limit;
+    DWORD device_uuid[4];
 };
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
@@ -375,6 +399,90 @@ static NTSTATUS check_stream( HWND root, struct wayland_host_test_state *state )
     return status;
 }
 
+static NTSTATUS create_pool_with_size( HWND root, struct wayland_host_test_state *state,
+                                       SIZE_T metadata_size )
+{
+    struct wayland_buffer_pool_metadata metadata;
+    NTSTATUS status;
+
+    memset( &metadata, 0, sizeof(metadata) );
+    metadata.allocation_size = state->allocation_size;
+    metadata.width = state->pool_width;
+    metadata.height = state->pool_height;
+    metadata.format = state->pool_format;
+    metadata.slot_count = state->pool_slot_count;
+    metadata.frame_credit_limit = state->frame_credit_limit;
+    memcpy( metadata.device_uuid, state->device_uuid, sizeof(metadata.device_uuid) );
+    SERVER_START_REQ( create_wayland_buffer_pool )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        req->pool_generation = state->pool_generation;
+        wine_server_add_data( req, &metadata, metadata_size );
+        status = p_wine_server_call( req );
+        state->registry_generation = reply->registry_generation;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS create_pool( HWND root, struct wayland_host_test_state *state )
+{
+    return create_pool_with_size( root, state, sizeof(struct wayland_buffer_pool_metadata) );
+}
+
+static NTSTATUS retire_pool( HWND root, struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( retire_wayland_buffer_pool )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        req->pool_generation = state->pool_generation;
+        status = p_wine_server_call( req );
+        state->registry_generation = reply->registry_generation;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_pool( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                          UINT64 previous_generation, struct wayland_pool_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_buffer_pool )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->previous_pool_generation = previous_generation;
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->pool_generation = reply->pool_generation;
+            info->allocation_size = reply->allocation_size;
+            info->registry_generation = reply->registry_generation;
+            info->width = reply->width;
+            info->height = reply->height;
+            info->format = reply->format;
+            info->slot_count = reply->slot_count;
+            info->frame_credit_limit = reply->frame_credit_limit;
+            info->device_uuid[0] = reply->device_uuid_0;
+            info->device_uuid[1] = reply->device_uuid_1;
+            info->device_uuid[2] = reply->device_uuid_2;
+            info->device_uuid[3] = reply->device_uuid_3;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS revoke_contributor( HWND root, struct wayland_host_test_state *state )
 {
     NTSTATUS status;
@@ -469,6 +577,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_host_test_state *state;
     struct wayland_scene_info scene;
     struct wayland_contributor_info contributor;
+    struct wayland_pool_info pool;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -540,6 +649,19 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
         case HOST_CHILD_COMMAND_SET_READY:
             state->command_status = set_host_ready( state->host_epoch );
             break;
+        case HOST_CHILD_COMMAND_GET_POOL:
+            state->command_status = get_pool( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->pool_generation, &pool );
+            state->pool_generation = pool.pool_generation;
+            state->allocation_size = pool.allocation_size;
+            state->registry_generation = pool.registry_generation;
+            state->pool_width = pool.width;
+            state->pool_height = pool.height;
+            state->pool_format = pool.format;
+            state->pool_slot_count = pool.slot_count;
+            state->frame_credit_limit = pool.frame_credit_limit;
+            memcpy( state->device_uuid, pool.device_uuid, sizeof(state->device_uuid) );
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -569,6 +691,12 @@ static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE res
             break;
         case PRODUCER_CHILD_COMMAND_CHECK:
             state->producer_status = check_stream( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_CREATE_POOL:
+            state->producer_status = create_pool( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_RETIRE_POOL:
+            state->producer_status = retire_pool( (HWND)(UINT_PTR)state->root, state );
             break;
         case PRODUCER_CHILD_COMMAND_EXIT:
             state->producer_status = STATUS_SUCCESS;
@@ -681,6 +809,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_host_info info;
     struct wayland_scene_info scene;
     struct wayland_contributor_info contributor;
+    struct wayland_pool_info pool;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -1272,6 +1401,130 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out binding replacement-test stream.\n" );
     ok( !state->producer_status, "Replacement-test bind returned %#lx.\n",
         state->producer_status );
+
+    state->pool_generation = 1;
+    state->allocation_size = 64 * 64 * 4;
+    state->pool_width = 64;
+    state->pool_height = 64;
+    state->pool_format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
+    state->pool_slot_count = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    state->frame_credit_limit = 3;
+    state->device_uuid[0] = 0x11223344;
+    state->device_uuid[1] = 0x55667788;
+    state->device_uuid[2] = 0x99aabbcc;
+    state->device_uuid[3] = 0xddeeff00;
+    status = create_pool_with_size( root, state,
+            sizeof(struct wayland_buffer_pool_metadata) - sizeof(DWORD) );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH,
+        "Truncated pool metadata returned %#lx.\n", status );
+    state->device_uuid[0] = state->device_uuid[1] = 0;
+    state->device_uuid[2] = state->device_uuid[3] = 0;
+    status = create_pool( root, state );
+    ok( status == STATUS_INVALID_PARAMETER, "Zero pool UUID returned %#lx.\n", status );
+    state->device_uuid[0] = 0x11223344;
+    state->device_uuid[1] = 0x55667788;
+    state->device_uuid[2] = 0x99aabbcc;
+    state->device_uuid[3] = 0xddeeff00;
+    state->frame_credit_limit = WINE_WAYLAND_MAX_FRAME_CREDITS + 1;
+    status = create_pool( root, state );
+    ok( status == STATUS_INVALID_PARAMETER, "Excess pool credits returned %#lx.\n", status );
+    state->frame_credit_limit = 3;
+    state->allocation_size = 256ull * 1024 * 1024 / WINE_WAYLAND_BUFFER_POOL_SLOTS + 1;
+    status = create_pool( root, state );
+    ok( status == STATUS_INVALID_PARAMETER, "Oversized pool allocation returned %#lx.\n", status );
+    state->allocation_size = 64 * 64 * 4;
+    status = create_pool( root, state );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Non-producer pool registration returned %#lx.\n", status );
+    state->pool_width = 0;
+    status = create_pool( root, state );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "Invalid pool dimensions returned %#lx.\n", status );
+    state->pool_width = 64;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out registering transport pool 1.\n" );
+    ok( !state->producer_status, "Pool 1 registration returned %#lx.\n",
+        state->producer_status );
+    status = get_pool( root, old_epoch, state->contributor_id, 0, &pool );
+    ok( status == STATUS_ACCESS_DENIED, "Non-host pool query returned %#lx.\n", status );
+    state->pool_generation = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out querying transport pool 1.\n" );
+    ok( !state->command_status && state->pool_generation == 1 &&
+        state->allocation_size == 64 * 64 * 4 && state->pool_width == 64 &&
+        state->pool_height == 64 &&
+        state->pool_format == WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM &&
+        state->pool_slot_count == WINE_WAYLAND_BUFFER_POOL_SLOTS &&
+        state->frame_credit_limit == 3 && state->device_uuid[0] == 0x11223344 &&
+        state->device_uuid[1] == 0x55667788 && state->device_uuid[2] == 0x99aabbcc &&
+        state->device_uuid[3] == 0xddeeff00,
+        "Pool 1 query returned %#lx, generation %s, allocation %s, size %lux%lu, format %#lx, slots %lu, credits %lu.\n",
+        state->command_status, wine_dbgstr_longlong( state->pool_generation ),
+        wine_dbgstr_longlong( state->allocation_size ), state->pool_width, state->pool_height,
+        state->pool_format, state->pool_slot_count, state->frame_credit_limit );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out repeating transport pool generation 1.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Duplicate pool generation returned %#lx.\n", state->producer_status );
+    state->pool_generation = ~(UINT64)0;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out testing pool-generation overflow.\n" );
+    ok( state->producer_status == STATUS_INTEGER_OVERFLOW,
+        "Maximum pool generation returned %#lx.\n", state->producer_status );
+    state->pool_generation = 2;
+    state->allocation_size = 256ull * 1024 * 1024 / WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out testing the root pool budget.\n" );
+    ok( state->producer_status == STATUS_INSUFFICIENT_RESOURCES,
+        "Root pool budget overflow returned %#lx.\n", state->producer_status );
+    state->allocation_size = 64 * 64 * 4;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out registering transport pool 2.\n" );
+    ok( !state->producer_status, "Pool 2 registration returned %#lx.\n",
+        state->producer_status );
+    state->pool_generation = 3;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out exceeding the pool-generation limit.\n" );
+    ok( state->producer_status == STATUS_INSUFFICIENT_RESOURCES,
+        "Third live pool generation returned %#lx.\n", state->producer_status );
+    state->pool_generation = 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_RETIRE_POOL ),
+        "Timed out retiring transport pool 1.\n" );
+    ok( !state->producer_status, "Pool 1 retirement returned %#lx.\n",
+        state->producer_status );
+    state->pool_generation = 3;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out registering replacement transport pool 3.\n" );
+    ok( !state->producer_status, "Pool 3 registration returned %#lx.\n",
+        state->producer_status );
+    state->pool_generation = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out enumerating transport pool 2.\n" );
+    ok( !state->command_status && state->pool_generation == 2,
+        "First live pool enumeration returned %#lx, generation %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->pool_generation ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out enumerating transport pool 3.\n" );
+    ok( !state->command_status && state->pool_generation == 3,
+        "Second live pool enumeration returned %#lx, generation %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->pool_generation ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out checking the end of pool enumeration.\n" );
+    ok( state->command_status == STATUS_NO_MORE_ENTRIES,
+        "End of pool enumeration returned %#lx.\n", state->command_status );
+
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 5,
                             state->contributor_id, state->stream_id,
                             state->binding_generation, &next_generation, NULL );

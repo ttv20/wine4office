@@ -57,6 +57,21 @@ enum property_type
 };
 
 #define MAX_WAYLAND_SCENE_CONTRIBUTORS 16
+#define MAX_WAYLAND_BUFFER_POOLS 2
+#define MAX_WAYLAND_ROOT_POOL_BYTES (256ull * 1024 * 1024)
+#define MAX_WAYLAND_DESKTOP_POOL_BYTES (1024ull * 1024 * 1024)
+
+struct wayland_buffer_pool
+{
+    unsigned __int64 generation;
+    unsigned __int64 allocation_size;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     format;
+    unsigned int     slot_count;
+    unsigned int     frame_credit_limit;
+    unsigned int     device_uuid[4];
+};
 
 struct wayland_scene_contributor
 {
@@ -75,6 +90,8 @@ struct wayland_scene_contributor
     unsigned int         source;
     unsigned int         target_layer;
     unsigned int         state;
+    unsigned __int64     latest_pool_generation;
+    struct wayland_buffer_pool pools[MAX_WAYLAND_BUFFER_POOLS];
 };
 
 struct wayland_scene_registry
@@ -3998,6 +4015,235 @@ DECL_HANDLER(check_wayland_stream)
         reply->registry_generation = root->wayland_scene_registry->generation;
     }
     release_object( desktop );
+}
+
+static struct wayland_buffer_pool *find_wayland_buffer_pool(
+        struct wayland_scene_contributor *contributor, unsigned __int64 generation )
+{
+    unsigned int i;
+
+    for (i = 0; i < MAX_WAYLAND_BUFFER_POOLS; ++i)
+        if (contributor->pools[i].generation == generation) return &contributor->pools[i];
+    return NULL;
+}
+
+static unsigned __int64 wayland_buffer_pool_bytes( const struct wayland_buffer_pool *pool )
+{
+    return pool->allocation_size * pool->slot_count;
+}
+
+static unsigned __int64 wayland_root_pool_bytes( const struct window *root )
+{
+    unsigned __int64 total = 0;
+    unsigned int i, j;
+
+    if (!root->wayland_scene_registry) return 0;
+    for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+        for (j = 0; j < MAX_WAYLAND_BUFFER_POOLS; ++j)
+            if (root->wayland_scene_registry->contributors[i].pools[j].generation)
+                total += wayland_buffer_pool_bytes(
+                        &root->wayland_scene_registry->contributors[i].pools[j] );
+    return total;
+}
+
+static unsigned __int64 wayland_desktop_pool_bytes( const struct desktop *desktop )
+{
+    struct window *root;
+    unsigned __int64 total = 0, bytes;
+    user_handle_t handle = 0;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (root->desktop != desktop) continue;
+        bytes = wayland_root_pool_bytes( root );
+        if (total > MAX_WAYLAND_DESKTOP_POOL_BYTES - min(bytes,
+                MAX_WAYLAND_DESKTOP_POOL_BYTES))
+            return MAX_WAYLAND_DESKTOP_POOL_BYTES + 1;
+        total += bytes;
+    }
+    return total;
+}
+
+static struct wayland_scene_contributor *get_current_wayland_stream(
+        struct window *root, struct desktop *desktop, unsigned __int64 contributor_id,
+        unsigned __int64 stream_id, unsigned __int64 binding_generation )
+{
+    struct wayland_scene_contributor *contributor;
+
+    if (root->desktop != desktop)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else if (!(contributor = find_wayland_contributor( root, contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
+             contributor->producer != current->process || contributor->stream_id != stream_id)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (contributor->binding_generation != binding_generation ||
+             contributor->host_epoch != desktop->wayland_host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else
+        return contributor;
+    return NULL;
+}
+
+DECL_HANDLER(create_wayland_buffer_pool)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool = NULL;
+    struct window *root;
+    struct desktop *desktop;
+    struct wayland_buffer_pool_metadata metadata;
+    unsigned __int64 minimum_size, pool_size, root_size, desktop_size;
+    unsigned int i;
+
+    reply->registry_generation = 0;
+    if (get_req_data_size() != sizeof(metadata))
+    {
+        set_error( STATUS_INFO_LENGTH_MISMATCH );
+        return;
+    }
+    memcpy( &metadata, get_req_data(), sizeof(metadata) );
+    if (!req->pool_generation || !metadata.width || !metadata.height || metadata.width > 16384 ||
+        metadata.height > 16384 || metadata.format != WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM ||
+        metadata.slot_count != WINE_WAYLAND_BUFFER_POOL_SLOTS || !metadata.frame_credit_limit ||
+        metadata.frame_credit_limit > WINE_WAYLAND_MAX_FRAME_CREDITS ||
+        metadata.reserved ||
+        !(metadata.device_uuid[0] | metadata.device_uuid[1] |
+          metadata.device_uuid[2] | metadata.device_uuid[3]))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    minimum_size = (unsigned __int64)metadata.width * metadata.height * 4;
+    if (metadata.allocation_size < minimum_size ||
+        metadata.allocation_size > MAX_WAYLAND_ROOT_POOL_BYTES / WINE_WAYLAND_BUFFER_POOL_SLOTS)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    if (req->pool_generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else if (req->pool_generation <= contributor->latest_pool_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        for (i = 0; i < MAX_WAYLAND_BUFFER_POOLS; ++i)
+            if (!contributor->pools[i].generation)
+            {
+                pool = &contributor->pools[i];
+                break;
+            }
+        pool_size = metadata.allocation_size * metadata.slot_count;
+        root_size = wayland_root_pool_bytes( root );
+        desktop_size = wayland_desktop_pool_bytes( desktop );
+        if (!pool || root_size > MAX_WAYLAND_ROOT_POOL_BYTES - pool_size ||
+            desktop_size > MAX_WAYLAND_DESKTOP_POOL_BYTES - pool_size)
+            set_error( STATUS_INSUFFICIENT_RESOURCES );
+        else
+        {
+            pool->generation = req->pool_generation;
+            pool->allocation_size = metadata.allocation_size;
+            pool->width = metadata.width;
+            pool->height = metadata.height;
+            pool->format = metadata.format;
+            pool->slot_count = metadata.slot_count;
+            pool->frame_credit_limit = metadata.frame_credit_limit;
+            memcpy( pool->device_uuid, metadata.device_uuid, sizeof(pool->device_uuid) );
+            contributor->latest_pool_generation = req->pool_generation;
+            reply->registry_generation = ++root->wayland_scene_registry->generation;
+        }
+    }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(retire_wayland_buffer_pool)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->registry_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    if (!(pool = find_wayland_buffer_pool( contributor, req->pool_generation )))
+        set_error( STATUS_NOT_FOUND );
+    else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        memset( pool, 0, sizeof(*pool) );
+        reply->registry_generation = ++root->wayland_scene_registry->generation;
+    }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_buffer_pool)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool = NULL;
+    struct window *root;
+    unsigned __int64 next_generation = ~(unsigned __int64)0;
+    unsigned int i;
+
+    reply->pool_generation = 0;
+    reply->allocation_size = 0;
+    reply->registry_generation = 0;
+    reply->width = 0;
+    reply->height = 0;
+    reply->format = 0;
+    reply->slot_count = 0;
+    reply->frame_credit_limit = 0;
+    reply->device_uuid_0 = 0;
+    reply->device_uuid_1 = 0;
+    reply->device_uuid_2 = 0;
+    reply->device_uuid_3 = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    for (i = 0; i < MAX_WAYLAND_BUFFER_POOLS; ++i)
+        if (contributor->pools[i].generation > req->previous_pool_generation &&
+            contributor->pools[i].generation < next_generation)
+        {
+            pool = &contributor->pools[i];
+            next_generation = pool->generation;
+        }
+    if (!pool)
+    {
+        set_error( STATUS_NO_MORE_ENTRIES );
+        return;
+    }
+    reply->pool_generation = pool->generation;
+    reply->allocation_size = pool->allocation_size;
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    reply->width = pool->width;
+    reply->height = pool->height;
+    reply->format = pool->format;
+    reply->slot_count = pool->slot_count;
+    reply->frame_credit_limit = pool->frame_credit_limit;
+    reply->device_uuid_0 = pool->device_uuid[0];
+    reply->device_uuid_1 = pool->device_uuid[1];
+    reply->device_uuid_2 = pool->device_uuid[2];
+    reply->device_uuid_3 = pool->device_uuid[3];
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

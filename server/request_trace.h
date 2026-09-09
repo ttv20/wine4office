@@ -3884,6 +3884,59 @@ static void dump_check_wayland_stream_reply( const struct check_wayland_stream_r
     dump_uint64( ", registry_generation=", &req->registry_generation );
 }
 
+static void dump_create_wayland_buffer_pool_request( const struct create_wayland_buffer_pool_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", pool_generation=", &req->pool_generation );
+    dump_varargs_bytes( ", metadata=", cur_size );
+}
+
+static void dump_create_wayland_buffer_pool_reply( const struct create_wayland_buffer_pool_reply *req )
+{
+    dump_uint64( " registry_generation=", &req->registry_generation );
+}
+
+static void dump_retire_wayland_buffer_pool_request( const struct retire_wayland_buffer_pool_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", pool_generation=", &req->pool_generation );
+}
+
+static void dump_retire_wayland_buffer_pool_reply( const struct retire_wayland_buffer_pool_reply *req )
+{
+    dump_uint64( " registry_generation=", &req->registry_generation );
+}
+
+static void dump_get_wayland_buffer_pool_request( const struct get_wayland_buffer_pool_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", previous_pool_generation=", &req->previous_pool_generation );
+}
+
+static void dump_get_wayland_buffer_pool_reply( const struct get_wayland_buffer_pool_reply *req )
+{
+    dump_uint64( " pool_generation=", &req->pool_generation );
+    dump_uint64( ", allocation_size=", &req->allocation_size );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", format=%08x", req->format );
+    fprintf( stderr, ", slot_count=%08x", req->slot_count );
+    fprintf( stderr, ", frame_credit_limit=%08x", req->frame_credit_limit );
+    fprintf( stderr, ", device_uuid_0=%08x", req->device_uuid_0 );
+    fprintf( stderr, ", device_uuid_1=%08x", req->device_uuid_1 );
+    fprintf( stderr, ", device_uuid_2=%08x", req->device_uuid_2 );
+    fprintf( stderr, ", device_uuid_3=%08x", req->device_uuid_3 );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4225,6 +4278,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_contributor_identity_request,
     (dump_func)dump_ack_wayland_contributor_revoke_request,
     (dump_func)dump_check_wayland_stream_request,
+    (dump_func)dump_create_wayland_buffer_pool_request,
+    (dump_func)dump_retire_wayland_buffer_pool_request,
+    (dump_func)dump_get_wayland_buffer_pool_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4566,6 +4622,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_contributor_identity_reply,
     NULL,
     (dump_func)dump_check_wayland_stream_reply,
+    (dump_func)dump_create_wayland_buffer_pool_reply,
+    (dump_func)dump_retire_wayland_buffer_pool_reply,
+    (dump_func)dump_get_wayland_buffer_pool_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4907,6 +4966,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_contributor_identity",
     "ack_wayland_contributor_revoke",
     "check_wayland_stream",
+    "create_wayland_buffer_pool",
+    "retire_wayland_buffer_pool",
+    "get_wayland_buffer_pool",
 };
 
 static const struct
