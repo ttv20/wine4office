@@ -3,4 +3,5 @@ IMPORTS   = imm32 user32 gdi32 dwmapi setupapi opengl32 d3d9 dxgi d3d10 d3d11 d3
 
 SOURCES = \
 	d3dkmt.c \
+	wayland_host.c \
 	win32u.c

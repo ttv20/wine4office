@@ -328,6 +328,12 @@ DECL_HANDLER(d3dkmt_object_open_name);
 DECL_HANDLER(d3dkmt_mutex_acquire);
 DECL_HANDLER(d3dkmt_mutex_release);
 DECL_HANDLER(alpc_create_port);
+DECL_HANDLER(request_wayland_host_startup);
+DECL_HANDLER(cancel_wayland_host_startup);
+DECL_HANDLER(register_wayland_host);
+DECL_HANDLER(set_wayland_host_ready);
+DECL_HANDLER(release_wayland_host);
+DECL_HANDLER(get_wayland_host);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -653,6 +659,12 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_mutex_acquire,
     (req_handler)req_d3dkmt_mutex_release,
     (req_handler)req_alpc_create_port,
+    (req_handler)req_request_wayland_host_startup,
+    (req_handler)req_cancel_wayland_host_startup,
+    (req_handler)req_register_wayland_host,
+    (req_handler)req_set_wayland_host_ready,
+    (req_handler)req_release_wayland_host,
+    (req_handler)req_get_wayland_host,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2489,3 +2501,38 @@ C_ASSERT( offsetof(struct alpc_create_port_request, max_msg_len) == 16 );
 C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
 C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
 C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_request, version) == 12 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_request, capabilities) == 16 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_request, endpoint_device) == 24 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_request, endpoint_inode) == 32 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_request, seat) == 40 );
+C_ASSERT( sizeof(struct request_wayland_host_startup_request) == 48 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_reply, token_low) == 8 );
+C_ASSERT( offsetof(struct request_wayland_host_startup_reply, token_high) == 16 );
+C_ASSERT( sizeof(struct request_wayland_host_startup_reply) == 24 );
+C_ASSERT( offsetof(struct cancel_wayland_host_startup_request, token_low) == 16 );
+C_ASSERT( offsetof(struct cancel_wayland_host_startup_request, token_high) == 24 );
+C_ASSERT( sizeof(struct cancel_wayland_host_startup_request) == 32 );
+C_ASSERT( offsetof(struct register_wayland_host_request, version) == 12 );
+C_ASSERT( offsetof(struct register_wayland_host_request, capabilities) == 16 );
+C_ASSERT( offsetof(struct register_wayland_host_request, token_low) == 24 );
+C_ASSERT( offsetof(struct register_wayland_host_request, token_high) == 32 );
+C_ASSERT( offsetof(struct register_wayland_host_request, endpoint_device) == 40 );
+C_ASSERT( offsetof(struct register_wayland_host_request, endpoint_inode) == 48 );
+C_ASSERT( offsetof(struct register_wayland_host_request, seat) == 56 );
+C_ASSERT( sizeof(struct register_wayland_host_request) == 64 );
+C_ASSERT( offsetof(struct register_wayland_host_reply, host_epoch) == 8 );
+C_ASSERT( sizeof(struct register_wayland_host_reply) == 16 );
+C_ASSERT( offsetof(struct set_wayland_host_ready_request, host_epoch) == 16 );
+C_ASSERT( sizeof(struct set_wayland_host_ready_request) == 24 );
+C_ASSERT( offsetof(struct release_wayland_host_request, host_epoch) == 16 );
+C_ASSERT( sizeof(struct release_wayland_host_request) == 24 );
+C_ASSERT( sizeof(struct get_wayland_host_request) == 16 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, process_id) == 8 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, capabilities) == 12 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, host_epoch) == 16 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, endpoint_device) == 24 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, endpoint_inode) == 32 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, seat) == 40 );
+C_ASSERT( offsetof(struct get_wayland_host_reply, ready) == 44 );
+C_ASSERT( sizeof(struct get_wayland_host_reply) == 48 );

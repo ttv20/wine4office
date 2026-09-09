@@ -20,9 +20,15 @@
 
 #include "config.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <sys/types.h>
+#include <unistd.h>
+#ifdef HAVE_SYS_RANDOM_H
+#include <sys/random.h>
+#endif
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -40,8 +46,10 @@
 #include "security.h"
 
 #define DESKTOP_ALL_ACCESS 0x01ff
+#define WAYLAND_HOST_STARTUP_TIMEOUT (30 * TICKS_PER_SEC)
 
 static struct list winstation_list = LIST_INIT(winstation_list);
+static unsigned __int64 wayland_host_epoch;
 
 struct winstation_init_data
 {
@@ -65,6 +73,136 @@ static WCHAR *desktop_get_full_name( struct object *obj, data_size_t max, data_s
 static int desktop_link_name( struct object *obj, struct object_name *name, struct object *parent );
 static int desktop_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void desktop_destroy( struct object *obj );
+
+static int fill_random_bytes( void *buffer, size_t size )
+{
+    unsigned char *ptr = buffer;
+    int fd;
+
+#ifdef HAVE_GETRANDOM
+    while (size)
+    {
+        ssize_t ret;
+
+        do ret = getrandom( ptr, size, 0 );
+        while (ret == -1 && errno == EINTR);
+        if (ret == -1)
+        {
+            if (errno == ENOSYS) break;
+            return 0;
+        }
+        if (!ret) return 0;
+        ptr += ret;
+        size -= ret;
+    }
+    if (!size) return 1;
+#endif
+
+    if ((fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) == -1) return 0;
+    while (size)
+    {
+        ssize_t ret;
+
+        do ret = read( fd, ptr, size );
+        while (ret == -1 && errno == EINTR);
+        if (ret <= 0)
+        {
+            close( fd );
+            return 0;
+        }
+        ptr += ret;
+        size -= ret;
+    }
+    close( fd );
+    return 1;
+}
+
+static void clear_wayland_host_startup( struct desktop *desktop )
+{
+    if (desktop->wayland_host_startup_timeout)
+        remove_timeout_user( desktop->wayland_host_startup_timeout );
+    desktop->wayland_host_startup_timeout = NULL;
+    if (desktop->wayland_host_launcher)
+        release_object( desktop->wayland_host_launcher );
+    desktop->wayland_host_launcher = NULL;
+    desktop->wayland_host_token_low = 0;
+    desktop->wayland_host_token_high = 0;
+    desktop->wayland_startup_endpoint_device = 0;
+    desktop->wayland_startup_endpoint_inode = 0;
+    desktop->wayland_startup_capabilities = 0;
+    desktop->wayland_startup_seat = 0;
+}
+
+static void expire_wayland_host_startup( void *private )
+{
+    struct desktop *desktop = private;
+
+    desktop->wayland_host_startup_timeout = NULL;
+    clear_wayland_host_startup( desktop );
+}
+
+static void clear_wayland_host_registration( struct desktop *desktop )
+{
+    if (desktop->wayland_host_process)
+        release_object( desktop->wayland_host_process );
+    desktop->wayland_host_process = NULL;
+    desktop->wayland_host_capabilities = 0;
+    desktop->wayland_host_ready = 0;
+}
+
+static int validate_wayland_host_context( unsigned int version, unsigned int capabilities,
+                                          unsigned __int64 endpoint_device,
+                                          unsigned __int64 endpoint_inode, unsigned int seat )
+{
+    const unsigned int valid_caps = WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET |
+            WINE_WAYLAND_HOST_CAP_COMPOSITOR | WINE_WAYLAND_HOST_CAP_SHM |
+            WINE_WAYLAND_HOST_CAP_SEAT | WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS;
+    const unsigned int required_caps = WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET |
+            WINE_WAYLAND_HOST_CAP_COMPOSITOR | WINE_WAYLAND_HOST_CAP_SEAT;
+
+    if (version != WINE_WAYLAND_HOST_PROTOCOL_VERSION)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return 0;
+    }
+    if ((capabilities & ~valid_caps) || (capabilities & required_caps) != required_caps ||
+        !endpoint_device || !endpoint_inode || !seat)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return 0;
+    }
+    return 1;
+}
+
+static int wayland_host_context_matches( const struct desktop *desktop,
+                                         unsigned __int64 endpoint_device,
+                                         unsigned __int64 endpoint_inode, unsigned int seat )
+{
+    return (!desktop->wayland_host_endpoint_device && !desktop->wayland_host_endpoint_inode &&
+            !desktop->wayland_host_seat) ||
+           (desktop->wayland_host_endpoint_device == endpoint_device &&
+            desktop->wayland_host_endpoint_inode == endpoint_inode &&
+            desktop->wayland_host_seat == seat);
+}
+
+static int generate_wayland_host_token( struct desktop *desktop )
+{
+    unsigned __int64 token[2];
+
+    do
+    {
+        if (!fill_random_bytes( token, sizeof(token) ))
+        {
+            desktop->wayland_host_token_low = desktop->wayland_host_token_high = 0;
+            set_error( STATUS_UNSUCCESSFUL );
+            return 0;
+        }
+        desktop->wayland_host_token_low = token[0];
+        desktop->wayland_host_token_high = token[1];
+    }
+    while (!desktop->wayland_host_token_low && !desktop->wayland_host_token_high);
+    return 1;
+}
 
 static const WCHAR winstation_name[] = {'W','i','n','d','o','w','S','t','a','t','i','o','n'};
 
@@ -245,8 +383,10 @@ static void desktop_dump( struct object *obj, int verbose )
 {
     struct desktop *desktop = (struct desktop *)obj;
 
-    fprintf( stderr, "Desktop flags=%x winstation=%p top_win=%p hooks=%p\n",
-             desktop->shared->flags, desktop->winstation, desktop->top_window, desktop->global_hooks );
+    fprintf( stderr, "Desktop flags=%x winstation=%p top_win=%p hooks=%p wayland_host=%04x epoch=%llu\n",
+             desktop->shared->flags, desktop->winstation, desktop->top_window, desktop->global_hooks,
+             desktop->wayland_host_process ? desktop->wayland_host_process->id : 0,
+             (unsigned long long)desktop->wayland_host_epoch );
 }
 
 static bool desktop_init( struct object *obj, const void *init_data )
@@ -283,6 +423,21 @@ static bool desktop_init( struct object *obj, const void *init_data )
     desktop->clip_flags = 0;
     desktop->cursor_win = 0;
     desktop->alt_pressed = 0;
+    desktop->wayland_host_process = NULL;
+    desktop->wayland_host_launcher = NULL;
+    desktop->wayland_host_startup_timeout = NULL;
+    desktop->wayland_host_token_low = 0;
+    desktop->wayland_host_token_high = 0;
+    desktop->wayland_host_epoch = 0;
+    desktop->wayland_host_endpoint_device = 0;
+    desktop->wayland_host_endpoint_inode = 0;
+    desktop->wayland_startup_endpoint_device = 0;
+    desktop->wayland_startup_endpoint_inode = 0;
+    desktop->wayland_host_capabilities = 0;
+    desktop->wayland_host_seat = 0;
+    desktop->wayland_startup_capabilities = 0;
+    desktop->wayland_startup_seat = 0;
+    desktop->wayland_host_ready = 0;
     memset( &desktop->key_repeat, 0, sizeof(desktop->key_repeat) );
     list_init( &desktop->threads );
     list_init( &desktop->hotkeys );
@@ -374,8 +529,27 @@ static void desktop_destroy( struct object *obj )
     if (desktop->global_hooks) release_object( desktop->global_hooks );
     if (desktop->close_timeout) remove_timeout_user( desktop->close_timeout );
     if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
+    clear_wayland_host_registration( desktop );
+    clear_wayland_host_startup( desktop );
     release_object( desktop->winstation );
     if (desktop->shared) free_shared_object( desktop->shared );
+}
+
+void cleanup_process_wayland_hosts( struct process *process )
+{
+    struct winstation *winstation;
+    struct desktop *desktop;
+
+    LIST_FOR_EACH_ENTRY( winstation, &winstation_list, struct winstation, entry )
+    {
+        LIST_FOR_EACH_ENTRY( desktop, &winstation->desktops, struct desktop, entry )
+        {
+            if (desktop->wayland_host_process == process)
+                clear_wayland_host_registration( desktop );
+            if (desktop->wayland_host_launcher == process)
+                clear_wayland_host_startup( desktop );
+        }
+    }
 }
 
 /* retrieve the thread desktop, checking the handle access rights */
@@ -992,4 +1166,155 @@ DECL_HANDLER(enum_winstation)
         set_reply_data_ptr( data, (ptr - data) * sizeof(WCHAR) );
         set_error( STATUS_BUFFER_TOO_SMALL );
     }
+}
+
+DECL_HANDLER(request_wayland_host_startup)
+{
+    struct desktop *desktop;
+
+    reply->token_low = 0;
+    reply->token_high = 0;
+    if (!validate_wayland_host_context( req->version, req->capabilities,
+                                        req->endpoint_device, req->endpoint_inode,
+                                        req->seat )) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+
+    if (desktop->wayland_host_process || desktop->wayland_host_launcher)
+        set_error( STATUS_DEVICE_BUSY );
+    else if (!wayland_host_context_matches( desktop, req->endpoint_device,
+                                             req->endpoint_inode, req->seat ))
+        set_error( STATUS_ACCESS_DENIED );
+    else if (generate_wayland_host_token( desktop ))
+    {
+        desktop->wayland_host_launcher = (struct process *)grab_object( current->process );
+        desktop->wayland_startup_endpoint_device = req->endpoint_device;
+        desktop->wayland_startup_endpoint_inode = req->endpoint_inode;
+        desktop->wayland_startup_capabilities = req->capabilities;
+        desktop->wayland_startup_seat = req->seat;
+        desktop->wayland_host_startup_timeout = add_timeout_user(
+                -WAYLAND_HOST_STARTUP_TIMEOUT, expire_wayland_host_startup, desktop );
+        if (!desktop->wayland_host_startup_timeout)
+            clear_wayland_host_startup( desktop );
+        else
+        {
+            reply->token_low = desktop->wayland_host_token_low;
+            reply->token_high = desktop->wayland_host_token_high;
+        }
+    }
+    release_object( desktop );
+}
+
+DECL_HANDLER(cancel_wayland_host_startup)
+{
+    struct desktop *desktop;
+
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!desktop->wayland_host_launcher ||
+        desktop->wayland_host_token_low != req->token_low ||
+        desktop->wayland_host_token_high != req->token_high ||
+        desktop->wayland_host_launcher != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else
+        clear_wayland_host_startup( desktop );
+    release_object( desktop );
+}
+
+DECL_HANDLER(register_wayland_host)
+{
+    struct desktop *desktop;
+
+    reply->host_epoch = 0;
+    if (!validate_wayland_host_context( req->version, req->capabilities,
+                                        req->endpoint_device, req->endpoint_inode,
+                                        req->seat )) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+
+    if (desktop->wayland_host_process)
+        set_error( STATUS_DEVICE_BUSY );
+    else if (!desktop->wayland_host_launcher ||
+             desktop->wayland_host_token_low != req->token_low ||
+             desktop->wayland_host_token_high != req->token_high ||
+             desktop->wayland_host_launcher->id != current->process->parent_id ||
+             desktop->wayland_host_launcher->session_id != current->process->session_id ||
+             desktop->wayland_startup_endpoint_device != req->endpoint_device ||
+             desktop->wayland_startup_endpoint_inode != req->endpoint_inode ||
+             desktop->wayland_startup_capabilities != req->capabilities ||
+             desktop->wayland_startup_seat != req->seat)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!wayland_host_context_matches( desktop, req->endpoint_device,
+                                             req->endpoint_inode, req->seat ))
+        set_error( STATUS_ACCESS_DENIED );
+    else
+    {
+        desktop->wayland_host_process = (struct process *)grab_object( current->process );
+        if (!++wayland_host_epoch) ++wayland_host_epoch;
+        desktop->wayland_host_epoch = wayland_host_epoch;
+        desktop->wayland_host_endpoint_device = req->endpoint_device;
+        desktop->wayland_host_endpoint_inode = req->endpoint_inode;
+        desktop->wayland_host_capabilities = req->capabilities;
+        desktop->wayland_host_seat = req->seat;
+        desktop->wayland_host_ready = 0;
+        reply->host_epoch = desktop->wayland_host_epoch;
+        clear_wayland_host_startup( desktop );
+    }
+    release_object( desktop );
+}
+
+DECL_HANDLER(set_wayland_host_ready)
+{
+    struct desktop *desktop;
+
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else if (desktop->wayland_host_epoch != req->host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (desktop->wayland_host_process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else
+        desktop->wayland_host_ready = 1;
+    release_object( desktop );
+}
+
+DECL_HANDLER(release_wayland_host)
+{
+    struct desktop *desktop;
+
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else if (desktop->wayland_host_epoch != req->host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (desktop->wayland_host_process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else
+        clear_wayland_host_registration( desktop );
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_host)
+{
+    struct desktop *desktop;
+
+    reply->process_id = 0;
+    reply->capabilities = 0;
+    reply->host_epoch = 0;
+    reply->endpoint_device = 0;
+    reply->endpoint_inode = 0;
+    reply->seat = 0;
+    reply->ready = 0;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else
+    {
+        reply->process_id = desktop->wayland_host_process->id;
+        reply->capabilities = desktop->wayland_host_capabilities;
+        reply->host_epoch = desktop->wayland_host_epoch;
+        reply->endpoint_device = desktop->wayland_host_endpoint_device;
+        reply->endpoint_inode = desktop->wayland_host_endpoint_inode;
+        reply->seat = desktop->wayland_host_seat;
+        reply->ready = desktop->wayland_host_ready;
+    }
+    release_object( desktop );
 }

@@ -939,6 +939,7 @@ static void process_killed( struct process *process )
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
     if (process->appcore_complete) set_event( process->appcore_complete );
+    cleanup_process_wayland_hosts( process );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;

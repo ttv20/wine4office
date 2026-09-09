@@ -33,6 +33,14 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 1
+
+#define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
+#define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
+#define WINE_WAYLAND_HOST_CAP_SHM            0x00000004
+#define WINE_WAYLAND_HOST_CAP_SEAT           0x00000008
+#define WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+
 struct request_header
 {
     int          req;
@@ -6451,6 +6459,101 @@ struct alpc_create_port_reply
 };
 
 
+
+struct request_wayland_host_startup_request
+{
+    struct request_header __header;
+    unsigned int     version;
+    unsigned int     capabilities;
+    char __pad_20[4];
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+    char __pad_44[4];
+};
+struct request_wayland_host_startup_reply
+{
+    struct reply_header __header;
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+};
+
+
+struct cancel_wayland_host_startup_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+};
+struct cancel_wayland_host_startup_reply
+{
+    struct reply_header __header;
+};
+
+
+struct register_wayland_host_request
+{
+    struct request_header __header;
+    unsigned int     version;
+    unsigned int     capabilities;
+    char __pad_20[4];
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+    char __pad_60[4];
+};
+struct register_wayland_host_reply
+{
+    struct reply_header __header;
+    unsigned __int64 host_epoch;
+};
+
+
+struct set_wayland_host_ready_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    unsigned __int64 host_epoch;
+};
+struct set_wayland_host_ready_reply
+{
+    struct reply_header __header;
+};
+
+
+struct release_wayland_host_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    unsigned __int64 host_epoch;
+};
+struct release_wayland_host_reply
+{
+    struct reply_header __header;
+};
+
+
+struct get_wayland_host_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_wayland_host_reply
+{
+    struct reply_header __header;
+    process_id_t     process_id;
+    unsigned int     capabilities;
+    unsigned __int64 host_epoch;
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+    unsigned int     ready;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6774,6 +6877,12 @@ enum request
     REQ_d3dkmt_mutex_acquire,
     REQ_d3dkmt_mutex_release,
     REQ_alpc_create_port,
+    REQ_request_wayland_host_startup,
+    REQ_cancel_wayland_host_startup,
+    REQ_register_wayland_host,
+    REQ_set_wayland_host_ready,
+    REQ_release_wayland_host,
+    REQ_get_wayland_host,
     REQ_NB_REQUESTS
 };
 
@@ -7102,6 +7211,12 @@ union generic_request
     struct d3dkmt_mutex_acquire_request d3dkmt_mutex_acquire_request;
     struct d3dkmt_mutex_release_request d3dkmt_mutex_release_request;
     struct alpc_create_port_request alpc_create_port_request;
+    struct request_wayland_host_startup_request request_wayland_host_startup_request;
+    struct cancel_wayland_host_startup_request cancel_wayland_host_startup_request;
+    struct register_wayland_host_request register_wayland_host_request;
+    struct set_wayland_host_ready_request set_wayland_host_ready_request;
+    struct release_wayland_host_request release_wayland_host_request;
+    struct get_wayland_host_request get_wayland_host_request;
 };
 union generic_reply
 {
@@ -7428,8 +7543,14 @@ union generic_reply
     struct d3dkmt_mutex_acquire_reply d3dkmt_mutex_acquire_reply;
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
     struct alpc_create_port_reply alpc_create_port_reply;
+    struct request_wayland_host_startup_reply request_wayland_host_startup_reply;
+    struct cancel_wayland_host_startup_reply cancel_wayland_host_startup_reply;
+    struct register_wayland_host_reply register_wayland_host_reply;
+    struct set_wayland_host_ready_reply set_wayland_host_ready_reply;
+    struct release_wayland_host_reply release_wayland_host_reply;
+    struct get_wayland_host_reply get_wayland_host_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 966
+#define SERVER_PROTOCOL_VERSION 967
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

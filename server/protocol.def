@@ -49,6 +49,14 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 1
+
+#define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
+#define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
+#define WINE_WAYLAND_HOST_CAP_SHM            0x00000004
+#define WINE_WAYLAND_HOST_CAP_SEAT           0x00000008
+#define WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+
 struct request_header
 {
     int          req;          /* request code */
@@ -4465,4 +4473,58 @@ enum inproc_sync_type
     VARARG(obj_attr,object_attributes); /* object attributes */
 @REPLY
     obj_handle_t        handle;         /* handle to the ALPC port */
+@END
+
+
+/* Reserve the current desktop for a directly launched Wayland host. */
+@REQ(request_wayland_host_startup)
+    unsigned int     version;
+    unsigned int     capabilities;
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+@REPLY
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+@END
+
+/* Cancel a Wayland host startup reservation owned by the caller. */
+@REQ(cancel_wayland_host_startup)
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+@END
+
+/* Register the directly launched process as the current desktop's Wayland host. */
+@REQ(register_wayland_host)
+    unsigned int     version;
+    unsigned int     capabilities;
+    unsigned __int64 token_low;
+    unsigned __int64 token_high;
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+@REPLY
+    unsigned __int64 host_epoch;
+@END
+
+/* Publish that the registered host has initialized its backend. */
+@REQ(set_wayland_host_ready)
+    unsigned __int64 host_epoch;
+@END
+
+/* Gracefully release the registered host. */
+@REQ(release_wayland_host)
+    unsigned __int64 host_epoch;
+@END
+
+/* Query the registered host for the caller's current desktop. */
+@REQ(get_wayland_host)
+@REPLY
+    process_id_t     process_id;
+    unsigned int     capabilities;
+    unsigned __int64 host_epoch;
+    unsigned __int64 endpoint_device;
+    unsigned __int64 endpoint_inode;
+    unsigned int     seat;
+    unsigned int     ready;
 @END

@@ -86,6 +86,21 @@ struct desktop
     unsigned int         clip_flags;       /* last cursor clip flags */
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
+    struct process      *wayland_host_process; /* registered presentation host */
+    struct process      *wayland_host_launcher; /* owner of the startup permit */
+    struct timeout_user *wayland_host_startup_timeout;
+    unsigned __int64     wayland_host_token_low;
+    unsigned __int64     wayland_host_token_high;
+    unsigned __int64     wayland_host_epoch;
+    unsigned __int64     wayland_host_endpoint_device;
+    unsigned __int64     wayland_host_endpoint_inode;
+    unsigned __int64     wayland_startup_endpoint_device;
+    unsigned __int64     wayland_startup_endpoint_inode;
+    unsigned int         wayland_host_capabilities;
+    unsigned int         wayland_host_seat;
+    unsigned int         wayland_startup_capabilities;
+    unsigned int         wayland_startup_seat;
+    unsigned int         wayland_host_ready;
 };
 
 /* user handles functions */
@@ -213,6 +228,7 @@ extern void connect_process_winstation( struct process *process, struct unicode_
 extern void set_process_default_desktop( struct process *process, struct desktop *desktop,
                                          obj_handle_t handle );
 extern void close_process_desktop( struct process *process );
+extern void cleanup_process_wayland_hosts( struct process *process );
 extern void set_thread_default_desktop( struct thread *thread, struct desktop *desktop, obj_handle_t handle );
 extern void release_thread_desktop( struct thread *thread, int close );
 

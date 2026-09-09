@@ -3681,6 +3681,68 @@ static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *re
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_request_wayland_host_startup_request( const struct request_wayland_host_startup_request *req )
+{
+    fprintf( stderr, " version=%08x", req->version );
+    fprintf( stderr, ", capabilities=%08x", req->capabilities );
+    dump_uint64( ", endpoint_device=", &req->endpoint_device );
+    dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
+    fprintf( stderr, ", seat=%08x", req->seat );
+}
+
+static void dump_request_wayland_host_startup_reply( const struct request_wayland_host_startup_reply *req )
+{
+    dump_uint64( " token_low=", &req->token_low );
+    dump_uint64( ", token_high=", &req->token_high );
+}
+
+static void dump_cancel_wayland_host_startup_request( const struct cancel_wayland_host_startup_request *req )
+{
+    dump_uint64( " token_low=", &req->token_low );
+    dump_uint64( ", token_high=", &req->token_high );
+}
+
+static void dump_register_wayland_host_request( const struct register_wayland_host_request *req )
+{
+    fprintf( stderr, " version=%08x", req->version );
+    fprintf( stderr, ", capabilities=%08x", req->capabilities );
+    dump_uint64( ", token_low=", &req->token_low );
+    dump_uint64( ", token_high=", &req->token_high );
+    dump_uint64( ", endpoint_device=", &req->endpoint_device );
+    dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
+    fprintf( stderr, ", seat=%08x", req->seat );
+}
+
+static void dump_register_wayland_host_reply( const struct register_wayland_host_reply *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+}
+
+static void dump_set_wayland_host_ready_request( const struct set_wayland_host_ready_request *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+}
+
+static void dump_release_wayland_host_request( const struct release_wayland_host_request *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+}
+
+static void dump_get_wayland_host_request( const struct get_wayland_host_request *req )
+{
+}
+
+static void dump_get_wayland_host_reply( const struct get_wayland_host_reply *req )
+{
+    fprintf( stderr, " process_id=%04x", req->process_id );
+    fprintf( stderr, ", capabilities=%08x", req->capabilities );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", endpoint_device=", &req->endpoint_device );
+    dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
+    fprintf( stderr, ", seat=%08x", req->seat );
+    fprintf( stderr, ", ready=%08x", req->ready );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4006,6 +4068,12 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_mutex_acquire_request,
     (dump_func)dump_d3dkmt_mutex_release_request,
     (dump_func)dump_alpc_create_port_request,
+    (dump_func)dump_request_wayland_host_startup_request,
+    (dump_func)dump_cancel_wayland_host_startup_request,
+    (dump_func)dump_register_wayland_host_request,
+    (dump_func)dump_set_wayland_host_ready_request,
+    (dump_func)dump_release_wayland_host_request,
+    (dump_func)dump_get_wayland_host_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4331,6 +4399,12 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_mutex_acquire_reply,
     NULL,
     (dump_func)dump_alpc_create_port_reply,
+    (dump_func)dump_request_wayland_host_startup_reply,
+    NULL,
+    (dump_func)dump_register_wayland_host_reply,
+    NULL,
+    NULL,
+    (dump_func)dump_get_wayland_host_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4656,6 +4730,12 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "d3dkmt_mutex_acquire",
     "d3dkmt_mutex_release",
     "alpc_create_port",
+    "request_wayland_host_startup",
+    "cancel_wayland_host_startup",
+    "register_wayland_host",
+    "set_wayland_host_ready",
+    "release_wayland_host",
+    "get_wayland_host",
 };
 
 static const struct
@@ -4793,6 +4873,7 @@ static const struct
     { "PROCESS_NOT_IN_JOB",          STATUS_PROCESS_NOT_IN_JOB },
     { "RANGE_NOT_LOCKED",            STATUS_RANGE_NOT_LOCKED },
     { "REPARSE_POINT_NOT_RESOLVED",  STATUS_REPARSE_POINT_NOT_RESOLVED },
+    { "REVISION_MISMATCH",           STATUS_REVISION_MISMATCH },
     { "SECTION_TOO_BIG",             STATUS_SECTION_TOO_BIG },
     { "SEMAPHORE_LIMIT_EXCEEDED",    STATUS_SEMAPHORE_LIMIT_EXCEEDED },
     { "SHARING_VIOLATION",           STATUS_SHARING_VIOLATION },

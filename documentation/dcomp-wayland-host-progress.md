@@ -15,6 +15,13 @@ or transport fixture is not Outlook support.
   connection, and records compositor, shared-memory and seat globals.
 - The executable currently runs only with `--probe`. It does not register with
   wineserver, create a native role, accept content, or take window ownership.
+- Wineserver now owns one host registration per Windows desktop. A 128-bit
+  startup permit is bound to the requesting process, its direct child, the
+  desktop/session and a verified endpoint/seat tuple. Successful registration
+  consumes the permit and returns a server-issued `host_epoch`; stale epochs,
+  duplicate hosts and mismatched endpoints are rejected. Process exit clears
+  startup permits and active registration, and unused permits expire after 30
+  seconds, without unpinning the desktop's native-display identity.
 
 ## Contributor interception inventory
 
@@ -73,6 +80,11 @@ admitted.
   initial Wine run contained one test-harness failure because the matching
   foreign-target rejection was incorrectly marked `todo_wine`; no product
   mismatch was found.
+- The host-registration server and win32u test executables rebuilt for x86-64
+  and i386. Both architecture tests passed concurrently on isolated Windows
+  desktops. They cover startup contention, direct-child authentication,
+  endpoint mismatch, readiness authority, peer-exit cleanup, replacement with
+  a fresh epoch, stale-epoch rejection and startup cancellation.
 - Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe
