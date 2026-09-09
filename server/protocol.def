@@ -60,6 +60,7 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_EMPTY          0x00000001
 #define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
+#define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
 
 #define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
 
@@ -4545,7 +4546,7 @@ enum inproc_sync_type
     unsigned int     ready;
 @END
 
-/* Publish a complete content-free scene for an owned top-level window. */
+/* Publish a complete scene disposition for an owned top-level window. */
 @REQ(publish_wayland_scene)
     user_handle_t    root;
     unsigned int     disposition;
@@ -4556,6 +4557,7 @@ enum inproc_sync_type
     unsigned __int64 binding_generation;
 @REPLY
     unsigned __int64 scene_generation;
+    unsigned __int64 owner_revision;
 @END
 
 /* Query a scene as the registered host for its desktop. */

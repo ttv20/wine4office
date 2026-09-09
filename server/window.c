@@ -3606,9 +3606,11 @@ DECL_HANDLER(publish_wayland_scene)
     struct wayland_scene_contributor *contributor = NULL;
 
     reply->scene_generation = 0;
+    reply->owner_revision = 0;
     if (req->disposition != WINE_WAYLAND_SCENE_EMPTY &&
         req->disposition != WINE_WAYLAND_SCENE_HIDDEN &&
-        req->disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+        req->disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+        req->disposition != WINE_WAYLAND_SCENE_LOCAL_FALLBACK)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
@@ -3626,6 +3628,8 @@ DECL_HANDLER(publish_wayland_scene)
         release_object( desktop );
         return;
     }
+    reply->scene_generation = root->wayland_scene_generation;
+    reply->owner_revision = root->wayland_scene_owner_revision;
     if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
         set_error( STATUS_DEVICE_NOT_READY );
     else if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
@@ -3654,6 +3658,7 @@ DECL_HANDLER(publish_wayland_scene)
         root->wayland_scene_binding_generation = req->binding_generation;
         root->wayland_scene_disposition = req->disposition;
         reply->scene_generation = root->wayland_scene_generation;
+        reply->owner_revision = root->wayland_scene_owner_revision;
     }
     release_object( desktop );
 }

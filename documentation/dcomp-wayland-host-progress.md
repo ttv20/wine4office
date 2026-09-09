@@ -2,6 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
+Generated server protocol version: 974.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -42,6 +43,24 @@ or transport fixture is not Outlook support.
   `Empty` generation when that stream supplied the current hosted scene.
   Revoked entries remain as tombstones until the current host acknowledges
   them, after which their bounded slots can be reused.
+- DComp now publishes committed per-root scene state at the successful
+  `Commit()` boundary. Targets above and below one HWND share a private scene
+  transaction even when they belong to different DComp devices. A root in the
+  committed tree publishes `LocalFallback`; only removal of the final layer
+  publishes `Empty`. Neither disposition claims a hosted GPU stream, and the
+  legacy local presentation path remains active. Publication is edge-triggered:
+  setters and unchanged/visual-only commits perform no host IPC. Releasing an
+  applied target publishes the same committed removal after local unbinding,
+  without requiring another Commit. The server validates the real top-level
+  HWND owner; child-window targets remain local and are not admitted by this
+  first topology.
+- A failed publication returns the server's current scene generation and
+  owner revision in the fixed reply so the owner can resynchronize its
+  compare-and-swap once without exposing the scene to another process.
+  Automatic replay when a host becomes
+  Ready without a later DComp state transition is still pending; polling every
+  DComp Commit was rejected because it would put synchronous IPC on the frame
+  hot path.
 
 ## Contributor interception inventory
 
@@ -134,6 +153,25 @@ admitted.
   as `/workspace/artifacts/wayland-contributor6-{x64,i386}.log`; the matching
   binaries and hashes are under
   `/workspace/artifacts/contributor-authority-runner`.
+- The committed DComp scene adapter passed 218 checks with zero failures in
+  both x86-64 and i386 on the task KDE desktop. The fixture uses below and
+  above targets owned by separate DComp devices and verifies
+  `LocalFallback -> Empty`, no partial publication when only one layer is
+  removed, no generation change for an unchanged Commit, CAS generation
+  continuity, target-release removal without another Commit, and a fresh
+  transaction after host replacement. The public
+  cross-process DComp oracle also remained at 36 checks with zero failures in
+  both architectures. Logs are retained as
+  `/workspace/artifacts/dcomp-scene-cas-{x64,i386}.log` and
+  `/workspace/artifacts/dcomp-scene-cas-dcomp-host-{x64,i386}.log`; the
+  coherent runner, exact test binaries and hashes are retained at
+  `/workspace/runner-dcomp-empty-scene` and
+  `/workspace/artifacts/dcomp-empty-scene-runner`.
+- The broader x86-64 DComp device pixel test remains unsuitable as a clean
+  gate in this KDE/R600 environment: the task runner reported three existing
+  transform/opacity/composite pixel failures, while the unchanged baseline
+  runner reported five in the same areas. The task-specific authority and
+  public contract fixtures are unaffected.
 - Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe

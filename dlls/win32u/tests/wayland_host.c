@@ -9,6 +9,8 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#define COBJMACROS
+
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 
@@ -19,6 +21,7 @@
 #include "wine/test.h"
 
 #include "winbase.h"
+#include "dcomp.h"
 #include "wingdi.h"
 #include "winuser.h"
 #include "wine/server.h"
@@ -29,6 +32,9 @@
 #define TEST_CAPABILITIES (WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET | \
                            WINE_WAYLAND_HOST_CAP_COMPOSITOR | \
                            WINE_WAYLAND_HOST_CAP_SHM | WINE_WAYLAND_HOST_CAP_SEAT)
+
+static const GUID dcomp_device_iid =
+    {0xc37ea93a, 0xe7aa, 0x450d, {0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3}};
 
 enum host_child_command
 {
@@ -238,11 +244,13 @@ static NTSTATUS get_host( struct wayland_host_info *info )
 
 static NTSTATUS publish_scene( HWND root, UINT disposition, UINT64 expected_generation,
                                UINT64 owner_revision, UINT64 contributor_id, UINT64 stream_id,
-                               UINT64 binding_generation, UINT64 *scene_generation )
+                               UINT64 binding_generation, UINT64 *scene_generation,
+                               UINT64 *current_owner_revision )
 {
     NTSTATUS status;
 
     *scene_generation = 0;
+    if (current_owner_revision) *current_owner_revision = 0;
     SERVER_START_REQ( publish_wayland_scene )
     {
         req->root = wine_server_user_handle( root );
@@ -252,8 +260,10 @@ static NTSTATUS publish_scene( HWND root, UINT disposition, UINT64 expected_gene
         req->contributor_id = contributor_id;
         req->stream_id = stream_id;
         req->binding_generation = binding_generation;
-        if (!(status = p_wine_server_call( req )))
+        status = p_wine_server_call( req );
+        if (!status)
             *scene_generation = reply->scene_generation;
+        if (current_owner_revision) *current_owner_revision = reply->owner_revision;
     }
     SERVER_END_REQ;
     return status;
@@ -496,7 +506,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->command_status = publish_scene( (HWND)(UINT_PTR)state->root,
                     state->scene_disposition, state->scene_generation,
                     state->owner_revision, state->contributor_id, state->stream_id,
-                    state->binding_generation, &state->applied_generation );
+                    state->binding_generation, &state->applied_generation, NULL );
             break;
         case HOST_CHILD_COMMAND_GET_CONTRIBUTOR:
             state->command_status = get_contributor( (HWND)(UINT_PTR)state->root,
@@ -670,12 +680,17 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_contributor_info contributor;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
+    IDCompositionDevice *below_device = NULL, *above_device = NULL;
+    IDCompositionTarget *below_target = NULL, *above_target = NULL;
+    IDCompositionVisual *below_visual = NULL, *above_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, command_event = NULL, result_event = NULL;
     HANDLE producer_command_event = NULL, producer_result_event = NULL;
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
+    UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
-    HWND root = NULL;
+    HWND root = NULL, dcomp_root = NULL;
+    HRESULT hr;
     NTSTATUS status;
     BOOL created;
     unsigned int i;
@@ -691,7 +706,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !!root, "Failed to create scene root, error %lu.\n", GetLastError() );
     if (!root) goto done;
     status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
-                            &scene_generation );
+                            &scene_generation, NULL );
     ok( status == STATUS_DEVICE_NOT_READY,
         "Scene publication without a host returned %#lx.\n", status );
     ok( !scene_generation, "Rejected scene returned generation %s.\n",
@@ -784,18 +799,109 @@ static void test_host_registration( const char *program, const char *test_name )
             TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT, &token_low, &token_high );
     ok( status == STATUS_DEVICE_BUSY, "Startup with a live host returned %#lx.\n", status );
 
-    status = publish_scene( root, 0xdeadbeef, 0, 1, 0, 0, 0, &scene_generation );
+    dcomp_root = CreateWindowExW( 0, L"static", L"DComp empty scene root", WS_POPUP,
+                                  0, 0, 64, 64, NULL, NULL, NULL, NULL );
+    ok( !!dcomp_root, "Failed to create DComp scene root, error %lu.\n", GetLastError() );
+    if (dcomp_root)
+    {
+        hr = DCompositionCreateDevice( NULL, &dcomp_device_iid, (void **)&below_device );
+        ok( hr == S_OK, "Creating below DComp device returned %#lx.\n", hr );
+        hr = DCompositionCreateDevice( NULL, &dcomp_device_iid, (void **)&above_device );
+        ok( hr == S_OK, "Creating above DComp device returned %#lx.\n", hr );
+    }
+    if (below_device && above_device)
+    {
+        hr = IDCompositionDevice_CreateTargetForHwnd( below_device, dcomp_root, FALSE,
+                                                       &below_target );
+        ok( hr == S_OK, "Creating below DComp target returned %#lx.\n", hr );
+        hr = IDCompositionDevice_CreateTargetForHwnd( above_device, dcomp_root, TRUE,
+                                                       &above_target );
+        ok( hr == S_OK, "Creating above DComp target returned %#lx.\n", hr );
+        hr = IDCompositionDevice_CreateVisual( below_device, &below_visual );
+        ok( hr == S_OK, "Creating below DComp visual returned %#lx.\n", hr );
+        hr = IDCompositionDevice_CreateVisual( above_device, &above_visual );
+        ok( hr == S_OK, "Creating above DComp visual returned %#lx.\n", hr );
+    }
+    if (below_target && above_target && below_visual && above_visual)
+    {
+        hr = IDCompositionTarget_SetRoot( below_target, below_visual );
+        ok( hr == S_OK, "Setting below DComp root returned %#lx.\n", hr );
+        hr = IDCompositionTarget_SetRoot( above_target, above_visual );
+        ok( hr == S_OK, "Setting above DComp root returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( below_device );
+        ok( hr == S_OK, "Committing below DComp root returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( above_device );
+        ok( hr == S_OK, "Committing above DComp root returned %#lx.\n", hr );
+
+        state->root = (UINT_PTR)dcomp_root;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying nonempty DComp scene.\n" );
+        ok( !state->command_status && state->scene_generation && state->owner_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+            "Nonempty DComp scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        dcomp_generation = state->scene_generation;
+
+        hr = IDCompositionTarget_SetRoot( below_target, NULL );
+        ok( hr == S_OK, "Clearing below DComp root returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( below_device );
+        ok( hr == S_OK, "Committing below DComp removal returned %#lx.\n", hr );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying partly empty DComp scene.\n" );
+        ok( !state->command_status && state->scene_generation == dcomp_generation &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+            "Removing one DComp layer returned %#lx, generation %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            state->scene_disposition );
+
+        hr = IDCompositionTarget_SetRoot( above_target, NULL );
+        ok( hr == S_OK, "Clearing above DComp root returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( above_device );
+        ok( hr == S_OK, "Committing final DComp removal returned %#lx.\n", hr );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying empty DComp scene.\n" );
+        ok( !state->command_status && state->scene_generation && state->owner_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+            "Empty DComp scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        ok( state->scene_generation == dcomp_generation + 1,
+            "Empty DComp scene generation is %s, expected %s.\n",
+            wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( dcomp_generation + 1 ) );
+        dcomp_generation = state->scene_generation;
+        dcomp_revision = state->owner_revision;
+
+        hr = IDCompositionDevice_Commit( below_device );
+        ok( hr == S_OK, "No-op empty DComp Commit returned %#lx.\n", hr );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying no-op DComp scene.\n" );
+        ok( !state->command_status && state->scene_generation == dcomp_generation &&
+            state->owner_revision == dcomp_revision,
+            "No-op DComp Commit changed generation %s or revision %s.\n",
+            wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ) );
+        state->root = (UINT_PTR)root;
+    }
+
+    status = publish_scene( root, 0xdeadbeef, 0, 1, 0, 0, 0, &scene_generation, NULL );
     ok( status == STATUS_INVALID_PARAMETER, "Invalid scene disposition returned %#lx.\n", status );
     status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
-                            &scene_generation );
+                            &scene_generation, NULL );
     ok( !status && scene_generation == 1,
         "Empty scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( scene_generation ) );
     status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, 0, 2, 0, 0, 0,
-                            &next_generation );
-    ok( status == STATUS_REVISION_MISMATCH && !next_generation,
-        "Stale scene transaction returned %#lx, generation %s.\n",
-        status, wine_dbgstr_longlong( next_generation ) );
+                            &next_generation, &current_owner_revision );
+    ok( status == STATUS_REVISION_MISMATCH && !next_generation && current_owner_revision == 1,
+        "Stale scene transaction returned %#lx, generation %s, current revision %s.\n",
+        status, wine_dbgstr_longlong( next_generation ),
+        wine_dbgstr_longlong( current_owner_revision ) );
     status = get_scene( root, old_epoch, &scene );
     ok( status == STATUS_ACCESS_DENIED, "Non-host scene query returned %#lx.\n", status );
 
@@ -917,7 +1023,7 @@ static void test_host_registration( const char *program, const char *test_name )
 
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 2,
                             state->contributor_id, state->stream_id,
-                            state->binding_generation, &next_generation );
+                            state->binding_generation, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Hosted scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -983,7 +1089,7 @@ static void test_host_registration( const char *program, const char *test_name )
         state->producer_status, wine_dbgstr_longlong( state->registry_generation ) );
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 3,
                             state->contributor_id, state->stream_id,
-                            state->binding_generation, &next_generation );
+                            state->binding_generation, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Exit-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -1060,7 +1166,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->command_status == STATUS_ACCESS_DENIED,
         "Foreign scene publication returned %#lx.\n", state->command_status );
     status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, scene_generation, 4,
-                            0, 0, 0, &next_generation );
+                            0, 0, 0, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Hidden scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -1080,7 +1186,7 @@ static void test_host_registration( const char *program, const char *test_name )
         state->producer_status );
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 5,
                             state->contributor_id, state->stream_id,
-                            state->binding_generation, &next_generation );
+                            state->binding_generation, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Replacement-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -1114,6 +1220,26 @@ static void test_host_registration( const char *program, const char *test_name )
         state->register_status, state->ready_status );
     ok( state->host_epoch > old_epoch, "Replacement epoch %s did not follow %s.\n",
         wine_dbgstr_longlong( state->host_epoch ), wine_dbgstr_longlong( old_epoch ) );
+    if (dcomp_generation)
+    {
+        hr = IDCompositionTarget_SetRoot( above_target, above_visual );
+        ok( hr == S_OK, "Restoring DComp root for replacement returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( above_device );
+        ok( hr == S_OK, "Replacement local DComp Commit returned %#lx.\n", hr );
+        IDCompositionTarget_Release( above_target );
+        above_target = NULL;
+        state->root = (UINT_PTR)dcomp_root;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying replayed DComp scene.\n" );
+        ok( !state->command_status && state->scene_generation == dcomp_generation + 2 &&
+            state->owner_revision > dcomp_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+            "Target-release DComp scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        state->root = (UINT_PTR)root;
+    }
     status = set_host_ready( old_epoch );
     ok( status == STATUS_REVISION_MISMATCH, "Stale epoch returned %#lx.\n", status );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
@@ -1145,7 +1271,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->command_status == STATUS_NOT_FOUND,
         "Unreplayed scene query returned %#lx.\n", state->command_status );
     status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, scene_generation, 6,
-                            0, 0, 0, &next_generation );
+                            0, 0, 0, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Replacement scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -1173,6 +1299,12 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !status, "Startup cancellation returned %#lx.\n", status );
 
 done:
+    if (above_visual) IDCompositionVisual_Release( above_visual );
+    if (below_visual) IDCompositionVisual_Release( below_visual );
+    if (above_target) IDCompositionTarget_Release( above_target );
+    if (below_target) IDCompositionTarget_Release( below_target );
+    if (above_device) IDCompositionDevice_Release( above_device );
+    if (below_device) IDCompositionDevice_Release( below_device );
     if (producer.hProcess)
         stop_producer_child( state, producer_command_event, producer_result_event, &producer );
     if (process.hProcess) stop_host_child( state, command_event, result_event, &process );
@@ -1183,6 +1315,7 @@ done:
     if (command_event) CloseHandle( command_event );
     if (ready_event) CloseHandle( ready_event );
     if (mapping) CloseHandle( mapping );
+    if (dcomp_root) DestroyWindow( dcomp_root );
     if (root) DestroyWindow( root );
 }
 

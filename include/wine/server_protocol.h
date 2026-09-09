@@ -44,6 +44,7 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_EMPTY          0x00000001
 #define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
+#define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
 
 #define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
 
@@ -6586,6 +6587,7 @@ struct publish_wayland_scene_reply
 {
     struct reply_header __header;
     unsigned __int64 scene_generation;
+    unsigned __int64 owner_revision;
 };
 
 
@@ -7768,6 +7770,6 @@ union generic_reply
     struct check_wayland_stream_reply check_wayland_stream_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 972
+#define SERVER_PROTOCOL_VERSION 974
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

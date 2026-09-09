@@ -8,6 +8,9 @@
  * License as published by the Free Software Foundation; either
  * version 2.1 of the License, or (at your option) any later version.
  */
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+
 #include <stdarg.h>
 #include <stdlib.h>
 #include <math.h>
@@ -21,6 +24,7 @@
 #include "dcomp.h"
 #include "wine/dcomp.h"
 #include "wine/debug.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
@@ -38,6 +42,14 @@ struct dcomp_device
     BOOL dirty;
 };
 
+struct dcomp_scene
+{
+    HWND hwnd;
+    unsigned int refcount;
+    UINT64 scene_generation;
+    UINT committed_disposition;
+    BOOL committed;
+};
 
 
 struct dcomp_target
@@ -47,6 +59,7 @@ struct dcomp_target
     HWND hwnd;
     BOOL topmost;
     struct dcomp_device *device;
+    struct dcomp_scene *scene;
     IDCompositionVisual *root;
     IDCompositionVisual *applied_root;
     struct dcomp_target *next;
@@ -110,6 +123,7 @@ static const WCHAR dcomp_target_above_prop[] = L"__wine_dcomp_target_above";
 static INIT_ONCE dcomp_global_once = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION dcomp_global_lock;
 static struct dcomp_device *dcomp_devices;
+static UINT64 dcomp_owner_revision;
 
 static BOOL CALLBACK dcomp_global_init(INIT_ONCE *once, void *param, void **context)
 {
@@ -126,6 +140,139 @@ static void dcomp_global_enter(void)
 static void dcomp_global_leave(void)
 {
     LeaveCriticalSection(&dcomp_global_lock);
+}
+
+static BOOL dcomp_target_is_current(const struct dcomp_target *target)
+{
+    const WCHAR *property = target->topmost ? dcomp_target_above_prop : dcomp_target_below_prop;
+
+    return IsWindow(target->hwnd) && GetPropW(target->hwnd, property) == target;
+}
+
+/* The below and above targets of one HWND can belong to different DComp
+ * devices. Keep their server transaction state in one process-private object;
+ * HWND properties remain only legacy target caches and never carry authority. */
+static struct dcomp_scene *dcomp_scene_acquire(HWND hwnd)
+{
+    struct dcomp_device *device;
+    struct dcomp_target *target;
+    struct dcomp_scene *scene;
+
+    for (device = dcomp_devices; device; device = device->next_global)
+        for (target = device->targets; target; target = target->next)
+            if (target->hwnd == hwnd && dcomp_target_is_current(target))
+            {
+                ++target->scene->refcount;
+                return target->scene;
+            }
+
+    if (!(scene = calloc(1, sizeof(*scene)))) return NULL;
+    scene->hwnd = hwnd;
+    scene->refcount = 1;
+    return scene;
+}
+
+static void dcomp_scene_release(struct dcomp_scene *scene)
+{
+    if (!--scene->refcount) free(scene);
+}
+
+static BOOL dcomp_scene_has_applied_root(const struct dcomp_scene *scene)
+{
+    struct dcomp_device *device;
+    struct dcomp_target *target;
+
+    for (device = dcomp_devices; device; device = device->next_global)
+        for (target = device->targets; target; target = target->next)
+            if (target->scene == scene && dcomp_target_is_current(target) && target->applied_root)
+                return TRUE;
+    return FALSE;
+}
+
+static BOOL dcomp_scene_has_current_target(const struct dcomp_scene *scene)
+{
+    struct dcomp_device *device;
+    struct dcomp_target *target;
+
+    for (device = dcomp_devices; device; device = device->next_global)
+        for (target = device->targets; target; target = target->next)
+            if (target->scene == scene && dcomp_target_is_current(target)) return TRUE;
+    return FALSE;
+}
+
+static NTSTATUS dcomp_publish_scene(struct dcomp_scene *scene, UINT disposition,
+        UINT64 owner_revision, UINT64 *scene_generation, UINT64 *current_owner_revision)
+{
+    NTSTATUS status;
+
+    *scene_generation = 0;
+    *current_owner_revision = 0;
+    SERVER_START_REQ(publish_wayland_scene)
+    {
+        req->root = wine_server_user_handle(scene->hwnd);
+        req->disposition = disposition;
+        req->expected_generation = scene->scene_generation;
+        req->owner_revision = owner_revision;
+        status = wine_server_call(req);
+        /* On a CAS failure the server returns its current transaction state so
+         * an owner-side adapter can resynchronize without granting host access. */
+        *scene_generation = reply->scene_generation;
+        *current_owner_revision = reply->owner_revision;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+/* Called with dcomp_global_lock held, after committed roots are updated. */
+static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL allow_no_target)
+{
+    UINT64 scene_generation, owner_revision, current_owner_revision;
+    UINT disposition;
+    NTSTATUS status;
+
+    if (!allow_no_target && !dcomp_scene_has_current_target(scene)) return;
+    disposition = dcomp_scene_has_applied_root(scene) ? WINE_WAYLAND_SCENE_LOCAL_FALLBACK
+            : WINE_WAYLAND_SCENE_EMPTY;
+    if (scene->committed && scene->committed_disposition == disposition) return;
+    scene->committed_disposition = disposition;
+    scene->committed = TRUE;
+    if (dcomp_owner_revision == ~(UINT64)0) return;
+
+    owner_revision = ++dcomp_owner_revision;
+    status = dcomp_publish_scene(scene, disposition, owner_revision, &scene_generation,
+            &current_owner_revision);
+    if (status == STATUS_REVISION_MISMATCH)
+    {
+        scene->scene_generation = scene_generation;
+        if (dcomp_owner_revision < current_owner_revision)
+            dcomp_owner_revision = current_owner_revision;
+        if (dcomp_owner_revision == ~(UINT64)0) return;
+        owner_revision = ++dcomp_owner_revision;
+        status = dcomp_publish_scene(scene, disposition, owner_revision, &scene_generation,
+                &current_owner_revision);
+    }
+    if (!status)
+    {
+        scene->scene_generation = scene_generation;
+        TRACE("Published committed scene %#x for %p at generation %s.\n",
+                disposition, scene->hwnd, wine_dbgstr_longlong(scene->scene_generation));
+    }
+    else if (status != STATUS_NOT_FOUND && status != STATUS_DEVICE_NOT_READY)
+        TRACE("Could not publish committed scene for %p, status %#lx.\n",
+                scene->hwnd, status);
+}
+
+static void dcomp_device_publish_committed_scenes(struct dcomp_device *device)
+{
+    struct dcomp_target *target, *previous;
+
+    for (target = device->targets; target; target = target->next)
+    {
+        for (previous = device->targets; previous != target; previous = previous->next)
+            if (previous->scene == target->scene) break;
+        if (previous != target) continue;
+        dcomp_scene_publish_committed_state(target->scene, FALSE);
+    }
 }
 static HRESULT dcomp_validate_offset(float value)
 {
@@ -1234,13 +1381,14 @@ static ULONG WINAPI dcomp_target_Release(IDCompositionTarget *iface)
         struct dcomp_target **link;
         const WCHAR *property = target->topmost ? dcomp_target_above_prop : dcomp_target_below_prop;
         struct wine_dcomp_visual_desc parent_desc;
+        BOOL was_current;
 
         dcomp_global_enter();
         EnterCriticalSection(&target->device->lock);
         for (link = &target->device->targets; *link && *link != target; link = &(*link)->next);
         if (*link) *link = target->next;
-        if (IsWindow(target->hwnd) && GetPropW(target->hwnd, property) == target)
-            RemovePropW(target->hwnd, property);
+        was_current = dcomp_target_is_current(target);
+        if (was_current) RemovePropW(target->hwnd, property);
         if (target->root)
             impl_from_IDCompositionVisual2((IDCompositionVisual2 *)target->root)->root_target = NULL;
         target->device->dirty = TRUE;
@@ -1255,6 +1403,9 @@ static ULONG WINAPI dcomp_target_Release(IDCompositionTarget *iface)
             target->applied_root->lpVtbl->Release(target->applied_root);
         }
         if (target->root) target->root->lpVtbl->Release(target->root);
+        if (was_current && target->scene->committed)
+            dcomp_scene_publish_committed_state(target->scene, TRUE);
+        dcomp_scene_release(target->scene);
         dcomp_device_Release(&target->device->IDCompositionDevice_iface);
         dcomp_global_leave();
         free(target);
@@ -1507,6 +1658,7 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
             }
             LeaveCriticalSection(&other_device->lock);
         }
+    dcomp_device_publish_committed_scenes(device);
     dcomp_global_leave();
     return S_OK;
 }
@@ -1567,6 +1719,15 @@ static HRESULT WINAPI dcomp_device_CreateTargetForHwnd(IDCompositionDevice *ifac
         iface->lpVtbl->Release(iface);
         free(object);
         return hr;
+    }
+    if (!(object->scene = dcomp_scene_acquire(hwnd)))
+    {
+        RemovePropW(hwnd, property);
+        LeaveCriticalSection(&device->lock);
+        dcomp_global_leave();
+        iface->lpVtbl->Release(iface);
+        free(object);
+        return E_OUTOFMEMORY;
     }
     object->next = device->targets;
     device->targets = object;

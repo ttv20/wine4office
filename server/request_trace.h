@@ -3757,6 +3757,7 @@ static void dump_publish_wayland_scene_request( const struct publish_wayland_sce
 static void dump_publish_wayland_scene_reply( const struct publish_wayland_scene_reply *req )
 {
     dump_uint64( " scene_generation=", &req->scene_generation );
+    dump_uint64( ", owner_revision=", &req->owner_revision );
 }
 
 static void dump_get_wayland_scene_request( const struct get_wayland_scene_request *req )
