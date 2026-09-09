@@ -49,6 +49,14 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
 #define WINE_WAYLAND_MAX_FRAME_CREDITS 16
+#define WINE_WAYLAND_BUFFER_IMPORT_PENDING  0
+#define WINE_WAYLAND_BUFFER_IMPORT_IMPORTED 1
+#define WINE_WAYLAND_BUFFER_IMPORT_FAILED   2
+#define WINE_WAYLAND_BUFFER_SLOT_INFO(registered,imported,failed) \
+    (((registered) & 0xff) | (((imported) & 0xff) << 8) | (((failed) & 0xff) << 16))
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED(info) ((info) & 0xff)
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED(info)   (((info) >> 8) & 0xff)
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 
 struct wayland_buffer_pool_metadata
 {
@@ -6811,7 +6819,7 @@ struct get_wayland_buffer_pool_reply
     unsigned int     format;
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
-    unsigned int     registered_slots;
+    unsigned int     slot_info;
     unsigned int     device_uuid_0;
     unsigned int     device_uuid_1;
     unsigned int     device_uuid_2;
@@ -6861,7 +6869,28 @@ struct get_wayland_buffer_slot_reply
     obj_handle_t     ready_sync;
     obj_handle_t     reuse_sync;
     unsigned int     registered_slots;
+    unsigned int     import_state;
+    char __pad_28[4];
     unsigned __int64 registry_generation;
+};
+
+
+struct set_wayland_buffer_slot_import_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     slot;
+    unsigned int     import_state;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 pool_generation;
+};
+struct set_wayland_buffer_slot_import_reply
+{
+    struct reply_header __header;
+    unsigned __int64 registry_generation;
+    unsigned int     imported_slots;
+    unsigned int     failed_slots;
 };
 
 
@@ -7209,6 +7238,7 @@ enum request
     REQ_get_wayland_buffer_pool,
     REQ_register_wayland_buffer_slot,
     REQ_get_wayland_buffer_slot,
+    REQ_set_wayland_buffer_slot_import,
     REQ_NB_REQUESTS
 };
 
@@ -7558,6 +7588,7 @@ union generic_request
     struct get_wayland_buffer_pool_request get_wayland_buffer_pool_request;
     struct register_wayland_buffer_slot_request register_wayland_buffer_slot_request;
     struct get_wayland_buffer_slot_request get_wayland_buffer_slot_request;
+    struct set_wayland_buffer_slot_import_request set_wayland_buffer_slot_import_request;
 };
 union generic_reply
 {
@@ -7905,8 +7936,9 @@ union generic_reply
     struct get_wayland_buffer_pool_reply get_wayland_buffer_pool_reply;
     struct register_wayland_buffer_slot_reply register_wayland_buffer_slot_reply;
     struct get_wayland_buffer_slot_reply get_wayland_buffer_slot_reply;
+    struct set_wayland_buffer_slot_import_reply set_wayland_buffer_slot_import_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 976
+#define SERVER_PROTOCOL_VERSION 977
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

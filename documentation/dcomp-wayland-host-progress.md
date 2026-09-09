@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 976.
+Generated server protocol version: 977.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -63,6 +63,15 @@ or transport fixture is not Outlook support.
   acknowledges the tombstone. Window destruction releases all remaining
   pools. Registration still does not prove native GPU import or authorize a
   transport-backed `HostedContent` scene.
+- The current Ready host can now record one terminal import result for each
+  registered slot. Successful and failed imports are counted separately,
+  repeated identical results are idempotent, and a conflicting result or an
+  acknowledgement for a revoked stream is rejected. Pool enumeration packs
+  the bounded registered/imported/failed counters into one fixed-width field.
+  The test host asserts import success after validating the duplicated object
+  types; the real `winewayland-host` renderer still does not import Vulkan
+  memory or synchronization objects, so this acknowledgement does not yet
+  authorize hosted presentation.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -229,6 +238,18 @@ admitted.
   `/workspace/runner-dcomp-slot-authority`,
   `/workspace/artifacts/slot-authority-win32u-test-{x64,i386}.exe` and
   `/workspace/artifacts/dcomp-slot-authority-SHA256SUMS`.
+- The host-import acknowledgement extension passed 363 checks with zero
+  failures in both x86-64 and i386 on protocol 977. It covers invalid and
+  foreign results, successful and failed terminal imports, idempotent replay,
+  conflicting-result rejection, per-pool counters, all-three-slot completion,
+  and rejection of a replacement host's attempt to change a revoked stream.
+  The public DComp host oracle remained at 36 checks with zero failures in both
+  architectures. Logs are retained as
+  `/workspace/artifacts/dcomp-import-authority-{x64,i386}.log` and
+  `/workspace/artifacts/dcomp-import-authority-dcomp-host-{x64,i386}.log`; the
+  coherent runner and exact test binaries are retained at
+  `/workspace/runner-dcomp-import-authority` and
+  `/workspace/artifacts/import-authority-win32u-test-{x64,i386}.exe`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

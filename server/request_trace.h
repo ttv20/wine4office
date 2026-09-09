@@ -3931,7 +3931,7 @@ static void dump_get_wayland_buffer_pool_reply( const struct get_wayland_buffer_
     fprintf( stderr, ", format=%08x", req->format );
     fprintf( stderr, ", slot_count=%08x", req->slot_count );
     fprintf( stderr, ", frame_credit_limit=%08x", req->frame_credit_limit );
-    fprintf( stderr, ", registered_slots=%08x", req->registered_slots );
+    fprintf( stderr, ", slot_info=%08x", req->slot_info );
     fprintf( stderr, ", device_uuid_0=%08x", req->device_uuid_0 );
     fprintf( stderr, ", device_uuid_1=%08x", req->device_uuid_1 );
     fprintf( stderr, ", device_uuid_2=%08x", req->device_uuid_2 );
@@ -3972,7 +3972,25 @@ static void dump_get_wayland_buffer_slot_reply( const struct get_wayland_buffer_
     fprintf( stderr, ", ready_sync=%04x", req->ready_sync );
     fprintf( stderr, ", reuse_sync=%04x", req->reuse_sync );
     fprintf( stderr, ", registered_slots=%08x", req->registered_slots );
+    fprintf( stderr, ", import_state=%08x", req->import_state );
     dump_uint64( ", registry_generation=", &req->registry_generation );
+}
+
+static void dump_set_wayland_buffer_slot_import_request( const struct set_wayland_buffer_slot_import_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", slot=%08x", req->slot );
+    fprintf( stderr, ", import_state=%08x", req->import_state );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", pool_generation=", &req->pool_generation );
+}
+
+static void dump_set_wayland_buffer_slot_import_reply( const struct set_wayland_buffer_slot_import_reply *req )
+{
+    dump_uint64( " registry_generation=", &req->registry_generation );
+    fprintf( stderr, ", imported_slots=%08x", req->imported_slots );
+    fprintf( stderr, ", failed_slots=%08x", req->failed_slots );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -4321,6 +4339,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_buffer_pool_request,
     (dump_func)dump_register_wayland_buffer_slot_request,
     (dump_func)dump_get_wayland_buffer_slot_request,
+    (dump_func)dump_set_wayland_buffer_slot_import_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4667,6 +4686,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_buffer_pool_reply,
     (dump_func)dump_register_wayland_buffer_slot_reply,
     (dump_func)dump_get_wayland_buffer_slot_reply,
+    (dump_func)dump_set_wayland_buffer_slot_import_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5013,6 +5033,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_buffer_pool",
     "register_wayland_buffer_slot",
     "get_wayland_buffer_slot",
+    "set_wayland_buffer_slot_import",
 };
 
 static const struct

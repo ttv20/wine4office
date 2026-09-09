@@ -349,6 +349,7 @@ DECL_HANDLER(retire_wayland_buffer_pool);
 DECL_HANDLER(get_wayland_buffer_pool);
 DECL_HANDLER(register_wayland_buffer_slot);
 DECL_HANDLER(get_wayland_buffer_slot);
+DECL_HANDLER(set_wayland_buffer_slot_import);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -695,6 +696,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_wayland_buffer_pool,
     (req_handler)req_register_wayland_buffer_slot,
     (req_handler)req_get_wayland_buffer_slot,
+    (req_handler)req_set_wayland_buffer_slot_import,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2682,7 +2684,7 @@ C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, height) == 36 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, format) == 40 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, slot_count) == 44 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, frame_credit_limit) == 48 );
-C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, registered_slots) == 52 );
+C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, slot_info) == 52 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_0) == 56 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_1) == 60 );
 C_ASSERT( offsetof(struct get_wayland_buffer_pool_reply, device_uuid_2) == 64 );
@@ -2711,5 +2713,17 @@ C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, memory) == 8 );
 C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, ready_sync) == 12 );
 C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, reuse_sync) == 16 );
 C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, registered_slots) == 20 );
-C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, registry_generation) == 24 );
-C_ASSERT( sizeof(struct get_wayland_buffer_slot_reply) == 32 );
+C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, import_state) == 24 );
+C_ASSERT( offsetof(struct get_wayland_buffer_slot_reply, registry_generation) == 32 );
+C_ASSERT( sizeof(struct get_wayland_buffer_slot_reply) == 40 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, root) == 12 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, slot) == 16 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, import_state) == 20 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, host_epoch) == 24 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, contributor_id) == 32 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_request, pool_generation) == 40 );
+C_ASSERT( sizeof(struct set_wayland_buffer_slot_import_request) == 48 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, registry_generation) == 8 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, imported_slots) == 16 );
+C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, failed_slots) == 20 );
+C_ASSERT( sizeof(struct set_wayland_buffer_slot_import_reply) == 24 );

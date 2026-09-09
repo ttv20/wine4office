@@ -68,6 +68,7 @@ struct wayland_buffer_slot
     struct object *memory;
     struct object *ready_sync;
     struct object *reuse_sync;
+    unsigned int   import_state;
 };
 
 struct wayland_buffer_pool
@@ -80,6 +81,8 @@ struct wayland_buffer_pool
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
     unsigned int     registered_slots;
+    unsigned int     imported_slots;
+    unsigned int     failed_slots;
     unsigned int     device_uuid[4];
     struct wayland_buffer_slot slots[WINE_WAYLAND_BUFFER_POOL_SLOTS];
 };
@@ -4247,7 +4250,7 @@ DECL_HANDLER(get_wayland_buffer_pool)
     reply->format = 0;
     reply->slot_count = 0;
     reply->frame_credit_limit = 0;
-    reply->registered_slots = 0;
+    reply->slot_info = 0;
     reply->device_uuid_0 = 0;
     reply->device_uuid_1 = 0;
     reply->device_uuid_2 = 0;
@@ -4279,7 +4282,9 @@ DECL_HANDLER(get_wayland_buffer_pool)
     reply->format = pool->format;
     reply->slot_count = pool->slot_count;
     reply->frame_credit_limit = pool->frame_credit_limit;
-    reply->registered_slots = pool->registered_slots;
+    reply->slot_info = WINE_WAYLAND_BUFFER_SLOT_INFO( pool->registered_slots,
+                                                       pool->imported_slots,
+                                                       pool->failed_slots );
     reply->device_uuid_0 = pool->device_uuid[0];
     reply->device_uuid_1 = pool->device_uuid[1];
     reply->device_uuid_2 = pool->device_uuid[2];
@@ -4368,6 +4373,7 @@ DECL_HANDLER(get_wayland_buffer_slot)
     reply->ready_sync = 0;
     reply->reuse_sync = 0;
     reply->registered_slots = 0;
+    reply->import_state = WINE_WAYLAND_BUFFER_IMPORT_PENDING;
     reply->registry_generation = 0;
     if (!(root = get_window( req->root ))) return;
     if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
@@ -4389,6 +4395,7 @@ DECL_HANDLER(get_wayland_buffer_slot)
         return;
     }
     slot = &pool->slots[req->slot];
+    reply->import_state = slot->import_state;
     if (!slot->memory)
     {
         set_error( STATUS_NOT_FOUND );
@@ -4409,6 +4416,75 @@ DECL_HANDLER(get_wayland_buffer_slot)
         reply->memory = reply->ready_sync = reply->reuse_sync = 0;
         set_error( error );
     }
+}
+
+DECL_HANDLER(set_wayland_buffer_slot_import)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct window *root;
+
+    reply->registry_generation = 0;
+    reply->imported_slots = 0;
+    reply->failed_slots = 0;
+    if (req->import_state != WINE_WAYLAND_BUFFER_IMPORT_IMPORTED &&
+        req->import_state != WINE_WAYLAND_BUFFER_IMPORT_FAILED)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
+        contributor->host_epoch != req->host_epoch)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (!(pool = find_wayland_buffer_pool( contributor, req->pool_generation )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->imported_slots = pool->imported_slots;
+    reply->failed_slots = pool->failed_slots;
+    if (req->slot >= pool->slot_count)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    slot = &pool->slots[req->slot];
+    if (!slot->memory)
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (slot->import_state)
+    {
+        if (slot->import_state != req->import_state)
+            set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+    {
+        set_error( STATUS_INTEGER_OVERFLOW );
+        return;
+    }
+    slot->import_state = req->import_state;
+    if (req->import_state == WINE_WAYLAND_BUFFER_IMPORT_IMPORTED)
+        ++pool->imported_slots;
+    else
+        ++pool->failed_slots;
+    reply->imported_slots = pool->imported_slots;
+    reply->failed_slots = pool->failed_slots;
+    reply->registry_generation = ++root->wayland_scene_registry->generation;
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

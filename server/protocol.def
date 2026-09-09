@@ -65,6 +65,14 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
 #define WINE_WAYLAND_MAX_FRAME_CREDITS 16
+#define WINE_WAYLAND_BUFFER_IMPORT_PENDING  0
+#define WINE_WAYLAND_BUFFER_IMPORT_IMPORTED 1
+#define WINE_WAYLAND_BUFFER_IMPORT_FAILED   2
+#define WINE_WAYLAND_BUFFER_SLOT_INFO(registered,imported,failed) \
+    (((registered) & 0xff) | (((imported) & 0xff) << 8) | (((failed) & 0xff) << 16))
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED(info) ((info) & 0xff)
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED(info)   (((info) >> 8) & 0xff)
+#define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 
 struct wayland_buffer_pool_metadata
 {
@@ -4717,7 +4725,7 @@ enum inproc_sync_type
     unsigned int     format;
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
-    unsigned int     registered_slots;
+    unsigned int     slot_info;
     unsigned int     device_uuid_0;
     unsigned int     device_uuid_1;
     unsigned int     device_uuid_2;
@@ -4753,5 +4761,20 @@ enum inproc_sync_type
     obj_handle_t     ready_sync;
     obj_handle_t     reuse_sync;
     unsigned int     registered_slots;
+    unsigned int     import_state;
     unsigned __int64 registry_generation;
+@END
+
+/* Record the current host's terminal import result for one pinned slot. */
+@REQ(set_wayland_buffer_slot_import)
+    user_handle_t    root;
+    unsigned int     slot;
+    unsigned int     import_state;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 pool_generation;
+@REPLY
+    unsigned __int64 registry_generation;
+    unsigned int     imported_slots;
+    unsigned int     failed_slots;
 @END

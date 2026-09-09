@@ -49,6 +49,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_SET_READY,
     HOST_CHILD_COMMAND_GET_POOL,
     HOST_CHILD_COMMAND_GET_SLOT,
+    HOST_CHILD_COMMAND_SET_SLOT_IMPORT,
     HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS,
     HOST_CHILD_COMMAND_EXIT,
 };
@@ -113,7 +114,10 @@ struct wayland_host_test_state
     DWORD pool_slot_count;
     DWORD frame_credit_limit;
     DWORD registered_slots;
+    DWORD imported_slots;
+    DWORD failed_slots;
     DWORD slot;
+    DWORD slot_import_state;
     DWORD slot_registration_variant;
     DWORD slot_memory_handle;
     DWORD slot_ready_handle;
@@ -180,6 +184,8 @@ struct wayland_pool_info
     DWORD slot_count;
     DWORD frame_credit_limit;
     DWORD registered_slots;
+    DWORD imported_slots;
+    DWORD failed_slots;
     DWORD device_uuid[4];
 };
 
@@ -190,6 +196,7 @@ struct wayland_slot_info
     obj_handle_t reuse_sync;
     UINT64 registry_generation;
     DWORD registered_slots;
+    DWORD import_state;
 };
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
@@ -507,7 +514,12 @@ static NTSTATUS get_pool( HWND root, UINT64 host_epoch, UINT64 contributor_id,
             info->format = reply->format;
             info->slot_count = reply->slot_count;
             info->frame_credit_limit = reply->frame_credit_limit;
-            info->registered_slots = reply->registered_slots;
+            info->registered_slots =
+                    WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED( reply->slot_info );
+            info->imported_slots =
+                    WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED( reply->slot_info );
+            info->failed_slots =
+                    WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED( reply->slot_info );
             info->device_uuid[0] = reply->device_uuid_0;
             info->device_uuid[1] = reply->device_uuid_1;
             info->device_uuid[2] = reply->device_uuid_2;
@@ -606,7 +618,34 @@ static NTSTATUS get_slot( HWND root, UINT64 host_epoch, UINT64 contributor_id,
         info->ready_sync = reply->ready_sync;
         info->reuse_sync = reply->reuse_sync;
         info->registered_slots = reply->registered_slots;
+        info->import_state = reply->import_state;
         info->registry_generation = reply->registry_generation;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_slot_import( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                                 UINT64 pool_generation, DWORD slot, DWORD import_state,
+                                 UINT64 *registry_generation, DWORD *imported_slots,
+                                 DWORD *failed_slots )
+{
+    NTSTATUS status;
+
+    *registry_generation = 0;
+    *imported_slots = *failed_slots = 0;
+    SERVER_START_REQ( set_wayland_buffer_slot_import )
+    {
+        req->root = wine_server_user_handle( root );
+        req->slot = slot;
+        req->import_state = import_state;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->pool_generation = pool_generation;
+        status = p_wine_server_call( req );
+        *registry_generation = reply->registry_generation;
+        *imported_slots = reply->imported_slots;
+        *failed_slots = reply->failed_slots;
     }
     SERVER_END_REQ;
     return status;
@@ -791,6 +830,8 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->pool_slot_count = pool.slot_count;
             state->frame_credit_limit = pool.frame_credit_limit;
             state->registered_slots = pool.registered_slots;
+            state->imported_slots = pool.imported_slots;
+            state->failed_slots = pool.failed_slots;
             memcpy( state->device_uuid, pool.device_uuid, sizeof(state->device_uuid) );
             break;
         case HOST_CHILD_COMMAND_GET_SLOT:
@@ -798,6 +839,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->host_epoch, state->contributor_id, state->pool_generation,
                     state->slot, &slot );
             state->registered_slots = slot.registered_slots;
+            state->slot_import_state = slot.import_state;
             state->registry_generation = slot.registry_generation;
             state->slot_memory_status = state->command_status ? STATUS_PENDING :
                     query_d3dkmt_test_object( D3DKMT_RESOURCE, 0, slot.memory );
@@ -808,6 +850,12 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             close_d3dkmt_test_handle( &slot.reuse_sync );
             close_d3dkmt_test_handle( &slot.ready_sync );
             close_d3dkmt_test_handle( &slot.memory );
+            break;
+        case HOST_CHILD_COMMAND_SET_SLOT_IMPORT:
+            state->command_status = set_slot_import( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->pool_generation,
+                    state->slot, state->slot_import_state, &state->registry_generation,
+                    &state->imported_slots, &state->failed_slots );
             break;
         case HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS:
             state->slot_memory_status = query_d3dkmt_test_object( D3DKMT_RESOURCE,
@@ -1030,6 +1078,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
     UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
     UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
+    UINT64 import_registry_generation;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL;
@@ -1037,7 +1086,7 @@ static void test_host_registration( const char *program, const char *test_name )
     NTSTATUS status;
     BOOL created;
     unsigned int i;
-    DWORD registered_slots;
+    DWORD registered_slots, imported_slots, failed_slots;
 
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Initial host query returned %#lx.\n", status );
@@ -1789,6 +1838,78 @@ static void test_host_registration( const char *program, const char *test_name )
         "Completed pool query returned %#lx, generation %s, slots %lu.\n",
         state->command_status, wine_dbgstr_longlong( state->pool_generation ),
         state->registered_slots );
+    status = set_slot_import( root, old_epoch, state->contributor_id, 1, 0,
+                              WINE_WAYLAND_BUFFER_IMPORT_PENDING,
+                              &import_registry_generation, &imported_slots, &failed_slots );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "Nonterminal slot import result returned %#lx.\n", status );
+    status = set_slot_import( root, old_epoch, state->contributor_id, 1, 0,
+                              WINE_WAYLAND_BUFFER_IMPORT_IMPORTED,
+                              &import_registry_generation, &imported_slots, &failed_slots );
+    ok( status == STATUS_ACCESS_DENIED && !imported_slots && !failed_slots,
+        "Non-host slot import returned %#lx, imported %lu, failed %lu.\n",
+        status, imported_slots, failed_slots );
+    state->slot = 0;
+    state->slot_import_state = WINE_WAYLAND_BUFFER_IMPORT_IMPORTED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out acknowledging slot 0 import.\n" );
+    ok( !state->command_status && state->imported_slots == 1 && !state->failed_slots,
+        "Slot 0 import returned %#lx, imported %lu, failed %lu.\n",
+        state->command_status, state->imported_slots, state->failed_slots );
+    import_registry_generation = state->registry_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out repeating slot 0 import.\n" );
+    ok( !state->command_status && state->registry_generation == import_registry_generation &&
+        state->imported_slots == 1 && !state->failed_slots,
+        "Repeated import returned %#lx, registry %s, imported %lu, failed %lu.\n",
+        state->command_status, wine_dbgstr_longlong( state->registry_generation ),
+        state->imported_slots, state->failed_slots );
+    state->slot_import_state = WINE_WAYLAND_BUFFER_IMPORT_FAILED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out changing slot 0 import result.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Conflicting slot import returned %#lx.\n", state->command_status );
+    state->slot = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out acknowledging an out-of-range import.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER,
+        "Out-of-range slot import returned %#lx.\n", state->command_status );
+    state->slot = 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out recording slot 1 import failure.\n" );
+    ok( !state->command_status && state->imported_slots == 1 && state->failed_slots == 1,
+        "Slot 1 import failure returned %#lx, imported %lu, failed %lu.\n",
+        state->command_status, state->imported_slots, state->failed_slots );
+    state->slot = 2;
+    state->slot_import_state = WINE_WAYLAND_BUFFER_IMPORT_IMPORTED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out acknowledging slot 2 import.\n" );
+    ok( !state->command_status && state->imported_slots == 2 && state->failed_slots == 1,
+        "Slot 2 import returned %#lx, imported %lu, failed %lu.\n",
+        state->command_status, state->imported_slots, state->failed_slots );
+    state->pool_generation = 1;
+    state->slot = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SLOT ),
+        "Timed out querying imported slot 0.\n" );
+    ok( !state->command_status &&
+        state->slot_import_state == WINE_WAYLAND_BUFFER_IMPORT_IMPORTED,
+        "Imported slot query returned %#lx, import state %lu.\n",
+        state->command_status, state->slot_import_state );
+    state->pool_generation = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out querying pool import totals.\n" );
+    ok( !state->command_status && state->pool_generation == 1 &&
+        state->imported_slots == 2 && state->failed_slots == 1,
+        "Pool import totals returned %#lx, imported %lu, failed %lu.\n",
+        state->command_status, state->imported_slots, state->failed_slots );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CREATE_POOL ),
         "Timed out repeating transport pool generation 1.\n" );
@@ -1864,6 +1985,44 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->producer_status,
         "Closing replacement-pool producer handles returned %#lx.\n",
         state->producer_status );
+    for (i = 1; i < WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS ),
+            "Timed out creating replacement-pool slot %u objects.\n", i );
+        ok( !state->producer_status,
+            "Creating replacement-pool slot %u objects returned %#lx.\n",
+            i, state->producer_status );
+        state->slot = i;
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+            "Timed out registering replacement-pool slot %u.\n", i );
+        ok( !state->producer_status && state->registered_slots == i + 1,
+            "Replacement-pool slot %u returned %#lx, slots %lu.\n",
+            i, state->producer_status, state->registered_slots );
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS ),
+            "Timed out closing replacement-pool slot %u handles.\n", i );
+        ok( !state->producer_status,
+            "Closing replacement-pool slot %u handles returned %#lx.\n",
+            i, state->producer_status );
+    }
+    for (i = 0; i < WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        state->pool_generation = 3;
+        state->slot = i;
+        state->slot_import_state = WINE_WAYLAND_BUFFER_IMPORT_IMPORTED;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+            "Timed out acknowledging replacement-pool slot %u import.\n", i );
+        ok( !state->command_status && state->imported_slots == i + 1 &&
+            !state->failed_slots,
+            "Replacement-pool slot %u import returned %#lx, imported %lu, failed %lu.\n",
+            i, state->command_status, state->imported_slots, state->failed_slots );
+    }
     state->pool_generation = 0;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_POOL ),
@@ -1877,6 +2036,10 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && state->pool_generation == 3,
         "Second live pool enumeration returned %#lx, generation %s.\n",
         state->command_status, wine_dbgstr_longlong( state->pool_generation ) );
+    ok( state->registered_slots == WINE_WAYLAND_BUFFER_POOL_SLOTS &&
+        state->imported_slots == WINE_WAYLAND_BUFFER_POOL_SLOTS && !state->failed_slots,
+        "Imported pool reported registered %lu, imported %lu, failed %lu.\n",
+        state->registered_slots, state->imported_slots, state->failed_slots );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_POOL ),
         "Timed out checking the end of pool enumeration.\n" );
@@ -1989,12 +2152,19 @@ static void test_host_registration( const char *program, const char *test_name )
     scene_generation = state->revocation_scene_generation;
     state->pool_generation = 3;
     state->slot = 0;
+    state->slot_import_state = WINE_WAYLAND_BUFFER_IMPORT_IMPORTED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_SLOT_IMPORT ),
+        "Timed out changing a revoked contributor import.\n" );
+    ok( state->command_status == STATUS_ACCESS_DENIED,
+        "Revoked contributor import returned %#lx.\n", state->command_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SLOT ),
         "Timed out querying a revoked contributor's pinned slot.\n" );
     ok( !state->command_status && !state->slot_memory_status &&
         !state->slot_ready_status && !state->slot_reuse_status &&
-        state->registered_slots == 1,
+        state->registered_slots == WINE_WAYLAND_BUFFER_POOL_SLOTS &&
+        state->slot_import_state == WINE_WAYLAND_BUFFER_IMPORT_IMPORTED,
         "Revoked contributor slot returned %#lx, types %#lx/%#lx/%#lx, slots %lu.\n",
         state->command_status, state->slot_memory_status, state->slot_ready_status,
         state->slot_reuse_status, state->registered_slots );
