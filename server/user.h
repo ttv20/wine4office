@@ -112,6 +112,7 @@ extern user_handle_t get_user_full_handle( user_handle_t handle );
 extern void *free_user_handle( user_handle_t handle );
 extern void *next_user_handle( user_handle_t *handle, unsigned short type );
 extern void free_process_user_handles( struct process *process );
+extern int fill_server_random_bytes( void *buffer, size_t size );
 
 /* clipboard functions */
 
@@ -188,6 +189,8 @@ extern void post_desktop_message( struct desktop *desktop, unsigned int message,
                                   lparam_t wparam, lparam_t lparam );
 extern void free_window_handle( struct window *win );
 extern void destroy_thread_windows( struct thread *thread );
+extern void cleanup_process_wayland_scenes( struct process *process );
+extern void revoke_wayland_desktop_streams( struct desktop *desktop );
 extern int is_child_window( user_handle_t parent, user_handle_t child );
 extern struct thread *make_window_foreground( struct desktop *desktop, user_handle_t window,
                                               int *is_desktop, int *set_foreground );

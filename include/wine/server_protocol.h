@@ -16,9 +16,6 @@
 #include <winbase.h>
 #include <ntuser.h>
 
-#define WINE_WAYLAND_SCENE_EMPTY  0x00000001
-#define WINE_WAYLAND_SCENE_HIDDEN 0x00000002
-
 typedef unsigned int obj_handle_t;
 typedef unsigned int user_handle_t;
 typedef unsigned int d3dkmt_handle_t;
@@ -43,6 +40,22 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_HOST_CAP_SHM            0x00000004
 #define WINE_WAYLAND_HOST_CAP_SEAT           0x00000008
 #define WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+
+#define WINE_WAYLAND_SCENE_EMPTY          0x00000001
+#define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
+#define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
+
+#define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
+
+#define WINE_WAYLAND_TARGET_BELOW 0x00000001
+#define WINE_WAYLAND_TARGET_ABOVE 0x00000002
+
+#define WINE_WAYLAND_CONTRIBUTOR_GRANTED 0x00000001
+#define WINE_WAYLAND_CONTRIBUTOR_BOUND   0x00000002
+#define WINE_WAYLAND_CONTRIBUTOR_REVOKED 0x00000003
+
+#define WINE_WAYLAND_CONTRIBUTOR_INFO(source,layer,state) \
+    ((source) | ((layer) << 8) | ((state) << 16))
 
 struct request_header
 {
@@ -6565,6 +6578,9 @@ struct publish_wayland_scene_request
     char __pad_20[4];
     unsigned __int64 expected_generation;
     unsigned __int64 owner_revision;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
 };
 struct publish_wayland_scene_reply
 {
@@ -6600,6 +6616,128 @@ struct set_wayland_scene_applied_request
 struct set_wayland_scene_applied_reply
 {
     struct reply_header __header;
+};
+
+
+struct create_wayland_contributor_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     source;
+    unsigned int     target_layer;
+    unsigned __int64 contribution_revision;
+};
+struct create_wayland_contributor_reply
+{
+    struct reply_header __header;
+    unsigned __int64 contributor_id;
+    unsigned __int64 grant_low;
+    unsigned __int64 grant_high;
+    unsigned __int64 registry_generation;
+};
+
+
+struct bind_wayland_stream_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 grant_low;
+    unsigned __int64 grant_high;
+};
+struct bind_wayland_stream_reply
+{
+    struct reply_header __header;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 host_epoch;
+    unsigned __int64 registry_generation;
+};
+
+
+struct revoke_wayland_contributor_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 binding_generation;
+};
+struct revoke_wayland_contributor_reply
+{
+    struct reply_header __header;
+    unsigned __int64 registry_generation;
+    unsigned __int64 scene_generation;
+};
+
+
+struct get_wayland_contributor_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 previous_contributor_id;
+};
+struct get_wayland_contributor_reply
+{
+    struct reply_header __header;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 contributor_host_epoch;
+    unsigned __int64 registry_generation;
+    unsigned __int64 revocation_scene_generation;
+    unsigned int     info;
+    char __pad_60[4];
+};
+
+
+struct get_wayland_contributor_identity_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+};
+struct get_wayland_contributor_identity_reply
+{
+    struct reply_header __header;
+    unsigned __int64 contribution_revision;
+    process_id_t     owner_process_id;
+    process_id_t     producer_process_id;
+    unsigned int     source;
+    unsigned int     target_layer;
+    unsigned int     state;
+    char __pad_36[4];
+};
+
+
+struct ack_wayland_contributor_revoke_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 binding_generation;
+};
+struct ack_wayland_contributor_revoke_reply
+{
+    struct reply_header __header;
+};
+
+
+struct check_wayland_stream_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+};
+struct check_wayland_stream_reply
+{
+    struct reply_header __header;
+    unsigned __int64 host_epoch;
+    unsigned __int64 registry_generation;
 };
 
 
@@ -6935,6 +7073,13 @@ enum request
     REQ_publish_wayland_scene,
     REQ_get_wayland_scene,
     REQ_set_wayland_scene_applied,
+    REQ_create_wayland_contributor,
+    REQ_bind_wayland_stream,
+    REQ_revoke_wayland_contributor,
+    REQ_get_wayland_contributor,
+    REQ_get_wayland_contributor_identity,
+    REQ_ack_wayland_contributor_revoke,
+    REQ_check_wayland_stream,
     REQ_NB_REQUESTS
 };
 
@@ -7272,6 +7417,13 @@ union generic_request
     struct publish_wayland_scene_request publish_wayland_scene_request;
     struct get_wayland_scene_request get_wayland_scene_request;
     struct set_wayland_scene_applied_request set_wayland_scene_applied_request;
+    struct create_wayland_contributor_request create_wayland_contributor_request;
+    struct bind_wayland_stream_request bind_wayland_stream_request;
+    struct revoke_wayland_contributor_request revoke_wayland_contributor_request;
+    struct get_wayland_contributor_request get_wayland_contributor_request;
+    struct get_wayland_contributor_identity_request get_wayland_contributor_identity_request;
+    struct ack_wayland_contributor_revoke_request ack_wayland_contributor_revoke_request;
+    struct check_wayland_stream_request check_wayland_stream_request;
 };
 union generic_reply
 {
@@ -7607,8 +7759,15 @@ union generic_reply
     struct publish_wayland_scene_reply publish_wayland_scene_reply;
     struct get_wayland_scene_reply get_wayland_scene_reply;
     struct set_wayland_scene_applied_reply set_wayland_scene_applied_reply;
+    struct create_wayland_contributor_reply create_wayland_contributor_reply;
+    struct bind_wayland_stream_reply bind_wayland_stream_reply;
+    struct revoke_wayland_contributor_reply revoke_wayland_contributor_reply;
+    struct get_wayland_contributor_reply get_wayland_contributor_reply;
+    struct get_wayland_contributor_identity_reply get_wayland_contributor_identity_reply;
+    struct ack_wayland_contributor_revoke_reply ack_wayland_contributor_revoke_reply;
+    struct check_wayland_stream_reply check_wayland_stream_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 968
+#define SERVER_PROTOCOL_VERSION 972
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -33,6 +33,15 @@ or transport fixture is not Outlook support.
   replacement host cannot replay an old scene; the owner must publish it for
   the replacement host epoch. This tranche carries no buffers and makes no GPU
   transport claim.
+- Each root now has a lazily allocated registry capped at 16 contributors.
+  The logical owner creates a DComp contributor and receives a random 128-bit
+  one-use grant. A producer consumes that grant to receive server-issued stream
+  and binding IDs tied to the current host epoch. The host can enumerate both
+  state and immutable owner/producer identity. Owner revoke, producer exit and
+  host replacement reject later stream validation before publishing an
+  `Empty` generation when that stream supplied the current hosted scene.
+  Revoked entries remain as tombstones until the current host acknowledges
+  them, after which their bounded slots can be reused.
 
 ## Contributor interception inventory
 
@@ -115,6 +124,16 @@ admitted.
   then passed with a real display. Logs and exact test binaries are retained at
   `/workspace/artifacts/wayland-scene-{x64,i386-debug}.log` and
   `/workspace/artifacts/scene-authority-runner`.
+- The contributor/stream-authority extension passed 189 checks with zero
+  failures in both x86-64 and i386, including a concurrent run on isolated
+  Windows desktops. It covers foreign owner/host operations,
+  invalid and consumed grants, server-issued identities, stale bindings,
+  hosted scene publication, revoke-before-new-validation, producer-exit and
+  host-replacement revocation, identity queries, registry exhaustion at 16
+  entries, tombstone acknowledgement and slot reuse. Exact logs are retained
+  as `/workspace/artifacts/wayland-contributor6-{x64,i386}.log`; the matching
+  binaries and hashes are under
+  `/workspace/artifacts/contributor-authority-runner`.
 - Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe

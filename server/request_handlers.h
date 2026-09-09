@@ -337,6 +337,13 @@ DECL_HANDLER(get_wayland_host);
 DECL_HANDLER(publish_wayland_scene);
 DECL_HANDLER(get_wayland_scene);
 DECL_HANDLER(set_wayland_scene_applied);
+DECL_HANDLER(create_wayland_contributor);
+DECL_HANDLER(bind_wayland_stream);
+DECL_HANDLER(revoke_wayland_contributor);
+DECL_HANDLER(get_wayland_contributor);
+DECL_HANDLER(get_wayland_contributor_identity);
+DECL_HANDLER(ack_wayland_contributor_revoke);
+DECL_HANDLER(check_wayland_stream);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -671,6 +678,13 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_publish_wayland_scene,
     (req_handler)req_get_wayland_scene,
     (req_handler)req_set_wayland_scene_applied,
+    (req_handler)req_create_wayland_contributor,
+    (req_handler)req_bind_wayland_stream,
+    (req_handler)req_revoke_wayland_contributor,
+    (req_handler)req_get_wayland_contributor,
+    (req_handler)req_get_wayland_contributor_identity,
+    (req_handler)req_ack_wayland_contributor_revoke,
+    (req_handler)req_check_wayland_stream,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2546,7 +2560,10 @@ C_ASSERT( offsetof(struct publish_wayland_scene_request, root) == 12 );
 C_ASSERT( offsetof(struct publish_wayland_scene_request, disposition) == 16 );
 C_ASSERT( offsetof(struct publish_wayland_scene_request, expected_generation) == 24 );
 C_ASSERT( offsetof(struct publish_wayland_scene_request, owner_revision) == 32 );
-C_ASSERT( sizeof(struct publish_wayland_scene_request) == 40 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, contributor_id) == 40 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, stream_id) == 48 );
+C_ASSERT( offsetof(struct publish_wayland_scene_request, binding_generation) == 56 );
+C_ASSERT( sizeof(struct publish_wayland_scene_request) == 64 );
 C_ASSERT( offsetof(struct publish_wayland_scene_reply, scene_generation) == 8 );
 C_ASSERT( sizeof(struct publish_wayland_scene_reply) == 16 );
 C_ASSERT( offsetof(struct get_wayland_scene_request, root) == 12 );
@@ -2562,3 +2579,66 @@ C_ASSERT( offsetof(struct set_wayland_scene_applied_request, root) == 12 );
 C_ASSERT( offsetof(struct set_wayland_scene_applied_request, host_epoch) == 16 );
 C_ASSERT( offsetof(struct set_wayland_scene_applied_request, scene_generation) == 24 );
 C_ASSERT( sizeof(struct set_wayland_scene_applied_request) == 32 );
+C_ASSERT( offsetof(struct create_wayland_contributor_request, root) == 12 );
+C_ASSERT( offsetof(struct create_wayland_contributor_request, source) == 16 );
+C_ASSERT( offsetof(struct create_wayland_contributor_request, target_layer) == 20 );
+C_ASSERT( offsetof(struct create_wayland_contributor_request, contribution_revision) == 24 );
+C_ASSERT( sizeof(struct create_wayland_contributor_request) == 32 );
+C_ASSERT( offsetof(struct create_wayland_contributor_reply, contributor_id) == 8 );
+C_ASSERT( offsetof(struct create_wayland_contributor_reply, grant_low) == 16 );
+C_ASSERT( offsetof(struct create_wayland_contributor_reply, grant_high) == 24 );
+C_ASSERT( offsetof(struct create_wayland_contributor_reply, registry_generation) == 32 );
+C_ASSERT( sizeof(struct create_wayland_contributor_reply) == 40 );
+C_ASSERT( offsetof(struct bind_wayland_stream_request, root) == 12 );
+C_ASSERT( offsetof(struct bind_wayland_stream_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct bind_wayland_stream_request, grant_low) == 24 );
+C_ASSERT( offsetof(struct bind_wayland_stream_request, grant_high) == 32 );
+C_ASSERT( sizeof(struct bind_wayland_stream_request) == 40 );
+C_ASSERT( offsetof(struct bind_wayland_stream_reply, stream_id) == 8 );
+C_ASSERT( offsetof(struct bind_wayland_stream_reply, binding_generation) == 16 );
+C_ASSERT( offsetof(struct bind_wayland_stream_reply, host_epoch) == 24 );
+C_ASSERT( offsetof(struct bind_wayland_stream_reply, registry_generation) == 32 );
+C_ASSERT( sizeof(struct bind_wayland_stream_reply) == 40 );
+C_ASSERT( offsetof(struct revoke_wayland_contributor_request, root) == 12 );
+C_ASSERT( offsetof(struct revoke_wayland_contributor_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct revoke_wayland_contributor_request, binding_generation) == 24 );
+C_ASSERT( sizeof(struct revoke_wayland_contributor_request) == 32 );
+C_ASSERT( offsetof(struct revoke_wayland_contributor_reply, registry_generation) == 8 );
+C_ASSERT( offsetof(struct revoke_wayland_contributor_reply, scene_generation) == 16 );
+C_ASSERT( sizeof(struct revoke_wayland_contributor_reply) == 24 );
+C_ASSERT( offsetof(struct get_wayland_contributor_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_contributor_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct get_wayland_contributor_request, previous_contributor_id) == 24 );
+C_ASSERT( sizeof(struct get_wayland_contributor_request) == 32 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, contributor_id) == 8 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, stream_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, binding_generation) == 24 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, contributor_host_epoch) == 32 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, registry_generation) == 40 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, revocation_scene_generation) == 48 );
+C_ASSERT( offsetof(struct get_wayland_contributor_reply, info) == 56 );
+C_ASSERT( sizeof(struct get_wayland_contributor_reply) == 64 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_request, contributor_id) == 24 );
+C_ASSERT( sizeof(struct get_wayland_contributor_identity_request) == 32 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, contribution_revision) == 8 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, owner_process_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, producer_process_id) == 20 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, source) == 24 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, target_layer) == 28 );
+C_ASSERT( offsetof(struct get_wayland_contributor_identity_reply, state) == 32 );
+C_ASSERT( sizeof(struct get_wayland_contributor_identity_reply) == 40 );
+C_ASSERT( offsetof(struct ack_wayland_contributor_revoke_request, root) == 12 );
+C_ASSERT( offsetof(struct ack_wayland_contributor_revoke_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct ack_wayland_contributor_revoke_request, contributor_id) == 24 );
+C_ASSERT( offsetof(struct ack_wayland_contributor_revoke_request, binding_generation) == 32 );
+C_ASSERT( sizeof(struct ack_wayland_contributor_revoke_request) == 40 );
+C_ASSERT( offsetof(struct check_wayland_stream_request, root) == 12 );
+C_ASSERT( offsetof(struct check_wayland_stream_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct check_wayland_stream_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct check_wayland_stream_request, binding_generation) == 32 );
+C_ASSERT( sizeof(struct check_wayland_stream_request) == 40 );
+C_ASSERT( offsetof(struct check_wayland_stream_reply, host_epoch) == 8 );
+C_ASSERT( offsetof(struct check_wayland_stream_reply, registry_generation) == 16 );
+C_ASSERT( sizeof(struct check_wayland_stream_reply) == 24 );

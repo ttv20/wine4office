@@ -36,7 +36,19 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_SCENE,
     HOST_CHILD_COMMAND_APPLY_SCENE,
     HOST_CHILD_COMMAND_PUBLISH_SCENE,
+    HOST_CHILD_COMMAND_GET_CONTRIBUTOR,
+    HOST_CHILD_COMMAND_GET_CONTRIBUTOR_IDENTITY,
+    HOST_CHILD_COMMAND_CREATE_CONTRIBUTOR,
+    HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE,
     HOST_CHILD_COMMAND_EXIT,
+};
+
+enum producer_child_command
+{
+    PRODUCER_CHILD_COMMAND_NONE,
+    PRODUCER_CHILD_COMMAND_BIND,
+    PRODUCER_CHILD_COMMAND_CHECK,
+    PRODUCER_CHILD_COMMAND_EXIT,
 };
 
 struct wayland_host_test_state
@@ -50,16 +62,32 @@ struct wayland_host_test_state
     UINT64 scene_generation;
     UINT64 owner_revision;
     UINT64 applied_generation;
+    UINT64 contributor_id;
+    UINT64 stream_id;
+    UINT64 binding_generation;
+    UINT64 grant_low;
+    UINT64 grant_high;
+    UINT64 registry_generation;
+    UINT64 contributor_host_epoch;
+    UINT64 contribution_revision;
+    UINT64 revocation_scene_generation;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
     DWORD command;
     DWORD scene_disposition;
     DWORD scene_owner_process_id;
+    DWORD contributor_info;
+    DWORD contributor_owner_process_id;
+    DWORD contributor_producer_process_id;
+    DWORD contributor_source;
+    DWORD contributor_target_layer;
+    DWORD contributor_state;
     NTSTATUS mismatch_status;
     NTSTATUS register_status;
     NTSTATUS ready_status;
     NTSTATUS command_status;
+    NTSTATUS producer_status;
 };
 
 struct wayland_host_info
@@ -80,6 +108,23 @@ struct wayland_scene_info
     UINT64 applied_generation;
     DWORD owner_process_id;
     DWORD disposition;
+};
+
+struct wayland_contributor_info
+{
+    UINT64 contributor_id;
+    UINT64 stream_id;
+    UINT64 binding_generation;
+    UINT64 host_epoch;
+    UINT64 registry_generation;
+    UINT64 revocation_scene_generation;
+    DWORD info;
+    DWORD owner_process_id;
+    DWORD producer_process_id;
+    DWORD source;
+    DWORD target_layer;
+    DWORD state;
+    UINT64 contribution_revision;
 };
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
@@ -192,7 +237,8 @@ static NTSTATUS get_host( struct wayland_host_info *info )
 }
 
 static NTSTATUS publish_scene( HWND root, UINT disposition, UINT64 expected_generation,
-                               UINT64 owner_revision, UINT64 *scene_generation )
+                               UINT64 owner_revision, UINT64 contributor_id, UINT64 stream_id,
+                               UINT64 binding_generation, UINT64 *scene_generation )
 {
     NTSTATUS status;
 
@@ -203,6 +249,9 @@ static NTSTATUS publish_scene( HWND root, UINT disposition, UINT64 expected_gene
         req->disposition = disposition;
         req->expected_generation = expected_generation;
         req->owner_revision = owner_revision;
+        req->contributor_id = contributor_id;
+        req->stream_id = stream_id;
+        req->binding_generation = binding_generation;
         if (!(status = p_wine_server_call( req )))
             *scene_generation = reply->scene_generation;
     }
@@ -247,11 +296,169 @@ static NTSTATUS set_scene_applied( HWND root, UINT64 host_epoch, UINT64 scene_ge
     return status;
 }
 
+static NTSTATUS create_contributor( HWND root, UINT source, UINT target_layer,
+                                    UINT64 contribution_revision,
+                                    struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    state->contributor_id = state->grant_low = state->grant_high = 0;
+    state->registry_generation = 0;
+    SERVER_START_REQ( create_wayland_contributor )
+    {
+        req->root = wine_server_user_handle( root );
+        req->source = source;
+        req->target_layer = target_layer;
+        req->contribution_revision = contribution_revision;
+        if (!(status = p_wine_server_call( req )))
+        {
+            state->contributor_id = reply->contributor_id;
+            state->grant_low = reply->grant_low;
+            state->grant_high = reply->grant_high;
+            state->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS bind_stream( HWND root, struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    state->stream_id = state->binding_generation = state->contributor_host_epoch = 0;
+    SERVER_START_REQ( bind_wayland_stream )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->grant_low = state->grant_low;
+        req->grant_high = state->grant_high;
+        if (!(status = p_wine_server_call( req )))
+        {
+            state->stream_id = reply->stream_id;
+            state->binding_generation = reply->binding_generation;
+            state->contributor_host_epoch = reply->host_epoch;
+            state->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS check_stream( HWND root, struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( check_wayland_stream )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        if (!(status = p_wine_server_call( req )))
+        {
+            state->contributor_host_epoch = reply->host_epoch;
+            state->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS revoke_contributor( HWND root, struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    state->registry_generation = state->revocation_scene_generation = 0;
+    SERVER_START_REQ( revoke_wayland_contributor )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->binding_generation = state->binding_generation;
+        if (!(status = p_wine_server_call( req )))
+        {
+            state->registry_generation = reply->registry_generation;
+            state->revocation_scene_generation = reply->scene_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_contributor( HWND root, UINT64 host_epoch, UINT64 previous_id,
+                                 struct wayland_contributor_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_contributor )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->previous_contributor_id = previous_id;
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->contributor_id = reply->contributor_id;
+            info->stream_id = reply->stream_id;
+            info->binding_generation = reply->binding_generation;
+            info->host_epoch = reply->contributor_host_epoch;
+            info->registry_generation = reply->registry_generation;
+            info->revocation_scene_generation = reply->revocation_scene_generation;
+            info->info = reply->info;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_contributor_identity( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                                          struct wayland_contributor_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_contributor_identity )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->contribution_revision = reply->contribution_revision;
+            info->owner_process_id = reply->owner_process_id;
+            info->producer_process_id = reply->producer_process_id;
+            info->source = reply->source;
+            info->target_layer = reply->target_layer;
+            info->state = reply->state;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS ack_contributor_revoke( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                                        UINT64 binding_generation )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( ack_wayland_contributor_revoke )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->binding_generation = binding_generation;
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_event,
                             HANDLE result_event )
 {
     struct wayland_host_test_state *state;
     struct wayland_scene_info scene;
+    struct wayland_contributor_info contributor;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -288,7 +495,37 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
         case HOST_CHILD_COMMAND_PUBLISH_SCENE:
             state->command_status = publish_scene( (HWND)(UINT_PTR)state->root,
                     state->scene_disposition, state->scene_generation,
-                    state->owner_revision, &state->applied_generation );
+                    state->owner_revision, state->contributor_id, state->stream_id,
+                    state->binding_generation, &state->applied_generation );
+            break;
+        case HOST_CHILD_COMMAND_GET_CONTRIBUTOR:
+            state->command_status = get_contributor( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, &contributor );
+            state->contributor_id = contributor.contributor_id;
+            state->stream_id = contributor.stream_id;
+            state->binding_generation = contributor.binding_generation;
+            state->contributor_host_epoch = contributor.host_epoch;
+            state->registry_generation = contributor.registry_generation;
+            state->revocation_scene_generation = contributor.revocation_scene_generation;
+            state->contributor_info = contributor.info;
+            break;
+        case HOST_CHILD_COMMAND_GET_CONTRIBUTOR_IDENTITY:
+            state->command_status = get_contributor_identity( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, &contributor );
+            state->contribution_revision = contributor.contribution_revision;
+            state->contributor_owner_process_id = contributor.owner_process_id;
+            state->contributor_producer_process_id = contributor.producer_process_id;
+            state->contributor_source = contributor.source;
+            state->contributor_target_layer = contributor.target_layer;
+            state->contributor_state = contributor.state;
+            break;
+        case HOST_CHILD_COMMAND_CREATE_CONTRIBUTOR:
+            state->command_status = create_contributor( (HWND)(UINT_PTR)state->root,
+                    WINE_WAYLAND_CONTRIBUTOR_DCOMP, WINE_WAYLAND_TARGET_BELOW, 1, state );
+            break;
+        case HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE:
+            state->command_status = ack_contributor_revoke( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->binding_generation );
             break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
@@ -297,6 +534,36 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             return;
         default:
             state->command_status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        SetEvent( result_event );
+    }
+    UnmapViewOfFile( state );
+}
+
+static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE result_event )
+{
+    struct wayland_host_test_state *state;
+    DWORD wait;
+
+    if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) ))) return;
+    while ((wait = WaitForSingleObject( command_event, 30000 )) == WAIT_OBJECT_0)
+    {
+        switch (state->command)
+        {
+        case PRODUCER_CHILD_COMMAND_BIND:
+            state->producer_status = bind_stream( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_CHECK:
+            state->producer_status = check_stream( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_EXIT:
+            state->producer_status = STATUS_SUCCESS;
+            SetEvent( result_event );
+            UnmapViewOfFile( state );
+            return;
+        default:
+            state->producer_status = STATUS_INVALID_PARAMETER;
             break;
         }
         SetEvent( result_event );
@@ -318,11 +585,35 @@ static BOOL start_host_child( const char *program, const char *test_name, HANDLE
     return CreateProcessA( program, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, process );
 }
 
+static BOOL start_producer_child( const char *program, const char *test_name, HANDLE mapping,
+                                  HANDLE command_event, HANDLE result_event,
+                                  PROCESS_INFORMATION *process )
+{
+    STARTUPINFOA startup = {sizeof(startup)};
+    char command[MAX_PATH * 2];
+
+    snprintf( command, sizeof(command),
+              "\"%s\" %s wayland_producer_child 0x%Ix 0x%Ix 0x%Ix",
+              program, test_name, (UINT_PTR)mapping, (UINT_PTR)command_event,
+              (UINT_PTR)result_event );
+    return CreateProcessA( program, command, NULL, NULL, TRUE, 0, NULL, NULL, &startup, process );
+}
+
 static BOOL send_host_child_command( struct wayland_host_test_state *state, HANDLE command_event,
                                      HANDLE result_event, enum host_child_command command )
 {
     state->command = command;
     state->command_status = STATUS_PENDING;
+    ResetEvent( result_event );
+    return SetEvent( command_event ) &&
+           WaitForSingleObject( result_event, 30000 ) == WAIT_OBJECT_0;
+}
+
+static BOOL send_producer_child_command( struct wayland_host_test_state *state, HANDLE command_event,
+                                         HANDLE result_event, enum producer_child_command command )
+{
+    state->command = command;
+    state->producer_status = STATUS_PENDING;
     ResetEvent( result_event );
     return SetEvent( command_event ) &&
            WaitForSingleObject( result_event, 30000 ) == WAIT_OBJECT_0;
@@ -336,6 +627,20 @@ static void stop_host_child( struct wayland_host_test_state *state, HANDLE comma
     send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_EXIT );
     wait = WaitForSingleObject( process->hProcess, 30000 );
     ok( wait == WAIT_OBJECT_0, "Host child wait returned %#lx.\n", wait );
+    CloseHandle( process->hThread );
+    CloseHandle( process->hProcess );
+    memset( process, 0, sizeof(*process) );
+}
+
+static void stop_producer_child( struct wayland_host_test_state *state, HANDLE command_event,
+                                 HANDLE result_event, PROCESS_INFORMATION *process )
+{
+    DWORD wait;
+
+    send_producer_child_command( state, command_event, result_event,
+                                 PRODUCER_CHILD_COMMAND_EXIT );
+    wait = WaitForSingleObject( process->hProcess, 30000 );
+    ok( wait == WAIT_OBJECT_0, "Producer child wait returned %#lx.\n", wait );
     CloseHandle( process->hThread );
     CloseHandle( process->hProcess );
     memset( process, 0, sizeof(*process) );
@@ -362,12 +667,18 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_host_test_state *state = NULL;
     struct wayland_host_info info;
     struct wayland_scene_info scene;
+    struct wayland_contributor_info contributor;
     PROCESS_INFORMATION process = {0};
+    PROCESS_INFORMATION producer = {0};
     HANDLE mapping = NULL, ready_event = NULL, command_event = NULL, result_event = NULL;
+    HANDLE producer_command_event = NULL, producer_result_event = NULL;
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
+    UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
+    UINT64 contributor_ids[16];
     HWND root = NULL;
     NTSTATUS status;
     BOOL created;
+    unsigned int i;
 
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Initial host query returned %#lx.\n", status );
@@ -379,7 +690,8 @@ static void test_host_registration( const char *program, const char *test_name )
                             0, 0, 64, 64, NULL, NULL, NULL, NULL );
     ok( !!root, "Failed to create scene root, error %lu.\n", GetLastError() );
     if (!root) goto done;
-    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, &scene_generation );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
+                            &scene_generation );
     ok( status == STATUS_DEVICE_NOT_READY,
         "Scene publication without a host returned %#lx.\n", status );
     ok( !scene_generation, "Rejected scene returned generation %s.\n",
@@ -412,10 +724,14 @@ static void test_host_registration( const char *program, const char *test_name )
     ready_event = CreateEventW( &security, TRUE, FALSE, NULL );
     command_event = CreateEventW( &security, FALSE, FALSE, NULL );
     result_event = CreateEventW( &security, TRUE, FALSE, NULL );
-    ok( mapping && ready_event && command_event && result_event,
+    producer_command_event = CreateEventW( &security, FALSE, FALSE, NULL );
+    producer_result_event = CreateEventW( &security, TRUE, FALSE, NULL );
+    ok( mapping && ready_event && command_event && result_event &&
+        producer_command_event && producer_result_event,
         "Failed to create child IPC, error %lu.\n",
         GetLastError() );
-    if (!mapping || !ready_event || !command_event || !result_event) goto done;
+    if (!mapping || !ready_event || !command_event || !result_event ||
+        !producer_command_event || !producer_result_event) goto done;
     state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) );
     ok( !!state, "Failed to map child state, error %lu.\n", GetLastError() );
     if (!state) goto done;
@@ -468,13 +784,15 @@ static void test_host_registration( const char *program, const char *test_name )
             TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT, &token_low, &token_high );
     ok( status == STATUS_DEVICE_BUSY, "Startup with a live host returned %#lx.\n", status );
 
-    status = publish_scene( root, 0xdeadbeef, 0, 1, &scene_generation );
+    status = publish_scene( root, 0xdeadbeef, 0, 1, 0, 0, 0, &scene_generation );
     ok( status == STATUS_INVALID_PARAMETER, "Invalid scene disposition returned %#lx.\n", status );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, &scene_generation );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
+                            &scene_generation );
     ok( !status && scene_generation == 1,
         "Empty scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( scene_generation ) );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, 0, 2, &next_generation );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, 0, 2, 0, 0, 0,
+                            &next_generation );
     ok( status == STATUS_REVISION_MISMATCH && !next_generation,
         "Stale scene transaction returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -514,18 +832,257 @@ static void test_host_registration( const char *program, const char *test_name )
         "Applied scene query returned status %#lx, applied generation %s.\n",
         state->command_status, wine_dbgstr_longlong( state->applied_generation ) );
 
+    status = create_contributor( root, 0xdeadbeef, WINE_WAYLAND_TARGET_BELOW, 1, state );
+    ok( status == STATUS_INVALID_PARAMETER, "Invalid contributor source returned %#lx.\n", status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_CREATE_CONTRIBUTOR ),
+        "Timed out attempting foreign contributor creation.\n" );
+    ok( state->command_status == STATUS_ACCESS_DENIED,
+        "Foreign contributor creation returned %#lx.\n", state->command_status );
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 1, state );
+    ok( !status && state->contributor_id && (state->grant_low || state->grant_high) &&
+        state->registry_generation == 1,
+        "Contributor creation returned %#lx, id %s, grant %s:%s, registry %s.\n",
+        status, wine_dbgstr_longlong( state->contributor_id ),
+        wine_dbgstr_longlong( state->grant_low ), wine_dbgstr_longlong( state->grant_high ),
+        wine_dbgstr_longlong( state->registry_generation ) );
+    status = get_contributor( root, old_epoch, 0, &contributor );
+    ok( status == STATUS_ACCESS_DENIED, "Non-host contributor query returned %#lx.\n", status );
+
+    created = start_producer_child( program, test_name, mapping, producer_command_event,
+                                    producer_result_event, &producer );
+    ok( created, "Failed to start producer child, error %lu.\n", GetLastError() );
+    if (!created) goto done;
+    state->grant_high ^= 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_BIND ),
+        "Timed out attempting an invalid producer bind.\n" );
+    ok( state->producer_status == STATUS_ACCESS_DENIED,
+        "Invalid producer grant returned %#lx.\n", state->producer_status );
+    state->grant_high ^= 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_BIND ),
+        "Timed out binding producer stream.\n" );
+    ok( !state->producer_status && state->stream_id && state->binding_generation &&
+        state->contributor_host_epoch == old_epoch && state->registry_generation == 2,
+        "Producer bind returned %#lx, stream %s, binding %s, host %s, registry %s.\n",
+        state->producer_status, wine_dbgstr_longlong( state->stream_id ),
+        wine_dbgstr_longlong( state->binding_generation ),
+        wine_dbgstr_longlong( state->contributor_host_epoch ),
+        wine_dbgstr_longlong( state->registry_generation ) );
+    bound_contributor_id = state->contributor_id;
+    bound_stream_id = state->stream_id;
+    bound_binding_generation = state->binding_generation;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_BIND ),
+        "Timed out reusing a consumed contributor grant.\n" );
+    ok( state->producer_status == STATUS_ACCESS_DENIED,
+        "Consumed contributor grant returned %#lx.\n", state->producer_status );
+    state->contributor_id = bound_contributor_id;
+    state->stream_id = bound_stream_id;
+    state->binding_generation = bound_binding_generation;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CHECK ),
+        "Timed out validating producer stream.\n" );
+    ok( !state->producer_status, "Current producer stream returned %#lx.\n",
+        state->producer_status );
+
+    state->contributor_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+        "Timed out enumerating contributor from host.\n" );
+    ok( !state->command_status && state->contributor_id && state->stream_id &&
+        state->binding_generation && state->contributor_host_epoch == old_epoch &&
+        state->contributor_info == WINE_WAYLAND_CONTRIBUTOR_INFO(
+                WINE_WAYLAND_CONTRIBUTOR_DCOMP, WINE_WAYLAND_TARGET_BELOW,
+                WINE_WAYLAND_CONTRIBUTOR_BOUND ),
+        "Host contributor query returned %#lx, id %s, stream %s, binding %s, info %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->contributor_id ),
+        wine_dbgstr_longlong( state->stream_id ),
+        wine_dbgstr_longlong( state->binding_generation ), state->contributor_info );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR_IDENTITY ),
+        "Timed out querying contributor identity.\n" );
+    ok( !state->command_status && state->contribution_revision == 1 &&
+        state->contributor_owner_process_id == GetCurrentProcessId() &&
+        state->contributor_producer_process_id == producer.dwProcessId &&
+        state->contributor_source == WINE_WAYLAND_CONTRIBUTOR_DCOMP &&
+        state->contributor_target_layer == WINE_WAYLAND_TARGET_BELOW &&
+        state->contributor_state == WINE_WAYLAND_CONTRIBUTOR_BOUND,
+        "Contributor identity returned %#lx, revision %s, owner %lu, producer %lu, source %#lx, layer %#lx, state %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->contribution_revision ),
+        state->contributor_owner_process_id, state->contributor_producer_process_id,
+        state->contributor_source, state->contributor_target_layer, state->contributor_state );
+
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 2,
+                            state->contributor_id, state->stream_id,
+                            state->binding_generation, &next_generation );
+    ok( !status && next_generation == scene_generation + 1,
+        "Hosted scene publication returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+    state->binding_generation++;
+    status = revoke_contributor( root, state );
+    ok( status == STATUS_REVISION_MISMATCH,
+        "Stale contributor revocation returned %#lx.\n", status );
+    state->binding_generation--;
+    status = revoke_contributor( root, state );
+    ok( !status && state->registry_generation == 3 &&
+        state->revocation_scene_generation == scene_generation + 1,
+        "Contributor revocation returned %#lx, registry %s, scene %s.\n",
+        status, wine_dbgstr_longlong( state->registry_generation ),
+        wine_dbgstr_longlong( state->revocation_scene_generation ) );
+    scene_generation = state->revocation_scene_generation;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CHECK ),
+        "Timed out checking revoked producer stream.\n" );
+    ok( state->producer_status == STATUS_ACCESS_DENIED,
+        "Revoked producer stream returned %#lx.\n", state->producer_status );
+    state->contributor_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+        "Timed out enumerating revoked contributor.\n" );
+    ok( !state->command_status &&
+        state->contributor_info == WINE_WAYLAND_CONTRIBUTOR_INFO(
+                WINE_WAYLAND_CONTRIBUTOR_DCOMP, WINE_WAYLAND_TARGET_BELOW,
+                WINE_WAYLAND_CONTRIBUTOR_REVOKED ) &&
+        state->revocation_scene_generation == scene_generation,
+        "Revoked contributor query returned %#lx, info %#lx, scene %s.\n",
+        state->command_status, state->contributor_info,
+        wine_dbgstr_longlong( state->revocation_scene_generation ) );
+    state->binding_generation++;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+        "Timed out acknowledging stale contributor revoke.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Stale contributor acknowledgement returned %#lx.\n", state->command_status );
+    state->binding_generation--;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+        "Timed out acknowledging contributor revoke.\n" );
+    ok( !state->command_status, "Contributor acknowledgement returned %#lx.\n",
+        state->command_status );
+    state->contributor_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+        "Timed out checking empty contributor registry.\n" );
+    ok( state->command_status == STATUS_NO_MORE_ENTRIES,
+        "Empty contributor registry returned %#lx.\n", state->command_status );
+
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_ABOVE, 2, state );
+    ok( !status && state->registry_generation == 5,
+        "Exit-test contributor creation returned %#lx, registry %s.\n",
+        status, wine_dbgstr_longlong( state->registry_generation ) );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_BIND ),
+        "Timed out binding exit-test producer stream.\n" );
+    ok( !state->producer_status && state->registry_generation == 6,
+        "Exit-test producer bind returned %#lx, registry %s.\n",
+        state->producer_status, wine_dbgstr_longlong( state->registry_generation ) );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 3,
+                            state->contributor_id, state->stream_id,
+                            state->binding_generation, &next_generation );
+    ok( !status && next_generation == scene_generation + 1,
+        "Exit-test hosted scene returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+    stop_producer_child( state, producer_command_event, producer_result_event, &producer );
+    state->contributor_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+        "Timed out enumerating exited producer.\n" );
+    ok( !state->command_status &&
+        state->contributor_info == WINE_WAYLAND_CONTRIBUTOR_INFO(
+                WINE_WAYLAND_CONTRIBUTOR_DCOMP, WINE_WAYLAND_TARGET_ABOVE,
+                WINE_WAYLAND_CONTRIBUTOR_REVOKED ) &&
+        state->registry_generation == 7 &&
+        state->revocation_scene_generation == scene_generation + 1,
+        "Exited producer query returned %#lx, info %#lx, registry %s, scene %s.\n",
+        state->command_status, state->contributor_info,
+        wine_dbgstr_longlong( state->registry_generation ),
+        wine_dbgstr_longlong( state->revocation_scene_generation ) );
+    scene_generation = state->revocation_scene_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+        "Timed out acknowledging exited producer.\n" );
+    ok( !state->command_status, "Exited producer acknowledgement returned %#lx.\n",
+        state->command_status );
+
+    for (i = 0; i < ARRAY_SIZE(contributor_ids); ++i)
+    {
+        status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                (i & 1) ? WINE_WAYLAND_TARGET_ABOVE : WINE_WAYLAND_TARGET_BELOW,
+                i + 3, state );
+        contributor_ids[i] = state->contributor_id;
+        ok( !status && contributor_ids[i],
+            "Contributor %u creation returned %#lx, id %s.\n", i, status,
+            wine_dbgstr_longlong( contributor_ids[i] ) );
+    }
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 20, state );
+    ok( status == STATUS_INSUFFICIENT_RESOURCES && !state->contributor_id,
+        "Contributor registry overflow returned %#lx, id %s.\n", status,
+        wine_dbgstr_longlong( state->contributor_id ) );
+    for (i = 0; i < ARRAY_SIZE(contributor_ids); ++i)
+    {
+        state->contributor_id = contributor_ids[i];
+        state->binding_generation = 0;
+        status = revoke_contributor( root, state );
+        ok( !status, "Contributor %u revocation returned %#lx.\n", i, status );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+            "Timed out acknowledging contributor %u.\n", i );
+        ok( !state->command_status, "Contributor %u acknowledgement returned %#lx.\n",
+            i, state->command_status );
+    }
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 21, state );
+    ok( !status && state->contributor_id,
+        "Contributor slot reuse returned %#lx, id %s.\n", status,
+        wine_dbgstr_longlong( state->contributor_id ) );
+    state->binding_generation = 0;
+    status = revoke_contributor( root, state );
+    ok( !status, "Reused contributor revocation returned %#lx.\n", status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+        "Timed out acknowledging reused contributor.\n" );
+    ok( !state->command_status, "Reused contributor acknowledgement returned %#lx.\n",
+        state->command_status );
+
     state->scene_generation = scene_generation;
-    state->owner_revision = 2;
+    state->owner_revision = 4;
     state->scene_disposition = WINE_WAYLAND_SCENE_HIDDEN;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_PUBLISH_SCENE ),
         "Timed out attempting foreign scene publication.\n" );
     ok( state->command_status == STATUS_ACCESS_DENIED,
         "Foreign scene publication returned %#lx.\n", state->command_status );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, scene_generation, 2,
-                            &next_generation );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, scene_generation, 4,
+                            0, 0, 0, &next_generation );
     ok( !status && next_generation == scene_generation + 1,
         "Hidden scene publication returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 22, state );
+    ok( !status, "Replacement-test contributor creation returned %#lx.\n", status );
+    created = start_producer_child( program, test_name, mapping, producer_command_event,
+                                    producer_result_event, &producer );
+    ok( created, "Failed to restart producer child, error %lu.\n", GetLastError() );
+    if (!created) goto done;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_BIND ),
+        "Timed out binding replacement-test stream.\n" );
+    ok( !state->producer_status, "Replacement-test bind returned %#lx.\n",
+        state->producer_status );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 5,
+                            state->contributor_id, state->stream_id,
+                            state->binding_generation, &next_generation );
+    ok( !status && next_generation == scene_generation + 1,
+        "Replacement-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
 
@@ -535,6 +1092,11 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !info.process_id && !info.host_epoch && !info.ready,
         "Missing host query returned pid %lu, epoch %s, ready %lu.\n",
         info.process_id, wine_dbgstr_longlong( info.host_epoch ), info.ready );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CHECK ),
+        "Timed out checking stream without a host.\n" );
+    ok( state->producer_status == STATUS_DEVICE_NOT_READY,
+        "Stream check without a host returned %#lx.\n", state->producer_status );
 
     status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION, TEST_CAPABILITIES,
             TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
@@ -554,13 +1116,36 @@ static void test_host_registration( const char *program, const char *test_name )
         wine_dbgstr_longlong( state->host_epoch ), wine_dbgstr_longlong( old_epoch ) );
     status = set_host_ready( old_epoch );
     ok( status == STATUS_REVISION_MISMATCH, "Stale epoch returned %#lx.\n", status );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CHECK ),
+        "Timed out checking stream after host replacement.\n" );
+    ok( state->producer_status == STATUS_ACCESS_DENIED,
+        "Old stream after host replacement returned %#lx.\n", state->producer_status );
+    state->contributor_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+        "Timed out enumerating host-revoked contributor.\n" );
+    ok( !state->command_status &&
+        state->contributor_info == WINE_WAYLAND_CONTRIBUTOR_INFO(
+                WINE_WAYLAND_CONTRIBUTOR_DCOMP, WINE_WAYLAND_TARGET_BELOW,
+                WINE_WAYLAND_CONTRIBUTOR_REVOKED ) &&
+        state->revocation_scene_generation == scene_generation + 1,
+        "Host-revoked contributor returned %#lx, info %#lx, scene %s.\n",
+        state->command_status, state->contributor_info,
+        wine_dbgstr_longlong( state->revocation_scene_generation ) );
+    scene_generation = state->revocation_scene_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+        "Timed out acknowledging host-revoked contributor.\n" );
+    ok( !state->command_status, "Host-revoked acknowledgement returned %#lx.\n",
+        state->command_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying scene from replacement host.\n" );
     ok( state->command_status == STATUS_NOT_FOUND,
         "Unreplayed scene query returned %#lx.\n", state->command_status );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, scene_generation, 3,
-                            &next_generation );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, scene_generation, 6,
+                            0, 0, 0, &next_generation );
     ok( !status && next_generation == scene_generation + 1,
         "Replacement scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
@@ -568,11 +1153,12 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying replacement scene.\n" );
     ok( !state->command_status && state->scene_generation == next_generation &&
-        state->owner_revision == 3 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+        state->owner_revision == 6 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
         "Replacement scene query returned status %#lx, generation %s, revision %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
     stop_host_child( state, command_event, result_event, &process );
+    stop_producer_child( state, producer_command_event, producer_result_event, &producer );
 
     status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION, TEST_CAPABILITIES,
             TEST_ENDPOINT_DEVICE ^ 1, TEST_ENDPOINT_INODE, TEST_SEAT,
@@ -587,8 +1173,12 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !status, "Startup cancellation returned %#lx.\n", status );
 
 done:
+    if (producer.hProcess)
+        stop_producer_child( state, producer_command_event, producer_result_event, &producer );
     if (process.hProcess) stop_host_child( state, command_event, result_event, &process );
     if (state) UnmapViewOfFile( state );
+    if (producer_result_event) CloseHandle( producer_result_event );
+    if (producer_command_event) CloseHandle( producer_command_event );
     if (result_event) CloseHandle( result_event );
     if (command_event) CloseHandle( command_event );
     if (ready_event) CloseHandle( ready_event );
@@ -613,6 +1203,14 @@ START_TEST(wayland_host)
                             (HANDLE)(UINT_PTR)_strtoui64( argv[4], NULL, 0 ),
                             (HANDLE)(UINT_PTR)_strtoui64( argv[5], NULL, 0 ),
                             (HANDLE)(UINT_PTR)_strtoui64( argv[6], NULL, 0 ) );
+        return;
+    }
+    if (argc == 6 && !strcmp( argv[2], "wayland_producer_child" ))
+    {
+        if (p_wine_server_call)
+            run_producer_child( (HANDLE)(UINT_PTR)_strtoui64( argv[3], NULL, 0 ),
+                                (HANDLE)(UINT_PTR)_strtoui64( argv[4], NULL, 0 ),
+                                (HANDLE)(UINT_PTR)_strtoui64( argv[5], NULL, 0 ) );
         return;
     }
     if (p_wine_server_call)

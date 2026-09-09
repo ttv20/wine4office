@@ -56,6 +56,33 @@ enum property_type
     PROP_TYPE_ATOM    /* plain atom */
 };
 
+#define MAX_WAYLAND_SCENE_CONTRIBUTORS 16
+
+struct wayland_scene_contributor
+{
+    struct process      *owner;
+    struct process      *producer;
+    process_id_t         owner_id;
+    process_id_t         producer_id;
+    unsigned __int64     contributor_id;
+    unsigned __int64     stream_id;
+    unsigned __int64     binding_generation;
+    unsigned __int64     host_epoch;
+    unsigned __int64     grant_low;
+    unsigned __int64     grant_high;
+    unsigned __int64     contribution_revision;
+    unsigned __int64     revocation_scene_generation;
+    unsigned int         source;
+    unsigned int         target_layer;
+    unsigned int         state;
+};
+
+struct wayland_scene_registry
+{
+    unsigned __int64 generation;
+    struct wayland_scene_contributor contributors[MAX_WAYLAND_SCENE_CONTRIBUTORS];
+};
+
 
 struct window
 {
@@ -100,8 +127,16 @@ struct window
     unsigned __int64 wayland_scene_owner_revision;
     unsigned __int64 wayland_scene_applied_generation;
     unsigned __int64 wayland_scene_host_epoch;
+    unsigned __int64 wayland_scene_contributor_id;
+    unsigned __int64 wayland_scene_stream_id;
+    unsigned __int64 wayland_scene_binding_generation;
     unsigned int     wayland_scene_disposition;
+    struct wayland_scene_registry *wayland_scene_registry;
 };
+
+static unsigned __int64 wayland_contributor_id;
+static unsigned __int64 wayland_stream_id;
+static unsigned __int64 wayland_binding_generation;
 
 C_ASSERT( sizeof(window_shm_t) == offsetof(window_shm_t, extra[0]) );
 
@@ -167,6 +202,7 @@ static void window_destroy( struct object *obj )
     if (win->update_region) free_region( win->update_region );
     if (win->class) release_class( win->class );
     free( win->text );
+    free( win->wayland_scene_registry );
 
     if (win->shared) free_shared_object( win->shared );
 }
@@ -695,7 +731,11 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_scene_owner_revision = 0;
     win->wayland_scene_applied_generation = 0;
     win->wayland_scene_host_epoch = 0;
+    win->wayland_scene_contributor_id = 0;
+    win->wayland_scene_stream_id = 0;
+    win->wayland_scene_binding_generation = 0;
     win->wayland_scene_disposition = 0;
+    win->wayland_scene_registry = NULL;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
     list_init( &win->children );
     list_init( &win->unlinked );
@@ -3465,14 +3505,110 @@ DECL_HANDLER(set_window_layered_info)
     else set_win32_error( ERROR_INVALID_WINDOW_HANDLE );
 }
 
+static struct wayland_scene_contributor *find_wayland_contributor( struct window *root,
+                                                                    unsigned __int64 id )
+{
+    unsigned int i;
+
+    if (!root->wayland_scene_registry || !id) return NULL;
+    for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+    {
+        struct wayland_scene_contributor *contributor =
+                &root->wayland_scene_registry->contributors[i];
+        if (contributor->state && contributor->contributor_id == id) return contributor;
+    }
+    return NULL;
+}
+
+static int generate_wayland_contributor_grant( unsigned __int64 *low, unsigned __int64 *high )
+{
+    unsigned __int64 token[2];
+
+    do
+    {
+        if (!fill_server_random_bytes( token, sizeof(token) ))
+        {
+            set_error( STATUS_UNSUCCESSFUL );
+            return 0;
+        }
+    }
+    while (!token[0] && !token[1]);
+    *low = token[0];
+    *high = token[1];
+    return 1;
+}
+
+static int is_owned_wayland_scene_root( struct window *root, struct desktop *desktop )
+{
+    if (root->desktop != desktop || root->parent != desktop->top_window ||
+        !root->thread || root->thread->process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return 0;
+    }
+    return 1;
+}
+
+static int is_current_wayland_host( struct desktop *desktop, unsigned __int64 host_epoch )
+{
+    if (!desktop->wayland_host_process)
+        set_error( STATUS_NOT_FOUND );
+    else if (desktop->wayland_host_epoch != host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (desktop->wayland_host_process != current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else
+        return 1;
+    return 0;
+}
+
+static int wayland_scene_uses_contributor( const struct window *root,
+                                           const struct wayland_scene_contributor *contributor )
+{
+    return root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+           root->wayland_scene_contributor_id == contributor->contributor_id &&
+           root->wayland_scene_stream_id == contributor->stream_id &&
+           root->wayland_scene_binding_generation == contributor->binding_generation;
+}
+
+static void invalidate_wayland_contributor( struct window *root,
+                                            struct wayland_scene_contributor *contributor )
+{
+    if (!contributor->state || contributor->state == WINE_WAYLAND_CONTRIBUTOR_REVOKED) return;
+
+    contributor->state = WINE_WAYLAND_CONTRIBUTOR_REVOKED;
+    contributor->owner = NULL;
+    contributor->producer = NULL;
+    contributor->grant_low = 0;
+    contributor->grant_high = 0;
+    if (!++root->wayland_scene_registry->generation)
+        ++root->wayland_scene_registry->generation;
+
+    if (wayland_scene_uses_contributor( root, contributor ))
+    {
+        if (!++root->wayland_scene_generation) ++root->wayland_scene_generation;
+        root->wayland_scene_applied_generation = 0;
+        root->wayland_scene_host_epoch = root->desktop->wayland_host_epoch;
+        root->wayland_scene_contributor_id = 0;
+        root->wayland_scene_stream_id = 0;
+        root->wayland_scene_binding_generation = 0;
+        root->wayland_scene_disposition = WINE_WAYLAND_SCENE_EMPTY;
+        contributor->revocation_scene_generation = root->wayland_scene_generation;
+    }
+}
+
 DECL_HANDLER(publish_wayland_scene)
 {
     struct window *root;
     struct desktop *desktop;
+    struct wayland_scene_contributor *contributor = NULL;
 
     reply->scene_generation = 0;
     if (req->disposition != WINE_WAYLAND_SCENE_EMPTY &&
-        req->disposition != WINE_WAYLAND_SCENE_HIDDEN)
+        req->disposition != WINE_WAYLAND_SCENE_HIDDEN &&
+        req->disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
@@ -3485,12 +3621,23 @@ DECL_HANDLER(publish_wayland_scene)
     if (!(root = get_window( req->root ))) return;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
 
-    if (root->desktop != desktop || root->parent != desktop->top_window)
-        set_error( STATUS_ACCESS_DENIED );
-    else if (!root->thread || root->thread->process != current->process)
-        set_error( STATUS_ACCESS_DENIED );
-    else if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+    if (!is_owned_wayland_scene_root( root, desktop ))
+    {
+        release_object( desktop );
+        return;
+    }
+    if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
         set_error( STATUS_DEVICE_NOT_READY );
+    else if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+             (!(contributor = find_wayland_contributor( root, req->contributor_id )) ||
+              contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
+              contributor->stream_id != req->stream_id ||
+              contributor->binding_generation != req->binding_generation ||
+              contributor->host_epoch != desktop->wayland_host_epoch))
+        set_error( STATUS_ACCESS_DENIED );
+    else if (req->disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+             (req->contributor_id || req->stream_id || req->binding_generation))
+        set_error( STATUS_INVALID_PARAMETER );
     else if (req->expected_generation != root->wayland_scene_generation ||
              req->owner_revision <= root->wayland_scene_owner_revision)
         set_error( STATUS_REVISION_MISMATCH );
@@ -3502,6 +3649,9 @@ DECL_HANDLER(publish_wayland_scene)
         root->wayland_scene_owner_revision = req->owner_revision;
         root->wayland_scene_applied_generation = 0;
         root->wayland_scene_host_epoch = desktop->wayland_host_epoch;
+        root->wayland_scene_contributor_id = req->contributor_id;
+        root->wayland_scene_stream_id = req->stream_id;
+        root->wayland_scene_binding_generation = req->binding_generation;
         root->wayland_scene_disposition = req->disposition;
         reply->scene_generation = root->wayland_scene_generation;
     }
@@ -3561,4 +3711,325 @@ DECL_HANDLER(set_wayland_scene_applied)
         set_error( STATUS_DEVICE_NOT_READY );
     else
         root->wayland_scene_applied_generation = req->scene_generation;
+}
+
+DECL_HANDLER(create_wayland_contributor)
+{
+    struct wayland_scene_contributor *contributor = NULL;
+    struct wayland_scene_registry *registry;
+    struct window *root;
+    struct desktop *desktop;
+    unsigned __int64 grant_low, grant_high;
+    unsigned int i;
+
+    reply->contributor_id = 0;
+    reply->grant_low = 0;
+    reply->grant_high = 0;
+    reply->registry_generation = 0;
+    if (req->source != WINE_WAYLAND_CONTRIBUTOR_DCOMP ||
+        (req->target_layer != WINE_WAYLAND_TARGET_BELOW &&
+         req->target_layer != WINE_WAYLAND_TARGET_ABOVE) ||
+        !req->contribution_revision)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!is_owned_wayland_scene_root( root, desktop )) goto done;
+    if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+    {
+        set_error( STATUS_DEVICE_NOT_READY );
+        goto done;
+    }
+    if (!(registry = root->wayland_scene_registry))
+    {
+        if (!(registry = mem_alloc( sizeof(*registry) ))) goto done;
+        memset( registry, 0, sizeof(*registry) );
+        root->wayland_scene_registry = registry;
+    }
+    for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+    {
+        if (!registry->contributors[i].state)
+        {
+            contributor = &registry->contributors[i];
+            break;
+        }
+    }
+    if (!contributor)
+    {
+        set_error( STATUS_INSUFFICIENT_RESOURCES );
+        goto done;
+    }
+    if (wayland_contributor_id == ~(unsigned __int64)0 ||
+        registry->generation == ~(unsigned __int64)0)
+    {
+        set_error( STATUS_INTEGER_OVERFLOW );
+        goto done;
+    }
+    if (!generate_wayland_contributor_grant( &grant_low, &grant_high )) goto done;
+
+    contributor->owner = current->process;
+    contributor->owner_id = current->process->id;
+    contributor->contributor_id = ++wayland_contributor_id;
+    contributor->grant_low = grant_low;
+    contributor->grant_high = grant_high;
+    contributor->contribution_revision = req->contribution_revision;
+    contributor->source = req->source;
+    contributor->target_layer = req->target_layer;
+    contributor->state = WINE_WAYLAND_CONTRIBUTOR_GRANTED;
+    reply->contributor_id = contributor->contributor_id;
+    reply->grant_low = contributor->grant_low;
+    reply->grant_high = contributor->grant_high;
+    reply->registry_generation = ++registry->generation;
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(bind_wayland_stream)
+{
+    struct wayland_scene_contributor *contributor;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->stream_id = 0;
+    reply->binding_generation = 0;
+    reply->host_epoch = 0;
+    reply->registry_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (root->desktop != desktop)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else if (desktop->wayland_host_process == current->process)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_GRANTED ||
+             contributor->grant_low != req->grant_low ||
+             contributor->grant_high != req->grant_high)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (wayland_stream_id == ~(unsigned __int64)0 ||
+             wayland_binding_generation == ~(unsigned __int64)0 ||
+             root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        contributor->producer = current->process;
+        contributor->producer_id = current->process->id;
+        contributor->stream_id = ++wayland_stream_id;
+        contributor->binding_generation = ++wayland_binding_generation;
+        contributor->host_epoch = desktop->wayland_host_epoch;
+        contributor->grant_low = 0;
+        contributor->grant_high = 0;
+        contributor->state = WINE_WAYLAND_CONTRIBUTOR_BOUND;
+        reply->stream_id = contributor->stream_id;
+        reply->binding_generation = contributor->binding_generation;
+        reply->host_epoch = contributor->host_epoch;
+        reply->registry_generation = ++root->wayland_scene_registry->generation;
+    }
+    release_object( desktop );
+}
+
+DECL_HANDLER(revoke_wayland_contributor)
+{
+    struct wayland_scene_contributor *contributor;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->registry_generation = 0;
+    reply->scene_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!is_owned_wayland_scene_root( root, desktop )) goto done;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->owner != current->process ||
+             contributor->state == WINE_WAYLAND_CONTRIBUTOR_REVOKED)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (contributor->binding_generation != req->binding_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0 ||
+             (wayland_scene_uses_contributor( root, contributor ) &&
+              root->wayland_scene_generation == ~(unsigned __int64)0))
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        invalidate_wayland_contributor( root, contributor );
+        reply->registry_generation = root->wayland_scene_registry->generation;
+        reply->scene_generation = contributor->revocation_scene_generation;
+    }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_contributor)
+{
+    struct wayland_scene_contributor *contributor = NULL;
+    struct window *root;
+    unsigned __int64 next_id = ~(unsigned __int64)0;
+    unsigned int i;
+
+    reply->contributor_id = 0;
+    reply->stream_id = 0;
+    reply->binding_generation = 0;
+    reply->contributor_host_epoch = 0;
+    reply->registry_generation = 0;
+    reply->revocation_scene_generation = 0;
+    reply->info = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!root->wayland_scene_registry)
+    {
+        set_error( STATUS_NO_MORE_ENTRIES );
+        return;
+    }
+    for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+    {
+        struct wayland_scene_contributor *candidate =
+                &root->wayland_scene_registry->contributors[i];
+        if (candidate->state && candidate->contributor_id > req->previous_contributor_id &&
+            candidate->contributor_id < next_id)
+        {
+            contributor = candidate;
+            next_id = candidate->contributor_id;
+        }
+    }
+    if (!contributor)
+    {
+        set_error( STATUS_NO_MORE_ENTRIES );
+        return;
+    }
+    reply->contributor_id = contributor->contributor_id;
+    reply->stream_id = contributor->stream_id;
+    reply->binding_generation = contributor->binding_generation;
+    reply->contributor_host_epoch = contributor->host_epoch;
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    reply->revocation_scene_generation = contributor->revocation_scene_generation;
+    reply->info = WINE_WAYLAND_CONTRIBUTOR_INFO( contributor->source,
+                                                contributor->target_layer,
+                                                contributor->state );
+}
+
+DECL_HANDLER(get_wayland_contributor_identity)
+{
+    struct wayland_scene_contributor *contributor;
+    struct window *root;
+
+    reply->contribution_revision = 0;
+    reply->owner_process_id = 0;
+    reply->producer_process_id = 0;
+    reply->source = 0;
+    reply->target_layer = 0;
+    reply->state = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->contribution_revision = contributor->contribution_revision;
+    reply->owner_process_id = contributor->owner_id;
+    reply->producer_process_id = contributor->producer_id;
+    reply->source = contributor->source;
+    reply->target_layer = contributor->target_layer;
+    reply->state = contributor->state;
+}
+
+DECL_HANDLER(ack_wayland_contributor_revoke)
+{
+    struct wayland_scene_contributor *contributor;
+    struct window *root;
+
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_REVOKED)
+        set_error( STATUS_DEVICE_BUSY );
+    else if (contributor->binding_generation != req->binding_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+        set_error( STATUS_INTEGER_OVERFLOW );
+    else
+    {
+        memset( contributor, 0, sizeof(*contributor) );
+        ++root->wayland_scene_registry->generation;
+    }
+}
+
+DECL_HANDLER(check_wayland_stream)
+{
+    struct wayland_scene_contributor *contributor;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->host_epoch = 0;
+    reply->registry_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (root->desktop != desktop)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
+             contributor->producer != current->process ||
+             contributor->stream_id != req->stream_id)
+        set_error( STATUS_ACCESS_DENIED );
+    else if (contributor->binding_generation != req->binding_generation ||
+             contributor->host_epoch != desktop->wayland_host_epoch)
+        set_error( STATUS_REVISION_MISMATCH );
+    else
+    {
+        reply->host_epoch = contributor->host_epoch;
+        reply->registry_generation = root->wayland_scene_registry->generation;
+    }
+    release_object( desktop );
+}
+
+void cleanup_process_wayland_scenes( struct process *process )
+{
+    struct window *root;
+    user_handle_t handle = 0;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        unsigned int i;
+
+        if (!root->wayland_scene_registry) continue;
+        for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+        {
+            struct wayland_scene_contributor *contributor =
+                    &root->wayland_scene_registry->contributors[i];
+            if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_REVOKED &&
+                (contributor->owner == process || contributor->producer == process))
+                invalidate_wayland_contributor( root, contributor );
+        }
+    }
+}
+
+void revoke_wayland_desktop_streams( struct desktop *desktop )
+{
+    struct window *root;
+    user_handle_t handle = 0;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        unsigned int i;
+
+        if (root->desktop != desktop || !root->wayland_scene_registry) continue;
+        for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+        {
+            struct wayland_scene_contributor *contributor =
+                    &root->wayland_scene_registry->contributors[i];
+            if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_REVOKED)
+                invalidate_wayland_contributor( root, contributor );
+        }
+    }
 }

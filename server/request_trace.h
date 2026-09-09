@@ -3749,6 +3749,9 @@ static void dump_publish_wayland_scene_request( const struct publish_wayland_sce
     fprintf( stderr, ", disposition=%08x", req->disposition );
     dump_uint64( ", expected_generation=", &req->expected_generation );
     dump_uint64( ", owner_revision=", &req->owner_revision );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
 }
 
 static void dump_publish_wayland_scene_reply( const struct publish_wayland_scene_reply *req )
@@ -3776,6 +3779,108 @@ static void dump_set_wayland_scene_applied_request( const struct set_wayland_sce
     fprintf( stderr, " root=%08x", req->root );
     dump_uint64( ", host_epoch=", &req->host_epoch );
     dump_uint64( ", scene_generation=", &req->scene_generation );
+}
+
+static void dump_create_wayland_contributor_request( const struct create_wayland_contributor_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", source=%08x", req->source );
+    fprintf( stderr, ", target_layer=%08x", req->target_layer );
+    dump_uint64( ", contribution_revision=", &req->contribution_revision );
+}
+
+static void dump_create_wayland_contributor_reply( const struct create_wayland_contributor_reply *req )
+{
+    dump_uint64( " contributor_id=", &req->contributor_id );
+    dump_uint64( ", grant_low=", &req->grant_low );
+    dump_uint64( ", grant_high=", &req->grant_high );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
+}
+
+static void dump_bind_wayland_stream_request( const struct bind_wayland_stream_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", grant_low=", &req->grant_low );
+    dump_uint64( ", grant_high=", &req->grant_high );
+}
+
+static void dump_bind_wayland_stream_reply( const struct bind_wayland_stream_reply *req )
+{
+    dump_uint64( " stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
+}
+
+static void dump_revoke_wayland_contributor_request( const struct revoke_wayland_contributor_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+}
+
+static void dump_revoke_wayland_contributor_reply( const struct revoke_wayland_contributor_reply *req )
+{
+    dump_uint64( " registry_generation=", &req->registry_generation );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+}
+
+static void dump_get_wayland_contributor_request( const struct get_wayland_contributor_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", previous_contributor_id=", &req->previous_contributor_id );
+}
+
+static void dump_get_wayland_contributor_reply( const struct get_wayland_contributor_reply *req )
+{
+    dump_uint64( " contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", contributor_host_epoch=", &req->contributor_host_epoch );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
+    dump_uint64( ", revocation_scene_generation=", &req->revocation_scene_generation );
+    fprintf( stderr, ", info=%08x", req->info );
+}
+
+static void dump_get_wayland_contributor_identity_request( const struct get_wayland_contributor_identity_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+}
+
+static void dump_get_wayland_contributor_identity_reply( const struct get_wayland_contributor_identity_reply *req )
+{
+    dump_uint64( " contribution_revision=", &req->contribution_revision );
+    fprintf( stderr, ", owner_process_id=%04x", req->owner_process_id );
+    fprintf( stderr, ", producer_process_id=%04x", req->producer_process_id );
+    fprintf( stderr, ", source=%08x", req->source );
+    fprintf( stderr, ", target_layer=%08x", req->target_layer );
+    fprintf( stderr, ", state=%08x", req->state );
+}
+
+static void dump_ack_wayland_contributor_revoke_request( const struct ack_wayland_contributor_revoke_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+}
+
+static void dump_check_wayland_stream_request( const struct check_wayland_stream_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+}
+
+static void dump_check_wayland_stream_reply( const struct check_wayland_stream_reply *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -4112,6 +4217,13 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_publish_wayland_scene_request,
     (dump_func)dump_get_wayland_scene_request,
     (dump_func)dump_set_wayland_scene_applied_request,
+    (dump_func)dump_create_wayland_contributor_request,
+    (dump_func)dump_bind_wayland_stream_request,
+    (dump_func)dump_revoke_wayland_contributor_request,
+    (dump_func)dump_get_wayland_contributor_request,
+    (dump_func)dump_get_wayland_contributor_identity_request,
+    (dump_func)dump_ack_wayland_contributor_revoke_request,
+    (dump_func)dump_check_wayland_stream_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4446,6 +4558,13 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_publish_wayland_scene_reply,
     (dump_func)dump_get_wayland_scene_reply,
     NULL,
+    (dump_func)dump_create_wayland_contributor_reply,
+    (dump_func)dump_bind_wayland_stream_reply,
+    (dump_func)dump_revoke_wayland_contributor_reply,
+    (dump_func)dump_get_wayland_contributor_reply,
+    (dump_func)dump_get_wayland_contributor_identity_reply,
+    NULL,
+    (dump_func)dump_check_wayland_stream_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4780,6 +4899,13 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "publish_wayland_scene",
     "get_wayland_scene",
     "set_wayland_scene_applied",
+    "create_wayland_contributor",
+    "bind_wayland_stream",
+    "revoke_wayland_contributor",
+    "get_wayland_contributor",
+    "get_wayland_contributor_identity",
+    "ack_wayland_contributor_revoke",
+    "check_wayland_stream",
 };
 
 static const struct

@@ -74,7 +74,7 @@ static int desktop_link_name( struct object *obj, struct object_name *name, stru
 static int desktop_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void desktop_destroy( struct object *obj );
 
-static int fill_random_bytes( void *buffer, size_t size )
+int fill_server_random_bytes( void *buffer, size_t size )
 {
     unsigned char *ptr = buffer;
     int fd;
@@ -143,6 +143,7 @@ static void expire_wayland_host_startup( void *private )
 
 static void clear_wayland_host_registration( struct desktop *desktop )
 {
+    revoke_wayland_desktop_streams( desktop );
     if (desktop->wayland_host_process)
         release_object( desktop->wayland_host_process );
     desktop->wayland_host_process = NULL;
@@ -191,7 +192,7 @@ static int generate_wayland_host_token( struct desktop *desktop )
 
     do
     {
-        if (!fill_random_bytes( token, sizeof(token) ))
+        if (!fill_server_random_bytes( token, sizeof(token) ))
         {
             desktop->wayland_host_token_low = desktop->wayland_host_token_high = 0;
             set_error( STATUS_UNSUCCESSFUL );

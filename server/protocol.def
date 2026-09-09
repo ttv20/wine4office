@@ -32,9 +32,6 @@
 #include <winbase.h>
 #include <ntuser.h>
 
-#define WINE_WAYLAND_SCENE_EMPTY  0x00000001
-#define WINE_WAYLAND_SCENE_HIDDEN 0x00000002
-
 typedef unsigned int obj_handle_t;
 typedef unsigned int user_handle_t;
 typedef unsigned int d3dkmt_handle_t;
@@ -59,6 +56,22 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_HOST_CAP_SHM            0x00000004
 #define WINE_WAYLAND_HOST_CAP_SEAT           0x00000008
 #define WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
+
+#define WINE_WAYLAND_SCENE_EMPTY          0x00000001
+#define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
+#define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
+
+#define WINE_WAYLAND_CONTRIBUTOR_DCOMP 0x00000001
+
+#define WINE_WAYLAND_TARGET_BELOW 0x00000001
+#define WINE_WAYLAND_TARGET_ABOVE 0x00000002
+
+#define WINE_WAYLAND_CONTRIBUTOR_GRANTED 0x00000001
+#define WINE_WAYLAND_CONTRIBUTOR_BOUND   0x00000002
+#define WINE_WAYLAND_CONTRIBUTOR_REVOKED 0x00000003
+
+#define WINE_WAYLAND_CONTRIBUTOR_INFO(source,layer,state) \
+    ((source) | ((layer) << 8) | ((state) << 16))
 
 struct request_header
 {
@@ -4538,6 +4551,9 @@ enum inproc_sync_type
     unsigned int     disposition;
     unsigned __int64 expected_generation;
     unsigned __int64 owner_revision;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
 @REPLY
     unsigned __int64 scene_generation;
 @END
@@ -4559,4 +4575,88 @@ enum inproc_sync_type
     user_handle_t    root;
     unsigned __int64 host_epoch;
     unsigned __int64 scene_generation;
+@END
+
+/* Create a bounded contributor grant as the logical root owner. */
+@REQ(create_wayland_contributor)
+    user_handle_t    root;
+    unsigned int     source;
+    unsigned int     target_layer;
+    unsigned __int64 contribution_revision;
+@REPLY
+    unsigned __int64 contributor_id;
+    unsigned __int64 grant_low;
+    unsigned __int64 grant_high;
+    unsigned __int64 registry_generation;
+@END
+
+/* Consume an owner-issued contributor grant and bind the calling producer. */
+@REQ(bind_wayland_stream)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 grant_low;
+    unsigned __int64 grant_high;
+@REPLY
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 host_epoch;
+    unsigned __int64 registry_generation;
+@END
+
+/* Revoke a contributor before any later stream admission. */
+@REQ(revoke_wayland_contributor)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 binding_generation;
+@REPLY
+    unsigned __int64 registry_generation;
+    unsigned __int64 scene_generation;
+@END
+
+/* Enumerate contributor state as the registered host. */
+@REQ(get_wayland_contributor)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 previous_contributor_id;
+@REPLY
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 contributor_host_epoch;
+    unsigned __int64 registry_generation;
+    unsigned __int64 revocation_scene_generation;
+    unsigned int     info;
+@END
+
+/* Query immutable contributor identity as the registered host. */
+@REQ(get_wayland_contributor_identity)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+@REPLY
+    unsigned __int64 contribution_revision;
+    process_id_t     owner_process_id;
+    process_id_t     producer_process_id;
+    unsigned int     source;
+    unsigned int     target_layer;
+    unsigned int     state;
+@END
+
+/* Release a revoked contributor tombstone after host observation. */
+@REQ(ack_wayland_contributor_revoke)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 binding_generation;
+@END
+
+/* Validate producer authority only; this does not submit or present a frame. */
+@REQ(check_wayland_stream)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+@REPLY
+    unsigned __int64 host_epoch;
+    unsigned __int64 registry_generation;
 @END
