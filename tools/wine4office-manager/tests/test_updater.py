@@ -330,8 +330,10 @@ class UpdaterTests(unittest.TestCase):
                 "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
                 "--only-upgrade", "-y", "wine4office",
             ]
+        ), mock.patch.object(
+            backend, "package_installation", return_value=apt
         ), mock.patch.object(backend.subprocess, "run", return_value=completed) as run:
-            backend.install_package_update(lambda _line: None, apt)
+            result = backend.install_package_update(lambda _line: None, apt)
         self.assertEqual([call.args[0] for call in run.call_args_list], [
             ["/usr/bin/pkexec", "/usr/bin/apt-get", "update"],
             [
@@ -339,6 +341,99 @@ class UpdaterTests(unittest.TestCase):
                 "--only-upgrade", "-y", "wine4office",
             ],
         ])
+        self.assertFalse(result["changed"])
+        self.assertIn("already current", result["message"])
+
+    def test_package_update_verifies_every_owned_component_changed(self):
+        apt = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        (self.install_root / "VERSION").write_text("1.0.0\n")
+        (self.install_root / "WINE_VERSION").write_text("1.0.0\n")
+
+        def update_package(*_args, **_kwargs):
+            (self.install_root / "VERSION").write_text("2.0.0\n")
+            (self.install_root / "WINE_VERSION").write_text("2.0.0\n")
+            return mock.Mock(returncode=0, stdout="updated\n")
+
+        with mock.patch.object(
+            backend, "package_update_command",
+            return_value=["/usr/bin/pkexec", "/usr/bin/apt-get", "install"],
+        ), mock.patch.object(
+            backend, "package_installation", return_value=apt
+        ), mock.patch.object(backend.subprocess, "run", side_effect=update_package):
+            result = backend.install_package_update(lambda _line: None, apt)
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(set(result["components"]), {"manager", "wine"})
+
+    def test_package_update_detects_build_metadata_replacement(self):
+        apt = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        (self.install_root / "VERSION").write_text("1.0.0+build.4\n")
+        (self.install_root / "WINE_VERSION").write_text("1.0.0+build.4\n")
+
+        def update_package(*_args, **_kwargs):
+            (self.install_root / "VERSION").write_text("1.0.0+build.5\n")
+            (self.install_root / "WINE_VERSION").write_text("1.0.0+build.5\n")
+            return mock.Mock(returncode=0, stdout="updated\n")
+
+        with mock.patch.object(
+            backend, "package_update_command",
+            return_value=["/usr/bin/pkexec", "/usr/bin/apt-get", "install"],
+        ), mock.patch.object(
+            backend, "package_installation", return_value=apt
+        ), mock.patch.object(backend.subprocess, "run", side_effect=update_package):
+            result = backend.install_package_update(lambda _line: None, apt)
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(set(result["components"]), {"manager", "wine"})
+
+    def test_package_installation_skips_feed_checks_and_install_lock(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "apt",
+            "package": "wine4office",
+            "components": ["manager", "wine"],
+        }))
+        state = manager.ManagerState()
+        with mock.patch.object(backend, "check_for_updates") as check:
+            self.assertFalse(state.start_update_check())
+        check.assert_not_called()
+        self.assertTrue(state.snapshot()["updater"]["checked"])
+        with mock.patch.object(backend, "_install_update_lock") as lock:
+            backend.wait_for_install_update()
+        lock.assert_not_called()
+
+    def test_unchanged_package_update_does_not_migrate_wine_prefix(self):
+        package = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        with mock.patch.object(
+            backend, "package_installation", return_value=package
+        ), mock.patch.object(
+            backend, "package_update_command", return_value=["pkexec", "apt-get"]
+        ), mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=None
+        ), mock.patch.object(
+            manager, "stop_wine_confirmed"
+        ), mock.patch.object(
+            backend, "install_package_update", return_value={
+                "changed": False, "components": (), "message": "already current",
+            }
+        ), mock.patch.object(backend, "update_wine_prefix") as update_prefix:
+            state = manager.ManagerState()
+            state.start_package_update()
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        update_prefix.assert_not_called()
+        self.assertEqual(state.snapshot()["task"]["status"], "completed")
+        self.assertFalse(state.snapshot()["task"]["wine_update_completed"])
 
     def test_package_installation_rejects_executable_metadata(self):
         package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
@@ -350,6 +445,46 @@ class UpdaterTests(unittest.TestCase):
         }))
         with self.assertRaisesRegex(ValueError, "package name"):
             backend.package_installation()
+
+    def test_nix_package_wrapper_is_embedded_in_persistent_commands(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "nix",
+            "package": "wine4office",
+            "components": ["manager", "wine"],
+        }))
+        wrapper = self.root / "profile/bin/wine4office"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\nexec \"$@\"\n")
+        wrapper.chmod(0o755)
+        with mock.patch.dict(
+            os.environ, {"WINE4OFFICE_PACKAGE_WRAPPER": str(wrapper)}
+        ):
+            self.assertEqual(
+                backend.package_wrap_command(["/nix/store/raw-wine", "wineboot"]),
+                [str(wrapper), "--exec", "/nix/store/raw-wine", "wineboot"],
+            )
+            launcher = backend._shortcut_launcher_text(
+                "excel", self.home / ".wine4office",
+                Path("/nix/store/raw-runner/bin/wine"),
+                self.home / "EXCEL.EXE", None,
+            )
+            with mock.patch.object(
+                backend, "_preload_manager_executable",
+                return_value=Path("/nix/store/raw-manager"),
+            ), mock.patch.object(
+                backend, "_preload_worker_executable",
+                return_value=Path("/nix/store/raw-worker"),
+            ):
+                update_unit = backend._automatic_update_service_text()
+                preload_unit = backend._preload_unit_text(
+                    self.home / "binding.json", self.home / "status.json"
+                )
+
+        self.assertIn(f"wine_command=({wrapper} --exec ", launcher)
+        self.assertIn(f'ExecStart="{wrapper}" "--exec" ', update_unit)
+        self.assertIn(f'ExecStart="{wrapper}" "--exec" ', preload_unit)
 
     def test_equal_or_downgrade_is_rejected_before_download(self):
         parsed = backend.parse_release_metadata(

@@ -13,6 +13,7 @@ validate_package_input() {
     package_version=$3
     package_provider=$4
     package_name=$5
+    # shellcheck disable=SC2034 # Consumed by the sourcing package builder.
     package_output=$6
     [[ -x "$manager_binary" ]] || { echo "Manager binary is not executable" >&2; exit 1; }
     [[ -f "$wine_archive" ]] || { echo "Wine archive is missing" >&2; exit 1; }

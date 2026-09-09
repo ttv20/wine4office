@@ -44,7 +44,7 @@ FONT_HELPER = (INSTALL_ROOT / "lib/register-office-cloud-fonts.sh"
 
 def manager_restart_command() -> list[str]:
     if FROZEN:
-        return [str(Path(sys.executable).resolve())]
+        return backend.package_wrap_command([str(Path(sys.executable).resolve())])
     if INSTALL_ROOT != HERE:
         return [str(INSTALL_ROOT / "bin/wine4office-manager")]
     return [str(Path(sys.executable).resolve()), str(HERE / "wine4office_manager.py")]
@@ -684,6 +684,14 @@ class ManagerState:
         with self.lock:
             if self.updater["checking"]:
                 return False
+            if backend.package_installation() is not None:
+                self.updater = {
+                    "checking": False,
+                    "checked": True,
+                    "offer": None,
+                    "error": "",
+                }
+                return False
             metadata_url = str(self.config["update_url"]).strip()
             if not metadata_url:
                 return False
@@ -778,10 +786,10 @@ class ManagerState:
                 raise RuntimeError(
                     "Package-managed and standalone updates must be installed separately."
                 )
-            package = (
-                offer["updates"][package_updates[0]]["package"]
-                if package_updates else None
-            )
+            if package_updates:
+                raise RuntimeError(
+                    "Package-managed Wine4Office must be updated as one package."
+                )
 
         def install() -> str:
             preload_update = None
@@ -797,21 +805,15 @@ class ManagerState:
                         use_x11=active_use_x11,
                     )
                     self.output("Stopped the selected Wine environment before updating.")
-                if package is not None:
-                    self.set_progress(
-                        f"Updating through {package['provider_name']}", None
-                    )
-                    result = backend.install_package_update(self.output, package)
-                else:
-                    result = backend.install_release_updates(
-                        metadata, selected, self.output, self.cancel_event,
-                        expected_channel=backend.accepted_update_channels(
-                            include_prereleases=(
-                                config.get("include_prereleases") is True
-                            )
-                        ),
-                        progress=self.set_progress,
-                    )
+                result = backend.install_release_updates(
+                    metadata, selected, self.output, self.cancel_event,
+                    expected_channel=backend.accepted_update_channels(
+                        include_prereleases=(
+                            config.get("include_prereleases") is True
+                        )
+                    ),
+                    progress=self.set_progress,
+                )
                 if "wine" in selected:
                     self.set_progress("Updating the Wine environment", None)
                     new_wine = str(backend.runner_update_target() / "bin/wine")
@@ -852,6 +854,77 @@ class ManagerState:
         self.start_task("update", install)
         with self.lock:
             self.updater["offer"] = None
+
+    def start_package_update(self) -> None:
+        """Update every component owned by one system package."""
+        with self.lock:
+            package = backend.package_installation()
+            if package is None:
+                raise RuntimeError("Wine4Office is not managed by a system package.")
+            if backend.package_update_command(package) is None:
+                raise RuntimeError(backend.package_update_instructions(package))
+            config = dict(self.config)
+            active_use_x11, _active_use_vulkan = backend.active_graphics_settings(config)
+            components = tuple(package["components"])
+
+        def install() -> str:
+            preload_update = None
+            try:
+                if "wine" in components:
+                    self.set_progress("Stopping background services", None)
+                    preload_update = backend.prepare_preload_runner_update(
+                        config["prefix"], active_use_x11,
+                        wine_value=config["wine"],
+                    )
+                    stop_wine_confirmed(
+                        config["prefix"], config["wine"],
+                        use_x11=active_use_x11,
+                    )
+                    self.output("Stopped the selected Wine environment before updating.")
+                self.set_progress(
+                    f"Updating through {package['provider_name']}", None
+                )
+                result = backend.install_package_update(self.output, package)
+                if not result["changed"]:
+                    return result["message"]
+                changed = set(result["components"])
+                if "wine" in changed:
+                    self.set_progress("Updating the Wine environment", None)
+                    new_wine = str(backend.runner_update_target() / "bin/wine")
+                    self.output(backend.update_wine_prefix(
+                        config["prefix"], new_wine, active_use_x11,
+                        self.output, self.cancel_event, self.set_process,
+                    ))
+                    if preload_update is not None:
+                        backend.finish_preload_runner_update(preload_update, new_wine)
+                        preload_update = None
+                        self.output(
+                            "Updated the background services to use the new Wine runner."
+                        )
+                    with self.lock:
+                        candidate = dict(self.config)
+                        candidate["wine"] = new_wine
+                        backend.save_config(candidate)
+                        self.config = candidate
+                        config.update(candidate)
+                        self.task["wine_update_completed"] = True
+                if "manager" in changed:
+                    self.set_progress("Finishing the Manager update", None)
+                    with self.lock:
+                        self.task["restart_required"] = True
+                    self._run_updated_manager_post_install(config)
+                return result["message"]
+            finally:
+                if preload_update is not None:
+                    try:
+                        backend.restore_preload_after_runner_update(preload_update)
+                    except RuntimeError as error:
+                        self.output(
+                            "WARNING: Could not resume background services after the "
+                            f"package update: {error}"
+                        )
+
+        self.start_task("update", install)
 
     def _run_updated_manager_post_install(self, config: dict) -> None:
         target = backend.manager_update_target()
@@ -1499,7 +1572,8 @@ def main() -> int:
 
     if args.install_shortcut:
         path = backend.install_manager_shortcut(
-            LAUNCHER if FROZEN else LAUNCHER.with_name("wine4office-manager"), ICONS
+            MANAGER_RESTART_COMMAND if FROZEN else LAUNCHER.with_name("wine4office-manager"),
+            ICONS,
         )
         print(path)
         return 0

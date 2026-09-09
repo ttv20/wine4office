@@ -41,26 +41,53 @@ let
       runHook postInstall
     '';
   };
-in pkgs.buildFHSEnv {
-  name = "wine4office";
-  targetPkgs = p: with p; [
-    alsa-lib cups dbus ffmpeg fontconfig freetype gnutls krb5
-    libGL libgphoto2 libpulseaudio libusb1 libva libxkbcommon
-    ocl-icd pcsclite sane-backends SDL2 stdenv.cc.cc.lib
-    unixodbc vulkan-loader wayland zlib
-    gst_all_1.gstreamer gst_all_1.gst-plugins-base
-    libx11 libxcomposite libxcursor libxext libxi libxinerama
-    libxrandr libxrender libxxf86vm
-  ];
-  multiPkgs = p: with p; [
-    alsa-lib fontconfig freetype gnutls stdenv.cc.cc.lib zlib
-  ];
-  profile = ''
-    export WINE4OFFICE_MANAGER_ROOT=${payload}/opt/wine4office
+  dispatcher = pkgs.writeShellScript "wine4office-dispatch" ''
+    if [ "''${1-}" = "--exec" ]; then
+      shift
+      if [ "$#" -eq 0 ]; then
+        echo "wine4office: --exec requires a command" >&2
+        exit 2
+      fi
+      exec "$@"
+    fi
+    exec ${payload}/opt/wine4office/bin/Wine4OfficeManager "$@"
   '';
-  runScript = "${payload}/opt/wine4office/bin/Wine4OfficeManager";
-  extraInstallCommands = ''
-    ln -s "$out/bin/wine4office" "$out/bin/Wine4OfficeManager"
+  fhs = pkgs.buildFHSEnv {
+    name = "wine4office-fhs";
+    targetPkgs = p: with p; [
+      alsa-lib cups dbus ffmpeg fontconfig freetype glib gnutls krb5
+      libGL libgphoto2 libpulseaudio libusb1 libva libxkbcommon
+      ocl-icd pcsclite sane-backends SDL2 stdenv.cc.cc.lib
+      unixodbc vulkan-loader wayland zlib
+      gst_all_1.gstreamer gst_all_1.gst-plugins-base
+      libx11 libxcomposite libxcursor libxext libxi libxinerama
+      libxrandr libxrender libxxf86vm
+      libxcb-util libxcb-render-util xcb-util-cursor
+      xcbutilimage xcbutilkeysyms xcbutilwm
+    ];
+    multiPkgs = p: with p; [
+      alsa-lib fontconfig freetype gnutls stdenv.cc.cc.lib zlib
+    ];
+    profile = ''
+      export WINE4OFFICE_MANAGER_ROOT=${payload}/opt/wine4office
+    '';
+    runScript = dispatcher;
+  };
+in pkgs.symlinkJoin {
+  name = "wine4office-${release.version}";
+  paths = [ fhs ];
+  postBuild = ''
+    cat > "$out/bin/wine4office" <<EOF
+    #!${pkgs.runtimeShell}
+    case \$0 in
+      /*) package_wrapper=\$0 ;;
+      *) package_wrapper=\$(command -v -- "\$0") ;;
+    esac
+    export WINE4OFFICE_PACKAGE_WRAPPER=\$package_wrapper
+    exec ${fhs}/bin/wine4office-fhs "\$@"
+    EOF
+    chmod 0755 "$out/bin/wine4office"
+    ln -s wine4office "$out/bin/Wine4OfficeManager"
   '';
   meta = {
     description = "Wine and manager tuned for Microsoft Office";

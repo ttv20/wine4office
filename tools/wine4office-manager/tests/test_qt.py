@@ -988,6 +988,40 @@ class QtManagerTests(unittest.TestCase):
             self.window.start_background_update_check()
         check.assert_called_once_with()
 
+    def test_package_installation_hides_feed_controls_and_uses_package_update(self):
+        package = {
+            "schema_version": 1,
+            "provider": "apt",
+            "provider_name": "APT",
+            "package": "wine4office",
+            "components": ("manager", "wine"),
+        }
+        with mock.patch.object(
+            backend, "package_installation", return_value=package
+        ), mock.patch.object(
+            backend, "package_update_command", return_value=["pkexec", "apt-get"]
+        ):
+            self.window.refresh_state()
+
+        self.assertTrue(self.window.update_edit.isHidden())
+        self.assertTrue(self.window.include_prereleases.isHidden())
+        self.assertTrue(self.window.automatic_update_checks.isHidden())
+        self.assertFalse(self.window.package_update_label.isHidden())
+        self.assertIn("APT", self.window.update_button.text())
+
+        with mock.patch.object(
+            backend, "package_update_command", return_value=["pkexec", "apt-get"]
+        ), mock.patch.object(
+            backend, "office_installation_exists", return_value=False
+        ), mock.patch.object(
+            self.state, "start_package_update"
+        ) as start, mock.patch.object(
+            self.window, "_show_task_progress"
+        ), mock.patch.object(self.window, "refresh_state"):
+            self.window.start_update()
+
+        start.assert_called_once_with()
+
     def test_combined_update_prompt_installs_once_and_opens_maintenance(self):
         offer = {
             "id": "manager:0.1.6|wine:11.14",
@@ -1857,6 +1891,7 @@ class QtManagerTests(unittest.TestCase):
 
     def test_close_during_staged_transition_waits_for_rollback(self):
         target = self._make_prefix(self.home / "replacement-prefix")
+        backend.mark_prefix_owned(self.old_prefix)
         staged = self.old_prefix.with_name(".old-staged-for-close")
         staged_ready = threading.Event()
         cancel_observed = threading.Event()

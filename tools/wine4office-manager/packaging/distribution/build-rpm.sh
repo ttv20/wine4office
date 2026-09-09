@@ -10,13 +10,24 @@ source "$here/common.sh"
 validate_package_input "$@"
 command -v rpmbuild >/dev/null || { echo "rpmbuild is required" >&2; exit 1; }
 
-rpm_version=${package_version%%-*}
+version_without_build=${package_version%%+*}
+build_metadata=
+if [[ $package_version == *+* ]]; then
+    build_metadata=${package_version#*+}
+    [[ $build_metadata =~ ^[A-Za-z0-9]+([.-][A-Za-z0-9]+)*$ ]] || {
+        echo "Invalid RPM build metadata" >&2; exit 1;
+    }
+fi
+rpm_version=${version_without_build%%-*}
 rpm_release=1
-if [[ $package_version == *-* ]]; then
-    suffix=${package_version#*-}
+if [[ $version_without_build == *-* ]]; then
+    suffix=${version_without_build#*-}
     suffix=${suffix//-/.}
     [[ $suffix =~ ^[A-Za-z0-9.]+$ ]] || { echo "Invalid RPM prerelease" >&2; exit 1; }
     rpm_release="0.${suffix}.1"
+fi
+if [[ -n $build_metadata ]]; then
+    rpm_release+=".${build_metadata//-/.}"
 fi
 [[ $rpm_version =~ ^[0-9]+([.][0-9A-Za-z]+)*$ ]] || {
     echo "Version cannot be represented as an RPM version" >&2; exit 1;
@@ -42,7 +53,7 @@ URL:            https://github.com/ttv20/wine4office
 Source0:        payload.tar.gz
 BuildArch:      x86_64
 AutoReqProv:    no
-Requires:       glibc, libglvnd-glx, libglvnd-egl, fontconfig, freetype, dbus-libs, gnutls
+Requires:       glibc, glib2, libxkbcommon, libxkbcommon-x11, libX11-xcb, libxcb, xcb-util, xcb-util-cursor, xcb-util-image, xcb-util-keysyms, xcb-util-renderutil, xcb-util-wm, libglvnd-glx, libglvnd-egl, fontconfig, freetype, dbus-libs, gnutls, krb5-libs
 
 %description
 Wine4Office packages the project release runner and standalone Qt manager.

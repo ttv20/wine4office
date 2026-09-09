@@ -239,9 +239,11 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends wine4office
               cmp /opt/wine4office/bin/Wine4OfficeManager "$2"
-              QT_QPA_PLATFORM=offscreen \
+              useradd --create-home package-test
+              runuser -u package-test -- env QT_QPA_PLATFORM=offscreen \
                 /opt/wine4office/bin/Wine4OfficeManager --smoke-test
-              /opt/wine4office/runner/bin/wine --version
+              runuser -u package-test -- \
+                /opt/wine4office/runner/bin/wine --version
             ' -- "$deb" "/work/release/Wine4OfficeManager-${version}-x86_64"
           docker run --rm --init \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
@@ -258,9 +260,11 @@ jobs:
                 > /etc/yum.repos.d/wine4office-test.repo
               dnf install -y wine4office
               cmp /opt/wine4office/bin/Wine4OfficeManager "$2"
-              QT_QPA_PLATFORM=offscreen \
+              useradd --create-home package-test
+              runuser -u package-test -- env QT_QPA_PLATFORM=offscreen \
                 /opt/wine4office/bin/Wine4OfficeManager --smoke-test
-              /opt/wine4office/runner/bin/wine --version
+              runuser -u package-test -- \
+                /opt/wine4office/runner/bin/wine --version
             ' -- "$rpm" "/work/release/Wine4OfficeManager-${version}-x86_64"
           tar -C release/repositories --sort=name --mtime=@0 --owner=0 --group=0 \
             --numeric-owner -czf "release/wine4office-${version}-repositories-unsigned.tar.gz" .

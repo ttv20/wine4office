@@ -199,6 +199,7 @@ class ManagerWindow(QMainWindow):
         self.handled_offer_id = ""
         self.manual_update_check = False
         self.reported_update_error = ""
+        self.package_installation: dict | None = None
         self.restart_prompted = False
         self.task_sensitive_buttons: list[QPushButton | QCommandLinkButton] = []
         self.installed_apps: set[str] = set()
@@ -1626,16 +1627,21 @@ class ManagerWindow(QMainWindow):
             self.incident_ask.toggled.connect(self.set_incident_reporting_mode)
             layout.addWidget(reliability)
 
-        update = QGroupBox("Updates")
-        update_layout = QVBoxLayout(update)
+        self.update_group = QGroupBox("Updates")
+        update_layout = QVBoxLayout(self.update_group)
         update_form = self._form()
         self.update_edit = QLineEdit()
         self.update_edit.setPlaceholderText("HTTPS release metadata URL")
         self.update_edit.setAccessibleName("Release metadata address")
         self.version_label = QLabel("Manager: development; Wine: development")
         update_form.addRow("Installed versions:", self.version_label)
-        update_form.addRow("Metadata URL:", self.update_edit)
+        self.update_url_label = QLabel("Metadata URL:")
+        update_form.addRow(self.update_url_label, self.update_edit)
         update_layout.addLayout(update_form)
+        self.package_update_label = QLabel()
+        self.package_update_label.setWordWrap(True)
+        self.package_update_label.hide()
+        update_layout.addWidget(self.package_update_label)
         self.automatic_update_checks = QCheckBox(
             "Check in the background at login and every 24 hours"
         )
@@ -1666,7 +1672,7 @@ class ManagerWindow(QMainWindow):
         )
         update_buttons.addWidget(self.update_button)
         update_layout.addLayout(update_buttons)
-        layout.addWidget(update)
+        layout.addWidget(self.update_group)
 
         removal = QGroupBox("Removal")
         removal_layout = QVBoxLayout(removal)
@@ -2644,6 +2650,41 @@ class ManagerWindow(QMainWindow):
         config = self.save_config()
         if not config:
             return
+        package = self.package_installation
+        if package is not None:
+            instructions = backend.package_update_instructions(package)
+            if backend.package_update_command(package) is None:
+                QApplication.clipboard().setText(instructions)
+                self.notify("Package update instructions copied.")
+                return
+            update_started = False
+            try:
+                self.restart_prompted = False
+                self.pending_runner_update_repair = (
+                    "wine" in package["components"]
+                    and backend.office_installation_exists(config["prefix"])
+                )
+                self.state.start_package_update()
+                update_started = True
+                self._show_task_progress(
+                    "update",
+                    f"Updating with {package['provider_name']}",
+                    "Wine4Office Manager and Wine runner",
+                    f"Preparing {package['provider_name']} package update…",
+                    {
+                        "completed": "Package update completed.",
+                        "cancelled": "Package update cancelled.",
+                        "failed": "Package update failed. Review the details below.",
+                    },
+                    cancellable=False,
+                )
+                self.notify(f"{package['provider_name']} package update started.")
+                self.refresh_state()
+            except Exception as error:
+                if not update_started:
+                    self.pending_runner_update_repair = False
+                self.show_error(error)
+            return
         if not config["update_url"]:
             self.show_error("Configure an HTTPS release metadata address first.")
             return
@@ -2672,39 +2713,16 @@ class ManagerWindow(QMainWindow):
             f"{labels[name]}: {offer['updates'][name]['version']}"
             for name in selected
         )
-        package = next((
-            offer["updates"][name].get("package") for name in selected
-            if offer["updates"][name].get("install_method") == "package"
-        ), None)
-        package_command = backend.package_update_command(package) if package else None
-        package_instructions = (
-            backend.package_update_instructions(package) if package else ""
-        )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Question)
         dialog.setWindowTitle(self._tr("Wine4Office update available"))
         dialog.setText(self._tr("Updates are available."))
-        if package:
-            dialog.setInformativeText(
-                f"{versions}\n\nThis installation is managed by "
-                f"{package['provider_name']}. Wine4Office will not replace package-owned "
-                f"files itself.\n\n{package_instructions}"
-            )
-            install_button = dialog.addButton(
-                f"Update with {package['provider_name']}",
-                QMessageBox.ButtonRole.AcceptRole,
-            ) if package_command else None
-            copy_button = dialog.addButton(
-                "Copy update instructions", QMessageBox.ButtonRole.ActionRole
-            ) if not package_command else None
-        else:
-            dialog.setInformativeText(
-                f"{versions}\n\n{self._tr('Nothing downloads until you approve this update.')}"
-            )
-            install_button = dialog.addButton(
-                self._tr("Download and install"), QMessageBox.ButtonRole.AcceptRole
-            )
-            copy_button = None
+        dialog.setInformativeText(
+            f"{versions}\n\n{self._tr('Nothing downloads until you approve this update.')}"
+        )
+        install_button = dialog.addButton(
+            self._tr("Download and install"), QMessageBox.ButtonRole.AcceptRole
+        )
         later_button = dialog.addButton(self._tr("Later"), QMessageBox.ButtonRole.RejectRole)
         skip_button = dialog.addButton(
             self._tr("Skip these versions"), QMessageBox.ButtonRole.DestructiveRole
@@ -2724,12 +2742,9 @@ class ManagerWindow(QMainWindow):
         clicked = dialog.clickedButton()
         if clicked is skip_button:
             self.state.skip_offered_updates(selected)
-        elif copy_button is not None and clicked is copy_button:
-            QApplication.clipboard().setText(package_instructions)
-            self.notify("Package update instructions copied.")
         elif disable_button is not None and clicked is disable_button:
             self._apply_automatic_update_checks(False, prompted=True)
-        elif install_button is not None and clicked is install_button:
+        elif clicked is install_button:
             update_started = False
             try:
                 if "manager" in selected:
@@ -3041,6 +3056,30 @@ class ManagerWindow(QMainWindow):
                 if snapshot.get("package_installation") else ""
             )
         )
+        package = snapshot.get("package_installation")
+        self.package_installation = dict(package) if package else None
+        package_managed = self.package_installation is not None
+        self.update_group.setTitle("Package updates" if package_managed else "Updates")
+        self.update_url_label.setVisible(not package_managed)
+        self.update_edit.setVisible(not package_managed)
+        self.automatic_update_checks.setVisible(not package_managed)
+        self.include_prereleases.setVisible(not package_managed)
+        self.package_update_label.setVisible(package_managed)
+        if package_managed:
+            provider = self.package_installation["provider_name"]
+            instructions = backend.package_update_instructions(self.package_installation)
+            self.package_update_label.setText(
+                f"This installation is managed by {provider}. Updates use the system "
+                f"package source.\n\n{instructions}"
+            )
+            self.update_button.setText(
+                f"Update with {provider}…"
+                if backend.package_update_command(self.package_installation) else
+                "Copy update instructions"
+            )
+        else:
+            self.package_update_label.clear()
+            self.update_button.setText("Check for updates…")
         updater = snapshot["updater"]
         automatic_enabled = (
             snapshot["config"].get("automatic_update_checks") is True

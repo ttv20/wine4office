@@ -26,7 +26,7 @@ Version: $deb_version
 Architecture: amd64
 Maintainer: Wine4Office Project <noreply@wine4office.org>
 Installed-Size: $installed_size
-Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libfontconfig1, libfreetype6, libdbus-1-3, libgnutls30t64
+Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libglib2.0-0t64, libxkbcommon0, libxkbcommon-x11-0, libx11-xcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-util1, libxcb-xkb1, libfontconfig1, libfreetype6, libdbus-1-3, libgnutls30t64, libkrb5-3, libgssapi-krb5-2
 Suggests: policykit-1
 Section: otherosfs
 Priority: optional

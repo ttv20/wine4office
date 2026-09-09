@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
-- Add reusable AUR, Nix, Ubuntu, and Fedora packages and route packaged installations through their package manager for updates.
+- Add reusable AUR, Nix, Ubuntu, and Fedora packages with package-manager updates, unprivileged startup checks, and persistent Nix runtime wrappers.
+- Keep Authenticode verification working with multi-digit OpenSSL patch versions.
 - Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

@@ -21,6 +21,13 @@ tree atomically under `https://packages.wine4office.org/`. Until a package serve
 and signing key exist, CI uploads the packages and unsigned repository trees as
 release artifacts for testing only.
 
+Packaged installations use the distribution package source as their update
+authority. The Manager hides the standalone metadata URL, prerelease selector,
+and background release-feed controls. APT and DNF updates run as one combined
+Manager-and-Wine transaction; the Manager compares the installed versions before
+and after the transaction and runs Wine migration only when both components
+actually advanced. AUR and Nix show copyable update instructions.
+
 Suggested production paths:
 
 ```text
@@ -34,7 +41,11 @@ Ubuntu users add `deb [signed-by=/usr/share/keyrings/wine4office.asc]
 https://packages.wine4office.org/apt stable main`. Fedora users install
 `wine4office.repo`. AUR remains hosted by the AUR and downloads immutable GitHub
 release assets. The generated Nix flake uses an FHS environment because the
-PyInstaller one-file Manager extracts embedded ELF libraries at runtime.
+PyInstaller one-file Manager extracts embedded ELF libraries at runtime. Its
+wrapper is also embedded into generated Office shortcuts and user services so
+later launches re-enter that environment. Install the flake into a Nix profile
+or NixOS configuration before creating persistent shortcuts; a transient
+`nix run` store path is not a durable installation location.
 
 The repository trees need only static HTTPS hosting; no package-specific web
 application or database is required. They can be served by the same Nginx,

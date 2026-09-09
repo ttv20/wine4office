@@ -170,7 +170,10 @@ The same workflow packages those exact artifacts as DEB and RPM files and
 generates fixed-hash AUR and Nix sources. Packaged installations contain a
 root-owned `PACKAGE-INSTALLATION.json`. The Manager uses it to send APT and DNF
 updates through the system package manager, show AUR or Nix update instructions,
-and reject direct replacement of package-owned Manager or Wine files. See
+hide standalone feed and prerelease controls, and reject direct replacement of
+package-owned Manager or Wine files. Package updates are verified by rereading
+the installed component versions before Wine migration or Manager restart work.
+See
 `packaging/distribution/README.md` for repository layout and signing.
 
 Tagged runs use the workflow's `contents: write` permission and `GITHUB_TOKEN` to create the GitHub Release when needed, then upload the manager pair, Wine pair, `install.sh`, and finally `release.json` with `gh release upload --clobber`. Publishing `release.json` last keeps it as the feed commit marker. Reruns replace matching assets instead of creating duplicates.

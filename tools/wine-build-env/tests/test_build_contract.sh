@@ -58,6 +58,8 @@ build_env=(
 env "${build_env[@]}" "$contract/build.sh" configure
 grep -qx 'configure_archs=i386,x86_64' "$build_dir/WINE4OFFICE_BUILD.env"
 grep -qx 'jobs=12' "$build_dir/WINE4OFFICE_BUILD.env"
+grep -qx 'wine4office_release_version=development' \
+    "$build_dir/WINE4OFFICE_BUILD.env"
 provenance_before=$(sha256sum "$build_dir/WINE4OFFICE_BUILD.env")
 if env "${build_env[@]}" "$contract/build.sh" invalid >"$tmp/invalid-mode.log" 2>&1; then
     echo "Build contract accepted an invalid mode" >&2
@@ -67,6 +69,25 @@ fi
     echo "Invalid mode changed build provenance" >&2
     exit 1
 }
+
+sed -i "s/--with-krb5/--with-krb5 --with-wine4office-version=0.2.2/" \
+    "$build_dir/config.status"
+env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.2 \
+    "$contract/build.sh" configure
+grep -qx 'wine4office_release_version=0.2.2' \
+    "$build_dir/WINE4OFFICE_BUILD.env"
+if env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.3 \
+        "$contract/build.sh" configure >"$tmp/wrong-brand.log" 2>&1; then
+    echo "Build contract accepted a differently branded Wine tree" >&2
+    exit 1
+fi
+grep -F 'branded for a different Wine4Office release' \
+    "$tmp/wrong-brand.log" >/dev/null
+sed -i 's/ --with-wine4office-version=0.2.2//' "$build_dir/config.status"
+env "${build_env[@]}" "$contract/build.sh" configure
+
+grep -F 'wine4office-\$(WINE4OFFICE_VERSION) (Wine \$(PACKAGE_VERSION))' \
+    "$root/configure.ac" >/dev/null
 
 cp "$build_dir/include/config.h" "$tmp/config.good"
 sed -i '/SONAME_LIBGSSAPI_KRB5/d' "$build_dir/include/config.h"

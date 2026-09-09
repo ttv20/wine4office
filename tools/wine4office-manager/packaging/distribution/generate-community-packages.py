@@ -11,6 +11,16 @@ import urllib.parse
 from pathlib import Path
 
 
+def shell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def nix_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace(
+        "${", "\\${"
+    ) + '"'
+
+
 def validated_release(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1:
@@ -21,18 +31,29 @@ def validated_release(path: Path) -> dict:
             or data.get("wine", {}).get("version") != version):
         raise ValueError("manager and Wine must use the same valid product version")
     metadata_url = data.get("metadata_url")
+    if not isinstance(metadata_url, str):
+        raise ValueError("metadata_url must use HTTPS")
     parsed = urllib.parse.urlsplit(metadata_url)
-    if parsed.scheme != "https" or not parsed.hostname:
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.fragment):
         raise ValueError("metadata_url must use HTTPS")
     for name in ("manager", "wine"):
-        component = data[name]
+        component = data.get(name)
+        if not isinstance(component, dict) or not isinstance(component.get("url"), str):
+            raise ValueError(f"{name} release entry is invalid")
         url = urllib.parse.urljoin(metadata_url, component["url"])
         parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme != "https" or not parsed.hostname:
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or parsed.fragment
+                or any(ord(character) < 0x21 or ord(character) == 0x7f for character in url)):
             raise ValueError(f"{name} URL must use HTTPS")
         if not re.fullmatch(r"[0-9a-f]{64}", component["sha256"]):
             raise ValueError(f"{name} SHA-256 is invalid")
         component["resolved_url"] = url
+    base_version = data["wine"].get("base_version", "unknown")
+    if (base_version != "unknown" and (not isinstance(base_version, str)
+            or not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", base_version))):
+        raise ValueError("Wine base version is invalid")
     return data
 
 
@@ -51,6 +72,8 @@ def generate_aur(release: dict, output: Path, distribution: Path) -> None:
     pkgver = version.replace("-", "_")
     manager_url = release["manager"]["resolved_url"]
     wine_url = release["wine"]["resolved_url"]
+    manager_source = shell_single_quote(f"Wine4OfficeManager::{manager_url}")
+    wine_source = shell_single_quote(f"wine4office-runner::{wine_url}")
     pkgbuild = f'''# Generated from release.json. Do not edit hashes by hand.
 pkgname=wine4office-bin
 pkgver={pkgver}
@@ -60,7 +83,10 @@ pkgdesc="Wine and manager tuned for Microsoft Office"
 arch=('x86_64')
 url="https://github.com/ttv20/wine4office"
 license=('LGPL-2.1-or-later')
-depends=('glibc' 'gcc-libs' 'libglvnd' 'fontconfig' 'freetype2' 'dbus' 'gnutls')
+depends=('glibc' 'gcc-libs' 'glib2' 'libxkbcommon' 'libxkbcommon-x11'
+         'libxcb' 'xcb-util' 'xcb-util-cursor' 'xcb-util-image'
+         'xcb-util-keysyms' 'xcb-util-renderutil' 'xcb-util-wm'
+         'libglvnd' 'fontconfig' 'freetype2' 'dbus' 'gnutls' 'krb5')
 optdepends=('polkit: install updates from the Manager'
             'libx11: X11 display driver'
             'wayland: native Wayland display driver'
@@ -69,8 +95,8 @@ provides=('wine4office')
 conflicts=('wine4office')
 options=('!strip')
 source=('wine4office.desktop' 'wine4office-manager.png')
-source_x86_64=('Wine4OfficeManager::{manager_url}'
-               'wine4office-runner::{wine_url}')
+source_x86_64=({manager_source}
+               {wine_source})
 sha256sums=('{file_sha256(desktop)}'
             '{file_sha256(icon)}')
 sha256sums_x86_64=('{release["manager"]["sha256"]}'
@@ -117,11 +143,22 @@ EOF
 \tlicense = LGPL-2.1-or-later
 \tdepends = glibc
 \tdepends = gcc-libs
+\tdepends = glib2
+\tdepends = libxkbcommon
+\tdepends = libxkbcommon-x11
+\tdepends = libxcb
+\tdepends = xcb-util
+\tdepends = xcb-util-cursor
+\tdepends = xcb-util-image
+\tdepends = xcb-util-keysyms
+\tdepends = xcb-util-renderutil
+\tdepends = xcb-util-wm
 \tdepends = libglvnd
 \tdepends = fontconfig
 \tdepends = freetype2
 \tdepends = dbus
 \tdepends = gnutls
+\tdepends = krb5
 \toptdepends = polkit: install updates from the Manager
 \toptdepends = libx11: X11 display driver
 \toptdepends = wayland: native Wayland display driver
@@ -161,7 +198,7 @@ def generate_nix(release: dict, output: Path, distribution: Path) -> None:
     }
     lines = ["{"]
     for key, value in data.items():
-        lines.append(f"  {key} = {json.dumps(value)};")
+        lines.append(f"  {key} = {nix_string(value)};")
     lines.append("}")
     (output / "release.nix").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
