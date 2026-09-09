@@ -16,6 +16,9 @@ mkdir "$fake_sign_bin"
 cat > "$fake_sign_bin/gpg" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ ${WINE4OFFICE_TEST_GPG_FAIL:-0} == 1 ]]; then
+    exit 73
+fi
 output=
 input=
 while (($#)); do
@@ -82,6 +85,21 @@ case $mode in
             "$distribution/build-apt-repository.sh" "$tmp/repository" stable "$deb"
         [[ -f $tmp/repository/dists/stable/InRelease ]]
         [[ -f $tmp/repository/dists/stable/Release.gpg ]]
+        apt_metadata_hash=$(sha256sum \
+            "$tmp/repository/dists/stable/Release" \
+            "$tmp/repository/dists/stable/InRelease" \
+            "$tmp/repository/dists/stable/Release.gpg")
+        if WINE4OFFICE_TEST_GPG_FAIL=1 PATH="$fake_sign_bin:$PATH" \
+                WINE4OFFICE_GPG_KEY_ID=test \
+                "$distribution/build-apt-repository.sh" \
+                "$tmp/repository" stable "$deb" >/dev/null 2>&1; then
+            echo "APT repository update ignored a signing failure" >&2
+            exit 1
+        fi
+        [[ $(sha256sum \
+            "$tmp/repository/dists/stable/Release" \
+            "$tmp/repository/dists/stable/InRelease" \
+            "$tmp/repository/dists/stable/Release.gpg") == "$apt_metadata_hash" ]]
         "$distribution/build-apt-repository.sh" "$tmp/repository" stable "$deb"
         [[ ! -e $tmp/repository/dists/stable/InRelease ]]
         [[ ! -e $tmp/repository/dists/stable/Release.gpg ]]
@@ -110,9 +128,26 @@ case $mode in
             PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
             "$distribution/build-rpm-repository.sh" "$tmp/repository" "$rpm"
         [[ $(sha256sum "$rpm") == "$rpm_hash" ]]
-        grep -Fx "$tmp/repository/rpm/x86_64/Packages/$(basename "$rpm")" \
-            "$tmp/rpmsign.log" >/dev/null
+        signed_rpm=$(tail -n 1 "$tmp/rpmsign.log")
+        case $signed_rpm in
+            "$tmp/repository/rpm/x86_64/".repository.*/Packages/"$(basename "$rpm")") ;;
+            *) echo "rpmsign did not receive a staged repository copy" >&2; exit 1 ;;
+        esac
         [[ -f $tmp/repository/rpm/x86_64/repodata/repomd.xml.asc ]]
+        rpm_metadata_hash=$(sha256sum \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml" \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml.asc")
+        if WINE4OFFICE_TEST_GPG_FAIL=1 WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/rpmsign.log" \
+                PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
+                "$distribution/build-rpm-repository.sh" \
+                "$tmp/repository" "$rpm" >/dev/null 2>&1; then
+            echo "RPM repository update ignored a signing failure" >&2
+            exit 1
+        fi
+        [[ $(sha256sum \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml" \
+            "$tmp/repository/rpm/x86_64/repodata/repomd.xml.asc") == \
+            "$rpm_metadata_hash" ]]
         "$distribution/build-rpm-repository.sh" "$tmp/repository" "$rpm"
         [[ ! -e $tmp/repository/rpm/x86_64/repodata/repomd.xml.asc ]]
         cmp "$distribution/wine4office.repo" "$tmp/repository/wine4office.repo"

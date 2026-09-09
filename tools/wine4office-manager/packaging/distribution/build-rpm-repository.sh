@@ -8,22 +8,79 @@ here=$(cd "$(dirname "$0")" && pwd)
 repository=$1
 shift
 command -v createrepo_c >/dev/null || { echo "createrepo_c is required" >&2; exit 1; }
-packages=$repository/rpm/x86_64/Packages
-mkdir -p "$packages"
-install -m 0644 "$here/wine4office.repo" "$repository/wine4office.repo"
 for package in "$@"; do
     [[ -f $package && $package == *.rpm ]] || { echo "Invalid RPM: $package" >&2; exit 1; }
-    repository_package=$packages/$(basename "$package")
-    install -m 0644 "$package" "$repository_package"
+done
+
+mkdir -p "$repository"
+repository=$(cd "$repository" && pwd)
+repository_root=$repository/rpm/x86_64
+packages=$repository_root/Packages
+mkdir -p "$packages"
+install -m 0644 "$here/wine4office.repo" "$repository/wine4office.repo"
+staged_repository=$(mktemp -d "$repository_root/.repository.XXXXXX")
+staged_packages=$staged_repository/Packages
+backup_metadata=
+package_commit_temp=
+cleanup() {
+    local status=$?
+    [[ -z ${package_commit_temp:-} || ! -e $package_commit_temp ]] || \
+        rm -f -- "$package_commit_temp"
+    [[ -z ${staged_repository:-} || ! -e $staged_repository ]] || \
+        rm -rf -- "$staged_repository"
+    if ((status != 0)) && [[ -n ${backup_metadata:-} && -e $backup_metadata \
+            && ! -e $repository_root/repodata ]]; then
+        mv -- "$backup_metadata" "$repository_root/repodata"
+    fi
+}
+trap cleanup EXIT
+mkdir -p "$staged_packages"
+if [[ -d $packages ]]; then
+    cp -al "$packages/." "$staged_packages/"
+fi
+if [[ -d $repository_root/repodata ]]; then
+    cp -a "$repository_root/repodata" "$staged_repository/repodata"
+fi
+for package in "$@"; do
+    package_name=$(basename "$package")
+    staged_package=$staged_packages/$package_name
+    rm -f -- "$staged_package"
+    install -m 0644 "$package" "$staged_package"
     if [[ -n ${WINE4OFFICE_GPG_KEY_ID:-} ]]; then
         rpmsign --addsign --define "_gpg_name $WINE4OFFICE_GPG_KEY_ID" \
-            "$repository_package"
+            "$staged_package"
     fi
 done
-rm -f -- "$repository/rpm/x86_64/repodata/repomd.xml.asc"
-createrepo_c --update "$repository/rpm/x86_64"
+createrepo_c --update "$staged_repository"
 if [[ -n ${WINE4OFFICE_GPG_KEY_ID:-} ]]; then
     gpg --batch --yes --local-user "$WINE4OFFICE_GPG_KEY_ID" \
         --detach-sign --armor \
-        "$repository/rpm/x86_64/repodata/repomd.xml"
+        --output "$staged_repository/repodata/repomd.xml.asc" \
+        "$staged_repository/repodata/repomd.xml"
+else
+    rm -f -- "$staged_repository/repodata/repomd.xml.asc"
+fi
+
+for package in "$@"; do
+    package_name=$(basename "$package")
+    package_commit_temp=$(mktemp "$packages/.${package_name}.XXXXXX")
+    install -m 0644 "$staged_packages/$package_name" "$package_commit_temp"
+    mv -f -- "$package_commit_temp" "$packages/$package_name"
+    package_commit_temp=
+done
+if [[ -e $repository_root/repodata ]]; then
+    backup_metadata=$(mktemp -d "$repository_root/.repodata.backup.XXXXXX")
+    rmdir "$backup_metadata"
+    mv -- "$repository_root/repodata" "$backup_metadata"
+fi
+if ! mv -- "$staged_repository/repodata" "$repository_root/repodata"; then
+    [[ -z $backup_metadata || ! -e $backup_metadata ]] || \
+        mv -- "$backup_metadata" "$repository_root/repodata"
+    exit 1
+fi
+rm -rf -- "$staged_repository"
+staged_repository=
+if [[ -n $backup_metadata ]]; then
+    rm -rf -- "$backup_metadata"
+    backup_metadata=
 fi

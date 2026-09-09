@@ -4708,6 +4708,19 @@ case $with_wine4office_version in #(
   *) :
      ;;
 esac
+if test -n "$with_wine4office_version"
+then :
+  case $with_wine4office_version in #(
+  [A-Za-z0-9]*) :
+     ;; #(
+  *) :
+    as_fn_error $? "invalid Wine4Office release version: $with_wine4office_version" "$LINENO" 5 ;;
+esac
+  if test ${#with_wine4office_version} -gt 128
+then :
+  as_fn_error $? "Wine4Office release version is longer than 128 characters" "$LINENO" 5
+fi
+fi
 WINE4OFFICE_VERSION=$with_wine4office_version
 
 

@@ -467,6 +467,43 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("APT failed", task["log"])
         self.assertIn("Restoring the selected Wine environment", task["log"])
 
+    def test_failed_new_package_runner_recovers_with_previous_runner(self):
+        package = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        new_runner = self.install_root / "runner"
+        with mock.patch.object(
+            backend, "package_installation", return_value=package
+        ), mock.patch.object(
+            backend, "package_update_command", return_value=["pkexec", "apt-get"]
+        ), mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=None
+        ), mock.patch.object(
+            manager, "stop_wine_confirmed"
+        ), mock.patch.object(
+            backend, "install_package_update", return_value={
+                "changed": True, "components": ("manager", "wine"),
+                "message": "updated",
+            }
+        ), mock.patch.object(
+            backend, "runner_update_target", return_value=new_runner
+        ), mock.patch.object(
+            backend, "update_wine_prefix",
+            side_effect=[RuntimeError("new runner failed"), "previous runner restored"],
+        ) as update_prefix:
+            state = manager.ManagerState()
+            previous_wine = state.config["wine"]
+            state.start_package_update()
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        self.assertEqual(update_prefix.call_count, 2)
+        self.assertEqual(
+            update_prefix.call_args_list[0].args[1], str(new_runner / "bin/wine")
+        )
+        self.assertEqual(update_prefix.call_args_list[1].args[1], previous_wine)
+        self.assertEqual(state.snapshot()["task"]["status"], "failed")
+
     def test_package_installation_rejects_executable_metadata(self):
         package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
         package_file.write_text(__import__("json").dumps({

@@ -15,6 +15,17 @@ if (cd "$tmp/configure-sentinel" && \
 fi
 grep -F -- '--with-wine4office-version requires an explicit VERSION value' \
     "$tmp/configure-sentinel.log" >/dev/null
+overlong_version=$(printf 'a%.0s' {1..129})
+for invalid_version in -rc1 "$overlong_version"; do
+    invalid_dir=$tmp/configure-invalid-${invalid_version:0:8}
+    mkdir "$invalid_dir"
+    if (cd "$invalid_dir" && \
+            "$root/configure" "--with-wine4office-version=$invalid_version") \
+            >"$invalid_dir.log" 2>&1; then
+        echo "Configure accepted an invalid Wine4Office version" >&2
+        exit 1
+    fi
+done
 
 assert_absent() {
     local pattern=$1

@@ -96,6 +96,12 @@ AS_CASE([$with_wine4office_version],
         [no], [with_wine4office_version=],
         [yes], [AC_MSG_ERROR([--with-wine4office-version requires an explicit VERSION value])],
         [*[[!A-Za-z0-9._+-]]*], [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])
+AS_IF([test -n "$with_wine4office_version"],
+      [AS_CASE([$with_wine4office_version],
+               [[A-Za-z0-9]]*, [],
+               [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])
+       AS_IF([test ${#with_wine4office_version} -gt 128],
+             [AC_MSG_ERROR([Wine4Office release version is longer than 128 characters])])])
 AC_SUBST([WINE4OFFICE_VERSION], [$with_wine4office_version])
 
 AC_CANONICAL_HOST

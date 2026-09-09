@@ -902,7 +902,6 @@ class ManagerState:
                 if "wine" in changed:
                     self.set_progress("Updating the Wine environment", None)
                     new_wine = str(backend.runner_update_target() / "bin/wine")
-                    recovery_wine = new_wine
                     self.output(backend.update_wine_prefix(
                         config["prefix"], new_wine, active_use_x11,
                         self.output, self.cancel_event, self.set_process,

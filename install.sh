@@ -317,7 +317,10 @@ wine = artifact("wine", 8 * 1024**3, "tar.zst")
 canonical = https_url(payload.get("metadata_url"), source, "metadata")
 wine_base_version = payload["wine"].get("base_version", "unknown")
 if (wine_base_version != "unknown"
-        and not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", wine_base_version)):
+        and not re.fullmatch(
+            r"[0-9]+(?:[.][0-9A-Za-z]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?",
+            wine_base_version,
+        )):
     raise SystemExit("invalid Wine base version")
 for field in (*manager, *wine, canonical):
     print(field)
