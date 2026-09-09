@@ -544,11 +544,13 @@ class QtManagerTests(unittest.TestCase):
             single_shot.assert_called_once()
             single_shot.call_args.args[1]()
 
-        finish.assert_called_once_with(True, True, False, snapshot["task"]["generation"])
+        finish.assert_called_once_with(
+            True, True, False, snapshot["task"]["generation"], snapshot["config"]
+        )
         self.assertTrue(self.window.restart_prompted)
         self.assertFalse(self.window.pending_runner_update_repair)
 
-    def test_update_prompts_wait_for_newer_task_and_its_dialog(self):
+    def test_update_prompts_preserve_target_through_an_environment_switch(self):
         with self.state.lock:
             self.state._task_generation = 1
             self.state.task = {
@@ -578,11 +580,16 @@ class QtManagerTests(unittest.TestCase):
 
             with self.state.lock:
                 self.state._task_generation = 2
+                self.state.config = {
+                    **self.state.config,
+                    "prefix": str(self.home / "new-environment"),
+                    "wine": str(self.home / "new-runner/bin/wine"),
+                }
                 self.state.task = {
                     **self.state.task,
                     "generation": 2,
                     "running": True,
-                    "kind": "office-quick-repair",
+                    "kind": "environment-switch",
                     "status": "running",
                 }
             update_callback()
@@ -592,7 +599,7 @@ class QtManagerTests(unittest.TestCase):
 
             newer_progress = mock.Mock()
             self.window.update_progress_dialog = newer_progress
-            self.window.update_progress_task_kind = "office-quick-repair"
+            self.window.update_progress_task_kind = "environment-switch"
             self.window.update_progress_task_generation = 2
             with self.state.lock:
                 self.state.task["running"] = False
@@ -607,8 +614,34 @@ class QtManagerTests(unittest.TestCase):
             self.window.update_progress_task_generation = None
             single_shot.call_args.args[1]()
 
-        repair.assert_called_once_with(self.config)
+        repair.assert_called_once_with(snapshot["config"])
+        self.assertNotEqual(
+            repair.call_args.args[0]["prefix"], self.state.config["prefix"]
+        )
         restart.assert_called_once_with(True)
+
+    def test_upgrade_repair_prompt_skips_a_missing_captured_environment(self):
+        removed_config = {
+            **self.config,
+            "prefix": str(self.home / "removed-environment"),
+        }
+        unavailable = {
+            "prefix_exists": False,
+            "wine_exists": True,
+            "apps": {app: False for app in backend.APP_META},
+        }
+        with mock.patch.object(
+            backend, "environment_status", return_value=unavailable
+        ), mock.patch.object(
+            self.window, "prompt_office_upgrade_repair"
+        ) as repair:
+            self.window._finish_update_prompts(
+                True, False, True,
+                self.state.snapshot()["task"]["generation"],
+                removed_config,
+            )
+
+        repair.assert_not_called()
 
     def test_manager_restart_waits_for_upgrade_repair(self):
         progress = mock.Mock()

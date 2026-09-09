@@ -1228,7 +1228,8 @@ class ManagerWindow(QMainWindow):
 
     def _finish_update_prompts(
             self, repair_required: bool, restart_required: bool,
-            update_succeeded: bool, update_generation: int | None = None) -> None:
+            update_succeeded: bool, update_generation: int | None = None,
+            repair_config: dict | None = None) -> None:
         with self.state.lock:
             task = dict(self.state.task)
         if update_generation is None:
@@ -1240,9 +1241,10 @@ class ManagerWindow(QMainWindow):
             QTimer.singleShot(
                 100,
                 lambda repair=repair_required, restart=restart_required,
-                succeeded=update_succeeded, generation=update_generation:
+                succeeded=update_succeeded, generation=update_generation,
+                config=repair_config:
                 self._finish_update_prompts(
-                    repair, restart, succeeded, generation
+                    repair, restart, succeeded, generation, config
                 ),
             )
             return
@@ -1254,11 +1256,17 @@ class ManagerWindow(QMainWindow):
             self.update_progress_dialog.accept()
         repair_started = False
         if repair_required:
-            with self.state.lock:
-                config = dict(self.state.config)
-            if restart_required:
-                self.pending_manager_restart_after_repair = update_succeeded
-            repair_started = self.prompt_office_upgrade_repair(config)
+            if repair_config is None:
+                with self.state.lock:
+                    repair_config = dict(self.state.config)
+            status = backend.environment_status(
+                repair_config["prefix"], repair_config["wine"]
+            )
+            if (status["prefix_exists"] and status["wine_exists"]
+                    and any(status["apps"].values())):
+                if restart_required:
+                    self.pending_manager_restart_after_repair = update_succeeded
+                repair_started = self.prompt_office_upgrade_repair(repair_config)
         if restart_required and not repair_started:
             self.pending_manager_restart_after_repair = None
             self.prompt_manager_restart(update_succeeded)
@@ -3105,13 +3113,17 @@ class ManagerWindow(QMainWindow):
                 if repair_required or restart_required:
                     update_succeeded = task["status"] == "completed"
                     delay = 700 if self.update_progress_dialog is not None else 0
+                    repair_config = (
+                        dict(snapshot["config"]) if repair_required else None
+                    )
                     QTimer.singleShot(
                         delay,
                         lambda repair=repair_required, restart=restart_required,
                         succeeded=update_succeeded,
-                        generation=int(task.get("generation", 0)):
+                        generation=int(task.get("generation", 0)),
+                        config=repair_config:
                         self._finish_update_prompts(
-                            repair, restart, succeeded, generation
+                            repair, restart, succeeded, generation, config
                         ),
                     )
         self.last_task_state = task_state
