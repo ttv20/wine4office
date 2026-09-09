@@ -104,10 +104,10 @@ if ! mv -- "$staged_distribution" "$live_distribution"; then
         mv -- "$backup_distribution" "$live_distribution"
     exit 1
 fi
+committed_new_packages=()
 rm -rf -- "$staged_repository"
 staged_repository=
 if [[ -n $backup_distribution ]]; then
     rm -rf -- "$backup_distribution"
     backup_distribution=
 fi
-committed_new_packages=()

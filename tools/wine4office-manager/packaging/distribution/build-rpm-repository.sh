@@ -25,6 +25,7 @@ backup_metadata=
 package_commit_temp=
 committed_new_packages=()
 declare -A package_source_digests=()
+declare -A package_signing_states=()
 cleanup() {
     local status=$?
     [[ -z ${package_commit_temp:-} || ! -e $package_commit_temp ]] || \
@@ -53,10 +54,19 @@ for package in "$@"; do
     live_package=$packages/$package_name
     source_digest=$(sha256sum "$package" | cut -d ' ' -f 1)
     package_source_digests["$package_name"]=$source_digest
+    desired_signing_state=${WINE4OFFICE_GPG_KEY_ID:-unsigned}
+    package_signing_states["$package_name"]=$desired_signing_state
     rm -f -- "$staged_package"
     source_digest_file=$source_digests/$package_name.sha256
+    signing_state_file=$source_digests/$package_name.signing-key
     if [[ -e $live_package && -f $source_digest_file \
             && $(cat "$source_digest_file") == "$source_digest" ]]; then
+        if [[ -n ${WINE4OFFICE_GPG_KEY_ID:-} \
+                && (! -f $signing_state_file \
+                    || $(cat "$signing_state_file") != "$desired_signing_state") ]]; then
+            echo "Refusing to change signing state for a published RPM; use a new package release: $live_package" >&2
+            exit 1
+        fi
         install -m 0644 "$live_package" "$staged_package"
     else
         install -m 0644 "$package" "$staged_package"
@@ -97,6 +107,14 @@ for package in "$@"; do
         package_commit_temp=
         committed_new_packages+=("$source_digest_file")
     fi
+    signing_state_file=$source_digests/$package_name.signing-key
+    if [[ ! -e $signing_state_file ]]; then
+        package_commit_temp=$(mktemp "$source_digests/.${package_name}.XXXXXX")
+        printf '%s\n' "${package_signing_states[$package_name]}" > "$package_commit_temp"
+        mv -- "$package_commit_temp" "$signing_state_file"
+        package_commit_temp=
+        committed_new_packages+=("$signing_state_file")
+    fi
 done
 if [[ -e $repository_root/repodata ]]; then
     backup_metadata=$(mktemp -d "$repository_root/.repodata.backup.XXXXXX")
@@ -108,10 +126,10 @@ if ! mv -- "$staged_repository/repodata" "$repository_root/repodata"; then
         mv -- "$backup_metadata" "$repository_root/repodata"
     exit 1
 fi
+committed_new_packages=()
 rm -rf -- "$staged_repository"
 staged_repository=
 if [[ -n $backup_metadata ]]; then
     rm -rf -- "$backup_metadata"
     backup_metadata=
 fi
-committed_new_packages=()

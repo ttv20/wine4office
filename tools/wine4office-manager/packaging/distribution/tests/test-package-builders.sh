@@ -137,6 +137,15 @@ case $mode in
         find "$tmp/build-metadata-packages" \
             -name 'wine4office-2.3.4-1.build.5*.x86_64.rpm' -print -quit \
             | grep -q .
+        "$distribution/build-rpm-repository.sh" "$tmp/unsigned-repository" "$rpm"
+        if WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/unsigned-rpmsign.log" \
+                PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
+                "$distribution/build-rpm-repository.sh" \
+                "$tmp/unsigned-repository" "$rpm" >/dev/null 2>&1; then
+            echo "RPM repository silently reused an unsigned package in signed mode" >&2
+            exit 1
+        fi
+        [[ ! -e $tmp/unsigned-repository/rpm/x86_64/repodata/repomd.xml.asc ]]
         rpm_hash=$(sha256sum "$rpm")
         WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/rpmsign.log" \
             PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \

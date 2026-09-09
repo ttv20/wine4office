@@ -23,7 +23,8 @@ release artifacts for testing only.
 
 Published package filenames are immutable. Rebuilds with different bytes must
 use a new DEB version or RPM release so existing repository metadata never
-points to replaced content.
+points to replaced content. Enabling RPM package signing for a previously
+unsigned filename also requires a new RPM release.
 
 Packaged installations use the distribution package source as their update
 authority. The Manager hides the standalone metadata URL, prerelease selector,
