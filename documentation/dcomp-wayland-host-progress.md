@@ -63,3 +63,22 @@ admitted.
   `/workspace/artifacts/winewayland-host-build.sha256` in environment
   `dcomp-host-probe-20260909`.
 - Native Windows fixture and Outlook baseline are pending.
+
+## Reproduce the current probe
+
+The environment uses runner
+`runner-wine4office-0-0-0-main-347abf611ff6`. After placing the two PE files
+and Unix library recorded in `winewayland-host-build.sha256` into that
+task-owned runner, run:
+
+```sh
+tools/office-test-env/office-exec.sh dcomp-host-probe-20260909 -- \
+  /usr/bin/env HOME=/workspace/home USER=tester LOGNAME=tester \
+  XDG_RUNTIME_DIR=/tmp/runtime-wine365 WAYLAND_DISPLAY=wayland-0 \
+  WINEPREFIX=/workspace/home/.wine4office WINEDEBUG=-all \
+  /workspace/runner-wine4office-0-0-0-main-347abf611ff6/bin/wine \
+  winewayland-host.exe --probe
+```
+
+Pass the explicit i386 PE path in place of `winewayland-host.exe` to exercise
+the WoW64 Unix-call table.
