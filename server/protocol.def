@@ -4717,8 +4717,41 @@ enum inproc_sync_type
     unsigned int     format;
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
+    unsigned int     registered_slots;
     unsigned int     device_uuid_0;
     unsigned int     device_uuid_1;
     unsigned int     device_uuid_2;
     unsigned int     device_uuid_3;
+@END
+
+
+/* Pin one exportable image and its separate ready/reuse synchronization. */
+@REQ(register_wayland_buffer_slot)
+    user_handle_t    root;
+    unsigned int     slot;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+    obj_handle_t     memory;
+    obj_handle_t     ready_sync;
+    obj_handle_t     reuse_sync;
+@REPLY
+    unsigned __int64 registry_generation;
+    unsigned int     registered_slots;
+@END
+
+/* Duplicate one registered slot's pinned objects into the current host. */
+@REQ(get_wayland_buffer_slot)
+    user_handle_t    root;
+    unsigned int     slot;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 pool_generation;
+@REPLY
+    obj_handle_t     memory;
+    obj_handle_t     ready_sync;
+    obj_handle_t     reuse_sync;
+    unsigned int     registered_slots;
+    unsigned __int64 registry_generation;
 @END

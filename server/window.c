@@ -30,11 +30,13 @@
 
 #include "object.h"
 #include "file.h"
+#include "handle.h"
 #include "request.h"
 #include "thread.h"
 #include "process.h"
 #include "user.h"
 #include "unicode.h"
+#include "d3dkmt.h"
 
 static const struct ratio no_dpi;
 
@@ -61,6 +63,13 @@ enum property_type
 #define MAX_WAYLAND_ROOT_POOL_BYTES (256ull * 1024 * 1024)
 #define MAX_WAYLAND_DESKTOP_POOL_BYTES (1024ull * 1024 * 1024)
 
+struct wayland_buffer_slot
+{
+    struct object *memory;
+    struct object *ready_sync;
+    struct object *reuse_sync;
+};
+
 struct wayland_buffer_pool
 {
     unsigned __int64 generation;
@@ -70,7 +79,9 @@ struct wayland_buffer_pool
     unsigned int     format;
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
+    unsigned int     registered_slots;
     unsigned int     device_uuid[4];
+    struct wayland_buffer_slot slots[WINE_WAYLAND_BUFFER_POOL_SLOTS];
 };
 
 struct wayland_scene_contributor
@@ -155,6 +166,30 @@ static unsigned __int64 wayland_contributor_id;
 static unsigned __int64 wayland_stream_id;
 static unsigned __int64 wayland_binding_generation;
 
+static void release_wayland_buffer_pool( struct wayland_buffer_pool *pool )
+{
+    unsigned int i;
+
+    for (i = 0; i < WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        if (pool->slots[i].memory) release_object( pool->slots[i].memory );
+        if (pool->slots[i].ready_sync) release_object( pool->slots[i].ready_sync );
+        if (pool->slots[i].reuse_sync) release_object( pool->slots[i].reuse_sync );
+    }
+    memset( pool, 0, sizeof(*pool) );
+}
+
+static void release_wayland_scene_registry( struct wayland_scene_registry *registry )
+{
+    unsigned int i, j;
+
+    if (!registry) return;
+    for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+        for (j = 0; j < MAX_WAYLAND_BUFFER_POOLS; ++j)
+            release_wayland_buffer_pool( &registry->contributors[i].pools[j] );
+    free( registry );
+}
+
 C_ASSERT( sizeof(window_shm_t) == offsetof(window_shm_t, extra[0]) );
 
 static void window_dump( struct object *obj, int verbose );
@@ -219,7 +254,7 @@ static void window_destroy( struct object *obj )
     if (win->update_region) free_region( win->update_region );
     if (win->class) release_class( win->class );
     free( win->text );
-    free( win->wayland_scene_registry );
+    release_wayland_scene_registry( win->wayland_scene_registry );
 
     if (win->shared) free_shared_object( win->shared );
 }
@@ -3968,6 +4003,7 @@ DECL_HANDLER(ack_wayland_contributor_revoke)
 {
     struct wayland_scene_contributor *contributor;
     struct window *root;
+    unsigned int i;
 
     if (!(root = get_window( req->root ))) return;
     if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
@@ -3981,6 +4017,8 @@ DECL_HANDLER(ack_wayland_contributor_revoke)
         set_error( STATUS_INTEGER_OVERFLOW );
     else
     {
+        for (i = 0; i < MAX_WAYLAND_BUFFER_POOLS; ++i)
+            release_wayland_buffer_pool( &contributor->pools[i] );
         memset( contributor, 0, sizeof(*contributor) );
         ++root->wayland_scene_registry->generation;
     }
@@ -4185,7 +4223,7 @@ DECL_HANDLER(retire_wayland_buffer_pool)
         set_error( STATUS_INTEGER_OVERFLOW );
     else
     {
-        memset( pool, 0, sizeof(*pool) );
+        release_wayland_buffer_pool( pool );
         reply->registry_generation = ++root->wayland_scene_registry->generation;
     }
 
@@ -4209,6 +4247,7 @@ DECL_HANDLER(get_wayland_buffer_pool)
     reply->format = 0;
     reply->slot_count = 0;
     reply->frame_credit_limit = 0;
+    reply->registered_slots = 0;
     reply->device_uuid_0 = 0;
     reply->device_uuid_1 = 0;
     reply->device_uuid_2 = 0;
@@ -4240,10 +4279,136 @@ DECL_HANDLER(get_wayland_buffer_pool)
     reply->format = pool->format;
     reply->slot_count = pool->slot_count;
     reply->frame_credit_limit = pool->frame_credit_limit;
+    reply->registered_slots = pool->registered_slots;
     reply->device_uuid_0 = pool->device_uuid[0];
     reply->device_uuid_1 = pool->device_uuid[1];
     reply->device_uuid_2 = pool->device_uuid[2];
     reply->device_uuid_3 = pool->device_uuid[3];
+}
+
+DECL_HANDLER(register_wayland_buffer_slot)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct object *memory = NULL, *ready_sync = NULL, *reuse_sync = NULL;
+    struct window *root;
+    struct desktop *desktop;
+    unsigned int i;
+
+    reply->registry_generation = 0;
+    reply->registered_slots = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    if (!(pool = find_wayland_buffer_pool( contributor, req->pool_generation )))
+        set_error( STATUS_NOT_FOUND );
+    else if (req->slot >= pool->slot_count)
+        set_error( STATUS_INVALID_PARAMETER );
+    else
+    {
+        slot = &pool->slots[req->slot];
+        reply->registered_slots = pool->registered_slots;
+        if (slot->memory)
+            set_error( STATUS_OBJECT_NAME_COLLISION );
+        else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
+            set_error( STATUS_INTEGER_OVERFLOW );
+        else if (!(memory = get_d3dkmt_object_handle( current->process, req->memory,
+                                                      D3DKMT_RESOURCE )))
+            goto done;
+        else if (!(ready_sync = get_d3dkmt_object_handle( current->process, req->ready_sync,
+                                                          D3DKMT_SYNC )))
+            goto done;
+        else if (!(reuse_sync = get_d3dkmt_object_handle( current->process, req->reuse_sync,
+                                                          D3DKMT_SYNC )))
+            goto done;
+        else if (ready_sync == reuse_sync)
+            set_error( STATUS_INVALID_PARAMETER );
+        else
+        {
+            for (i = 0; i < pool->slot_count; ++i)
+            {
+                const struct wayland_buffer_slot *other = &pool->slots[i];
+
+                if (other->memory == memory || other->ready_sync == ready_sync ||
+                    other->ready_sync == reuse_sync || other->reuse_sync == ready_sync ||
+                    other->reuse_sync == reuse_sync)
+                {
+                    set_error( STATUS_OBJECT_NAME_COLLISION );
+                    goto done;
+                }
+            }
+            slot->memory = memory;
+            slot->ready_sync = ready_sync;
+            slot->reuse_sync = reuse_sync;
+            memory = ready_sync = reuse_sync = NULL;
+            reply->registered_slots = ++pool->registered_slots;
+            reply->registry_generation = ++root->wayland_scene_registry->generation;
+        }
+    }
+
+done:
+    if (reuse_sync) release_object( reuse_sync );
+    if (ready_sync) release_object( ready_sync );
+    if (memory) release_object( memory );
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_buffer_slot)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct window *root;
+    unsigned int error;
+
+    reply->memory = 0;
+    reply->ready_sync = 0;
+    reply->reuse_sync = 0;
+    reply->registered_slots = 0;
+    reply->registry_generation = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!(contributor = find_wayland_contributor( root, req->contributor_id )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->registry_generation = root->wayland_scene_registry->generation;
+    if (!(pool = find_wayland_buffer_pool( contributor, req->pool_generation )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->registered_slots = pool->registered_slots;
+    if (req->slot >= pool->slot_count)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    slot = &pool->slots[req->slot];
+    if (!slot->memory)
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (!(reply->memory = alloc_handle( current->process, slot->memory,
+                                        STANDARD_RIGHTS_ALL, 0 )))
+        return;
+    if (!(reply->ready_sync = alloc_handle( current->process, slot->ready_sync,
+                                            STANDARD_RIGHTS_ALL, 0 )) ||
+        !(reply->reuse_sync = alloc_handle( current->process, slot->reuse_sync,
+                                            STANDARD_RIGHTS_ALL, 0 )))
+    {
+        error = get_error();
+        if (reply->reuse_sync) close_handle( current->process, reply->reuse_sync );
+        if (reply->ready_sync) close_handle( current->process, reply->ready_sync );
+        close_handle( current->process, reply->memory );
+        reply->memory = reply->ready_sync = reply->reuse_sync = 0;
+        set_error( error );
+    }
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

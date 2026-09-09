@@ -48,6 +48,8 @@ enum host_child_command
     HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE,
     HOST_CHILD_COMMAND_SET_READY,
     HOST_CHILD_COMMAND_GET_POOL,
+    HOST_CHILD_COMMAND_GET_SLOT,
+    HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -58,7 +60,17 @@ enum producer_child_command
     PRODUCER_CHILD_COMMAND_CHECK,
     PRODUCER_CHILD_COMMAND_CREATE_POOL,
     PRODUCER_CHILD_COMMAND_RETIRE_POOL,
+    PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS,
+    PRODUCER_CHILD_COMMAND_REGISTER_SLOT,
+    PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS,
     PRODUCER_CHILD_COMMAND_EXIT,
+};
+
+enum slot_registration_variant
+{
+    SLOT_REGISTRATION_VALID,
+    SLOT_REGISTRATION_WRONG_MEMORY_TYPE,
+    SLOT_REGISTRATION_SHARED_SYNC,
 };
 
 struct wayland_host_test_state
@@ -100,12 +112,24 @@ struct wayland_host_test_state
     DWORD pool_format;
     DWORD pool_slot_count;
     DWORD frame_credit_limit;
+    DWORD registered_slots;
+    DWORD slot;
+    DWORD slot_registration_variant;
+    DWORD slot_memory_handle;
+    DWORD slot_ready_handle;
+    DWORD slot_reuse_handle;
+    DWORD slot_memory_global;
+    DWORD slot_ready_global;
+    DWORD slot_reuse_global;
     DWORD device_uuid[4];
     NTSTATUS mismatch_status;
     NTSTATUS register_status;
     NTSTATUS ready_status;
     NTSTATUS command_status;
     NTSTATUS producer_status;
+    NTSTATUS slot_memory_status;
+    NTSTATUS slot_ready_status;
+    NTSTATUS slot_reuse_status;
 };
 
 struct wayland_host_info
@@ -155,7 +179,17 @@ struct wayland_pool_info
     DWORD format;
     DWORD slot_count;
     DWORD frame_credit_limit;
+    DWORD registered_slots;
     DWORD device_uuid[4];
+};
+
+struct wayland_slot_info
+{
+    obj_handle_t memory;
+    obj_handle_t ready_sync;
+    obj_handle_t reuse_sync;
+    UINT64 registry_generation;
+    DWORD registered_slots;
 };
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
@@ -473,11 +507,106 @@ static NTSTATUS get_pool( HWND root, UINT64 host_epoch, UINT64 contributor_id,
             info->format = reply->format;
             info->slot_count = reply->slot_count;
             info->frame_credit_limit = reply->frame_credit_limit;
+            info->registered_slots = reply->registered_slots;
             info->device_uuid[0] = reply->device_uuid_0;
             info->device_uuid[1] = reply->device_uuid_1;
             info->device_uuid[2] = reply->device_uuid_2;
             info->device_uuid[3] = reply->device_uuid_3;
         }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS create_d3dkmt_test_object( enum d3dkmt_type type, obj_handle_t *handle,
+                                           DWORD *global )
+{
+    NTSTATUS status;
+
+    *handle = 0;
+    *global = 0;
+    SERVER_START_REQ( d3dkmt_object_create )
+    {
+        req->type = type;
+        req->fd = -1;
+        req->value = 0;
+        if (!(status = p_wine_server_call( req )))
+        {
+            *handle = reply->handle;
+            *global = reply->global;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void close_d3dkmt_test_handle( obj_handle_t *handle )
+{
+    if (*handle) CloseHandle( wine_server_ptr_handle( *handle ) );
+    *handle = 0;
+}
+
+static NTSTATUS query_d3dkmt_test_object( enum d3dkmt_type type, DWORD global,
+                                          obj_handle_t handle )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( d3dkmt_object_query )
+    {
+        req->type = type;
+        req->global = global;
+        req->handle = handle;
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS register_slot( HWND root, const struct wayland_host_test_state *state,
+                               obj_handle_t memory, obj_handle_t ready_sync,
+                               obj_handle_t reuse_sync, DWORD *registered_slots )
+{
+    NTSTATUS status;
+
+    *registered_slots = 0;
+    SERVER_START_REQ( register_wayland_buffer_slot )
+    {
+        req->root = wine_server_user_handle( root );
+        req->slot = state->slot;
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        req->pool_generation = state->pool_generation;
+        req->memory = memory;
+        req->ready_sync = ready_sync;
+        req->reuse_sync = reuse_sync;
+        status = p_wine_server_call( req );
+        *registered_slots = reply->registered_slots;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_slot( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                          UINT64 pool_generation, DWORD slot,
+                          struct wayland_slot_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_buffer_slot )
+    {
+        req->root = wine_server_user_handle( root );
+        req->slot = slot;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->pool_generation = pool_generation;
+        status = p_wine_server_call( req );
+        info->memory = reply->memory;
+        info->ready_sync = reply->ready_sync;
+        info->reuse_sync = reply->reuse_sync;
+        info->registered_slots = reply->registered_slots;
+        info->registry_generation = reply->registry_generation;
     }
     SERVER_END_REQ;
     return status;
@@ -578,6 +707,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_scene_info scene;
     struct wayland_contributor_info contributor;
     struct wayland_pool_info pool;
+    struct wayland_slot_info slot;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -660,7 +790,33 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->pool_format = pool.format;
             state->pool_slot_count = pool.slot_count;
             state->frame_credit_limit = pool.frame_credit_limit;
+            state->registered_slots = pool.registered_slots;
             memcpy( state->device_uuid, pool.device_uuid, sizeof(state->device_uuid) );
+            break;
+        case HOST_CHILD_COMMAND_GET_SLOT:
+            state->command_status = get_slot( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->pool_generation,
+                    state->slot, &slot );
+            state->registered_slots = slot.registered_slots;
+            state->registry_generation = slot.registry_generation;
+            state->slot_memory_status = state->command_status ? STATUS_PENDING :
+                    query_d3dkmt_test_object( D3DKMT_RESOURCE, 0, slot.memory );
+            state->slot_ready_status = state->command_status ? STATUS_PENDING :
+                    query_d3dkmt_test_object( D3DKMT_SYNC, 0, slot.ready_sync );
+            state->slot_reuse_status = state->command_status ? STATUS_PENDING :
+                    query_d3dkmt_test_object( D3DKMT_SYNC, 0, slot.reuse_sync );
+            close_d3dkmt_test_handle( &slot.reuse_sync );
+            close_d3dkmt_test_handle( &slot.ready_sync );
+            close_d3dkmt_test_handle( &slot.memory );
+            break;
+        case HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS:
+            state->slot_memory_status = query_d3dkmt_test_object( D3DKMT_RESOURCE,
+                    state->slot_memory_global, 0 );
+            state->slot_ready_status = query_d3dkmt_test_object( D3DKMT_SYNC,
+                    state->slot_ready_global, 0 );
+            state->slot_reuse_status = query_d3dkmt_test_object( D3DKMT_SYNC,
+                    state->slot_reuse_global, 0 );
+            state->command_status = STATUS_SUCCESS;
             break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
@@ -679,6 +835,9 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
 static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE result_event )
 {
     struct wayland_host_test_state *state;
+    obj_handle_t memory = 0, ready_sync = 0, reuse_sync = 0;
+    obj_handle_t register_memory, register_ready, register_reuse;
+    NTSTATUS status;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) ))) return;
@@ -698,7 +857,54 @@ static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE res
         case PRODUCER_CHILD_COMMAND_RETIRE_POOL:
             state->producer_status = retire_pool( (HWND)(UINT_PTR)state->root, state );
             break;
+        case PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS:
+            close_d3dkmt_test_handle( &reuse_sync );
+            close_d3dkmt_test_handle( &ready_sync );
+            close_d3dkmt_test_handle( &memory );
+            status = create_d3dkmt_test_object( D3DKMT_RESOURCE, &memory,
+                                                &state->slot_memory_global );
+            if (!status)
+                status = create_d3dkmt_test_object( D3DKMT_SYNC, &ready_sync,
+                                                    &state->slot_ready_global );
+            if (!status)
+                status = create_d3dkmt_test_object( D3DKMT_SYNC, &reuse_sync,
+                                                    &state->slot_reuse_global );
+            if (status)
+            {
+                close_d3dkmt_test_handle( &reuse_sync );
+                close_d3dkmt_test_handle( &ready_sync );
+                close_d3dkmt_test_handle( &memory );
+            }
+            state->slot_memory_handle = memory;
+            state->slot_ready_handle = ready_sync;
+            state->slot_reuse_handle = reuse_sync;
+            state->producer_status = status;
+            break;
+        case PRODUCER_CHILD_COMMAND_REGISTER_SLOT:
+            register_memory = memory;
+            register_ready = ready_sync;
+            register_reuse = reuse_sync;
+            if (state->slot_registration_variant == SLOT_REGISTRATION_WRONG_MEMORY_TYPE)
+                register_memory = ready_sync;
+            else if (state->slot_registration_variant == SLOT_REGISTRATION_SHARED_SYNC)
+                register_reuse = ready_sync;
+            state->producer_status = register_slot( (HWND)(UINT_PTR)state->root, state,
+                    register_memory, register_ready, register_reuse,
+                    &state->registered_slots );
+            break;
+        case PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS:
+            close_d3dkmt_test_handle( &reuse_sync );
+            close_d3dkmt_test_handle( &ready_sync );
+            close_d3dkmt_test_handle( &memory );
+            state->slot_memory_handle = 0;
+            state->slot_ready_handle = 0;
+            state->slot_reuse_handle = 0;
+            state->producer_status = STATUS_SUCCESS;
+            break;
         case PRODUCER_CHILD_COMMAND_EXIT:
+            close_d3dkmt_test_handle( &reuse_sync );
+            close_d3dkmt_test_handle( &ready_sync );
+            close_d3dkmt_test_handle( &memory );
             state->producer_status = STATUS_SUCCESS;
             SetEvent( result_event );
             UnmapViewOfFile( state );
@@ -810,6 +1016,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_scene_info scene;
     struct wayland_contributor_info contributor;
     struct wayland_pool_info pool;
+    struct wayland_slot_info slot;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -830,6 +1037,7 @@ static void test_host_registration( const char *program, const char *test_name )
     NTSTATUS status;
     BOOL created;
     unsigned int i;
+    DWORD registered_slots;
 
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Initial host query returned %#lx.\n", status );
@@ -1464,6 +1672,123 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, wine_dbgstr_longlong( state->pool_generation ),
         wine_dbgstr_longlong( state->allocation_size ), state->pool_width, state->pool_height,
         state->pool_format, state->pool_slot_count, state->frame_credit_limit );
+    ok( state->registered_slots == 0, "New pool reported %lu registered slots.\n",
+        state->registered_slots );
+
+    state->pool_generation = 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS ),
+        "Timed out creating slot objects.\n" );
+    ok( !state->producer_status && state->slot_memory_handle && state->slot_ready_handle &&
+        state->slot_reuse_handle && state->slot_memory_global && state->slot_ready_global &&
+        state->slot_reuse_global, "Creating slot objects returned %#lx.\n",
+        state->producer_status );
+    state->slot = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    state->slot_registration_variant = SLOT_REGISTRATION_VALID;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out registering an out-of-range slot.\n" );
+    ok( state->producer_status == STATUS_INVALID_PARAMETER,
+        "Out-of-range slot registration returned %#lx.\n", state->producer_status );
+    state->slot = 0;
+    status = register_slot( root, state, state->slot_memory_handle,
+                            state->slot_ready_handle, state->slot_reuse_handle,
+                            &registered_slots );
+    ok( status == STATUS_ACCESS_DENIED && !registered_slots,
+        "Foreign slot registration returned %#lx, slots %lu.\n", status, registered_slots );
+    state->slot_registration_variant = SLOT_REGISTRATION_WRONG_MEMORY_TYPE;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out registering a sync as slot memory.\n" );
+    ok( state->producer_status == STATUS_OBJECT_TYPE_MISMATCH,
+        "Wrong slot memory type returned %#lx.\n", state->producer_status );
+    state->slot_registration_variant = SLOT_REGISTRATION_SHARED_SYNC;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out registering one sync in both directions.\n" );
+    ok( state->producer_status == STATUS_INVALID_PARAMETER,
+        "Shared ready/reuse sync returned %#lx.\n", state->producer_status );
+    state->slot_registration_variant = SLOT_REGISTRATION_VALID;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out registering slot 0.\n" );
+    ok( !state->producer_status && state->registered_slots == 1,
+        "Slot 0 registration returned %#lx, slots %lu.\n",
+        state->producer_status, state->registered_slots );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out repeating slot 0 registration.\n" );
+    ok( state->producer_status == STATUS_OBJECT_NAME_COLLISION &&
+        state->registered_slots == 1,
+        "Duplicate slot registration returned %#lx, slots %lu.\n",
+        state->producer_status, state->registered_slots );
+    state->slot = 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out aliasing slot 0 objects into slot 1.\n" );
+    ok( state->producer_status == STATUS_OBJECT_NAME_COLLISION &&
+        state->registered_slots == 1,
+        "Aliased slot registration returned %#lx, slots %lu.\n",
+        state->producer_status, state->registered_slots );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS ),
+        "Timed out closing slot 0 producer handles.\n" );
+    ok( !state->producer_status, "Closing slot 0 producer handles returned %#lx.\n",
+        state->producer_status );
+    for (i = 1; i < WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS ),
+            "Timed out creating slot %u objects.\n", i );
+        ok( !state->producer_status, "Creating slot %u objects returned %#lx.\n",
+            i, state->producer_status );
+        state->slot = i;
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+            "Timed out registering slot %u.\n", i );
+        ok( !state->producer_status && state->registered_slots == i + 1,
+            "Slot %u registration returned %#lx, slots %lu.\n", i,
+            state->producer_status, state->registered_slots );
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS ),
+            "Timed out closing slot %u producer handles.\n", i );
+        ok( !state->producer_status, "Closing slot %u handles returned %#lx.\n",
+            i, state->producer_status );
+    }
+    status = get_slot( root, old_epoch, state->contributor_id, 1, 2, &slot );
+    ok( status == STATUS_ACCESS_DENIED && !slot.memory && !slot.ready_sync &&
+        !slot.reuse_sync, "Non-host slot query returned %#lx and handles %#x/%#x/%#x.\n",
+        status, slot.memory, slot.ready_sync, slot.reuse_sync );
+    state->pool_generation = 1;
+    state->slot = 2;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SLOT ),
+        "Timed out duplicating slot objects into the host.\n" );
+    ok( !state->command_status && !state->slot_memory_status &&
+        !state->slot_ready_status && !state->slot_reuse_status &&
+        state->registered_slots == WINE_WAYLAND_BUFFER_POOL_SLOTS,
+        "Host slot query returned %#lx, types %#lx/%#lx/%#lx, slots %lu.\n",
+        state->command_status, state->slot_memory_status, state->slot_ready_status,
+        state->slot_reuse_status, state->registered_slots );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS ),
+        "Timed out querying producer-closed slot objects.\n" );
+    ok( !state->command_status && !state->slot_memory_status &&
+        !state->slot_ready_status && !state->slot_reuse_status,
+        "Pinned slot objects returned %#lx/%#lx/%#lx.\n",
+        state->slot_memory_status, state->slot_ready_status, state->slot_reuse_status );
+    state->pool_generation = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_POOL ),
+        "Timed out querying the completed transport pool.\n" );
+    ok( !state->command_status && state->pool_generation == 1 &&
+        state->registered_slots == WINE_WAYLAND_BUFFER_POOL_SLOTS,
+        "Completed pool query returned %#lx, generation %s, slots %lu.\n",
+        state->command_status, wine_dbgstr_longlong( state->pool_generation ),
+        state->registered_slots );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CREATE_POOL ),
         "Timed out repeating transport pool generation 1.\n" );
@@ -1500,11 +1825,44 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out retiring transport pool 1.\n" );
     ok( !state->producer_status, "Pool 1 retirement returned %#lx.\n",
         state->producer_status );
+    state->slot = 2;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SLOT ),
+        "Timed out querying a retired pool slot.\n" );
+    ok( state->command_status == STATUS_NOT_FOUND,
+        "Retired pool slot query returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS ),
+        "Timed out checking retired slot object release.\n" );
+    ok( !state->command_status && state->slot_memory_status == STATUS_INVALID_PARAMETER &&
+        state->slot_ready_status == STATUS_INVALID_PARAMETER &&
+        state->slot_reuse_status == STATUS_INVALID_PARAMETER,
+        "Retired slot objects returned %#lx/%#lx/%#lx.\n",
+        state->slot_memory_status, state->slot_ready_status, state->slot_reuse_status );
     state->pool_generation = 3;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CREATE_POOL ),
         "Timed out registering replacement transport pool 3.\n" );
     ok( !state->producer_status, "Pool 3 registration returned %#lx.\n",
+        state->producer_status );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS ),
+        "Timed out creating replacement-pool slot objects.\n" );
+    ok( !state->producer_status, "Creating replacement-pool objects returned %#lx.\n",
+        state->producer_status );
+    state->slot = 0;
+    state->slot_registration_variant = SLOT_REGISTRATION_VALID;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_REGISTER_SLOT ),
+        "Timed out registering the replacement-pool slot.\n" );
+    ok( !state->producer_status && state->registered_slots == 1,
+        "Replacement-pool slot registration returned %#lx, slots %lu.\n",
+        state->producer_status, state->registered_slots );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS ),
+        "Timed out closing replacement-pool producer handles.\n" );
+    ok( !state->producer_status,
+        "Closing replacement-pool producer handles returned %#lx.\n",
         state->producer_status );
     state->pool_generation = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -1629,11 +1987,42 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, state->contributor_info,
         wine_dbgstr_longlong( state->revocation_scene_generation ) );
     scene_generation = state->revocation_scene_generation;
+    state->pool_generation = 3;
+    state->slot = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SLOT ),
+        "Timed out querying a revoked contributor's pinned slot.\n" );
+    ok( !state->command_status && !state->slot_memory_status &&
+        !state->slot_ready_status && !state->slot_reuse_status &&
+        state->registered_slots == 1,
+        "Revoked contributor slot returned %#lx, types %#lx/%#lx/%#lx, slots %lu.\n",
+        state->command_status, state->slot_memory_status, state->slot_ready_status,
+        state->slot_reuse_status, state->registered_slots );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS ),
+        "Timed out checking revoked contributor slot pins.\n" );
+    ok( !state->command_status && !state->slot_memory_status &&
+        !state->slot_ready_status && !state->slot_reuse_status,
+        "Revoked contributor objects returned %#lx/%#lx/%#lx before acknowledgement.\n",
+        state->slot_memory_status, state->slot_ready_status, state->slot_reuse_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
         "Timed out acknowledging host-revoked contributor.\n" );
     ok( !state->command_status, "Host-revoked acknowledgement returned %#lx.\n",
         state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SLOT ),
+        "Timed out querying an acknowledged contributor slot.\n" );
+    ok( state->command_status == STATUS_NOT_FOUND,
+        "Acknowledged contributor slot returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS ),
+        "Timed out checking acknowledged contributor object release.\n" );
+    ok( !state->command_status && state->slot_memory_status == STATUS_INVALID_PARAMETER &&
+        state->slot_ready_status == STATUS_INVALID_PARAMETER &&
+        state->slot_reuse_status == STATUS_INVALID_PARAMETER,
+        "Acknowledged contributor objects returned %#lx/%#lx/%#lx.\n",
+        state->slot_memory_status, state->slot_ready_status, state->slot_reuse_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying retained scene from replacement host.\n" );

@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 975.
+Generated server protocol version: 976.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -54,6 +54,15 @@ or transport fixture is not Outlook support.
   retire an old generation without allowing generation reuse. This stage does
   not yet accept resource handles, acknowledge GPU import or submit frames;
   pool metadata alone never authorizes `HostedContent`.
+- Each pool now has three resource slots. The authenticated producer registers
+  one D3DKMT resource plus separate ready and reuse synchronization objects per
+  slot. Wineserver validates the exact object types, pins the underlying
+  objects after the producer closes its handles or exits, and duplicates them
+  only into the current Ready host. Explicit pool retirement releases the
+  pins; revoked contributors retain them until the replacement host
+  acknowledges the tombstone. Window destruction releases all remaining
+  pools. Registration still does not prove native GPU import or authorize a
+  transport-backed `HostedContent` scene.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -206,6 +215,20 @@ admitted.
   coherent runner and exact test binaries are retained at
   `/workspace/runner-dcomp-pool-authority` and
   `/workspace/artifacts/pool-authority-win32u-test-{x64,i386}.exe`.
+- The resource-slot authority passed 324 checks with zero failures in both
+  x86-64 and i386 on protocol 976. It rejects foreign producers, wrong object
+  types, shared ready/reuse objects, duplicate or aliased slots and out-of-range slots;
+  registers all three slots; duplicates pinned objects into the host; and
+  proves the objects remain alive after producer-handle closure. Global-object
+  queries also prove release after explicit pool retirement and after the
+  replacement host acknowledges a revoked contributor. The public DComp host
+  oracle remained at 36 checks with zero failures in both architectures. Logs
+  are retained as `/workspace/artifacts/dcomp-slot-authority-{x64,i386}.log`
+  and `/workspace/artifacts/dcomp-slot-authority-dcomp-host-{x64,i386}.log`;
+  the coherent runner, exact test binaries and hashes are retained at
+  `/workspace/runner-dcomp-slot-authority`,
+  `/workspace/artifacts/slot-authority-win32u-test-{x64,i386}.exe` and
+  `/workspace/artifacts/dcomp-slot-authority-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

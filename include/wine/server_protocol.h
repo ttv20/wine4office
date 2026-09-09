@@ -6811,11 +6811,57 @@ struct get_wayland_buffer_pool_reply
     unsigned int     format;
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
+    unsigned int     registered_slots;
     unsigned int     device_uuid_0;
     unsigned int     device_uuid_1;
     unsigned int     device_uuid_2;
     unsigned int     device_uuid_3;
+};
+
+
+
+struct register_wayland_buffer_slot_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     slot;
+    char __pad_20[4];
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 pool_generation;
+    obj_handle_t     memory;
+    obj_handle_t     ready_sync;
+    obj_handle_t     reuse_sync;
     char __pad_68[4];
+};
+struct register_wayland_buffer_slot_reply
+{
+    struct reply_header __header;
+    unsigned __int64 registry_generation;
+    unsigned int     registered_slots;
+    char __pad_20[4];
+};
+
+
+struct get_wayland_buffer_slot_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     slot;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 pool_generation;
+};
+struct get_wayland_buffer_slot_reply
+{
+    struct reply_header __header;
+    obj_handle_t     memory;
+    obj_handle_t     ready_sync;
+    obj_handle_t     reuse_sync;
+    unsigned int     registered_slots;
+    unsigned __int64 registry_generation;
 };
 
 
@@ -7161,6 +7207,8 @@ enum request
     REQ_create_wayland_buffer_pool,
     REQ_retire_wayland_buffer_pool,
     REQ_get_wayland_buffer_pool,
+    REQ_register_wayland_buffer_slot,
+    REQ_get_wayland_buffer_slot,
     REQ_NB_REQUESTS
 };
 
@@ -7508,6 +7556,8 @@ union generic_request
     struct create_wayland_buffer_pool_request create_wayland_buffer_pool_request;
     struct retire_wayland_buffer_pool_request retire_wayland_buffer_pool_request;
     struct get_wayland_buffer_pool_request get_wayland_buffer_pool_request;
+    struct register_wayland_buffer_slot_request register_wayland_buffer_slot_request;
+    struct get_wayland_buffer_slot_request get_wayland_buffer_slot_request;
 };
 union generic_reply
 {
@@ -7853,8 +7903,10 @@ union generic_reply
     struct create_wayland_buffer_pool_reply create_wayland_buffer_pool_reply;
     struct retire_wayland_buffer_pool_reply retire_wayland_buffer_pool_reply;
     struct get_wayland_buffer_pool_reply get_wayland_buffer_pool_reply;
+    struct register_wayland_buffer_slot_reply register_wayland_buffer_slot_reply;
+    struct get_wayland_buffer_slot_reply get_wayland_buffer_slot_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 975
+#define SERVER_PROTOCOL_VERSION 976
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
