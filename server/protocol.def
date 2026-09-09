@@ -49,7 +49,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 3
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 4
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -4869,4 +4869,14 @@ enum inproc_sync_type
     unsigned int     backend_status;
     unsigned int     reusable;
     unsigned int     outstanding_frames;
+@END
+
+/* Enumerate roots carrying scene or transport work as the current host. */
+@REQ(get_wayland_host_root)
+    user_handle_t    previous_root;
+    unsigned __int64 host_epoch;
+@REPLY
+    user_handle_t    root;
+    unsigned __int64 scene_generation;
+    unsigned __int64 registry_generation;
 @END

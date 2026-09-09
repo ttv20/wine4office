@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 981.
+Generated server protocol version: 982.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -36,9 +36,8 @@ or transport fixture is not Outlook support.
   idempotent, conflicting metadata is rejected, and pool retirement or renderer
   teardown destroys every partial or complete import and closes unconsumed FDs.
   The registered host also recreates this renderer on the exact admitted GPU
-  before publishing Ready. Host work discovery, conversion of the authorized
-  server handles to these FDs, and GPU ready/reuse queue submissions are still
-  pending, so this primitive alone is not an end-to-end frame transport.
+  before publishing Ready. GPU ready/reuse queue submissions are still pending,
+  so this primitive alone is not an end-to-end frame transport.
 - Vulkan transport admission is now bound to the probed physical device. The
   startup permit records the host's 16-byte device UUID, registration must
   present the same UUID, and host queries return the registered identity.
@@ -93,17 +92,28 @@ or transport fixture is not Outlook support.
   only into the current Ready host. Explicit pool retirement releases the
   pins; revoked contributors retain them until the replacement host
   acknowledges the tombstone. Window destruction releases all remaining
-  pools. Registration still does not prove native GPU import or authorize a
-  transport-backed `HostedContent` scene.
+  pools. Registration still does not authorize a transport-backed
+  `HostedContent` scene.
 - The current Ready host can now record one terminal import result for each
   registered slot. Successful and failed imports are counted separately,
   repeated identical results are idempotent, and a conflicting result or an
   acknowledgement for a revoked stream is rejected. Pool enumeration packs
   the bounded registered/imported/failed counters into one fixed-width field.
-  The test host asserts import success after validating the duplicated object
-  types; the real `winewayland-host` renderer still does not import Vulkan
-  memory or synchronization objects, so this acknowledgement does not yet
-  authorize hosted presentation.
+  The real host reports success only after importing Vulkan memory and both
+  synchronization objects; this acknowledgement does not yet authorize hosted
+  presentation.
+- The server now lets only the current Ready host enumerate top-level roots
+  that carry scene or contributor state. The registered host walks each root,
+  contributor, pool and slot, converts the three duplicated D3DKMT handles to
+  owned Unix FDs, and calls the native Vulkan importer. It records `IMPORTED`
+  only after memory plus both timeline semaphores succeed, records `FAILED` on
+  a terminal conversion/import failure, and closes every duplicated handle and
+  unconsumed FD. Host-local pool identities keep equal producer generation
+  numbers from aliasing across roots or contributors. A complete scan also
+  retires native imports for pools that disappeared; contributor revocation
+  retires its imports before acknowledging the server tombstone. This first
+  host fixture polls at 20 ms and retains the initial two-pool renderer cap.
+  An event-driven wakeup and per-window pool scaling remain pending.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -353,6 +363,15 @@ admitted.
   transport and registration passed in both architectures; logs are retained
   as `/workspace/artifacts/dcomp-native-import-final4-{probe,renderer,registration}-{x64,i386}.log`,
   with hashes in `dcomp-native-import-final-SHA256SUMS`.
+- Protocol 982 root discovery and the host-side server-handle import path built
+  for x86-64 and i386. The authority regression passed 475 checks with zero
+  failures in both architectures, including rejection of a non-host enumerator
+  and complete discovery of retained scene roots. The updated real host
+  registration fixture also passed in both architectures on the Radeon
+  fallback path. Evidence is retained as
+  `/workspace/artifacts/dcomp-host-work-{authority,registration}-{x64,i386}.log`,
+  with hashes in `/workspace/artifacts/dcomp-host-work-SHA256SUMS` and the
+  coherent runner at `/workspace/runner-dcomp-host-work`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

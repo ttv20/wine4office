@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 3
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 4
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -7014,6 +7014,22 @@ struct get_wayland_frame_result_reply
 };
 
 
+struct get_wayland_host_root_request
+{
+    struct request_header __header;
+    user_handle_t    previous_root;
+    unsigned __int64 host_epoch;
+};
+struct get_wayland_host_root_reply
+{
+    struct reply_header __header;
+    user_handle_t    root;
+    char __pad_12[4];
+    unsigned __int64 scene_generation;
+    unsigned __int64 registry_generation;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7364,6 +7380,7 @@ enum request
     REQ_set_wayland_frame_reusable,
     REQ_set_wayland_frame_result,
     REQ_get_wayland_frame_result,
+    REQ_get_wayland_host_root,
     REQ_NB_REQUESTS
 };
 
@@ -7719,6 +7736,7 @@ union generic_request
     struct set_wayland_frame_reusable_request set_wayland_frame_reusable_request;
     struct set_wayland_frame_result_request set_wayland_frame_result_request;
     struct get_wayland_frame_result_request get_wayland_frame_result_request;
+    struct get_wayland_host_root_request get_wayland_host_root_request;
 };
 union generic_reply
 {
@@ -8072,8 +8090,9 @@ union generic_reply
     struct set_wayland_frame_reusable_reply set_wayland_frame_reusable_reply;
     struct set_wayland_frame_result_reply set_wayland_frame_result_reply;
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
+    struct get_wayland_host_root_reply get_wayland_host_root_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 981
+#define SERVER_PROTOCOL_VERSION 982
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

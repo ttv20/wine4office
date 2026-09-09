@@ -255,6 +255,62 @@ struct registered_host_info
     uint32_t device_uuid[4];
 };
 
+#define HOST_RENDERER_MAX_POOLS 2
+
+struct host_root_info
+{
+    user_handle_t root;
+    uint64_t scene_generation;
+    uint64_t registry_generation;
+};
+
+struct host_contributor_info
+{
+    uint64_t contributor_id;
+    uint64_t stream_id;
+    uint64_t binding_generation;
+    uint64_t host_epoch;
+    uint64_t registry_generation;
+    uint64_t revocation_scene_generation;
+    uint32_t info;
+};
+
+struct host_pool_info
+{
+    uint64_t pool_generation;
+    uint64_t allocation_size;
+    uint64_t registry_generation;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t slot_count;
+    uint32_t frame_credit_limit;
+    uint32_t slot_info;
+    uint32_t device_uuid[4];
+};
+
+struct host_slot_info
+{
+    obj_handle_t memory;
+    obj_handle_t ready_sync;
+    obj_handle_t reuse_sync;
+    uint64_t registry_generation;
+    uint32_t registered_slots;
+    uint32_t import_state;
+};
+
+struct host_renderer_pool
+{
+    user_handle_t root;
+    uint64_t contributor_id;
+    uint64_t server_generation;
+    uint64_t renderer_generation;
+    BOOL seen;
+};
+
+static struct host_renderer_pool renderer_pools[HOST_RENDERER_MAX_POOLS];
+static uint64_t next_renderer_pool_generation;
+
 static NTSTATUS get_registered_host(struct registered_host_info *info)
 {
     NTSTATUS status;
@@ -281,12 +337,375 @@ static NTSTATUS get_registered_host(struct registered_host_info *info)
     return status;
 }
 
+static NTSTATUS get_next_host_root(uint64_t host_epoch, user_handle_t previous_root,
+        struct host_root_info *info)
+{
+    NTSTATUS status;
+
+    memset(info, 0, sizeof(*info));
+    SERVER_START_REQ(get_wayland_host_root)
+    {
+        req->previous_root = previous_root;
+        req->host_epoch = host_epoch;
+        if (!(status = wine_server_call(req)))
+        {
+            info->root = reply->root;
+            info->scene_generation = reply->scene_generation;
+            info->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_next_contributor(user_handle_t root, uint64_t host_epoch,
+        uint64_t previous_contributor_id, struct host_contributor_info *info)
+{
+    NTSTATUS status;
+
+    memset(info, 0, sizeof(*info));
+    SERVER_START_REQ(get_wayland_contributor)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        req->previous_contributor_id = previous_contributor_id;
+        if (!(status = wine_server_call(req)))
+        {
+            info->contributor_id = reply->contributor_id;
+            info->stream_id = reply->stream_id;
+            info->binding_generation = reply->binding_generation;
+            info->host_epoch = reply->contributor_host_epoch;
+            info->registry_generation = reply->registry_generation;
+            info->revocation_scene_generation = reply->revocation_scene_generation;
+            info->info = reply->info;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_next_pool(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t previous_pool_generation,
+        struct host_pool_info *info)
+{
+    NTSTATUS status;
+
+    memset(info, 0, sizeof(*info));
+    SERVER_START_REQ(get_wayland_buffer_pool)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->previous_pool_generation = previous_pool_generation;
+        if (!(status = wine_server_call(req)))
+        {
+            info->pool_generation = reply->pool_generation;
+            info->allocation_size = reply->allocation_size;
+            info->registry_generation = reply->registry_generation;
+            info->width = reply->width;
+            info->height = reply->height;
+            info->format = reply->format;
+            info->slot_count = reply->slot_count;
+            info->frame_credit_limit = reply->frame_credit_limit;
+            info->slot_info = reply->slot_info;
+            info->device_uuid[0] = reply->device_uuid_0;
+            info->device_uuid[1] = reply->device_uuid_1;
+            info->device_uuid[2] = reply->device_uuid_2;
+            info->device_uuid[3] = reply->device_uuid_3;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_buffer_slot(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t pool_generation, uint32_t slot,
+        struct host_slot_info *info)
+{
+    NTSTATUS status;
+
+    memset(info, 0, sizeof(*info));
+    SERVER_START_REQ(get_wayland_buffer_slot)
+    {
+        req->root = root;
+        req->slot = slot;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->pool_generation = pool_generation;
+        if (!(status = wine_server_call(req)))
+        {
+            info->memory = reply->memory;
+            info->ready_sync = reply->ready_sync;
+            info->reuse_sync = reply->reuse_sync;
+            info->registered_slots = reply->registered_slots;
+            info->import_state = reply->import_state;
+            info->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_buffer_slot_import(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t pool_generation, uint32_t slot,
+        uint32_t import_state)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(set_wayland_buffer_slot_import)
+    {
+        req->root = root;
+        req->slot = slot;
+        req->import_state = import_state;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->pool_generation = pool_generation;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS ack_contributor_revoke(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t binding_generation)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(ack_wayland_contributor_revoke)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->binding_generation = binding_generation;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void close_slot_handles(struct host_slot_info *slot)
+{
+    if (slot->reuse_sync) CloseHandle(wine_server_ptr_handle(slot->reuse_sync));
+    if (slot->ready_sync) CloseHandle(wine_server_ptr_handle(slot->ready_sync));
+    if (slot->memory) CloseHandle(wine_server_ptr_handle(slot->memory));
+    slot->memory = slot->ready_sync = slot->reuse_sync = 0;
+}
+
+static struct host_renderer_pool *find_renderer_pool(user_handle_t root,
+        uint64_t contributor_id, uint64_t server_generation)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
+        if (renderer_pools[i].renderer_generation && renderer_pools[i].root == root &&
+            renderer_pools[i].contributor_id == contributor_id &&
+            renderer_pools[i].server_generation == server_generation)
+            return &renderer_pools[i];
+    return NULL;
+}
+
+static struct host_renderer_pool *allocate_renderer_pool(user_handle_t root,
+        uint64_t contributor_id, uint64_t server_generation)
+{
+    struct host_renderer_pool *pool;
+    unsigned int i;
+
+    if ((pool = find_renderer_pool(root, contributor_id, server_generation))) return pool;
+    for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
+        if (!renderer_pools[i].renderer_generation)
+        {
+            pool = &renderer_pools[i];
+            if (!++next_renderer_pool_generation) ++next_renderer_pool_generation;
+            pool->root = root;
+            pool->contributor_id = contributor_id;
+            pool->server_generation = server_generation;
+            pool->renderer_generation = next_renderer_pool_generation;
+            return pool;
+        }
+    return NULL;
+}
+
+static NTSTATUS retire_renderer_pool(struct host_renderer_pool *pool)
+{
+    struct winewayland_host_renderer_retire retire;
+    NTSTATUS status;
+
+    memset(&retire, 0, sizeof(retire));
+    retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    retire.size = sizeof(retire);
+    retire.pool_generation = pool->renderer_generation;
+    status = WINE_UNIX_CALL(unix_renderer_retire, &retire);
+    if (!status) memset(pool, 0, sizeof(*pool));
+    return status;
+}
+
+static NTSTATUS retire_contributor_pools(user_handle_t root, uint64_t contributor_id)
+{
+    NTSTATUS status;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
+    {
+        if (!renderer_pools[i].renderer_generation || renderer_pools[i].root != root ||
+            renderer_pools[i].contributor_id != contributor_id)
+            continue;
+        if ((status = retire_renderer_pool(&renderer_pools[i]))) return status;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS import_buffer_slot(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, const struct host_pool_info *pool,
+        struct host_renderer_pool *renderer_pool, uint32_t slot_index, BOOL force_failure)
+{
+    struct winewayland_host_renderer_import import;
+    struct host_slot_info slot;
+    NTSTATUS status, renderer_status, report_status;
+
+    if ((status = get_buffer_slot(root, host_epoch, contributor_id,
+            pool->pool_generation, slot_index, &slot))) return status;
+    if (slot.import_state != WINE_WAYLAND_BUFFER_IMPORT_PENDING)
+    {
+        close_slot_handles(&slot);
+        return STATUS_SUCCESS;
+    }
+    if (force_failure)
+    {
+        close_slot_handles(&slot);
+        return set_buffer_slot_import(root, host_epoch, contributor_id,
+                pool->pool_generation, slot_index, WINE_WAYLAND_BUFFER_IMPORT_FAILED);
+    }
+
+    memset(&import, 0, sizeof(import));
+    import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    import.size = sizeof(import);
+    import.pool_generation = renderer_pool->renderer_generation;
+    import.allocation_size = pool->allocation_size;
+    import.width = pool->width;
+    import.height = pool->height;
+    import.format = pool->format;
+    import.slot = slot_index;
+    import.memory_type_index = WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE(pool->slot_info);
+    import.memory_fd = import.ready_fd = import.reuse_fd = -1;
+    status = wine_server_handle_to_fd(wine_server_ptr_handle(slot.memory), GENERIC_ALL,
+            &import.memory_fd, NULL);
+    if (!status)
+        status = wine_server_handle_to_fd(wine_server_ptr_handle(slot.ready_sync), GENERIC_ALL,
+                &import.ready_fd, NULL);
+    if (!status)
+        status = wine_server_handle_to_fd(wine_server_ptr_handle(slot.reuse_sync), GENERIC_ALL,
+                &import.reuse_fd, NULL);
+    close_slot_handles(&slot);
+    renderer_status = WINE_UNIX_CALL(unix_renderer_import, &import);
+    if (!status) status = renderer_status;
+
+    report_status = set_buffer_slot_import(root, host_epoch, contributor_id,
+            pool->pool_generation, slot_index, status ? WINE_WAYLAND_BUFFER_IMPORT_FAILED :
+            WINE_WAYLAND_BUFFER_IMPORT_IMPORTED);
+    return report_status ? report_status : status;
+}
+
+static NTSTATUS process_buffer_pool(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, const struct host_pool_info *pool)
+{
+    struct host_renderer_pool *renderer_pool;
+    uint32_t failed, registered, slot;
+    NTSTATUS status = STATUS_SUCCESS, slot_status;
+
+    registered = WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED(pool->slot_info);
+    failed = WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(pool->slot_info);
+    renderer_pool = find_renderer_pool(root, contributor_id, pool->pool_generation);
+    if (renderer_pool) renderer_pool->seen = TRUE;
+    if (registered != pool->slot_count) return STATUS_SUCCESS;
+    if (!renderer_pool && !failed)
+        renderer_pool = allocate_renderer_pool(root, contributor_id, pool->pool_generation);
+    if (renderer_pool) renderer_pool->seen = TRUE;
+
+    for (slot = 0; slot < pool->slot_count; ++slot)
+    {
+        slot_status = import_buffer_slot(root, host_epoch, contributor_id, pool,
+                renderer_pool, slot, failed || !renderer_pool || status);
+        if (slot_status && !status) status = slot_status;
+    }
+    if ((failed || status) && renderer_pool)
+    {
+        slot_status = retire_renderer_pool(renderer_pool);
+        if (slot_status && !status) status = slot_status;
+    }
+    return status;
+}
+
+static NTSTATUS process_contributor(user_handle_t root, uint64_t host_epoch,
+        const struct host_contributor_info *contributor)
+{
+    struct host_pool_info pool;
+    uint64_t previous_pool = 0;
+    uint32_t state = (contributor->info >> 16) & 0xff;
+    NTSTATUS status;
+
+    if (state == WINE_WAYLAND_CONTRIBUTOR_REVOKED)
+    {
+        if ((status = retire_contributor_pools(root, contributor->contributor_id))) return status;
+        return ack_contributor_revoke(root, host_epoch, contributor->contributor_id,
+                contributor->binding_generation);
+    }
+    if (state != WINE_WAYLAND_CONTRIBUTOR_BOUND || contributor->host_epoch != host_epoch)
+        return STATUS_SUCCESS;
+
+    while (!(status = get_next_pool(root, host_epoch, contributor->contributor_id,
+            previous_pool, &pool)))
+    {
+        previous_pool = pool.pool_generation;
+        if ((status = process_buffer_pool(root, host_epoch, contributor->contributor_id,
+                &pool))) return status;
+    }
+    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
+}
+
+static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t host_epoch)
+{
+    struct host_contributor_info contributor;
+    uint64_t previous_contributor = 0;
+    NTSTATUS status;
+
+    while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,
+            &contributor)))
+    {
+        previous_contributor = contributor.contributor_id;
+        if ((status = process_contributor(root->root, host_epoch, &contributor))) return status;
+    }
+    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
+}
+
+static NTSTATUS process_host_work(uint64_t host_epoch)
+{
+    struct host_root_info root;
+    user_handle_t previous_root = 0;
+    NTSTATUS status;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i) renderer_pools[i].seen = FALSE;
+    while (!(status = get_next_host_root(host_epoch, previous_root, &root)))
+    {
+        previous_root = root.root;
+        if ((status = process_host_root(&root, host_epoch))) return status;
+    }
+    if (status != STATUS_NO_MORE_ENTRIES) return status;
+
+    for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
+        if (renderer_pools[i].renderer_generation && !renderer_pools[i].seen &&
+            (status = retire_renderer_pool(&renderer_pools[i])))
+            return status;
+    return STATUS_SUCCESS;
+}
+
 static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_event)
 {
     struct winewayland_host_startup *startup;
     struct winewayland_host_probe probe;
     uint64_t host_epoch = 0;
-    NTSTATUS status;
+    NTSTATUS status, work_status, last_work_status = STATUS_SUCCESS;
+    DWORD wait;
 
     if (!(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
     {
@@ -309,9 +728,26 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
     InterlockedExchange((LONG *)&startup->status, status);
     SetEvent(ready_event);
 
-    if (!status) WaitForSingleObject(stop_event, 60000);
+    if (!status)
+    {
+        do
+        {
+            if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
+            {
+                work_status = process_host_work(host_epoch);
+                if (work_status && work_status != last_work_status)
+                    fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
+                last_work_status = work_status;
+            }
+            wait = WaitForSingleObject(stop_event, 20);
+        }
+        while (wait == WAIT_TIMEOUT);
+        if (wait != WAIT_OBJECT_0) status = STATUS_UNSUCCESSFUL;
+    }
     if (host_epoch) release_host(host_epoch);
     destroy_renderer();
+    memset(renderer_pools, 0, sizeof(renderer_pools));
+    next_renderer_pool_generation = 0;
     UnmapViewOfFile(startup);
     return status ? 6 : 0;
 }

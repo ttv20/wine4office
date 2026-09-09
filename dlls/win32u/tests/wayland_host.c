@@ -59,6 +59,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_FRAME,
     HOST_CHILD_COMMAND_SET_FRAME_REUSABLE,
     HOST_CHILD_COMMAND_SET_FRAME_RESULT,
+    HOST_CHILD_COMMAND_GET_ROOT,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -109,6 +110,8 @@ struct wayland_host_test_state
     UINT64 frame_id;
     UINT64 ready_value;
     UINT64 reuse_value;
+    UINT64 enumeration_cursor;
+    UINT64 enumerated_root;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -177,6 +180,13 @@ struct wayland_scene_info
     UINT64 applied_generation;
     DWORD owner_process_id;
     DWORD disposition;
+};
+
+struct wayland_host_root_info
+{
+    UINT64 root;
+    UINT64 scene_generation;
+    UINT64 registry_generation;
 };
 
 struct wayland_contributor_info
@@ -372,6 +382,27 @@ static NTSTATUS get_host( struct wayland_host_info *info )
             info->device_uuid[1] = reply->device_uuid_1;
             info->device_uuid[2] = reply->device_uuid_2;
             info->device_uuid[3] = reply->device_uuid_3;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_host_root( UINT64 host_epoch, UINT64 previous_root,
+                               struct wayland_host_root_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_host_root )
+    {
+        req->previous_root = wine_server_user_handle( (HANDLE)(UINT_PTR)previous_root );
+        req->host_epoch = host_epoch;
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->root = (UINT_PTR)wine_server_ptr_handle( reply->root );
+            info->scene_generation = reply->scene_generation;
+            info->registry_generation = reply->registry_generation;
         }
     }
     SERVER_END_REQ;
@@ -946,6 +977,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_pool_info pool;
     struct wayland_slot_info slot;
     struct wayland_frame_info frame;
+    struct wayland_host_root_info host_root;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -1093,6 +1125,13 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->host_epoch, state->contributor_id, state->frame_id,
                     state->frame_result, state->backend_status,
                     &state->outstanding_frames );
+            break;
+        case HOST_CHILD_COMMAND_GET_ROOT:
+            state->command_status = get_host_root( state->host_epoch,
+                    state->enumeration_cursor, &host_root );
+            state->enumerated_root = host_root.root;
+            state->scene_generation = host_root.scene_generation;
+            state->registry_generation = host_root.registry_generation;
             break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
@@ -1309,6 +1348,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_pool_info pool;
     struct wayland_slot_info slot;
     struct wayland_frame_info frame;
+    struct wayland_host_root_info host_root;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -1328,7 +1368,7 @@ static void test_host_registration( const char *program, const char *test_name )
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL;
     HRESULT hr;
     NTSTATUS status;
-    BOOL created;
+    BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
     unsigned int i;
     DWORD registered_slots, imported_slots, failed_slots;
 
@@ -1480,6 +1520,41 @@ static void test_host_registration( const char *program, const char *test_name )
         info.device_uuid[3] == TEST_DEVICE_UUID_3,
         "Host device UUID is %08lx%08lx%08lx%08lx.\n", info.device_uuid[0],
         info.device_uuid[1], info.device_uuid[2], info.device_uuid[3] );
+
+    status = get_host_root( old_epoch, 0, &host_root );
+    ok( status == STATUS_ACCESS_DENIED && !host_root.root &&
+        !host_root.scene_generation && !host_root.registry_generation,
+        "Non-host root enumeration returned %#lx, root %s, scene %s, registry %s.\n",
+        status, wine_dbgstr_longlong( host_root.root ),
+        wine_dbgstr_longlong( host_root.scene_generation ),
+        wine_dbgstr_longlong( host_root.registry_generation ) );
+    state->enumeration_cursor = 0;
+    for (i = 0; i < 4; ++i)
+    {
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_ROOT ),
+            "Timed out enumerating host root %u.\n", i );
+        if (state->command_status == STATUS_NO_MORE_ENTRIES) break;
+        ok( !state->command_status && state->enumerated_root && state->scene_generation,
+            "Host root %u returned %#lx, root %s, scene %s, registry %s.\n", i,
+            state->command_status, wine_dbgstr_longlong( state->enumerated_root ),
+            wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->registry_generation ) );
+        if (state->command_status || !state->enumerated_root) break;
+        if ((HWND)(UINT_PTR)state->enumerated_root == root) saw_root = TRUE;
+        else if ((HWND)(UINT_PTR)state->enumerated_root == pre_ready_root)
+            saw_pre_ready_root = TRUE;
+        else
+            ok( 0, "Enumerated unexpected host root %s.\n",
+                wine_dbgstr_longlong( state->enumerated_root ) );
+        state->enumeration_cursor = state->enumerated_root;
+    }
+    ok( state->command_status == STATUS_NO_MORE_ENTRIES,
+        "Completed host root enumeration returned %#lx.\n", state->command_status );
+    ok( saw_root && (!pre_ready_root || saw_pre_ready_root),
+        "Host root enumeration saw retained %u and pre-ready %u.\n",
+        saw_root, saw_pre_ready_root );
+    state->enumeration_cursor = 0;
 
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),

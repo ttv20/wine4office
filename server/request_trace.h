@@ -4081,6 +4081,19 @@ static void dump_get_wayland_frame_result_reply( const struct get_wayland_frame_
     fprintf( stderr, ", outstanding_frames=%08x", req->outstanding_frames );
 }
 
+static void dump_get_wayland_host_root_request( const struct get_wayland_host_root_request *req )
+{
+    fprintf( stderr, " previous_root=%08x", req->previous_root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+}
+
+static void dump_get_wayland_host_root_reply( const struct get_wayland_host_root_reply *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+    dump_uint64( ", registry_generation=", &req->registry_generation );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4433,6 +4446,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_frame_reusable_request,
     (dump_func)dump_set_wayland_frame_result_request,
     (dump_func)dump_get_wayland_frame_result_request,
+    (dump_func)dump_get_wayland_host_root_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4785,6 +4799,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_frame_reusable_reply,
     (dump_func)dump_set_wayland_frame_result_reply,
     (dump_func)dump_get_wayland_frame_result_reply,
+    (dump_func)dump_get_wayland_host_root_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5137,6 +5152,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_wayland_frame_reusable",
     "set_wayland_frame_result",
     "get_wayland_frame_result",
+    "get_wayland_host_root",
 };
 
 static const struct

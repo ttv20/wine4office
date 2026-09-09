@@ -4809,6 +4809,35 @@ done:
     release_object( desktop );
 }
 
+DECL_HANDLER(get_wayland_host_root)
+{
+    struct window *root;
+    struct desktop *desktop;
+    user_handle_t handle = req->previous_root;
+
+    reply->root = 0;
+    reply->scene_generation = 0;
+    reply->registry_generation = 0;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!is_current_wayland_host( desktop, req->host_epoch )) goto done;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (root->desktop != desktop || root->parent != desktop->top_window ||
+            (!root->wayland_scene_generation && !root->wayland_scene_registry))
+            continue;
+        reply->root = root->handle;
+        reply->scene_generation = root->wayland_scene_generation;
+        if (root->wayland_scene_registry)
+            reply->registry_generation = root->wayland_scene_registry->generation;
+        goto done;
+    }
+    set_error( STATUS_NO_MORE_ENTRIES );
+
+done:
+    release_object( desktop );
+}
+
 void cleanup_process_wayland_scenes( struct process *process )
 {
     struct window *root;
