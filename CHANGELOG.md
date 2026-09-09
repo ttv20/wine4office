@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
+- Add reusable AUR, Nix, Ubuntu, and Fedora packages and route packaged installations through their package manager for updates.
+- Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.
 - Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.

@@ -291,6 +291,14 @@ MAX_WINE_FILE_SIZE = 4 * 1024**3
 MAX_WINE_EXTRACTED_SIZE = 16 * 1024**3
 DEFAULT_UPDATE_CHANNEL = "stable"
 VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
+PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
+PACKAGE_PROVIDERS = {
+    "apt": "APT",
+    "dnf": "DNF",
+    "aur": "AUR",
+    "nix": "Nix",
+}
 PREFIX_MARKER_NAME = ".wine4office-managed-prefix"
 PREFIX_MARKER_CONTENT = b"Wine4OfficeManager prefix v1\n"
 _STANDALONE_VERSION_CACHE = None
@@ -328,6 +336,109 @@ def installed_root() -> Path | None:
                 pass
     here = Path(__file__).resolve().parent
     return here.parent if here.name == "lib" else None
+
+
+def package_installation() -> dict | None:
+    """Return validated package ownership recorded beside the installed payload."""
+    override = os.environ.get("WINE4OFFICE_PACKAGE_INSTALLATION")
+    root = installed_root()
+    path = Path(override).expanduser() if override else (
+        root / PACKAGE_INSTALLATION_FILE if root is not None else None
+    )
+    if path is None or not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > 16 * 1024:
+            raise ValueError("Package installation metadata is too large.")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Package installation metadata is unreadable.") from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("Package installation metadata has an invalid schema.")
+    provider = payload.get("provider")
+    package = payload.get("package")
+    components = payload.get("components")
+    if provider not in PACKAGE_PROVIDERS:
+        raise ValueError("Package installation metadata has an unknown provider.")
+    if not isinstance(package, str) or not PACKAGE_NAME_PATTERN.fullmatch(package):
+        raise ValueError("Package installation metadata has an invalid package name.")
+    if (not isinstance(components, list) or not components
+            or any(name not in ("manager", "wine") for name in components)
+            or len(set(components)) != len(components)):
+        raise ValueError("Package installation metadata has invalid components.")
+    return {
+        "schema_version": 1,
+        "provider": provider,
+        "provider_name": PACKAGE_PROVIDERS[provider],
+        "package": package,
+        "components": tuple(components),
+    }
+
+
+def package_update_instructions(installation: dict | None = None) -> str:
+    installation = installation or package_installation()
+    if installation is None:
+        raise RuntimeError("Wine4Office is not managed by a system package.")
+    package = installation["package"]
+    provider = installation["provider"]
+    if provider == "apt":
+        return f"sudo apt update && sudo apt install --only-upgrade {package}"
+    if provider == "dnf":
+        return f"sudo dnf upgrade {package}"
+    if provider == "aur":
+        return f"paru -S {package}  # or: yay -S {package}"
+    return "Update the Wine4Office input in your NixOS configuration or Nix profile."
+
+
+def package_update_command(installation: dict | None = None) -> list[str] | None:
+    """Build an allowlisted noninteractive package update command."""
+    installation = installation or package_installation()
+    if installation is None:
+        return None
+    package = installation["package"]
+    provider = installation["provider"]
+    pkexec = shutil.which("pkexec")
+    if provider == "apt" and pkexec:
+        apt_get = shutil.which("apt-get")
+        if apt_get:
+            return [pkexec, apt_get, "install", "--only-upgrade", "-y", package]
+    if provider == "dnf" and pkexec:
+        dnf = shutil.which("dnf5") or shutil.which("dnf")
+        if dnf:
+            return [pkexec, dnf, "upgrade", "-y", package]
+    return None
+
+
+def install_package_update(output: Output,
+                           installation: dict | None = None) -> str:
+    installation = installation or package_installation()
+    command = package_update_command(installation)
+    if installation is None:
+        raise RuntimeError("Wine4Office is not managed by a system package.")
+    if command is None:
+        raise RuntimeError(
+            f"Update Wine4Office through {installation['provider_name']}: "
+            f"{package_update_instructions(installation)}"
+        )
+    output(f"Requesting a Wine4Office update through {installation['provider_name']}.")
+    commands = [command]
+    if installation["provider"] == "apt":
+        commands.insert(0, command[:2] + ["update"])
+    for package_command in commands:
+        process = subprocess.run(
+            package_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", check=False,
+        )
+        if process.stdout:
+            for line in process.stdout.splitlines():
+                output(line)
+        if process.returncode:
+            raise RuntimeError(
+                f"{installation['provider_name']} exited with status "
+                f"{process.returncode}."
+            )
+    return f"Wine4Office was updated through {installation['provider_name']}."
+
 
 def standalone_manager_version_path(target: Path | None = None) -> Path | None:
     if target is None:
@@ -403,6 +514,20 @@ def current_wine_version() -> str:
             if value:
                 return value
     return "development"
+
+
+def current_wine_base_version() -> str:
+    """Return the upstream Wine version used for the installed runner."""
+    root = installed_root()
+    candidates = [root / "WINE_BASE_VERSION"] if root else [
+        data_home() / "wine4office/WINE_BASE_VERSION"
+    ]
+    for version in candidates:
+        if version.is_file():
+            value = version.read_text(errors="replace").strip()
+            if re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", value):
+                return value
+    return "unknown"
 
 
 def configured_update_url() -> str:
@@ -2578,6 +2703,12 @@ def _parse_component(payload: object, name: str, metadata_url: str) -> dict:
     }
     if name == "wine":
         result["format"] = "tar.zst"
+        base_version = payload.get("base_version")
+        if base_version is not None:
+            if (not isinstance(base_version, str)
+                    or not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", base_version)):
+                raise ValueError("Release metadata has an invalid Wine base version.")
+            result["base_version"] = base_version
     return result
 
 
@@ -2775,6 +2906,7 @@ def available_updates(metadata: dict, skipped: dict | None = None,
     _validate_update_channel(metadata, expected_channel)
     skipped = skipped if isinstance(skipped, dict) else {}
     installed = {"manager": current_version(), "wine": current_wine_version()}
+    package = package_installation()
     updates: dict[str, dict] = {}
     for name in ("manager", "wine"):
         candidate = metadata[name]
@@ -2788,6 +2920,9 @@ def available_updates(metadata: dict, skipped: dict | None = None,
         if compare_versions(candidate["version"], current) <= 0:
             continue
         updates[name] = dict(candidate)
+        if package is not None and name in package["components"]:
+            updates[name]["install_method"] = "package"
+            updates[name]["package"] = dict(package)
     return updates
 
 
@@ -4211,6 +4346,10 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
     offered = available_updates(metadata, expected_channel=expected_channel)
     if any(name not in offered for name in selected):
         raise ValueError("Refusing an equal, older, or unknown-version component update.")
+    if any(offered[name].get("install_method") == "package" for name in selected):
+        raise RuntimeError(
+            "A system-package installation must be updated through its package manager."
+        )
 
     root = installed_root()
     manager_target = manager_update_target() if "manager" in selected else None
@@ -4280,6 +4419,9 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
             if runner_staged is not None:
                 text_updates[version_root / "WINE_VERSION"] = \
                     metadata["wine"]["version"] + "\n"
+                if metadata["wine"].get("base_version"):
+                    text_updates[version_root / "WINE_BASE_VERSION"] = \
+                        metadata["wine"]["base_version"] + "\n"
             if root is not None:
                 text_updates[root / "UPDATE_URL"] = metadata["metadata_url"] + "\n"
             _commit_update_transaction(replacements, text_updates)

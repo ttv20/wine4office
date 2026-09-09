@@ -151,6 +151,7 @@ The generic Zstandard Wine archive has one root, `wine4office-1.0.0-x86_64/`. Pa
   },
   "wine": {
     "version": "1.0.0",
+    "base_version": "11.17",
     "url": "https://github.com/ttv20/wine4office/releases/latest/download/wine4office-1.0.0-x86_64.tar.zst",
     "sha256": "64 lowercase hexadecimal characters",
     "size": 123456789,
@@ -164,6 +165,13 @@ Artifact URLs may be absolute HTTPS URLs or paths relative to `metadata_url`. A 
 ## GitHub CI/CD
 
 `.github/workflows/wine4office-release.yml` runs manually and for `wine4office-v*` tags on a `self-hosted`, `linux`, `x64` GitHub Actions runner. It reuses the Wine configure/build/install staging process, builds Wine4Office Manager as a separate PyInstaller binary, packages the manager and Wine artifacts, and publishes `install.sh`. The manager pair, Wine pair, and release metadata plus installer are uploaded as separate CI artifacts.
+
+The same workflow packages those exact artifacts as DEB and RPM files and
+generates fixed-hash AUR and Nix sources. Packaged installations contain a
+root-owned `PACKAGE-INSTALLATION.json`. The Manager uses it to send APT and DNF
+updates through the system package manager, show AUR or Nix update instructions,
+and reject direct replacement of package-owned Manager or Wine files. See
+`packaging/distribution/README.md` for repository layout and signing.
 
 Tagged runs use the workflow's `contents: write` permission and `GITHUB_TOKEN` to create the GitHub Release when needed, then upload the manager pair, Wine pair, `install.sh`, and finally `release.json` with `gh release upload --clobber`. Publishing `release.json` last keeps it as the feed commit marker. Reruns replace matching assets instead of creating duplicates.
 

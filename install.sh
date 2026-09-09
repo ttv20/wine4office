@@ -220,7 +220,7 @@ cleanup() {
         rm -rf -- "$RUNNER_BACKUP"
         rm -f -- "$MANAGER_BACKUP"
         rm -f -- "$UNINSTALLER_BACKUP"
-        for name in VERSION WINE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
+        for name in VERSION WINE_VERSION WINE_BASE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
             rm -f -- "$ROOT/.$name.old.$$"
         done
     fi
@@ -315,11 +315,16 @@ def artifact(name, maximum, expected_format=None):
 manager = artifact("manager", 1024**3)
 wine = artifact("wine", 8 * 1024**3, "tar.zst")
 canonical = https_url(payload.get("metadata_url"), source, "metadata")
+wine_base_version = payload["wine"].get("base_version", "unknown")
+if (wine_base_version != "unknown"
+        and not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", wine_base_version)):
+    raise SystemExit("invalid Wine base version")
 for field in (*manager, *wine, canonical):
     print(field)
+print(wine_base_version)
 PY
 )
-[[ ${#RELEASE[@]} -eq 9 ]] || fail "release metadata did not produce nine validated fields"
+[[ ${#RELEASE[@]} -eq 10 ]] || fail "release metadata did not produce ten validated fields"
 MANAGER_VERSION=${RELEASE[0]}
 MANAGER_URL=${RELEASE[1]}
 MANAGER_SHA256=${RELEASE[2]}
@@ -329,6 +334,7 @@ WINE_URL=${RELEASE[5]}
 WINE_SHA256=${RELEASE[6]}
 WINE_SIZE=${RELEASE[7]}
 CANONICAL_METADATA_URL=${RELEASE[8]}
+WINE_BASE_VERSION=${RELEASE[9]}
 
 printf 'Downloading Wine4Office Manager %s…\n' "$MANAGER_VERSION"
 fetch_limited "$MANAGER_URL" "$TMP/Wine4OfficeManager" "$MANAGER_SIZE"
@@ -399,7 +405,7 @@ rm -f -- "$ROOT/bin/wine4office-manager" "$ROOT/bin/wine4office-launcher" \
     "$ROOT/bin/wine4office-preload-worker"
 if $PURGE_RUNNER; then
     rm -rf -- "$ROOT/runner"
-    rm -f -- "$ROOT/VERSION" "$ROOT/WINE_VERSION" "$ROOT/UPDATE_URL" \
+    rm -f -- "$ROOT/VERSION" "$ROOT/WINE_VERSION" "$ROOT/WINE_BASE_VERSION" "$ROOT/UPDATE_URL" \
         "$ROOT/UPDATE_CHANNEL" "$ROOT/STANDALONE" "$ROOT/install.json" \
         "$ROOT/.wine4office-update.lock"
     rm -rf -- "$CONFIG_HOME/wine4office"
@@ -587,6 +593,7 @@ install -m 0755 "$TMP/wine4office-uninstall" "$NEW_UNINSTALLER"
 mv -- "$EXTRACTED_ROOT" "$NEW_RUNNER"
 printf '%s\n' "$MANAGER_VERSION" > "$TMP/metadata/VERSION"
 printf '%s\n' "$WINE_VERSION" > "$TMP/metadata/WINE_VERSION"
+printf '%s\n' "$WINE_BASE_VERSION" > "$TMP/metadata/WINE_BASE_VERSION"
 printf '%s\n' "$CANONICAL_METADATA_URL" > "$TMP/metadata/UPDATE_URL"
 printf 'stable\n' > "$TMP/metadata/UPDATE_CHANNEL"
 printf 'Wine4OfficeManager\n' > "$TMP/metadata/STANDALONE"
@@ -610,7 +617,7 @@ if [[ -e $UNINSTALLER_TARGET || -L $UNINSTALLER_TARGET ]]; then
 fi
 UNINSTALLER_CHANGED=true
 mv -- "$NEW_UNINSTALLER" "$UNINSTALLER_TARGET"
-for name in VERSION WINE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
+for name in VERSION WINE_VERSION WINE_BASE_VERSION UPDATE_URL UPDATE_CHANNEL STANDALONE; do
     backup=$ROOT/.$name.old.$$
     [[ ! -e $backup && ! -L $backup ]] || fail "stale metadata backup exists: $backup"
     if [[ -e $ROOT/$name || -L $ROOT/$name ]]; then mv -- "$ROOT/$name" "$backup"; fi

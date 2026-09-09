@@ -149,7 +149,10 @@ grep -F 'libfreetype-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'libfontconfig-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'tools/wine-build-env/run-build-container.sh full' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
-assert_absent 'apt-get install' "$root/.github/workflows/wine4office-release.yml"
+grep -F -- '--workdir /work ubuntu:24.04' \
+    "$root/.github/workflows/wine4office-release.yml" >/dev/null
+assert_absent 'Install build dependencies when permitted' \
+    "$root/.github/workflows/wine4office-release.yml"
 grep -F -- '--exclude=/.git' "$contract/sync-agent-source.sh" >/dev/null
 assert_absent '--exclude=/.git/' "$contract/sync-agent-source.sh"
 grep -F 'docker container inspect "$HOSTNAME"' "$contract/run-build-container.sh" >/dev/null

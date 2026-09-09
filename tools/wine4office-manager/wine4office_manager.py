@@ -770,6 +770,18 @@ class ManagerState:
             metadata = offer["metadata"]
             config = dict(self.config)
             active_use_x11, _active_use_vulkan = backend.active_graphics_settings(config)
+            package_updates = [
+                name for name in selected
+                if offer["updates"][name].get("install_method") == "package"
+            ]
+            if package_updates and len(package_updates) != len(selected):
+                raise RuntimeError(
+                    "Package-managed and standalone updates must be installed separately."
+                )
+            package = (
+                offer["updates"][package_updates[0]]["package"]
+                if package_updates else None
+            )
 
         def install() -> str:
             preload_update = None
@@ -785,15 +797,21 @@ class ManagerState:
                         use_x11=active_use_x11,
                     )
                     self.output("Stopped the selected Wine environment before updating.")
-                result = backend.install_release_updates(
-                    metadata, selected, self.output, self.cancel_event,
-                    expected_channel=backend.accepted_update_channels(
-                        include_prereleases=(
-                            config.get("include_prereleases") is True
-                        )
-                    ),
-                    progress=self.set_progress,
-                )
+                if package is not None:
+                    self.set_progress(
+                        f"Updating through {package['provider_name']}", None
+                    )
+                    result = backend.install_package_update(self.output, package)
+                else:
+                    result = backend.install_release_updates(
+                        metadata, selected, self.output, self.cancel_event,
+                        expected_channel=backend.accepted_update_channels(
+                            include_prereleases=(
+                                config.get("include_prereleases") is True
+                            )
+                        ),
+                        progress=self.set_progress,
+                    )
                 if "wine" in selected:
                     self.set_progress("Updating the Wine environment", None)
                     new_wine = str(backend.runner_update_target() / "bin/wine")
@@ -1078,6 +1096,8 @@ class ManagerState:
             "status": backend.environment_status(config["prefix"], config["wine"]),
             "version": backend.current_version(),
             "wine_version": backend.current_wine_version(),
+            "wine_base_version": backend.current_wine_base_version(),
+            "package_installation": backend.package_installation(),
             "task": task,
             "updater": updater,
             "preload": preload,

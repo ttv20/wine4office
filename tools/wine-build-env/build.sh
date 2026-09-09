@@ -24,6 +24,7 @@ jobs=${WINE_BUILD_JOBS:-18}
 max_compile_commands=${WINE_BUILD_MAX_COMPILE_COMMANDS:-80}
 image_id=${WINE_BUILD_IMAGE_ID:-unknown}
 reconfigure=${WINE_BUILD_RECONFIGURE:-0}
+release_version=${WINE4OFFICE_RELEASE_VERSION:-}
 
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "WINE_BUILD_JOBS must be a positive integer" >&2; exit 2; }
 [[ "$prefix" == /opt/wine4office ]] || { echo "WINE_BUILD_PREFIX must be /opt/wine4office" >&2; exit 2; }
@@ -33,6 +34,10 @@ reconfigure=${WINE_BUILD_RECONFIGURE:-0}
 }
 [[ "$max_compile_commands" =~ ^[0-9]+$ ]] || {
     echo "WINE_BUILD_MAX_COMPILE_COMMANDS must be a non-negative integer" >&2
+    exit 2
+}
+[[ -z "$release_version" || "$release_version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
+    echo "WINE4OFFICE_RELEASE_VERSION is invalid" >&2
     exit 2
 }
 [[ -x "$source_dir/configure" ]] || { echo "Invalid Wine source tree: $source_dir" >&2; exit 1; }
@@ -46,6 +51,10 @@ stage_dir=$(cd "$stage_dir" && pwd)
 }
 
 configure_build() {
+    local -a product_version_arg=()
+    if [[ -n "$release_version" ]]; then
+        product_version_arg=("--with-wine4office-version=$release_version")
+    fi
     if [[ "$reconfigure" == 1 || ! -f "$build_dir/Makefile" ]]; then
         echo "Configuring the canonical Office build in $build_dir"
         (
@@ -55,7 +64,8 @@ configure_build() {
                 --prefix="$prefix" \
                 --enable-archs=i386,x86_64 \
                 --with-gssapi \
-                --with-krb5
+                --with-krb5 \
+                "${product_version_arg[@]}"
         )
     fi
 
@@ -70,6 +80,15 @@ configure_build() {
             exit 1
         }
     done
+    if [[ -n "$release_version" ]]; then
+        grep -F -- "--with-wine4office-version=$release_version" "$build_dir/config.status" >/dev/null || {
+            echo "Build tree is branded for a different Wine4Office release" >&2
+            exit 1
+        }
+    elif grep -F -- "--with-wine4office-version=" "$build_dir/config.status" >/dev/null; then
+        echo "Development build tree unexpectedly has release branding" >&2
+        exit 1
+    fi
     grep -Fx "srcdir = $source_dir" "$build_dir/Makefile" >/dev/null || {
         echo "Build tree source provenance mismatch: expected $source_dir" >&2
         exit 1
@@ -117,6 +136,7 @@ configure_prefix=$prefix
 configure_archs=i386,x86_64
 configure_gssapi=required
 configure_krb5=required
+wine4office_release_version=${release_version:-development}
 jobs=$jobs
 EOF
     if [[ -n "$install_plan_sha256" ]]; then

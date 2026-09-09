@@ -2672,16 +2672,39 @@ class ManagerWindow(QMainWindow):
             f"{labels[name]}: {offer['updates'][name]['version']}"
             for name in selected
         )
+        package = next((
+            offer["updates"][name].get("package") for name in selected
+            if offer["updates"][name].get("install_method") == "package"
+        ), None)
+        package_command = backend.package_update_command(package) if package else None
+        package_instructions = (
+            backend.package_update_instructions(package) if package else ""
+        )
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Question)
         dialog.setWindowTitle(self._tr("Wine4Office update available"))
         dialog.setText(self._tr("Updates are available."))
-        dialog.setInformativeText(
-            f"{versions}\n\n{self._tr('Nothing downloads until you approve this update.')}"
-        )
-        install_button = dialog.addButton(
-            self._tr("Download and install"), QMessageBox.ButtonRole.AcceptRole
-        )
+        if package:
+            dialog.setInformativeText(
+                f"{versions}\n\nThis installation is managed by "
+                f"{package['provider_name']}. Wine4Office will not replace package-owned "
+                f"files itself.\n\n{package_instructions}"
+            )
+            install_button = dialog.addButton(
+                f"Update with {package['provider_name']}",
+                QMessageBox.ButtonRole.AcceptRole,
+            ) if package_command else None
+            copy_button = dialog.addButton(
+                "Copy update instructions", QMessageBox.ButtonRole.ActionRole
+            ) if not package_command else None
+        else:
+            dialog.setInformativeText(
+                f"{versions}\n\n{self._tr('Nothing downloads until you approve this update.')}"
+            )
+            install_button = dialog.addButton(
+                self._tr("Download and install"), QMessageBox.ButtonRole.AcceptRole
+            )
+            copy_button = None
         later_button = dialog.addButton(self._tr("Later"), QMessageBox.ButtonRole.RejectRole)
         skip_button = dialog.addButton(
             self._tr("Skip these versions"), QMessageBox.ButtonRole.DestructiveRole
@@ -2701,9 +2724,12 @@ class ManagerWindow(QMainWindow):
         clicked = dialog.clickedButton()
         if clicked is skip_button:
             self.state.skip_offered_updates(selected)
+        elif copy_button is not None and clicked is copy_button:
+            QApplication.clipboard().setText(package_instructions)
+            self.notify("Package update instructions copied.")
         elif disable_button is not None and clicked is disable_button:
             self._apply_automatic_update_checks(False, prompted=True)
-        elif clicked is install_button:
+        elif install_button is not None and clicked is install_button:
             update_started = False
             try:
                 if "manager" in selected:
@@ -3008,7 +3034,12 @@ class ManagerWindow(QMainWindow):
 
         self.version_label.setText(
             f"{self._tr('Manager:')} {snapshot['version']}"
-            f"{self._tr('; Wine:')} {snapshot['wine_version']}"
+            f"{self._tr('; Wine4Office:')} {snapshot['wine_version']}"
+            f"{self._tr('; Wine base:')} {snapshot['wine_base_version']}"
+            + (
+                f"; package: {snapshot['package_installation']['provider_name']}"
+                if snapshot.get("package_installation") else ""
+            )
         )
         updater = snapshot["updater"]
         automatic_enabled = (

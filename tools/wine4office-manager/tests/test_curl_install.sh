@@ -44,7 +44,7 @@ write_metadata() {
     release_channel=${4:-stable}
     RELEASE="$RELEASE" MANAGER_DIGEST="$manager_digest" \
         MANAGER_VERSION="$manager_version" WINE_VERSION="$wine_version" \
-        RELEASE_CHANNEL="$release_channel" python3 - <<'PY'
+        RELEASE_CHANNEL="$release_channel" WINE_BASE_VERSION=11.17 python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -64,6 +64,7 @@ payload = {
     },
     "wine": {
         "version": os.environ["WINE_VERSION"],
+        "base_version": os.environ["WINE_BASE_VERSION"],
         "url": "wine.tar.zst",
         "sha256": hashlib.sha256(wine.read_bytes()).hexdigest(),
         "size": wine.stat().st_size,
@@ -125,6 +126,7 @@ export WINE4OFFICE_METADATA_URL=https://example.invalid/release.json
 [[ -x $WINE4OFFICE_HOME/runner/bin/wine ]]
 [[ $(cat "$WINE4OFFICE_HOME/runner/identity") == "runner payload" ]]
 [[ $(cat "$WINE4OFFICE_HOME/WINE_VERSION") == 0.1.0 ]]
+[[ $(cat "$WINE4OFFICE_HOME/WINE_BASE_VERSION") == 11.17 ]]
 [[ -L $WINE4OFFICE_BIN_HOME/Wine4OfficeManager ]]
 if [[ -n $REAL_MANAGER ]]; then
     [[ -f $XDG_DATA_HOME/applications/wine4office-manager.desktop ]]
@@ -196,6 +198,7 @@ write_metadata "$MANAGER_DIGEST" 0.2.0 0.2.0
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" >/dev/null
 [[ $(cat "$WINE4OFFICE_HOME/VERSION") == 0.2.0 ]]
 [[ $(cat "$WINE4OFFICE_HOME/WINE_VERSION") == 0.2.0 ]]
+[[ $(cat "$WINE4OFFICE_HOME/WINE_BASE_VERSION") == 11.17 ]]
 [[ $(cat "$WINE4OFFICE_HOME/runner/identity") == "runner payload v2" ]]
 
 BEFORE_MANAGER=$(sha256sum "$WINE4OFFICE_HOME/bin/Wine4OfficeManager")

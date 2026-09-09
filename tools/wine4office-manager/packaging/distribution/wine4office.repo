@@ -1,0 +1,7 @@
+[wine4office]
+name=Wine4Office
+baseurl=https://packages.wine4office.org/rpm/x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.wine4office.org/keys/wine4office-packages.asc

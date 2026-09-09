@@ -87,8 +87,10 @@ class UpdaterTests(unittest.TestCase):
         create.assert_called_once_with(cafile="/bundle/cacert.pem")
 
     def test_schema_v1_resolves_artifacts_and_canonical_metadata_url(self):
+        payload = self.metadata()
+        payload["wine"]["base_version"] = "11.17"
         parsed = backend.parse_release_metadata(
-            self.metadata(), "https://current.example/downloads/release.json"
+            payload, "https://current.example/downloads/release.json"
         )
         self.assertEqual(parsed["schema_version"], 1)
         self.assertEqual(
@@ -99,6 +101,7 @@ class UpdaterTests(unittest.TestCase):
             parsed["wine"]["url"],
             "https://current.example/downloads/wine4office-11.2.0-x86_64.tar.zst",
         )
+        self.assertEqual(parsed["wine"]["base_version"], "11.17")
         self.assertEqual(
             parsed["metadata_url"], "https://future.example/releases/release.json"
         )
@@ -223,6 +226,17 @@ class UpdaterTests(unittest.TestCase):
         invalid["manager"]["url"] = "http://updates.example/manager"
         with self.assertRaisesRegex(ValueError, "HTTPS"):
             backend.parse_release_metadata(invalid, "https://updates.example/release.json")
+        invalid = self.metadata()
+        invalid["wine"]["base_version"] = "11.17;invalid"
+        with self.assertRaisesRegex(ValueError, "Wine base version"):
+            backend.parse_release_metadata(invalid, "https://updates.example/release.json")
+
+    def test_current_wine_base_version_reads_only_valid_metadata(self):
+        version = self.install_root / "WINE_BASE_VERSION"
+        version.write_text("11.17\n")
+        self.assertEqual(backend.current_wine_base_version(), "11.17")
+        version.write_text("11.17;invalid\n")
+        self.assertEqual(backend.current_wine_base_version(), "unknown")
 
     def test_channel_mismatch_is_rejected_before_update_offers(self):
         payload = self.metadata()
@@ -256,6 +270,86 @@ class UpdaterTests(unittest.TestCase):
              mock.patch.object(backend, "current_wine_version", return_value="11.1.0"):
             updates = backend.available_updates(parsed, {"wine": "11.2.0"})
         self.assertEqual(set(updates), {"manager"})
+
+    def test_package_installation_marks_updates_and_blocks_self_replacement(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "apt",
+            "package": "wine4office",
+            "components": ["manager", "wine"],
+        }))
+        (self.install_root / "VERSION").write_text("1.0.0\n")
+        (self.install_root / "WINE_VERSION").write_text("1.0.0\n")
+        parsed = backend.parse_release_metadata(
+            self.metadata(), "https://updates.example/release.json"
+        )
+
+        updates = backend.available_updates(parsed)
+
+        self.assertEqual(set(updates), {"manager", "wine"})
+        self.assertTrue(all(
+            update["install_method"] == "package" for update in updates.values()
+        ))
+        self.assertEqual(updates["manager"]["package"]["provider_name"], "APT")
+        with mock.patch.object(backend, "_download_artifact") as download:
+            with self.assertRaisesRegex(RuntimeError, "package manager"):
+                backend.install_release_updates(
+                    parsed, ["manager"], lambda _line: None
+                )
+        download.assert_not_called()
+
+    def test_package_update_commands_are_constructed_from_allowlisted_fields(self):
+        apt = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        with mock.patch.object(
+            backend.shutil, "which",
+            side_effect=lambda command: f"/usr/bin/{command}" if command in {
+                "pkexec", "apt-get"
+            } else None,
+        ):
+            self.assertEqual(backend.package_update_command(apt), [
+                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
+                "--only-upgrade", "-y", "wine4office",
+            ])
+        self.assertEqual(
+            backend.package_update_instructions(apt),
+            "sudo apt update && sudo apt install --only-upgrade wine4office",
+        )
+
+    def test_apt_package_update_refreshes_metadata_before_installing(self):
+        apt = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        completed = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(
+            backend, "package_update_command", return_value=[
+                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
+                "--only-upgrade", "-y", "wine4office",
+            ]
+        ), mock.patch.object(backend.subprocess, "run", return_value=completed) as run:
+            backend.install_package_update(lambda _line: None, apt)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ["/usr/bin/pkexec", "/usr/bin/apt-get", "update"],
+            [
+                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
+                "--only-upgrade", "-y", "wine4office",
+            ],
+        ])
+
+    def test_package_installation_rejects_executable_metadata(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "apt",
+            "package": "wine4office;touch-owned",
+            "components": ["manager", "wine"],
+        }))
+        with self.assertRaisesRegex(ValueError, "package name"):
+            backend.package_installation()
 
     def test_equal_or_downgrade_is_rejected_before_download(self):
         parsed = backend.parse_release_metadata(

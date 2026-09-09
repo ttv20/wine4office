@@ -72,6 +72,7 @@ exec docker run --rm --init \
     --env WINE_BUILD_JOBS="$jobs" \
     --env WINE_BUILD_RECONFIGURE="${WINE_BUILD_RECONFIGURE:-0}" \
     --env WINE_BUILD_MAX_COMPILE_COMMANDS="${WINE_BUILD_MAX_COMPILE_COMMANDS:-80}" \
+    --env WINE4OFFICE_RELEASE_VERSION="${WINE4OFFICE_RELEASE_VERSION:-}" \
     --env WINE_BUILD_IMAGE_ID="$image_id" \
     "$image" \
     "$container_contract/build.sh" "$mode" "$@"
