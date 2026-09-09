@@ -4246,7 +4246,13 @@ DECL_HANDLER(create_wayland_buffer_pool)
     if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
             req->stream_id, req->binding_generation ))) goto done;
     reply->registry_generation = root->wayland_scene_registry->generation;
-    if (req->pool_generation == ~(unsigned __int64)0)
+    if (!(desktop->wayland_host_capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT) ||
+        metadata.device_uuid[0] != desktop->wayland_host_device_uuid[0] ||
+        metadata.device_uuid[1] != desktop->wayland_host_device_uuid[1] ||
+        metadata.device_uuid[2] != desktop->wayland_host_device_uuid[2] ||
+        metadata.device_uuid[3] != desktop->wayland_host_device_uuid[3])
+        set_error( STATUS_NOT_SUPPORTED );
+    else if (req->pool_generation == ~(unsigned __int64)0)
         set_error( STATUS_INTEGER_OVERFLOW );
     else if (req->pool_generation <= contributor->latest_pool_generation)
         set_error( STATUS_REVISION_MISMATCH );

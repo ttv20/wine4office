@@ -100,6 +100,8 @@ struct desktop
     unsigned int         wayland_host_seat;
     unsigned int         wayland_startup_capabilities;
     unsigned int         wayland_startup_seat;
+    unsigned int         wayland_host_device_uuid[4];
+    unsigned int         wayland_startup_device_uuid[4];
     unsigned int         wayland_host_ready;
 };
 

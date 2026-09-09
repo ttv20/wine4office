@@ -29,6 +29,10 @@
 #define TEST_ENDPOINT_DEVICE 0x1122334455667788ULL
 #define TEST_ENDPOINT_INODE  0x8877665544332211ULL
 #define TEST_SEAT 17
+#define TEST_DEVICE_UUID_0 0x11223344
+#define TEST_DEVICE_UUID_1 0x55667788
+#define TEST_DEVICE_UUID_2 0x99aabbcc
+#define TEST_DEVICE_UUID_3 0xddeeff00
 #define TEST_CAPABILITIES (WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET | \
                            WINE_WAYLAND_HOST_CAP_COMPOSITOR | \
                            WINE_WAYLAND_HOST_CAP_SHM | WINE_WAYLAND_HOST_CAP_SEAT | \
@@ -140,6 +144,9 @@ struct wayland_host_test_state
     DWORD outstanding_frames;
     DWORD available_credits;
     DWORD device_uuid[4];
+    DWORD host_device_uuid[4];
+    NTSTATUS length_status;
+    NTSTATUS uuid_mismatch_status;
     NTSTATUS mismatch_status;
     NTSTATUS register_status;
     NTSTATUS ready_status;
@@ -159,6 +166,7 @@ struct wayland_host_info
     DWORD capabilities;
     DWORD seat;
     DWORD ready;
+    DWORD device_uuid[4];
 };
 
 struct wayland_scene_info
@@ -229,13 +237,22 @@ struct wayland_frame_info
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
 
-static NTSTATUS request_host_startup( UINT version, UINT capabilities, UINT64 endpoint_device,
-                                      UINT64 endpoint_inode, UINT seat, UINT64 *token_low,
-                                      UINT64 *token_high )
+static NTSTATUS request_host_startup_with_size( UINT version, UINT capabilities,
+                                                UINT64 endpoint_device, UINT64 endpoint_inode,
+                                                UINT seat, UINT data_size, UINT64 *token_low,
+                                                UINT64 *token_high )
 {
+    DWORD device_uuid[5] = {0};
     NTSTATUS status;
 
     *token_low = *token_high = 0;
+    if (capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT)
+    {
+        device_uuid[0] = TEST_DEVICE_UUID_0;
+        device_uuid[1] = TEST_DEVICE_UUID_1;
+        device_uuid[2] = TEST_DEVICE_UUID_2;
+        device_uuid[3] = TEST_DEVICE_UUID_3;
+    }
     SERVER_START_REQ( request_wayland_host_startup )
     {
         req->version = version;
@@ -243,6 +260,7 @@ static NTSTATUS request_host_startup( UINT version, UINT capabilities, UINT64 en
         req->endpoint_device = endpoint_device;
         req->endpoint_inode = endpoint_inode;
         req->seat = seat;
+        wine_server_add_data( req, device_uuid, data_size );
         if (!(status = p_wine_server_call( req )))
         {
             *token_low = reply->token_low;
@@ -251,6 +269,15 @@ static NTSTATUS request_host_startup( UINT version, UINT capabilities, UINT64 en
     }
     SERVER_END_REQ;
     return status;
+}
+
+static NTSTATUS request_host_startup( UINT version, UINT capabilities, UINT64 endpoint_device,
+                                      UINT64 endpoint_inode, UINT seat, UINT64 *token_low,
+                                      UINT64 *token_high )
+{
+    return request_host_startup_with_size( version, capabilities, endpoint_device,
+                                           endpoint_inode, seat, 4 * sizeof(DWORD),
+                                           token_low, token_high );
 }
 
 static NTSTATUS cancel_host_startup( UINT64 token_low, UINT64 token_high )
@@ -267,8 +294,9 @@ static NTSTATUS cancel_host_startup( UINT64 token_low, UINT64 token_high )
     return status;
 }
 
-static NTSTATUS register_host( const struct wayland_host_test_state *state, UINT64 endpoint_device,
-                               UINT64 *host_epoch )
+static NTSTATUS register_host_with_size( const struct wayland_host_test_state *state,
+                                         UINT64 endpoint_device, UINT data_size,
+                                         UINT64 *host_epoch )
 {
     NTSTATUS status;
 
@@ -282,10 +310,18 @@ static NTSTATUS register_host( const struct wayland_host_test_state *state, UINT
         req->endpoint_device = endpoint_device;
         req->endpoint_inode = state->endpoint_inode;
         req->seat = state->seat;
+        wine_server_add_data( req, state->host_device_uuid, data_size );
         if (!(status = p_wine_server_call( req ))) *host_epoch = reply->host_epoch;
     }
     SERVER_END_REQ;
     return status;
+}
+
+static NTSTATUS register_host( const struct wayland_host_test_state *state, UINT64 endpoint_device,
+                               UINT64 *host_epoch )
+{
+    return register_host_with_size( state, endpoint_device,
+                                    sizeof(state->host_device_uuid), host_epoch );
 }
 
 static NTSTATUS set_host_ready( UINT64 host_epoch )
@@ -330,6 +366,10 @@ static NTSTATUS get_host( struct wayland_host_info *info )
             info->endpoint_inode = reply->endpoint_inode;
             info->seat = reply->seat;
             info->ready = reply->ready;
+            info->device_uuid[0] = reply->device_uuid_0;
+            info->device_uuid[1] = reply->device_uuid_1;
+            info->device_uuid[2] = reply->device_uuid_2;
+            info->device_uuid[3] = reply->device_uuid_3;
         }
     }
     SERVER_END_REQ;
@@ -909,6 +949,12 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
         return;
     }
     state->process_id = GetCurrentProcessId();
+    state->length_status = register_host_with_size( state, state->endpoint_device,
+            sizeof(state->host_device_uuid) - sizeof(DWORD), &state->host_epoch );
+    state->host_device_uuid[0] ^= 1;
+    state->uuid_mismatch_status = register_host( state, state->endpoint_device,
+                                                 &state->host_epoch );
+    state->host_device_uuid[0] ^= 1;
     state->mismatch_status = register_host( state, state->endpoint_device ^ 1,
                                             &state->host_epoch );
     state->register_status = register_host( state, state->endpoint_device,
@@ -1235,6 +1281,8 @@ static void reset_child_state( struct wayland_host_test_state *state, HANDLE rea
 {
     state->host_epoch = 0;
     state->process_id = 0;
+    state->length_status = STATUS_PENDING;
+    state->uuid_mismatch_status = STATUS_PENDING;
     state->mismatch_status = STATUS_PENDING;
     state->register_status = STATUS_PENDING;
     state->ready_status = STATUS_PENDING;
@@ -1319,6 +1367,20 @@ static void test_host_registration( const char *program, const char *test_name )
         ok( hr == S_OK, "Committing DComp before host startup returned %#lx.\n", hr );
     }
 
+    status = request_host_startup_with_size( WINE_WAYLAND_HOST_PROTOCOL_VERSION,
+            TEST_CAPABILITIES, TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
+            3 * sizeof(DWORD), &token_low, &token_high );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH,
+        "Truncated device UUID returned %#lx.\n", status );
+    ok( !token_low && !token_high, "Truncated device UUID returned a startup token.\n" );
+
+    status = request_host_startup_with_size( WINE_WAYLAND_HOST_PROTOCOL_VERSION,
+            TEST_CAPABILITIES, TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
+            5 * sizeof(DWORD), &token_low, &token_high );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH,
+        "Oversized device UUID returned %#lx.\n", status );
+    ok( !token_low && !token_high, "Oversized device UUID returned a startup token.\n" );
+
     status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION + 1,
             TEST_CAPABILITIES, TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
             &token_low, &token_high );
@@ -1364,6 +1426,10 @@ static void test_host_registration( const char *program, const char *test_name )
     state->endpoint_inode = TEST_ENDPOINT_INODE;
     state->capabilities = TEST_CAPABILITIES;
     state->seat = TEST_SEAT;
+    state->host_device_uuid[0] = TEST_DEVICE_UUID_0;
+    state->host_device_uuid[1] = TEST_DEVICE_UUID_1;
+    state->host_device_uuid[2] = TEST_DEVICE_UUID_2;
+    state->host_device_uuid[3] = TEST_DEVICE_UUID_3;
     state->root = (UINT_PTR)root;
     reset_child_state( state, ready_event, command_event, result_event );
 
@@ -1378,6 +1444,10 @@ static void test_host_registration( const char *program, const char *test_name )
     if (!created) goto done;
     ok( WaitForSingleObject( ready_event, 30000 ) == WAIT_OBJECT_0,
         "Timed out waiting for host child.\n" );
+    ok( state->length_status == STATUS_INFO_LENGTH_MISMATCH,
+        "Truncated registration UUID returned %#lx.\n", state->length_status );
+    ok( state->uuid_mismatch_status == STATUS_ACCESS_DENIED,
+        "Registration UUID mismatch returned %#lx.\n", state->uuid_mismatch_status );
     ok( state->mismatch_status == STATUS_ACCESS_DENIED,
         "Endpoint mismatch returned %#lx.\n", state->mismatch_status );
     ok( !state->register_status, "Host registration returned %#lx.\n", state->register_status );
@@ -1398,6 +1468,12 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( info.seat == TEST_SEAT && info.capabilities == TEST_CAPABILITIES && info.ready,
         "Host context is seat %lu, capabilities %#lx, ready %lu.\n",
         info.seat, info.capabilities, info.ready );
+    ok( info.device_uuid[0] == TEST_DEVICE_UUID_0 &&
+        info.device_uuid[1] == TEST_DEVICE_UUID_1 &&
+        info.device_uuid[2] == TEST_DEVICE_UUID_2 &&
+        info.device_uuid[3] == TEST_DEVICE_UUID_3,
+        "Host device UUID is %08lx%08lx%08lx%08lx.\n", info.device_uuid[0],
+        info.device_uuid[1], info.device_uuid[2], info.device_uuid[3] );
 
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
@@ -1856,10 +1932,10 @@ static void test_host_registration( const char *program, const char *test_name )
     state->pool_format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
     state->pool_slot_count = WINE_WAYLAND_BUFFER_POOL_SLOTS;
     state->frame_credit_limit = 3;
-    state->device_uuid[0] = 0x11223344;
-    state->device_uuid[1] = 0x55667788;
-    state->device_uuid[2] = 0x99aabbcc;
-    state->device_uuid[3] = 0xddeeff00;
+    state->device_uuid[0] = TEST_DEVICE_UUID_0;
+    state->device_uuid[1] = TEST_DEVICE_UUID_1;
+    state->device_uuid[2] = TEST_DEVICE_UUID_2;
+    state->device_uuid[3] = TEST_DEVICE_UUID_3;
     status = create_pool_with_size( root, state,
             sizeof(struct wayland_buffer_pool_metadata) - sizeof(DWORD) );
     ok( status == STATUS_INFO_LENGTH_MISMATCH,
@@ -1868,10 +1944,17 @@ static void test_host_registration( const char *program, const char *test_name )
     state->device_uuid[2] = state->device_uuid[3] = 0;
     status = create_pool( root, state );
     ok( status == STATUS_INVALID_PARAMETER, "Zero pool UUID returned %#lx.\n", status );
-    state->device_uuid[0] = 0x11223344;
-    state->device_uuid[1] = 0x55667788;
-    state->device_uuid[2] = 0x99aabbcc;
-    state->device_uuid[3] = 0xddeeff00;
+    state->device_uuid[0] = TEST_DEVICE_UUID_0;
+    state->device_uuid[1] = TEST_DEVICE_UUID_1;
+    state->device_uuid[2] = TEST_DEVICE_UUID_2;
+    state->device_uuid[3] = TEST_DEVICE_UUID_3;
+    state->device_uuid[0] ^= 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out registering a pool for a mismatched GPU.\n" );
+    ok( state->producer_status == STATUS_NOT_SUPPORTED,
+        "Mismatched pool GPU returned %#lx.\n", state->producer_status );
+    state->device_uuid[0] ^= 1;
     state->frame_credit_limit = WINE_WAYLAND_MAX_FRAME_CREDITS + 1;
     status = create_pool( root, state );
     ok( status == STATUS_INVALID_PARAMETER, "Excess pool credits returned %#lx.\n", status );

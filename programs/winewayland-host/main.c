@@ -79,6 +79,7 @@ static NTSTATUS request_host_startup(const struct winewayland_host_probe *probe,
         req->endpoint_device = probe->endpoint_device;
         req->endpoint_inode = probe->endpoint_inode;
         req->seat = probe->seat_global;
+        wine_server_add_data(req, probe->device_uuid, sizeof(probe->device_uuid));
         if (!(status = wine_server_call(req)))
         {
             *token_low = reply->token_low;
@@ -118,6 +119,7 @@ static NTSTATUS register_host(const struct winewayland_host_startup *startup,
         req->endpoint_device = probe->endpoint_device;
         req->endpoint_inode = probe->endpoint_inode;
         req->seat = probe->seat_global;
+        wine_server_add_data(req, probe->device_uuid, sizeof(probe->device_uuid));
         if (!(status = wine_server_call(req))) *host_epoch = reply->host_epoch;
     }
     SERVER_END_REQ;
@@ -159,6 +161,7 @@ struct registered_host_info
     uint64_t endpoint_inode;
     uint32_t seat;
     uint32_t ready;
+    uint32_t device_uuid[4];
 };
 
 static NTSTATUS get_registered_host(struct registered_host_info *info)
@@ -177,6 +180,10 @@ static NTSTATUS get_registered_host(struct registered_host_info *info)
             info->endpoint_inode = reply->endpoint_inode;
             info->seat = reply->seat;
             info->ready = reply->ready;
+            info->device_uuid[0] = reply->device_uuid_0;
+            info->device_uuid[1] = reply->device_uuid_1;
+            info->device_uuid[2] = reply->device_uuid_2;
+            info->device_uuid[3] = reply->device_uuid_3;
         }
     }
     SERVER_END_REQ;
@@ -302,7 +309,8 @@ static int test_registration(void)
             info.process_id != startup->process_id || info.host_epoch != startup->host_epoch ||
             info.endpoint_device != probe.endpoint_device ||
             info.endpoint_inode != probe.endpoint_inode || info.seat != probe.seat_global ||
-            info.capabilities != probe.capabilities)
+            info.capabilities != probe.capabilities ||
+            memcmp(info.device_uuid, probe.device_uuid, sizeof(info.device_uuid)))
     {
         fprintf(stderr, "registration=failed child_status=%#lx query_status=%#lx\n",
                 (NTSTATUS)startup->status, status);

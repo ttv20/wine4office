@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 2
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 3
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -6526,6 +6526,7 @@ struct request_wayland_host_startup_request
     unsigned __int64 endpoint_device;
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
+    /* VARARG(device_uuid,bytes); */
     char __pad_44[4];
 };
 struct request_wayland_host_startup_reply
@@ -6560,6 +6561,7 @@ struct register_wayland_host_request
     unsigned __int64 endpoint_device;
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
+    /* VARARG(device_uuid,bytes); */
     char __pad_60[4];
 };
 struct register_wayland_host_reply
@@ -6608,6 +6610,10 @@ struct get_wayland_host_reply
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
     unsigned int     ready;
+    unsigned int     device_uuid_0;
+    unsigned int     device_uuid_1;
+    unsigned int     device_uuid_2;
+    unsigned int     device_uuid_3;
 };
 
 
@@ -8065,6 +8071,6 @@ union generic_reply
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 979
+#define SERVER_PROTOCOL_VERSION 980
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

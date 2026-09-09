@@ -3688,6 +3688,7 @@ static void dump_request_wayland_host_startup_request( const struct request_wayl
     dump_uint64( ", endpoint_device=", &req->endpoint_device );
     dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
     fprintf( stderr, ", seat=%08x", req->seat );
+    dump_varargs_bytes( ", device_uuid=", cur_size );
 }
 
 static void dump_request_wayland_host_startup_reply( const struct request_wayland_host_startup_reply *req )
@@ -3711,6 +3712,7 @@ static void dump_register_wayland_host_request( const struct register_wayland_ho
     dump_uint64( ", endpoint_device=", &req->endpoint_device );
     dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
     fprintf( stderr, ", seat=%08x", req->seat );
+    dump_varargs_bytes( ", device_uuid=", cur_size );
 }
 
 static void dump_register_wayland_host_reply( const struct register_wayland_host_reply *req )
@@ -3741,6 +3743,10 @@ static void dump_get_wayland_host_reply( const struct get_wayland_host_reply *re
     dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
     fprintf( stderr, ", seat=%08x", req->seat );
     fprintf( stderr, ", ready=%08x", req->ready );
+    fprintf( stderr, ", device_uuid_0=%08x", req->device_uuid_0 );
+    fprintf( stderr, ", device_uuid_1=%08x", req->device_uuid_1 );
+    fprintf( stderr, ", device_uuid_2=%08x", req->device_uuid_2 );
+    fprintf( stderr, ", device_uuid_3=%08x", req->device_uuid_3 );
 }
 
 static void dump_publish_wayland_scene_request( const struct publish_wayland_scene_request *req )

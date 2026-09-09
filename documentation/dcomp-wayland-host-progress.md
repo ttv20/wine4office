@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 979.
+Generated server protocol version: 980.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -28,6 +28,13 @@ or transport fixture is not Outlook support.
   with that exact extension set. Failure leaves the transport capability off
   and reports the rejected requirement; basic host registration and local
   fallback remain available.
+- Vulkan transport admission is now bound to the probed physical device. The
+  startup permit records the host's 16-byte device UUID, registration must
+  present the same UUID, and host queries return the registered identity.
+  Hosts without Vulkan transport must use an all-zero UUID. Wineserver accepts
+  a transport pool only when the registered host advertised Vulkan transport
+  and the pool UUID exactly matches that host device, so a pool cannot cross
+  GPUs or outlive a fallback-only admission decision.
 - Wineserver now owns one host registration per Windows desktop. A 128-bit
   startup permit is bound to the requesting process, its direct child, the
   desktop/session and a verified endpoint/seat tuple. Successful registration
@@ -291,6 +298,19 @@ admitted.
   zero opaque-FD external-semaphore features; fallback host registration then
   succeeded in both architectures with capabilities `0xf`. Logs are retained
   as `/workspace/artifacts/dcomp-vulkan-{probe,registration,authority,oracle}-{x64,i386}.log`.
+- The device-binding extension passed 466 checks with zero failures in both
+  x86-64 and i386 on protocol 980. It covers short and oversized UUID payloads,
+  startup and registration UUID retention, registration mismatch, public
+  host-query identity, and rejection of a producer pool whose UUID differs
+  from the registered host GPU. The real Radeon HD 5670
+  probe and registration remained on the honest fallback path with
+  capabilities `0xf` and an all-zero UUID. The public DComp oracle remained at
+  36 checks with zero failures in both architectures. Logs and exact test
+  binaries are retained as
+  `/workspace/artifacts/dcomp-device-binding-final-authority-{x64,i386}.log`,
+  `/workspace/artifacts/dcomp-device-binding-{probe,registration,oracle}-{x64,i386}.log`,
+  `/workspace/artifacts/device-binding-final-win32u-test-{x64,i386}.exe`, and the
+  coherent runner is `/workspace/runner-dcomp-device-binding`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

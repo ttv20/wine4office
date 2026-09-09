@@ -49,7 +49,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 2
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 3
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -4540,6 +4540,7 @@ enum inproc_sync_type
     unsigned __int64 endpoint_device;
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
+    VARARG(device_uuid,bytes);
 @REPLY
     unsigned __int64 token_low;
     unsigned __int64 token_high;
@@ -4560,6 +4561,7 @@ enum inproc_sync_type
     unsigned __int64 endpoint_device;
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
+    VARARG(device_uuid,bytes);
 @REPLY
     unsigned __int64 host_epoch;
 @END
@@ -4584,6 +4586,10 @@ enum inproc_sync_type
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
     unsigned int     ready;
+    unsigned int     device_uuid_0;
+    unsigned int     device_uuid_1;
+    unsigned int     device_uuid_2;
+    unsigned int     device_uuid_3;
 @END
 
 /* Publish a complete scene disposition for an owned top-level window. */

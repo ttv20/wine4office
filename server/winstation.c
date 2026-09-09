@@ -131,6 +131,8 @@ static void clear_wayland_host_startup( struct desktop *desktop )
     desktop->wayland_startup_endpoint_inode = 0;
     desktop->wayland_startup_capabilities = 0;
     desktop->wayland_startup_seat = 0;
+    memset( desktop->wayland_startup_device_uuid, 0,
+            sizeof(desktop->wayland_startup_device_uuid) );
 }
 
 static void expire_wayland_host_startup( void *private )
@@ -149,11 +151,14 @@ static void clear_wayland_host_registration( struct desktop *desktop )
     desktop->wayland_host_process = NULL;
     desktop->wayland_host_capabilities = 0;
     desktop->wayland_host_ready = 0;
+    memset( desktop->wayland_host_device_uuid, 0,
+            sizeof(desktop->wayland_host_device_uuid) );
 }
 
 static int validate_wayland_host_context( unsigned int version, unsigned int capabilities,
                                           unsigned __int64 endpoint_device,
-                                          unsigned __int64 endpoint_inode, unsigned int seat )
+                                          unsigned __int64 endpoint_inode, unsigned int seat,
+                                          const unsigned int device_uuid[4] )
 {
     const unsigned int valid_caps = WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET |
             WINE_WAYLAND_HOST_CAP_COMPOSITOR | WINE_WAYLAND_HOST_CAP_SHM |
@@ -168,7 +173,9 @@ static int validate_wayland_host_context( unsigned int version, unsigned int cap
         return 0;
     }
     if ((capabilities & ~valid_caps) || (capabilities & required_caps) != required_caps ||
-        !endpoint_device || !endpoint_inode || !seat)
+        !endpoint_device || !endpoint_inode || !seat ||
+        (!!(capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT) !=
+         !!(device_uuid[0] | device_uuid[1] | device_uuid[2] | device_uuid[3])))
     {
         set_error( STATUS_INVALID_PARAMETER );
         return 0;
@@ -439,6 +446,9 @@ static bool desktop_init( struct object *obj, const void *init_data )
     desktop->wayland_host_seat = 0;
     desktop->wayland_startup_capabilities = 0;
     desktop->wayland_startup_seat = 0;
+    memset( desktop->wayland_host_device_uuid, 0, sizeof(desktop->wayland_host_device_uuid) );
+    memset( desktop->wayland_startup_device_uuid, 0,
+            sizeof(desktop->wayland_startup_device_uuid) );
     desktop->wayland_host_ready = 0;
     memset( &desktop->key_repeat, 0, sizeof(desktop->key_repeat) );
     list_init( &desktop->threads );
@@ -1173,12 +1183,19 @@ DECL_HANDLER(enum_winstation)
 DECL_HANDLER(request_wayland_host_startup)
 {
     struct desktop *desktop;
+    unsigned int device_uuid[4];
 
     reply->token_low = 0;
     reply->token_high = 0;
+    if (get_req_data_size() != sizeof(device_uuid))
+    {
+        set_error( STATUS_INFO_LENGTH_MISMATCH );
+        return;
+    }
+    memcpy( device_uuid, get_req_data(), sizeof(device_uuid) );
     if (!validate_wayland_host_context( req->version, req->capabilities,
                                         req->endpoint_device, req->endpoint_inode,
-                                        req->seat )) return;
+                                        req->seat, device_uuid )) return;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
 
     if (desktop->wayland_host_process || desktop->wayland_host_launcher)
@@ -1193,6 +1210,8 @@ DECL_HANDLER(request_wayland_host_startup)
         desktop->wayland_startup_endpoint_inode = req->endpoint_inode;
         desktop->wayland_startup_capabilities = req->capabilities;
         desktop->wayland_startup_seat = req->seat;
+        memcpy( desktop->wayland_startup_device_uuid, device_uuid,
+                sizeof(desktop->wayland_startup_device_uuid) );
         desktop->wayland_host_startup_timeout = add_timeout_user(
                 -WAYLAND_HOST_STARTUP_TIMEOUT, expire_wayland_host_startup, desktop );
         if (!desktop->wayland_host_startup_timeout)
@@ -1224,11 +1243,18 @@ DECL_HANDLER(cancel_wayland_host_startup)
 DECL_HANDLER(register_wayland_host)
 {
     struct desktop *desktop;
+    unsigned int device_uuid[4];
 
     reply->host_epoch = 0;
+    if (get_req_data_size() != sizeof(device_uuid))
+    {
+        set_error( STATUS_INFO_LENGTH_MISMATCH );
+        return;
+    }
+    memcpy( device_uuid, get_req_data(), sizeof(device_uuid) );
     if (!validate_wayland_host_context( req->version, req->capabilities,
                                         req->endpoint_device, req->endpoint_inode,
-                                        req->seat )) return;
+                                        req->seat, device_uuid )) return;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
 
     if (desktop->wayland_host_process)
@@ -1241,7 +1267,9 @@ DECL_HANDLER(register_wayland_host)
              desktop->wayland_startup_endpoint_device != req->endpoint_device ||
              desktop->wayland_startup_endpoint_inode != req->endpoint_inode ||
              desktop->wayland_startup_capabilities != req->capabilities ||
-             desktop->wayland_startup_seat != req->seat)
+             desktop->wayland_startup_seat != req->seat ||
+             memcmp( desktop->wayland_startup_device_uuid, device_uuid,
+                     sizeof(desktop->wayland_startup_device_uuid) ))
         set_error( STATUS_ACCESS_DENIED );
     else if (!wayland_host_context_matches( desktop, req->endpoint_device,
                                              req->endpoint_inode, req->seat ))
@@ -1255,6 +1283,8 @@ DECL_HANDLER(register_wayland_host)
         desktop->wayland_host_endpoint_inode = req->endpoint_inode;
         desktop->wayland_host_capabilities = req->capabilities;
         desktop->wayland_host_seat = req->seat;
+        memcpy( desktop->wayland_host_device_uuid, device_uuid,
+                sizeof(desktop->wayland_host_device_uuid) );
         desktop->wayland_host_ready = 0;
         reply->host_epoch = desktop->wayland_host_epoch;
         clear_wayland_host_startup( desktop );
@@ -1308,6 +1338,10 @@ DECL_HANDLER(get_wayland_host)
     reply->endpoint_inode = 0;
     reply->seat = 0;
     reply->ready = 0;
+    reply->device_uuid_0 = 0;
+    reply->device_uuid_1 = 0;
+    reply->device_uuid_2 = 0;
+    reply->device_uuid_3 = 0;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
     if (!desktop->wayland_host_process)
         set_error( STATUS_NOT_FOUND );
@@ -1320,6 +1354,10 @@ DECL_HANDLER(get_wayland_host)
         reply->endpoint_inode = desktop->wayland_host_endpoint_inode;
         reply->seat = desktop->wayland_host_seat;
         reply->ready = desktop->wayland_host_ready;
+        reply->device_uuid_0 = desktop->wayland_host_device_uuid[0];
+        reply->device_uuid_1 = desktop->wayland_host_device_uuid[1];
+        reply->device_uuid_2 = desktop->wayland_host_device_uuid[2];
+        reply->device_uuid_3 = desktop->wayland_host_device_uuid[3];
     }
     release_object( desktop );
 }
