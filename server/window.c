@@ -3630,7 +3630,8 @@ DECL_HANDLER(publish_wayland_scene)
     }
     reply->scene_generation = root->wayland_scene_generation;
     reply->owner_revision = root->wayland_scene_owner_revision;
-    if (!desktop->wayland_host_process || !desktop->wayland_host_ready)
+    if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+        (!desktop->wayland_host_process || !desktop->wayland_host_ready))
         set_error( STATUS_DEVICE_NOT_READY );
     else if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
              (!(contributor = find_wayland_contributor( root, req->contributor_id )) ||
@@ -3652,7 +3653,8 @@ DECL_HANDLER(publish_wayland_scene)
         root->wayland_scene_generation++;
         root->wayland_scene_owner_revision = req->owner_revision;
         root->wayland_scene_applied_generation = 0;
-        root->wayland_scene_host_epoch = desktop->wayland_host_epoch;
+        root->wayland_scene_host_epoch = desktop->wayland_host_process &&
+                desktop->wayland_host_ready ? desktop->wayland_host_epoch : 0;
         root->wayland_scene_contributor_id = req->contributor_id;
         root->wayland_scene_stream_id = req->stream_id;
         root->wayland_scene_binding_generation = req->binding_generation;
@@ -4036,5 +4038,24 @@ void revoke_wayland_desktop_streams( struct desktop *desktop )
             if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_REVOKED)
                 invalidate_wayland_contributor( root, contributor );
         }
+    }
+}
+
+/* Make retained non-hosted scene state visible to a newly ready host.  This
+ * changes only the delivery epoch, not the semantic scene generation. */
+void activate_wayland_desktop_scenes( struct desktop *desktop )
+{
+    struct window *root;
+    user_handle_t handle = 0;
+
+    if (!desktop->wayland_host_process || !desktop->wayland_host_ready) return;
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (root->desktop != desktop || !root->wayland_scene_generation ||
+            root->wayland_scene_host_epoch == desktop->wayland_host_epoch ||
+            root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+            continue;
+        root->wayland_scene_host_epoch = desktop->wayland_host_epoch;
+        root->wayland_scene_applied_generation = 0;
     }
 }

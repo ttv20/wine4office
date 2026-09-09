@@ -1273,7 +1273,10 @@ DECL_HANDLER(set_wayland_host_ready)
     else if (desktop->wayland_host_process != current->process)
         set_error( STATUS_ACCESS_DENIED );
     else
+    {
         desktop->wayland_host_ready = 1;
+        activate_wayland_desktop_scenes( desktop );
+    }
     release_object( desktop );
 }
 

@@ -30,10 +30,12 @@ or transport fixture is not Outlook support.
 - Wineserver now also owns the first per-root scene transaction. Only the
   logical top-level window owner can publish `Empty` or `Hidden`, publication
   uses an expected generation and a strictly increasing owner revision, and
-  only the current Ready host can query or acknowledge that generation. A
-  replacement host cannot replay an old scene; the owner must publish it for
-  the replacement host epoch. This tranche carries no buffers and makes no GPU
-  transport claim.
+  only the current Ready host can query or acknowledge that generation.
+  Non-hosted scene state is retained when no host is Ready and is made visible
+  to a replacement host without changing the semantic generation. Authenticated
+  `HostedContent` from an old epoch is never replayed; its stream is revoked and
+  the retained state becomes `Empty`. This tranche carries no buffers and makes
+  no GPU transport claim.
 - Each root now has a lazily allocated registry capped at 16 contributors.
   The logical owner creates a DComp contributor and receives a random 128-bit
   one-use grant. A producer consumes that grant to receive server-issued stream
@@ -56,11 +58,13 @@ or transport fixture is not Outlook support.
   first topology.
 - A failed publication returns the server's current scene generation and
   owner revision in the fixed reply so the owner can resynchronize its
-  compare-and-swap once without exposing the scene to another process.
-  Automatic replay when a host becomes
-  Ready without a later DComp state transition is still pending; polling every
-  DComp Commit was rejected because it would put synchronous IPC on the frame
-  hot path.
+  compare-and-swap once without exposing the scene to another process. The
+  server now accepts committed non-hosted dispositions before host startup and
+  attaches the latest one to a new host epoch at `HostReady`. Repeated
+  `HostReady` calls are idempotent, and activation neither increments the scene
+  generation nor republishes over a newer `Hidden` or authenticated
+  `HostedContent` disposition. DComp Commit remains edge-triggered and does not
+  poll for host state.
 
 ## Contributor interception inventory
 
@@ -167,6 +171,19 @@ admitted.
   coherent runner, exact test binaries and hashes are retained at
   `/workspace/runner-dcomp-empty-scene` and
   `/workspace/artifacts/dcomp-empty-scene-runner`.
+- The retained-scene activation extension passed 238 checks with zero failures
+  in both x86-64 and i386 on the task KDE desktop. It commits a DComp root before
+  any host exists, verifies delivery when the host becomes Ready, repeats
+  `HostReady` without changing generation, preserves newer `Hidden` and
+  authenticated `HostedContent` state, and delivers the retained current scene
+  to a replacement host without another application Commit. The public
+  cross-process DComp oracle remained at 36 checks with zero failures in both
+  architectures. Logs are retained as
+  `/workspace/artifacts/dcomp-scene-replay-{x64b,i386b}.log` and
+  `/workspace/artifacts/dcomp-scene-replay-dcomp-host-{x64,i386}.log`; the
+  coherent runner and exact test binaries are retained at
+  `/workspace/runner-dcomp-scene-replay` and
+  `/workspace/artifacts/scene-replay-win32u-test-{x64,i386}.exe`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

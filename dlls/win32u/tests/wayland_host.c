@@ -46,6 +46,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_CONTRIBUTOR_IDENTITY,
     HOST_CHILD_COMMAND_CREATE_CONTRIBUTOR,
     HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE,
+    HOST_CHILD_COMMAND_SET_READY,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -261,8 +262,7 @@ static NTSTATUS publish_scene( HWND root, UINT disposition, UINT64 expected_gene
         req->stream_id = stream_id;
         req->binding_generation = binding_generation;
         status = p_wine_server_call( req );
-        if (!status)
-            *scene_generation = reply->scene_generation;
+        *scene_generation = reply->scene_generation;
         if (current_owner_revision) *current_owner_revision = reply->owner_revision;
     }
     SERVER_END_REQ;
@@ -537,6 +537,9 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->command_status = ack_contributor_revoke( (HWND)(UINT_PTR)state->root,
                     state->host_epoch, state->contributor_id, state->binding_generation );
             break;
+        case HOST_CHILD_COMMAND_SET_READY:
+            state->command_status = set_host_ready( state->host_epoch );
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -683,13 +686,17 @@ static void test_host_registration( const char *program, const char *test_name )
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
     IDCompositionTarget *below_target = NULL, *above_target = NULL;
     IDCompositionVisual *below_visual = NULL, *above_visual = NULL;
+    IDCompositionDevice *pre_ready_device = NULL;
+    IDCompositionTarget *pre_ready_target = NULL;
+    IDCompositionVisual *pre_ready_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, command_event = NULL, result_event = NULL;
     HANDLE producer_command_event = NULL, producer_result_event = NULL;
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
     UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
+    UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
-    HWND root = NULL, dcomp_root = NULL;
+    HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL;
     HRESULT hr;
     NTSTATUS status;
     BOOL created;
@@ -707,10 +714,34 @@ static void test_host_registration( const char *program, const char *test_name )
     if (!root) goto done;
     status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
                             &scene_generation, NULL );
-    ok( status == STATUS_DEVICE_NOT_READY,
-        "Scene publication without a host returned %#lx.\n", status );
-    ok( !scene_generation, "Rejected scene returned generation %s.\n",
-        wine_dbgstr_longlong( scene_generation ) );
+    ok( !status && scene_generation == 1,
+        "Retained scene publication without a host returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( scene_generation ) );
+
+    pre_ready_root = CreateWindowExW( 0, L"static", L"Pre-ready DComp scene root", WS_POPUP,
+                                      0, 0, 64, 64, NULL, NULL, NULL, NULL );
+    ok( !!pre_ready_root, "Failed to create pre-ready DComp root, error %lu.\n",
+        GetLastError() );
+    if (pre_ready_root)
+    {
+        hr = DCompositionCreateDevice( NULL, &dcomp_device_iid, (void **)&pre_ready_device );
+        ok( hr == S_OK, "Creating pre-ready DComp device returned %#lx.\n", hr );
+    }
+    if (pre_ready_device)
+    {
+        hr = IDCompositionDevice_CreateTargetForHwnd( pre_ready_device, pre_ready_root, FALSE,
+                                                       &pre_ready_target );
+        ok( hr == S_OK, "Creating pre-ready DComp target returned %#lx.\n", hr );
+        hr = IDCompositionDevice_CreateVisual( pre_ready_device, &pre_ready_visual );
+        ok( hr == S_OK, "Creating pre-ready DComp visual returned %#lx.\n", hr );
+    }
+    if (pre_ready_target && pre_ready_visual)
+    {
+        hr = IDCompositionTarget_SetRoot( pre_ready_target, pre_ready_visual );
+        ok( hr == S_OK, "Setting pre-ready DComp root returned %#lx.\n", hr );
+        hr = IDCompositionDevice_Commit( pre_ready_device );
+        ok( hr == S_OK, "Committing DComp before host startup returned %#lx.\n", hr );
+    }
 
     status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION + 1,
             TEST_CAPABILITIES, TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
@@ -791,6 +822,67 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( info.seat == TEST_SEAT && info.capabilities == TEST_CAPABILITIES && info.ready,
         "Host context is seat %lu, capabilities %#lx, ready %lu.\n",
         info.seat, info.capabilities, info.ready );
+
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SCENE ),
+        "Timed out querying the scene retained before host startup.\n" );
+    ok( !state->command_status && state->scene_generation == scene_generation &&
+        state->owner_revision == 1 &&
+        state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+        "Retained scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+        wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+
+    if (pre_ready_target && pre_ready_visual)
+    {
+        state->root = (UINT_PTR)pre_ready_root;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying DComp state committed before host startup.\n" );
+        ok( !state->command_status && state->scene_generation && state->owner_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+            "Pre-ready DComp scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        pre_ready_generation = state->scene_generation;
+        pre_ready_revision = state->owner_revision;
+
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_SET_READY ),
+            "Timed out repeating HostReady.\n" );
+        ok( !state->command_status, "Duplicate HostReady returned %#lx.\n",
+            state->command_status );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying DComp state after duplicate HostReady.\n" );
+        ok( !state->command_status && state->scene_generation == pre_ready_generation &&
+            state->owner_revision == pre_ready_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+            "Duplicate HostReady changed DComp scene %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+
+        status = publish_scene( pre_ready_root, WINE_WAYLAND_SCENE_HIDDEN,
+                                pre_ready_generation, pre_ready_revision + 1,
+                                0, 0, 0, &pre_ready_generation, NULL );
+        ok( !status, "Publishing a newer hidden scene returned %#lx.\n", status );
+        ++pre_ready_revision;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_SET_READY ),
+            "Timed out repeating HostReady after a newer scene.\n" );
+        ok( !state->command_status, "Duplicate HostReady after Hidden returned %#lx.\n",
+            state->command_status );
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying the newer scene after duplicate HostReady.\n" );
+        ok( !state->command_status && state->scene_generation == pre_ready_generation &&
+            state->owner_revision == pre_ready_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_HIDDEN,
+            "HostReady overwrote newer scene %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        state->root = (UINT_PTR)root;
+    }
     status = set_host_ready( old_epoch );
     ok( status == STATUS_ACCESS_DENIED, "Foreign ready returned %#lx.\n", status );
     status = release_host( old_epoch );
@@ -889,16 +981,12 @@ static void test_host_registration( const char *program, const char *test_name )
         state->root = (UINT_PTR)root;
     }
 
-    status = publish_scene( root, 0xdeadbeef, 0, 1, 0, 0, 0, &scene_generation, NULL );
+    status = publish_scene( root, 0xdeadbeef, 0, 1, 0, 0, 0, &next_generation, NULL );
     ok( status == STATUS_INVALID_PARAMETER, "Invalid scene disposition returned %#lx.\n", status );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
-                            &scene_generation, NULL );
-    ok( !status && scene_generation == 1,
-        "Empty scene publication returned %#lx, generation %s.\n",
-        status, wine_dbgstr_longlong( scene_generation ) );
     status = publish_scene( root, WINE_WAYLAND_SCENE_HIDDEN, 0, 2, 0, 0, 0,
                             &next_generation, &current_owner_revision );
-    ok( status == STATUS_REVISION_MISMATCH && !next_generation && current_owner_revision == 1,
+    ok( status == STATUS_REVISION_MISMATCH && next_generation == scene_generation &&
+        current_owner_revision == 1,
         "Stale scene transaction returned %#lx, generation %s, current revision %s.\n",
         status, wine_dbgstr_longlong( next_generation ),
         wine_dbgstr_longlong( current_owner_revision ) );
@@ -1191,6 +1279,20 @@ static void test_host_registration( const char *program, const char *test_name )
         "Replacement-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_READY ),
+        "Timed out repeating HostReady for hosted content.\n" );
+    ok( !state->command_status, "Duplicate HostReady for hosted content returned %#lx.\n",
+        state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SCENE ),
+        "Timed out querying hosted content after duplicate HostReady.\n" );
+    ok( !state->command_status && state->scene_generation == scene_generation &&
+        state->owner_revision == 5 &&
+        state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
+        "HostReady changed hosted content %#lx, generation %s, revision %s, disposition %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+        wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
 
     stop_host_child( state, command_event, result_event, &process );
     status = get_host( &info );
@@ -1220,6 +1322,20 @@ static void test_host_registration( const char *program, const char *test_name )
         state->register_status, state->ready_status );
     ok( state->host_epoch > old_epoch, "Replacement epoch %s did not follow %s.\n",
         wine_dbgstr_longlong( state->host_epoch ), wine_dbgstr_longlong( old_epoch ) );
+    if (pre_ready_generation)
+    {
+        state->root = (UINT_PTR)pre_ready_root;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_SCENE ),
+            "Timed out querying retained DComp scene from replacement host.\n" );
+        ok( !state->command_status && state->scene_generation == pre_ready_generation &&
+            state->owner_revision == pre_ready_revision &&
+            state->scene_disposition == WINE_WAYLAND_SCENE_HIDDEN,
+            "Replacement host scene returned %#lx, generation %s, revision %s, disposition %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+            wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
+        state->root = (UINT_PTR)root;
+    }
     if (dcomp_generation)
     {
         hr = IDCompositionTarget_SetRoot( above_target, above_visual );
@@ -1267,20 +1383,10 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
-        "Timed out querying scene from replacement host.\n" );
-    ok( state->command_status == STATUS_NOT_FOUND,
-        "Unreplayed scene query returned %#lx.\n", state->command_status );
-    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, scene_generation, 6,
-                            0, 0, 0, &next_generation, NULL );
-    ok( !status && next_generation == scene_generation + 1,
-        "Replacement scene publication returned %#lx, generation %s.\n",
-        status, wine_dbgstr_longlong( next_generation ) );
-    ok( send_host_child_command( state, command_event, result_event,
-                                HOST_CHILD_COMMAND_GET_SCENE ),
-        "Timed out querying replacement scene.\n" );
-    ok( !state->command_status && state->scene_generation == next_generation &&
-        state->owner_revision == 6 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
-        "Replacement scene query returned status %#lx, generation %s, revision %s, disposition %#lx.\n",
+        "Timed out querying retained scene from replacement host.\n" );
+    ok( !state->command_status && state->scene_generation == scene_generation &&
+        state->owner_revision == 5 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+        "Retained replacement scene returned status %#lx, generation %s, revision %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
     stop_host_child( state, command_event, result_event, &process );
@@ -1299,6 +1405,9 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !status, "Startup cancellation returned %#lx.\n", status );
 
 done:
+    if (pre_ready_visual) IDCompositionVisual_Release( pre_ready_visual );
+    if (pre_ready_target) IDCompositionTarget_Release( pre_ready_target );
+    if (pre_ready_device) IDCompositionDevice_Release( pre_ready_device );
     if (above_visual) IDCompositionVisual_Release( above_visual );
     if (below_visual) IDCompositionVisual_Release( below_visual );
     if (above_target) IDCompositionTarget_Release( above_target );
@@ -1315,6 +1424,7 @@ done:
     if (command_event) CloseHandle( command_event );
     if (ready_event) CloseHandle( ready_event );
     if (mapping) CloseHandle( mapping );
+    if (pre_ready_root) DestroyWindow( pre_ready_root );
     if (dcomp_root) DestroyWindow( dcomp_root );
     if (root) DestroyWindow( root );
 }
