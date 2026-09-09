@@ -548,8 +548,9 @@ static void run_queued_tests(void)
 
     if (test_batch_count > 1)
     {
-        for (i = test_batch_index, dst = 0; i < mt_test_count; i += test_batch_count)
-            mt_tests[dst++] = mt_tests[i];
+        for (i = 0, dst = 0; i < mt_test_count; ++i)
+            if (i % test_batch_count == test_batch_index)
+                mt_tests[dst++] = mt_tests[i];
         trace("Running batch %u/%u: %u of %Iu queued tests.\n",
                 test_batch_index + 1, test_batch_count, dst, mt_test_count);
         mt_test_count = dst;
