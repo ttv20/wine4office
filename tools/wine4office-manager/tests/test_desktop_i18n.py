@@ -77,6 +77,73 @@ class DesktopIntegrationTests(unittest.TestCase):
 
 
 class TranslationTests(unittest.TestCase):
+    def test_manual_odt_download_text_is_translated_in_every_catalog(self):
+        sources = (
+            "The automatic download failed twice. Open or copy the Microsoft "
+            "download link, download Office Deployment Tool, then choose the "
+            "downloaded file.",
+            "Copy link",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            for source in sources:
+                with self.subTest(language=language, source=source):
+                    translated = i18n.CATALOGS[language].get(source)
+                    self.assertIsNotNone(translated)
+                    if language != "en":
+                        self.assertNotEqual(translated, source)
+
+    def test_office_install_and_repair_text_is_translated_in_every_catalog(self):
+        sources = (
+            "Install Office",
+            "Install or repair Microsoft Office in the selected Wine environment.",
+            "Manage installations and download Office",
+            "Open Microsoft's website to manage computers linked to your subscription or "
+            "organization, or download the online Office installer. Sign-in is required.",
+            "Work or school account",
+            "Microsoft 365 Enterprise / Education — manage installations and download the "
+            "online installer.",
+            "Personal or family account",
+            "Microsoft 365 Personal / Family — manage your subscription, devices, and "
+            "download the online installer.",
+            "Could not open the Microsoft 365 account page:",
+            "Repair Office",
+            "Quick Repair uses the Office files already on this computer and works offline. "
+            "Online Repair downloads and reinstalls Office; use it after an update when Outlook "
+            "does not work correctly. It may also improve Office performance.",
+            "Close every Office application before starting a repair.",
+            "Run Quick Repair",
+            "Run Office Quick Repair using local files",
+            "Run Online Repair",
+            "Run Office Online Repair",
+            "Running Office Quick Repair",
+            "Preparing Office Quick Repair…",
+            "Office Quick Repair completed.",
+            "Office Quick Repair cancelled.",
+            "Office Quick Repair failed. Review the details below.",
+            "Office Quick Repair started.",
+            "Running Office Online Repair",
+            "Preparing Office Online Repair…",
+            "Office Online Repair completed.",
+            "Office Online Repair cancelled.",
+            "Office Online Repair failed. Review the details below.",
+            "Office Online Repair started.",
+            "Online Repair required after upgrade",
+            "This Wine4Office upgrade changed the compatibility environment used by the "
+            "existing Office installation.",
+            "Run Online Repair before using Outlook. Until the repair completes, Outlook may "
+            "not work and Office performance may be lower. Online Repair updates the existing "
+            "Office installation for the new Wine4Office version.",
+            "office-quick-repair",
+            "office-online-repair",
+        )
+        for language in i18n.SUPPORTED_LANGUAGES:
+            for source in sources:
+                with self.subTest(language=language, source=source):
+                    translated = i18n.CATALOGS[language].get(source)
+                    self.assertIsNotNone(translated)
+                    if language != "en":
+                        self.assertNotEqual(translated, source)
+
     def test_each_supported_language_has_its_own_json_catalog(self):
         expected = {
             f"{language}.json" for language in i18n.SUPPORTED_LANGUAGES
@@ -116,7 +183,7 @@ class TranslationTests(unittest.TestCase):
         self.assertEqual(i18n.translate("Environment", language), "סביבה")
 
     def test_hebrew_and_arabic_have_core_navigation_catalogs(self):
-        keys = ("Environment", "Install Office & Teams", "Applications", "Office settings",
+        keys = ("Environment", "Install Office", "Applications", "Office settings",
                 "Wine tools", "Maintenance")
         for language in ("he", "ar"):
             for key in keys:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import http.client
 import io
 import fcntl
 import hashlib
@@ -28,6 +29,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from contextlib import contextmanager
+from functools import lru_cache
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
@@ -44,6 +46,13 @@ OFFICE_X11_EXECUTABLES = (
     "WINWORD.EXE", "EXCEL.EXE", "POWERPNT.EXE", "OUTLOOK.EXE",
     "ONENOTE.EXE", "MSACCESS.EXE", "MSPUB.EXE", "VISIO.EXE", "WINPROJ.EXE",
 )
+OFFICE_CLICK_TO_RUN_CONFIGURATION_KEY = (
+    r"HKLM\Software\Microsoft\Office\ClickToRun\Configuration"
+)
+OFFICE_REPAIR_TYPES = {
+    "quick": "QuickRepair",
+    "online": "FullRepair",
+}
 STOP_GRACE_SECONDS = 10.0
 STOP_DETECTION_SECONDS = 4.0
 OFFICE_COMPATIBILITY_POLICIES = {
@@ -167,6 +176,10 @@ APP_META = {
 }
 
 OFFICE_CUSTOMIZATION_URL = "https://config.office.com/deploymentsettings"
+OFFICE_WORK_SCHOOL_ACCOUNT_URL = "https://portal.office.com/account/?ref=Harmony#"
+OFFICE_PERSONAL_ACCOUNT_URL = (
+    "https://account.microsoft.com/services/microsoft365/details"
+)
 OFFICE_PRODUCTS = (
     {
         "label": "Microsoft 365 Apps for enterprise",
@@ -247,6 +260,7 @@ MAX_OFFICE_XML_SIZE = 1024 * 1024
 MAX_ODT_PAGE_SIZE = 4 * 1024 * 1024
 MAX_ODT_DOWNLOAD_SIZE = 32 * 1024 * 1024
 MAX_ODT_SETUP_SIZE = 64 * 1024 * 1024
+ODT_RETRY_DELAY_SECONDS = 2.0
 MAX_TEAMS_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
 MAX_TEAMS_MSIX_SIZE = 512 * 1024 * 1024
 MAX_WEBVIEW2_BOOTSTRAPPER_SIZE = 32 * 1024 * 1024
@@ -1557,6 +1571,96 @@ def find_office_app(prefix_value: str, app: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def find_office_click_to_run(prefix_value: str) -> Path | None:
+    """Return the installed Office Click-to-Run repair client, if present."""
+    prefix = validate_prefix(prefix_value)
+    candidates = (
+        prefix / "drive_c/Program Files/Common Files/Microsoft Shared/ClickToRun/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files (x86)/Common Files/Microsoft Shared/ClickToRun/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files/Microsoft Office 15/ClientX64/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files/Microsoft Office 15/ClientX86/OfficeClickToRun.exe",
+        prefix / "drive_c/Program Files (x86)/Microsoft Office 15/ClientX86/OfficeClickToRun.exe",
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def office_installation_exists(prefix_value: str) -> bool:
+    """Return whether the prefix contains an existing Office installation."""
+    return any(
+        find_office_app(prefix_value, app) is not None
+        for app in APP_META
+        if app != "teams"
+    )
+
+
+def _office_click_to_run_configuration_value(
+        wine: Path, environment: dict[str, str], value_name: str) -> str:
+    result = subprocess.run(
+        [str(wine), "reg", "query", OFFICE_CLICK_TO_RUN_CONFIGURATION_KEY,
+         "/v", value_name],
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False,
+    )
+    match = re.search(
+        rf"^\s*{re.escape(value_name)}\s+REG_[A-Z0-9_]+\s+(.+?)\s*$",
+        result.stdout,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if result.returncode or match is None:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f"\n{detail}" if detail else ""
+        raise RuntimeError(
+            f"Office Click-to-Run configuration is missing {value_name}.{suffix}"
+        )
+    return match.group(1).strip()
+
+
+def repair_office(prefix_value: str, wine_value: str, repair_type: str,
+                  output: Output, cancel_event=None, process_callback=None,
+                  use_x11: bool = True) -> str:
+    """Run Microsoft's visible Quick or Online Click-to-Run repair."""
+    selected_repair = OFFICE_REPAIR_TYPES.get(repair_type)
+    if selected_repair is None:
+        raise ValueError(f"Unknown Office repair type: {repair_type}")
+    prefix = validate_prefix(prefix_value)
+    if not (prefix / "system.reg").is_file():
+        raise FileNotFoundError(f"Wine environment is not initialized: {prefix}")
+    wine = require_wine(wine_value)
+    click_to_run = find_office_click_to_run(str(prefix))
+    if click_to_run is None:
+        raise FileNotFoundError(
+            "Office Click-to-Run is not installed in the selected Wine environment."
+        )
+    environment = wine_environment(prefix, wine, use_x11)
+    platform = _office_click_to_run_configuration_value(
+        wine, environment, "Platform"
+    ).lower()
+    culture = _office_click_to_run_configuration_value(
+        wine, environment, "ClientCulture"
+    ).lower()
+    if platform not in {"x86", "x64"}:
+        raise RuntimeError(
+            f"Office Click-to-Run reported an unsupported platform: {platform}"
+        )
+    if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})+", culture):
+        raise RuntimeError(
+            f"Office Click-to-Run reported an invalid language: {culture}"
+        )
+    repair_label = "Quick" if repair_type == "quick" else "Online"
+    output(f"Starting Microsoft Office {repair_label} Repair.")
+    _stream_command(
+        [
+            str(wine), str(click_to_run), "scenario=Repair",
+            f"platform={platform}", f"culture={culture}",
+            "forceappshutdown=False", f"RepairType={selected_repair}",
+            "DisplayLevel=True",
+        ],
+        environment, output, cwd=click_to_run.parent,
+        cancel_event=cancel_event, process_callback=process_callback,
+    )
+    return f"Microsoft Office {repair_label} Repair completed successfully."
 
 
 def environment_status(prefix_value: str, wine_value: str) -> dict:
@@ -3204,6 +3308,123 @@ def _resolve_latest_odt_url(cancel_event=None) -> str:
 
 
 
+class OdtDownloadError(RuntimeError):
+    """Both automatic attempts failed; the UI may offer a local installer."""
+
+    def __init__(self, message: str, download_url: str) -> None:
+        super().__init__(message)
+        self.download_url = download_url
+
+
+def _acquire_odt(output: Output, cancel_event=None) -> Path:
+    download_url = _ODT_DOWNLOAD_PAGE
+    for attempt in range(1, 3):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        try:
+            output(f"Downloading Office Deployment Tool (attempt {attempt}/2).")
+            download_url = _resolve_latest_odt_url(cancel_event)
+            return _download_odt(download_url, output, cancel_event)
+        except (http.client.HTTPException, OSError, ValueError, RuntimeError) as error:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Operation cancelled.") from error
+            output(f"Office Deployment Tool download attempt {attempt}/2 failed: {error}")
+            if attempt == 2:
+                raise OdtDownloadError(
+                    "Office Deployment Tool could not be downloaded after two attempts.",
+                    download_url,
+                ) from error
+            if cancel_event is not None:
+                if cancel_event.wait(ODT_RETRY_DELAY_SECONDS):
+                    raise RuntimeError("Operation cancelled.") from error
+            else:
+                time.sleep(ODT_RETRY_DELAY_SECONDS)
+    raise AssertionError("Unreachable")
+
+
+def _snapshot_local_odt(source, destination: Path) -> Path:
+    # Extract our private copy, never delete or execute a changing user file.
+    source = Path(source)
+    if not source.is_file():
+        raise ValueError("Choose an Office Deployment Tool file.")
+    with source.open("rb") as stream, destination.open("xb") as target:
+        size, signature = _copy_bounded_response(
+            stream, target, MAX_ODT_DOWNLOAD_SIZE, "Office Deployment Tool file"
+        )
+    if size < 1024 or signature != b"MZ":
+        raise ValueError("Office Deployment Tool file is not a valid Windows executable.")
+    _verify_microsoft_signed_pe(destination)
+    return destination
+
+
+@lru_cache(maxsize=1)
+def _microsoft_authenticode_store():
+    from signify.authenticode.cert_store import (
+        LEGACY_TRUSTED_CERTIFICATE_STORE,
+        TRUSTED_CERTIFICATE_STORE_WITH_CTL,
+    )
+    from signify.x509 import CertificateStore
+
+    certificates = []
+    for certificate in TRUSTED_CERTIFICATE_STORE_WITH_CTL:
+        try:
+            certificate.subject_public_algorithm
+        except (KeyError, NotImplementedError, ValueError):
+            # Current certificate bundles include experimental algorithms that
+            # signify cannot validate. They cannot establish a usable chain.
+            continue
+        certificates.append(certificate)
+    current_store = CertificateStore(
+        certificates, trusted=True, ctl=TRUSTED_CERTIFICATE_STORE_WITH_CTL.ctl
+    )
+    return current_store | LEGACY_TRUSTED_CERTIFICATE_STORE
+
+
+def _authenticode_verification_results(path: Path):
+    try:
+        from signify.exceptions import SignifyError
+        from signify.authenticode.signed_file import SignedPEFile
+    except ImportError as error:
+        raise RuntimeError(
+            "Wine4Office Manager is missing the Authenticode verifier."
+        ) from error
+
+    try:
+        with path.open("rb") as stream:
+            return list(
+                SignedPEFile(stream).verify(
+                    signature_types="embedded",
+                    multi_verify_mode="any",
+                    trusted_certificate_store=_microsoft_authenticode_store(),
+                )
+            )
+    except SignifyError as error:
+        raise OdtSignatureError from error
+
+
+class OdtSignatureError(ValueError):
+    """The selected executable failed Authenticode verification."""
+
+
+def _verify_microsoft_signed_pe(path: Path) -> None:
+    try:
+        results = _authenticode_verification_results(path)
+    except OdtSignatureError as error:
+        raise ValueError(
+            "Office Deployment Tool file does not have a valid trusted signature."
+        ) from error
+    for signed_data, _indirect_data, chains in results:
+        signer = signed_data.signer_info
+        for chain in chains:
+            for certificate in chain:
+                if (certificate.issuer == signer.issuer
+                        and certificate.serial_number == signer.serial_number
+                        and "Microsoft Corporation"
+                        in certificate.subject.get_components("O")):
+                    return
+    raise ValueError("Office Deployment Tool file is not signed by Microsoft.")
+
+
 def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
     url = _trusted_microsoft_url(url, _ODT_DOWNLOAD_HOSTS, "Office Deployment Tool download")
     download_dir = cache_home() / "wine4office/odt"
@@ -3231,6 +3452,7 @@ def _download_odt(url: str, output: Output, cancel_event=None) -> Path:
                 raise ValueError("Office Deployment Tool download is not a valid Windows executable.")
             target.flush()
             os.fsync(target.fileno())
+        _verify_microsoft_signed_pe(temporary_path)
         os.replace(temporary_path, destination)
         temporary_path = None
         return destination
@@ -3534,7 +3756,7 @@ def install_office_with_odt(prefix, wine, config_path, output,
                             cancel_event=None, process_callback=None, *,
                             configuration_payload=None,
                             installer_launching_callback=None,
-                            installer_process_callback=None) -> str:
+                            installer_process_callback=None, local_odt=None) -> str:
     """Snapshot configuration, fetch current ODT, then run setup /configure."""
     prefix_path = validate_prefix(prefix)
     if not (prefix_path / "system.reg").is_file():
@@ -3555,9 +3777,12 @@ def install_office_with_odt(prefix, wine, config_path, output,
             extraction_directory.mkdir(mode=0o700)
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Operation cancelled.")
-            output("Resolving the latest Office Deployment Tool from Microsoft.")
-            odt_url = _resolve_latest_odt_url(cancel_event)
-            odt = _download_odt(odt_url, output, cancel_event)
+            if local_odt is None:
+                output("Resolving the latest Office Deployment Tool from Microsoft.")
+                odt = _acquire_odt(output, cancel_event)
+            else:
+                output("Using the selected Office Deployment Tool file.")
+                odt = _snapshot_local_odt(local_odt, work_directory / "odt.exe")
             windows_extraction_directory = _windows_document_path(
                 str(extraction_directory), wine_path, environment
             )

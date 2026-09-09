@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Retry Office installer downloads once, then offer manual download and file selection.
+- Bundle the certificate data needed to verify Office installers in standalone Manager builds.
+- Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.
+- Link to Microsoft's work/school and personal account pages for managing computers and downloading the online Office installer.
+- Hide the Teams installer from the Manager while Teams support is unavailable.
+
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Restore Outlook account setup after Office repairs its Click-to-Run registry data.
