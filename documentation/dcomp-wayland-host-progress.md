@@ -62,7 +62,18 @@ admitted.
   `/workspace/artifacts/winewayland-host-probe-{x64,i386}.log` and
   `/workspace/artifacts/winewayland-host-build.sha256` in environment
   `dcomp-host-probe-20260909`.
-- Native Windows fixture and Outlook baseline are pending.
+- A public DComp host oracle now runs a window owner and composition producer
+  as separate processes. Native Windows x86-64 and i386 each passed 36 checks.
+  Windows rejects a foreign-process `CreateTargetForHwnd()` with
+  `E_ACCESSDENIED`; the producer can still create windowless composition
+  content and owns no visible top-level window. The logical owner preserves
+  its HWND identity, publishes `SetRoot(NULL)` without another Present, can
+  cancel `WM_CLOSE`, and receives `S_OK` from a hidden-window Present.
+- The same oracle on Wine matched those results in both architectures. The
+  initial Wine run contained one test-harness failure because the matching
+  foreign-target rejection was incorrectly marked `todo_wine`; no product
+  mismatch was found.
+- Outlook topology and timing baselines are pending.
 
 ## Reproduce the current probe
 
