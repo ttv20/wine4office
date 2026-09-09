@@ -1472,6 +1472,10 @@ fi
 WINE_NOTICE_WITH(wayland, [test -z "$WAYLAND_CLIENT_LIBS" -o -z "$WAYLAND_SCANNER" -o -z "$XKBCOMMON_LIBS" -o -z "$XKBREGISTRY_LIBS" -o "$ac_cv_header_linux_input_h" = "no"],
                  [Wayland ${notice_platform}development files not found, the Wayland driver won't be supported.],
                  [enable_winewayland_drv])
+if test "x$enable_winewayland_drv" = xno
+then
+    enable_winewayland_host=no
+fi
 
 if test "$enable_wineandroid_drv$enable_winemac_drv$enable_winewayland_drv" = "nonono"
 then
@@ -3710,6 +3714,7 @@ WINE_CONFIG_MAKEFILE(programs/whoami)
 WINE_CONFIG_MAKEFILE(programs/wine4office-appv-preload)
 WINE_CONFIG_MAKEFILE(programs/wine4office-appv-preload/tests)
 WINE_CONFIG_MAKEFILE(programs/wine4office-voip-broker)
+WINE_CONFIG_MAKEFILE(programs/winewayland-host)
 WINE_CONFIG_MAKEFILE(programs/wine4officeauth)
 WINE_CONFIG_MAKEFILE(programs/wine4officeclose)
 WINE_CONFIG_MAKEFILE(programs/wine4officeclose/tests)

@@ -1,0 +1,11 @@
+MODULE = winewayland-host.exe
+UNIXLIB = winewayland-host.so
+IMPORTS = ntdll
+UNIX_CFLAGS = $(WAYLAND_CLIENT_CFLAGS)
+UNIX_LIBS = $(WAYLAND_CLIENT_LIBS)
+
+EXTRADLLFLAGS = -mconsole -municode
+
+SOURCES = \
+	main.c \
+	unixlib.c

@@ -17125,6 +17125,10 @@ This is an error since --with-wayland was requested." "$LINENO" 5 ;;
 esac
 enable_winewayland_drv=${enable_winewayland_drv:-no}
 fi
+if test "x$enable_winewayland_drv" = xno
+then
+    enable_winewayland_host=no
+fi
 
 if test "$enable_wineandroid_drv$enable_winemac_drv$enable_winewayland_drv" = "nonono"
 then
@@ -23682,6 +23686,7 @@ wine_fn_config_makefile programs/whoami enable_whoami
 wine_fn_config_makefile programs/wine4office-appv-preload enable_wine4office_appv_preload
 wine_fn_config_makefile programs/wine4office-appv-preload/tests enable_tests
 wine_fn_config_makefile programs/wine4office-voip-broker enable_wine4office_voip_broker
+wine_fn_config_makefile programs/winewayland-host enable_winewayland_host
 wine_fn_config_makefile programs/wine4officeauth enable_wine4officeauth
 wine_fn_config_makefile programs/wine4officeclose enable_wine4officeclose
 wine_fn_config_makefile programs/wine4officeclose/tests enable_tests
