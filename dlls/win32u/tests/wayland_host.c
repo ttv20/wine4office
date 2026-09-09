@@ -51,6 +51,9 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_SLOT,
     HOST_CHILD_COMMAND_SET_SLOT_IMPORT,
     HOST_CHILD_COMMAND_QUERY_SLOT_GLOBALS,
+    HOST_CHILD_COMMAND_GET_FRAME,
+    HOST_CHILD_COMMAND_SET_FRAME_REUSABLE,
+    HOST_CHILD_COMMAND_SET_FRAME_RESULT,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -64,6 +67,8 @@ enum producer_child_command
     PRODUCER_CHILD_COMMAND_CREATE_SLOT_OBJECTS,
     PRODUCER_CHILD_COMMAND_REGISTER_SLOT,
     PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS,
+    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME,
+    PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT,
     PRODUCER_CHILD_COMMAND_EXIT,
 };
 
@@ -96,6 +101,9 @@ struct wayland_host_test_state
     UINT64 revocation_scene_generation;
     UINT64 pool_generation;
     UINT64 allocation_size;
+    UINT64 frame_id;
+    UINT64 ready_value;
+    UINT64 reuse_value;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -125,6 +133,11 @@ struct wayland_host_test_state
     DWORD slot_memory_global;
     DWORD slot_ready_global;
     DWORD slot_reuse_global;
+    DWORD frame_result;
+    DWORD backend_status;
+    DWORD frame_reusable;
+    DWORD outstanding_frames;
+    DWORD available_credits;
     DWORD device_uuid[4];
     NTSTATUS mismatch_status;
     NTSTATUS register_status;
@@ -197,6 +210,20 @@ struct wayland_slot_info
     UINT64 registry_generation;
     DWORD registered_slots;
     DWORD import_state;
+};
+
+struct wayland_frame_info
+{
+    UINT64 pool_generation;
+    UINT64 frame_id;
+    UINT64 ready_value;
+    UINT64 reuse_value;
+    DWORD slot;
+    DWORD reusable;
+    DWORD outstanding_frames;
+    DWORD result;
+    DWORD backend_status;
+    DWORD available_credits;
 };
 
 static unsigned int (CDECL *p_wine_server_call)( void * );
@@ -651,6 +678,131 @@ static NTSTATUS set_slot_import( HWND root, UINT64 host_epoch, UINT64 contributo
     return status;
 }
 
+static NTSTATUS submit_frame_with_size( HWND root, struct wayland_host_test_state *state,
+                                        SIZE_T submission_size )
+{
+    struct wayland_frame_submission submission;
+    NTSTATUS status;
+
+    memset( &submission, 0, sizeof(submission) );
+    submission.pool_generation = state->pool_generation;
+    submission.frame_id = state->frame_id;
+    submission.ready_value = state->ready_value;
+    submission.reuse_value = state->reuse_value;
+    submission.slot = state->slot;
+    SERVER_START_REQ( submit_wayland_frame )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        wine_server_add_data( req, &submission, submission_size );
+        status = p_wine_server_call( req );
+        state->outstanding_frames = reply->outstanding_frames;
+        state->available_credits = reply->available_credits;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS submit_frame( HWND root, struct wayland_host_test_state *state )
+{
+    return submit_frame_with_size( root, state, sizeof(struct wayland_frame_submission) );
+}
+
+static NTSTATUS get_frame( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                           UINT64 previous_frame_id, struct wayland_frame_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_frame )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->previous_frame_id = previous_frame_id;
+        status = p_wine_server_call( req );
+        info->pool_generation = reply->pool_generation;
+        info->frame_id = reply->frame_id;
+        info->ready_value = reply->ready_value;
+        info->reuse_value = reply->reuse_value;
+        info->slot = reply->slot;
+        info->reusable = reply->reusable;
+        info->outstanding_frames = reply->outstanding_frames;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_frame_reusable( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                                    UINT64 frame_id, UINT64 ready_value, UINT64 reuse_value,
+                                    DWORD *outstanding_frames )
+{
+    NTSTATUS status;
+
+    *outstanding_frames = 0;
+    SERVER_START_REQ( set_wayland_frame_reusable )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->frame_id = frame_id;
+        req->ready_value = ready_value;
+        req->reuse_value = reuse_value;
+        status = p_wine_server_call( req );
+        *outstanding_frames = reply->outstanding_frames;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_frame_result( HWND root, UINT64 host_epoch, UINT64 contributor_id,
+                                  UINT64 frame_id, DWORD result, DWORD backend_status,
+                                  DWORD *outstanding_frames )
+{
+    NTSTATUS status;
+
+    *outstanding_frames = 0;
+    SERVER_START_REQ( set_wayland_frame_result )
+    {
+        req->root = wine_server_user_handle( root );
+        req->result = result;
+        req->backend_status = backend_status;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->frame_id = frame_id;
+        status = p_wine_server_call( req );
+        *outstanding_frames = reply->outstanding_frames;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_frame_result( HWND root, struct wayland_host_test_state *state,
+                                  struct wayland_frame_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_frame_result )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        req->frame_id = state->frame_id;
+        status = p_wine_server_call( req );
+        info->reuse_value = reply->reuse_value;
+        info->result = reply->result;
+        info->backend_status = reply->backend_status;
+        info->reusable = reply->reusable;
+        info->outstanding_frames = reply->outstanding_frames;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS revoke_contributor( HWND root, struct wayland_host_test_state *state )
 {
     NTSTATUS status;
@@ -747,6 +899,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_contributor_info contributor;
     struct wayland_pool_info pool;
     struct wayland_slot_info slot;
+    struct wayland_frame_info frame;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -866,6 +1019,28 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->slot_reuse_global, 0 );
             state->command_status = STATUS_SUCCESS;
             break;
+        case HOST_CHILD_COMMAND_GET_FRAME:
+            state->command_status = get_frame( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->frame_id, &frame );
+            state->pool_generation = frame.pool_generation;
+            state->frame_id = frame.frame_id;
+            state->ready_value = frame.ready_value;
+            state->reuse_value = frame.reuse_value;
+            state->slot = frame.slot;
+            state->frame_reusable = frame.reusable;
+            state->outstanding_frames = frame.outstanding_frames;
+            break;
+        case HOST_CHILD_COMMAND_SET_FRAME_REUSABLE:
+            state->command_status = set_frame_reusable( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->frame_id,
+                    state->ready_value, state->reuse_value, &state->outstanding_frames );
+            break;
+        case HOST_CHILD_COMMAND_SET_FRAME_RESULT:
+            state->command_status = set_frame_result( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->contributor_id, state->frame_id,
+                    state->frame_result, state->backend_status,
+                    &state->outstanding_frames );
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -883,6 +1058,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
 static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE result_event )
 {
     struct wayland_host_test_state *state;
+    struct wayland_frame_info frame;
     obj_handle_t memory = 0, ready_sync = 0, reuse_sync = 0;
     obj_handle_t register_memory, register_ready, register_reuse;
     NTSTATUS status;
@@ -948,6 +1124,18 @@ static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE res
             state->slot_ready_handle = 0;
             state->slot_reuse_handle = 0;
             state->producer_status = STATUS_SUCCESS;
+            break;
+        case PRODUCER_CHILD_COMMAND_SUBMIT_FRAME:
+            state->producer_status = submit_frame( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT:
+            state->producer_status = get_frame_result( (HWND)(UINT_PTR)state->root,
+                                                        state, &frame );
+            state->reuse_value = frame.reuse_value;
+            state->frame_result = frame.result;
+            state->backend_status = frame.backend_status;
+            state->frame_reusable = frame.reusable;
+            state->outstanding_frames = frame.outstanding_frames;
             break;
         case PRODUCER_CHILD_COMMAND_EXIT:
             close_d3dkmt_test_handle( &reuse_sync );
@@ -1065,6 +1253,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_contributor_info contributor;
     struct wayland_pool_info pool;
     struct wayland_slot_info slot;
+    struct wayland_frame_info frame;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -2045,6 +2234,372 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out checking the end of pool enumeration.\n" );
     ok( state->command_status == STATUS_NO_MORE_ENTRIES,
         "End of pool enumeration returned %#lx.\n", state->command_status );
+
+    state->pool_generation = 3;
+    state->frame_id = 1;
+    state->ready_value = 1;
+    state->reuse_value = 1;
+    state->slot = 0;
+    status = submit_frame_with_size( root, state,
+            sizeof(struct wayland_frame_submission) - sizeof(DWORD) );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH,
+        "Truncated frame submission returned %#lx.\n", status );
+    status = submit_frame( root, state );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Foreign frame submission returned %#lx.\n", status );
+    state->pool_generation = 2;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting against an unimported pool.\n" );
+    ok( state->producer_status == STATUS_DEVICE_NOT_READY,
+        "Unimported pool submission returned %#lx.\n", state->producer_status );
+    state->pool_generation = 3;
+    state->frame_id = ~(UINT64)0;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out testing frame-id overflow.\n" );
+    ok( state->producer_status == STATUS_INTEGER_OVERFLOW,
+        "Maximum frame id returned %#lx.\n", state->producer_status );
+    state->frame_id = 1;
+    state->ready_value = 0;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a zero ready value.\n" );
+    ok( state->producer_status == STATUS_INVALID_PARAMETER,
+        "Zero ready value returned %#lx.\n", state->producer_status );
+    state->ready_value = 1;
+    state->slot = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting an out-of-range frame slot.\n" );
+    ok( state->producer_status == STATUS_INVALID_PARAMETER,
+        "Out-of-range frame slot returned %#lx.\n", state->producer_status );
+    state->slot = 0;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 1.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 1 &&
+        state->available_credits == 2,
+        "Frame 1 submission returned %#lx, outstanding %lu, credits %lu.\n",
+        state->producer_status, state->outstanding_frames, state->available_credits );
+    status = get_frame_result( root, state, &frame );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Foreign frame-result query returned %#lx.\n", status );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out repeating frame 1.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Repeated frame id returned %#lx.\n", state->producer_status );
+    state->frame_id = 2;
+    state->ready_value = 2;
+    state->reuse_value = 2;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out reusing busy slot 0.\n" );
+    ok( state->producer_status == STATUS_DEVICE_BUSY,
+        "Busy frame slot returned %#lx.\n", state->producer_status );
+    state->slot = 1;
+    state->ready_value = 5;
+    state->reuse_value = 7;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 2.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 2 &&
+        state->available_credits == 1,
+        "Frame 2 submission returned %#lx, outstanding %lu, credits %lu.\n",
+        state->producer_status, state->outstanding_frames, state->available_credits );
+    state->frame_id = 3;
+    state->slot = 2;
+    state->ready_value = 9;
+    state->reuse_value = 11;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 3.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 3 &&
+        !state->available_credits,
+        "Frame 3 submission returned %#lx, outstanding %lu, credits %lu.\n",
+        state->producer_status, state->outstanding_frames, state->available_credits );
+
+    status = get_frame( root, old_epoch, state->contributor_id, 0, &frame );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Non-host frame enumeration returned %#lx.\n", status );
+    state->frame_id = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out enumerating frame 1.\n" );
+    ok( !state->command_status && state->frame_id == 1 && state->pool_generation == 3 &&
+        !state->slot && state->ready_value == 1 && state->reuse_value == 1 &&
+        !state->frame_reusable && state->outstanding_frames == 3,
+        "Frame 1 enumeration returned %#lx, frame %s, slot %lu, values %s/%s.\n",
+        state->command_status, wine_dbgstr_longlong( state->frame_id ), state->slot,
+        wine_dbgstr_longlong( state->ready_value ), wine_dbgstr_longlong( state->reuse_value ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out enumerating frame 2.\n" );
+    ok( !state->command_status && state->frame_id == 2 && state->slot == 1 &&
+        state->ready_value == 5 && state->reuse_value == 7,
+        "Frame 2 enumeration returned %#lx, frame %s, slot %lu, values %s/%s.\n",
+        state->command_status, wine_dbgstr_longlong( state->frame_id ), state->slot,
+        wine_dbgstr_longlong( state->ready_value ), wine_dbgstr_longlong( state->reuse_value ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out enumerating frame 3.\n" );
+    ok( !state->command_status && state->frame_id == 3 && state->slot == 2 &&
+        state->ready_value == 9 && state->reuse_value == 11,
+        "Frame 3 enumeration returned %#lx, frame %s, slot %lu, values %s/%s.\n",
+        state->command_status, wine_dbgstr_longlong( state->frame_id ), state->slot,
+        wine_dbgstr_longlong( state->ready_value ), wine_dbgstr_longlong( state->reuse_value ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out checking the end of frame enumeration.\n" );
+    ok( state->command_status == STATUS_NO_MORE_ENTRIES,
+        "End of frame enumeration returned %#lx.\n", state->command_status );
+
+    state->frame_id = 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
+        "Timed out querying pending frame 1.\n" );
+    ok( state->producer_status == STATUS_PENDING && !state->frame_result &&
+        !state->frame_reusable && state->reuse_value == 1 && state->outstanding_frames == 3,
+        "Pending frame 1 returned %#lx, result %lu, reusable %lu, reuse %s.\n",
+        state->producer_status, state->frame_result, state->frame_reusable,
+        wine_dbgstr_longlong( state->reuse_value ) );
+    state->frame_id = 2;
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_PRESENTED;
+    state->backend_status = STATUS_SUCCESS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out completing non-reusable frame 2.\n" );
+    ok( state->command_status == STATUS_DEVICE_BUSY,
+        "Non-reusable frame result returned %#lx.\n", state->command_status );
+    state->frame_id = 1;
+    state->ready_value = 2;
+    state->reuse_value = 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 1 with stale values.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Mismatched frame reuse returned %#lx.\n", state->command_status );
+    state->ready_value = 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 1.\n" );
+    ok( !state->command_status && state->outstanding_frames == 3,
+        "Frame 1 reuse returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out repeating frame 1 reuse.\n" );
+    ok( !state->command_status && state->outstanding_frames == 3,
+        "Repeated frame 1 reuse returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    state->frame_id = 4;
+    state->pool_generation = 3;
+    state->slot = 0;
+    state->ready_value = 2;
+    state->reuse_value = 2;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out testing credit retention after slot reuse.\n" );
+    ok( state->producer_status == STATUS_INSUFFICIENT_RESOURCES &&
+        state->outstanding_frames == 3 && !state->available_credits,
+        "Submission after reuse returned %#lx, outstanding %lu, credits %lu.\n",
+        state->producer_status, state->outstanding_frames, state->available_credits );
+    state->frame_id = 1;
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_PRESENTED;
+    state->backend_status = STATUS_DEVICE_REMOVED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out reporting an invalid successful result.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER,
+        "Successful result with failure status returned %#lx.\n", state->command_status );
+    state->backend_status = STATUS_SUCCESS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out presenting frame 1.\n" );
+    ok( !state->command_status && state->outstanding_frames == 2,
+        "Frame 1 result returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out repeating frame 1 result.\n" );
+    ok( !state->command_status && state->outstanding_frames == 2,
+        "Repeated frame 1 result returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_DISCARDED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out changing frame 1 result.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Conflicting frame 1 result returned %#lx.\n", state->command_status );
+    state->frame_id = 4;
+    state->pool_generation = 3;
+    state->slot = 0;
+    state->ready_value = 2;
+    state->reuse_value = 2;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 4 after terminal credit.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 3 &&
+        !state->available_credits,
+        "Frame 4 submission returned %#lx, outstanding %lu, credits %lu.\n",
+        state->producer_status, state->outstanding_frames, state->available_credits );
+    state->frame_id = 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
+        "Timed out consuming frame 1 result.\n" );
+    ok( !state->producer_status &&
+        state->frame_result == WINE_WAYLAND_FRAME_RESULT_PRESENTED &&
+        state->backend_status == STATUS_SUCCESS && state->frame_reusable &&
+        state->reuse_value == 1 && state->outstanding_frames == 3,
+        "Frame 1 result query returned %#lx, result %lu, status %#lx, reusable %lu.\n",
+        state->producer_status, state->frame_result, state->backend_status,
+        state->frame_reusable );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
+        "Timed out repeating consumed frame 1 result.\n" );
+    ok( state->producer_status == STATUS_NOT_FOUND,
+        "Consumed frame 1 result returned %#lx.\n", state->producer_status );
+
+    state->frame_id = 3;
+    state->ready_value = 9;
+    state->reuse_value = 11;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 3 before frame 2.\n" );
+    ok( !state->command_status && state->outstanding_frames == 3,
+        "Frame 3 reverse reuse returned %#lx.\n", state->command_status );
+    state->frame_id = 2;
+    state->ready_value = 5;
+    state->reuse_value = 7;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 2 after frame 3.\n" );
+    ok( !state->command_status && state->outstanding_frames == 3,
+        "Frame 2 reverse reuse returned %#lx.\n", state->command_status );
+    state->frame_id = 3;
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_DISCARDED;
+    state->backend_status = STATUS_SUCCESS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out discarding frame 3.\n" );
+    ok( !state->command_status && state->outstanding_frames == 2,
+        "Frame 3 discard returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    state->frame_id = 2;
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_FAILED;
+    state->backend_status = STATUS_DEVICE_REMOVED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out failing frame 2.\n" );
+    ok( !state->command_status && state->outstanding_frames == 1,
+        "Frame 2 failure returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    state->frame_id = 4;
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_PRESENTED;
+    state->backend_status = STATUS_SUCCESS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out completing frame 4 before reuse.\n" );
+    ok( state->command_status == STATUS_DEVICE_BUSY,
+        "Frame 4 result before reuse returned %#lx.\n", state->command_status );
+    state->ready_value = 2;
+    state->reuse_value = 2;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 4.\n" );
+    ok( !state->command_status && state->outstanding_frames == 1,
+        "Frame 4 reuse returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out presenting frame 4.\n" );
+    ok( !state->command_status && !state->outstanding_frames,
+        "Frame 4 result returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    for (i = 2; i <= 4; ++i)
+    {
+        state->frame_id = i;
+        ok( send_producer_child_command( state, producer_command_event,
+                                        producer_result_event,
+                                        PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
+            "Timed out consuming frame %u result.\n", i );
+        ok( !state->producer_status && state->frame_reusable &&
+            !state->outstanding_frames,
+            "Frame %u result query returned %#lx, result %lu, status %#lx.\n",
+            i, state->producer_status, state->frame_result, state->backend_status );
+    }
+
+    state->pool_generation = 3;
+    state->slot = 0;
+    state->frame_id = 5;
+    state->ready_value = 2;
+    state->reuse_value = 3;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out testing repeated ready value.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Repeated ready value returned %#lx.\n", state->producer_status );
+    state->ready_value = 3;
+    state->reuse_value = 2;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out testing repeated reuse value.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Repeated reuse value returned %#lx.\n", state->producer_status );
+    state->ready_value = ~(UINT64)0;
+    state->reuse_value = 3;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out testing ready-value overflow.\n" );
+    ok( state->producer_status == STATUS_INTEGER_OVERFLOW,
+        "Maximum ready value returned %#lx.\n", state->producer_status );
+    state->ready_value = 3;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 5.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 1,
+        "Frame 5 submission returned %#lx, outstanding %lu.\n",
+        state->producer_status, state->outstanding_frames );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_RETIRE_POOL ),
+        "Timed out retiring a pool with a live frame.\n" );
+    ok( state->producer_status == STATUS_DEVICE_BUSY,
+        "Pool retirement with a live frame returned %#lx.\n", state->producer_status );
+    state->frame_id = 5;
+    state->ready_value = 3;
+    state->reuse_value = 3;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
+        "Timed out releasing frame 5.\n" );
+    ok( !state->command_status, "Frame 5 reuse returned %#lx.\n",
+        state->command_status );
+    state->frame_result = WINE_WAYLAND_FRAME_RESULT_PRESENTED;
+    state->backend_status = STATUS_SUCCESS;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
+        "Timed out presenting frame 5.\n" );
+    ok( !state->command_status && !state->outstanding_frames,
+        "Frame 5 result returned %#lx, outstanding %lu.\n",
+        state->command_status, state->outstanding_frames );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
+        "Timed out consuming frame 5 result.\n" );
+    ok( !state->producer_status &&
+        state->frame_result == WINE_WAYLAND_FRAME_RESULT_PRESENTED,
+        "Frame 5 result query returned %#lx, result %lu.\n",
+        state->producer_status, state->frame_result );
+    state->pool_generation = 3;
+    state->frame_id = 6;
+    state->slot = 1;
+    state->ready_value = 6;
+    state->reuse_value = 8;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting the host-replacement frame.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 1,
+        "Host-replacement frame returned %#lx, outstanding %lu.\n",
+        state->producer_status, state->outstanding_frames );
 
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 5,
                             state->contributor_id, state->stream_id,

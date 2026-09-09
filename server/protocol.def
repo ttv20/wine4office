@@ -74,6 +74,11 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED(info)   (((info) >> 8) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 
+#define WINE_WAYLAND_FRAME_RESULT_PENDING   0
+#define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
+#define WINE_WAYLAND_FRAME_RESULT_DISCARDED 2
+#define WINE_WAYLAND_FRAME_RESULT_FAILED    3
+
 struct wayland_buffer_pool_metadata
 {
     unsigned __int64 allocation_size;
@@ -83,6 +88,16 @@ struct wayland_buffer_pool_metadata
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
     unsigned int     device_uuid[4];
+    unsigned int     reserved;
+};
+
+struct wayland_frame_submission
+{
+    unsigned __int64 pool_generation;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+    unsigned int     slot;
     unsigned int     reserved;
 };
 
@@ -4777,4 +4792,71 @@ enum inproc_sync_type
     unsigned __int64 registry_generation;
     unsigned int     imported_slots;
     unsigned int     failed_slots;
+@END
+
+/* Accept one bounded frame under an imported pool and authenticated stream. */
+@REQ(submit_wayland_frame)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    VARARG(submission,bytes);
+@REPLY
+    unsigned int     outstanding_frames;
+    unsigned int     available_credits;
+@END
+
+/* Enumerate accepted nonterminal frames as the current host. */
+@REQ(get_wayland_frame)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 previous_frame_id;
+@REPLY
+    unsigned __int64 pool_generation;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+    unsigned int     slot;
+    unsigned int     reusable;
+    unsigned int     outstanding_frames;
+@END
+
+/* Release a source slot after the host completed and synchronized its read. */
+@REQ(set_wayland_frame_reusable)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+@REPLY
+    unsigned int     outstanding_frames;
+@END
+
+/* Publish one terminal native backend result without claiming scanout timing. */
+@REQ(set_wayland_frame_result)
+    user_handle_t    root;
+    unsigned int     result;
+    unsigned int     backend_status;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 frame_id;
+@REPLY
+    unsigned int     outstanding_frames;
+@END
+
+/* Consume a terminal result, or observe whether the source slot is reusable. */
+@REQ(get_wayland_frame_result)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 frame_id;
+@REPLY
+    unsigned __int64 reuse_value;
+    unsigned int     result;
+    unsigned int     backend_status;
+    unsigned int     reusable;
+    unsigned int     outstanding_frames;
 @END

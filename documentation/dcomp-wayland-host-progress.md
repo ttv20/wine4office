@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 977.
+Generated server protocol version: 978.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -72,6 +72,16 @@ or transport fixture is not Outlook support.
   types; the real `winewayland-host` renderer still does not import Vulkan
   memory or synchronization objects, so this acknowledgement does not yet
   authorize hosted presentation.
+- Producers can now submit frames through a server-authorized bounded queue
+  after all three slots in a pool have imported successfully. Frame, ready and
+  reuse values are nonzero and monotonic, each slot admits only one active
+  frame, and source-slot reuse is independent from terminal backend completion.
+  Credits remain occupied until the host reports `Presented`, `Discarded` or
+  `Failed`; producers consume each result once. Pool retirement rejects live
+  frame records, while contributor revocation or host replacement cancels the
+  queue and credits without releasing pinned resources before tombstone
+  acknowledgement. This is still an authority and lifetime contract. The real
+  host does not yet wait on or copy pixels from these frames.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -250,6 +260,20 @@ admitted.
   coherent runner and exact test binaries are retained at
   `/workspace/runner-dcomp-import-authority` and
   `/workspace/artifacts/import-authority-win32u-test-{x64,i386}.exe`.
+- The bounded frame-queue extension passed 457 checks with zero failures in
+  both x86-64 and i386 on protocol 978. It covers malformed and unauthorized
+  submissions, all-slot import gating, monotonic frame/ready/reuse values,
+  slot exclusion, credit retention after source reuse, reverse-order reuse,
+  idempotent and conflicting completion, one-time producer result consumption,
+  pool-retirement blocking and cancellation on host replacement. The public
+  cross-process DComp oracle remained at 36 checks with zero failures in both
+  architectures. Logs are retained as
+  `/workspace/artifacts/dcomp-frame-authority-{x64,i386}.log` and
+  `/workspace/artifacts/dcomp-frame-authority-dcomp-host-{x64,i386}.log`; the
+  coherent runner, exact test binaries and hashes are retained at
+  `/workspace/runner-dcomp-frame-authority`,
+  `/workspace/artifacts/frame-authority-win32u-test-{x64,i386}.exe` and
+  `/workspace/artifacts/dcomp-frame-authority-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

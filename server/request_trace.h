@@ -3993,6 +3993,88 @@ static void dump_set_wayland_buffer_slot_import_reply( const struct set_wayland_
     fprintf( stderr, ", failed_slots=%08x", req->failed_slots );
 }
 
+static void dump_submit_wayland_frame_request( const struct submit_wayland_frame_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_varargs_bytes( ", submission=", cur_size );
+}
+
+static void dump_submit_wayland_frame_reply( const struct submit_wayland_frame_reply *req )
+{
+    fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
+    fprintf( stderr, ", available_credits=%08x", req->available_credits );
+}
+
+static void dump_get_wayland_frame_request( const struct get_wayland_frame_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", previous_frame_id=", &req->previous_frame_id );
+}
+
+static void dump_get_wayland_frame_reply( const struct get_wayland_frame_reply *req )
+{
+    dump_uint64( " pool_generation=", &req->pool_generation );
+    dump_uint64( ", frame_id=", &req->frame_id );
+    dump_uint64( ", ready_value=", &req->ready_value );
+    dump_uint64( ", reuse_value=", &req->reuse_value );
+    fprintf( stderr, ", slot=%08x", req->slot );
+    fprintf( stderr, ", reusable=%08x", req->reusable );
+    fprintf( stderr, ", outstanding_frames=%08x", req->outstanding_frames );
+}
+
+static void dump_set_wayland_frame_reusable_request( const struct set_wayland_frame_reusable_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", frame_id=", &req->frame_id );
+    dump_uint64( ", ready_value=", &req->ready_value );
+    dump_uint64( ", reuse_value=", &req->reuse_value );
+}
+
+static void dump_set_wayland_frame_reusable_reply( const struct set_wayland_frame_reusable_reply *req )
+{
+    fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
+}
+
+static void dump_set_wayland_frame_result_request( const struct set_wayland_frame_result_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", result=%08x", req->result );
+    fprintf( stderr, ", backend_status=%08x", req->backend_status );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", frame_id=", &req->frame_id );
+}
+
+static void dump_set_wayland_frame_result_reply( const struct set_wayland_frame_result_reply *req )
+{
+    fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
+}
+
+static void dump_get_wayland_frame_result_request( const struct get_wayland_frame_result_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", frame_id=", &req->frame_id );
+}
+
+static void dump_get_wayland_frame_result_reply( const struct get_wayland_frame_result_reply *req )
+{
+    dump_uint64( " reuse_value=", &req->reuse_value );
+    fprintf( stderr, ", result=%08x", req->result );
+    fprintf( stderr, ", backend_status=%08x", req->backend_status );
+    fprintf( stderr, ", reusable=%08x", req->reusable );
+    fprintf( stderr, ", outstanding_frames=%08x", req->outstanding_frames );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4340,6 +4422,11 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_register_wayland_buffer_slot_request,
     (dump_func)dump_get_wayland_buffer_slot_request,
     (dump_func)dump_set_wayland_buffer_slot_import_request,
+    (dump_func)dump_submit_wayland_frame_request,
+    (dump_func)dump_get_wayland_frame_request,
+    (dump_func)dump_set_wayland_frame_reusable_request,
+    (dump_func)dump_set_wayland_frame_result_request,
+    (dump_func)dump_get_wayland_frame_result_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4687,6 +4774,11 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_register_wayland_buffer_slot_reply,
     (dump_func)dump_get_wayland_buffer_slot_reply,
     (dump_func)dump_set_wayland_buffer_slot_import_reply,
+    (dump_func)dump_submit_wayland_frame_reply,
+    (dump_func)dump_get_wayland_frame_reply,
+    (dump_func)dump_set_wayland_frame_reusable_reply,
+    (dump_func)dump_set_wayland_frame_result_reply,
+    (dump_func)dump_get_wayland_frame_result_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5034,6 +5126,11 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "register_wayland_buffer_slot",
     "get_wayland_buffer_slot",
     "set_wayland_buffer_slot_import",
+    "submit_wayland_frame",
+    "get_wayland_frame",
+    "set_wayland_frame_reusable",
+    "set_wayland_frame_result",
+    "get_wayland_frame_result",
 };
 
 static const struct

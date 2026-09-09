@@ -60,6 +60,7 @@ enum property_type
 
 #define MAX_WAYLAND_SCENE_CONTRIBUTORS 16
 #define MAX_WAYLAND_BUFFER_POOLS 2
+#define MAX_WAYLAND_FRAME_RECORDS (WINE_WAYLAND_MAX_FRAME_CREDITS * 2)
 #define MAX_WAYLAND_ROOT_POOL_BYTES (256ull * 1024 * 1024)
 #define MAX_WAYLAND_DESKTOP_POOL_BYTES (1024ull * 1024 * 1024)
 
@@ -69,6 +70,21 @@ struct wayland_buffer_slot
     struct object *ready_sync;
     struct object *reuse_sync;
     unsigned int   import_state;
+    unsigned __int64 last_ready_value;
+    unsigned __int64 last_reuse_value;
+    unsigned __int64 active_frame_id;
+};
+
+struct wayland_frame
+{
+    unsigned __int64 pool_generation;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+    unsigned int     slot;
+    unsigned int     reusable;
+    unsigned int     result;
+    unsigned int     backend_status;
 };
 
 struct wayland_buffer_pool
@@ -105,7 +121,10 @@ struct wayland_scene_contributor
     unsigned int         target_layer;
     unsigned int         state;
     unsigned __int64     latest_pool_generation;
+    unsigned __int64     latest_frame_id;
+    unsigned int         outstanding_frames;
     struct wayland_buffer_pool pools[MAX_WAYLAND_BUFFER_POOLS];
+    struct wayland_frame frames[MAX_WAYLAND_FRAME_RECORDS];
 };
 
 struct wayland_scene_registry
@@ -191,6 +210,17 @@ static void release_wayland_scene_registry( struct wayland_scene_registry *regis
         for (j = 0; j < MAX_WAYLAND_BUFFER_POOLS; ++j)
             release_wayland_buffer_pool( &registry->contributors[i].pools[j] );
     free( registry );
+}
+
+static void reset_wayland_contributor_frames( struct wayland_scene_contributor *contributor )
+{
+    unsigned int i, j;
+
+    for (i = 0; i < MAX_WAYLAND_BUFFER_POOLS; ++i)
+        for (j = 0; j < WINE_WAYLAND_BUFFER_POOL_SLOTS; ++j)
+            contributor->pools[i].slots[j].active_frame_id = 0;
+    memset( contributor->frames, 0, sizeof(contributor->frames) );
+    contributor->outstanding_frames = 0;
 }
 
 C_ASSERT( sizeof(window_shm_t) == offsetof(window_shm_t, extra[0]) );
@@ -3638,6 +3668,7 @@ static void invalidate_wayland_contributor( struct window *root,
     contributor->producer = NULL;
     contributor->grant_low = 0;
     contributor->grant_high = 0;
+    reset_wayland_contributor_frames( contributor );
     if (!++root->wayland_scene_registry->generation)
         ++root->wayland_scene_registry->generation;
 
@@ -4068,6 +4099,53 @@ static struct wayland_buffer_pool *find_wayland_buffer_pool(
     return NULL;
 }
 
+static struct wayland_frame *find_wayland_frame( struct wayland_scene_contributor *contributor,
+                                                  unsigned __int64 frame_id )
+{
+    unsigned int i;
+
+    for (i = 0; i < MAX_WAYLAND_FRAME_RECORDS; ++i)
+        if (contributor->frames[i].frame_id == frame_id) return &contributor->frames[i];
+    return NULL;
+}
+
+static struct wayland_frame *find_free_wayland_frame(
+        struct wayland_scene_contributor *contributor )
+{
+    unsigned int i;
+
+    for (i = 0; i < MAX_WAYLAND_FRAME_RECORDS; ++i)
+        if (!contributor->frames[i].frame_id) return &contributor->frames[i];
+    return NULL;
+}
+
+static int wayland_buffer_pool_has_frames( const struct wayland_scene_contributor *contributor,
+                                            unsigned __int64 pool_generation )
+{
+    unsigned int i;
+
+    for (i = 0; i < MAX_WAYLAND_FRAME_RECORDS; ++i)
+        if (contributor->frames[i].frame_id &&
+            contributor->frames[i].pool_generation == pool_generation) return 1;
+    return 0;
+}
+
+static struct wayland_scene_contributor *get_current_wayland_host_contributor(
+        struct window *root, unsigned __int64 host_epoch, unsigned __int64 contributor_id )
+{
+    struct wayland_scene_contributor *contributor;
+
+    if (!is_current_wayland_host( root->desktop, host_epoch )) return NULL;
+    if (!(contributor = find_wayland_contributor( root, contributor_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
+             contributor->host_epoch != host_epoch)
+        set_error( STATUS_ACCESS_DENIED );
+    else
+        return contributor;
+    return NULL;
+}
+
 static unsigned __int64 wayland_buffer_pool_bytes( const struct wayland_buffer_pool *pool )
 {
     return pool->allocation_size * pool->slot_count;
@@ -4222,6 +4300,8 @@ DECL_HANDLER(retire_wayland_buffer_pool)
     reply->registry_generation = root->wayland_scene_registry->generation;
     if (!(pool = find_wayland_buffer_pool( contributor, req->pool_generation )))
         set_error( STATUS_NOT_FOUND );
+    else if (wayland_buffer_pool_has_frames( contributor, req->pool_generation ))
+        set_error( STATUS_DEVICE_BUSY );
     else if (root->wayland_scene_registry->generation == ~(unsigned __int64)0)
         set_error( STATUS_INTEGER_OVERFLOW );
     else
@@ -4485,6 +4565,238 @@ DECL_HANDLER(set_wayland_buffer_slot_import)
     reply->imported_slots = pool->imported_slots;
     reply->failed_slots = pool->failed_slots;
     reply->registry_generation = ++root->wayland_scene_registry->generation;
+}
+
+DECL_HANDLER(submit_wayland_frame)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct wayland_frame *frame;
+    struct wayland_frame_submission submission;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->outstanding_frames = 0;
+    reply->available_credits = 0;
+    if (get_req_data_size() != sizeof(submission))
+    {
+        set_error( STATUS_INFO_LENGTH_MISMATCH );
+        return;
+    }
+    memcpy( &submission, get_req_data(), sizeof(submission) );
+    if (!submission.pool_generation || !submission.frame_id || !submission.ready_value ||
+        !submission.reuse_value || submission.reserved)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (submission.frame_id == ~(unsigned __int64)0 ||
+        submission.ready_value == ~(unsigned __int64)0 ||
+        submission.reuse_value == ~(unsigned __int64)0)
+    {
+        set_error( STATUS_INTEGER_OVERFLOW );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    if (!(pool = find_wayland_buffer_pool( contributor, submission.pool_generation )))
+        set_error( STATUS_NOT_FOUND );
+    else if (submission.slot >= pool->slot_count)
+        set_error( STATUS_INVALID_PARAMETER );
+    else if (pool->registered_slots != pool->slot_count ||
+             pool->imported_slots != pool->slot_count || pool->failed_slots)
+        set_error( STATUS_DEVICE_NOT_READY );
+    else
+    {
+        reply->available_credits = pool->frame_credit_limit > contributor->outstanding_frames ?
+                pool->frame_credit_limit - contributor->outstanding_frames : 0;
+        slot = &pool->slots[submission.slot];
+        if (slot->import_state != WINE_WAYLAND_BUFFER_IMPORT_IMPORTED)
+            set_error( STATUS_DEVICE_NOT_READY );
+        else if (submission.frame_id <= contributor->latest_frame_id ||
+                 submission.ready_value <= slot->last_ready_value ||
+                 submission.reuse_value <= slot->last_reuse_value)
+            set_error( STATUS_REVISION_MISMATCH );
+        else if (slot->active_frame_id)
+            set_error( STATUS_DEVICE_BUSY );
+        else if (contributor->outstanding_frames >= pool->frame_credit_limit ||
+                 !(frame = find_free_wayland_frame( contributor )))
+            set_error( STATUS_INSUFFICIENT_RESOURCES );
+        else
+        {
+            memset( frame, 0, sizeof(*frame) );
+            frame->pool_generation = submission.pool_generation;
+            frame->frame_id = submission.frame_id;
+            frame->ready_value = submission.ready_value;
+            frame->reuse_value = submission.reuse_value;
+            frame->slot = submission.slot;
+            slot->last_ready_value = submission.ready_value;
+            slot->last_reuse_value = submission.reuse_value;
+            slot->active_frame_id = submission.frame_id;
+            contributor->latest_frame_id = submission.frame_id;
+            reply->outstanding_frames = ++contributor->outstanding_frames;
+            reply->available_credits = pool->frame_credit_limit -
+                    contributor->outstanding_frames;
+        }
+    }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_frame)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_frame *frame = NULL;
+    struct window *root;
+    unsigned __int64 next_id = ~(unsigned __int64)0;
+    unsigned int i;
+
+    reply->pool_generation = 0;
+    reply->frame_id = 0;
+    reply->ready_value = 0;
+    reply->reuse_value = 0;
+    reply->slot = 0;
+    reply->reusable = 0;
+    reply->outstanding_frames = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(contributor = get_current_wayland_host_contributor( root, req->host_epoch,
+                                                               req->contributor_id ))) return;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    for (i = 0; i < MAX_WAYLAND_FRAME_RECORDS; ++i)
+    {
+        struct wayland_frame *candidate = &contributor->frames[i];
+
+        if (candidate->frame_id && !candidate->result &&
+            candidate->frame_id > req->previous_frame_id && candidate->frame_id < next_id)
+        {
+            frame = candidate;
+            next_id = candidate->frame_id;
+        }
+    }
+    if (!frame)
+    {
+        set_error( STATUS_NO_MORE_ENTRIES );
+        return;
+    }
+    reply->pool_generation = frame->pool_generation;
+    reply->frame_id = frame->frame_id;
+    reply->ready_value = frame->ready_value;
+    reply->reuse_value = frame->reuse_value;
+    reply->slot = frame->slot;
+    reply->reusable = frame->reusable;
+}
+
+DECL_HANDLER(set_wayland_frame_reusable)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct wayland_frame *frame;
+    struct window *root;
+
+    reply->outstanding_frames = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(contributor = get_current_wayland_host_contributor( root, req->host_epoch,
+                                                               req->contributor_id ))) return;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    if (!(frame = find_wayland_frame( contributor, req->frame_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (frame->ready_value != req->ready_value || frame->reuse_value != req->reuse_value)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (frame->result)
+        set_error( STATUS_INVALID_DEVICE_STATE );
+    else if (frame->reusable)
+        return;
+    else if (!(pool = find_wayland_buffer_pool( contributor, frame->pool_generation )))
+        set_error( STATUS_NOT_FOUND );
+    else
+    {
+        slot = &pool->slots[frame->slot];
+        if (slot->active_frame_id != frame->frame_id)
+            set_error( STATUS_REVISION_MISMATCH );
+        else
+        {
+            slot->active_frame_id = 0;
+            frame->reusable = 1;
+        }
+    }
+}
+
+DECL_HANDLER(set_wayland_frame_result)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_frame *frame;
+    struct window *root;
+
+    reply->outstanding_frames = 0;
+    if ((req->result != WINE_WAYLAND_FRAME_RESULT_PRESENTED &&
+         req->result != WINE_WAYLAND_FRAME_RESULT_DISCARDED &&
+         req->result != WINE_WAYLAND_FRAME_RESULT_FAILED) ||
+        ((req->result == WINE_WAYLAND_FRAME_RESULT_FAILED) ==
+         (req->backend_status == STATUS_SUCCESS)))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(contributor = get_current_wayland_host_contributor( root, req->host_epoch,
+                                                               req->contributor_id ))) return;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    if (!(frame = find_wayland_frame( contributor, req->frame_id )))
+        set_error( STATUS_NOT_FOUND );
+    else if (frame->result)
+    {
+        if (frame->result != req->result || frame->backend_status != req->backend_status)
+            set_error( STATUS_REVISION_MISMATCH );
+    }
+    else if (!frame->reusable)
+        set_error( STATUS_DEVICE_BUSY );
+    else
+    {
+        frame->result = req->result;
+        frame->backend_status = req->backend_status;
+        reply->outstanding_frames = --contributor->outstanding_frames;
+    }
+}
+
+DECL_HANDLER(get_wayland_frame_result)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_frame *frame;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->reuse_value = 0;
+    reply->result = WINE_WAYLAND_FRAME_RESULT_PENDING;
+    reply->backend_status = STATUS_PENDING;
+    reply->reusable = 0;
+    reply->outstanding_frames = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    if (!(frame = find_wayland_frame( contributor, req->frame_id )))
+        set_error( STATUS_NOT_FOUND );
+    else
+    {
+        reply->reuse_value = frame->reuse_value;
+        reply->result = frame->result;
+        reply->backend_status = frame->result ? frame->backend_status : STATUS_PENDING;
+        reply->reusable = frame->reusable;
+        if (!frame->result)
+            set_error( STATUS_PENDING );
+        else
+            memset( frame, 0, sizeof(*frame) );
+    }
+
+done:
+    release_object( desktop );
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

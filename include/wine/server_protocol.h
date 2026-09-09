@@ -58,6 +58,11 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_IMPORTED(info)   (((info) >> 8) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 
+#define WINE_WAYLAND_FRAME_RESULT_PENDING   0
+#define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
+#define WINE_WAYLAND_FRAME_RESULT_DISCARDED 2
+#define WINE_WAYLAND_FRAME_RESULT_FAILED    3
+
 struct wayland_buffer_pool_metadata
 {
     unsigned __int64 allocation_size;
@@ -67,6 +72,16 @@ struct wayland_buffer_pool_metadata
     unsigned int     slot_count;
     unsigned int     frame_credit_limit;
     unsigned int     device_uuid[4];
+    unsigned int     reserved;
+};
+
+struct wayland_frame_submission
+{
+    unsigned __int64 pool_generation;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+    unsigned int     slot;
     unsigned int     reserved;
 };
 
@@ -6894,6 +6909,101 @@ struct set_wayland_buffer_slot_import_reply
 };
 
 
+struct submit_wayland_frame_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    /* VARARG(submission,bytes); */
+};
+struct submit_wayland_frame_reply
+{
+    struct reply_header __header;
+    unsigned int     outstanding_frames;
+    unsigned int     available_credits;
+};
+
+
+struct get_wayland_frame_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 previous_frame_id;
+};
+struct get_wayland_frame_reply
+{
+    struct reply_header __header;
+    unsigned __int64 pool_generation;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+    unsigned int     slot;
+    unsigned int     reusable;
+    unsigned int     outstanding_frames;
+    char __pad_52[4];
+};
+
+
+struct set_wayland_frame_reusable_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 frame_id;
+    unsigned __int64 ready_value;
+    unsigned __int64 reuse_value;
+};
+struct set_wayland_frame_reusable_reply
+{
+    struct reply_header __header;
+    unsigned int     outstanding_frames;
+    char __pad_12[4];
+};
+
+
+struct set_wayland_frame_result_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     result;
+    unsigned int     backend_status;
+    unsigned __int64 host_epoch;
+    unsigned __int64 contributor_id;
+    unsigned __int64 frame_id;
+};
+struct set_wayland_frame_result_reply
+{
+    struct reply_header __header;
+    unsigned int     outstanding_frames;
+    char __pad_12[4];
+};
+
+
+struct get_wayland_frame_result_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 frame_id;
+};
+struct get_wayland_frame_result_reply
+{
+    struct reply_header __header;
+    unsigned __int64 reuse_value;
+    unsigned int     result;
+    unsigned int     backend_status;
+    unsigned int     reusable;
+    unsigned int     outstanding_frames;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7239,6 +7349,11 @@ enum request
     REQ_register_wayland_buffer_slot,
     REQ_get_wayland_buffer_slot,
     REQ_set_wayland_buffer_slot_import,
+    REQ_submit_wayland_frame,
+    REQ_get_wayland_frame,
+    REQ_set_wayland_frame_reusable,
+    REQ_set_wayland_frame_result,
+    REQ_get_wayland_frame_result,
     REQ_NB_REQUESTS
 };
 
@@ -7589,6 +7704,11 @@ union generic_request
     struct register_wayland_buffer_slot_request register_wayland_buffer_slot_request;
     struct get_wayland_buffer_slot_request get_wayland_buffer_slot_request;
     struct set_wayland_buffer_slot_import_request set_wayland_buffer_slot_import_request;
+    struct submit_wayland_frame_request submit_wayland_frame_request;
+    struct get_wayland_frame_request get_wayland_frame_request;
+    struct set_wayland_frame_reusable_request set_wayland_frame_reusable_request;
+    struct set_wayland_frame_result_request set_wayland_frame_result_request;
+    struct get_wayland_frame_result_request get_wayland_frame_result_request;
 };
 union generic_reply
 {
@@ -7937,8 +8057,13 @@ union generic_reply
     struct register_wayland_buffer_slot_reply register_wayland_buffer_slot_reply;
     struct get_wayland_buffer_slot_reply get_wayland_buffer_slot_reply;
     struct set_wayland_buffer_slot_import_reply set_wayland_buffer_slot_import_reply;
+    struct submit_wayland_frame_reply submit_wayland_frame_reply;
+    struct get_wayland_frame_reply get_wayland_frame_reply;
+    struct set_wayland_frame_reusable_reply set_wayland_frame_reusable_reply;
+    struct set_wayland_frame_result_reply set_wayland_frame_result_reply;
+    struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 977
+#define SERVER_PROTOCOL_VERSION 978
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

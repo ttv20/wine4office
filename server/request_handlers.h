@@ -350,6 +350,11 @@ DECL_HANDLER(get_wayland_buffer_pool);
 DECL_HANDLER(register_wayland_buffer_slot);
 DECL_HANDLER(get_wayland_buffer_slot);
 DECL_HANDLER(set_wayland_buffer_slot_import);
+DECL_HANDLER(submit_wayland_frame);
+DECL_HANDLER(get_wayland_frame);
+DECL_HANDLER(set_wayland_frame_reusable);
+DECL_HANDLER(set_wayland_frame_result);
+DECL_HANDLER(get_wayland_frame_result);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -697,6 +702,11 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_register_wayland_buffer_slot,
     (req_handler)req_get_wayland_buffer_slot,
     (req_handler)req_set_wayland_buffer_slot_import,
+    (req_handler)req_submit_wayland_frame,
+    (req_handler)req_get_wayland_frame,
+    (req_handler)req_set_wayland_frame_reusable,
+    (req_handler)req_set_wayland_frame_result,
+    (req_handler)req_get_wayland_frame_result,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2727,3 +2737,54 @@ C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, registry_generat
 C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, imported_slots) == 16 );
 C_ASSERT( offsetof(struct set_wayland_buffer_slot_import_reply, failed_slots) == 20 );
 C_ASSERT( sizeof(struct set_wayland_buffer_slot_import_reply) == 24 );
+C_ASSERT( offsetof(struct submit_wayland_frame_request, root) == 12 );
+C_ASSERT( offsetof(struct submit_wayland_frame_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct submit_wayland_frame_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct submit_wayland_frame_request, binding_generation) == 32 );
+C_ASSERT( sizeof(struct submit_wayland_frame_request) == 40 );
+C_ASSERT( offsetof(struct submit_wayland_frame_reply, outstanding_frames) == 8 );
+C_ASSERT( offsetof(struct submit_wayland_frame_reply, available_credits) == 12 );
+C_ASSERT( sizeof(struct submit_wayland_frame_reply) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_frame_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_request, contributor_id) == 24 );
+C_ASSERT( offsetof(struct get_wayland_frame_request, previous_frame_id) == 32 );
+C_ASSERT( sizeof(struct get_wayland_frame_request) == 40 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, pool_generation) == 8 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, frame_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, ready_value) == 24 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, reuse_value) == 32 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, slot) == 40 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, reusable) == 44 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, outstanding_frames) == 48 );
+C_ASSERT( sizeof(struct get_wayland_frame_reply) == 56 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, root) == 12 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, host_epoch) == 16 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, contributor_id) == 24 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, frame_id) == 32 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, ready_value) == 40 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, reuse_value) == 48 );
+C_ASSERT( sizeof(struct set_wayland_frame_reusable_request) == 56 );
+C_ASSERT( offsetof(struct set_wayland_frame_reusable_reply, outstanding_frames) == 8 );
+C_ASSERT( sizeof(struct set_wayland_frame_reusable_reply) == 16 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, root) == 12 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, result) == 16 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, backend_status) == 20 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, host_epoch) == 24 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, contributor_id) == 32 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_request, frame_id) == 40 );
+C_ASSERT( sizeof(struct set_wayland_frame_result_request) == 48 );
+C_ASSERT( offsetof(struct set_wayland_frame_result_reply, outstanding_frames) == 8 );
+C_ASSERT( sizeof(struct set_wayland_frame_result_reply) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_request, binding_generation) == 32 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_request, frame_id) == 40 );
+C_ASSERT( sizeof(struct get_wayland_frame_result_request) == 48 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_reply, reuse_value) == 8 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_reply, result) == 16 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_reply, backend_status) == 20 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_reply, reusable) == 24 );
+C_ASSERT( offsetof(struct get_wayland_frame_result_reply, outstanding_frames) == 28 );
+C_ASSERT( sizeof(struct get_wayland_frame_result_reply) == 32 );
