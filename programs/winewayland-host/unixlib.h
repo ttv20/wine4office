@@ -23,6 +23,7 @@
 #define WINEWAYLAND_HOST_CAP_SEAT          0x00000008
 #define WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
 #define WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT 0x00000020
+#define WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM 1
 
 struct winewayland_host_probe
 {
@@ -50,9 +51,52 @@ struct winewayland_host_startup
     uint64_t host_epoch;
 };
 
+#define WINEWAYLAND_HOST_RENDERER_VERSION 1
+
+struct winewayland_host_renderer_create
+{
+    uint32_t version;
+    uint32_t size;
+    uint32_t device_uuid[4];
+    char display_name[WINEWAYLAND_HOST_NAME_MAX];
+    char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
+    uint64_t endpoint_device;
+    uint64_t endpoint_inode;
+};
+
+struct winewayland_host_renderer_import
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t pool_generation;
+    uint64_t allocation_size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t slot;
+    uint32_t memory_type_index;
+    int32_t memory_fd;
+    int32_t ready_fd;
+    int32_t reuse_fd;
+    uint32_t reserved[2];
+};
+
+struct winewayland_host_renderer_retire
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t pool_generation;
+};
+
 enum winewayland_host_unix_func
 {
     unix_probe_backend,
+    unix_renderer_create,
+    unix_renderer_import,
+    unix_renderer_retire,
+    unix_renderer_self_test,
+    unix_renderer_headless_self_test,
+    unix_renderer_destroy,
     winewayland_host_unix_func_count,
 };
 

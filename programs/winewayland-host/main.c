@@ -23,12 +23,16 @@
 
 C_ASSERT(sizeof(struct winewayland_host_startup) == 40);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
+C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
+C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SEAT == WINE_WAYLAND_HOST_CAP_SEAT);
 C_ASSERT(WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS == WINE_WAYLAND_HOST_CAP_MULTIPLE_SEATS);
 C_ASSERT(WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT == WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT);
+C_ASSERT(WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM == WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM);
 
 static NTSTATUS get_backend_probe(struct winewayland_host_probe *probe)
 {
@@ -40,6 +44,26 @@ static NTSTATUS get_backend_probe(struct winewayland_host_probe *probe)
     if (__wine_init_unix_call()) return STATUS_DLL_NOT_FOUND;
     status = WINE_UNIX_CALL(unix_probe_backend, probe);
     return status;
+}
+
+static NTSTATUS create_renderer(const struct winewayland_host_probe *probe)
+{
+    struct winewayland_host_renderer_create params;
+
+    memset(&params, 0, sizeof(params));
+    params.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    params.size = sizeof(params);
+    memcpy(params.device_uuid, probe->device_uuid, sizeof(params.device_uuid));
+    memcpy(params.display_name, probe->display_name, sizeof(params.display_name));
+    memcpy(params.endpoint_path, probe->endpoint_path, sizeof(params.endpoint_path));
+    params.endpoint_device = probe->endpoint_device;
+    params.endpoint_inode = probe->endpoint_inode;
+    return WINE_UNIX_CALL(unix_renderer_create, &params);
+}
+
+static void destroy_renderer(void)
+{
+    WINE_UNIX_CALL(unix_renderer_destroy, NULL);
 }
 
 static int probe_backend(void)
@@ -63,6 +87,73 @@ static int probe_backend(void)
             probe.device_uuid[2], probe.device_uuid[3]);
     printf("seat_global=%u\n", probe.seat_global);
     printf("capabilities=%#x\n", probe.capabilities);
+    return 0;
+}
+
+static int test_renderer(void)
+{
+    struct winewayland_host_renderer_import import;
+    struct winewayland_host_probe probe;
+    NTSTATUS status;
+
+    if ((status = get_backend_probe(&probe)))
+    {
+        fprintf(stderr, "renderer=unavailable probe_status=%#lx\n", status);
+        return 4;
+    }
+    if (!(probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        printf("renderer=unsupported capabilities=%#x\n", probe.capabilities);
+        return 0;
+    }
+    status = create_renderer(&probe);
+    if (!status)
+    {
+        status = WINE_UNIX_CALL(unix_renderer_self_test, NULL);
+        if (status)
+        {
+            fprintf(stderr, "renderer=failed self_test_status=%#lx\n", status);
+            destroy_renderer();
+            return 5;
+        }
+        memset(&import, 0, sizeof(import));
+        import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        import.size = sizeof(import);
+        import.pool_generation = 1;
+        import.allocation_size = 1;
+        import.width = import.height = 1;
+        import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
+        import.memory_fd = import.ready_fd = import.reuse_fd = -1;
+        status = WINE_UNIX_CALL(unix_renderer_import, &import);
+        if (status == STATUS_INVALID_HANDLE)
+        {
+            printf("renderer=ready device_uuid=%08x%08x%08x%08x self_test=passed import_validation=passed\n",
+                    probe.device_uuid[0], probe.device_uuid[1], probe.device_uuid[2],
+                    probe.device_uuid[3]);
+            status = STATUS_SUCCESS;
+        }
+        else fprintf(stderr, "renderer=failed import_validation_status=%#lx\n", status);
+    }
+    else fprintf(stderr, "renderer=failed status=%#lx\n", status);
+    destroy_renderer();
+    return status ? 5 : 0;
+}
+
+static int test_headless_transport(void)
+{
+    NTSTATUS status;
+
+    if (__wine_init_unix_call())
+    {
+        fprintf(stderr, "transport_self_test=failed status=%#lx\n", STATUS_DLL_NOT_FOUND);
+        return 5;
+    }
+    if ((status = WINE_UNIX_CALL(unix_renderer_headless_self_test, NULL)))
+    {
+        fprintf(stderr, "transport_self_test=failed status=%#lx\n", status);
+        return 5;
+    }
+    printf("transport_self_test=passed\n");
     return 0;
 }
 
@@ -206,7 +297,11 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
             startup->size != sizeof(*startup))
         status = STATUS_REVISION_MISMATCH;
     else if (!(status = get_backend_probe(&probe)))
+    {
         status = register_host(startup, &probe, &host_epoch);
+        if (!status && (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+            status = create_renderer(&probe);
+    }
     if (!status) status = set_host_ready(host_epoch);
 
     startup->process_id = GetCurrentProcessId();
@@ -214,11 +309,9 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
     InterlockedExchange((LONG *)&startup->status, status);
     SetEvent(ready_event);
 
-    if (!status)
-    {
-        WaitForSingleObject(stop_event, 60000);
-        release_host(host_epoch);
-    }
+    if (!status) WaitForSingleObject(stop_event, 60000);
+    if (host_epoch) release_host(host_epoch);
+    destroy_renderer();
     UnmapViewOfFile(startup);
     return status ? 6 : 0;
 }
@@ -346,12 +439,16 @@ done:
 int wmain(int argc, WCHAR **argv)
 {
     if (argc == 2 && !wcscmp(argv[1], L"--probe")) return probe_backend();
+    if (argc == 2 && !wcscmp(argv[1], L"--renderer-test")) return test_renderer();
+    if (argc == 2 && !wcscmp(argv[1], L"--transport-self-test"))
+        return test_headless_transport();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
 
-    fwprintf(stderr, L"Usage: %s --probe | --registration-test\n", argv[0]);
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --registration-test\n",
+            argv[0]);
     return 2;
 }

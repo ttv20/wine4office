@@ -23,11 +23,22 @@ or transport fixture is not Outlook support.
 - The host now probes a native Vulkan device before advertising transport
   support. Admission requires a graphics queue that can present to the probed
   Wayland connection, opaque-FD import and export for the fixed BGRA8 transfer
-  image and semaphore type, timeline semaphores, swapchain support and a
+  image and timeline semaphore type, Vulkan 1.2, swapchain support and a
   nonzero device UUID. It also creates and destroys a logical Vulkan device
   with that exact extension set. Failure leaves the transport capability off
   and reports the rejected requirement; basic host registration and local
   fallback remain available.
+- The host Unix renderer now has a bounded native Vulkan import primitive. It
+  recreates the fixed BGRA8 optimal-tiling transfer image, requires the exact
+  producer allocation size and memory-type index, imports opaque-FD dedicated
+  memory, and imports separate ready/reuse timeline semaphores transactionally.
+  At most two three-slot pool generations remain live; duplicate metadata is
+  idempotent, conflicting metadata is rejected, and pool retirement or renderer
+  teardown destroys every partial or complete import and closes unconsumed FDs.
+  The registered host also recreates this renderer on the exact admitted GPU
+  before publishing Ready. Host work discovery, conversion of the authorized
+  server handles to these FDs, and GPU ready/reuse queue submissions are still
+  pending, so this primitive alone is not an end-to-end frame transport.
 - Vulkan transport admission is now bound to the probed physical device. The
   startup permit records the host's 16-byte device UUID, registration must
   present the same UUID, and host queries return the registered identity.
@@ -325,6 +336,23 @@ admitted.
   `/workspace/artifacts/dcomp-memory-type-{authority,probe,registration,oracle}-{x64,i386}.log`,
   `/workspace/artifacts/memory-type-win32u-test-{x64,i386}.exe`, and
   `/workspace/runner-dcomp-memory-type`.
+- The native import primitive compiled through the real Vulkan headers for the
+  Unix library and both PE architectures. An isolated Intel Iris Xe run created
+  one exportable 64x64 BGRA8 image with dedicated device memory, exported its
+  opaque FD plus two timeline-semaphore FDs, imported all three into new Vulkan
+  objects, bound the imported memory, observed the producer's distinct timeline
+  values 7 and 11 through the imported semaphores, retired the imported pool
+  and cleaned up.
+  The same self-test passed through x86-64 and the i386 WoW64 Unix-call table.
+  Evidence is retained on `elkana-scadasudo` under
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/transport-timeline-final4-{x64,i386}.log`,
+  with hashes in `transport-timeline-final-SHA256SUMS`.
+  The isolated virtual KWin backend did not expose a Vulkan Wayland presentation
+  queue, so this is import interoperability evidence, not native WSI admission.
+  On the task Radeon environment the final host continued to withhold Vulkan
+  transport and registration passed in both architectures; logs are retained
+  as `/workspace/artifacts/dcomp-native-import-final4-{probe,renderer,registration}-{x64,i386}.log`,
+  with hashes in `dcomp-native-import-final-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
