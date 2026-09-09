@@ -869,6 +869,9 @@ class ManagerState:
 
         def install() -> str:
             preload_update = None
+            wine_stopped = False
+            wine_restarted = False
+            recovery_wine = config["wine"]
             try:
                 if "wine" in components:
                     self.set_progress("Stopping background services", None)
@@ -880,21 +883,31 @@ class ManagerState:
                         config["prefix"], config["wine"],
                         use_x11=active_use_x11,
                     )
+                    wine_stopped = True
                     self.output("Stopped the selected Wine environment before updating.")
                 self.set_progress(
                     f"Updating through {package['provider_name']}", None
                 )
                 result = backend.install_package_update(self.output, package)
                 if not result["changed"]:
+                    if wine_stopped:
+                        self.set_progress("Restarting the Wine environment", None)
+                        self.output(backend.update_wine_prefix(
+                            config["prefix"], recovery_wine, active_use_x11,
+                            self.output, process_callback=self.set_process,
+                        ))
+                        wine_restarted = True
                     return result["message"]
                 changed = set(result["components"])
                 if "wine" in changed:
                     self.set_progress("Updating the Wine environment", None)
                     new_wine = str(backend.runner_update_target() / "bin/wine")
+                    recovery_wine = new_wine
                     self.output(backend.update_wine_prefix(
                         config["prefix"], new_wine, active_use_x11,
                         self.output, self.cancel_event, self.set_process,
                     ))
+                    wine_restarted = True
                     if preload_update is not None:
                         backend.finish_preload_runner_update(preload_update, new_wine)
                         preload_update = None
@@ -915,6 +928,20 @@ class ManagerState:
                     self._run_updated_manager_post_install(config)
                 return result["message"]
             finally:
+                if wine_stopped and not wine_restarted:
+                    try:
+                        self.output(
+                            "Restoring the selected Wine environment after the failed update."
+                        )
+                        self.output(backend.update_wine_prefix(
+                            config["prefix"], recovery_wine, active_use_x11,
+                            self.output, process_callback=self.set_process,
+                        ))
+                    except Exception as error:
+                        self.output(
+                            "WARNING: Could not restore the selected Wine environment after "
+                            f"the package update: {error}"
+                        )
                 if preload_update is not None:
                     try:
                         backend.restore_preload_after_runner_update(preload_update)

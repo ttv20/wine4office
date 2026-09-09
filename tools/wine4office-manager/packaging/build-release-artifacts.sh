@@ -30,10 +30,10 @@ mono="$RUNNER/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi"
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
 if [[ -n $WINE_BASE_VERSION ]]; then
-    [[ $WINE_BASE_VERSION =~ ^[0-9]+([.][0-9A-Za-z]+)+$ ]] || {
+    [[ $WINE_BASE_VERSION =~ ^[0-9]+([.][0-9A-Za-z]+)+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
         echo "Unsafe Wine base version: $WINE_BASE_VERSION" >&2; exit 1;
     }
-    [[ $($RUNNER/bin/wine --version) == "wine4office-${VERSION} (Wine ${WINE_BASE_VERSION})" ]] || {
+    [[ $("$RUNNER/bin/wine" --version) == "wine4office-${VERSION} (Wine ${WINE_BASE_VERSION})" ]] || {
         echo "Wine runner branding does not match the release and base versions" >&2
         exit 1
     }

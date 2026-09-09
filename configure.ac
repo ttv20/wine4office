@@ -92,9 +92,10 @@ AC_ARG_WITH(system-dllpath,AS_HELP_STRING([--with-system-dllpath=PATH],[load ext
 AC_ARG_WITH(wine-tools,AS_HELP_STRING([--with-wine-tools=DIR],[use Wine tools from directory DIR]))
 AC_ARG_WITH(wine64,    AS_HELP_STRING([--with-wine64=DIR],[use the 64-bit Wine in DIR for a Wow64 build]))
 
-AS_IF([test "x$with_wine4office_version" != x],
-      [AS_CASE([$with_wine4office_version],
-               [*[[!A-Za-z0-9._+-]]*], [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])])
+AS_CASE([$with_wine4office_version],
+        [no], [with_wine4office_version=],
+        [yes], [AC_MSG_ERROR([--with-wine4office-version requires an explicit VERSION value])],
+        [*[[!A-Za-z0-9._+-]]*], [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])
 AC_SUBST([WINE4OFFICE_VERSION], [$with_wine4office_version])
 
 AC_CANONICAL_HOST

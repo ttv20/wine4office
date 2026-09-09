@@ -68,9 +68,6 @@ let
     multiPkgs = p: with p; [
       alsa-lib fontconfig freetype gnutls stdenv.cc.cc.lib zlib
     ];
-    profile = ''
-      export WINE4OFFICE_MANAGER_ROOT=${payload}/opt/wine4office
-    '';
     runScript = dispatcher;
   };
 in pkgs.symlinkJoin {

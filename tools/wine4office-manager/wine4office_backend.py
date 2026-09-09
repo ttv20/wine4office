@@ -291,6 +291,9 @@ MAX_WINE_FILE_SIZE = 4 * 1024**3
 MAX_WINE_EXTRACTED_SIZE = 16 * 1024**3
 DEFAULT_UPDATE_CHANNEL = "stable"
 VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+WINE_BASE_VERSION_PATTERN = re.compile(
+    r"[0-9]+(?:[.][0-9A-Za-z]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?"
+)
 PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
 PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
 PACKAGE_PROVIDERS = {
@@ -591,7 +594,7 @@ def current_wine_base_version() -> str:
     for version in candidates:
         if version.is_file():
             value = version.read_text(errors="replace").strip()
-            if re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", value):
+            if WINE_BASE_VERSION_PATTERN.fullmatch(value):
                 return value
     return "unknown"
 
@@ -2778,7 +2781,7 @@ def _parse_component(payload: object, name: str, metadata_url: str) -> dict:
         base_version = payload.get("base_version")
         if base_version is not None:
             if (not isinstance(base_version, str)
-                    or not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", base_version)):
+                    or not WINE_BASE_VERSION_PATTERN.fullmatch(base_version)):
                 raise ValueError("Release metadata has an invalid Wine base version.")
             result["base_version"] = base_version
     return result
@@ -4497,9 +4500,8 @@ def install_release_updates(metadata: dict, components: Iterable[str], output: O
             if runner_staged is not None:
                 text_updates[version_root / "WINE_VERSION"] = \
                     metadata["wine"]["version"] + "\n"
-                if metadata["wine"].get("base_version"):
-                    text_updates[version_root / "WINE_BASE_VERSION"] = \
-                        metadata["wine"]["base_version"] + "\n"
+                text_updates[version_root / "WINE_BASE_VERSION"] = \
+                    metadata["wine"].get("base_version", "unknown") + "\n"
             if root is not None:
                 text_updates[root / "UPDATE_URL"] = metadata["metadata_url"] + "\n"
             _commit_update_transaction(replacements, text_updates)

@@ -17,6 +17,8 @@ for package in "$@"; do
     [[ -f $package && $package == *.deb ]] || { echo "Invalid DEB: $package" >&2; exit 1; }
     install -m 0644 "$package" "$pool/$(basename "$package")"
 done
+rm -f -- "$repository/dists/$codename/InRelease" \
+    "$repository/dists/$codename/Release.gpg"
 (
     cd "$repository"
     apt-ftparchive packages pool/main > "dists/$codename/main/binary-amd64/Packages"

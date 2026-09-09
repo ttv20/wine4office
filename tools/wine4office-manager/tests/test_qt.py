@@ -1000,9 +1000,19 @@ class QtManagerTests(unittest.TestCase):
             backend, "package_installation", return_value=package
         ), mock.patch.object(
             backend, "package_update_command", return_value=["pkexec", "apt-get"]
-        ):
+        ), mock.patch.object(
+            self.window, "_tr", side_effect=lambda text: f"translated:{text}"
+        ) as translate:
             self.window.refresh_state()
 
+        translated_sources = {call.args[0] for call in translate.call_args_list}
+        self.assertTrue({
+            "; package:",
+            "Package updates",
+            "This installation is managed by {provider}. Updates use the system package source.",
+            "Update with {provider}…",
+        }.issubset(translated_sources))
+        self.assertEqual(self.window.update_group.title(), "translated:Package updates")
         self.assertTrue(self.window.update_edit.isHidden())
         self.assertTrue(self.window.include_prereleases.isHidden())
         self.assertTrue(self.window.automatic_update_checks.isHidden())

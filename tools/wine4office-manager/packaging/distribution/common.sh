@@ -29,7 +29,8 @@ validate_package_input() {
 }
 
 stage_package_payload() {
-    local destination=$1 extraction root
+    local destination=$1 extraction root wine_base_version wine_build_id
+    local wine_build_prefix candidate
     extraction=$(mktemp -d)
     tar --zstd -xf "$wine_archive" -C "$extraction"
     mapfile -t roots < <(find "$extraction" -mindepth 1 -maxdepth 1 -type d -print)
@@ -48,8 +49,13 @@ stage_package_payload() {
     cp -a "$root/." "$destination/opt/wine4office/runner/"
     wine_base_version=unknown
     wine_build_id=$("$root/bin/wine" --version 2>/dev/null || true)
-    if [[ $wine_build_id =~ ^wine4office-[^[:space:]]+[[:space:]]\(Wine[[:space:]]([0-9]+([.][0-9A-Za-z]+)+)\)$ ]]; then
-        wine_base_version=${BASH_REMATCH[1]}
+    wine_build_prefix="wine4office-${package_version} (Wine "
+    if [[ $wine_build_id == "$wine_build_prefix"*')' ]]; then
+        candidate=${wine_build_id#"$wine_build_prefix"}
+        candidate=${candidate%')'}
+        if [[ $candidate =~ ^[0-9]+([.][0-9A-Za-z]+)+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            wine_base_version=$candidate
+        fi
     fi
     ln -s /opt/wine4office/bin/Wine4OfficeManager \
         "$destination/usr/bin/Wine4OfficeManager"

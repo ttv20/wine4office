@@ -81,11 +81,11 @@ configure_build() {
         }
     done
     if [[ -n "$release_version" ]]; then
-        grep -F -- "--with-wine4office-version=$release_version" "$build_dir/config.status" >/dev/null || {
+        grep -Fx -- "WINE4OFFICE_VERSION = $release_version" "$build_dir/Makefile" >/dev/null || {
             echo "Build tree is branded for a different Wine4Office release" >&2
             exit 1
         }
-    elif grep -F -- "--with-wine4office-version=" "$build_dir/config.status" >/dev/null; then
+    elif ! grep -Fx -- "WINE4OFFICE_VERSION = " "$build_dir/Makefile" >/dev/null; then
         echo "Development build tree unexpectedly has release branding" >&2
         exit 1
     fi

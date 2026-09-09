@@ -11,10 +11,35 @@ version=2.3.4
 runner=$tmp/runner
 manager=$tmp/Wine4OfficeManager
 release=$tmp/release
+fake_sign_bin=$tmp/fake-sign-bin
+mkdir "$fake_sign_bin"
+cat > "$fake_sign_bin/gpg" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=
+input=
+while (($#)); do
+    case $1 in
+        --output) output=${2:?}; shift 2 ;;
+        *) input=$1; shift ;;
+    esac
+done
+if [[ -z $output ]]; then
+    [[ -n $input ]]
+    output=$input.asc
+fi
+printf 'test signature\n' > "$output"
+EOF
+cat > "$fake_sign_bin/rpmsign" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${!#}" >> "${WINE4OFFICE_TEST_RPMSIGN_LOG:?}"
+EOF
+chmod 0755 "$fake_sign_bin/gpg" "$fake_sign_bin/rpmsign"
 mkdir -p "$runner/bin" "$runner/share/wine/gecko" "$runner/share/wine/mono"
 cat > "$runner/bin/wine" <<'EOF'
 #!/bin/sh
-echo 'wine4office-2.3.4 (Wine 11.17)'
+echo 'wine4office-2.3.4 (Wine 11.17-rc1)'
 EOF
 cat > "$manager" <<'EOF'
 #!/bin/sh
@@ -27,15 +52,15 @@ printf x > "$runner/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
 printf x > "$runner/share/wine/mono/wine-mono-11.3.0-x86.msi"
 "$release_builder" "$runner" "$manager" "$release" "$version" \
     https://updates.example/releases/release.json \
-    https://updates.example/releases  stable 11.17 >/dev/null
+    https://updates.example/releases  stable 11.17-rc1 >/dev/null
 
 verify_installation() {
     [[ $(/opt/wine4office/runner/bin/wine --version) == \
-        'wine4office-2.3.4 (Wine 11.17)' ]]
+        'wine4office-2.3.4 (Wine 11.17-rc1)' ]]
     /opt/wine4office/bin/Wine4OfficeManager --smoke-test
     cmp "$manager" /opt/wine4office/bin/Wine4OfficeManager
     cmp "$runner/bin/wine" /opt/wine4office/runner/bin/wine
-    [[ $(cat /opt/wine4office/WINE_BASE_VERSION) == 11.17 ]]
+    [[ $(cat /opt/wine4office/WINE_BASE_VERSION) == 11.17-rc1 ]]
     python3 - <<'PY'
 import json
 from pathlib import Path
@@ -53,7 +78,13 @@ case $mode in
         deb=$tmp/packages/wine4office_2.3.4_amd64.deb
         dpkg-deb -f "$deb" Depends | grep -F 'libgssapi-krb5-2' >/dev/null
         dpkg-deb -f "$deb" Depends | grep -F 'libxcb-cursor0' >/dev/null
+        PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
+            "$distribution/build-apt-repository.sh" "$tmp/repository" stable "$deb"
+        [[ -f $tmp/repository/dists/stable/InRelease ]]
+        [[ -f $tmp/repository/dists/stable/Release.gpg ]]
         "$distribution/build-apt-repository.sh" "$tmp/repository" stable "$deb"
+        [[ ! -e $tmp/repository/dists/stable/InRelease ]]
+        [[ ! -e $tmp/repository/dists/stable/Release.gpg ]]
         printf 'deb [trusted=yes] file:%s stable main\n' "$tmp/repository" \
             > /etc/apt/sources.list.d/wine4office-test.list
         apt-get update >/dev/null
@@ -74,7 +105,16 @@ case $mode in
         find "$tmp/build-metadata-packages" \
             -name 'wine4office-2.3.4-1.build.5*.x86_64.rpm' -print -quit \
             | grep -q .
+        rpm_hash=$(sha256sum "$rpm")
+        WINE4OFFICE_TEST_RPMSIGN_LOG="$tmp/rpmsign.log" \
+            PATH="$fake_sign_bin:$PATH" WINE4OFFICE_GPG_KEY_ID=test \
+            "$distribution/build-rpm-repository.sh" "$tmp/repository" "$rpm"
+        [[ $(sha256sum "$rpm") == "$rpm_hash" ]]
+        grep -Fx "$tmp/repository/rpm/x86_64/Packages/$(basename "$rpm")" \
+            "$tmp/rpmsign.log" >/dev/null
+        [[ -f $tmp/repository/rpm/x86_64/repodata/repomd.xml.asc ]]
         "$distribution/build-rpm-repository.sh" "$tmp/repository" "$rpm"
+        [[ ! -e $tmp/repository/rpm/x86_64/repodata/repomd.xml.asc ]]
         cmp "$distribution/wine4office.repo" "$tmp/repository/wine4office.repo"
         cat > /etc/yum.repos.d/wine4office-test.repo <<EOF
 [wine4office-test]
@@ -95,10 +135,15 @@ EOF
         grep -F $'\tdepends = krb5' "$tmp/community/aur/.SRCINFO" >/dev/null
         grep -F $'\tdepends = xcb-util-cursor' \
             "$tmp/community/aur/.SRCINFO" >/dev/null
-        grep -F 'wineBaseVersion = "11.17";' "$tmp/community/nix/release.nix" >/dev/null
+        grep -F 'wineBaseVersion = "11.17-rc1";' "$tmp/community/nix/release.nix" >/dev/null
+        if grep -F 'WINE4OFFICE_MANAGER_ROOT' "$tmp/community/nix/package.nix" >/dev/null; then
+            echo "Nix package redirects bundled Manager resource lookup" >&2
+            exit 1
+        fi
         if command -v makepkg >/dev/null; then
-            chmod -R a+rwX "$tmp/community/aur"
             if [[ $EUID -eq 0 ]]; then
+                nobody_group=$(id -gn nobody)
+                chown -R "nobody:$nobody_group" "$tmp/community/aur"
                 (cd "$tmp/community/aur" && \
                     runuser -u nobody -- env HOME=/tmp makepkg --printsrcinfo) \
                     > "$tmp/generated.SRCINFO"

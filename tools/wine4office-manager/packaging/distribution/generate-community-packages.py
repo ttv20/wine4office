@@ -10,6 +10,10 @@ import shutil
 import urllib.parse
 from pathlib import Path
 
+WINE_BASE_VERSION_PATTERN = re.compile(
+    r"[0-9]+(?:[.][0-9A-Za-z]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?"
+)
+
 
 def shell_single_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
@@ -52,7 +56,7 @@ def validated_release(path: Path) -> dict:
         component["resolved_url"] = url
     base_version = data["wine"].get("base_version", "unknown")
     if (base_version != "unknown" and (not isinstance(base_version, str)
-            or not re.fullmatch(r"[0-9]+(?:[.][0-9A-Za-z]+)+", base_version))):
+            or not WINE_BASE_VERSION_PATTERN.fullmatch(base_version))):
         raise ValueError("Wine base version is invalid")
     return data
 

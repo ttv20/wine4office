@@ -3052,14 +3052,17 @@ class ManagerWindow(QMainWindow):
             f"{self._tr('; Wine4Office:')} {snapshot['wine_version']}"
             f"{self._tr('; Wine base:')} {snapshot['wine_base_version']}"
             + (
-                f"; package: {snapshot['package_installation']['provider_name']}"
+                f"{self._tr('; package:')} "
+                f"{snapshot['package_installation']['provider_name']}"
                 if snapshot.get("package_installation") else ""
             )
         )
         package = snapshot.get("package_installation")
         self.package_installation = dict(package) if package else None
         package_managed = self.package_installation is not None
-        self.update_group.setTitle("Package updates" if package_managed else "Updates")
+        self.update_group.setTitle(self._tr(
+            "Package updates" if package_managed else "Updates"
+        ))
         self.update_url_label.setVisible(not package_managed)
         self.update_edit.setVisible(not package_managed)
         self.automatic_update_checks.setVisible(not package_managed)
@@ -3069,17 +3072,20 @@ class ManagerWindow(QMainWindow):
             provider = self.package_installation["provider_name"]
             instructions = backend.package_update_instructions(self.package_installation)
             self.package_update_label.setText(
-                f"This installation is managed by {provider}. Updates use the system "
-                f"package source.\n\n{instructions}"
+                self._tr(
+                    "This installation is managed by {provider}. Updates use the system "
+                    "package source."
+                ).format(provider=provider)
+                + f"\n\n{instructions}"
             )
             self.update_button.setText(
-                f"Update with {provider}…"
+                self._tr("Update with {provider}…").format(provider=provider)
                 if backend.package_update_command(self.package_installation) else
-                "Copy update instructions"
+                self._tr("Copy update instructions")
             )
         else:
             self.package_update_label.clear()
-            self.update_button.setText("Check for updates…")
+            self.update_button.setText(self._tr("Check for updates…"))
         updater = snapshot["updater"]
         automatic_enabled = (
             snapshot["config"].get("automatic_update_checks") is True

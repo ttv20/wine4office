@@ -4698,15 +4698,16 @@ then :
 fi
 
 
-if test "x$with_wine4office_version" != x
-then :
-  case $with_wine4office_version in #(
+case $with_wine4office_version in #(
+  no) :
+    with_wine4office_version= ;; #(
+  yes) :
+    as_fn_error $? "--with-wine4office-version requires an explicit VERSION value" "$LINENO" 5 ;; #(
   *[!A-Za-z0-9._+-]*) :
     as_fn_error $? "invalid Wine4Office release version: $with_wine4office_version" "$LINENO" 5 ;; #(
   *) :
      ;;
 esac
-fi
 WINE4OFFICE_VERSION=$with_wine4office_version
 
 

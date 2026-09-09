@@ -6,6 +6,16 @@ contract=$root/tools/wine-build-env
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
+mkdir "$tmp/configure-sentinel"
+if (cd "$tmp/configure-sentinel" && \
+        "$root/configure" --with-wine4office-version) \
+        >"$tmp/configure-sentinel.log" 2>&1; then
+    echo "Configure accepted Wine4Office branding without an explicit version" >&2
+    exit 1
+fi
+grep -F -- '--with-wine4office-version requires an explicit VERSION value' \
+    "$tmp/configure-sentinel.log" >/dev/null
+
 assert_absent() {
     local pattern=$1
     local file=$2
@@ -31,7 +41,7 @@ mkdir -p "$source_dir/tools/wine4office-manager/packaging/linux-uapi" \
     "$build_dir/include" "$stage_dir" "$fake_bin"
 printf '#!/bin/sh\nexit 99\n' > "$source_dir/configure"
 chmod 0755 "$source_dir/configure"
-printf 'srcdir = %s\n' "$source_dir" > "$build_dir/Makefile"
+printf 'srcdir = %s\nWINE4OFFICE_VERSION = \n' "$source_dir" > "$build_dir/Makefile"
 cat > "$build_dir/config.status" <<'EOF'
 ac_cs_config='--prefix=/opt/wine4office --enable-archs=i386,x86_64 --with-gssapi --with-krb5'
 EOF
@@ -72,18 +82,23 @@ fi
 
 sed -i "s/--with-krb5/--with-krb5 --with-wine4office-version=0.2.2/" \
     "$build_dir/config.status"
+sed -i 's/^WINE4OFFICE_VERSION = $/WINE4OFFICE_VERSION = 0.2.2/' \
+    "$build_dir/Makefile"
 env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.2 \
     "$contract/build.sh" configure
 grep -qx 'wine4office_release_version=0.2.2' \
     "$build_dir/WINE4OFFICE_BUILD.env"
-if env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.3 \
+sed -i 's/0.2.2/0.2.22/g' "$build_dir/config.status" "$build_dir/Makefile"
+if env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.2 \
         "$contract/build.sh" configure >"$tmp/wrong-brand.log" 2>&1; then
-    echo "Build contract accepted a differently branded Wine tree" >&2
+    echo "Build contract accepted a prefix-matching Wine4Office brand" >&2
     exit 1
 fi
 grep -F 'branded for a different Wine4Office release' \
     "$tmp/wrong-brand.log" >/dev/null
-sed -i 's/ --with-wine4office-version=0.2.2//' "$build_dir/config.status"
+sed -i 's/ --with-wine4office-version=0.2.22//' "$build_dir/config.status"
+sed -i 's/^WINE4OFFICE_VERSION = 0.2.22$/WINE4OFFICE_VERSION = /' \
+    "$build_dir/Makefile"
 env "${build_env[@]}" "$contract/build.sh" configure
 
 grep -F 'wine4office-\$(WINE4OFFICE_VERSION) (Wine \$(PACKAGE_VERSION))' \
