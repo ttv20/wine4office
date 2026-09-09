@@ -59,6 +59,7 @@ printf '%s\n' "$CHANNEL" > "$BUILD/CHANNEL"
     --add-data "$HERE/icons:icons" \
     --add-data "$HERE/translations:translations" \
     --collect-data mscerts \
+    --collect-data signify \
     --add-data "$HERE/register-office-cloud-fonts.sh:." \
     --add-data "$BUILD/VERSION:." \
     --add-data "$BUILD/CHANNEL:." \

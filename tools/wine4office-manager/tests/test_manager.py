@@ -468,6 +468,28 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WINE4OFFICE_MANAGER_ROOT": str(root)}):
             self.assertEqual(backend.installed_root(), root.resolve())
 
+    def test_smoke_test_loads_signing_data_and_can_verify_a_real_odt(self):
+        odt = self.home / "officedeploymenttool.exe"
+        with mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=[object()]
+        ) as trust_store, mock.patch.object(
+            backend, "_verify_microsoft_signed_pe"
+        ) as verify, mock.patch.dict(
+            os.environ, {"WINE4OFFICE_SMOKE_TEST_ODT": str(odt)}
+        ):
+            manager._validate_smoke_test_authenticode()
+
+        trust_store.cache_clear.assert_called_once_with()
+        trust_store.assert_called_once_with()
+        verify.assert_called_once_with(odt)
+
+    def test_smoke_test_rejects_an_empty_signing_store(self):
+        with mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=[]
+        ):
+            with self.assertRaisesRegex(RuntimeError, "trust store is empty"):
+                manager._validate_smoke_test_authenticode()
+
     def test_standalone_manager_launcher_uses_active_pending_graphics(self):
         config = backend.default_config()
         config["use_x11"] = False

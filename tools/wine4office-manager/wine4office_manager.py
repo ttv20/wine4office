@@ -1259,6 +1259,16 @@ class ManagerState:
         return True
 
 
+def _validate_smoke_test_authenticode() -> None:
+    """Load packaged signing data and optionally verify a real ODT fixture."""
+    backend._microsoft_authenticode_store.cache_clear()
+    if not backend._microsoft_authenticode_store():
+        raise RuntimeError("Microsoft Authenticode trust store is empty.")
+    odt_fixture = os.environ.get("WINE4OFFICE_SMOKE_TEST_ODT", "").strip()
+    if odt_fixture:
+        backend._verify_microsoft_signed_pe(Path(odt_fixture))
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Wine4Office Manager")
@@ -1473,6 +1483,16 @@ def main() -> int:
         )
         print(path)
         return 0
+
+    if args.smoke_test:
+        try:
+            _validate_smoke_test_authenticode()
+        except (OSError, RuntimeError, ValueError) as error:
+            print(
+                f"wine4office smoke test: Authenticode verification unavailable: {error}",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         post_install.run_post_install(
