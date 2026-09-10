@@ -167,7 +167,21 @@ fi
 write_metadata "$MANAGER_DIGEST" 0.2.0-beta.1 0.2.0-beta.1 prerelease
 PATH="$FAKE_BIN:$PATH" "$HERE/install.sh" --tag 0.2.0-beta.1 >/dev/null
 [[ $(cat "$WINE4OFFICE_HOME/VERSION") == 0.2.0-beta.1 ]]
-[[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == stable ]]
+[[ $(cat "$WINE4OFFICE_HOME/UPDATE_CHANNEL") == prerelease ]]
+
+BUNDLE_HOME=$TMP/bundle-home
+curl_lines_before=$(wc -l < "$FAKE_CURL_LOG")
+WINE4OFFICE_BUNDLE_DIR="$RELEASE" \
+WINE4OFFICE_METADATA_URL=https://example.invalid/release.json \
+WINE4OFFICE_HOME="$BUNDLE_HOME/data/wine4office" \
+WINE4OFFICE_BIN_HOME="$BUNDLE_HOME/bin" \
+XDG_DATA_HOME="$BUNDLE_HOME/data" HOME="$BUNDLE_HOME" \
+WINE4OFFICE_LAUNCH_MANAGER=no PATH="$FAKE_BIN:$PATH" \
+    "$HERE/install.sh" >/dev/null
+[[ $(cat "$BUNDLE_HOME/data/wine4office/VERSION") == 0.2.0-beta.1 ]]
+[[ $(cat "$BUNDLE_HOME/data/wine4office/UPDATE_CHANNEL") == prerelease ]]
+[[ $(cat "$BUNDLE_HOME/data/wine4office/WINE_BASE_VERSION") == 11.17-rc1 ]]
+[[ $(wc -l < "$FAKE_CURL_LOG") == "$curl_lines_before" ]]
 write_metadata "$MANAGER_DIGEST"
 if [[ -z $REAL_MANAGER ]]; then
     [[ $(grep -c '^<launch>$' "$WINE4OFFICE_TEST_MANAGER_LOG" || true) == 0 ]]

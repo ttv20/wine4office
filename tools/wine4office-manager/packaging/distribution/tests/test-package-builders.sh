@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mode=${1:?usage: test-package-builders.sh deb|rpm|community}
+mode=${1:?usage: test-package-builders.sh deb|rpm|community|appimage}
 root=$(cd "$(dirname "$0")/../../../../.." && pwd)
 distribution=$root/tools/wine4office-manager/packaging/distribution
 release_builder=$root/tools/wine4office-manager/packaging/build-release-artifacts.sh
@@ -263,6 +263,76 @@ PY
             echo "Community package generator accepted an invalid Wine base version" >&2
             exit 1
         fi
+        ;;
+    appimage)
+        fake_appimagetool=$tmp/fake-appimagetool
+        cat > "$fake_appimagetool" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+appdir=${@: -2:1}
+output=${@: -1}
+tar -C "$appdir" -cf "${WINE4OFFICE_TEST_APPDIR_CAPTURE:?}" .
+: > "$output"
+EOF
+        chmod 0755 "$fake_appimagetool"
+        : > "$tmp/fake-runtime"
+        capture=$tmp/AppDir.tar
+        APPIMAGETOOL="$fake_appimagetool" \
+        APPIMAGE_RUNTIME="$tmp/fake-runtime" \
+        WINE4OFFICE_TEST_APPDIR_CAPTURE="$capture" \
+            "$distribution/build-appimage.sh" \
+            "$release/Wine4OfficeManager-${version}-x86_64" \
+            "$release/wine4office-${version}-x86_64.tar.zst" \
+            "$release/release.json" "$root/install.sh" "$tmp/packages"
+        appimage=$tmp/packages/Wine4Office-2.3.4-x86_64.AppImage
+        [[ -x $appimage && -f $appimage.sha256 ]]
+        mkdir "$tmp/appdir"
+        tar -xf "$capture" -C "$tmp/appdir"
+        bash -n "$tmp/appdir/AppRun"
+        bash -n "$tmp/appdir/payload/install.sh"
+        cmp "$manager" "$tmp/appdir/payload/Wine4OfficeManager"
+        cmp "$release/wine4office-${version}-x86_64.tar.zst" \
+            "$tmp/appdir/payload/wine.tar.zst"
+        cmp "$release/release.json" "$tmp/appdir/payload/release.json"
+        [[ $(cat "$tmp/appdir/payload/VERSION") == 2.3.4 ]]
+        [[ $(cat "$tmp/appdir/payload/METADATA_URL") == \
+            https://updates.example/releases/release.json ]]
+        [[ ! -e $tmp/appdir/payload/PACKAGE-INSTALLATION.json ]]
+
+        appimage_home=$tmp/appimage-home
+        appimage_root=$appimage_home/data/wine4office
+        APPDIR="$tmp/appdir" \
+        HOME="$appimage_home" XDG_DATA_HOME="$appimage_home/data" \
+        WINE4OFFICE_HOME="$appimage_root" \
+        WINE4OFFICE_BIN_HOME="$appimage_home/bin" \
+            "$tmp/appdir/AppRun" --appimage-install-only >/dev/null
+        cmp "$manager" "$appimage_root/bin/Wine4OfficeManager"
+        cmp "$runner/bin/wine" "$appimage_root/runner/bin/wine"
+        [[ $(cat "$appimage_root/UPDATE_CHANNEL") == stable ]]
+        [[ ! -e $appimage_root/PACKAGE-INSTALLATION.json ]]
+
+        runner_identity=$(stat -c '%d:%i' "$appimage_root/runner/bin/wine")
+        APPDIR="$tmp/appdir" \
+        HOME="$appimage_home" XDG_DATA_HOME="$appimage_home/data" \
+        WINE4OFFICE_HOME="$appimage_root" \
+        WINE4OFFICE_BIN_HOME="$appimage_home/bin" \
+            "$tmp/appdir/AppRun" --appimage-install-only >/dev/null
+        [[ $(stat -c '%d:%i' "$appimage_root/runner/bin/wine") == "$runner_identity" ]]
+
+        printf '9.0.0\n' > "$appimage_root/VERSION"
+        APPDIR="$tmp/appdir" \
+        HOME="$appimage_home" \
+        XDG_DATA_HOME="$appimage_home/data" \
+        WINE4OFFICE_HOME="$appimage_root" \
+        WINE4OFFICE_BIN_HOME="$appimage_home/bin" \
+            "$tmp/appdir/AppRun" --appimage-install-only \
+            | grep -F 'not downgrading' >/dev/null
+        [[ $(cat "$appimage_root/VERSION") == 9.0.0 ]]
+
+        mv "$tmp/appdir" "$tmp/AppDir.removed"
+        "$appimage_root/bin/Wine4OfficeManager" --smoke-test
+        [[ $("$appimage_root/runner/bin/wine" --version) == \
+            'wine4office-2.3.4 (Wine 11.17-rc1)' ]]
         ;;
     *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac

@@ -9,10 +9,29 @@ The package layout is `/opt/wine4office`, with command links in `/usr/bin`.
 User prefixes, Office installations, configuration, and documents stay in the
 user's home directory and package removal does not delete them.
 
-`build-deb.sh` and `build-rpm.sh` consume the two release artifacts. The release
-workflow runs each builder in its matching distribution container. AUR and Nix
-sources are generated from `release.json`, so their URLs and SHA-256 hashes are
-fixed to one release.
+`build-deb.sh`, `build-rpm.sh`, and `build-appimage.sh` consume the same release
+artifacts. The release workflow runs the DEB and RPM builders in matching
+distribution containers. AUR and Nix sources are generated from `release.json`,
+so their URLs and SHA-256 hashes are fixed to one release.
+
+The AppImage is a single-file installer. Its first launch verifies and installs
+the bundled Manager and Wine runner under `~/.local/share/wine4office`, then runs
+the installed Manager. Later launches reuse that durable installation. Office
+shortcuts, Wine services, and updates therefore keep working if the downloaded
+AppImage is moved or removed. The installed copy follows the existing standalone
+release feed and does not claim package-manager ownership.
+
+Build an AppImage with the pinned `appimagetool-uruntime` used by the release
+workflow:
+
+```bash
+APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage \
+APPIMAGE_RUNTIME=/path/to/uruntime-appimage-squashfs-lite-x86_64 \
+tools/wine4office-manager/packaging/distribution/build-appimage.sh \
+    release/Wine4OfficeManager-VERSION-x86_64 \
+    release/wine4office-VERSION-x86_64.tar.zst \
+    release/release.json release/install.sh release
+```
 
 APT and RPM repositories are static HTTPS directory trees. Run
 `build-apt-repository.sh` or `build-rpm-repository.sh` with

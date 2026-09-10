@@ -109,6 +109,8 @@ jobs:
         run: python3 programs/wine4officeauth/tests/test_authorize_url.py
       - name: Test canonical Wine build contract
         run: tools/wine-build-env/tests/test_build_contract.sh
+      - name: Test AppImage packaging contract
+        run: tools/wine4office-manager/packaging/distribution/tests/test-package-builders.sh appimage
 
       - name: Configure and build Wine4Office
         env:
@@ -216,6 +218,44 @@ jobs:
           tar -C release/community --sort=name --mtime=@0 --owner=0 --group=0 \
             --numeric-owner -czf "release/wine4office-${version}-nix.tar.gz" nix
 
+      - name: Build and smoke-test AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          tool="$RUNNER_TEMP/appimagetool-uruntime-x86_64.AppImage"
+          runtime="$RUNNER_TEMP/uruntime-appimage-squashfs-lite-x86_64"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
+            --output "$tool" \
+            https://github.com/pkgforge-dev/appimagetool-uruntime/releases/download/continuous/appimagetool-x86_64.AppImage
+          echo "4cfda236f46c425aef5bfe397c572663fe1bf7d0a8f62fd31197bad37438c1ca  $tool" \
+            | sha256sum --check
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
+            --output "$runtime" \
+            https://github.com/VHSgunzo/uruntime/releases/download/v0.6.1/uruntime-appimage-squashfs-lite-x86_64
+          echo "e5463fa896fc583cab3b03e498fde5d311b6661bb6e184797081dfdb863bab82  $runtime" \
+            | sha256sum --check
+          chmod 0755 "$tool"
+          APPIMAGETOOL="$tool" APPIMAGE_RUNTIME="$runtime" \
+            tools/wine4office-manager/packaging/distribution/build-appimage.sh \
+              "release/Wine4OfficeManager-${version}-x86_64" \
+              "release/wine4office-${version}-x86_64.tar.zst" \
+              release/release.json release/install.sh release
+
+          appimage="$GITHUB_WORKSPACE/release/Wine4Office-${version}-x86_64.AppImage"
+          test_home=$(mktemp -d)
+          APPIMAGE_EXTRACT_AND_RUN=1 HOME="$test_home" \
+          XDG_DATA_HOME="$test_home/.local/share" \
+          WINE4OFFICE_HOME="$test_home/.local/share/wine4office" \
+          WINE4OFFICE_BIN_HOME="$test_home/.local/bin" \
+            "$appimage" --appimage-install-only
+          mv "$appimage" "$appimage.after-install"
+          QT_QPA_PLATFORM=offscreen \
+            "$test_home/.local/share/wine4office/bin/Wine4OfficeManager" --smoke-test
+          "$test_home/.local/share/wine4office/runner/bin/wine" --version \
+            | grep -Fx "wine4office-${version} (Wine $(sed -n 's/^Wine version //p' VERSION))"
+          mv "$appimage.after-install" "$appimage"
+
       - name: Build testable static repository trees
         shell: bash
         run: |
@@ -305,6 +345,8 @@ jobs:
           path: |
             release/*.deb
             release/*.rpm
+            release/Wine4Office-${{ steps.version.outputs.version }}-x86_64.AppImage
+            release/Wine4Office-${{ steps.version.outputs.version }}-x86_64.AppImage.sha256
             release/wine4office-${{ steps.version.outputs.version }}-aur.tar.gz
             release/wine4office-${{ steps.version.outputs.version }}-nix.tar.gz
             release/wine4office-${{ steps.version.outputs.version }}-repositories-unsigned.tar.gz
@@ -331,6 +373,8 @@ jobs:
             "release/release.json"
             "release/"*.deb
             "release/"*.rpm
+            "release/Wine4Office-${version}-x86_64.AppImage"
+            "release/Wine4Office-${version}-x86_64.AppImage.sha256"
             "release/wine4office-${version}-aur.tar.gz"
             "release/wine4office-${version}-nix.tar.gz"
             "release/wine4office-${version}-repositories-unsigned.tar.gz"

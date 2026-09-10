@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
-- Add reusable AUR, Nix, Ubuntu, and Fedora packages with package-manager updates, unprivileged startup checks, and persistent Nix runtime wrappers.
+- Add AppImage, AUR, Nix, Ubuntu, and Fedora packages with durable user installs, package-manager updates, and startup checks.
 - Keep Authenticode verification working with multi-digit OpenSSL patch versions.
 - Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.

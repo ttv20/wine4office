@@ -5,6 +5,7 @@ umask 077
 
 DEFAULT_METADATA_URL=https://github.com/ttv20/wine4office/releases/latest/download/release.json
 METADATA_URL=${WINE4OFFICE_METADATA_URL:-$DEFAULT_METADATA_URL}
+BUNDLE_DIR=${WINE4OFFICE_BUNDLE_DIR:-}
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 BIN_HOME=${WINE4OFFICE_BIN_HOME:-$HOME/.local/bin}
 ROOT=${WINE4OFFICE_HOME:-$DATA_HOME/wine4office}
@@ -92,11 +93,20 @@ prompt_and_launch_manager() {
     esac
 }
 
-for command in curl flock install python3 readlink sha256sum stat zstd; do
+required_commands=(flock install python3 readlink sha256sum stat zstd)
+[[ -n $BUNDLE_DIR ]] || required_commands+=(curl)
+for command in "${required_commands[@]}"; do
     command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 [[ $(uname -m) == x86_64 ]] || fail "only x86_64 Linux is currently supported"
 [[ $METADATA_URL == https://* ]] || fail "metadata URL must use HTTPS"
+if [[ -n $BUNDLE_DIR ]]; then
+    [[ $BUNDLE_DIR == /* && -d $BUNDLE_DIR ]] || \
+        fail "bundled release directory must be an absolute directory"
+    BUNDLE_DIR=$(readlink -f "$BUNDLE_DIR")
+    [[ -f $BUNDLE_DIR/release.json && ! -L $BUNDLE_DIR/release.json ]] || \
+        fail "bundled release metadata is missing"
+fi
 ROOT=$(python3 - "$ROOT" "$HOME" <<'PY'
 import pathlib
 import sys
@@ -265,23 +275,39 @@ fetch_limited() {
         python3 "$TMP/bounded_download.py" "$destination" "$maximum"
 }
 
-printf 'Fetching release metadata…\n'
-fetch_limited "$METADATA_URL" "$TMP/release.json" 1048576
+copy_limited() {
+    local source=$1 destination=$2 maximum=$3 size
+    [[ -f $source && ! -L $source ]] || fail "bundled release artifact is missing: $source"
+    size=$(stat -c '%s' "$source")
+    ((size > 0 && size <= maximum)) || \
+        fail "bundled release artifact exceeds $maximum bytes: $source"
+    install -m 0600 "$source" "$destination"
+}
+
+if [[ -n $BUNDLE_DIR ]]; then
+    printf 'Reading bundled release metadata…\n'
+    copy_limited "$BUNDLE_DIR/release.json" "$TMP/release.json" 1048576
+else
+    printf 'Fetching release metadata…\n'
+    fetch_limited "$METADATA_URL" "$TMP/release.json" 1048576
+fi
 mapfile -t RELEASE < <(python3 - "$METADATA_URL" "$TMP/release.json" \
-    "$TAGGED_RELEASE" <<'PY'
+    "$TAGGED_RELEASE" "$([[ -n $BUNDLE_DIR ]] && echo true || echo false)" <<'PY'
 import json
 import re
 import sys
 import urllib.parse
 
-source, path, tagged_text = sys.argv[1:]
+source, path, tagged_text, bundled_text = sys.argv[1:]
 tagged_release = tagged_text == "true"
+bundled_release = bundled_text == "true"
 with open(path, "rb") as release_file:
     payload = json.load(release_file)
 if not isinstance(payload, dict) or payload.get("schema_version") != 1:
     raise SystemExit("release.json must use schema version 1")
 channel = payload.get("channel")
-allowed_channels = {"stable", "prerelease"} if tagged_release else {"stable"}
+allowed_channels = ({"stable", "prerelease"}
+                    if tagged_release or bundled_release else {"stable"})
 if channel not in allowed_channels:
     expected = "stable or prerelease" if tagged_release else "stable"
     raise SystemExit(f"release.json must use the {expected} channel")
@@ -325,9 +351,10 @@ if (wine_base_version != "unknown"
 for field in (*manager, *wine, canonical):
     print(field)
 print(wine_base_version)
+print(channel)
 PY
 )
-[[ ${#RELEASE[@]} -eq 10 ]] || fail "release metadata did not produce ten validated fields"
+[[ ${#RELEASE[@]} -eq 11 ]] || fail "release metadata did not produce eleven validated fields"
 MANAGER_VERSION=${RELEASE[0]}
 MANAGER_URL=${RELEASE[1]}
 MANAGER_SHA256=${RELEASE[2]}
@@ -338,11 +365,19 @@ WINE_SHA256=${RELEASE[6]}
 WINE_SIZE=${RELEASE[7]}
 CANONICAL_METADATA_URL=${RELEASE[8]}
 WINE_BASE_VERSION=${RELEASE[9]}
+RELEASE_CHANNEL=${RELEASE[10]}
 
-printf 'Downloading Wine4Office Manager %s…\n' "$MANAGER_VERSION"
-fetch_limited "$MANAGER_URL" "$TMP/Wine4OfficeManager" "$MANAGER_SIZE"
-printf 'Downloading Wine runner %s…\n' "$WINE_VERSION"
-fetch_limited "$WINE_URL" "$TMP/wine.tar.zst" "$WINE_SIZE"
+if [[ -n $BUNDLE_DIR ]]; then
+    printf 'Reading bundled Wine4Office Manager %s…\n' "$MANAGER_VERSION"
+    copy_limited "$BUNDLE_DIR/Wine4OfficeManager" "$TMP/Wine4OfficeManager" "$MANAGER_SIZE"
+    printf 'Reading bundled Wine runner %s…\n' "$WINE_VERSION"
+    copy_limited "$BUNDLE_DIR/wine.tar.zst" "$TMP/wine.tar.zst" "$WINE_SIZE"
+else
+    printf 'Downloading Wine4Office Manager %s…\n' "$MANAGER_VERSION"
+    fetch_limited "$MANAGER_URL" "$TMP/Wine4OfficeManager" "$MANAGER_SIZE"
+    printf 'Downloading Wine runner %s…\n' "$WINE_VERSION"
+    fetch_limited "$WINE_URL" "$TMP/wine.tar.zst" "$WINE_SIZE"
+fi
 
 verify() {
     path=$1
@@ -598,7 +633,7 @@ printf '%s\n' "$MANAGER_VERSION" > "$TMP/metadata/VERSION"
 printf '%s\n' "$WINE_VERSION" > "$TMP/metadata/WINE_VERSION"
 printf '%s\n' "$WINE_BASE_VERSION" > "$TMP/metadata/WINE_BASE_VERSION"
 printf '%s\n' "$CANONICAL_METADATA_URL" > "$TMP/metadata/UPDATE_URL"
-printf 'stable\n' > "$TMP/metadata/UPDATE_CHANNEL"
+printf '%s\n' "$RELEASE_CHANNEL" > "$TMP/metadata/UPDATE_CHANNEL"
 printf 'Wine4OfficeManager\n' > "$TMP/metadata/STANDALONE"
 chmod 0644 "$TMP/metadata"/*
 
