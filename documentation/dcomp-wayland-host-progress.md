@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 984.
+Generated server protocol version: 985.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -221,6 +221,13 @@ or transport fixture is not Outlook support.
   flight, consumes the host's terminal result, completes the matching Present
   record and returns one frame-latency credit exactly once. Binding replacement
   and shutdown retain the tuple needed to drain already accepted frames.
+- Wineserver now publishes an authorized logical-window snapshot to the current
+  host. The snapshot includes a monotonic state revision, styles, outer and
+  client rectangles, and a bounded UTF-16 title. Title, style and geometry
+  changes advance the revision. The host converts the title to bounded UTF-8,
+  applies it to its `xdg_toplevel`, and sets matching xdg window geometry when
+  it creates or resizes the WSI swapchain. Foreign processes cannot query the
+  snapshot.
 
 ## Contributor interception inventory
 
@@ -577,6 +584,15 @@ admitted.
   retained as `artifacts/present-wait-wsi-{x64,i386}.log`,
   `artifacts/present-wait-dcomp-x64.log` and
   `artifacts/present-wait-SHA256SUMS` in the Intel task directory.
+- Protocol 985 window-state authority passed 521 checks with zero failures in
+  both x86-64 and i386 on the Radeon task environment. It rejects non-host
+  queries, returns the original title and client extent, and advances the
+  revision while returning updated title and outer bounds after real User32
+  mutations. The coupled wineserver, ntdll, host and tests rebuilt for both PE
+  architectures. Evidence is retained as
+  `/workspace/artifacts/window-state-authority-{x64,i386}.log`, with exact
+  binaries and hashes under `/workspace/artifacts/window-state-*` and the
+  coherent runner at `/workspace/runner-window-state`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

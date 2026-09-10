@@ -356,6 +356,7 @@ DECL_HANDLER(set_wayland_frame_reusable);
 DECL_HANDLER(set_wayland_frame_result);
 DECL_HANDLER(get_wayland_frame_result);
 DECL_HANDLER(get_wayland_host_root);
+DECL_HANDLER(get_wayland_window_state);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -709,6 +710,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_wayland_frame_result,
     (req_handler)req_get_wayland_frame_result,
     (req_handler)req_get_wayland_host_root,
+    (req_handler)req_get_wayland_window_state,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2805,3 +2807,13 @@ C_ASSERT( offsetof(struct get_wayland_host_root_reply, root_generation) == 24 );
 C_ASSERT( offsetof(struct get_wayland_host_root_reply, scene_generation) == 32 );
 C_ASSERT( offsetof(struct get_wayland_host_root_reply, registry_generation) == 40 );
 C_ASSERT( sizeof(struct get_wayland_host_root_reply) == 48 );
+C_ASSERT( offsetof(struct get_wayland_window_state_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_window_state_request, host_epoch) == 16 );
+C_ASSERT( sizeof(struct get_wayland_window_state_request) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, state_revision) == 8 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, style) == 16 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, ex_style) == 20 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, window) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, client) == 40 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, title_length) == 56 );
+C_ASSERT( sizeof(struct get_wayland_window_state_reply) == 64 );

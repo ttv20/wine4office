@@ -62,6 +62,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_SET_FRAME_REUSABLE,
     HOST_CHILD_COMMAND_SET_FRAME_RESULT,
     HOST_CHILD_COMMAND_GET_ROOT,
+    HOST_CHILD_COMMAND_GET_WINDOW_STATE,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -120,6 +121,7 @@ struct wayland_host_test_state
     UINT64 enumerated_root;
     UINT64 root_identity;
     UINT64 root_generation;
+    UINT64 window_state_revision;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -155,6 +157,11 @@ struct wayland_host_test_state
     DWORD frame_reusable;
     DWORD outstanding_frames;
     DWORD available_credits;
+    DWORD window_style;
+    DWORD window_ex_style;
+    struct rectangle window_rect;
+    struct rectangle client_rect;
+    WCHAR window_title[64];
     DWORD device_uuid[4];
     DWORD host_device_uuid[4];
     NTSTATUS length_status;
@@ -197,6 +204,16 @@ struct wayland_host_root_info
     UINT64 root_generation;
     UINT64 scene_generation;
     UINT64 registry_generation;
+};
+
+struct wayland_window_state_info
+{
+    UINT64 revision;
+    DWORD style;
+    DWORD ex_style;
+    struct rectangle window;
+    struct rectangle client;
+    WCHAR title[64];
 };
 
 struct wayland_contributor_info
@@ -417,6 +434,33 @@ static NTSTATUS get_host_root( UINT64 host_epoch, UINT64 previous_root,
             info->root_generation = reply->root_generation;
             info->scene_generation = reply->scene_generation;
             info->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_window_state( HWND root, UINT64 host_epoch,
+                                  struct wayland_window_state_info *info )
+{
+    NTSTATUS status;
+    unsigned int length;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_window_state )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        wine_server_set_reply( req, info->title, sizeof(info->title) - sizeof(WCHAR) );
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->revision = reply->state_revision;
+            info->style = reply->style;
+            info->ex_style = reply->ex_style;
+            info->window = reply->window;
+            info->client = reply->client;
+            length = wine_server_reply_size( reply ) / sizeof(WCHAR);
+            info->title[min( length, ARRAY_SIZE(info->title) - 1 )] = 0;
         }
     }
     SERVER_END_REQ;
@@ -996,6 +1040,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_slot_info slot;
     struct wayland_frame_info frame;
     struct wayland_host_root_info host_root;
+    struct wayland_window_state_info window_state;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -1154,6 +1199,16 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->root_generation = host_root.root_generation;
             state->scene_generation = host_root.scene_generation;
             state->registry_generation = host_root.registry_generation;
+            break;
+        case HOST_CHILD_COMMAND_GET_WINDOW_STATE:
+            state->command_status = get_window_state( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, &window_state );
+            state->window_state_revision = window_state.revision;
+            state->window_style = window_state.style;
+            state->window_ex_style = window_state.ex_style;
+            state->window_rect = window_state.window;
+            state->client_rect = window_state.client;
+            memcpy( state->window_title, window_state.title, sizeof(state->window_title) );
             break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
@@ -1371,6 +1426,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_slot_info slot;
     struct wayland_frame_info frame;
     struct wayland_host_root_info host_root;
+    struct wayland_window_state_info window_state;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -1393,6 +1449,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
     UINT64 import_registry_generation;
     UINT64 root_identity = 0, pre_ready_root_identity = 0;
+    UINT64 window_state_revision;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
@@ -1550,6 +1607,39 @@ static void test_host_registration( const char *program, const char *test_name )
         info.device_uuid[3] == TEST_DEVICE_UUID_3,
         "Host device UUID is %08lx%08lx%08lx%08lx.\n", info.device_uuid[0],
         info.device_uuid[1], info.device_uuid[2], info.device_uuid[3] );
+
+    status = get_window_state( root, old_epoch, &window_state );
+    ok( status == STATUS_ACCESS_DENIED, "Non-host window-state query returned %#lx.\n", status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
+        "Timed out querying initial window state.\n" );
+    ok( !state->command_status && state->window_state_revision &&
+        (state->window_style & WS_POPUP) && !wcscmp( state->window_title, L"Wayland scene root" ) &&
+        state->client_rect.right - state->client_rect.left == 64 &&
+        state->client_rect.bottom - state->client_rect.top == 64,
+        "Initial window state returned %#lx, revision %s, style %#lx, title %s, client %dx%d.\n",
+        state->command_status, wine_dbgstr_longlong( state->window_state_revision ),
+        state->window_style, wine_dbgstr_w( state->window_title ),
+        state->client_rect.right - state->client_rect.left,
+        state->client_rect.bottom - state->client_rect.top );
+    window_state_revision = state->window_state_revision;
+    ok( SetWindowTextW( root, L"Updated hosted title" ),
+        "Failed to update window title, error %lu.\n", GetLastError() );
+    ok( SetWindowPos( root, NULL, 11, 13, 80, 72, SWP_NOACTIVATE | SWP_NOZORDER ),
+        "Failed to update window bounds, error %lu.\n", GetLastError() );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
+        "Timed out querying updated window state.\n" );
+    ok( !state->command_status && state->window_state_revision > window_state_revision &&
+        !wcscmp( state->window_title, L"Updated hosted title" ) &&
+        state->window_rect.left == 11 && state->window_rect.top == 13 &&
+        state->window_rect.right - state->window_rect.left == 80 &&
+        state->window_rect.bottom - state->window_rect.top == 72,
+        "Updated window state returned %#lx, revision %s, title %s, rect %d,%d %dx%d.\n",
+        state->command_status, wine_dbgstr_longlong( state->window_state_revision ),
+        wine_dbgstr_w( state->window_title ), state->window_rect.left,
+        state->window_rect.top, state->window_rect.right - state->window_rect.left,
+        state->window_rect.bottom - state->window_rect.top );
 
     hosted_root = CreateWindowExW( 0, L"static", L"Hosted DComp identity root", WS_POPUP,
                                    0, 0, 64, 64, NULL, NULL, NULL, NULL );

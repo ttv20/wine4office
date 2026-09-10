@@ -139,6 +139,8 @@ struct winewayland_host_renderer_root
     uint32_t configure_count;
     int32_t present_result;
     int32_t present_status;
+    uint64_t window_state_revision;
+    char title[256];
 };
 
 struct winewayland_host_renderer_root_retire

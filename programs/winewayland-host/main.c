@@ -33,7 +33,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame_release) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 56);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 320);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
@@ -518,6 +518,16 @@ struct host_root_info
     uint64_t registry_generation;
 };
 
+struct host_window_state
+{
+    uint64_t state_revision;
+    uint32_t style;
+    uint32_t ex_style;
+    struct rectangle window;
+    struct rectangle client;
+    char title[256];
+};
+
 struct host_renderer_root
 {
     user_handle_t root;
@@ -643,6 +653,38 @@ static NTSTATUS get_next_host_root(uint64_t host_epoch, user_handle_t previous_r
             info->root_generation = reply->root_generation;
             info->scene_generation = reply->scene_generation;
             info->registry_generation = reply->registry_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_host_window_state(user_handle_t root, uint64_t host_epoch,
+        struct host_window_state *state)
+{
+    WCHAR title[256];
+    NTSTATUS status;
+    unsigned int length;
+
+    memset(state, 0, sizeof(*state));
+    memset(title, 0, sizeof(title));
+    SERVER_START_REQ(get_wayland_window_state)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        wine_server_set_reply(req, title, sizeof(title) - sizeof(title[0]));
+        if (!(status = wine_server_call(req)))
+        {
+            state->state_revision = reply->state_revision;
+            state->style = reply->style;
+            state->ex_style = reply->ex_style;
+            state->window = reply->window;
+            state->client = reply->client;
+            length = wine_server_reply_size(reply) / sizeof(title[0]);
+            title[min(length, ARRAY_SIZE(title) - 1)] = 0;
+            if (!WideCharToMultiByte(CP_UTF8, 0, title, -1, state->title,
+                    sizeof(state->title), NULL, NULL))
+                state->title[0] = 0;
         }
     }
     SERVER_END_REQ;
@@ -1263,7 +1305,7 @@ static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t h
 }
 
 static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
-        struct host_renderer_root **result)
+        const struct host_window_state *state, struct host_renderer_root **result)
 {
     struct winewayland_host_renderer_root sync;
     struct host_renderer_root *free_root = NULL;
@@ -1284,6 +1326,8 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
             sync.size = sizeof(sync);
             sync.root_identity = root->root_identity;
             sync.root_generation = root->root_generation;
+            sync.window_state_revision = state->state_revision;
+            memcpy(sync.title, state->title, sizeof(sync.title));
             if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync))) return status;
             entry->root = root->root;
             entry->scene_generation = root->scene_generation;
@@ -1300,6 +1344,8 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     sync.size = sizeof(sync);
     sync.root_identity = root->root_identity;
     sync.root_generation = root->root_generation;
+    sync.window_state_revision = state->state_revision;
+    memcpy(sync.title, state->title, sizeof(sync.title));
     if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync))) return status;
     free_root->root = root->root;
     free_root->root_identity = root->root_identity;
@@ -1313,11 +1359,13 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
 static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t host_epoch)
 {
     struct host_contributor_info contributor;
+    struct host_window_state window_state;
     struct host_renderer_root *renderer_root;
     uint64_t previous_contributor = 0;
     NTSTATUS status;
 
-    if ((status = ensure_renderer_root(root, &renderer_root))) return status;
+    if ((status = get_host_window_state(root->root, host_epoch, &window_state))) return status;
+    if ((status = ensure_renderer_root(root, &window_state, &renderer_root))) return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
 
     while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,

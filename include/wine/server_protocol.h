@@ -7036,6 +7036,26 @@ struct get_wayland_host_root_reply
 };
 
 
+struct get_wayland_window_state_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+};
+struct get_wayland_window_state_reply
+{
+    struct reply_header __header;
+    unsigned __int64 state_revision;
+    unsigned int     style;
+    unsigned int     ex_style;
+    struct rectangle window;
+    struct rectangle client;
+    data_size_t      title_length;
+    /* VARARG(title,unicode_str); */
+    char __pad_60[4];
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7387,6 +7407,7 @@ enum request
     REQ_set_wayland_frame_result,
     REQ_get_wayland_frame_result,
     REQ_get_wayland_host_root,
+    REQ_get_wayland_window_state,
     REQ_NB_REQUESTS
 };
 
@@ -7743,6 +7764,7 @@ union generic_request
     struct set_wayland_frame_result_request set_wayland_frame_result_request;
     struct get_wayland_frame_result_request get_wayland_frame_result_request;
     struct get_wayland_host_root_request get_wayland_host_root_request;
+    struct get_wayland_window_state_request get_wayland_window_state_request;
 };
 union generic_reply
 {
@@ -8097,8 +8119,9 @@ union generic_reply
     struct set_wayland_frame_result_reply set_wayland_frame_result_reply;
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
     struct get_wayland_host_root_reply get_wayland_host_root_reply;
+    struct get_wayland_window_state_reply get_wayland_window_state_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 984
+#define SERVER_PROTOCOL_VERSION 985
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

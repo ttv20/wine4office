@@ -183,6 +183,7 @@ struct window
     unsigned __int64 wayland_scene_contributor_id;
     unsigned __int64 wayland_scene_stream_id;
     unsigned __int64 wayland_scene_binding_generation;
+    unsigned __int64 wayland_window_state_revision;
     unsigned int     wayland_scene_disposition;
     struct wayland_scene_registry *wayland_scene_registry;
 };
@@ -190,6 +191,11 @@ struct window
 static unsigned __int64 wayland_contributor_id;
 static unsigned __int64 wayland_stream_id;
 static unsigned __int64 wayland_binding_generation;
+
+static void bump_wayland_window_state_revision( struct window *win )
+{
+    if (!++win->wayland_window_state_revision) ++win->wayland_window_state_revision;
+}
 
 static void release_wayland_buffer_pool( struct wayland_buffer_pool *pool )
 {
@@ -825,6 +831,7 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_scene_disposition = 0;
     win->wayland_scene_registry = NULL;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
+    win->wayland_window_state_revision = 1;
     list_init( &win->children );
     list_init( &win->unlinked );
 
@@ -2708,10 +2715,15 @@ DECL_HANDLER(get_window_info)
 DECL_HANDLER(init_window_info)
 {
     struct window *win;
+    unsigned int old_style, old_ex_style;
 
     if (!(win = get_window( req->handle ))) return;
+    old_style = win->style;
+    old_ex_style = win->ex_style;
     win->style = req->style;
     win->ex_style = req->ex_style;
+    if (win->style != old_style || win->ex_style != old_ex_style)
+        bump_wayland_window_state_revision( win );
 
     /* changing window style triggers a non-client paint */
     win->paint_flags |= PAINT_NONCLIENT;
@@ -2722,6 +2734,7 @@ DECL_HANDLER(init_window_info)
 DECL_HANDLER(set_window_info)
 {
     struct window *win;
+    unsigned int old_style, old_ex_style;
     bool ansi;
 
     if (!(win = get_window( req->handle ))) return;
@@ -2731,6 +2744,8 @@ DECL_HANDLER(set_window_info)
         return;
     }
 
+    old_style = win->style;
+    old_ex_style = win->ex_style;
     SHARED_WRITE_BEGIN( win->shared, window_shm_t )
     {
         switch (req->offset)
@@ -2780,6 +2795,8 @@ DECL_HANDLER(set_window_info)
         }
     }
     SHARED_WRITE_END;
+    if (win->style != old_style || win->ex_style != old_ex_style)
+        bump_wayland_window_state_revision( win );
 }
 
 
@@ -2963,7 +2980,7 @@ DECL_HANDLER(set_window_pos)
     const struct rectangle *extra_rects = get_req_data();
     struct window *previous = NULL;
     struct window *top, *win = get_window( req->handle );
-    unsigned int flags = req->swp_flags, old_style;
+    unsigned int flags = req->swp_flags, old_style, old_ex_style;
 
     if (!win) return;
     if (!win->parent) flags |= SWP_NOZORDER;  /* no Z order for the desktop */
@@ -3028,6 +3045,7 @@ DECL_HANDLER(set_window_pos)
     if (win->paint_flags & PAINT_HAS_PIXEL_FORMAT) update_pixel_format_flags( win );
 
     old_style = win->style;
+    old_ex_style = win->ex_style;
     old_window = win->window_rect;
     old_client = win->client_rect;
     set_window_pos( win, previous, flags, &window_rect, &client_rect,
@@ -3035,6 +3053,10 @@ DECL_HANDLER(set_window_pos)
     if ((win->style & old_style & WS_VISIBLE) && (memcmp( &old_client, &win->client_rect, sizeof(old_client) )
         || memcmp( &old_window, &win->window_rect, sizeof(old_window) )))
         update_cursor_pos( win->desktop );
+    if (win->style != old_style || win->ex_style != old_ex_style ||
+        memcmp( &old_client, &win->client_rect, sizeof(old_client) ) ||
+        memcmp( &old_window, &win->window_rect, sizeof(old_window) ))
+        bump_wayland_window_state_revision( win );
 
     if (win->paint_flags & SET_WINPOS_LAYERED_WINDOW) validate_whole_window( win );
 
@@ -3120,13 +3142,16 @@ DECL_HANDLER(set_window_text)
     data_size_t len;
     WCHAR *text = NULL;
     struct window *win = get_window( req->handle );
+    int changed;
 
     if (!win) return;
     len = (get_req_data_size() / sizeof(WCHAR)) * sizeof(WCHAR);
     if (len && !(text = memdup( get_req_data(), len ))) return;
+    changed = len != win->text_len || (len && memcmp( text, win->text, len ));
     free( win->text );
     win->text = text;
     win->text_len = len;
+    if (changed) bump_wayland_window_state_revision( win );
 }
 
 
@@ -4859,6 +4884,33 @@ DECL_HANDLER(get_wayland_host_root)
 
 done:
     release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_window_state)
+{
+    struct window *root;
+
+    reply->state_revision = 0;
+    reply->style = 0;
+    reply->ex_style = 0;
+    reply->window = empty_rect;
+    reply->client = empty_rect;
+    reply->title_length = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    reply->state_revision = root->wayland_window_state_revision;
+    reply->style = root->style;
+    reply->ex_style = root->ex_style;
+    reply->window = root->window_rect;
+    reply->client = root->client_rect;
+    reply->title_length = root->text_len / sizeof(WCHAR);
+    if (root->text_len)
+        set_reply_data( root->text, min( root->text_len, get_reply_max_size() ));
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

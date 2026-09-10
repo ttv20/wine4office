@@ -4886,3 +4886,17 @@ enum inproc_sync_type
     unsigned __int64 scene_generation;
     unsigned __int64 registry_generation;
 @END
+
+/* Query the current logical-window snapshot as the registered host. */
+@REQ(get_wayland_window_state)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+@REPLY
+    unsigned __int64 state_revision;
+    unsigned int     style;
+    unsigned int     ex_style;
+    struct rectangle window;
+    struct rectangle client;
+    data_size_t      title_length;
+    VARARG(title,unicode_str);
+@END

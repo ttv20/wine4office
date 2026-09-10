@@ -46,7 +46,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 56);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 320);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
@@ -207,6 +207,7 @@ struct renderer_root
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
+    uint64_t window_state_revision;
 };
 
 struct renderer_slot
@@ -1877,6 +1878,7 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     root->requested_height = requested_height;
     root->swapchain_width = extent.width;
     root->swapchain_height = extent.height;
+    xdg_surface_set_window_geometry(root->xdg_surface, 0, 0, extent.width, extent.height);
     status = STATUS_SUCCESS;
 
 done:
@@ -1908,6 +1910,8 @@ static NTSTATUS sync_renderer_root(void *args)
     params->present_result = VK_NOT_READY;
     params->present_status = STATUS_PENDING;
     if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
+    if (params->window_state_revision && !memchr(params->title, 0, sizeof(params->title)))
+        return STATUS_INVALID_PARAMETER;
     if (!renderer.display || !renderer.compositor || !renderer.xdg_wm_base)
         return STATUS_DEVICE_NOT_READY;
 
@@ -1958,6 +1962,12 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
 
 done:
+    if (params->window_state_revision &&
+        params->window_state_revision != root->window_state_revision)
+    {
+        xdg_toplevel_set_title(root->xdg_toplevel, params->title);
+        root->window_state_revision = params->window_state_revision;
+    }
     if (requested_width || requested_height)
     {
         if (!requested_width || !requested_height) return STATUS_INVALID_PARAMETER;
