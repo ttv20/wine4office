@@ -184,6 +184,8 @@ struct window
     unsigned __int64 wayland_scene_stream_id;
     unsigned __int64 wayland_scene_binding_generation;
     unsigned __int64 wayland_window_state_revision;
+    unsigned __int64 wayland_close_host_epoch;
+    unsigned __int64 wayland_close_request_id;
     unsigned int     wayland_scene_disposition;
     struct wayland_scene_registry *wayland_scene_registry;
 };
@@ -4911,6 +4913,46 @@ DECL_HANDLER(get_wayland_window_state)
     reply->title_length = root->text_len / sizeof(WCHAR);
     if (root->text_len)
         set_reply_data( root->text, min( root->text_len, get_reply_max_size() ));
+}
+
+DECL_HANDLER(post_wayland_window_close)
+{
+    struct obj_locator locator;
+    struct window *root;
+
+    reply->state_revision = 0;
+    if (!req->root_identity || !req->root_generation || !req->request_id)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    locator = get_shared_object_locator( root->shared );
+    if (locator.id != req->root_identity || (root->handle >> 16) != req->root_generation)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (root->wayland_close_host_epoch != req->host_epoch)
+    {
+        root->wayland_close_host_epoch = req->host_epoch;
+        root->wayland_close_request_id = 0;
+    }
+    if (req->request_id < root->wayland_close_request_id)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    reply->state_revision = root->wayland_window_state_revision;
+    if (req->request_id == root->wayland_close_request_id) return;
+    post_message( root->handle, WM_CLOSE, 0, 0 );
+    if (!get_error()) root->wayland_close_request_id = req->request_id;
 }
 
 void cleanup_process_wayland_scenes( struct process *process )

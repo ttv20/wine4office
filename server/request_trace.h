@@ -4115,6 +4115,20 @@ static void dump_get_wayland_window_state_reply( const struct get_wayland_window
     dump_varargs_unicode_str( ", title=", cur_size );
 }
 
+static void dump_post_wayland_window_close_request( const struct post_wayland_window_close_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", request_id=", &req->request_id );
+}
+
+static void dump_post_wayland_window_close_reply( const struct post_wayland_window_close_reply *req )
+{
+    dump_uint64( " state_revision=", &req->state_revision );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4469,6 +4483,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_frame_result_request,
     (dump_func)dump_get_wayland_host_root_request,
     (dump_func)dump_get_wayland_window_state_request,
+    (dump_func)dump_post_wayland_window_close_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4823,6 +4838,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_frame_result_reply,
     (dump_func)dump_get_wayland_host_root_reply,
     (dump_func)dump_get_wayland_window_state_reply,
+    (dump_func)dump_post_wayland_window_close_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5177,6 +5193,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_frame_result",
     "get_wayland_host_root",
     "get_wayland_window_state",
+    "post_wayland_window_close",
 };
 
 static const struct

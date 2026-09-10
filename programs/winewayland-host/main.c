@@ -537,6 +537,7 @@ struct host_renderer_root
     uint64_t present_contributor_id;
     uint64_t present_frame_id;
     uint64_t present_renderer_pool_generation;
+    uint64_t close_request_id;
     uint32_t present_width;
     uint32_t present_height;
     int32_t present_result;
@@ -545,6 +546,8 @@ struct host_renderer_root
     NTSTATUS terminal_backend_status;
     BOOL present_submitted;
     BOOL source_released;
+    BOOL native_closed;
+    BOOL close_posted;
     BOOL seen;
 };
 
@@ -609,6 +612,7 @@ struct host_renderer_pool
 static struct host_renderer_pool renderer_pools[HOST_RENDERER_MAX_POOLS];
 static struct host_renderer_root renderer_roots[HOST_RENDERER_MAX_ROOTS];
 static uint64_t next_renderer_pool_generation;
+static uint64_t next_host_close_request_id;
 
 static NTSTATUS get_registered_host(struct registered_host_info *info)
 {
@@ -688,6 +692,29 @@ static NTSTATUS get_host_window_state(user_handle_t root, uint64_t host_epoch,
         }
     }
     SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS post_host_window_close(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    NTSTATUS status;
+
+    if (!root->close_request_id)
+    {
+        if (!++next_host_close_request_id) ++next_host_close_request_id;
+        root->close_request_id = next_host_close_request_id;
+    }
+    SERVER_START_REQ(post_wayland_window_close)
+    {
+        req->root = root->root;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->request_id = root->close_request_id;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    if (!status) root->close_posted = TRUE;
     return status;
 }
 
@@ -1331,6 +1358,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
             if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync))) return status;
             entry->root = root->root;
             entry->scene_generation = root->scene_generation;
+            entry->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
             entry->seen = TRUE;
             *result = entry;
             return STATUS_SUCCESS;
@@ -1351,6 +1379,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     free_root->root_identity = root->root_identity;
     free_root->root_generation = root->root_generation;
     free_root->scene_generation = root->scene_generation;
+    free_root->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
     free_root->seen = TRUE;
     *result = free_root;
     return STATUS_SUCCESS;
@@ -1366,6 +1395,9 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
 
     if ((status = get_host_window_state(root->root, host_epoch, &window_state))) return status;
     if ((status = ensure_renderer_root(root, &window_state, &renderer_root))) return status;
+    if (renderer_root->native_closed && !renderer_root->close_posted &&
+        (status = post_host_window_close(renderer_root, host_epoch)))
+        return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
 
     while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,

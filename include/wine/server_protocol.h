@@ -7056,6 +7056,22 @@ struct get_wayland_window_state_reply
 };
 
 
+struct post_wayland_window_close_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 request_id;
+};
+struct post_wayland_window_close_reply
+{
+    struct reply_header __header;
+    unsigned __int64 state_revision;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7408,6 +7424,7 @@ enum request
     REQ_get_wayland_frame_result,
     REQ_get_wayland_host_root,
     REQ_get_wayland_window_state,
+    REQ_post_wayland_window_close,
     REQ_NB_REQUESTS
 };
 
@@ -7765,6 +7782,7 @@ union generic_request
     struct get_wayland_frame_result_request get_wayland_frame_result_request;
     struct get_wayland_host_root_request get_wayland_host_root_request;
     struct get_wayland_window_state_request get_wayland_window_state_request;
+    struct post_wayland_window_close_request post_wayland_window_close_request;
 };
 union generic_reply
 {
@@ -8120,8 +8138,9 @@ union generic_reply
     struct get_wayland_frame_result_reply get_wayland_frame_result_reply;
     struct get_wayland_host_root_reply get_wayland_host_root_reply;
     struct get_wayland_window_state_reply get_wayland_window_state_reply;
+    struct post_wayland_window_close_reply post_wayland_window_close_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 985
+#define SERVER_PROTOCOL_VERSION 986
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

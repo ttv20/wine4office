@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 985.
+Generated server protocol version: 986.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -228,6 +228,13 @@ or transport fixture is not Outlook support.
   applies it to its `xdg_toplevel`, and sets matching xdg window geometry when
   it creates or resizes the WSI swapchain. Foreign processes cannot query the
   snapshot.
+- An xdg-toplevel close event now crosses an authenticated server operation
+  before it reaches the application. The request carries the host epoch, shared
+  root identity, USER handle generation and a monotonic request ID. Wineserver
+  validates all four, then posts `WM_CLOSE` to the existing owner thread's
+  normal Windows message queue. Replaying the same ID is idempotent and an
+  older ID or recycled-root tuple is rejected, so a host retry cannot deliver
+  two close requests or close a new window that reused the HWND value.
 
 ## Contributor interception inventory
 
@@ -593,6 +600,12 @@ admitted.
   `/workspace/artifacts/window-state-authority-{x64,i386}.log`, with exact
   binaries and hashes under `/workspace/artifacts/window-state-*` and the
   coherent runner at `/workspace/runner-window-state`.
+- Protocol 986 authenticated close delivery passed 530 checks with zero
+  failures in both x86-64 and i386 on the Radeon task environment. The tests
+  cover foreign-host rejection, mismatched shared identity, one normal
+  `WM_CLOSE` delivery, idempotent replay and stale request rejection. Evidence
+  is retained as `/workspace/artifacts/native-close-authority-{x64,i386}.log`,
+  with exact binaries and hashes under `/workspace/artifacts/native-close-*`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -4900,3 +4900,14 @@ enum inproc_sync_type
     data_size_t      title_length;
     VARARG(title,unicode_str);
 @END
+
+/* Post one authenticated native close request to the logical window owner. */
+@REQ(post_wayland_window_close)
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 request_id;
+@REPLY
+    unsigned __int64 state_revision;
+@END

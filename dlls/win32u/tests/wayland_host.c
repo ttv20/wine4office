@@ -63,6 +63,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_SET_FRAME_RESULT,
     HOST_CHILD_COMMAND_GET_ROOT,
     HOST_CHILD_COMMAND_GET_WINDOW_STATE,
+    HOST_CHILD_COMMAND_POST_CLOSE,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -122,6 +123,7 @@ struct wayland_host_test_state
     UINT64 root_identity;
     UINT64 root_generation;
     UINT64 window_state_revision;
+    UINT64 close_request_id;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -462,6 +464,27 @@ static NTSTATUS get_window_state( HWND root, UINT64 host_epoch,
             length = wine_server_reply_size( reply ) / sizeof(WCHAR);
             info->title[min( length, ARRAY_SIZE(info->title) - 1 )] = 0;
         }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS post_window_close( HWND root, UINT64 host_epoch, UINT64 root_identity,
+                                   UINT64 root_generation, UINT64 request_id,
+                                   UINT64 *state_revision )
+{
+    NTSTATUS status;
+
+    *state_revision = 0;
+    SERVER_START_REQ( post_wayland_window_close )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->request_id = request_id;
+        if (!(status = p_wine_server_call( req )))
+            *state_revision = reply->state_revision;
     }
     SERVER_END_REQ;
     return status;
@@ -1210,6 +1233,11 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->client_rect = window_state.client;
             memcpy( state->window_title, window_state.title, sizeof(state->window_title) );
             break;
+        case HOST_CHILD_COMMAND_POST_CLOSE:
+            state->command_status = post_window_close( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->root_identity, state->root_generation,
+                    state->close_request_id, &state->window_state_revision );
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -1448,7 +1476,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
     UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
     UINT64 import_registry_generation;
-    UINT64 root_identity = 0, pre_ready_root_identity = 0;
+    UINT64 root_identity = 0, root_generation = 0, pre_ready_root_identity = 0;
     UINT64 window_state_revision;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
@@ -1458,6 +1486,7 @@ static void test_host_registration( const char *program, const char *test_name )
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
     unsigned int i;
     DWORD registered_slots, imported_slots, failed_slots;
+    MSG msg;
 
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Initial host query returned %#lx.\n", status );
@@ -1800,6 +1829,7 @@ static void test_host_registration( const char *program, const char *test_name )
         {
             saw_root = TRUE;
             root_identity = state->root_identity;
+            root_generation = state->root_generation;
         }
         else if ((HWND)(UINT_PTR)state->enumerated_root == pre_ready_root)
         {
@@ -1820,6 +1850,46 @@ static void test_host_registration( const char *program, const char *test_name )
         "Distinct roots returned the same server identity %s.\n",
         wine_dbgstr_longlong( root_identity ) );
     state->enumeration_cursor = 0;
+
+    status = post_window_close( root, old_epoch, root_identity, root_generation, 1,
+                                &window_state_revision );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Non-host native close returned %#lx.\n", status );
+    while (PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ));
+    state->root_identity = root_identity ^ 1;
+    state->root_generation = root_generation;
+    state->close_request_id = 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting a mismatched native close.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Mismatched native close returned %#lx or posted WM_CLOSE.\n",
+        state->command_status );
+    state->root_identity = root_identity;
+    state->close_request_id = 2;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting native close.\n" );
+    ok( !state->command_status && state->window_state_revision &&
+        PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Native close returned %#lx, revision %s, without WM_CLOSE.\n",
+        state->command_status, wine_dbgstr_longlong( state->window_state_revision ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out replaying native close.\n" );
+    ok( !state->command_status &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Idempotent native close returned %#lx or posted a duplicate.\n",
+        state->command_status );
+    state->close_request_id = 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting stale native close.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Stale native close returned %#lx or posted WM_CLOSE.\n",
+        state->command_status );
 
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
