@@ -293,12 +293,12 @@ or transport fixture is not Outlook support.
   supported. The authority fixture verified the cross-root rejection while
   retaining the existing same-root registry tests and passed 662 checks with
   zero failures.
-- Native non-client rendering is not yet part of the host WSI image. DComp
-  therefore admits a composition swapchain only when the root client area
-  covers the complete outer window at the same screen origin. A title bar,
-  border, resize frame or any other non-client margin keeps the committed
-  scene in `LocalFallback`, preserving Wine's existing decorated-window path
-  until explicit frame composition is implemented.
+- Native non-client rendering is part of the host WSI image. DComp may admit
+  an identity composition swapchain whose extent matches the client area even
+  when the root has a title bar, border or resize frame. The guest invalidates
+  the complete frame after the successful Commit. Wineserver keeps the local
+  native lease active until the host has a snapshot from the current geometry,
+  so a missing or stale frame cannot expose an undecorated hosted root.
 - Protocol 995 adds the immutable software frame-snapshot authority boundary.
   The logical root owner may replace only a strictly newer BGRA8
   premultiplied snapshot for the current geometry revision. Wineserver pins
@@ -311,8 +311,7 @@ or transport fixture is not Outlook support.
   copies that full frame first and the host-owned GPU image into the exact
   client offset second. Snapshot, content and geometry revisions are checked
   together; replacement waits until an older Present stops reading the
-  buffer. Decorated admission remains guarded until its full pipeline fixture
-  proves the driver publication and combined image.
+  buffer.
 
 ## Contributor interception inventory
 
@@ -815,13 +814,14 @@ admitted.
   streams. The authority fixture terminated a host with A and the left mouse
   button held, observed both releases, and passed 660 checks with zero
   failures.
-- The framed-window admission fixture resized a `WS_OVERLAPPEDWINDOW` so its
-  DComp swapchain still exactly matched the 64x64 client area, then verified
-  that the non-client margin alone changes the scene from `HostedContent` to
-  `LocalFallback`. The full x86-64 Radeon authority suite passed 669 checks
-  with zero failures. Evidence is retained as
-  `/workspace/artifacts/framed-fallback-authority-x64.log` and
-  `/workspace/artifacts/framed-fallback-win32u-test-x64.exe`.
+- The decorated native-lease fixture proves that a `WS_OVERLAPPEDWINDOW`
+  remains `PreparingHost` when its frame snapshot is stale, then begins the
+  transfer only after a replacement snapshot is atomically bound to the
+  current geometry. The same suite admits a framed identity DComp swapchain.
+  The full x86-64 Radeon authority suite passed 700 checks with zero failures.
+  Evidence is retained as
+  `/workspace/artifacts/decorated-admission-authority-x64.log` and
+  `/workspace/artifacts/decorated-admission-authority-SHA256SUMS`.
 - The frame-snapshot authority fixture rejects a non-host reader and a stale
   geometry revision, accepts the current owner publication, closes the
   publisher handle, and verifies the current host can still map and read the
@@ -839,6 +839,17 @@ admitted.
   is retained as `artifacts/frame-snapshot-composite-wsi-{x64,i386}.log` in the
   Intel task directory. Both runs ended with zero task-prefix Wine processes;
   the laptop retained 62 GiB free.
+- The real decorated x86-64 DComp path passed on Intel Iris Xe with a 320x192
+  client inside a native title bar and resize frame. The driver published 18
+  software snapshots, the host imported all three Vulkan transport slots,
+  composited six frames without a discard or failure, and acknowledged one
+  local-to-host ownership transfer. The pre-existing popup lifecycle fixture
+  also remained green with nine imports, six Presents, three host activations,
+  two local activations and its transformed fallback/rehost sequence. Evidence
+  and hashes are retained as `artifacts/decorated-frame-pipeline-x64.log`,
+  `artifacts/decorated-admission-popup-regression-x64.log` and
+  `artifacts/decorated-admission-SHA256SUMS` in the Intel task directory. Both
+  runs ended with zero task-prefix Wine processes and 62 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

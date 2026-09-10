@@ -2625,7 +2625,7 @@ done:
     return ret;
 }
 
-static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
+static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2657,6 +2657,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
     uint64_t token_low = 0, token_high = 0;
     DXGI_SWAP_CHAIN_DESC1 desc = {0};
     D3D_FEATURE_LEVEL feature_level;
+    RECT client_rect = {0}, window_rect = {0, 0, 64, 64};
+    DWORD window_style = frame_test ? WS_OVERLAPPEDWINDOW : WS_POPUP;
     HWND window = NULL;
     NTSTATUS status;
     HRESULT hr = E_FAIL;
@@ -2717,9 +2719,23 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
         goto done;
     /* Initialise the process display driver before WineD3D creates its hidden
      * device window.  This matters for a 32-bit client in a WoW64 prefix. */
-    if (!(window = CreateWindowExW(0, L"static", L"DComp host pipeline", WS_POPUP,
-            0, 0, 64, 64, NULL, NULL, NULL, NULL)))
+    if (frame_test)
+    {
+        window_rect.right = 320;
+        window_rect.bottom = 192;
+        if (!AdjustWindowRectEx(&window_rect, window_style, FALSE, 0)) goto done;
+    }
+    if (!(window = CreateWindowExW(0, L"static", L"DComp host pipeline", window_style,
+            0, 0, window_rect.right - window_rect.left,
+            window_rect.bottom - window_rect.top, NULL, NULL, NULL, NULL)) ||
+            !GetClientRect(window, &client_rect) || client_rect.right <= 0 ||
+            client_rect.bottom <= 0)
         goto done;
+    if (frame_test)
+    {
+        ShowWindow(window, SW_SHOW);
+        UpdateWindow(window);
+    }
     if (input_test)
     {
         SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
@@ -2736,8 +2752,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
             (void **)&dcomp_device)))
         goto done;
 
-    desc.Width = 64;
-    desc.Height = 64;
+    desc.Width = client_rect.right;
+    desc.Height = client_rect.bottom;
     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
@@ -2753,6 +2769,13 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
             (IUnknown *)swapchain)) || FAILED(hr = IDCompositionTarget_SetRoot(target, visual)) ||
             FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
         goto done;
+
+    if (frame_test && !RedrawWindow(window, NULL, NULL,
+            RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
 
     /* The binding becomes visible only at the successful Commit boundary.
      * Present once afterward to create and register the transport pool; that
@@ -2954,6 +2977,21 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
     if (!InterlockedCompareExchange((LONG *)&startup->native_host_activations, 0, 0))
     {
         fprintf(stderr, "dcomp_pipeline=failed local retirement was not acknowledged\n");
+        goto done;
+    }
+
+    if (frame_test)
+    {
+        if (!InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0))
+        {
+            fprintf(stderr, "dcomp_frame=failed no software frame snapshot was uploaded\n");
+            goto done;
+        }
+        printf("dcomp_frame=passed client=%ldx%ld snapshots=%u imports=%u presented=%u discarded=%u host_activations=%u\n",
+                client_rect.right, client_rect.bottom, startup->frame_snapshots,
+                startup->imported_slots, startup->presented_frames,
+                startup->discarded_frames, startup->native_host_activations);
+        ret = 0;
         goto done;
     }
 
@@ -3173,11 +3211,13 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
+        return test_dcomp_pipeline(FALSE, FALSE, TRUE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE);
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE);
+        return test_dcomp_pipeline(TRUE, TRUE, FALSE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -3187,7 +3227,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
             argv[0]);
     return 2;
 }

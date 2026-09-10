@@ -5641,6 +5641,28 @@ static int validate_wayland_native_lease_root( struct window *root,
     return 1;
 }
 
+static int wayland_root_requires_frame_snapshot( const struct window *root )
+{
+    return root->client_rect.left != root->window_rect.left ||
+           root->client_rect.top != root->window_rect.top ||
+           root->client_rect.right != root->window_rect.right ||
+           root->client_rect.bottom != root->window_rect.bottom;
+}
+
+static int wayland_root_has_current_frame_snapshot( const struct window *root )
+{
+    unsigned int width, height;
+
+    width = root->window_rect.right > root->window_rect.left ?
+            root->window_rect.right - root->window_rect.left : 0;
+    height = root->window_rect.bottom > root->window_rect.top ?
+            root->window_rect.bottom - root->window_rect.top : 0;
+    return root->wayland_frame_snapshot &&
+           root->wayland_frame_snapshot_geometry_revision == root->wayland_geometry_revision &&
+           root->wayland_frame_snapshot_width == width &&
+           root->wayland_frame_snapshot_height == height;
+}
+
 DECL_HANDLER(manage_wayland_window_native_lease)
 {
     struct window *root;
@@ -5698,6 +5720,12 @@ DECL_HANDLER(manage_wayland_window_native_lease)
             root->wayland_native_lease_host_epoch == req->host_epoch &&
             root->wayland_native_lease_scene_generation == req->scene_generation)
         {
+            if (wayland_root_requires_frame_snapshot( root ) &&
+                !wayland_root_has_current_frame_snapshot( root ))
+            {
+                set_error( STATUS_DEVICE_NOT_READY );
+                return;
+            }
             if (!next_wayland_native_lease_request( root ))
             {
                 set_error( STATUS_INTEGER_OVERFLOW );

@@ -391,7 +391,7 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
     SIZE_T view_size = 0;
     HANDLE mapping = 0;
     UINT64 revision;
-    UINT32 *bits;
+    UINT32 *bits = NULL;
     unsigned int width, height, y;
     int client_left, client_top, client_right, client_bottom;
     NTSTATUS status;
@@ -400,9 +400,16 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
         !NtUserGetClientRect(hwnd, &client_rect, NtUserGetDpiForWindow(hwnd)) ||
         !NtUserClientToScreen(hwnd, &client_origin) ||
         window_rect.right <= window_rect.left || window_rect.bottom <= window_rect.top)
+    {
+        TRACE("Could not query frame snapshot geometry for %p.\n", hwnd);
         return;
+    }
     width = window_rect.right - window_rect.left;
     height = window_rect.bottom - window_rect.top;
+    TRACE("Frame snapshot geometry for %p is %ux%u at client %d,%d %dx%d, source %ux%u.\n",
+            hwnd, width, height, client_origin.x - window_rect.left,
+            client_origin.y - window_rect.top, client_rect.right - client_rect.left,
+            client_rect.bottom - client_rect.top, source->width, source->height);
     if (width > source->width || height > source->height || width > 16384 || height > 16384 ||
         (UINT64)width * height * sizeof(*bits) > 64ull * 1024 * 1024)
         return;
@@ -410,10 +417,18 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
     section_size.QuadPart = (UINT64)width * height * sizeof(*bits);
     status = NtCreateSection(&mapping, SECTION_MAP_READ | SECTION_MAP_WRITE, NULL,
             &section_size, PAGE_READWRITE, SEC_COMMIT, 0);
-    if (status) return;
+    if (status)
+    {
+        TRACE("Creating frame snapshot section for %p returned %#x.\n", hwnd, status);
+        return;
+    }
     status = NtMapViewOfSection(mapping, GetCurrentProcess(), (void **)&bits, 0, 0, NULL,
             &view_size, ViewUnmap, 0, PAGE_READWRITE);
-    if (status) goto done;
+    if (status)
+    {
+        TRACE("Mapping frame snapshot section for %p returned %#x.\n", hwnd, status);
+        goto done;
+    }
     for (y = 0; y < height; ++y)
         memcpy(bits + y * width, (const UINT32 *)source->map_data + y * source->width,
                 width * sizeof(*bits));
@@ -449,6 +464,8 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
         status = wine_server_call(req);
     }
     SERVER_END_REQ;
+    TRACE("Frame snapshot for %p revision %s extent %ux%u returned %#x.\n", hwnd,
+            wine_dbgstr_longlong(revision), width, height, status);
     if (status != STATUS_SUCCESS && status != STATUS_REVISION_MISMATCH &&
         status != STATUS_DEVICE_NOT_READY)
         TRACE("Frame snapshot publication for %p returned %#x.\n", hwnd, status);
@@ -566,6 +583,8 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     if (shape_bits)
         wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
                                       shape_info, shape_bits);
+    TRACE("Flushing %p with DComp target %u and detached host %u.\n",
+            window_surface->hwnd, dcomp_target, dcomp_host);
     if (dcomp_target) publish_frame_snapshot(window_surface->hwnd, shm_buffer);
     if (dcomp_host)
     {

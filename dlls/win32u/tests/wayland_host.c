@@ -1934,7 +1934,7 @@ static void test_host_registration( const char *program, const char *test_name )
     HWND second_root = NULL;
     HWND input_a = NULL, input_b = NULL;
     HWND previous_focus = NULL;
-    RECT pool_client_rect;
+    RECT pool_client_rect, framed_transfer_rect = {0, 0, 80, 72};
     POINT input_point, cursor_point;
     HRESULT hr;
     NTSTATUS status;
@@ -2307,7 +2307,7 @@ static void test_host_registration( const char *program, const char *test_name )
         }
         if (hosted_target && hosted_visual && hosted_swapchain)
         {
-            RECT framed_rect = {0, 0, 64, 64};
+            RECT framed_rect = {0, 0, 64, 64}, actual_rect = {0}, actual_client = {0};
 
             hr = IDCompositionVisual_SetContent( hosted_visual, (IUnknown *)hosted_swapchain );
             ok( hr == S_OK, "Setting hosted DComp content returned %#lx.\n", hr );
@@ -2363,6 +2363,18 @@ static void test_host_registration( const char *program, const char *test_name )
                              framed_rect.bottom - framed_rect.top,
                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED ),
                 "Failed to resize framed DComp root, error %lu.\n", GetLastError() );
+            ok( GetWindowRect( hosted_root, &actual_rect ) &&
+                GetClientRect( hosted_root, &actual_client ) &&
+                actual_client.right > 0 && actual_client.bottom > 0 &&
+                (actual_client.right != actual_rect.right - actual_rect.left ||
+                 actual_client.bottom != actual_rect.bottom - actual_rect.top),
+                "Framed DComp bounds are window %ldx%ld, client %ldx%ld.\n",
+                actual_rect.right - actual_rect.left, actual_rect.bottom - actual_rect.top,
+                actual_client.right, actual_client.bottom );
+            hr = IDXGISwapChain1_ResizeBuffers( hosted_swapchain, 2,
+                    actual_client.right, actual_client.bottom,
+                    DXGI_FORMAT_B8G8R8A8_UNORM, 0 );
+            ok( hr == S_OK, "Resizing the framed DComp swapchain returned %#lx.\n", hr );
             hr = IDCompositionVisual_SetContent( hosted_visual,
                                                  (IUnknown *)hosted_swapchain );
             ok( hr == S_OK, "Resetting framed DComp content returned %#lx.\n", hr );
@@ -2372,7 +2384,7 @@ static void test_host_registration( const char *program, const char *test_name )
                                         HOST_CHILD_COMMAND_GET_SCENE ),
                 "Timed out querying framed DComp scene.\n" );
             ok( !state->command_status &&
-                state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+                state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
                 "Framed DComp scene returned %#lx, generation %s, disposition %#lx.\n",
                 state->command_status, wine_dbgstr_longlong( state->scene_generation ),
                 state->scene_disposition );
@@ -2977,6 +2989,33 @@ static void test_host_registration( const char *program, const char *test_name )
         state->contributor_owner_process_id, state->contributor_producer_process_id,
         state->contributor_source, state->contributor_target_layer, state->contributor_state );
 
+    ok( AdjustWindowRectEx( &framed_transfer_rect, WS_OVERLAPPEDWINDOW, FALSE, 0 ),
+        "Failed to calculate framed native-transfer bounds, error %lu.\n", GetLastError() );
+    SetLastError( 0 );
+    SetWindowLongW( root, GWL_STYLE, WS_OVERLAPPEDWINDOW );
+    ok( (GetWindowLongW( root, GWL_STYLE ) & WS_OVERLAPPEDWINDOW) == WS_OVERLAPPEDWINDOW,
+        "Failed to apply framed native-transfer style, error %lu.\n", GetLastError() );
+    ok( SetWindowPos( root, NULL, 0, 0,
+                     framed_transfer_rect.right - framed_transfer_rect.left,
+                     framed_transfer_rect.bottom - framed_transfer_rect.top,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED ),
+        "Failed to resize framed native-transfer root, error %lu.\n", GetLastError() );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
+        "Timed out querying framed native-transfer state.\n" );
+    ok( !state->command_status &&
+        (state->client_rect.left != state->window_rect.left ||
+         state->client_rect.top != state->window_rect.top ||
+         state->client_rect.right != state->window_rect.right ||
+         state->client_rect.bottom != state->window_rect.bottom) &&
+        state->window_geometry_revision > window_geometry_revision,
+        "Framed native-transfer state returned %#lx, geometry %s, window %d,%d-%d,%d, client %d,%d-%d,%d.\n",
+        state->command_status, wine_dbgstr_longlong( state->window_geometry_revision ),
+        state->window_rect.left, state->window_rect.top, state->window_rect.right,
+        state->window_rect.bottom, state->client_rect.left, state->client_rect.top,
+        state->client_rect.right, state->client_rect.bottom );
+    window_geometry_revision = state->window_geometry_revision;
+
     status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 2,
                             state->contributor_id, state->stream_id,
                             state->binding_generation, &next_generation, NULL );
@@ -3022,6 +3061,45 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->command_status == STATUS_REVISION_MISMATCH,
         "Stale-scene native transfer returned %#lx.\n", state->command_status );
     state->scene_generation++;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out beginning a framed transfer without a current snapshot.\n" );
+    ok( state->command_status == STATUS_DEVICE_NOT_READY,
+        "Snapshot-less framed transfer returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the snapshot-less framed transfer.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST,
+        "Snapshot-less framed lease returned %#lx, state %#lx.\n",
+        state->command_status, state->native_lease_state );
+    snapshot_mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+            (state->window_rect.right - state->window_rect.left) *
+            (state->window_rect.bottom - state->window_rect.top) * 4, NULL );
+    ok( !!snapshot_mapping, "Failed to create framed native-transfer snapshot, error %lu.\n",
+        GetLastError() );
+    if (snapshot_mapping)
+    {
+        snapshot_bits = MapViewOfFile( snapshot_mapping, FILE_MAP_WRITE, 0, 0, 0 );
+        ok( !!snapshot_bits, "Failed to map framed native-transfer snapshot, error %lu.\n",
+            GetLastError() );
+        if (snapshot_bits)
+        {
+            snapshot_bits[0] = 0xff2468ac;
+            UnmapViewOfFile( snapshot_bits );
+        }
+        status = publish_frame_snapshot( root, snapshot_mapping,
+                state->window_rect.right - state->window_rect.left,
+                state->window_rect.bottom - state->window_rect.top, 3, 0,
+                &snapshot_revision, &snapshot_geometry_revision );
+        ok( !status && snapshot_revision == 3 &&
+            snapshot_geometry_revision == window_geometry_revision,
+            "Framed native-transfer snapshot returned %#lx, revision %s, geometry %s.\n",
+            status, wine_dbgstr_longlong( snapshot_revision ),
+            wine_dbgstr_longlong( snapshot_geometry_revision ) );
+        CloseHandle( snapshot_mapping );
+        snapshot_mapping = NULL;
+    }
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
         "Timed out beginning the native transfer.\n" );
@@ -3089,6 +3167,14 @@ static void test_host_registration( const char *program, const char *test_name )
         state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
         "Hosted native lease returned %#lx, state %#lx, action %#lx.\n",
         state->command_status, state->native_lease_state, state->native_lease_action );
+
+    SetLastError( 0 );
+    SetWindowLongW( root, GWL_STYLE, WS_POPUP );
+    ok( (GetWindowLongW( root, GWL_STYLE ) & WS_POPUP) == WS_POPUP,
+        "Failed to restore popup native-transfer style, error %lu.\n", GetLastError() );
+    ok( SetWindowPos( root, NULL, 0, 0, 80, 72,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED ),
+        "Failed to restore popup native-transfer bounds, error %lu.\n", GetLastError() );
 
     SetWindowPos( root, HWND_TOP, 100, 100, 64, 64,
                   SWP_SHOWWINDOW | SWP_NOACTIVATE );

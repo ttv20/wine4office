@@ -680,25 +680,10 @@ static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scen
     struct dcomp_visual *visual;
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
     IDXGISwapChain1 *candidate = NULL;
-    RECT client_rect, window_rect;
-    POINT client_origin = {0};
+    RECT client_rect;
 
     if (!GetClientRect(scene->hwnd, &client_rect) || client_rect.right <= 0 || client_rect.bottom <= 0)
         return NULL;
-    if (!GetWindowRect(scene->hwnd, &window_rect) ||
-            !ClientToScreen(scene->hwnd, &client_origin))
-        return NULL;
-    if (client_origin.x != window_rect.left || client_origin.y != window_rect.top ||
-            client_rect.right - client_rect.left != window_rect.right - window_rect.left ||
-            client_rect.bottom - client_rect.top != window_rect.bottom - window_rect.top)
-    {
-        TRACE("Hosted candidate for %p rejected: client %ld,%ld %ldx%ld does not cover window %ld,%ld %ldx%ld.\n",
-                scene->hwnd, client_origin.x, client_origin.y,
-                client_rect.right - client_rect.left, client_rect.bottom - client_rect.top,
-                window_rect.left, window_rect.top, window_rect.right - window_rect.left,
-                window_rect.bottom - window_rect.top);
-        return NULL;
-    }
 
     for (device = dcomp_devices; device; device = device->next_global)
     {
@@ -1829,8 +1814,9 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
     struct dcomp_device *device = impl_from_IDCompositionDevice(iface);
     struct dcomp_device *other_device;
     struct dcomp_visual *visual, *failed_visual;
-    struct dcomp_target *target;
-    unsigned int topmost;
+    struct dcomp_target *target, *previous;
+    HWND *hosted_windows = NULL;
+    unsigned int hosted_window_count = 0, hosted_window_index = 0, topmost;
     struct wine_dcomp_visual_desc parent_desc;
     HRESULT hr;
 
@@ -1948,7 +1934,28 @@ static HRESULT WINAPI dcomp_device_Commit(IDCompositionDevice *iface)
             LeaveCriticalSection(&other_device->lock);
         }
     dcomp_device_publish_committed_scenes(device);
+    for (target = device->targets; target; target = target->next)
+    {
+        for (previous = device->targets; previous != target; previous = previous->next)
+            if (previous->scene == target->scene) break;
+        if (previous == target && target->scene->committed &&
+            target->scene->committed_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+            hosted_window_count++;
+    }
+    if (hosted_window_count &&
+        (hosted_windows = calloc(hosted_window_count, sizeof(*hosted_windows))))
+        for (target = device->targets; target; target = target->next)
+        {
+            for (previous = device->targets; previous != target; previous = previous->next)
+                if (previous->scene == target->scene) break;
+            if (previous == target && target->scene->committed &&
+                target->scene->committed_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+                hosted_windows[hosted_window_index++] = target->hwnd;
+        }
     dcomp_global_leave();
+    while (hosted_window_index)
+        RedrawWindow(hosted_windows[--hosted_window_index], NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
+    free(hosted_windows);
     return S_OK;
 }
 
