@@ -139,13 +139,16 @@ or transport fixture is not Outlook support.
   passed to Vulkan for retirement. The first WSI primitive probes acquisition
   with timeout zero, clears one acquired image, submits the layout transitions,
   and presents it. A queue-ordered fence retains the command buffer and binary
-  semaphores until Vulkan has processed the presentation operation. A bounded
-  timeout returns pending and prevents root or renderer destruction while those
-  objects are still in flight. The same primitive can copy a completed
+  semaphores until Vulkan has processed the presentation operation. A
+  nonblocking poll returns pending and prevents root or renderer destruction
+  while those objects are still in flight. The same primitive can copy a completed
   host-owned transport frame instead of clearing the WSI image. That source
   frame is pinned through the queue-ordered fence, so pool retirement cannot
-  destroy it during the WSI read. This synchronous primitive is currently a
-  lifecycle fixture, not the final per-window presentation executor.
+  destroy it during the WSI read. Frame release now explicitly destroys the
+  immutable host copy after its final WSI reader. Vulkan submission and fence
+  processing are nonblocking, but `vkQueuePresentKHR` itself still runs on the
+  host event-loop thread and must move to the bounded per-window executor
+  before multi-window admission.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -158,8 +161,7 @@ or transport fixture is not Outlook support.
   copies each ready producer slot into one of 32 bounded host-owned records.
   It marks the source slot reusable only after fence completion. A frame-level
   failure cannot become terminal until the host has made the source slot safe;
-  recovery for permanent pre-submit failures remains pending. Local WSI,
-  composition and terminal Present results are not implemented yet.
+  recovery for permanent pre-submit failures remains pending.
 - Each accepted frame now records the aggregate scene generation and binding
   generation observed by its producer. The server accepts it only while the
   current scene is `HostedContent` for the same contributor, stream and
@@ -168,6 +170,13 @@ or transport fixture is not Outlook support.
   state changes. Host enumeration returns both generations, including the
   original scene generation after a newer scene replaces an already accepted
   frame, so the host can safely drain and discard stale GPU work.
+- The real host work scan now connects those accepted frames to each retained
+  root WSI. It copies a ready source, reports the transport slot reusable,
+  rejects a frame whose recorded scene or binding no longer matches, sizes the
+  swapchain from the authorized pool, and submits the immutable host copy.
+  `Presented`, `Discarded` and `Failed` are reported only after the WSI read is
+  terminal and the native frame release succeeds. A revoke or disappearing
+  root keeps the renderer pool pinned until an already submitted read drains.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -507,6 +516,16 @@ admitted.
   `/workspace/runner-dcomp-frame-scene` and
   `/workspace/artifacts/frame-scene-{authority-x64b.log,win32u-test-x64.exe,win32u-test-i386.exe,SHA256SUMS}`
   in environment `dcomp-host-probe-20260909`.
+- The nonblocking WSI and explicit-release fixture passed through both x86-64
+  and i386 Unix-call tables on Intel Iris Xe. Each run copied and verified all
+  4,096 red pixels, submitted that immutable frame to a four-image FIFO
+  swapchain, proved release stayed pending while the WSI fence owned the
+  source, then released it and recreated the swapchain from 64x64 to 96x80.
+  Logs and hashes are retained under the Intel task directory as
+  `artifacts/production-wsi-nonblocking-{x64,i386}.log` and
+  `artifacts/production-wsi-release-SHA256SUMS`. The Radeon x86-64 and i386
+  registration fixtures also remained on the honest fallback path with
+  capabilities `0xf`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

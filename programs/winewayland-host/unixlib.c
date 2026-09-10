@@ -402,8 +402,8 @@ static NTSTATUS destroy_renderer_frame(struct renderer_frame *frame)
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
         if (renderer.roots[i].present_source_pool_generation == frame->pool_generation &&
             renderer.roots[i].present_source_frame_id == frame->frame_id &&
-            (status = poll_renderer_root_present(&renderer.roots[i])))
-            return status;
+            renderer.roots[i].present_fence)
+            return STATUS_PENDING;
 
     if ((status = poll_renderer_frame(frame))) return status;
     if (frame->image && renderer.p_vkDestroyImage)
@@ -412,6 +412,22 @@ static NTSTATUS destroy_renderer_frame(struct renderer_frame *frame)
         renderer.p_vkFreeMemory(renderer.device, frame->memory, NULL);
     memset(frame, 0, sizeof(*frame));
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS release_renderer_frame(void *args)
+{
+    struct winewayland_host_renderer_frame_release *params = args;
+    unsigned int i;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->pool_generation || !params->frame_id) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].pool_generation == params->pool_generation &&
+            renderer.frames[i].frame_id == params->frame_id)
+            return destroy_renderer_frame(&renderer.frames[i]);
+    return STATUS_NOT_FOUND;
 }
 
 static NTSTATUS destroy_deferred_resources(void)
@@ -454,6 +470,9 @@ static NTSTATUS destroy_renderer(void)
     NTSTATUS status;
     unsigned int i;
 
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if ((status = poll_renderer_root_present(&renderer.roots[i])))
+            return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
     for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
         if (renderer.frames[i].frame_id &&
             (status = poll_renderer_frame(&renderer.frames[i])))
@@ -1894,14 +1913,7 @@ static NTSTATUS present_renderer_root(void *args)
     params->image_index = image_index;
     params->image_count = root->swapchain_image_count;
     params->present_result = present_result;
-    vr = renderer.p_vkWaitForFences(renderer.device, 1, &root->present_fence, VK_TRUE,
-            1000000000ull);
-    if (vr == VK_TIMEOUT) return STATUS_PENDING;
-    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
-    if ((status = poll_renderer_root_present(root))) return status;
-    if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
-        return STATUS_SUCCESS;
-    return present_result == VK_ERROR_OUT_OF_DATE_KHR ? STATUS_RETRY : STATUS_UNSUCCESSFUL;
+    return STATUS_PENDING;
 
 failed:
     status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
@@ -2071,13 +2083,14 @@ static NTSTATUS renderer_self_test(void *args)
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     struct renderer_frame *copied_frame = NULL;
+    struct winewayland_host_renderer_frame_release frame_release;
     unsigned char *pixels;
     uint32_t memory_type_index, readback_memory_type;
     uint64_t transition_value = 7;
     uint64_t ready_value = 0, reuse_value = 0;
     BOOL defer_resources = FALSE;
     unsigned int i;
-    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL, poll_status;
     VkResult vr;
 
     if (test_params)
@@ -2440,6 +2453,34 @@ readback_done:
                         present.source_pool_generation = copied_frame->pool_generation;
                         present.source_frame_id = copied_frame->frame_id;
                         status = present_renderer_root(&present);
+                        if (status == STATUS_PENDING && present.image_index != UINT32_MAX)
+                        {
+                            memset(&frame_release, 0, sizeof(frame_release));
+                            frame_release.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+                            frame_release.size = sizeof(frame_release);
+                            frame_release.pool_generation = copied_frame->pool_generation;
+                            frame_release.frame_id = copied_frame->frame_id;
+                            status = release_renderer_frame(&frame_release);
+                            if (status == STATUS_PENDING)
+                            {
+                                test_params->flags |= WINEWAYLAND_HOST_TEST_WSI_PINNED;
+                                status = STATUS_SUCCESS;
+                            }
+                            else
+                                status = STATUS_INVALID_HANDLE;
+                            vr = renderer.p_vkWaitForFences(renderer.device, 1,
+                                    &root->present_fence, VK_TRUE, 1000000000ull);
+                            if (vr == VK_TIMEOUT)
+                                status = STATUS_IO_TIMEOUT;
+                            else if (vr)
+                                status = STATUS_UNSUCCESSFUL;
+                            else if ((poll_status = poll_renderer_root_present(root)) && !status)
+                                status = poll_status;
+                            if (!status && present.present_result != VK_SUCCESS &&
+                                present.present_result != VK_SUBOPTIMAL_KHR)
+                                status = present.present_result == VK_ERROR_OUT_OF_DATE_KHR ?
+                                        STATUS_RETRY : STATUS_UNSUCCESSFUL;
+                        }
                         if (!status)
                         {
                             test_params->flags |= WINEWAYLAND_HOST_TEST_WSI_PRESENTED;
@@ -2455,6 +2496,21 @@ readback_done:
                 buffer = VK_NULL_HANDLE;
                 buffer_memory = VK_NULL_HANDLE;
             }
+        }
+        if (copied_frame)
+        {
+            memset(&frame_release, 0, sizeof(frame_release));
+            frame_release.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+            frame_release.size = sizeof(frame_release);
+            frame_release.pool_generation = copied_frame->pool_generation;
+            frame_release.frame_id = copied_frame->frame_id;
+            if (release_renderer_frame(&frame_release))
+            {
+                if (!status) status = STATUS_UNSUCCESSFUL;
+            }
+            else if (test_params)
+                test_params->flags |= WINEWAYLAND_HOST_TEST_FRAME_RELEASED;
+            copied_frame = NULL;
         }
         memset(&retire, 0, sizeof(retire));
         retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -2713,6 +2769,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,
+    release_renderer_frame,
 };
 
 #ifdef _WIN64
@@ -2731,6 +2788,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,
+    release_renderer_frame,
 };
 #endif
 

@@ -24,6 +24,8 @@
 #define WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
 #define WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT 0x00000020
 #define WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM 1
+#define WINEWAYLAND_HOST_VK_SUBOPTIMAL_KHR 1000001003
+#define WINEWAYLAND_HOST_VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
 
 struct winewayland_host_probe
 {
@@ -60,6 +62,8 @@ struct winewayland_host_startup
 
 #define WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED 0x00000001
 #define WINEWAYLAND_HOST_TEST_WSI_PRESENTED   0x00000002
+#define WINEWAYLAND_HOST_TEST_FRAME_RELEASED  0x00000004
+#define WINEWAYLAND_HOST_TEST_WSI_PINNED      0x00000008
 
 struct winewayland_host_renderer_create
 {
@@ -106,6 +110,14 @@ struct winewayland_host_renderer_frame
     uint64_t reuse_value;
     uint32_t slot;
     uint32_t reusable;
+};
+
+struct winewayland_host_renderer_frame_release
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t pool_generation;
+    uint64_t frame_id;
 };
 
 struct winewayland_host_renderer_root
@@ -168,6 +180,7 @@ enum winewayland_host_unix_func
     unix_renderer_self_test,
     unix_renderer_headless_self_test,
     unix_renderer_destroy,
+    unix_renderer_release_frame,
     winewayland_host_unix_func_count,
 };
 
