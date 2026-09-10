@@ -17,6 +17,22 @@
 #define WINE_DCOMP_VISUAL_RENDERER_ACTIVE 0x00000008
 #define WINE_DCOMP_VISUAL_TRANSFORM_ABSOLUTE 0x00000010
 
+#define WINE_DCOMP_WAYLAND_BINDING_VERSION 1
+
+/* This descriptor is process-private. The server validates every field again
+ * when the producer registers resources or submits a frame. */
+struct wine_dcomp_wayland_binding
+{
+    UINT version;
+    UINT flags;
+    HWND root;
+    UINT64 contributor_id;
+    UINT64 stream_id;
+    UINT64 binding_generation;
+    UINT64 scene_generation;
+    UINT64 host_epoch;
+};
+
 struct wine_dcomp_visual_desc
 {
     UINT version;

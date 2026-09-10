@@ -9,7 +9,12 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#define COBJMACROS
 #include <windows.h>
+#include "initguid.h"
+#include <d3d11.h>
+#include <dcomp.h>
+#include <dxgi1_2.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -21,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 40);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 56);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
@@ -51,6 +56,8 @@ static NTSTATUS get_backend_probe(struct winewayland_host_probe *probe)
     status = WINE_UNIX_CALL(unix_probe_backend, probe);
     return status;
 }
+
+static struct winewayland_host_startup *active_fixture_startup;
 
 static NTSTATUS create_renderer(const struct winewayland_host_probe *probe)
 {
@@ -954,6 +961,8 @@ static NTSTATUS import_buffer_slot(user_handle_t root, uint64_t host_epoch,
     report_status = set_buffer_slot_import(root, host_epoch, contributor_id,
             pool->pool_generation, slot_index, status ? WINE_WAYLAND_BUFFER_IMPORT_FAILED :
             WINE_WAYLAND_BUFFER_IMPORT_IMPORTED);
+    if (!status && !report_status && active_fixture_startup)
+        InterlockedIncrement((LONG *)&active_fixture_startup->imported_slots);
     return report_status ? report_status : status;
 }
 
@@ -1043,6 +1052,15 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
     if (status && status != STATUS_NOT_FOUND && status != STATUS_ACCESS_DENIED &&
         status != STATUS_REVISION_MISMATCH && status != STATUS_INVALID_HANDLE)
         return status;
+    if (active_fixture_startup)
+    {
+        if (result == WINE_WAYLAND_FRAME_RESULT_PRESENTED)
+            InterlockedIncrement((LONG *)&active_fixture_startup->presented_frames);
+        else if (result == WINE_WAYLAND_FRAME_RESULT_DISCARDED)
+            InterlockedIncrement((LONG *)&active_fixture_startup->discarded_frames);
+        else
+            InterlockedIncrement((LONG *)&active_fixture_startup->failed_frames);
+    }
     clear_root_present(root);
     return STATUS_SUCCESS;
 }
@@ -1364,6 +1382,7 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
 
     if (!status)
     {
+        active_fixture_startup = startup;
         do
         {
             if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
@@ -1377,6 +1396,7 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
             wait = WaitForSingleObject(stop_event, 20);
         }
         while (wait == WAIT_TIMEOUT);
+        active_fixture_startup = NULL;
         if (wait != WAIT_OBJECT_0) status = STATUS_UNSUCCESSFUL;
     }
     if (host_epoch) release_host(host_epoch);
@@ -1508,6 +1528,194 @@ done:
     return ret;
 }
 
+static int test_dcomp_pipeline(void)
+{
+    typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
+            UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
+            D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+    typedef HRESULT (WINAPI *create_dxgi_factory1_t)(REFIID, void **);
+    typedef HRESULT (WINAPI *dcomposition_create_device_t)(IDXGIDevice *, REFIID, void **);
+    static const GUID dcomp_device_iid =
+            {0xc37ea93a, 0xe7aa, 0x450d, {0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3}};
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    struct winewayland_host_startup *startup = NULL;
+    struct winewayland_host_probe probe;
+    PROCESS_INFORMATION process = {0};
+    ID3D11DeviceContext *context = NULL;
+    ID3D11Device *d3d_device = NULL;
+    IDXGIDevice *dxgi_device = NULL;
+    IDXGIFactory2 *factory = NULL;
+    IDXGISwapChain1 *swapchain = NULL;
+    IDCompositionDevice *dcomp_device = NULL;
+    IDCompositionTarget *target = NULL;
+    IDCompositionVisual *visual = NULL;
+    HANDLE mapping = NULL, ready_event = NULL, stop_event = NULL;
+    HMODULE d3d11_module = NULL, dxgi_module = NULL, dcomp_module = NULL;
+    d3d11_create_device_t create_device;
+    create_dxgi_factory1_t create_factory;
+    dcomposition_create_device_t create_dcomp;
+    uint64_t token_low = 0, token_high = 0;
+    DXGI_SWAP_CHAIN_DESC1 desc = {0};
+    D3D_FEATURE_LEVEL feature_level;
+    HWND window = NULL;
+    NTSTATUS status;
+    HRESULT hr = E_FAIL;
+    DWORD wait;
+    unsigned int i;
+    int ret = 7;
+
+    if ((status = get_backend_probe(&probe)))
+    {
+        fprintf(stderr, "dcomp_pipeline=unavailable probe_status=%#lx\n", status);
+        return 4;
+    }
+    if (!(probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        printf("dcomp_pipeline=unsupported capabilities=%#x\n", probe.capabilities);
+        return 0;
+    }
+    if ((status = request_host_startup(&probe, &token_low, &token_high)))
+    {
+        fprintf(stderr, "dcomp_pipeline=unavailable startup_status=%#lx\n", status);
+        return 5;
+    }
+
+    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
+            sizeof(*startup), NULL);
+    ready_event = CreateEventW(&security, TRUE, FALSE, NULL);
+    stop_event = CreateEventW(&security, TRUE, FALSE, NULL);
+    if (!mapping || !ready_event || !stop_event ||
+            !(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
+        goto done;
+    memset(startup, 0, sizeof(*startup));
+    startup->version = WINEWAYLAND_HOST_STARTUP_VERSION;
+    startup->size = sizeof(*startup);
+    startup->token_low = token_low;
+    startup->token_high = token_high;
+    startup->status = STATUS_PENDING;
+    if (!start_host_fixture(mapping, ready_event, stop_event, &process)) goto done;
+    if (WaitForSingleObject(ready_event, 30000) != WAIT_OBJECT_0 || startup->status)
+    {
+        fprintf(stderr, "dcomp_pipeline=failed host_status=%#lx\n", (NTSTATUS)startup->status);
+        goto done;
+    }
+
+    if (!(d3d11_module = LoadLibraryW(L"d3d11.dll")) ||
+            !(dxgi_module = LoadLibraryW(L"dxgi.dll")) ||
+            !(dcomp_module = LoadLibraryW(L"dcomp.dll")) ||
+            !(create_device = (d3d11_create_device_t)GetProcAddress(d3d11_module,
+            "D3D11CreateDevice")) ||
+            !(create_factory = (create_dxgi_factory1_t)GetProcAddress(dxgi_module,
+            "CreateDXGIFactory1")) ||
+            !(create_dcomp = (dcomposition_create_device_t)GetProcAddress(dcomp_module,
+            "DCompositionCreateDevice")))
+        goto done;
+    /* Initialise the process display driver before WineD3D creates its hidden
+     * device window.  This matters for a 32-bit client in a WoW64 prefix. */
+    if (!(window = CreateWindowExW(0, L"static", L"DComp host pipeline", WS_POPUP,
+            0, 0, 64, 64, NULL, NULL, NULL, NULL)))
+        goto done;
+    if (FAILED(hr = create_device(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &d3d_device,
+            &feature_level, &context)))
+        goto done;
+    if (FAILED(hr = ID3D11Device_QueryInterface(d3d_device, &IID_IDXGIDevice,
+            (void **)&dxgi_device)) || FAILED(hr = create_factory(&IID_IDXGIFactory2,
+            (void **)&factory)) || FAILED(hr = create_dcomp(dxgi_device, &dcomp_device_iid,
+            (void **)&dcomp_device)))
+        goto done;
+
+    desc.Width = 64;
+    desc.Height = 64;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SampleDesc.Count = 1;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    if (FAILED(hr = IDXGIFactory2_CreateSwapChainForComposition(factory,
+            (IUnknown *)d3d_device, &desc, NULL, &swapchain)) ||
+            FAILED(hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, window,
+            FALSE, &target)) || FAILED(hr = IDCompositionDevice_CreateVisual(dcomp_device,
+            &visual)) || FAILED(hr = IDCompositionVisual_SetContent(visual,
+            (IUnknown *)swapchain)) || FAILED(hr = IDCompositionTarget_SetRoot(target, visual)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+        goto done;
+
+    for (i = 0; i < 160 && startup->presented_frames < 6; ++i)
+    {
+        static const float colors[][4] =
+        {
+            {1.0f, 0.0f, 0.0f, 1.0f},
+            {0.0f, 1.0f, 0.0f, 1.0f},
+            {0.0f, 0.0f, 1.0f, 1.0f},
+        };
+        ID3D11RenderTargetView *view = NULL;
+        ID3D11Texture2D *texture = NULL;
+
+        if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
+                (void **)&texture))) break;
+        hr = ID3D11Device_CreateRenderTargetView(d3d_device, (ID3D11Resource *)texture,
+                NULL, &view);
+        if (SUCCEEDED(hr))
+        {
+            ID3D11DeviceContext_ClearRenderTargetView(context, view, colors[i % 3]);
+            ID3D11DeviceContext_Flush(context);
+            hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+        }
+        if (view) ID3D11RenderTargetView_Release(view);
+        ID3D11Texture2D_Release(texture);
+        if (FAILED(hr)) break;
+        Sleep(25);
+    }
+    if (FAILED(hr) || startup->imported_slots != WINE_WAYLAND_BUFFER_POOL_SLOTS ||
+            startup->presented_frames < 6 || startup->failed_frames)
+    {
+        fprintf(stderr, "dcomp_pipeline=failed hr=%#lx imports=%u presented=%u discarded=%u failed=%u\n",
+                hr, startup->imported_slots, startup->presented_frames,
+                startup->discarded_frames, startup->failed_frames);
+        goto done;
+    }
+    printf("dcomp_pipeline=passed imports=%u presented=%u discarded=%u\n",
+            startup->imported_slots, startup->presented_frames, startup->discarded_frames);
+    ret = 0;
+
+done:
+    if (target && visual)
+    {
+        IDCompositionTarget_SetRoot(target, NULL);
+        IDCompositionDevice_Commit(dcomp_device);
+        Sleep(100);
+    }
+    if (visual) IDCompositionVisual_Release(visual);
+    if (target) IDCompositionTarget_Release(target);
+    if (dcomp_device) IDCompositionDevice_Release(dcomp_device);
+    if (swapchain) IDXGISwapChain1_Release(swapchain);
+    if (factory) IDXGIFactory2_Release(factory);
+    if (dxgi_device) IDXGIDevice_Release(dxgi_device);
+    if (context) ID3D11DeviceContext_Release(context);
+    if (d3d_device) ID3D11Device_Release(d3d_device);
+    if (window) DestroyWindow(window);
+    if (stop_event) SetEvent(stop_event);
+    if (process.hProcess)
+    {
+        wait = WaitForSingleObject(process.hProcess, 30000);
+        if (wait != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    if (token_low || token_high) cancel_host_startup(token_low, token_high);
+    if (startup) UnmapViewOfFile(startup);
+    if (stop_event) CloseHandle(stop_event);
+    if (ready_event) CloseHandle(ready_event);
+    if (mapping) CloseHandle(mapping);
+    if (dcomp_module) FreeLibrary(dcomp_module);
+    if (dxgi_module) FreeLibrary(dxgi_module);
+    if (d3d11_module) FreeLibrary(d3d11_module);
+    return ret;
+}
+
 int wmain(int argc, WCHAR **argv)
 {
     if (argc == 2 && !wcscmp(argv[1], L"--probe")) return probe_backend();
@@ -1518,12 +1726,13 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--root-self-test")) return test_roots();
     if (argc == 2 && !wcscmp(argv[1], L"--wsi-self-test")) return test_wsi();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test")) return test_dcomp_pipeline();
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --registration-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --registration-test | --dcomp-pipeline-test\n",
             argv[0]);
     return 2;
 }

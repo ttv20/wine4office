@@ -21,7 +21,9 @@
 #include "wine/test.h"
 
 #include "winbase.h"
+#include "d3d11.h"
 #include "dcomp.h"
+#include "dxgi1_2.h"
 #include "wingdi.h"
 #include "winuser.h"
 #include "wine/server.h"
@@ -1377,6 +1379,13 @@ static void test_host_registration( const char *program, const char *test_name )
     IDCompositionDevice *pre_ready_device = NULL;
     IDCompositionTarget *pre_ready_target = NULL;
     IDCompositionVisual *pre_ready_visual = NULL;
+    ID3D11Device *hosted_d3d_device = NULL;
+    IDXGIDevice *hosted_dxgi_device = NULL;
+    IDXGIFactory2 *hosted_factory = NULL;
+    IDXGISwapChain1 *hosted_swapchain = NULL;
+    IDCompositionDevice *hosted_dcomp_device = NULL;
+    IDCompositionTarget *hosted_target = NULL;
+    IDCompositionVisual *hosted_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, command_event = NULL, result_event = NULL;
     HANDLE producer_command_event = NULL, producer_result_event = NULL;
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
@@ -1386,7 +1395,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 root_identity = 0, pre_ready_root_identity = 0;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
-    HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL;
+    HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
     HRESULT hr;
     NTSTATUS status;
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
@@ -1541,6 +1550,139 @@ static void test_host_registration( const char *program, const char *test_name )
         info.device_uuid[3] == TEST_DEVICE_UUID_3,
         "Host device UUID is %08lx%08lx%08lx%08lx.\n", info.device_uuid[0],
         info.device_uuid[1], info.device_uuid[2], info.device_uuid[3] );
+
+    hosted_root = CreateWindowExW( 0, L"static", L"Hosted DComp identity root", WS_POPUP,
+                                   0, 0, 64, 64, NULL, NULL, NULL, NULL );
+    ok( !!hosted_root, "Failed to create hosted DComp root, error %lu.\n", GetLastError() );
+    if (hosted_root)
+    {
+        D3D_FEATURE_LEVEL feature_level;
+        DXGI_SWAP_CHAIN_DESC1 desc = {0};
+
+        hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION,
+                &hosted_d3d_device, &feature_level, NULL );
+        if (FAILED(hr))
+            hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_WARP, NULL,
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION,
+                    &hosted_d3d_device, &feature_level, NULL );
+        ok( hr == S_OK, "Creating hosted D3D device returned %#lx.\n", hr );
+        if (hosted_d3d_device)
+        {
+            hr = ID3D11Device_QueryInterface( hosted_d3d_device, &IID_IDXGIDevice,
+                                               (void **)&hosted_dxgi_device );
+            ok( hr == S_OK, "Querying hosted DXGI device returned %#lx.\n", hr );
+            hr = CreateDXGIFactory1( &IID_IDXGIFactory2, (void **)&hosted_factory );
+            ok( hr == S_OK, "Creating hosted DXGI factory returned %#lx.\n", hr );
+        }
+        if (hosted_factory && hosted_d3d_device)
+        {
+            desc.Width = 64;
+            desc.Height = 64;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            desc.BufferCount = 2;
+            desc.SampleDesc.Count = 1;
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            desc.Scaling = DXGI_SCALING_STRETCH;
+            desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+            hr = IDXGIFactory2_CreateSwapChainForComposition( hosted_factory,
+                    (IUnknown *)hosted_d3d_device, &desc, NULL, &hosted_swapchain );
+            ok( hr == S_OK, "Creating hosted composition swapchain returned %#lx.\n", hr );
+        }
+        if (hosted_dxgi_device)
+        {
+            hr = DCompositionCreateDevice( hosted_dxgi_device, &dcomp_device_iid,
+                                            (void **)&hosted_dcomp_device );
+            ok( hr == S_OK, "Creating hosted DComp device returned %#lx.\n", hr );
+        }
+        if (hosted_dcomp_device)
+        {
+            hr = IDCompositionDevice_CreateTargetForHwnd( hosted_dcomp_device, hosted_root,
+                                                           FALSE, &hosted_target );
+            ok( hr == S_OK, "Creating hosted DComp target returned %#lx.\n", hr );
+            hr = IDCompositionDevice_CreateVisual( hosted_dcomp_device, &hosted_visual );
+            ok( hr == S_OK, "Creating hosted DComp visual returned %#lx.\n", hr );
+        }
+        if (hosted_target && hosted_visual && hosted_swapchain)
+        {
+            hr = IDCompositionVisual_SetContent( hosted_visual, (IUnknown *)hosted_swapchain );
+            ok( hr == S_OK, "Setting hosted DComp content returned %#lx.\n", hr );
+            hr = IDCompositionTarget_SetRoot( hosted_target, hosted_visual );
+            ok( hr == S_OK, "Setting hosted DComp root returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Committing hosted DComp root returned %#lx.\n", hr );
+
+            state->root = (UINT_PTR)hosted_root;
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying hosted DComp scene.\n" );
+            ok( !state->command_status && state->scene_generation &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
+                "Hosted DComp scene returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+            state->contributor_id = 0;
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_CONTRIBUTOR ),
+                "Timed out querying hosted DComp contributor.\n" );
+            ok( !state->command_status && state->contributor_id && state->stream_id &&
+                state->binding_generation && state->contributor_host_epoch == old_epoch,
+                "Hosted DComp contributor returned %#lx, id %s, stream %s, binding %s, epoch %s.\n",
+                state->command_status, wine_dbgstr_longlong( state->contributor_id ),
+                wine_dbgstr_longlong( state->stream_id ),
+                wine_dbgstr_longlong( state->binding_generation ),
+                wine_dbgstr_longlong( state->contributor_host_epoch ) );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_CONTRIBUTOR_IDENTITY ),
+                "Timed out querying hosted DComp contributor identity.\n" );
+            ok( !state->command_status &&
+                state->contributor_owner_process_id == GetCurrentProcessId() &&
+                state->contributor_producer_process_id == GetCurrentProcessId() &&
+                state->contributor_source == WINE_WAYLAND_CONTRIBUTOR_DCOMP &&
+                state->contributor_target_layer == WINE_WAYLAND_TARGET_BELOW &&
+                state->contributor_state == WINE_WAYLAND_CONTRIBUTOR_BOUND,
+                "Hosted DComp identity returned %#lx, owner %lu, producer %lu, source %#lx, layer %#lx, state %#lx.\n",
+                state->command_status, state->contributor_owner_process_id,
+                state->contributor_producer_process_id, state->contributor_source,
+                state->contributor_target_layer, state->contributor_state );
+
+            hr = IDCompositionTarget_SetRoot( hosted_target, NULL );
+            ok( hr == S_OK, "Clearing hosted DComp root returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Committing hosted DComp removal returned %#lx.\n", hr );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying removed hosted DComp scene.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+                "Removed hosted DComp scene returned %#lx, disposition %#lx.\n",
+                state->command_status, state->scene_disposition );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_ACK_CONTRIBUTOR_REVOKE ),
+                "Timed out acknowledging hosted DComp revoke.\n" );
+            ok( !state->command_status, "Hosted DComp revoke acknowledgement returned %#lx.\n",
+                state->command_status );
+            state->contributor_id = state->stream_id = state->binding_generation = 0;
+            state->root = (UINT_PTR)root;
+        }
+    }
+    if (hosted_visual) IDCompositionVisual_Release( hosted_visual );
+    hosted_visual = NULL;
+    if (hosted_target) IDCompositionTarget_Release( hosted_target );
+    hosted_target = NULL;
+    if (hosted_dcomp_device) IDCompositionDevice_Release( hosted_dcomp_device );
+    hosted_dcomp_device = NULL;
+    if (hosted_swapchain) IDXGISwapChain1_Release( hosted_swapchain );
+    hosted_swapchain = NULL;
+    if (hosted_factory) IDXGIFactory2_Release( hosted_factory );
+    hosted_factory = NULL;
+    if (hosted_dxgi_device) IDXGIDevice_Release( hosted_dxgi_device );
+    hosted_dxgi_device = NULL;
+    if (hosted_d3d_device) ID3D11Device_Release( hosted_d3d_device );
+    hosted_d3d_device = NULL;
+    if (hosted_root) DestroyWindow( hosted_root );
+    hosted_root = NULL;
 
     status = get_host_root( old_epoch, 0, &host_root );
     ok( status == STATUS_ACCESS_DENIED && !host_root.root && !host_root.root_identity &&
@@ -3043,6 +3185,13 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !status, "Startup cancellation returned %#lx.\n", status );
 
 done:
+    if (hosted_visual) IDCompositionVisual_Release( hosted_visual );
+    if (hosted_target) IDCompositionTarget_Release( hosted_target );
+    if (hosted_dcomp_device) IDCompositionDevice_Release( hosted_dcomp_device );
+    if (hosted_swapchain) IDXGISwapChain1_Release( hosted_swapchain );
+    if (hosted_factory) IDXGIFactory2_Release( hosted_factory );
+    if (hosted_dxgi_device) IDXGIDevice_Release( hosted_dxgi_device );
+    if (hosted_d3d_device) ID3D11Device_Release( hosted_d3d_device );
     if (pre_ready_visual) IDCompositionVisual_Release( pre_ready_visual );
     if (pre_ready_target) IDCompositionTarget_Release( pre_ready_target );
     if (pre_ready_device) IDCompositionDevice_Release( pre_ready_device );
@@ -3063,6 +3212,7 @@ done:
     if (ready_event) CloseHandle( ready_event );
     if (mapping) CloseHandle( mapping );
     if (pre_ready_root) DestroyWindow( pre_ready_root );
+    if (hosted_root) DestroyWindow( hosted_root );
     if (dcomp_root) DestroyWindow( dcomp_root );
     if (root) DestroyWindow( root );
 }

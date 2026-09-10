@@ -23,9 +23,15 @@
 #include "wined3d_private.h"
 #include "wined3d_gl.h"
 #include "wined3d_vk.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
+
+static NTSTATUS wined3d_wayland_retire_pool_record(struct wined3d_swapchain_vk *swapchain_vk);
+static void wined3d_swapchain_vk_destroy_wayland_pool(struct wined3d_swapchain_vk *swapchain_vk);
+static void wined3d_swapchain_vk_stop_wayland_completion_worker(
+        struct wined3d_swapchain_vk *swapchain_vk);
 
 static BOOL set_window_present_rect(HWND hwnd, UINT x, UINT y, UINT width, UINT height)
 {
@@ -146,11 +152,15 @@ void wined3d_swapchain_vk_cleanup(struct wined3d_swapchain_vk *swapchain_vk)
 
     wined3d_cs_destroy_object(cs, wined3d_swapchain_vk_destroy_object, swapchain_vk);
     wined3d_cs_finish(cs, WINED3D_CS_QUEUE_DEFAULT);
+    wined3d_swapchain_vk_stop_wayland_completion_worker(swapchain_vk);
     if (swapchain_vk->composition_source)
         wined3d_texture_decref( swapchain_vk->composition_source );
     swapchain_vk->composition_source = NULL;
     swapchain_vk->composition_image = VK_NULL_HANDLE;
     swapchain_vk->composition_command_buffer_id = 0;
+    if (swapchain_vk->wayland_pool_registered)
+        wined3d_wayland_retire_pool_record(swapchain_vk);
+    wined3d_swapchain_vk_destroy_wayland_pool(swapchain_vk);
 
     wined3d_swapchain_cleanup(&swapchain_vk->s);
 }
@@ -238,6 +248,40 @@ void CDECL wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swap
         memset(&swapchain->composition_desc, 0, sizeof(swapchain->composition_desc));
     else
         swapchain->composition_desc = *desc;
+}
+
+void CDECL wined3d_swapchain_set_wayland_host_binding(struct wined3d_swapchain *swapchain,
+        const struct wine_dcomp_wayland_binding *binding)
+{
+    TRACE("swapchain %p, binding %p.\n", swapchain, binding);
+
+    AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    if (binding)
+        swapchain->wayland_host_binding = *binding;
+    else
+        memset(&swapchain->wayland_host_binding, 0, sizeof(swapchain->wayland_host_binding));
+    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+}
+
+void wined3d_swapchain_complete_present(struct wined3d_swapchain *swapchain,
+        uint64_t present_id, HRESULT hr, bool release_credit)
+{
+    struct wined3d_swapchain_present_record *record;
+
+    AcquireSRWLockExclusive(&swapchain->present_result_lock);
+    record = &swapchain->present_results[present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
+    if (record->result.present_id == present_id && !record->completed)
+    {
+        record->result.result = hr;
+        record->result.backend_pending = FALSE;
+        record->completed = true;
+        if (present_id > swapchain->last_completed_present_id)
+            swapchain->last_completed_present_id = present_id;
+    }
+    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+
+    if (release_credit && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
+        ERR("Failed to release Present credit, error %lu.\n", GetLastError());
 }
 
 
@@ -1445,8 +1489,38 @@ static BOOL wined3d_swapchain_vk_apply_composition(struct wined3d_swapchain *swa
     UINT source_row_pitch, output_row_pitch;
     BOOL linear, source_mapped = FALSE, output_mapped = FALSE;
     HRESULT hr;
+
     if (!source_backup) return FALSE;
     *source_backup = NULL;
+
+    /* The hosted DComp path only admits an integer identity visual.  Avoid the
+     * CPU staging path for that no-op case; besides being needlessly expensive,
+     * resource mapping is a client-thread operation and cannot run from the
+     * command-stream Present callback. */
+    if (desc->version == WINE_DCOMP_VISUAL_DESC_VERSION
+            && desc->flags == (WINE_DCOMP_VISUAL_RENDERER_ACTIVE | WINE_DCOMP_VISUAL_HAS_SIZE)
+            && desc->transform[0] == 1.0f && desc->transform[1] == 0.0f
+            && desc->transform[2] == 0.0f && desc->transform[3] == 0.0f
+            && desc->transform[4] == 0.0f && desc->transform[5] == 1.0f
+            && desc->transform[6] == 0.0f && desc->transform[7] == 0.0f
+            && desc->transform[8] == 0.0f && desc->transform[9] == 0.0f
+            && desc->transform[10] == 1.0f && desc->transform[11] == 0.0f
+            && desc->transform[12] == 0.0f && desc->transform[13] == 0.0f
+            && desc->transform[14] == 0.0f && desc->transform[15] == 1.0f
+            && desc->render_origin[0] == 0.0f && desc->render_origin[1] == 0.0f
+            && desc->size[0] == back_buffer->resource.width
+            && desc->size[1] == back_buffer->resource.height
+            && desc->source_size[0] == back_buffer->resource.width
+            && desc->source_size[1] == back_buffer->resource.height
+            && desc->content_rect[0] == 0.0f && desc->content_rect[1] == 0.0f
+            && desc->content_rect[2] == back_buffer->resource.width
+            && desc->content_rect[3] == back_buffer->resource.height
+            && src_rect->left == 0 && src_rect->top == 0
+            && src_rect->right == (LONG)back_buffer->resource.width
+            && src_rect->bottom == (LONG)back_buffer->resource.height
+            && desc->opacity == 1.0f && desc->composite_mode <= 1)
+        return TRUE;
+
     if (back_buffer->resource.format->byte_count != 4
             || (back_buffer->resource.format->attrs & WINED3D_FORMAT_ATTR_BLOCKS))
     {
@@ -1626,6 +1700,588 @@ static void wined3d_swapchain_vk_restore_composition(struct wined3d_swapchain_vk
     swapchain_vk->composition_source = NULL;
     swapchain_vk->composition_image = VK_NULL_HANDLE;
     swapchain_vk->composition_command_buffer_id = 0;
+}
+
+static NTSTATUS wined3d_wayland_create_pool_record(struct wined3d_swapchain_vk *swapchain_vk,
+        const struct wine_dcomp_wayland_binding *binding)
+{
+    struct wayland_buffer_pool_metadata metadata = {0};
+    NTSTATUS status;
+
+    metadata.allocation_size = swapchain_vk->wayland_allocation_size;
+    metadata.width = swapchain_vk->wayland_width;
+    metadata.height = swapchain_vk->wayland_height;
+    metadata.format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
+    metadata.slot_count = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    metadata.frame_credit_limit = WINE_WAYLAND_BUFFER_POOL_SLOTS;
+    memcpy(metadata.device_uuid, &swapchain_vk->s.device->adapter->device_uuid,
+            sizeof(metadata.device_uuid));
+    metadata.memory_type_index = swapchain_vk->wayland_memory_type_index;
+    SERVER_START_REQ(create_wayland_buffer_pool)
+    {
+        req->root = wine_server_user_handle(binding->root);
+        req->contributor_id = binding->contributor_id;
+        req->stream_id = binding->stream_id;
+        req->binding_generation = binding->binding_generation;
+        req->pool_generation = swapchain_vk->wayland_pool_generation;
+        wine_server_add_data(req, &metadata, sizeof(metadata));
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS wined3d_wayland_register_slot(struct wined3d_swapchain_vk *swapchain_vk,
+        const struct wine_dcomp_wayland_binding *binding, unsigned int slot,
+        HANDLE memory, HANDLE ready, HANDLE reuse)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(register_wayland_buffer_slot)
+    {
+        req->root = wine_server_user_handle(binding->root);
+        req->slot = slot;
+        req->contributor_id = binding->contributor_id;
+        req->stream_id = binding->stream_id;
+        req->binding_generation = binding->binding_generation;
+        req->pool_generation = swapchain_vk->wayland_pool_generation;
+        req->memory = wine_server_obj_handle(memory);
+        req->ready_sync = wine_server_obj_handle(ready);
+        req->reuse_sync = wine_server_obj_handle(reuse);
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS wined3d_wayland_retire_pool_record(struct wined3d_swapchain_vk *swapchain_vk)
+{
+    NTSTATUS status;
+
+    if (!swapchain_vk->wayland_pool_registered) return STATUS_SUCCESS;
+    SERVER_START_REQ(retire_wayland_buffer_pool)
+    {
+        req->root = wine_server_user_handle(swapchain_vk->wayland_pool_root);
+        req->contributor_id = swapchain_vk->wayland_pool_contributor_id;
+        req->stream_id = swapchain_vk->wayland_pool_stream_id;
+        req->binding_generation = swapchain_vk->wayland_pool_binding_generation;
+        req->pool_generation = swapchain_vk->wayland_pool_generation;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void wined3d_swapchain_vk_destroy_wayland_pool(struct wined3d_swapchain_vk *swapchain_vk)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_slots); ++i)
+    {
+        if (swapchain_vk->wayland_slots[i].reuse)
+            VK_CALL(vkDestroySemaphore)(device_vk->vk_device,
+                    swapchain_vk->wayland_slots[i].reuse, NULL);
+        if (swapchain_vk->wayland_slots[i].ready)
+            VK_CALL(vkDestroySemaphore)(device_vk->vk_device,
+                    swapchain_vk->wayland_slots[i].ready, NULL);
+        if (swapchain_vk->wayland_slots[i].image)
+            VK_CALL(vkDestroyImage)(device_vk->vk_device,
+                    swapchain_vk->wayland_slots[i].image, NULL);
+        if (swapchain_vk->wayland_slots[i].memory)
+            VK_CALL(vkFreeMemory)(device_vk->vk_device,
+                    swapchain_vk->wayland_slots[i].memory, NULL);
+    }
+    memset(swapchain_vk->wayland_slots, 0, sizeof(swapchain_vk->wayland_slots));
+    swapchain_vk->wayland_pool_registered = false;
+    swapchain_vk->wayland_pool_binding_generation = 0;
+    swapchain_vk->wayland_pool_contributor_id = 0;
+    swapchain_vk->wayland_pool_stream_id = 0;
+    swapchain_vk->wayland_pool_root = NULL;
+    swapchain_vk->wayland_allocation_size = 0;
+    swapchain_vk->wayland_memory_type_index = 0;
+    swapchain_vk->wayland_width = swapchain_vk->wayland_height = 0;
+    swapchain_vk->wayland_next_slot = 0;
+}
+
+static HRESULT wined3d_swapchain_vk_create_wayland_pool(struct wined3d_swapchain_vk *swapchain_vk,
+        const struct wine_dcomp_wayland_binding *binding, unsigned int width, unsigned int height)
+{
+    struct wined3d_adapter_vk *adapter_vk = wined3d_adapter_vk(swapchain_vk->s.device->adapter);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    VkExternalMemoryImageCreateInfo external_image =
+            {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+    VkMemoryDedicatedAllocateInfo dedicated =
+            {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    VkExportMemoryAllocateInfo export_memory =
+            {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    VkSemaphoreTypeCreateInfo semaphore_type =
+            {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    VkExportSemaphoreCreateInfo export_semaphore =
+            {.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
+    VkSemaphoreCreateInfo semaphore_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkMemoryAllocateInfo allocate_info = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkImageCreateInfo image_info = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkMemoryRequirements requirements, first_requirements = {0};
+    unsigned int memory_type, i;
+    NTSTATUS status;
+    VkResult vr;
+
+    if (!vk_info->supported[WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32] ||
+            !vk_info->supported[WINED3D_VK_KHR_EXTERNAL_SEMAPHORE_WIN32] ||
+            !vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE] ||
+            !vk_info->vk_ops.vkGetMemoryWin32HandleKHR ||
+            (!vk_info->vk_ops.vkGetSemaphoreCounterValue &&
+             !vk_info->vk_ops.vkGetSemaphoreCounterValueKHR) ||
+            !vk_info->vk_ops.vkGetSemaphoreWin32HandleKHR)
+    {
+        TRACE("Wayland transport is unavailable: memory %u, semaphore %u, timeline %u, functions %p/%p/%p/%p.\n",
+                vk_info->supported[WINED3D_VK_KHR_EXTERNAL_MEMORY_WIN32],
+                vk_info->supported[WINED3D_VK_KHR_EXTERNAL_SEMAPHORE_WIN32],
+                vk_info->supported[WINED3D_VK_KHR_TIMELINE_SEMAPHORE],
+                vk_info->vk_ops.vkGetMemoryWin32HandleKHR,
+                vk_info->vk_ops.vkGetSemaphoreCounterValue,
+                vk_info->vk_ops.vkGetSemaphoreCounterValueKHR,
+                vk_info->vk_ops.vkGetSemaphoreWin32HandleKHR);
+        return E_NOTIMPL;
+    }
+    if (!binding->host_epoch || !binding->scene_generation || !width || !height)
+        return E_INVALIDARG;
+
+    external_image.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    image_info.pNext = &external_image;
+    image_info.flags = VK_IMAGE_CREATE_ALIAS_BIT;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    image_info.extent.width = width;
+    image_info.extent.height = height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_slots); ++i)
+    {
+        if ((vr = VK_CALL(vkCreateImage)(device_vk->vk_device, &image_info, NULL,
+                &swapchain_vk->wayland_slots[i].image))) goto failed;
+        VK_CALL(vkGetImageMemoryRequirements)(device_vk->vk_device,
+                swapchain_vk->wayland_slots[i].image, &requirements);
+        if (!i) first_requirements = requirements;
+        else if (requirements.size != first_requirements.size ||
+                requirements.memoryTypeBits != first_requirements.memoryTypeBits)
+        {
+            vr = VK_ERROR_FORMAT_NOT_SUPPORTED;
+            goto failed;
+        }
+    }
+    memory_type = wined3d_adapter_vk_get_memory_type_index(adapter_vk,
+            first_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (memory_type == ~0u)
+        memory_type = wined3d_adapter_vk_get_memory_type_index(adapter_vk,
+                first_requirements.memoryTypeBits, 0);
+    if (memory_type == ~0u)
+    {
+        vr = VK_ERROR_FEATURE_NOT_PRESENT;
+        goto failed;
+    }
+
+    export_memory.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    export_memory.pNext = &dedicated;
+    allocate_info.pNext = &export_memory;
+    allocate_info.allocationSize = first_requirements.size;
+    allocate_info.memoryTypeIndex = memory_type;
+    export_semaphore.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    semaphore_type.pNext = &export_semaphore;
+    semaphore_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    semaphore_info.pNext = &semaphore_type;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_slots); ++i)
+    {
+        dedicated.image = swapchain_vk->wayland_slots[i].image;
+        if ((vr = VK_CALL(vkAllocateMemory)(device_vk->vk_device, &allocate_info, NULL,
+                &swapchain_vk->wayland_slots[i].memory)) ||
+                (vr = VK_CALL(vkBindImageMemory)(device_vk->vk_device,
+                swapchain_vk->wayland_slots[i].image,
+                swapchain_vk->wayland_slots[i].memory, 0)) ||
+                (vr = VK_CALL(vkCreateSemaphore)(device_vk->vk_device, &semaphore_info, NULL,
+                &swapchain_vk->wayland_slots[i].ready)) ||
+                (vr = VK_CALL(vkCreateSemaphore)(device_vk->vk_device, &semaphore_info, NULL,
+                &swapchain_vk->wayland_slots[i].reuse)))
+            goto failed;
+    }
+
+    if (!++swapchain_vk->wayland_pool_generation)
+        ++swapchain_vk->wayland_pool_generation;
+    swapchain_vk->wayland_allocation_size = first_requirements.size;
+    swapchain_vk->wayland_memory_type_index = memory_type;
+    swapchain_vk->wayland_width = width;
+    swapchain_vk->wayland_height = height;
+    swapchain_vk->wayland_pool_binding_generation = binding->binding_generation;
+    swapchain_vk->wayland_pool_contributor_id = binding->contributor_id;
+    swapchain_vk->wayland_pool_stream_id = binding->stream_id;
+    swapchain_vk->wayland_pool_root = binding->root;
+    if ((status = wined3d_wayland_create_pool_record(swapchain_vk, binding)))
+    {
+        WARN("Could not reserve Wayland transport pool, status %#lx.\n", status);
+        goto failed_status;
+    }
+    swapchain_vk->wayland_pool_registered = true;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_slots); ++i)
+    {
+        VkMemoryGetWin32HandleInfoKHR memory_info =
+                {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+        VkSemaphoreGetWin32HandleInfoKHR semaphore_get =
+                {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+        HANDLE memory_handle = NULL, ready_handle = NULL, reuse_handle = NULL;
+
+        memory_info.memory = swapchain_vk->wayland_slots[i].memory;
+        memory_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        semaphore_get.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        if ((vr = VK_CALL(vkGetMemoryWin32HandleKHR)(device_vk->vk_device, &memory_info,
+                &memory_handle))) goto failed_handles;
+        semaphore_get.semaphore = swapchain_vk->wayland_slots[i].ready;
+        if ((vr = VK_CALL(vkGetSemaphoreWin32HandleKHR)(device_vk->vk_device, &semaphore_get,
+                &ready_handle))) goto failed_handles;
+        semaphore_get.semaphore = swapchain_vk->wayland_slots[i].reuse;
+        if ((vr = VK_CALL(vkGetSemaphoreWin32HandleKHR)(device_vk->vk_device, &semaphore_get,
+                &reuse_handle))) goto failed_handles;
+        status = wined3d_wayland_register_slot(swapchain_vk, binding, i, memory_handle,
+                ready_handle, reuse_handle);
+        CloseHandle(reuse_handle);
+        CloseHandle(ready_handle);
+        CloseHandle(memory_handle);
+        if (status)
+        {
+            WARN("Could not register Wayland transport slot %u, status %#lx.\n", i, status);
+            goto failed_status;
+        }
+        continue;
+
+failed_handles:
+        if (reuse_handle) CloseHandle(reuse_handle);
+        if (ready_handle) CloseHandle(ready_handle);
+        if (memory_handle) CloseHandle(memory_handle);
+        goto failed;
+    }
+    return S_OK;
+
+failed:
+    WARN("Could not allocate Wayland transport pool, Vulkan result %s.\n",
+            wined3d_debug_vkresult(vr));
+failed_status:
+    if (swapchain_vk->wayland_pool_registered)
+        wined3d_wayland_retire_pool_record(swapchain_vk);
+    wined3d_swapchain_vk_destroy_wayland_pool(swapchain_vk);
+    return E_FAIL;
+}
+
+static bool wined3d_wayland_poll_frame_results(struct wined3d_swapchain_vk *swapchain_vk)
+{
+    bool pending = false;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_frames); ++i)
+    {
+        typeof(swapchain_vk->wayland_frames[0]) frame;
+        unsigned int result = WINE_WAYLAND_FRAME_RESULT_PENDING;
+        unsigned int backend_status = STATUS_PENDING;
+        bool complete = false;
+        NTSTATUS status;
+
+        AcquireSRWLockShared(&swapchain_vk->s.present_result_lock);
+        frame = swapchain_vk->wayland_frames[i];
+        ReleaseSRWLockShared(&swapchain_vk->s.present_result_lock);
+        if (!frame.frame_id) continue;
+
+        SERVER_START_REQ(get_wayland_frame_result)
+        {
+            req->root = wine_server_user_handle(frame.root);
+            req->contributor_id = frame.contributor_id;
+            req->stream_id = frame.stream_id;
+            req->binding_generation = frame.binding_generation;
+            req->frame_id = frame.frame_id;
+            status = wine_server_call(req);
+            result = reply->result;
+            backend_status = reply->backend_status;
+        }
+        SERVER_END_REQ;
+        if (status == STATUS_PENDING)
+        {
+            pending = true;
+            continue;
+        }
+
+        AcquireSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+        if (swapchain_vk->wayland_frames[i].frame_id == frame.frame_id
+                && swapchain_vk->wayland_frames[i].present_id == frame.present_id)
+        {
+            memset(&swapchain_vk->wayland_frames[i], 0,
+                    sizeof(swapchain_vk->wayland_frames[i]));
+            complete = true;
+        }
+        ReleaseSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+
+        if (complete)
+        {
+            HRESULT hr = !status && (result == WINE_WAYLAND_FRAME_RESULT_PRESENTED
+                    || result == WINE_WAYLAND_FRAME_RESULT_DISCARDED) ? S_OK : E_FAIL;
+
+            TRACE("Hosted Wayland frame %s completed Present %s with result %u, status %#x, backend %#x.\n",
+                    wine_dbgstr_longlong(frame.frame_id), wine_dbgstr_longlong(frame.present_id),
+                    result, (unsigned int)status, backend_status);
+            wined3d_swapchain_complete_present(&swapchain_vk->s, frame.present_id, hr, true);
+        }
+    }
+    return pending;
+}
+
+static DWORD WINAPI wined3d_wayland_completion_worker(void *arg)
+{
+    struct wined3d_swapchain_vk *swapchain_vk = arg;
+    unsigned int i;
+
+    while (!InterlockedCompareExchange(&swapchain_vk->wayland_completion_stop, 0, 0))
+        WaitForSingleObject(swapchain_vk->wayland_completion_event,
+                wined3d_wayland_poll_frame_results(swapchain_vk) ? 20 : INFINITE);
+
+    for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_frames); ++i)
+    {
+        uint64_t present_id;
+
+        AcquireSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+        present_id = swapchain_vk->wayland_frames[i].present_id;
+        memset(&swapchain_vk->wayland_frames[i], 0,
+                sizeof(swapchain_vk->wayland_frames[i]));
+        ReleaseSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+        if (present_id)
+            wined3d_swapchain_complete_present(&swapchain_vk->s, present_id, E_FAIL, true);
+    }
+    return 0;
+}
+
+static bool wined3d_swapchain_vk_start_wayland_completion_worker(
+        struct wined3d_swapchain_vk *swapchain_vk)
+{
+    if (swapchain_vk->wayland_completion_thread) return true;
+    if (!(swapchain_vk->wayland_completion_event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        return false;
+    swapchain_vk->wayland_completion_stop = 0;
+    if (!(swapchain_vk->wayland_completion_thread = CreateThread(NULL, 0,
+            wined3d_wayland_completion_worker, swapchain_vk, 0, NULL)))
+    {
+        CloseHandle(swapchain_vk->wayland_completion_event);
+        swapchain_vk->wayland_completion_event = NULL;
+        return false;
+    }
+    return true;
+}
+
+static void wined3d_swapchain_vk_stop_wayland_completion_worker(
+        struct wined3d_swapchain_vk *swapchain_vk)
+{
+    if (!swapchain_vk->wayland_completion_thread) return;
+    InterlockedExchange(&swapchain_vk->wayland_completion_stop, 1);
+    SetEvent(swapchain_vk->wayland_completion_event);
+    WaitForSingleObject(swapchain_vk->wayland_completion_thread, INFINITE);
+    CloseHandle(swapchain_vk->wayland_completion_thread);
+    CloseHandle(swapchain_vk->wayland_completion_event);
+    swapchain_vk->wayland_completion_thread = NULL;
+    swapchain_vk->wayland_completion_event = NULL;
+}
+
+static HRESULT wined3d_swapchain_vk_submit_wayland_frame(struct wined3d_swapchain_vk *swapchain_vk,
+        struct wined3d_context_vk *context_vk, struct wined3d_texture_vk *back_buffer_vk,
+        const RECT *src_rect, uint64_t present_id)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
+    const struct wined3d_vk_info *vk_info = &device_vk->vk_info;
+    struct wine_dcomp_wayland_binding binding_value;
+    const struct wine_dcomp_wayland_binding *binding = &binding_value;
+    struct wayland_frame_submission submission = {0};
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    struct wined3d_texture *back_buffer = &back_buffer_vk->t;
+    VkCommandBuffer command_buffer;
+    VkImageCopy copy = {0};
+    uint64_t reuse_counter;
+    unsigned int frame_record, n, slot;
+    NTSTATUS status;
+    VkResult vr;
+
+    AcquireSRWLockShared(&swapchain_vk->s.present_result_lock);
+    binding_value = swapchain_vk->s.wayland_host_binding;
+    ReleaseSRWLockShared(&swapchain_vk->s.present_result_lock);
+    if (binding->version != WINE_DCOMP_WAYLAND_BINDING_VERSION || binding->flags ||
+            !binding->root || !binding->contributor_id || !binding->stream_id ||
+            !binding->binding_generation || !binding->scene_generation || !binding->host_epoch)
+    {
+        TRACE("No valid Wayland binding: version %u, flags %#x, root %p, contributor %s, stream %s, binding %s, scene %s, epoch %s.\n",
+                binding->version, binding->flags, binding->root,
+                wine_dbgstr_longlong(binding->contributor_id),
+                wine_dbgstr_longlong(binding->stream_id),
+                wine_dbgstr_longlong(binding->binding_generation),
+                wine_dbgstr_longlong(binding->scene_generation),
+                wine_dbgstr_longlong(binding->host_epoch));
+        return S_FALSE;
+    }
+    if (src_rect->left || src_rect->top || src_rect->right != (LONG)back_buffer->resource.width ||
+            src_rect->bottom != (LONG)back_buffer->resource.height)
+    {
+        TRACE("Wayland transport rejected source rect %s for %ux%u.\n", wine_dbgstr_rect(src_rect),
+                back_buffer->resource.width, back_buffer->resource.height);
+        return S_FALSE;
+    }
+    if (swapchain_vk->wayland_pool_registered &&
+            (swapchain_vk->wayland_pool_binding_generation != binding->binding_generation ||
+             swapchain_vk->wayland_pool_contributor_id != binding->contributor_id ||
+             swapchain_vk->wayland_width != back_buffer->resource.width ||
+             swapchain_vk->wayland_height != back_buffer->resource.height))
+    {
+        if (wined3d_wayland_retire_pool_record(swapchain_vk)) return S_FALSE;
+        wined3d_swapchain_vk_destroy_wayland_pool(swapchain_vk);
+    }
+    if (!swapchain_vk->wayland_pool_registered)
+    {
+        HRESULT pool_hr = wined3d_swapchain_vk_create_wayland_pool(swapchain_vk, binding,
+                back_buffer->resource.width, back_buffer->resource.height);
+
+        if (FAILED(pool_hr))
+        {
+            TRACE("Could not create Wayland transport pool, hr %#lx.\n", pool_hr);
+            return S_FALSE;
+        }
+    }
+    if (!wined3d_swapchain_vk_start_wayland_completion_worker(swapchain_vk))
+        return S_FALSE;
+
+    AcquireSRWLockShared(&swapchain_vk->s.present_result_lock);
+    for (frame_record = 0; frame_record < ARRAY_SIZE(swapchain_vk->wayland_frames);
+            ++frame_record)
+        if (!swapchain_vk->wayland_frames[frame_record].frame_id) break;
+    ReleaseSRWLockShared(&swapchain_vk->s.present_result_lock);
+    if (frame_record == ARRAY_SIZE(swapchain_vk->wayland_frames)) return S_FALSE;
+
+    slot = swapchain_vk->wayland_next_slot;
+    for (n = 0; n < ARRAY_SIZE(swapchain_vk->wayland_slots); ++n)
+    {
+        slot = (slot + n) % ARRAY_SIZE(swapchain_vk->wayland_slots);
+        if (!swapchain_vk->wayland_slots[slot].last_reuse_value) break;
+        if (!(vk_info->vk_ops.vkGetSemaphoreCounterValue ?
+                VK_CALL(vkGetSemaphoreCounterValue)(device_vk->vk_device,
+                swapchain_vk->wayland_slots[slot].reuse, &reuse_counter) :
+                VK_CALL(vkGetSemaphoreCounterValueKHR)(device_vk->vk_device,
+                swapchain_vk->wayland_slots[slot].reuse, &reuse_counter)) &&
+                reuse_counter >= swapchain_vk->wayland_slots[slot].last_reuse_value)
+            break;
+    }
+    if (n == ARRAY_SIZE(swapchain_vk->wayland_slots)) return S_FALSE;
+    swapchain_vk->wayland_next_slot = (slot + 1) % ARRAY_SIZE(swapchain_vk->wayland_slots);
+
+    if (!(command_buffer = wined3d_context_vk_get_command_buffer(context_vk))) return E_FAIL;
+    wined3d_context_vk_end_current_render_pass(context_vk);
+    wined3d_context_vk_image_barrier(context_vk, command_buffer,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk_access_mask_from_bind_flags(back_buffer->resource.bind_flags),
+            VK_ACCESS_TRANSFER_READ_BIT, back_buffer_vk->layout,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back_buffer_vk->image.vk_image, &range);
+
+    barrier.srcAccessMask = swapchain_vk->wayland_slots[slot].external_owned ?
+            VK_ACCESS_MEMORY_READ_BIT : 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = swapchain_vk->wayland_slots[slot].external_owned ?
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = swapchain_vk->wayland_slots[slot].external_owned ?
+            VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = swapchain_vk->wayland_slots[slot].external_owned ?
+            device_vk->graphics_queue.vk_queue_family_index : VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = swapchain_vk->wayland_slots[slot].image;
+    barrier.subresourceRange = range;
+    VK_CALL(vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.srcSubresource.layerCount = 1;
+    copy.dstSubresource = copy.srcSubresource;
+    copy.extent.width = back_buffer->resource.width;
+    copy.extent.height = back_buffer->resource.height;
+    copy.extent.depth = 1;
+    VK_CALL(vkCmdCopyImage)(command_buffer, back_buffer_vk->image.vk_image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_vk->wayland_slots[slot].image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = 0;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = device_vk->graphics_queue.vk_queue_family_index;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+    VK_CALL(vkCmdPipelineBarrier)(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    wined3d_context_vk_image_barrier(context_vk, command_buffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            vk_access_mask_from_bind_flags(back_buffer->resource.bind_flags),
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back_buffer_vk->layout,
+            back_buffer_vk->image.vk_image, &range);
+    back_buffer_vk->bind_mask = 0;
+    wined3d_context_vk_reference_texture(context_vk, back_buffer_vk);
+
+    if (!++swapchain_vk->wayland_timeline_value)
+        ++swapchain_vk->wayland_timeline_value;
+    if ((vr = wined3d_context_vk_submit_timeline(context_vk,
+            swapchain_vk->wayland_slots[slot].last_reuse_value ?
+            swapchain_vk->wayland_slots[slot].reuse : VK_NULL_HANDLE,
+            swapchain_vk->wayland_slots[slot].last_reuse_value,
+            swapchain_vk->wayland_slots[slot].ready,
+            swapchain_vk->wayland_timeline_value)) < 0)
+        return E_FAIL;
+    swapchain_vk->wayland_slots[slot].external_owned = true;
+
+    if (!++swapchain_vk->wayland_frame_id) ++swapchain_vk->wayland_frame_id;
+    submission.pool_generation = swapchain_vk->wayland_pool_generation;
+    submission.frame_id = swapchain_vk->wayland_frame_id;
+    submission.ready_value = swapchain_vk->wayland_timeline_value;
+    if (!++swapchain_vk->wayland_timeline_value)
+        ++swapchain_vk->wayland_timeline_value;
+    submission.reuse_value = swapchain_vk->wayland_timeline_value;
+    submission.scene_generation = binding->scene_generation;
+    submission.binding_generation = binding->binding_generation;
+    submission.slot = slot;
+    SERVER_START_REQ(submit_wayland_frame)
+    {
+        req->root = wine_server_user_handle(binding->root);
+        req->contributor_id = binding->contributor_id;
+        req->stream_id = binding->stream_id;
+        req->binding_generation = binding->binding_generation;
+        wine_server_add_data(req, &submission, sizeof(submission));
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    if (status) return S_FALSE;
+
+    swapchain_vk->wayland_slots[slot].last_reuse_value = submission.reuse_value;
+    AcquireSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+    swapchain_vk->wayland_frames[frame_record].frame_id = submission.frame_id;
+    swapchain_vk->wayland_frames[frame_record].present_id = present_id;
+    swapchain_vk->wayland_frames[frame_record].contributor_id = binding->contributor_id;
+    swapchain_vk->wayland_frames[frame_record].stream_id = binding->stream_id;
+    swapchain_vk->wayland_frames[frame_record].binding_generation = binding->binding_generation;
+    swapchain_vk->wayland_frames[frame_record].root = binding->root;
+    swapchain_vk->wayland_frames[frame_record].slot = slot;
+    ReleaseSRWLockExclusive(&swapchain_vk->s.present_result_lock);
+    SetEvent(swapchain_vk->wayland_completion_event);
+    TRACE("Submitted hosted Wayland frame %s for Present %s in slot %u.\n",
+            wine_dbgstr_longlong(submission.frame_id), wine_dbgstr_longlong(present_id), slot);
+    return S_OK;
 }
 
 static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain_vk,
@@ -1894,9 +2550,17 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
     {
         wined3d_texture_load_location(back_buffer, 0, &context_vk->c, back_buffer->resource.draw_binding);
         presented_identity = (uint64_t)wined3d_texture_vk(back_buffer)->image.vk_image;
+        hr = wined3d_swapchain_vk_submit_wayland_frame(swapchain_vk, context_vk,
+                wined3d_texture_vk(back_buffer), src_rect, result->present_id);
+        if (hr == S_OK)
+        {
+            result->backend_pending = TRUE;
+            native_present = true;
+            goto presented;
+        }
 
-        vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval,
-                &presentation_identity, &presentation_generation);
+        vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect,
+                swap_interval, &presentation_identity, &presentation_generation);
         if (vr == VK_ERROR_OUT_OF_DATE_KHR)
         {
             if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
@@ -1929,6 +2593,7 @@ static HRESULT swapchain_vk_present(struct wined3d_swapchain *swapchain, const R
         native_present = SUCCEEDED(hr);
     }
 
+presented:
     /* Match the legacy GDI fallback's frame rotation for formats without a
      * DDI mapping, but keep the completion failed so sparse Present1 repairs
      * cannot treat an unpresented frame as authoritative. */

@@ -164,6 +164,8 @@ struct wined3d_device_vk;
     VK_DEVICE_PFN(vkGetImageSparseMemoryRequirements) \
     VK_DEVICE_PFN(vkGetImageSubresourceLayout) \
     VK_DEVICE_EXT_PFN(vkGetMemoryWin32HandleKHR) \
+    VK_DEVICE_EXT_PFN(vkGetSemaphoreCounterValue) \
+    VK_DEVICE_EXT_PFN(vkGetSemaphoreCounterValueKHR) \
     VK_DEVICE_EXT_PFN(vkGetSemaphoreWin32HandleKHR) \
     VK_DEVICE_PFN(vkGetPipelineCacheData) \
     VK_DEVICE_PFN(vkGetQueryPoolResults) \
@@ -855,6 +857,9 @@ HRESULT wined3d_context_vk_init(struct wined3d_context_vk *context_vk,
 void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context_vk,
         unsigned int wait_semaphore_count, const VkSemaphore *wait_semaphores, const VkPipelineStageFlags *wait_stages,
         unsigned int signal_semaphore_count, const VkSemaphore *signal_semaphores);
+VkResult wined3d_context_vk_submit_timeline(struct wined3d_context_vk *context_vk,
+        VkSemaphore wait_semaphore, uint64_t wait_value,
+        VkSemaphore signal_semaphore, uint64_t signal_value);
 VkResult wined3d_context_vk_submit_keyed_mutex(struct wined3d_context_vk *context_vk,
         VkDeviceMemory memory, BOOL acquire, uint64_t key, uint32_t timeout);
 void wined3d_context_vk_wait_command_buffer(struct wined3d_context_vk *context_vk, uint64_t id);
@@ -1244,6 +1249,41 @@ struct wined3d_swapchain_vk
     struct wined3d_texture *composition_source;
     VkImage composition_image;
     uint64_t composition_command_buffer_id;
+    struct
+    {
+        VkImage image;
+        VkDeviceMemory memory;
+        VkSemaphore ready;
+        VkSemaphore reuse;
+        uint64_t last_reuse_value;
+        bool external_owned;
+    } wayland_slots[3];
+    struct
+    {
+        uint64_t frame_id;
+        uint64_t present_id;
+        uint64_t contributor_id;
+        uint64_t stream_id;
+        uint64_t binding_generation;
+        HWND root;
+        uint32_t slot;
+    } wayland_frames[16];
+    HANDLE wayland_completion_thread;
+    HANDLE wayland_completion_event;
+    LONG wayland_completion_stop;
+    uint64_t wayland_pool_generation;
+    uint64_t wayland_frame_id;
+    uint64_t wayland_timeline_value;
+    uint64_t wayland_pool_binding_generation;
+    uint64_t wayland_pool_contributor_id;
+    uint64_t wayland_pool_stream_id;
+    HWND wayland_pool_root;
+    VkDeviceSize wayland_allocation_size;
+    uint32_t wayland_memory_type_index;
+    uint32_t wayland_next_slot;
+    uint32_t wayland_width;
+    uint32_t wayland_height;
+    bool wayland_pool_registered;
 };
 
 static inline struct wined3d_swapchain_vk *wined3d_swapchain_vk(struct wined3d_swapchain *swapchain)

@@ -2293,6 +2293,7 @@ struct wined3d_depth_stencil_state;
 struct wined3d_device;
 struct wined3d_device_context;
 struct wine_dcomp_visual_desc;
+struct wine_dcomp_wayland_binding;
 struct wined3d_output;
 struct wined3d_palette;
 struct wined3d_query;
@@ -2349,6 +2350,7 @@ struct wined3d_swapchain_present_result
 {
     uint64_t present_id;
     HRESULT result;
+    BOOL backend_pending;
     uint32_t capabilities;
     uint64_t presented_physical_identity;
     uint64_t current_physical_identity;
@@ -3003,6 +3005,8 @@ void __cdecl wined3d_swapchain_set_palette(struct wined3d_swapchain *swapchain, 
 void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWND window);
 void __cdecl wined3d_swapchain_set_composition_desc(struct wined3d_swapchain *swapchain,
         const struct wine_dcomp_visual_desc *desc);
+void __cdecl wined3d_swapchain_set_wayland_host_binding(struct wined3d_swapchain *swapchain,
+        const struct wine_dcomp_wayland_binding *binding);
 
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,

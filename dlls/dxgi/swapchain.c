@@ -290,6 +290,34 @@ HRESULT WINAPI __wine_dxgi_set_composition_description(IDXGISwapChain1 *iface,
     return S_OK;
 }
 
+HRESULT WINAPI __wine_dxgi_set_wayland_host_binding(IDXGISwapChain1 *iface,
+        const struct wine_dcomp_wayland_binding *binding)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *swapchain4;
+    HRESULT hr;
+
+    if (!iface || (binding && (binding->version != WINE_DCOMP_WAYLAND_BINDING_VERSION
+            || binding->flags || !binding->root || !binding->contributor_id
+            || !binding->stream_id || !binding->binding_generation
+            || !binding->scene_generation || !binding->host_epoch)))
+        return E_INVALIDARG;
+    if (FAILED(hr = IDXGISwapChain1_QueryInterface(iface, &IID_IDXGISwapChain4,
+            (void **)&swapchain4)))
+        return hr;
+    if (swapchain4->lpVtbl != &d3d11_swapchain_vtbl)
+    {
+        IDXGISwapChain4_Release(swapchain4);
+        return E_NOINTERFACE;
+    }
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(swapchain4);
+    wined3d_mutex_lock();
+    wined3d_swapchain_set_wayland_host_binding(swapchain->wined3d_swapchain, binding);
+    wined3d_mutex_unlock();
+    IDXGISwapChain4_Release(swapchain4);
+    return S_OK;
+}
+
 
 /* IUnknown methods */
 

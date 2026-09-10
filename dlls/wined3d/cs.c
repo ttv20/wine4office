@@ -671,7 +671,6 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
     const struct wined3d_cs_present *op = data;
     const struct wined3d_swapchain_desc *desc;
     struct wined3d_swapchain *swapchain;
-    struct wined3d_swapchain_present_record *record;
     struct wined3d_swapchain_present_result result;
     LONGLONG elapsed_time;
     LARGE_INTEGER time;
@@ -771,17 +770,19 @@ static void wined3d_cs_exec_present(struct wined3d_cs *cs, const void *data)
         }
     }
 
-    AcquireSRWLockExclusive(&swapchain->present_result_lock);
-    record = &swapchain->present_results[result.present_id % WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT];
-    if (record->result.present_id == result.present_id)
+    if (result.backend_pending)
+        TRACE("Present %s remains pending in the hosted Wayland backend.\n",
+                wine_dbgstr_longlong(result.present_id));
+    else
     {
-        record->result = result;
-        record->completed = true;
-        swapchain->last_completed_present_id = result.present_id;
+        AcquireSRWLockExclusive(&swapchain->present_result_lock);
+        if (swapchain->present_results[result.present_id %
+                WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT].result.present_id == result.present_id)
+            swapchain->present_results[result.present_id %
+                    WINED3D_SWAPCHAIN_PRESENT_RESULT_COUNT].result = result;
+        ReleaseSRWLockExclusive(&swapchain->present_result_lock);
+        wined3d_swapchain_complete_present(swapchain, result.present_id, result.result, true);
     }
-    ReleaseSRWLockExclusive(&swapchain->present_result_lock);
-
-    ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
 }
 
 void wined3d_cs_emit_present(struct wined3d_cs *cs, struct wined3d_swapchain *swapchain,

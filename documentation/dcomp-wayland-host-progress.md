@@ -197,6 +197,20 @@ or transport fixture is not Outlook support.
   generation nor republishes over a newer `Hidden` or authenticated
   `HostedContent` disposition. DComp Commit remains edge-triggered and does not
   poll for host state.
+- DComp now admits the first real hosted producer topology. The committed
+  scene must contain exactly one visible, child-free, identity-mapped BGRA8
+  composition swapchain whose extent matches the root client area. DComp
+  creates the contributor, grant and binding, publishes `HostedContent`, and
+  passes the server-issued tuple into DXGI and WineD3D. Removal or fallback
+  revokes that tuple. Other visual trees continue through local presentation.
+- WineD3D's Vulkan backend now allocates a three-slot opaque-FD transport pool
+  on the admitted GPU. Each slot owns an exportable BGRA8 image and independent
+  ready/reuse timeline semaphores. Present copies the application backbuffer,
+  submits the authorized frame to wineserver and leaves the public Present
+  record pending. A bounded completion worker wakes only while frames are in
+  flight, consumes the host's terminal result, completes the matching Present
+  record and returns one frame-latency credit exactly once. Binding replacement
+  and shutdown retain the tuple needed to drain already accepted frames.
 
 ## Contributor interception inventory
 
@@ -526,6 +540,17 @@ admitted.
   `artifacts/production-wsi-release-SHA256SUMS`. The Radeon x86-64 and i386
   registration fixtures also remained on the honest fallback path with
   capabilities `0xf`.
+- The hosted-producer authority extension passed 514 checks with zero failures
+  in both x86-64 and i386 on the Radeon task environment. The coupled DComp,
+  DXGI and WineD3D targets rebuilt for both PE architectures, including the
+  Vulkan Unix backend. On Intel Iris Xe, the real x86-64 D3D11/DXGI/DComp
+  fixture created the authorized three-slot pool, imported all slots and
+  presented seven frames through the server and host WSI. This covers more
+  than two full slot-reuse cycles and proves that asynchronous host completion
+  returns producer credits. The retained log is
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/dcomp-pipeline-reuse-x64.log`.
+  The existing Intel i386 prefix failed during Wine display initialization
+  before entering the fixture, so no i386 end-to-end result is claimed yet.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

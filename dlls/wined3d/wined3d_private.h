@@ -4149,6 +4149,8 @@ void wined3d_swapchain_state_restore_from_fullscreen(struct wined3d_swapchain_st
         HWND window, const RECT *window_rect);
 HRESULT wined3d_swapchain_state_setup_fullscreen(struct wined3d_swapchain_state *state,
         HWND window, int x, int y, int width, int height);
+void wined3d_swapchain_complete_present(struct wined3d_swapchain *swapchain,
+        uint64_t present_id, HRESULT hr, bool release_credit);
 
 struct wined3d_swapchain_ops
 {
@@ -4199,6 +4201,7 @@ struct wined3d_swapchain
     struct wined3d_swapchain_state state;
     HWND win_handle;
     struct wine_dcomp_visual_desc composition_desc;
+    struct wine_dcomp_wayland_binding wayland_host_binding;
     HDC dc;
 };
 

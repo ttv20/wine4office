@@ -2522,6 +2522,26 @@ void wined3d_context_vk_submit_command_buffer(struct wined3d_context_vk *context
             wait_semaphores, wait_stages, signal_semaphore_count, signal_semaphores, NULL);
 }
 
+VkResult wined3d_context_vk_submit_timeline(struct wined3d_context_vk *context_vk,
+        VkSemaphore wait_semaphore, uint64_t wait_value,
+        VkSemaphore signal_semaphore, uint64_t signal_value)
+{
+    VkTimelineSemaphoreSubmitInfo timeline_info =
+            {.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    if (wait_semaphore)
+    {
+        timeline_info.waitSemaphoreValueCount = 1;
+        timeline_info.pWaitSemaphoreValues = &wait_value;
+    }
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues = &signal_value;
+    return wined3d_context_vk_submit_command_buffer_next(context_vk,
+            wait_semaphore ? 1 : 0, wait_semaphore ? &wait_semaphore : NULL,
+            wait_semaphore ? &wait_stage : NULL, 1, &signal_semaphore, &timeline_info);
+}
+
 VkResult wined3d_context_vk_submit_keyed_mutex(struct wined3d_context_vk *context_vk,
         VkDeviceMemory memory, BOOL acquire, uint64_t key, uint32_t timeout)
 {

@@ -47,8 +47,11 @@ struct dcomp_scene
     HWND hwnd;
     unsigned int refcount;
     UINT64 scene_generation;
+    UINT64 contribution_revision;
     UINT committed_disposition;
     BOOL committed;
+    IDXGISwapChain1 *hosted_swapchain;
+    struct wine_dcomp_wayland_binding hosted_binding;
 };
 
 
@@ -172,9 +175,38 @@ static struct dcomp_scene *dcomp_scene_acquire(HWND hwnd)
     return scene;
 }
 
+static void dcomp_set_wayland_host_binding(IDXGISwapChain1 *swapchain,
+        const struct wine_dcomp_wayland_binding *binding)
+{
+    typedef HRESULT (WINAPI *set_wayland_host_binding_t)(IDXGISwapChain1 *,
+            const struct wine_dcomp_wayland_binding *);
+    set_wayland_host_binding_t set_binding;
+    HMODULE dxgi;
+
+    if ((dxgi = GetModuleHandleW(L"dxgi.dll")) &&
+            (set_binding = (set_wayland_host_binding_t)GetProcAddress(dxgi,
+            "__wine_dxgi_set_wayland_host_binding")))
+        set_binding(swapchain, binding);
+}
+
+static void dcomp_scene_clear_hosted_binding(struct dcomp_scene *scene)
+{
+    if (scene->hosted_swapchain)
+    {
+        dcomp_set_wayland_host_binding(scene->hosted_swapchain, NULL);
+        scene->hosted_swapchain->lpVtbl->Release(scene->hosted_swapchain);
+        scene->hosted_swapchain = NULL;
+    }
+    memset(&scene->hosted_binding, 0, sizeof(scene->hosted_binding));
+}
+
 static void dcomp_scene_release(struct dcomp_scene *scene)
 {
-    if (!--scene->refcount) free(scene);
+    if (!--scene->refcount)
+    {
+        dcomp_scene_clear_hosted_binding(scene);
+        free(scene);
+    }
 }
 
 static BOOL dcomp_scene_has_applied_root(const struct dcomp_scene *scene)
@@ -201,7 +233,8 @@ static BOOL dcomp_scene_has_current_target(const struct dcomp_scene *scene)
 }
 
 static NTSTATUS dcomp_publish_scene(struct dcomp_scene *scene, UINT disposition,
-        UINT64 owner_revision, UINT64 *scene_generation, UINT64 *current_owner_revision)
+        const struct wine_dcomp_wayland_binding *binding, UINT64 owner_revision,
+        UINT64 *scene_generation, UINT64 *current_owner_revision)
 {
     NTSTATUS status;
 
@@ -213,6 +246,12 @@ static NTSTATUS dcomp_publish_scene(struct dcomp_scene *scene, UINT disposition,
         req->disposition = disposition;
         req->expected_generation = scene->scene_generation;
         req->owner_revision = owner_revision;
+        if (binding)
+        {
+            req->contributor_id = binding->contributor_id;
+            req->stream_id = binding->stream_id;
+            req->binding_generation = binding->binding_generation;
+        }
         status = wine_server_call(req);
         /* On a CAS failure the server returns its current transaction state so
          * an owner-side adapter can resynchronize without granting host access. */
@@ -223,23 +262,122 @@ static NTSTATUS dcomp_publish_scene(struct dcomp_scene *scene, UINT disposition,
     return status;
 }
 
+static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scene *scene,
+        UINT *target_layer);
+
+static NTSTATUS dcomp_scene_create_hosted_binding(struct dcomp_scene *scene,
+        IDXGISwapChain1 *swapchain, UINT target_layer)
+{
+    struct wine_dcomp_wayland_binding binding = {0};
+    UINT64 grant_low = 0, grant_high = 0;
+    NTSTATUS status;
+
+    if (scene->contribution_revision == ~(UINT64)0) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(create_wayland_contributor)
+    {
+        req->root = wine_server_user_handle(scene->hwnd);
+        req->source = WINE_WAYLAND_CONTRIBUTOR_DCOMP;
+        req->target_layer = target_layer;
+        req->contribution_revision = ++scene->contribution_revision;
+        if (!(status = wine_server_call(req)))
+        {
+            binding.contributor_id = reply->contributor_id;
+            grant_low = reply->grant_low;
+            grant_high = reply->grant_high;
+        }
+    }
+    SERVER_END_REQ;
+    if (status) return status;
+
+    SERVER_START_REQ(bind_wayland_stream)
+    {
+        req->root = wine_server_user_handle(scene->hwnd);
+        req->contributor_id = binding.contributor_id;
+        req->grant_low = grant_low;
+        req->grant_high = grant_high;
+        if (!(status = wine_server_call(req)))
+        {
+            binding.stream_id = reply->stream_id;
+            binding.binding_generation = reply->binding_generation;
+            binding.host_epoch = reply->host_epoch;
+        }
+    }
+    SERVER_END_REQ;
+    if (status)
+    {
+        SERVER_START_REQ(revoke_wayland_contributor)
+        {
+            req->root = wine_server_user_handle(scene->hwnd);
+            req->contributor_id = binding.contributor_id;
+            req->binding_generation = 0;
+            wine_server_call(req);
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
+    binding.version = WINE_DCOMP_WAYLAND_BINDING_VERSION;
+    binding.root = scene->hwnd;
+    scene->hosted_binding = binding;
+    scene->hosted_swapchain = swapchain;
+    swapchain->lpVtbl->AddRef(swapchain);
+    return STATUS_SUCCESS;
+}
+
+static void dcomp_scene_revoke_hosted_binding(struct dcomp_scene *scene)
+{
+    NTSTATUS status;
+
+    if (!scene->hosted_binding.contributor_id) return;
+    SERVER_START_REQ(revoke_wayland_contributor)
+    {
+        req->root = wine_server_user_handle(scene->hwnd);
+        req->contributor_id = scene->hosted_binding.contributor_id;
+        req->binding_generation = scene->hosted_binding.binding_generation;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    if (status && status != STATUS_NOT_FOUND && status != STATUS_ACCESS_DENIED &&
+            status != STATUS_REVISION_MISMATCH && status != STATUS_DEVICE_NOT_READY)
+        TRACE("Could not revoke hosted contributor for %p, status %#lx.\n", scene->hwnd, status);
+    dcomp_scene_clear_hosted_binding(scene);
+}
+
 /* Called with dcomp_global_lock held, after committed roots are updated. */
 static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL allow_no_target)
 {
+    IDXGISwapChain1 *candidate;
     UINT64 scene_generation, owner_revision, current_owner_revision;
+    UINT target_layer = 0;
     UINT disposition;
     NTSTATUS status;
 
     if (!allow_no_target && !dcomp_scene_has_current_target(scene)) return;
-    disposition = dcomp_scene_has_applied_root(scene) ? WINE_WAYLAND_SCENE_LOCAL_FALLBACK
-            : WINE_WAYLAND_SCENE_EMPTY;
-    if (scene->committed && scene->committed_disposition == disposition) return;
-    scene->committed_disposition = disposition;
-    scene->committed = TRUE;
+    candidate = dcomp_scene_get_hosted_candidate(scene, &target_layer);
+    disposition = dcomp_scene_has_applied_root(scene) ? WINE_WAYLAND_SCENE_LOCAL_FALLBACK :
+            WINE_WAYLAND_SCENE_EMPTY;
+    if (candidate && scene->hosted_swapchain != candidate)
+    {
+        if (scene->hosted_swapchain) dcomp_scene_revoke_hosted_binding(scene);
+        status = dcomp_scene_create_hosted_binding(scene, candidate, target_layer);
+        if (status && status != STATUS_DEVICE_NOT_READY)
+            TRACE("Could not bind hosted candidate for %p, status %#lx.\n", scene->hwnd, status);
+    }
+    if (candidate && scene->hosted_swapchain == candidate)
+        disposition = WINE_WAYLAND_SCENE_HOSTED_CONTENT;
+    if (candidate) candidate->lpVtbl->Release(candidate);
+    if (scene->committed && scene->committed_disposition == disposition)
+    {
+        if (disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+            dcomp_set_wayland_host_binding(scene->hosted_swapchain, &scene->hosted_binding);
+        return;
+    }
     if (dcomp_owner_revision == ~(UINT64)0) return;
 
     owner_revision = ++dcomp_owner_revision;
-    status = dcomp_publish_scene(scene, disposition, owner_revision, &scene_generation,
+    status = dcomp_publish_scene(scene, disposition,
+            disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT ? &scene->hosted_binding : NULL,
+            owner_revision, &scene_generation,
             &current_owner_revision);
     if (status == STATUS_REVISION_MISMATCH)
     {
@@ -248,18 +386,31 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
             dcomp_owner_revision = current_owner_revision;
         if (dcomp_owner_revision == ~(UINT64)0) return;
         owner_revision = ++dcomp_owner_revision;
-        status = dcomp_publish_scene(scene, disposition, owner_revision, &scene_generation,
+        status = dcomp_publish_scene(scene, disposition,
+                disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT ? &scene->hosted_binding : NULL,
+                owner_revision, &scene_generation,
                 &current_owner_revision);
     }
     if (!status)
     {
         scene->scene_generation = scene_generation;
+        scene->committed_disposition = disposition;
+        scene->committed = TRUE;
+        if (disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+        {
+            scene->hosted_binding.scene_generation = scene_generation;
+            dcomp_set_wayland_host_binding(scene->hosted_swapchain, &scene->hosted_binding);
+        }
+        else if (scene->hosted_swapchain)
+            dcomp_scene_revoke_hosted_binding(scene);
         TRACE("Published committed scene %#x for %p at generation %s.\n",
                 disposition, scene->hwnd, wine_dbgstr_longlong(scene->scene_generation));
     }
     else if (status != STATUS_NOT_FOUND && status != STATUS_DEVICE_NOT_READY)
         TRACE("Could not publish committed scene for %p, status %#lx.\n",
                 scene->hwnd, status);
+    if (status && disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+        dcomp_scene_revoke_hosted_binding(scene);
 }
 
 static void dcomp_device_publish_committed_scenes(struct dcomp_device *device)
@@ -462,6 +613,86 @@ static inline struct dcomp_visual *impl_from_IDCompositionVisual2(IDCompositionV
 static inline struct dcomp_visual *impl_from_IDCompositionVisualPrivate(IDCompositionVisualPrivate *iface)
 {
     return CONTAINING_RECORD(iface, struct dcomp_visual, IDCompositionVisualPrivate_iface);
+}
+
+static BOOL dcomp_description_is_hosted_identity(const struct wine_dcomp_visual_desc *desc,
+        UINT width, UINT height)
+{
+    float identity[16];
+
+    dcomp_matrix_identity(identity);
+    /* With an integer identity mapping and equal source/output extents, neither
+     * interpolation nor border sampling can change a covered pixel. */
+    return desc->version == WINE_DCOMP_VISUAL_DESC_VERSION &&
+            desc->flags == (WINE_DCOMP_VISUAL_RENDERER_ACTIVE | WINE_DCOMP_VISUAL_HAS_SIZE) &&
+            !memcmp(desc->transform, identity, sizeof(identity)) &&
+            desc->render_origin[0] == 0.0f && desc->render_origin[1] == 0.0f &&
+            desc->size[0] == width && desc->size[1] == height &&
+            desc->source_size[0] == width && desc->source_size[1] == height &&
+            desc->content_rect[0] == 0.0f && desc->content_rect[1] == 0.0f &&
+            desc->content_rect[2] == width && desc->content_rect[3] == height &&
+            desc->opacity == 1.0f && desc->interpolation_mode <= 1 &&
+            desc->border_mode <= 2 &&
+            desc->composite_mode <= 1;
+}
+
+static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scene *scene,
+        UINT *target_layer)
+{
+    struct dcomp_device *device;
+    struct dcomp_target *target;
+    struct dcomp_visual *visual;
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
+    IDXGISwapChain1 *candidate = NULL;
+    RECT client_rect;
+
+    if (!GetClientRect(scene->hwnd, &client_rect) || client_rect.right <= 0 || client_rect.bottom <= 0)
+        return NULL;
+
+    for (device = dcomp_devices; device; device = device->next_global)
+    {
+        EnterCriticalSection(&device->lock);
+        for (target = device->targets; target; target = target->next)
+        {
+            IDXGISwapChain1 *swapchain;
+
+            if (target->scene != scene || !dcomp_target_is_current(target) || !target->applied_root)
+                continue;
+            visual = impl_from_IDCompositionVisual2((IDCompositionVisual2 *)target->applied_root);
+            if (candidate || !visual->effective_visible || visual->applied_children ||
+                    !visual->applied_content || FAILED(visual->applied_content->lpVtbl->QueryInterface(
+                    visual->applied_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
+            {
+                TRACE("Hosted candidate %p rejected: prior %p, visible %u, children %p, content %p.\n",
+                        visual, candidate, visual->effective_visible, visual->applied_children,
+                        visual->applied_content);
+                if (candidate) candidate->lpVtbl->Release(candidate);
+                candidate = NULL;
+                LeaveCriticalSection(&device->lock);
+                return NULL;
+            }
+            if (FAILED(swapchain->lpVtbl->GetDesc1(swapchain, &swapchain_desc)) ||
+                    swapchain_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+                    swapchain_desc.SampleDesc.Count != 1 ||
+                    swapchain_desc.Width != (UINT)client_rect.right ||
+                    swapchain_desc.Height != (UINT)client_rect.bottom ||
+                    !dcomp_description_is_hosted_identity(&visual->applied_description,
+                    swapchain_desc.Width, swapchain_desc.Height))
+            {
+                TRACE("Hosted candidate %p rejected: format %#x, samples %u, extent %ux%u, client %ldx%ld, flags %#x.\n",
+                        visual, swapchain_desc.Format, swapchain_desc.SampleDesc.Count,
+                        swapchain_desc.Width, swapchain_desc.Height, client_rect.right,
+                        client_rect.bottom, visual->applied_description.flags);
+                swapchain->lpVtbl->Release(swapchain);
+                LeaveCriticalSection(&device->lock);
+                return NULL;
+            }
+            candidate = swapchain;
+            *target_layer = target->topmost ? WINE_WAYLAND_TARGET_ABOVE : WINE_WAYLAND_TARGET_BELOW;
+        }
+        LeaveCriticalSection(&device->lock);
+    }
+    return candidate;
 }
 
 static void dcomp_visual_child_list_free(struct dcomp_visual_child *child, BOOL clear_parent)
@@ -885,8 +1116,11 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
     typedef void (WINAPI *bind_composition_window_t)(HWND, HWND);
     typedef HRESULT (WINAPI *set_composition_description_t)(IDXGISwapChain1 *,
             const struct wine_dcomp_visual_desc *);
+    typedef HRESULT (WINAPI *set_wayland_host_binding_t)(IDXGISwapChain1 *,
+            const struct wine_dcomp_wayland_binding *);
     bind_composition_window_t bind_composition_window;
     set_composition_description_t set_composition_description;
+    set_wayland_host_binding_t set_wayland_host_binding;
     IDXGISwapChain1 *swapchain;
     HMODULE dxgi;
     HWND window;
@@ -899,6 +1133,10 @@ static void dcomp_visual_unbind_content(struct dcomp_visual *visual)
             && (set_composition_description = (set_composition_description_t)GetProcAddress(dxgi,
             "__wine_dxgi_set_composition_description")))
         set_composition_description(swapchain, NULL);
+    if ((dxgi = GetModuleHandleW(L"dxgi.dll"))
+            && (set_wayland_host_binding = (set_wayland_host_binding_t)GetProcAddress(dxgi,
+            "__wine_dxgi_set_wayland_host_binding")))
+        set_wayland_host_binding(swapchain, NULL);
     if (SUCCEEDED(swapchain->lpVtbl->GetHwnd(swapchain, &window)))
     {
         RemovePropW(window, L"__wine_dcomp_clip_enabled");
