@@ -36,8 +36,12 @@ or transport fixture is not Outlook support.
   idempotent, conflicting metadata is rejected, and pool retirement or renderer
   teardown destroys every partial or complete import and closes unconsumed FDs.
   The registered host also recreates this renderer on the exact admitted GPU
-  before publishing Ready. GPU ready/reuse queue submissions are still pending,
-  so this primitive alone is not an end-to-end frame transport.
+  before publishing Ready. The renderer now checks ready timelines without
+  waiting, submits an external-ownership acquire and image copy only after the
+  requested value is visible, and signals the matching reuse timeline when that
+  GPU submission completes. It retains a bounded host-owned image for later WSI
+  work. Teardown polls all tracked fences and also retains self-test exporter
+  objects across a bounded-wait timeout rather than destroying a live device.
 - Vulkan transport admission is now bound to the probed physical device. The
   startup permit records the host's 16-byte device UUID, registration must
   present the same UUID, and host queries return the registered identity.
@@ -122,8 +126,12 @@ or transport fixture is not Outlook support.
   `Failed`; producers consume each result once. Pool retirement rejects live
   frame records, while contributor revocation or host replacement cancels the
   queue and credits without releasing pinned resources before tombstone
-  acknowledgement. This is still an authority and lifetime contract. The real
-  host does not yet wait on or copy pixels from these frames.
+  acknowledgement. The real host now enumerates these accepted frames and
+  copies each ready producer slot into one of 32 bounded host-owned records.
+  It marks the source slot reusable only after fence completion. A frame-level
+  failure cannot become terminal until the host has made the source slot safe;
+  recovery for permanent pre-submit failures remains pending. Local WSI,
+  composition and terminal Present results are not implemented yet.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -372,6 +380,20 @@ admitted.
   `/workspace/artifacts/dcomp-host-work-{authority,registration}-{x64,i386}.log`,
   with hashes in `/workspace/artifacts/dcomp-host-work-SHA256SUMS` and the
   coherent runner at `/workspace/runner-dcomp-host-work`.
+- The Vulkan frame synchronization path rebuilt the Unix library and both PE
+  architectures. On Intel Iris Xe, x86-64 and i386 each proved that an
+  unavailable ready value returns pending without allocating a record, the
+  matching ready value submits a real image copy, and the producer's reuse
+  semaphore reaches 11 only after the copy fence completes. Logs and hashes are
+  retained on `elkana-scadasudo` under
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/frame-copy-final-{x64,i386}.log`
+  and `frame-copy-final-SHA256SUMS`. On the Radeon fallback environment, host
+  registration remained ready with capabilities `0xf` in both architectures,
+  and the protocol-982 authority fixture remained at 475 checks with zero
+  failures in both architectures. Evidence and runner hashes are retained as
+  `/workspace/artifacts/frame-copy-{authority-{x64,i386},final-registration-{x64,i386}}.log`
+  and `/workspace/artifacts/dcomp-frame-copy-final-SHA256SUMS` in
+  `dcomp-host-probe-20260909`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

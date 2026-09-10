@@ -41,6 +41,7 @@ C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
+C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 
 struct registry_probe
 {
@@ -93,6 +94,7 @@ static const struct wl_registry_listener registry_listener =
 
 #define MAX_RENDERER_POOLS 2
 #define RENDERER_POOL_SLOTS 3
+#define MAX_RENDERER_FRAMES 32
 
 struct renderer_slot
 {
@@ -108,6 +110,30 @@ struct renderer_slot
     VkSemaphore reuse;
 };
 
+struct renderer_frame
+{
+    uint64_t pool_generation;
+    uint64_t frame_id;
+    uint64_t ready_value;
+    uint64_t reuse_value;
+    uint32_t slot;
+    VkImage image;
+    VkDeviceMemory memory;
+    VkCommandBuffer command_buffer;
+    VkFence fence;
+    BOOL complete;
+};
+
+struct renderer_deferred_resources
+{
+    VkImage image;
+    VkDeviceMemory memory;
+    VkSemaphore ready;
+    VkSemaphore reuse;
+    VkCommandBuffer command_buffer;
+    VkFence fence;
+};
+
 struct vulkan_renderer
 {
     void *vulkan_handle;
@@ -115,6 +141,8 @@ struct vulkan_renderer
     VkInstance instance;
     VkPhysicalDevice physical_device;
     VkDevice device;
+    VkQueue queue;
+    VkCommandPool command_pool;
     uint32_t queue_family;
     uint32_t device_uuid[4];
     VkPhysicalDeviceMemoryProperties memory_properties;
@@ -132,8 +160,23 @@ struct vulkan_renderer
     PFN_vkGetSemaphoreFdKHR p_vkGetSemaphoreFdKHR;
     PFN_vkGetSemaphoreCounterValue p_vkGetSemaphoreCounterValue;
     PFN_vkImportSemaphoreFdKHR p_vkImportSemaphoreFdKHR;
-    PFN_vkSignalSemaphore p_vkSignalSemaphore;
+    PFN_vkGetDeviceQueue p_vkGetDeviceQueue;
+    PFN_vkCreateCommandPool p_vkCreateCommandPool;
+    PFN_vkDestroyCommandPool p_vkDestroyCommandPool;
+    PFN_vkAllocateCommandBuffers p_vkAllocateCommandBuffers;
+    PFN_vkFreeCommandBuffers p_vkFreeCommandBuffers;
+    PFN_vkBeginCommandBuffer p_vkBeginCommandBuffer;
+    PFN_vkEndCommandBuffer p_vkEndCommandBuffer;
+    PFN_vkCmdPipelineBarrier p_vkCmdPipelineBarrier;
+    PFN_vkCmdCopyImage p_vkCmdCopyImage;
+    PFN_vkCreateFence p_vkCreateFence;
+    PFN_vkDestroyFence p_vkDestroyFence;
+    PFN_vkGetFenceStatus p_vkGetFenceStatus;
+    PFN_vkWaitForFences p_vkWaitForFences;
+    PFN_vkQueueSubmit p_vkQueueSubmit;
+    struct renderer_deferred_resources deferred;
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
+    struct renderer_frame frames[MAX_RENDERER_FRAMES];
 };
 
 static struct vulkan_renderer renderer;
@@ -151,12 +194,83 @@ static void destroy_renderer_slot(struct renderer_slot *slot)
     memset(slot, 0, sizeof(*slot));
 }
 
-static void destroy_renderer(void)
+static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
 {
+    VkResult vr;
+
+    if (!frame->fence) return STATUS_SUCCESS;
+    vr = renderer.p_vkGetFenceStatus(renderer.device, frame->fence);
+    if (vr == VK_NOT_READY) return STATUS_PENDING;
+    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    renderer.p_vkDestroyFence(renderer.device, frame->fence, NULL);
+    renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+            &frame->command_buffer);
+    frame->fence = VK_NULL_HANDLE;
+    frame->command_buffer = VK_NULL_HANDLE;
+    frame->complete = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS destroy_renderer_frame(struct renderer_frame *frame)
+{
+    NTSTATUS status;
+
+    if ((status = poll_renderer_frame(frame))) return status;
+    if (frame->image && renderer.p_vkDestroyImage)
+        renderer.p_vkDestroyImage(renderer.device, frame->image, NULL);
+    if (frame->memory && renderer.p_vkFreeMemory)
+        renderer.p_vkFreeMemory(renderer.device, frame->memory, NULL);
+    memset(frame, 0, sizeof(*frame));
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS destroy_deferred_resources(void)
+{
+    struct renderer_deferred_resources *resources = &renderer.deferred;
+    VkResult vr;
+
+    if (resources->fence)
+    {
+        vr = renderer.p_vkGetFenceStatus(renderer.device, resources->fence);
+        if (vr == VK_NOT_READY) return STATUS_DEVICE_BUSY;
+        if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+        renderer.p_vkDestroyFence(renderer.device, resources->fence, NULL);
+        resources->fence = VK_NULL_HANDLE;
+    }
+    if (resources->command_buffer)
+    {
+        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+                &resources->command_buffer);
+        resources->command_buffer = VK_NULL_HANDLE;
+    }
+    if (resources->reuse)
+        renderer.p_vkDestroySemaphore(renderer.device, resources->reuse, NULL);
+    if (resources->ready)
+        renderer.p_vkDestroySemaphore(renderer.device, resources->ready, NULL);
+    if (resources->image)
+        renderer.p_vkDestroyImage(renderer.device, resources->image, NULL);
+    if (resources->memory)
+        renderer.p_vkFreeMemory(renderer.device, resources->memory, NULL);
+    memset(resources, 0, sizeof(*resources));
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS destroy_renderer(void)
+{
+    NTSTATUS status;
     unsigned int i;
 
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].frame_id &&
+            (status = poll_renderer_frame(&renderer.frames[i])))
+            return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
+    if ((status = destroy_deferred_resources())) return status;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if ((status = destroy_renderer_frame(&renderer.frames[i]))) return status;
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
         destroy_renderer_slot(&renderer.slots[i]);
+    if (renderer.command_pool && renderer.p_vkDestroyCommandPool)
+        renderer.p_vkDestroyCommandPool(renderer.device, renderer.command_pool, NULL);
     if (renderer.device && renderer.p_vkDestroyDevice)
         renderer.p_vkDestroyDevice(renderer.device, NULL);
     if (renderer.instance && renderer.p_vkDestroyInstance)
@@ -164,6 +278,7 @@ static void destroy_renderer(void)
     if (renderer.display) wl_display_disconnect(renderer.display);
     if (renderer.vulkan_handle) dlclose(renderer.vulkan_handle);
     memset(&renderer, 0, sizeof(renderer));
+    return STATUS_SUCCESS;
 }
 
 static BOOL has_vulkan_extension(const VkExtensionProperties *properties, uint32_t count,
@@ -502,6 +617,7 @@ static BOOL connected_to_endpoint(struct wl_display *display, const char *path)
 
 static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_addr)
 {
+    VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties;
     PFN_vkGetDeviceProcAddr get_device_proc_addr;
 
@@ -525,10 +641,29 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkGetSemaphoreFdKHR);
     LOAD_RENDERER_FUNC(vkGetSemaphoreCounterValue);
     LOAD_RENDERER_FUNC(vkImportSemaphoreFdKHR);
-    LOAD_RENDERER_FUNC(vkSignalSemaphore);
+    LOAD_RENDERER_FUNC(vkGetDeviceQueue);
+    LOAD_RENDERER_FUNC(vkCreateCommandPool);
+    LOAD_RENDERER_FUNC(vkDestroyCommandPool);
+    LOAD_RENDERER_FUNC(vkAllocateCommandBuffers);
+    LOAD_RENDERER_FUNC(vkFreeCommandBuffers);
+    LOAD_RENDERER_FUNC(vkBeginCommandBuffer);
+    LOAD_RENDERER_FUNC(vkEndCommandBuffer);
+    LOAD_RENDERER_FUNC(vkCmdPipelineBarrier);
+    LOAD_RENDERER_FUNC(vkCmdCopyImage);
+    LOAD_RENDERER_FUNC(vkCreateFence);
+    LOAD_RENDERER_FUNC(vkDestroyFence);
+    LOAD_RENDERER_FUNC(vkGetFenceStatus);
+    LOAD_RENDERER_FUNC(vkWaitForFences);
+    LOAD_RENDERER_FUNC(vkQueueSubmit);
 #undef LOAD_RENDERER_FUNC
 
     get_memory_properties(renderer.physical_device, &renderer.memory_properties);
+    renderer.p_vkGetDeviceQueue(renderer.device, renderer.queue_family, 0, &renderer.queue);
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = renderer.queue_family;
+    if (renderer.p_vkCreateCommandPool(renderer.device, &pool_info, NULL,
+            &renderer.command_pool))
+        return FALSE;
     return TRUE;
 }
 
@@ -758,15 +893,233 @@ done:
     return status;
 }
 
+static NTSTATUS process_renderer_frame(void *args)
+{
+    struct winewayland_host_renderer_frame *params = args;
+    VkTimelineSemaphoreSubmitInfo timeline_info =
+            {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkCommandBufferAllocateInfo command_allocate =
+            {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferBeginInfo command_begin =
+            {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkMemoryAllocateInfo memory_allocate = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkImageMemoryBarrier acquire[2], release[2];
+    VkImageCopy copy;
+    VkMemoryRequirements requirements;
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    struct renderer_slot *slot = NULL;
+    struct renderer_frame pending = {0}, *frame = NULL;
+    uint64_t pool_generation, frame_id, ready_value, reuse_value;
+    uint64_t ready_counter, reuse_counter;
+    uint32_t slot_index;
+    uint32_t memory_type;
+    unsigned int i;
+    NTSTATUS status;
+    VkResult vr;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!renderer.device) return STATUS_DEVICE_NOT_READY;
+    if (!params->pool_generation || !params->frame_id || !params->ready_value ||
+        !params->reuse_value || params->slot >= RENDERER_POOL_SLOTS || params->reusable)
+        return STATUS_INVALID_PARAMETER;
+    pool_generation = params->pool_generation;
+    frame_id = params->frame_id;
+    ready_value = params->ready_value;
+    reuse_value = params->reuse_value;
+    slot_index = params->slot;
+    params->reusable = 0;
+
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+    {
+        struct renderer_frame *candidate = &renderer.frames[i];
+
+        if (!candidate->frame_id && !frame) frame = candidate;
+        if (candidate->pool_generation != pool_generation || candidate->frame_id != frame_id)
+            continue;
+        if (candidate->ready_value != ready_value || candidate->reuse_value != reuse_value ||
+            candidate->slot != slot_index)
+            return STATUS_REVISION_MISMATCH;
+        if ((status = poll_renderer_frame(candidate))) return status;
+        if (!candidate->complete) return STATUS_PENDING;
+        params->reusable = 1;
+        return STATUS_SUCCESS;
+    }
+    if (!frame) return STATUS_PENDING;
+    for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
+        if (renderer.slots[i].pool_generation == pool_generation &&
+            renderer.slots[i].slot == slot_index)
+        {
+            slot = &renderer.slots[i];
+            break;
+        }
+    if (!slot) return STATUS_NOT_FOUND;
+    if ((vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, slot->ready,
+            &ready_counter)) ||
+        (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, slot->reuse,
+            &reuse_counter)))
+        goto failed;
+    if (ready_counter < ready_value) return STATUS_PENDING;
+    if (reuse_counter >= reuse_value)
+    {
+        params->reusable = 1;
+        return STATUS_REVISION_MISMATCH;
+    }
+
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+    image_info.extent.width = slot->width;
+    image_info.extent.height = slot->height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if ((vr = renderer.p_vkCreateImage(renderer.device, &image_info, NULL, &pending.image)))
+        goto failed;
+    renderer.p_vkGetImageMemoryRequirements(renderer.device, pending.image, &requirements);
+    for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
+         ++memory_type)
+        if ((requirements.memoryTypeBits & (1u << memory_type)) &&
+            (renderer.memory_properties.memoryTypes[memory_type].propertyFlags &
+             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            break;
+    if (memory_type == renderer.memory_properties.memoryTypeCount)
+        for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
+             ++memory_type)
+            if (requirements.memoryTypeBits & (1u << memory_type)) break;
+    if (memory_type == renderer.memory_properties.memoryTypeCount)
+    {
+        vr = VK_ERROR_FEATURE_NOT_PRESENT;
+        goto failed;
+    }
+    memory_allocate.allocationSize = requirements.size;
+    memory_allocate.memoryTypeIndex = memory_type;
+    if ((vr = renderer.p_vkAllocateMemory(renderer.device, &memory_allocate, NULL,
+            &pending.memory)) ||
+        (vr = renderer.p_vkBindImageMemory(renderer.device, pending.image, pending.memory, 0)))
+        goto failed;
+
+    command_allocate.commandPool = renderer.command_pool;
+    command_allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_allocate.commandBufferCount = 1;
+    if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device, &command_allocate,
+            &pending.command_buffer)) ||
+        (vr = renderer.p_vkBeginCommandBuffer(pending.command_buffer, &command_begin)))
+        goto failed;
+
+    memset(acquire, 0, sizeof(acquire));
+    acquire[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    acquire[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    acquire[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    acquire[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    acquire[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    acquire[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+    acquire[0].dstQueueFamilyIndex = renderer.queue_family;
+    acquire[0].image = slot->image;
+    acquire[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    acquire[0].subresourceRange.levelCount = 1;
+    acquire[0].subresourceRange.layerCount = 1;
+    acquire[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    acquire[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    acquire[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    acquire[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    acquire[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    acquire[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    acquire[1].image = pending.image;
+    acquire[1].subresourceRange = acquire[0].subresourceRange;
+    renderer.p_vkCmdPipelineBarrier(pending.command_buffer,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, NULL, 0, NULL, ARRAY_SIZE(acquire), acquire);
+
+    memset(&copy, 0, sizeof(copy));
+    copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy.srcSubresource.layerCount = 1;
+    copy.dstSubresource = copy.srcSubresource;
+    copy.extent.width = slot->width;
+    copy.extent.height = slot->height;
+    copy.extent.depth = 1;
+    renderer.p_vkCmdCopyImage(pending.command_buffer, slot->image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pending.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+    memset(release, 0, sizeof(release));
+    release[0] = acquire[0];
+    release[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    release[0].dstAccessMask = 0;
+    release[0].srcQueueFamilyIndex = renderer.queue_family;
+    release[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+    release[1] = acquire[1];
+    release[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    release[1].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    release[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    release[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    renderer.p_vkCmdPipelineBarrier(pending.command_buffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+            0, NULL, 0, NULL, ARRAY_SIZE(release), release);
+    if ((vr = renderer.p_vkEndCommandBuffer(pending.command_buffer)) ||
+        (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &pending.fence)))
+        goto failed;
+
+    timeline_info.waitSemaphoreValueCount = 1;
+    timeline_info.pWaitSemaphoreValues = &ready_value;
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues = &reuse_value;
+    submit_info.pNext = &timeline_info;
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &slot->ready;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &pending.command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &slot->reuse;
+    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, pending.fence)))
+        goto failed;
+
+    pending.pool_generation = pool_generation;
+    pending.frame_id = frame_id;
+    pending.ready_value = ready_value;
+    pending.reuse_value = reuse_value;
+    pending.slot = slot_index;
+    *frame = pending;
+    return STATUS_PENDING;
+
+failed:
+    fprintf(stderr, "Vulkan transport frame copy returned %d.\n", vr);
+    if (pending.fence) renderer.p_vkDestroyFence(renderer.device, pending.fence, NULL);
+    if (pending.command_buffer)
+        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+                &pending.command_buffer);
+    if (pending.image) renderer.p_vkDestroyImage(renderer.device, pending.image, NULL);
+    if (pending.memory) renderer.p_vkFreeMemory(renderer.device, pending.memory, NULL);
+    return vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY ?
+            STATUS_NO_MEMORY : STATUS_UNSUCCESSFUL;
+}
+
 static NTSTATUS retire_renderer_pool(void *args)
 {
     struct winewayland_host_renderer_retire *params = args;
+    NTSTATUS status;
     unsigned int i;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
         params->size != sizeof(*params))
         return STATUS_REVISION_MISMATCH;
     if (!params->pool_generation) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].pool_generation == params->pool_generation &&
+            (status = poll_renderer_frame(&renderer.frames[i])))
+            return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].pool_generation == params->pool_generation)
+            if ((status = destroy_renderer_frame(&renderer.frames[i]))) return status;
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
         if (renderer.slots[i].pool_generation == params->pool_generation)
             destroy_renderer_slot(&renderer.slots[i]);
@@ -791,15 +1144,28 @@ static NTSTATUS renderer_self_test(void *args)
     VkMemoryGetFdInfoKHR memory_fd_info = {VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
     VkSemaphoreGetFdInfoKHR semaphore_fd_info =
             {VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};
-    VkSemaphoreSignalInfo signal_info = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+    VkTimelineSemaphoreSubmitInfo transition_timeline =
+            {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkCommandBufferAllocateInfo command_allocate =
+            {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferBeginInfo command_begin =
+            {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkSubmitInfo transition_submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkImageMemoryBarrier transition[2];
     struct winewayland_host_renderer_import import;
     struct winewayland_host_renderer_retire retire;
+    struct winewayland_host_renderer_frame frame_params;
     VkMemoryRequirements requirements;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkSemaphore ready = VK_NULL_HANDLE, reuse = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
     uint32_t memory_type_index;
+    uint64_t transition_value = 7;
     uint64_t ready_value = 0, reuse_value = 0;
+    BOOL defer_resources = FALSE;
     unsigned int i;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     VkResult vr;
@@ -807,6 +1173,9 @@ static NTSTATUS renderer_self_test(void *args)
     (void)args;
     fprintf(stderr, "Vulkan transport self-test: begin.\n");
     if (!renderer.device) return STATUS_DEVICE_NOT_READY;
+    if (renderer.deferred.image || renderer.deferred.memory || renderer.deferred.ready ||
+        renderer.deferred.reuse || renderer.deferred.command_buffer || renderer.deferred.fence)
+        return STATUS_DEVICE_BUSY;
 
     external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
     image_info.pNext = &external_info;
@@ -862,12 +1231,54 @@ static NTSTATUS renderer_self_test(void *args)
     if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL, &ready)) ||
         (vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL, &reuse)))
         goto failed;
-    signal_info.semaphore = ready;
-    signal_info.value = 7;
-    if ((vr = renderer.p_vkSignalSemaphore(renderer.device, &signal_info))) goto failed;
-    signal_info.semaphore = reuse;
-    signal_info.value = 11;
-    if ((vr = renderer.p_vkSignalSemaphore(renderer.device, &signal_info))) goto failed;
+
+    command_allocate.commandPool = renderer.command_pool;
+    command_allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_allocate.commandBufferCount = 1;
+    if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device, &command_allocate,
+            &command_buffer)) ||
+        (vr = renderer.p_vkBeginCommandBuffer(command_buffer, &command_begin)))
+        goto failed;
+    memset(transition, 0, sizeof(transition));
+    transition[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    transition[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    transition[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    transition[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    transition[0].image = image;
+    transition[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    transition[0].subresourceRange.levelCount = 1;
+    transition[0].subresourceRange.layerCount = 1;
+    renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, transition);
+    transition[1] = transition[0];
+    transition[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition[1].srcQueueFamilyIndex = renderer.queue_family;
+    transition[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+    renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &transition[1]);
+    if ((vr = renderer.p_vkEndCommandBuffer(command_buffer)) ||
+        (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &fence)))
+        goto failed;
+    transition_timeline.signalSemaphoreValueCount = 1;
+    transition_timeline.pSignalSemaphoreValues = &transition_value;
+    transition_submit.pNext = &transition_timeline;
+    transition_submit.commandBufferCount = 1;
+    transition_submit.pCommandBuffers = &command_buffer;
+    transition_submit.signalSemaphoreCount = 1;
+    transition_submit.pSignalSemaphores = &ready;
+    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &transition_submit, fence))) goto failed;
+    if ((vr = renderer.p_vkWaitForFences(renderer.device, 1, &fence, VK_TRUE,
+            1000000000ull)))
+    {
+        defer_resources = TRUE;
+        goto failed;
+    }
+    renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+    renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1, &command_buffer);
+    fence = VK_NULL_HANDLE;
+    command_buffer = VK_NULL_HANDLE;
     fprintf(stderr, "Vulkan transport self-test: semaphores created.\n");
 
     memset(&import, 0, sizeof(import));
@@ -908,11 +1319,50 @@ static NTSTATUS renderer_self_test(void *args)
                     renderer.slots[i].ready, &ready_value)) ||
             (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device,
                     renderer.slots[i].reuse, &reuse_value)) ||
-            ready_value != 7 || reuse_value != 11)
+            ready_value != 7 || reuse_value)
         {
             fprintf(stderr, "Vulkan transport self-test: timeline values %llu/%llu, result %d.\n",
                     (unsigned long long)ready_value, (unsigned long long)reuse_value, vr);
             status = STATUS_INVALID_HANDLE;
+        }
+        if (!status)
+        {
+            memset(&frame_params, 0, sizeof(frame_params));
+            frame_params.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+            frame_params.size = sizeof(frame_params);
+            frame_params.pool_generation = import.pool_generation;
+            frame_params.frame_id = 1;
+            frame_params.ready_value = 8;
+            frame_params.reuse_value = 11;
+            status = process_renderer_frame(&frame_params);
+            if (status != STATUS_PENDING)
+                status = STATUS_INVALID_HANDLE;
+            else
+            {
+                frame_params.ready_value = 7;
+                status = process_renderer_frame(&frame_params);
+            }
+            if (status == STATUS_PENDING)
+            {
+                for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+                    if (renderer.frames[i].pool_generation == frame_params.pool_generation &&
+                        renderer.frames[i].frame_id == frame_params.frame_id)
+                        break;
+                if (i == ARRAY_SIZE(renderer.frames) ||
+                    (vr = renderer.p_vkWaitForFences(renderer.device, 1,
+                            &renderer.frames[i].fence, VK_TRUE, 1000000000ull)))
+                {
+                    defer_resources = i != ARRAY_SIZE(renderer.frames);
+                    status = STATUS_IO_TIMEOUT;
+                }
+                else status = process_renderer_frame(&frame_params);
+            }
+            if (!status && (!frame_params.reusable ||
+                (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device,
+                    reuse, &reuse_value)) || reuse_value != 11))
+                status = STATUS_INVALID_HANDLE;
+            fprintf(stderr, "Vulkan transport self-test: frame copy returned %#x, reuse %llu.\n",
+                    status, (unsigned long long)reuse_value);
         }
         memset(&retire, 0, sizeof(retire));
         retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -932,6 +1382,25 @@ failed:
             STATUS_NO_MEMORY : STATUS_INVALID_HANDLE;
 
 done:
+    if (defer_resources)
+    {
+        renderer.deferred.image = image;
+        renderer.deferred.memory = memory;
+        renderer.deferred.ready = ready;
+        renderer.deferred.reuse = reuse;
+        renderer.deferred.command_buffer = command_buffer;
+        renderer.deferred.fence = fence;
+        image = VK_NULL_HANDLE;
+        memory = VK_NULL_HANDLE;
+        ready = VK_NULL_HANDLE;
+        reuse = VK_NULL_HANDLE;
+        command_buffer = VK_NULL_HANDLE;
+        fence = VK_NULL_HANDLE;
+    }
+    if (fence) renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+    if (command_buffer)
+        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+                &command_buffer);
     if (reuse) renderer.p_vkDestroySemaphore(renderer.device, reuse, NULL);
     if (ready) renderer.p_vkDestroySemaphore(renderer.device, ready, NULL);
     if (image) renderer.p_vkDestroyImage(renderer.device, image, NULL);
@@ -943,7 +1412,7 @@ static NTSTATUS renderer_headless_self_test(void *args)
 {
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
     uint32_t device_uuid[4] = {0};
-    NTSTATUS status;
+    NTSTATUS status, cleanup_status;
 
     (void)args;
     fprintf(stderr, "Vulkan transport headless test: selecting device.\n");
@@ -958,15 +1427,15 @@ static NTSTATUS renderer_headless_self_test(void *args)
     else
         status = renderer_self_test(NULL);
     fprintf(stderr, "Vulkan transport headless test: cleanup.\n");
-    destroy_renderer();
+    cleanup_status = destroy_renderer();
+    if (!status) status = cleanup_status;
     return status;
 }
 
 static NTSTATUS destroy_renderer_call(void *args)
 {
     (void)args;
-    destroy_renderer();
-    return STATUS_SUCCESS;
+    return destroy_renderer();
 }
 
 #else
@@ -992,6 +1461,12 @@ static NTSTATUS import_renderer_slot(void *args)
 }
 
 static NTSTATUS retire_renderer_pool(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS process_renderer_frame(void *args)
 {
     (void)args;
     return STATUS_NOT_SUPPORTED;
@@ -1095,6 +1570,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     create_renderer,
     import_renderer_slot,
     retire_renderer_pool,
+    process_renderer_frame,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,
@@ -1107,6 +1583,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     create_renderer,
     import_renderer_slot,
     retire_renderer_pool,
+    process_renderer_frame,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,

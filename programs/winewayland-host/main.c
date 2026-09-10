@@ -26,6 +26,7 @@ C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
+C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -63,7 +64,10 @@ static NTSTATUS create_renderer(const struct winewayland_host_probe *probe)
 
 static void destroy_renderer(void)
 {
-    WINE_UNIX_CALL(unix_renderer_destroy, NULL);
+    NTSTATUS status = WINE_UNIX_CALL(unix_renderer_destroy, NULL);
+
+    if (status && status != STATUS_DEVICE_BUSY)
+        fprintf(stderr, "Wayland renderer teardown returned %#lx.\n", status);
 }
 
 static int probe_backend(void)
@@ -299,6 +303,16 @@ struct host_slot_info
     uint32_t import_state;
 };
 
+struct host_frame_info
+{
+    uint64_t pool_generation;
+    uint64_t frame_id;
+    uint64_t ready_value;
+    uint64_t reuse_value;
+    uint32_t slot;
+    uint32_t reusable;
+};
+
 struct host_renderer_pool
 {
     user_handle_t root;
@@ -460,6 +474,70 @@ static NTSTATUS set_buffer_slot_import(user_handle_t root, uint64_t host_epoch,
         req->host_epoch = host_epoch;
         req->contributor_id = contributor_id;
         req->pool_generation = pool_generation;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_next_frame(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t previous_frame_id, struct host_frame_info *info)
+{
+    NTSTATUS status;
+
+    memset(info, 0, sizeof(*info));
+    SERVER_START_REQ(get_wayland_frame)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->previous_frame_id = previous_frame_id;
+        if (!(status = wine_server_call(req)))
+        {
+            info->pool_generation = reply->pool_generation;
+            info->frame_id = reply->frame_id;
+            info->ready_value = reply->ready_value;
+            info->reuse_value = reply->reuse_value;
+            info->slot = reply->slot;
+            info->reusable = reply->reusable;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_frame_reusable(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, const struct host_frame_info *frame)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(set_wayland_frame_reusable)
+    {
+        req->root = root;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->frame_id = frame->frame_id;
+        req->ready_value = frame->ready_value;
+        req->reuse_value = frame->reuse_value;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_frame_failed(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id, uint64_t frame_id, NTSTATUS backend_status)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(set_wayland_frame_result)
+    {
+        req->root = root;
+        req->result = WINE_WAYLAND_FRAME_RESULT_FAILED;
+        req->backend_status = backend_status;
+        req->host_epoch = host_epoch;
+        req->contributor_id = contributor_id;
+        req->frame_id = frame_id;
         status = wine_server_call(req);
     }
     SERVER_END_REQ;
@@ -635,6 +713,44 @@ static NTSTATUS process_buffer_pool(user_handle_t root, uint64_t host_epoch,
     return status;
 }
 
+static NTSTATUS process_contributor_frames(user_handle_t root, uint64_t host_epoch,
+        uint64_t contributor_id)
+{
+    struct winewayland_host_renderer_frame renderer_frame;
+    struct host_renderer_pool *renderer_pool;
+    struct host_frame_info frame;
+    uint64_t previous_frame = 0;
+    NTSTATUS status, renderer_status;
+
+    while (!(status = get_next_frame(root, host_epoch, contributor_id, previous_frame,
+            &frame)))
+    {
+        previous_frame = frame.frame_id;
+        if (frame.reusable) continue;
+        if (!(renderer_pool = find_renderer_pool(root, contributor_id,
+                frame.pool_generation)))
+            continue;
+        memset(&renderer_frame, 0, sizeof(renderer_frame));
+        renderer_frame.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        renderer_frame.size = sizeof(renderer_frame);
+        renderer_frame.pool_generation = renderer_pool->renderer_generation;
+        renderer_frame.frame_id = frame.frame_id;
+        renderer_frame.ready_value = frame.ready_value;
+        renderer_frame.reuse_value = frame.reuse_value;
+        renderer_frame.slot = frame.slot;
+        renderer_status = WINE_UNIX_CALL(unix_renderer_process_frame, &renderer_frame);
+        if (renderer_status == STATUS_PENDING) continue;
+        /* Keep the server frame pending until the source slot is safe to reuse. */
+        if (!renderer_frame.reusable) continue;
+        if ((status = set_frame_reusable(root, host_epoch, contributor_id, &frame)))
+            return status;
+        if (renderer_status && (status = set_frame_failed(root, host_epoch, contributor_id,
+                frame.frame_id, renderer_status)))
+            return status;
+    }
+    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
+}
+
 static NTSTATUS process_contributor(user_handle_t root, uint64_t host_epoch,
         const struct host_contributor_info *contributor)
 {
@@ -659,7 +775,8 @@ static NTSTATUS process_contributor(user_handle_t root, uint64_t host_epoch,
         if ((status = process_buffer_pool(root, host_epoch, contributor->contributor_id,
                 &pool))) return status;
     }
-    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
+    if (status != STATUS_NO_MORE_ENTRIES) return status;
+    return process_contributor_frames(root, host_epoch, contributor->contributor_id);
 }
 
 static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t host_epoch)

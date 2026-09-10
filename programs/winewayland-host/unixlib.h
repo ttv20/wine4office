@@ -88,12 +88,25 @@ struct winewayland_host_renderer_retire
     uint64_t pool_generation;
 };
 
+struct winewayland_host_renderer_frame
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t pool_generation;
+    uint64_t frame_id;
+    uint64_t ready_value;
+    uint64_t reuse_value;
+    uint32_t slot;
+    uint32_t reusable;
+};
+
 enum winewayland_host_unix_func
 {
     unix_probe_backend,
     unix_renderer_create,
     unix_renderer_import,
     unix_renderer_retire,
+    unix_renderer_process_frame,
     unix_renderer_self_test,
     unix_renderer_headless_self_test,
     unix_renderer_destroy,
