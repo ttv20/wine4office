@@ -1247,6 +1247,8 @@ struct wined3d_swapchain_vk
     unsigned int width, height;
     unsigned int client_width, client_height;
     struct wined3d_texture *composition_source;
+    struct wined3d_texture *composition_staging_source;
+    struct wined3d_texture *composition_staging_output;
     VkImage composition_image;
     uint64_t composition_command_buffer_id;
     struct
