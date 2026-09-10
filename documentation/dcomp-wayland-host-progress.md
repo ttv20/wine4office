@@ -42,6 +42,8 @@ or transport fixture is not Outlook support.
   GPU submission completes. It retains a bounded host-owned image for later WSI
   work. Teardown polls all tracked fences and also retains self-test exporter
   objects across a bounded-wait timeout rather than destroying a live device.
+  The transport self-test clears the producer image to a known color and reads
+  every copied host pixel back through a host-visible staging buffer.
 - Vulkan transport admission is now bound to the probed physical device. The
   startup permit records the host's 16-byte device UUID, registration must
   present the same UUID, and host queries return the registered identity.
@@ -394,6 +396,14 @@ admitted.
   `/workspace/artifacts/frame-copy-{authority-{x64,i386},final-registration-{x64,i386}}.log`
   and `/workspace/artifacts/dcomp-frame-copy-final-SHA256SUMS` in
   `dcomp-host-probe-20260909`.
+- The Intel transport fixture now proves copied content rather than submission
+  alone. It clears the exportable BGRA8 producer image to opaque red, imports
+  and copies it through the host frame path, then copies the retained host image
+  to coherent mapped memory and validates all 4,096 pixels as
+  `B=0, G=0, R=255, A=255`. The x86-64 and i386 WoW64 paths both passed. Logs,
+  runner binaries and hashes are retained on `elkana-scadasudo` under
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/pixel-copy-{x64,i386}.log`
+  and `pixel-copy-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

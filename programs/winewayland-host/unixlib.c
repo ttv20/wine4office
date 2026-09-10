@@ -128,6 +128,8 @@ struct renderer_deferred_resources
 {
     VkImage image;
     VkDeviceMemory memory;
+    VkBuffer buffer;
+    VkDeviceMemory buffer_memory;
     VkSemaphore ready;
     VkSemaphore reuse;
     VkCommandBuffer command_buffer;
@@ -154,6 +156,12 @@ struct vulkan_renderer
     PFN_vkAllocateMemory p_vkAllocateMemory;
     PFN_vkFreeMemory p_vkFreeMemory;
     PFN_vkBindImageMemory p_vkBindImageMemory;
+    PFN_vkCreateBuffer p_vkCreateBuffer;
+    PFN_vkDestroyBuffer p_vkDestroyBuffer;
+    PFN_vkGetBufferMemoryRequirements p_vkGetBufferMemoryRequirements;
+    PFN_vkBindBufferMemory p_vkBindBufferMemory;
+    PFN_vkMapMemory p_vkMapMemory;
+    PFN_vkUnmapMemory p_vkUnmapMemory;
     PFN_vkCreateSemaphore p_vkCreateSemaphore;
     PFN_vkDestroySemaphore p_vkDestroySemaphore;
     PFN_vkGetMemoryFdKHR p_vkGetMemoryFdKHR;
@@ -168,7 +176,9 @@ struct vulkan_renderer
     PFN_vkBeginCommandBuffer p_vkBeginCommandBuffer;
     PFN_vkEndCommandBuffer p_vkEndCommandBuffer;
     PFN_vkCmdPipelineBarrier p_vkCmdPipelineBarrier;
+    PFN_vkCmdClearColorImage p_vkCmdClearColorImage;
     PFN_vkCmdCopyImage p_vkCmdCopyImage;
+    PFN_vkCmdCopyImageToBuffer p_vkCmdCopyImageToBuffer;
     PFN_vkCreateFence p_vkCreateFence;
     PFN_vkDestroyFence p_vkDestroyFence;
     PFN_vkGetFenceStatus p_vkGetFenceStatus;
@@ -243,6 +253,10 @@ static NTSTATUS destroy_deferred_resources(void)
                 &resources->command_buffer);
         resources->command_buffer = VK_NULL_HANDLE;
     }
+    if (resources->buffer)
+        renderer.p_vkDestroyBuffer(renderer.device, resources->buffer, NULL);
+    if (resources->buffer_memory)
+        renderer.p_vkFreeMemory(renderer.device, resources->buffer_memory, NULL);
     if (resources->reuse)
         renderer.p_vkDestroySemaphore(renderer.device, resources->reuse, NULL);
     if (resources->ready)
@@ -635,6 +649,12 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkAllocateMemory);
     LOAD_RENDERER_FUNC(vkFreeMemory);
     LOAD_RENDERER_FUNC(vkBindImageMemory);
+    LOAD_RENDERER_FUNC(vkCreateBuffer);
+    LOAD_RENDERER_FUNC(vkDestroyBuffer);
+    LOAD_RENDERER_FUNC(vkGetBufferMemoryRequirements);
+    LOAD_RENDERER_FUNC(vkBindBufferMemory);
+    LOAD_RENDERER_FUNC(vkMapMemory);
+    LOAD_RENDERER_FUNC(vkUnmapMemory);
     LOAD_RENDERER_FUNC(vkCreateSemaphore);
     LOAD_RENDERER_FUNC(vkDestroySemaphore);
     LOAD_RENDERER_FUNC(vkGetMemoryFdKHR);
@@ -649,7 +669,9 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkBeginCommandBuffer);
     LOAD_RENDERER_FUNC(vkEndCommandBuffer);
     LOAD_RENDERER_FUNC(vkCmdPipelineBarrier);
+    LOAD_RENDERER_FUNC(vkCmdClearColorImage);
     LOAD_RENDERER_FUNC(vkCmdCopyImage);
+    LOAD_RENDERER_FUNC(vkCmdCopyImageToBuffer);
     LOAD_RENDERER_FUNC(vkCreateFence);
     LOAD_RENDERER_FUNC(vkDestroyFence);
     LOAD_RENDERER_FUNC(vkGetFenceStatus);
@@ -1150,19 +1172,27 @@ static NTSTATUS renderer_self_test(void *args)
             {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     VkCommandBufferBeginInfo command_begin =
             {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkSubmitInfo transition_submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    VkImageMemoryBarrier transition[2];
+    VkImageMemoryBarrier transition[2], readback_image[2];
+    VkBufferMemoryBarrier readback_buffer;
+    VkBufferImageCopy readback_copy;
+    VkClearColorValue clear_color = {{1.0f, 0.0f, 0.0f, 1.0f}};
     struct winewayland_host_renderer_import import;
     struct winewayland_host_renderer_retire retire;
     struct winewayland_host_renderer_frame frame_params;
     VkMemoryRequirements requirements;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceMemory buffer_memory = VK_NULL_HANDLE;
     VkSemaphore ready = VK_NULL_HANDLE, reuse = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
+    VkBuffer buffer = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    uint32_t memory_type_index;
+    struct renderer_frame *copied_frame = NULL;
+    unsigned char *pixels;
+    uint32_t memory_type_index, readback_memory_type;
     uint64_t transition_value = 7;
     uint64_t ready_value = 0, reuse_value = 0;
     BOOL defer_resources = FALSE;
@@ -1173,8 +1203,9 @@ static NTSTATUS renderer_self_test(void *args)
     (void)args;
     fprintf(stderr, "Vulkan transport self-test: begin.\n");
     if (!renderer.device) return STATUS_DEVICE_NOT_READY;
-    if (renderer.deferred.image || renderer.deferred.memory || renderer.deferred.ready ||
-        renderer.deferred.reuse || renderer.deferred.command_buffer || renderer.deferred.fence)
+    if (renderer.deferred.image || renderer.deferred.memory || renderer.deferred.buffer ||
+        renderer.deferred.buffer_memory || renderer.deferred.ready || renderer.deferred.reuse ||
+        renderer.deferred.command_buffer || renderer.deferred.fence)
         return STATUS_DEVICE_BUSY;
 
     external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
@@ -1241,8 +1272,9 @@ static NTSTATUS renderer_self_test(void *args)
         goto failed;
     memset(transition, 0, sizeof(transition));
     transition[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    transition[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     transition[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    transition[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     transition[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     transition[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     transition[0].image = image;
@@ -1251,8 +1283,13 @@ static NTSTATUS renderer_self_test(void *args)
     transition[0].subresourceRange.layerCount = 1;
     renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, transition);
+    renderer.p_vkCmdClearColorImage(command_buffer, image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1,
+            &transition[0].subresourceRange);
     transition[1] = transition[0];
-    transition[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    transition[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    transition[1].dstAccessMask = 0;
+    transition[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     transition[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     transition[1].srcQueueFamilyIndex = renderer.queue_family;
     transition[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
@@ -1363,6 +1400,141 @@ static NTSTATUS renderer_self_test(void *args)
                 status = STATUS_INVALID_HANDLE;
             fprintf(stderr, "Vulkan transport self-test: frame copy returned %#x, reuse %llu.\n",
                     status, (unsigned long long)reuse_value);
+            if (!status)
+            {
+                for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+                    if (renderer.frames[i].pool_generation == frame_params.pool_generation &&
+                        renderer.frames[i].frame_id == frame_params.frame_id)
+                    {
+                        copied_frame = &renderer.frames[i];
+                        break;
+                    }
+                if (!copied_frame)
+                {
+                    status = STATUS_INVALID_HANDLE;
+                    goto readback_done;
+                }
+
+                buffer_info.size = 64 * 64 * 4;
+                buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                if ((vr = renderer.p_vkCreateBuffer(renderer.device, &buffer_info, NULL,
+                        &buffer)))
+                    goto failed;
+                renderer.p_vkGetBufferMemoryRequirements(renderer.device, buffer, &requirements);
+                for (readback_memory_type = 0;
+                     readback_memory_type < renderer.memory_properties.memoryTypeCount;
+                     ++readback_memory_type)
+                    if ((requirements.memoryTypeBits & (1u << readback_memory_type)) &&
+                        (renderer.memory_properties.memoryTypes[readback_memory_type].propertyFlags &
+                         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                         (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+                        break;
+                if (readback_memory_type == renderer.memory_properties.memoryTypeCount)
+                {
+                    status = STATUS_NOT_SUPPORTED;
+                    goto readback_done;
+                }
+                allocate_info.pNext = NULL;
+                allocate_info.allocationSize = requirements.size;
+                allocate_info.memoryTypeIndex = readback_memory_type;
+                if ((vr = renderer.p_vkAllocateMemory(renderer.device, &allocate_info, NULL,
+                        &buffer_memory)) ||
+                    (vr = renderer.p_vkBindBufferMemory(renderer.device, buffer,
+                            buffer_memory, 0)))
+                    goto failed;
+
+                command_allocate.commandPool = renderer.command_pool;
+                command_allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                command_allocate.commandBufferCount = 1;
+                if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device,
+                        &command_allocate, &command_buffer)) ||
+                    (vr = renderer.p_vkBeginCommandBuffer(command_buffer, &command_begin)))
+                    goto failed;
+                memset(readback_image, 0, sizeof(readback_image));
+                readback_image[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                readback_image[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                readback_image[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                readback_image[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                readback_image[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                readback_image[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                readback_image[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                readback_image[0].image = copied_frame->image;
+                readback_image[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                readback_image[0].subresourceRange.levelCount = 1;
+                readback_image[0].subresourceRange.layerCount = 1;
+                renderer.p_vkCmdPipelineBarrier(command_buffer,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                        readback_image);
+
+                memset(&readback_copy, 0, sizeof(readback_copy));
+                readback_copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                readback_copy.imageSubresource.layerCount = 1;
+                readback_copy.imageExtent.width = readback_copy.imageExtent.height = 64;
+                readback_copy.imageExtent.depth = 1;
+                renderer.p_vkCmdCopyImageToBuffer(command_buffer, copied_frame->image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &readback_copy);
+
+                readback_image[1] = readback_image[0];
+                readback_image[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                readback_image[1].dstAccessMask = 0;
+                readback_image[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                readback_image[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                memset(&readback_buffer, 0, sizeof(readback_buffer));
+                readback_buffer.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                readback_buffer.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                readback_buffer.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                readback_buffer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                readback_buffer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                readback_buffer.buffer = buffer;
+                readback_buffer.size = VK_WHOLE_SIZE;
+                renderer.p_vkCmdPipelineBarrier(command_buffer,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                        0, NULL, 1, &readback_buffer, 1, &readback_image[1]);
+                memset(&transition_submit, 0, sizeof(transition_submit));
+                transition_submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                transition_submit.commandBufferCount = 1;
+                transition_submit.pCommandBuffers = &command_buffer;
+                if ((vr = renderer.p_vkEndCommandBuffer(command_buffer)) ||
+                    (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL,
+                            &fence)) ||
+                    (vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &transition_submit,
+                            fence)))
+                    goto failed;
+                if ((vr = renderer.p_vkWaitForFences(renderer.device, 1, &fence,
+                        VK_TRUE, 1000000000ull)))
+                {
+                    defer_resources = TRUE;
+                    goto failed;
+                }
+                renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+                renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+                        &command_buffer);
+                fence = VK_NULL_HANDLE;
+                command_buffer = VK_NULL_HANDLE;
+                if ((vr = renderer.p_vkMapMemory(renderer.device, buffer_memory, 0,
+                        VK_WHOLE_SIZE, 0, (void **)&pixels)))
+                    goto failed;
+                for (i = 0; i < 64 * 64; ++i)
+                    if (pixels[i * 4] || pixels[i * 4 + 1] ||
+                        pixels[i * 4 + 2] != 0xff || pixels[i * 4 + 3] != 0xff)
+                    {
+                        status = STATUS_DATA_ERROR;
+                        break;
+                    }
+                renderer.p_vkUnmapMemory(renderer.device, buffer_memory);
+                fprintf(stderr, "Vulkan transport self-test: pixel copy returned %#x.\n",
+                        status);
+readback_done:
+                if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
+                if (buffer_memory) renderer.p_vkFreeMemory(renderer.device,
+                        buffer_memory, NULL);
+                buffer = VK_NULL_HANDLE;
+                buffer_memory = VK_NULL_HANDLE;
+            }
         }
         memset(&retire, 0, sizeof(retire));
         retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -1386,12 +1558,16 @@ done:
     {
         renderer.deferred.image = image;
         renderer.deferred.memory = memory;
+        renderer.deferred.buffer = buffer;
+        renderer.deferred.buffer_memory = buffer_memory;
         renderer.deferred.ready = ready;
         renderer.deferred.reuse = reuse;
         renderer.deferred.command_buffer = command_buffer;
         renderer.deferred.fence = fence;
         image = VK_NULL_HANDLE;
         memory = VK_NULL_HANDLE;
+        buffer = VK_NULL_HANDLE;
+        buffer_memory = VK_NULL_HANDLE;
         ready = VK_NULL_HANDLE;
         reuse = VK_NULL_HANDLE;
         command_buffer = VK_NULL_HANDLE;
@@ -1401,6 +1577,8 @@ done:
     if (command_buffer)
         renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
                 &command_buffer);
+    if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
+    if (buffer_memory) renderer.p_vkFreeMemory(renderer.device, buffer_memory, NULL);
     if (reuse) renderer.p_vkDestroySemaphore(renderer.device, reuse, NULL);
     if (ready) renderer.p_vkDestroySemaphore(renderer.device, ready, NULL);
     if (image) renderer.p_vkDestroyImage(renderer.device, image, NULL);
