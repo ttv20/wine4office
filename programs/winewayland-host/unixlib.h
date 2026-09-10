@@ -107,6 +107,7 @@ enum winewayland_host_unix_func
     unix_renderer_import,
     unix_renderer_retire,
     unix_renderer_process_frame,
+    unix_renderer_dispatch,
     unix_renderer_self_test,
     unix_renderer_headless_self_test,
     unix_renderer_destroy,

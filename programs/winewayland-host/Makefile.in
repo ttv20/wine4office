@@ -8,4 +8,5 @@ EXTRADLLFLAGS = -mconsole -municode
 
 SOURCES = \
 	main.c \
-	unixlib.c
+	unixlib.c \
+	xdg-shell.xml

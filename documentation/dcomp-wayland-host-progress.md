@@ -18,8 +18,10 @@ or transport fixture is not Outlook support.
   independently re-probe the Wayland endpoint, register with wineserver and
   publish Ready. The launcher/child path is currently exposed only by
   `--registration-test`; no application path launches a resident host yet.
-  The host still does not create a native role, accept content or take window
-  ownership.
+  The host now binds the version-1 `xdg_wm_base` subset needed for toplevel
+  creation and pumps pending Wayland events without blocking the server scan.
+  It answers compositor pings on its own connection. The host still does not
+  create a native role or take window ownership.
 - The host now probes a native Vulkan device before advertising transport
   support. Admission requires a graphics queue that can present to the probed
   Wayland connection and to a real unmapped `wl_surface` created on that exact
@@ -416,6 +418,15 @@ admitted.
   `0xf`. Logs and hashes are retained as `surface-gate-*` under the existing
   Intel artifact directory and `/workspace/artifacts/` in
   `dcomp-host-probe-20260909`.
+- The host build now generates a private minimal xdg-shell client protocol for
+  `xdg_wm_base`, `xdg_surface` and `xdg_toplevel`. A Ready transport host keeps
+  the compositor and shell globals from its verified connection and services
+  the display FD with a zero-timeout prepare/read/dispatch cycle on every host
+  iteration. The full Unix library and both PE programs rebuilt. Radeon
+  fallback registration remained ready in x86-64 and i386 after binding the
+  shell global; logs and hashes are retained as
+  `/workspace/artifacts/xdg-dispatch-registration-{x64,i386}.log` and
+  `/workspace/artifacts/xdg-dispatch-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

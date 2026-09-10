@@ -17,6 +17,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,6 +28,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
+#include "xdg-shell-client-protocol.h"
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -49,6 +52,18 @@ struct registry_probe
     uint32_t seats[16];
     unsigned int seat_count;
     struct wl_compositor *compositor;
+    struct xdg_wm_base *xdg_wm_base;
+};
+
+static void xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial)
+{
+    (void)data;
+    xdg_wm_base_pong(xdg_wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener xdg_wm_base_listener =
+{
+    xdg_wm_base_ping,
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
@@ -62,6 +77,13 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         if (!probe->compositor)
             probe->compositor = wl_registry_bind(registry, name,
                     &wl_compositor_interface, min(version, 4));
+    }
+    else if (!strcmp(interface, xdg_wm_base_interface.name) && !probe->xdg_wm_base)
+    {
+        probe->xdg_wm_base = wl_registry_bind(registry, name,
+                &xdg_wm_base_interface, 1);
+        if (probe->xdg_wm_base)
+            xdg_wm_base_add_listener(probe->xdg_wm_base, &xdg_wm_base_listener, NULL);
     }
     else if (!strcmp(interface, wl_shm_interface.name))
         probe->capabilities |= WINEWAYLAND_HOST_CAP_SHM;
@@ -96,7 +118,9 @@ static const struct wl_registry_listener registry_listener =
 
 static void destroy_registry_probe(struct registry_probe *probe)
 {
+    if (probe->xdg_wm_base) xdg_wm_base_destroy(probe->xdg_wm_base);
     if (probe->compositor) wl_compositor_destroy(probe->compositor);
+    probe->xdg_wm_base = NULL;
     probe->compositor = NULL;
 }
 
@@ -150,6 +174,8 @@ struct vulkan_renderer
 {
     void *vulkan_handle;
     struct wl_display *display;
+    struct wl_compositor *compositor;
+    struct xdg_wm_base *xdg_wm_base;
     VkInstance instance;
     VkPhysicalDevice physical_device;
     VkDevice device;
@@ -299,6 +325,8 @@ static NTSTATUS destroy_renderer(void)
         renderer.p_vkDestroyDevice(renderer.device, NULL);
     if (renderer.instance && renderer.p_vkDestroyInstance)
         renderer.p_vkDestroyInstance(renderer.instance, NULL);
+    if (renderer.xdg_wm_base) xdg_wm_base_destroy(renderer.xdg_wm_base);
+    if (renderer.compositor) wl_compositor_destroy(renderer.compositor);
     if (renderer.display) wl_display_disconnect(renderer.display);
     if (renderer.vulkan_handle) dlclose(renderer.vulkan_handle);
     memset(&renderer, 0, sizeof(renderer));
@@ -816,12 +844,16 @@ static NTSTATUS create_renderer(void *args)
         status = STATUS_PORT_DISCONNECTED;
         goto failed;
     }
-    if (!registry_probe.compositor ||
+    if (!registry_probe.compositor || !registry_probe.xdg_wm_base ||
         !(surface = wl_compositor_create_surface(registry_probe.compositor)) ||
         !probe_vulkan_transport(display, surface, params->device_uuid, device_uuid, &renderer))
         goto failed;
     wl_surface_destroy(surface);
     surface = NULL;
+    renderer.compositor = registry_probe.compositor;
+    renderer.xdg_wm_base = registry_probe.xdg_wm_base;
+    registry_probe.compositor = NULL;
+    registry_probe.xdg_wm_base = NULL;
     destroy_registry_probe(&registry_probe);
     wl_registry_destroy(registry);
     registry = NULL;
@@ -1253,6 +1285,44 @@ static NTSTATUS retire_renderer_pool(void *args)
         if (renderer.slots[i].pool_generation == params->pool_generation)
             destroy_renderer_slot(&renderer.slots[i]);
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS dispatch_renderer(void *args)
+{
+    struct pollfd pollfd;
+    int ret;
+
+    (void)args;
+    if (!renderer.display) return STATUS_DEVICE_NOT_READY;
+    while (wl_display_prepare_read(renderer.display) == -1)
+        if (wl_display_dispatch_pending(renderer.display) == -1)
+            return STATUS_PORT_DISCONNECTED;
+    if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+    {
+        wl_display_cancel_read(renderer.display);
+        return STATUS_PORT_DISCONNECTED;
+    }
+    pollfd.fd = wl_display_get_fd(renderer.display);
+    pollfd.events = POLLIN;
+    pollfd.revents = 0;
+    if ((ret = poll(&pollfd, 1, 0)) == -1)
+    {
+        wl_display_cancel_read(renderer.display);
+        return errno == EINTR ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    }
+    if (ret && (pollfd.revents & POLLIN))
+    {
+        if (wl_display_read_events(renderer.display) == -1)
+            return STATUS_PORT_DISCONNECTED;
+    }
+    else
+    {
+        wl_display_cancel_read(renderer.display);
+        if (pollfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+            return STATUS_PORT_DISCONNECTED;
+    }
+    return wl_display_dispatch_pending(renderer.display) == -1 ?
+            STATUS_PORT_DISCONNECTED : STATUS_SUCCESS;
 }
 
 static NTSTATUS renderer_self_test(void *args)
@@ -1757,6 +1827,12 @@ static NTSTATUS process_renderer_frame(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS dispatch_renderer(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS renderer_self_test(void *args)
 {
     (void)args;
@@ -1840,7 +1916,7 @@ static NTSTATUS probe_backend(void *args)
     }
     if (registry_probe.seat_count > 1)
         params->capabilities |= WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS;
-    if (registry_probe.compositor)
+    if (registry_probe.compositor && registry_probe.xdg_wm_base)
         surface = wl_compositor_create_surface(registry_probe.compositor);
     if (surface && probe_vulkan_transport(display, surface, NULL,
             params->device_uuid, NULL))
@@ -1862,6 +1938,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     import_renderer_slot,
     retire_renderer_pool,
     process_renderer_frame,
+    dispatch_renderer,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,
@@ -1875,6 +1952,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     import_renderer_slot,
     retire_renderer_pool,
     process_renderer_frame,
+    dispatch_renderer,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,

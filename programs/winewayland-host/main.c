@@ -851,7 +851,8 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
         {
             if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
             {
-                work_status = process_host_work(host_epoch);
+                work_status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL);
+                if (!work_status) work_status = process_host_work(host_epoch);
                 if (work_status && work_status != last_work_status)
                     fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
                 last_work_status = work_status;
