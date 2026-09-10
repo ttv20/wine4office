@@ -45,8 +45,9 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 40);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 48);
 
 struct registry_probe
 {
@@ -140,6 +141,19 @@ struct renderer_root
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
+    VkSurfaceKHR vulkan_surface;
+    VkSwapchainKHR swapchain;
+    VkImage swapchain_images[8];
+    VkSemaphore acquire_semaphore;
+    VkSemaphore present_semaphore;
+    VkCommandBuffer present_command_buffer;
+    VkFence present_fence;
+    uint32_t swapchain_image_count;
+    uint32_t requested_width;
+    uint32_t requested_height;
+    uint32_t swapchain_width;
+    uint32_t swapchain_height;
+    BOOL swapchain_image_initialized[8];
     uint32_t configure_count;
     int32_t width;
     int32_t height;
@@ -202,6 +216,11 @@ struct vulkan_renderer
     uint32_t device_uuid[4];
     VkPhysicalDeviceMemoryProperties memory_properties;
     PFN_vkDestroyInstance p_vkDestroyInstance;
+    PFN_vkCreateWaylandSurfaceKHR p_vkCreateWaylandSurfaceKHR;
+    PFN_vkDestroySurfaceKHR p_vkDestroySurfaceKHR;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR p_vkGetPhysicalDeviceSurfaceFormatsKHR;
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR p_vkGetPhysicalDeviceSurfacePresentModesKHR;
     PFN_vkDestroyDevice p_vkDestroyDevice;
     PFN_vkCreateImage p_vkCreateImage;
     PFN_vkDestroyImage p_vkDestroyImage;
@@ -237,6 +256,11 @@ struct vulkan_renderer
     PFN_vkGetFenceStatus p_vkGetFenceStatus;
     PFN_vkWaitForFences p_vkWaitForFences;
     PFN_vkQueueSubmit p_vkQueueSubmit;
+    PFN_vkCreateSwapchainKHR p_vkCreateSwapchainKHR;
+    PFN_vkDestroySwapchainKHR p_vkDestroySwapchainKHR;
+    PFN_vkGetSwapchainImagesKHR p_vkGetSwapchainImagesKHR;
+    PFN_vkAcquireNextImageKHR p_vkAcquireNextImageKHR;
+    PFN_vkQueuePresentKHR p_vkQueuePresentKHR;
     struct renderer_deferred_resources deferred;
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
     struct renderer_frame frames[MAX_RENDERER_FRAMES];
@@ -285,12 +309,40 @@ static const struct xdg_toplevel_listener renderer_root_toplevel_listener =
     renderer_root_toplevel_close,
 };
 
-static void destroy_renderer_root(struct renderer_root *root)
+static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
 {
+    VkResult vr;
+
+    if (!root->present_fence) return STATUS_SUCCESS;
+    vr = renderer.p_vkGetFenceStatus(renderer.device, root->present_fence);
+    if (vr == VK_NOT_READY) return STATUS_PENDING;
+    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    renderer.p_vkDestroyFence(renderer.device, root->present_fence, NULL);
+    renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+            &root->present_command_buffer);
+    renderer.p_vkDestroySemaphore(renderer.device, root->present_semaphore, NULL);
+    renderer.p_vkDestroySemaphore(renderer.device, root->acquire_semaphore, NULL);
+    root->present_fence = VK_NULL_HANDLE;
+    root->present_command_buffer = VK_NULL_HANDLE;
+    root->present_semaphore = VK_NULL_HANDLE;
+    root->acquire_semaphore = VK_NULL_HANDLE;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS destroy_renderer_root(struct renderer_root *root)
+{
+    NTSTATUS status;
+
+    if ((status = poll_renderer_root_present(root))) return status;
+    if (root->swapchain && renderer.p_vkDestroySwapchainKHR)
+        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+    if (root->vulkan_surface && renderer.p_vkDestroySurfaceKHR)
+        renderer.p_vkDestroySurfaceKHR(renderer.instance, root->vulkan_surface, NULL);
     if (root->xdg_toplevel) xdg_toplevel_destroy(root->xdg_toplevel);
     if (root->xdg_surface) xdg_surface_destroy(root->xdg_surface);
     if (root->surface) wl_surface_destroy(root->surface);
     memset(root, 0, sizeof(*root));
+    return STATUS_SUCCESS;
 }
 
 static struct renderer_root *find_renderer_root(uint64_t root_identity,
@@ -398,7 +450,8 @@ static NTSTATUS destroy_renderer(void)
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
         destroy_renderer_slot(&renderer.slots[i]);
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
-        destroy_renderer_root(&renderer.roots[i]);
+        if ((status = destroy_renderer_root(&renderer.roots[i])))
+            return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
     if (renderer.command_pool && renderer.p_vkDestroyCommandPool)
         renderer.p_vkDestroyCommandPool(renderer.device, renderer.command_pool, NULL);
     if (renderer.device && renderer.p_vkDestroyDevice)
@@ -833,7 +886,20 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     if (!(get_device_proc_addr = (void *)get_instance_proc_addr(renderer.instance,
             "vkGetDeviceProcAddr")) ||
         !(get_memory_properties = (void *)get_instance_proc_addr(renderer.instance,
-            "vkGetPhysicalDeviceMemoryProperties")))
+            "vkGetPhysicalDeviceMemoryProperties")) ||
+        !(renderer.p_vkCreateWaylandSurfaceKHR = (void *)get_instance_proc_addr(
+            renderer.instance, "vkCreateWaylandSurfaceKHR")) ||
+        !(renderer.p_vkDestroySurfaceKHR = (void *)get_instance_proc_addr(
+            renderer.instance, "vkDestroySurfaceKHR")) ||
+        !(renderer.p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR =
+            (void *)get_instance_proc_addr(renderer.instance,
+            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) ||
+        !(renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR =
+            (void *)get_instance_proc_addr(renderer.instance,
+            "vkGetPhysicalDeviceSurfaceFormatsKHR")) ||
+        !(renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR =
+            (void *)get_instance_proc_addr(renderer.instance,
+            "vkGetPhysicalDeviceSurfacePresentModesKHR")))
         return FALSE;
 
 #define LOAD_RENDERER_FUNC(name) \
@@ -872,6 +938,11 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkGetFenceStatus);
     LOAD_RENDERER_FUNC(vkWaitForFences);
     LOAD_RENDERER_FUNC(vkQueueSubmit);
+    LOAD_RENDERER_FUNC(vkCreateSwapchainKHR);
+    LOAD_RENDERER_FUNC(vkDestroySwapchainKHR);
+    LOAD_RENDERER_FUNC(vkGetSwapchainImagesKHR);
+    LOAD_RENDERER_FUNC(vkAcquireNextImageKHR);
+    LOAD_RENDERER_FUNC(vkQueuePresentKHR);
 #undef LOAD_RENDERER_FUNC
 
     get_memory_properties(renderer.physical_device, &renderer.memory_properties);
@@ -1410,11 +1481,144 @@ static NTSTATUS dispatch_renderer(void *args)
     return dispatch_wayland_display(renderer.display, 0);
 }
 
+static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
+        uint32_t requested_width, uint32_t requested_height)
+{
+    VkSwapchainCreateInfoKHR create_info = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceFormatKHR *formats = NULL, selected_format = {0};
+    VkPresentModeKHR *present_modes = NULL;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkImage images[ARRAY_SIZE(root->swapchain_images)];
+    VkCompositeAlphaFlagBitsKHR composite_alpha = 0;
+    uint32_t format_count = 0, image_count, mode_count = 0, i;
+    VkExtent2D extent;
+    VkResult vr = VK_SUCCESS;
+    BOOL has_fifo = FALSE;
+    NTSTATUS status = STATUS_NOT_SUPPORTED;
+
+    if (!root->configured) return STATUS_DEVICE_NOT_READY;
+    if (!requested_width || !requested_height || requested_width > 16384 ||
+        requested_height > 16384)
+        return STATUS_INVALID_PARAMETER;
+    if ((status = poll_renderer_root_present(root))) return status;
+    if (root->swapchain && root->requested_width == requested_width &&
+        root->requested_height == requested_height)
+        return STATUS_SUCCESS;
+    if ((vr = renderer.p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(renderer.physical_device,
+            root->vulkan_surface, &capabilities)))
+        goto done;
+    if ((vr = renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR(renderer.physical_device,
+            root->vulkan_surface, &format_count, NULL)) || !format_count ||
+        !(formats = calloc(format_count, sizeof(*formats))) ||
+        (vr = renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR(renderer.physical_device,
+            root->vulkan_surface, &format_count, formats)))
+        goto done;
+    for (i = 0; i < format_count; ++i)
+        if ((formats[i].format == VK_FORMAT_B8G8R8A8_UNORM ||
+             formats[i].format == VK_FORMAT_UNDEFINED) &&
+            formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            selected_format = formats[i];
+            if (selected_format.format == VK_FORMAT_UNDEFINED)
+                selected_format.format = VK_FORMAT_B8G8R8A8_UNORM;
+            break;
+        }
+    if (!selected_format.format) goto done;
+    if ((vr = renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR(renderer.physical_device,
+            root->vulkan_surface, &mode_count, NULL)) || !mode_count ||
+        !(present_modes = calloc(mode_count, sizeof(*present_modes))) ||
+        (vr = renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR(renderer.physical_device,
+            root->vulkan_surface, &mode_count, present_modes)))
+        goto done;
+    for (i = 0; i < mode_count; ++i)
+        if (present_modes[i] == VK_PRESENT_MODE_FIFO_KHR) has_fifo = TRUE;
+    if (!has_fifo) goto done;
+
+    if (capabilities.currentExtent.width != UINT32_MAX)
+        extent = capabilities.currentExtent;
+    else
+    {
+        extent.width = max(capabilities.minImageExtent.width,
+                min(capabilities.maxImageExtent.width, requested_width));
+        extent.height = max(capabilities.minImageExtent.height,
+                min(capabilities.maxImageExtent.height, requested_height));
+    }
+    if (!extent.width || !extent.height)
+    {
+        status = STATUS_DEVICE_NOT_READY;
+        goto done;
+    }
+    image_count = capabilities.minImageCount + 1;
+    if (capabilities.maxImageCount && image_count > capabilities.maxImageCount)
+        image_count = capabilities.maxImageCount;
+    if (image_count > ARRAY_SIZE(root->swapchain_images))
+        image_count = ARRAY_SIZE(root->swapchain_images);
+    if (image_count < capabilities.minImageCount) goto done;
+    if (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+        composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    else
+        for (i = 1; i <= VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR; i <<= 1)
+            if (capabilities.supportedCompositeAlpha & i)
+            {
+                composite_alpha = (VkCompositeAlphaFlagBitsKHR)i;
+                break;
+            }
+    if (!composite_alpha) goto done;
+
+    create_info.surface = root->vulkan_surface;
+    create_info.minImageCount = image_count;
+    create_info.imageFormat = selected_format.format;
+    create_info.imageColorSpace = selected_format.colorSpace;
+    create_info.imageExtent = extent;
+    create_info.imageArrayLayers = 1;
+    create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    create_info.preTransform = capabilities.currentTransform;
+    create_info.compositeAlpha = composite_alpha;
+    create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    create_info.clipped = VK_TRUE;
+    create_info.oldSwapchain = root->swapchain;
+    if ((vr = renderer.p_vkCreateSwapchainKHR(renderer.device, &create_info, NULL,
+            &swapchain)))
+        goto done;
+    image_count = ARRAY_SIZE(images);
+    if ((vr = renderer.p_vkGetSwapchainImagesKHR(renderer.device, swapchain, &image_count,
+            images)) || !image_count || image_count > ARRAY_SIZE(images))
+        goto done;
+    if (root->swapchain)
+        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+    root->swapchain = swapchain;
+    swapchain = VK_NULL_HANDLE;
+    memcpy(root->swapchain_images, images, image_count * sizeof(images[0]));
+    memset(root->swapchain_image_initialized, 0,
+            sizeof(root->swapchain_image_initialized));
+    root->swapchain_image_count = image_count;
+    root->requested_width = requested_width;
+    root->requested_height = requested_height;
+    root->swapchain_width = extent.width;
+    root->swapchain_height = extent.height;
+    status = STATUS_SUCCESS;
+
+done:
+    if (swapchain) renderer.p_vkDestroySwapchainKHR(renderer.device, swapchain, NULL);
+    free(present_modes);
+    free(formats);
+    if (status && vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
+    return status;
+}
+
 static NTSTATUS sync_renderer_root(void *args)
 {
     struct winewayland_host_renderer_root *params = args;
     struct renderer_root *root = NULL, *free_root = NULL;
+    VkWaylandSurfaceCreateInfoKHR surface_info =
+            {VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
     char title[96];
+    uint32_t requested_width = params->requested_width;
+    uint32_t requested_height = params->requested_height;
+    NTSTATUS status;
     unsigned int i;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
@@ -1432,7 +1636,9 @@ static NTSTATUS sync_renderer_root(void *args)
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
     {
         if (renderer.roots[i].root_identity == params->root_identity)
-            destroy_renderer_root(&renderer.roots[i]);
+        {
+            if ((status = destroy_renderer_root(&renderer.roots[i]))) return status;
+        }
         if (!renderer.roots[i].root_identity && !free_root) free_root = &renderer.roots[i];
     }
     if (!free_root) return STATUS_QUOTA_EXCEEDED;
@@ -1456,6 +1662,14 @@ static NTSTATUS sync_renderer_root(void *args)
     xdg_toplevel_set_title(root->xdg_toplevel, title);
     xdg_toplevel_set_app_id(root->xdg_toplevel, "winewayland-host");
     wl_surface_commit(root->surface);
+    surface_info.display = renderer.display;
+    surface_info.surface = root->surface;
+    if (renderer.p_vkCreateWaylandSurfaceKHR(renderer.instance, &surface_info, NULL,
+            &root->vulkan_surface))
+    {
+        destroy_renderer_root(root);
+        return STATUS_NOT_SUPPORTED;
+    }
     if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
     {
         destroy_renderer_root(root);
@@ -1464,25 +1678,175 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
 
 done:
+    if (requested_width || requested_height)
+    {
+        if (!requested_width || !requested_height) return STATUS_INVALID_PARAMETER;
+        if ((status = create_renderer_root_swapchain(root, requested_width,
+                requested_height)))
+            return status;
+    }
     if (root->configured) params->flags |= WINEWAYLAND_HOST_ROOT_CONFIGURED;
     if (root->closed) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
-    params->width = root->width;
-    params->height = root->height;
+    if (root->swapchain) params->flags |= WINEWAYLAND_HOST_ROOT_WSI_READY;
+    params->width = root->swapchain ? root->swapchain_width : root->width;
+    params->height = root->swapchain ? root->swapchain_height : root->height;
     params->configure_count = root->configure_count;
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS present_renderer_root(void *args)
+{
+    struct winewayland_host_renderer_present *params = args;
+    VkCommandBufferAllocateInfo allocate_info =
+            {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    VkSemaphoreCreateInfo semaphore_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkClearColorValue color;
+    struct renderer_root *root;
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+    VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    uint32_t image_index = UINT32_MAX;
+    VkResult present_result = VK_SUCCESS, vr;
+    NTSTATUS status;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    params->image_index = UINT32_MAX;
+    params->image_count = 0;
+    params->present_result = VK_SUCCESS;
+    if (params->reserved || !params->root_identity || !params->root_generation)
+        return STATUS_INVALID_PARAMETER;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        return STATUS_NOT_FOUND;
+    if (!root->swapchain) return STATUS_DEVICE_NOT_READY;
+    if ((status = poll_renderer_root_present(root))) return status;
+
+    if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
+            &acquire_semaphore)) ||
+        (vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
+            &present_semaphore)) ||
+        (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &fence)))
+        goto failed;
+    vr = renderer.p_vkAcquireNextImageKHR(renderer.device, root->swapchain, 0,
+            acquire_semaphore, VK_NULL_HANDLE, &image_index);
+    if (vr == VK_NOT_READY || vr == VK_TIMEOUT)
+    {
+        status = STATUS_PENDING;
+        goto done;
+    }
+    if (vr && vr != VK_SUBOPTIMAL_KHR) goto failed;
+    if (image_index >= root->swapchain_image_count)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
+    allocate_info.commandPool = renderer.command_pool;
+    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate_info.commandBufferCount = 1;
+    if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device, &allocate_info,
+            &command_buffer)) ||
+        (vr = renderer.p_vkBeginCommandBuffer(command_buffer, &begin_info)))
+        goto failed;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = root->swapchain_image_initialized[image_index] ?
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = root->swapchain_images[image_index];
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+    color.float32[0] = ((params->clear_color >> 16) & 0xff) / 255.0f;
+    color.float32[1] = ((params->clear_color >> 8) & 0xff) / 255.0f;
+    color.float32[2] = (params->clear_color & 0xff) / 255.0f;
+    color.float32[3] = ((params->clear_color >> 24) & 0xff) / 255.0f;
+    renderer.p_vkCmdClearColorImage(command_buffer, root->swapchain_images[image_index],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &barrier.subresourceRange);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = 0;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+    if ((vr = renderer.p_vkEndCommandBuffer(command_buffer))) goto failed;
+
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &acquire_semaphore;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &present_semaphore;
+    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
+        goto failed;
+    root->acquire_semaphore = acquire_semaphore;
+    root->present_semaphore = present_semaphore;
+    root->present_command_buffer = command_buffer;
+    root->present_fence = fence;
+    acquire_semaphore = present_semaphore = VK_NULL_HANDLE;
+    command_buffer = VK_NULL_HANDLE;
+    fence = VK_NULL_HANDLE;
+
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = &root->present_semaphore;
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &root->swapchain;
+    present_info.pImageIndices = &image_index;
+    present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
+    root->swapchain_image_initialized[image_index] = TRUE;
+    vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, root->present_fence);
+    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    params->image_index = image_index;
+    params->image_count = root->swapchain_image_count;
+    params->present_result = present_result;
+    vr = renderer.p_vkWaitForFences(renderer.device, 1, &root->present_fence, VK_TRUE,
+            1000000000ull);
+    if (vr == VK_TIMEOUT) return STATUS_PENDING;
+    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    if ((status = poll_renderer_root_present(root))) return status;
+    if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
+        return STATUS_SUCCESS;
+    return present_result == VK_ERROR_OUT_OF_DATE_KHR ? STATUS_RETRY : STATUS_UNSUCCESSFUL;
+
+failed:
+    status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+done:
+    if (fence) renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+    if (command_buffer)
+        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+                &command_buffer);
+    if (present_semaphore)
+        renderer.p_vkDestroySemaphore(renderer.device, present_semaphore, NULL);
+    if (acquire_semaphore)
+        renderer.p_vkDestroySemaphore(renderer.device, acquire_semaphore, NULL);
+    return status;
 }
 
 static NTSTATUS retire_renderer_root(void *args)
 {
     struct winewayland_host_renderer_root_retire *params = args;
     struct renderer_root *root;
+    NTSTATUS status;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
         params->size != sizeof(*params))
         return STATUS_REVISION_MISMATCH;
     if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
-    if ((root = find_renderer_root(params->root_identity, params->root_generation)))
-        destroy_renderer_root(root);
+    if ((root = find_renderer_root(params->root_identity, params->root_generation)) &&
+        (status = destroy_renderer_root(root)))
+        return status;
     if (renderer.display && wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
         return STATUS_PORT_DISCONNECTED;
     return STATUS_SUCCESS;
@@ -2100,6 +2464,12 @@ static NTSTATUS retire_renderer_root(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS present_renderer_root(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS shell_self_test(void *args)
 {
     (void)args;
@@ -2214,6 +2584,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     dispatch_renderer,
     sync_renderer_root,
     retire_renderer_root,
+    present_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
@@ -2231,6 +2602,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     dispatch_renderer,
     sync_renderer_root,
     retire_renderer_root,
+    present_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,

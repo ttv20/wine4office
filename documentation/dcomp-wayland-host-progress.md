@@ -131,8 +131,18 @@ or transport fixture is not Outlook support.
   `xdg_toplevel` per enumerated root, dispatches its configure events, and
   destroys the native objects when the root disappears from a complete scan.
   Repeating a root update is idempotent, while a new lifetime generation first
-  replaces the old native objects. The root remains unmapped because no buffer
-  is attached; WSI creation and presentation are the next tranche.
+  replaces the old native objects. The root remains unmapped until a later
+  configured extent explicitly creates and presents through its WSI.
+- Each persistent root now also owns a `VkSurfaceKHR`. Supplying a configured
+  extent creates a bounded FIFO swapchain with at most eight BGRA8 sRGB images;
+  changing the requested extent creates a replacement with the old swapchain
+  passed to Vulkan for retirement. The first WSI primitive probes acquisition
+  with timeout zero, clears one acquired image, submits the layout transitions,
+  and presents it. A queue-ordered fence retains the command buffer and binary
+  semaphores until Vulkan has processed the presentation operation. A bounded
+  timeout returns pending and prevents root or renderer destruction while those
+  objects are still in flight. This synchronous primitive is currently a
+  lifecycle fixture, not the final per-window presentation executor.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -458,6 +468,15 @@ admitted.
   could not run in the available pure-win64 test prefixes because their WoW64
   system directory lacks a 32-bit `kernel32.dll`; this was a harness failure
   before test entry, not a product result.
+- The persistent-root WSI fixture passed on Intel Iris Xe through both x86-64
+  and i386 Unix-call paths. Each run created a four-image FIFO swapchain,
+  acquired, cleared and presented a 64x64 image, recreated the swapchain at
+  96x80, presented again, and retired the root without an in-flight resource.
+  This verifies real `VkSurfaceKHR` and swapchain lifetime on an isolated
+  virtual KWin compositor. It does not prove a DComp frame reached that
+  swapchain, a present-wait commit boundary, or scanout. Logs and hashes are
+  retained on `elkana-scadasudo` under
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/wsi-lifecycle-{x64.log,i386.log,SHA256SUMS}`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

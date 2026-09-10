@@ -27,8 +27,9 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 40);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 48);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -254,6 +255,125 @@ static int test_roots(void)
 failed:
     fprintf(stderr, "root_self_test=failed status=%#lx flags=%#x\n", status, root.flags);
     destroy_renderer();
+    return 5;
+}
+
+static NTSTATUS wait_for_test_present(struct winewayland_host_renderer_root *root,
+        struct winewayland_host_renderer_present *present)
+{
+    NTSTATUS status;
+    unsigned int i;
+
+    for (i = 0; i < 100; ++i)
+    {
+        status = WINE_UNIX_CALL(unix_renderer_root_present, present);
+        if (status != STATUS_PENDING) return status;
+        Sleep(10);
+        if (present->image_index != UINT32_MAX)
+        {
+            status = WINE_UNIX_CALL(unix_renderer_root_sync, root);
+            if (status == STATUS_PENDING) continue;
+            if (status) return status;
+            return present->present_result ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+        }
+    }
+    return STATUS_IO_TIMEOUT;
+}
+
+static int test_wsi(void)
+{
+    struct winewayland_host_renderer_root_retire retire;
+    struct winewayland_host_renderer_present present;
+    struct winewayland_host_renderer_root root;
+    struct winewayland_host_probe probe;
+    uint32_t first_width, first_height, image_count;
+    NTSTATUS status;
+    unsigned int i;
+
+    if ((status = get_backend_probe(&probe)))
+    {
+        fprintf(stderr, "wsi_self_test=unavailable probe_status=%#lx\n", status);
+        return 4;
+    }
+    if (!(probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        printf("wsi_self_test=unsupported capabilities=%#x\n", probe.capabilities);
+        return 0;
+    }
+    if ((status = create_renderer(&probe))) goto failed_create;
+
+    memset(&root, 0, sizeof(root));
+    root.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    root.size = sizeof(root);
+    root.root_identity = 2;
+    root.root_generation = 1;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+    for (i = 0; i < 100 && !(root.flags & WINEWAYLAND_HOST_ROOT_CONFIGURED); ++i)
+    {
+        Sleep(10);
+        if ((status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL))) goto failed;
+        root.flags = 0;
+        if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+    }
+    if (!(root.flags & WINEWAYLAND_HOST_ROOT_CONFIGURED))
+    {
+        status = STATUS_IO_TIMEOUT;
+        goto failed;
+    }
+    root.requested_width = 64;
+    root.requested_height = 64;
+    root.flags = 0;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+    if (!(root.flags & WINEWAYLAND_HOST_ROOT_WSI_READY) || !root.width || !root.height)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
+    first_width = root.width;
+    first_height = root.height;
+
+    memset(&present, 0, sizeof(present));
+    present.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    present.size = sizeof(present);
+    present.root_identity = root.root_identity;
+    present.root_generation = root.root_generation;
+    present.clear_color = 0xffff0000;
+    if ((status = wait_for_test_present(&root, &present))) goto failed;
+    if (!present.image_count || present.image_index >= present.image_count)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
+    image_count = present.image_count;
+
+    root.requested_width = 96;
+    root.requested_height = 80;
+    root.flags = 0;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+    if (!(root.flags & WINEWAYLAND_HOST_ROOT_WSI_READY) || !root.width || !root.height)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
+    present.clear_color = 0xff0000ff;
+    present.image_index = UINT32_MAX;
+    if ((status = wait_for_test_present(&root, &present))) goto failed;
+
+    memset(&retire, 0, sizeof(retire));
+    retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    retire.size = sizeof(retire);
+    retire.root_identity = root.root_identity;
+    retire.root_generation = root.root_generation;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire))) goto failed;
+    destroy_renderer();
+    printf("wsi_self_test=passed images=%u first=%ux%u second=%ux%u\n", image_count,
+            first_width, first_height, root.width, root.height);
+    return 0;
+
+failed:
+    destroy_renderer();
+failed_create:
+    fprintf(stderr, "wsi_self_test=failed status=%#lx\n", status);
     return 5;
 }
 
@@ -1173,13 +1293,14 @@ int wmain(int argc, WCHAR **argv)
         return test_headless_transport();
     if (argc == 2 && !wcscmp(argv[1], L"--shell-self-test")) return test_shell();
     if (argc == 2 && !wcscmp(argv[1], L"--root-self-test")) return test_roots();
+    if (argc == 2 && !wcscmp(argv[1], L"--wsi-self-test")) return test_wsi();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --registration-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --registration-test\n",
             argv[0]);
     return 2;
 }

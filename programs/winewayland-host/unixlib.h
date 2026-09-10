@@ -56,6 +56,7 @@ struct winewayland_host_startup
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
 #define WINEWAYLAND_HOST_ROOT_CLOSED     0x00000004
+#define WINEWAYLAND_HOST_ROOT_WSI_READY  0x00000008
 
 struct winewayland_host_renderer_create
 {
@@ -110,6 +111,8 @@ struct winewayland_host_renderer_root
     uint32_t size;
     uint64_t root_identity;
     uint64_t root_generation;
+    uint32_t requested_width;
+    uint32_t requested_height;
     uint32_t flags;
     int32_t width;
     int32_t height;
@@ -124,6 +127,19 @@ struct winewayland_host_renderer_root_retire
     uint64_t root_generation;
 };
 
+struct winewayland_host_renderer_present
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t root_identity;
+    uint64_t root_generation;
+    uint32_t clear_color;
+    uint32_t image_index;
+    uint32_t image_count;
+    int32_t present_result;
+    uint32_t reserved;
+};
+
 enum winewayland_host_unix_func
 {
     unix_probe_backend,
@@ -134,6 +150,7 @@ enum winewayland_host_unix_func
     unix_renderer_dispatch,
     unix_renderer_root_sync,
     unix_renderer_root_retire,
+    unix_renderer_root_present,
     unix_shell_self_test,
     unix_renderer_self_test,
     unix_renderer_headless_self_test,
