@@ -1797,6 +1797,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_window_state_info window_state;
     struct wayland_configure_info configure;
     struct wayland_native_lease_info native_lease;
+    struct wayland_host_test_state second_root_state = {0};
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -1824,6 +1825,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
+    HWND second_root = NULL;
     HWND input_a = NULL, input_b = NULL;
     HWND previous_focus = NULL;
     RECT pool_client_rect;
@@ -1845,6 +1847,10 @@ static void test_host_registration( const char *program, const char *test_name )
                             0, 0, 64, 64, NULL, NULL, NULL, NULL );
     ok( !!root, "Failed to create scene root, error %lu.\n", GetLastError() );
     if (!root) goto done;
+    second_root = CreateWindowExW( 0, L"static", L"Second Wayland scene root", WS_POPUP,
+                                   0, 0, 64, 64, NULL, NULL, NULL, NULL );
+    ok( !!second_root, "Failed to create second scene root, error %lu.\n", GetLastError() );
+    if (!second_root) goto done;
     status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, 0, 1, 0, 0, 0,
                             &scene_generation, NULL );
     ok( !status && scene_generation == 1,
@@ -2654,6 +2660,11 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( state->contributor_id ),
         wine_dbgstr_longlong( state->grant_low ), wine_dbgstr_longlong( state->grant_high ),
         wine_dbgstr_longlong( state->registry_generation ) );
+    status = create_contributor( second_root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 1, &second_root_state );
+    ok( status == STATUS_DEVICE_BUSY && !second_root_state.contributor_id,
+        "Second hosted root returned %#lx, contributor %s.\n", status,
+        wine_dbgstr_longlong( second_root_state.contributor_id ) );
     status = get_contributor( root, old_epoch, 0, &contributor );
     ok( status == STATUS_ACCESS_DENIED, "Non-host contributor query returned %#lx.\n", status );
 
@@ -4400,6 +4411,7 @@ done:
     if (pre_ready_root) DestroyWindow( pre_ready_root );
     if (hosted_root) DestroyWindow( hosted_root );
     if (dcomp_root) DestroyWindow( dcomp_root );
+    if (second_root) DestroyWindow( second_root );
     if (root) DestroyWindow( root );
 }
 

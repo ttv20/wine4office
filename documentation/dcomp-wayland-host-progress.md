@@ -284,6 +284,15 @@ or transport fixture is not Outlook support.
   of risking a permanently pressed key. Physical modifier reconciliation,
   IME/text input and a compositor-originated pointer-recipient fixture remain
   pending.
+- The current Vulkan renderer still has one queue worker and one logical
+  device for every native root. Until per-window queue and device isolation is
+  implemented and the blocked-window fixture passes, wineserver admits active
+  contributor records on only one logical root per Windows desktop. A second
+  root receives `STATUS_DEVICE_BUSY`, which leaves DComp on its existing local
+  presentation path. Contributors above and below the same root remain
+  supported. The authority fixture verified the cross-root rejection while
+  retaining the existing same-root registry tests and passed 662 checks with
+  zero failures.
 
 ## Contributor interception inventory
 

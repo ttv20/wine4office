@@ -4032,6 +4032,26 @@ DECL_HANDLER(set_wayland_scene_applied)
         root->wayland_scene_applied_generation = req->scene_generation;
 }
 
+static int has_other_wayland_hosted_root( const struct window *root,
+                                          const struct desktop *desktop )
+{
+    struct window *other;
+    user_handle_t handle = 0;
+    unsigned int i;
+
+    while ((other = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (other == root || other->desktop != desktop || !other->wayland_scene_registry)
+            continue;
+        for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+            if (other->wayland_scene_registry->contributors[i].state &&
+                other->wayland_scene_registry->contributors[i].state !=
+                        WINE_WAYLAND_CONTRIBUTOR_REVOKED)
+                return 1;
+    }
+    return 0;
+}
+
 DECL_HANDLER(create_wayland_contributor)
 {
     struct wayland_scene_contributor *contributor = NULL;
@@ -4064,6 +4084,11 @@ DECL_HANDLER(create_wayland_contributor)
     if (!(desktop->wayland_host_capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT))
     {
         set_error( STATUS_NOT_SUPPORTED );
+        goto done;
+    }
+    if (has_other_wayland_hosted_root( root, desktop ))
+    {
+        set_error( STATUS_DEVICE_BUSY );
         goto done;
     }
     if (!(registry = root->wayland_scene_registry))
