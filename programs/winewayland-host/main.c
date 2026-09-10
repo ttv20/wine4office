@@ -1021,13 +1021,93 @@ static NTSTATUS post_host_window_close(struct host_renderer_root *root, uint64_t
     return status;
 }
 
+static NTSTATUS submit_host_input(struct host_renderer_root *root, uint64_t host_epoch,
+        const union hw_input *input, uint32_t flags)
+{
+    NTSTATUS status;
+
+    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(send_wayland_host_input)
+    {
+        req->root = root->root;
+        req->flags = flags;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->event_id = root->input_event_id;
+        wine_server_add_data(req, input, sizeof(*input));
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS reset_host_input(struct host_renderer_root *root, uint64_t host_epoch,
+        uint32_t flags)
+{
+    static const struct
+    {
+        int vkey;
+        uint32_t flags;
+        uint32_t data;
+    }
+    buttons[] =
+    {
+        {VK_LBUTTON, MOUSEEVENTF_LEFTUP, 0},
+        {VK_RBUTTON, MOUSEEVENTF_RIGHTUP, 0},
+        {VK_MBUTTON, MOUSEEVENTF_MIDDLEUP, 0},
+        {VK_XBUTTON1, MOUSEEVENTF_XUP, XBUTTON1},
+        {VK_XBUTTON2, MOUSEEVENTF_XUP, XBUTTON2},
+    };
+    union hw_input input;
+    uint32_t scan;
+    NTSTATUS status;
+    unsigned int i;
+    int vkey;
+
+    if (!flags || (flags & ~(WINEWAYLAND_HOST_INPUT_RESET_KEYS |
+            WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)))
+        return STATUS_INVALID_PARAMETER;
+    if (flags & WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+    {
+        for (vkey = 1; vkey < 256; ++vkey)
+        {
+            if (vkey < 7 && vkey != VK_CANCEL) continue;
+            if (vkey == VK_SHIFT || vkey == VK_CONTROL || vkey == VK_MENU) continue;
+            if (!(GetAsyncKeyState(vkey) & 0x8000)) continue;
+            memset(&input, 0, sizeof(input));
+            input.kbd.type = INPUT_KEYBOARD;
+            input.kbd.vkey = vkey;
+            scan = MapVirtualKeyExW(vkey, MAPVK_VK_TO_VSC_EX, GetKeyboardLayout(0));
+            input.kbd.scan = scan & 0xff;
+            input.kbd.flags = KEYEVENTF_KEYUP;
+            if (scan & ~0xff) input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
+            if ((status = submit_host_input(root, host_epoch, &input, 0))) return status;
+        }
+    }
+    if (flags & WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)
+    {
+        for (i = 0; i < ARRAY_SIZE(buttons); ++i)
+        {
+            if (!(GetAsyncKeyState(buttons[i].vkey) & 0x8000)) continue;
+            memset(&input, 0, sizeof(input));
+            input.mouse.type = INPUT_MOUSE;
+            input.mouse.flags = buttons[i].flags;
+            input.mouse.data = buttons[i].data;
+            if ((status = submit_host_input(root, host_epoch, &input,
+                    SEND_HWMSG_RAWINPUT))) return status;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_epoch,
         const struct winewayland_host_input_event *event)
 {
     union hw_input input;
     uint32_t scan;
-    NTSTATUS status;
 
+    if (event->reserved) return STATUS_INVALID_PARAMETER;
     memset(&input, 0, sizeof(input));
     switch (event->type)
     {
@@ -1095,24 +1175,15 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
         input.kbd.vkey = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX,
                 GetKeyboardLayout(0));
         break;
+    case WINEWAYLAND_HOST_INPUT_RESET:
+        return reset_host_input(root, host_epoch, event->flags);
     default:
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
-    SERVER_START_REQ(send_wayland_host_input)
-    {
-        req->root = root->root;
-        req->flags = event->type == WINEWAYLAND_HOST_INPUT_KEY ? 0 : SEND_HWMSG_RAWINPUT;
-        req->host_epoch = host_epoch;
-        req->root_identity = root->root_identity;
-        req->root_generation = root->root_generation;
-        req->event_id = root->input_event_id;
-        wine_server_add_data(req, &input, sizeof(input));
-        status = wine_server_call(req);
-    }
-    SERVER_END_REQ;
-    return status;
+    if (event->flags) return STATUS_INVALID_PARAMETER;
+    return submit_host_input(root, host_epoch, &input,
+            event->type == WINEWAYLAND_HOST_INPUT_KEY ? 0 : SEND_HWMSG_RAWINPUT);
 }
 
 static NTSTATUS get_next_contributor(user_handle_t root, uint64_t host_epoch,
@@ -1744,6 +1815,8 @@ static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t ho
     return process_contributor_frames(root, host_epoch, contributor);
 }
 
+static NTSTATUS process_host_input(uint64_t host_epoch);
+
 static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t host_epoch)
 {
     struct winewayland_host_renderer_root_retire retire;
@@ -1757,6 +1830,7 @@ static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t h
     retire.root_identity = root->root_identity;
     retire.root_generation = root->root_generation;
     status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
+    if (!status) status = process_host_input(host_epoch);
     if (!status) memset(root, 0, sizeof(*root));
     return status;
 }

@@ -432,12 +432,38 @@ static void queue_renderer_input(struct renderer_root *root,
         if (renderer.input_count == ARRAY_SIZE(renderer.input_events))
         {
             renderer.input_overflow = TRUE;
-            return;
+            renderer.input_head = (renderer.input_head + 1) %
+                    ARRAY_SIZE(renderer.input_events);
+            --renderer.input_count;
+            event->type = WINEWAYLAND_HOST_INPUT_RESET;
+            event->flags = WINEWAYLAND_HOST_INPUT_RESET_KEYS |
+                    WINEWAYLAND_HOST_INPUT_RESET_BUTTONS;
         }
     }
     index = (renderer.input_head + renderer.input_count) % ARRAY_SIZE(renderer.input_events);
     renderer.input_events[index] = *event;
     ++renderer.input_count;
+}
+
+static void queue_renderer_input_reset(struct renderer_root *root, uint32_t flags)
+{
+    struct winewayland_host_input_event event = {0};
+    unsigned int index, offset;
+
+    if (!root || !flags) return;
+    for (offset = 0; offset < renderer.input_count; ++offset)
+    {
+        index = (renderer.input_head + offset) % ARRAY_SIZE(renderer.input_events);
+        if (renderer.input_events[index].type != WINEWAYLAND_HOST_INPUT_RESET ||
+            renderer.input_events[index].root_identity != root->root_identity ||
+            renderer.input_events[index].root_generation != root->root_generation)
+            continue;
+        renderer.input_events[index].flags |= flags;
+        return;
+    }
+    event.type = WINEWAYLAND_HOST_INPUT_RESET;
+    event.flags = flags;
+    queue_renderer_input(root, &event, FALSE);
 }
 
 static uint32_t renderer_key_to_scan(uint32_t key)
@@ -711,11 +737,14 @@ static void renderer_keyboard_enter(void *data, struct wl_keyboard *keyboard,
 static void renderer_keyboard_leave(void *data, struct wl_keyboard *keyboard,
         uint32_t serial, struct wl_surface *surface)
 {
+    struct renderer_root *root = renderer.keyboard_root;
+
     (void)data;
     (void)keyboard;
     (void)serial;
     (void)surface;
     renderer.keyboard_root = NULL;
+    queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
 }
 
 static void renderer_keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial,
@@ -777,6 +806,8 @@ static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
     }
     else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && renderer.pointer)
     {
+        queue_renderer_input_reset(renderer.pointer_root,
+                WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
         if (wl_proxy_get_version((struct wl_proxy *)renderer.pointer) >=
                 WL_POINTER_RELEASE_SINCE_VERSION)
             wl_pointer_release(renderer.pointer);
@@ -793,6 +824,8 @@ static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
     }
     else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && renderer.keyboard)
     {
+        queue_renderer_input_reset(renderer.keyboard_root,
+                WINEWAYLAND_HOST_INPUT_RESET_KEYS);
         if (wl_proxy_get_version((struct wl_proxy *)renderer.keyboard) >=
                 WL_KEYBOARD_RELEASE_SINCE_VERSION)
             wl_keyboard_release(renderer.keyboard);
@@ -1162,6 +1195,10 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     NTSTATUS status;
 
     if ((status = poll_renderer_root_present(root))) return status;
+    if (renderer.pointer_root == root)
+        queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
+    if (renderer.keyboard_root == root)
+        queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
     destroy_renderer_root_swapchain(root);
     if (root->unmap_callback) wl_callback_destroy(root->unmap_callback);
     if (root->vulkan_surface && renderer.p_vkDestroySurfaceKHR)
@@ -2442,7 +2479,9 @@ static NTSTATUS test_renderer_input(void *args)
     event.code = 0x1e;
     event.state = 1;
     queue_renderer_input(root, &event, FALSE);
-    event.state = 0;
+    memset(&event, 0, sizeof(event));
+    event.type = WINEWAYLAND_HOST_INPUT_RESET;
+    event.flags = WINEWAYLAND_HOST_INPUT_RESET_KEYS;
     queue_renderer_input(root, &event, FALSE);
     return STATUS_SUCCESS;
 }

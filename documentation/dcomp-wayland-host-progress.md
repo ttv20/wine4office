@@ -277,9 +277,13 @@ or transport fixture is not Outlook support.
   path. Wineserver accepts an event only from the current Ready host for the
   exact root identity and USER lifetime generation while the scene and native
   lease are both Hosted, and rejects duplicate or stale event IDs. Stale
-  events are discarded rather than retried. Physical modifier reconciliation,
-  held-key and held-button release on seat loss, IME/text input and a
-  compositor-originated pointer-recipient fixture remain pending.
+  events are discarded rather than retried. Keyboard leave, seat capability
+  loss and focused-root retirement now queue an authenticated reset that
+  releases Wine's depressed keys or pointer buttons. If a pure-edge burst
+  fills the queue, the host replaces one edge with a full input reset instead
+  of risking a permanently pressed key. Physical modifier reconciliation,
+  host-crash cleanup, IME/text input and a compositor-originated
+  pointer-recipient fixture remain pending.
 
 ## Contributor interception inventory
 
@@ -760,7 +764,13 @@ admitted.
   `artifacts/host-input-synthetic-v3-x64.log` in the respective task
   environments. The isolated KWin compositor does not advertise the virtual
   keyboard protocol, so this does not yet prove externally injected physical
-  compositor input.
+  compositor input. A follow-up authority fixture changed Windows focus from
+  child A after key-down to child B before key-up and passed 654 checks with
+  zero failures. Renderer ABI 7 then replaced the synthetic key-up with the
+  same reset used for keyboard leave and seat loss; the Intel DComp fixture
+  still delivered one key-down and one key-up, completed seven Presents and
+  left no task-prefix Wine process. That evidence is retained as
+  `artifacts/host-input-seat-reset-x64.log`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

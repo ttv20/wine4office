@@ -1824,6 +1824,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
+    HWND input_a = NULL, input_b = NULL;
     HWND previous_focus = NULL;
     RECT pool_client_rect;
     POINT input_point, cursor_point;
@@ -2834,10 +2835,18 @@ static void test_host_registration( const char *program, const char *test_name )
         "Hosted native lease returned %#lx, state %#lx, action %#lx.\n",
         state->command_status, state->native_lease_state, state->native_lease_action );
 
+    SetWindowPos( root, HWND_TOP, 100, 100, 64, 64,
+                  SWP_SHOWWINDOW | SWP_NOACTIVATE );
+    input_a = CreateWindowExW( 0, L"static", L"input A", WS_CHILD | WS_VISIBLE,
+                               0, 0, 16, 16, root, NULL, NULL, NULL );
+    input_b = CreateWindowExW( 0, L"static", L"input B", WS_CHILD | WS_VISIBLE,
+                               16, 0, 16, 16, root, NULL, NULL, NULL );
+    ok( !!input_a && !!input_b, "Failed to create hosted input children, error %lu.\n",
+        GetLastError() );
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
-    previous_focus = SetFocus( root );
-    ok( GetFocus() == root, "Hosted input test focus is %p instead of %p.\n",
-        GetFocus(), root );
+    previous_focus = SetFocus( input_a );
+    ok( GetFocus() == input_a, "Hosted input test focus is %p instead of %p.\n",
+        GetFocus(), input_a );
     status = send_host_input( root, old_epoch, root_identity, root_generation, 1,
                               INPUT_KEYBOARD, 0, 0, 0, 0 );
     ok( status == STATUS_ACCESS_DENIED,
@@ -2856,28 +2865,30 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
         "Timed out sending native key down.\n" );
     ok( !state->command_status &&
-        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
+        PeekMessageW( &msg, input_a, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Native key down returned %#lx without the expected message.\n",
         state->command_status );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
         "Timed out replaying native key down.\n" );
     ok( state->command_status == STATUS_REVISION_MISMATCH &&
-        !PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ),
+        !PeekMessageW( &msg, input_a, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ),
         "Replayed native key down returned %#lx or queued a duplicate.\n",
         state->command_status );
     state->input_event_id = 2;
     state->input_flags = KEYEVENTF_KEYUP;
+    SetFocus( input_b );
+    ok( GetFocus() == input_b, "Hosted input release focus is %p instead of %p.\n",
+        GetFocus(), input_b );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
         "Timed out sending native key up.\n" );
     ok( !state->command_status &&
-        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
-        "Native key up returned %#lx without the expected message.\n",
+        PeekMessageW( &msg, input_b, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Native key up after focus change returned %#lx without the expected message.\n",
         state->command_status );
 
-    SetWindowPos( root, HWND_TOP, 100, 100, 64, 64,
-                  SWP_SHOWWINDOW | SWP_NOACTIVATE );
+    SetFocus( root );
     input_point.x = 8;
     input_point.y = 9;
     ClientToScreen( root, &input_point );
