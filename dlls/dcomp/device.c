@@ -680,10 +680,25 @@ static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scen
     struct dcomp_visual *visual;
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {0};
     IDXGISwapChain1 *candidate = NULL;
-    RECT client_rect;
+    RECT client_rect, window_rect;
+    POINT client_origin = {0};
 
     if (!GetClientRect(scene->hwnd, &client_rect) || client_rect.right <= 0 || client_rect.bottom <= 0)
         return NULL;
+    if (!GetWindowRect(scene->hwnd, &window_rect) ||
+            !ClientToScreen(scene->hwnd, &client_origin))
+        return NULL;
+    if (client_origin.x != window_rect.left || client_origin.y != window_rect.top ||
+            client_rect.right - client_rect.left != window_rect.right - window_rect.left ||
+            client_rect.bottom - client_rect.top != window_rect.bottom - window_rect.top)
+    {
+        TRACE("Hosted candidate for %p rejected: client %ld,%ld %ldx%ld does not cover window %ld,%ld %ldx%ld.\n",
+                scene->hwnd, client_origin.x, client_origin.y,
+                client_rect.right - client_rect.left, client_rect.bottom - client_rect.top,
+                window_rect.left, window_rect.top, window_rect.right - window_rect.left,
+                window_rect.bottom - window_rect.top);
+        return NULL;
+    }
 
     for (device = dcomp_devices; device; device = device->next_global)
     {

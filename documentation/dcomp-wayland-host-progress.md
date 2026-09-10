@@ -293,6 +293,12 @@ or transport fixture is not Outlook support.
   supported. The authority fixture verified the cross-root rejection while
   retaining the existing same-root registry tests and passed 662 checks with
   zero failures.
+- Native non-client rendering is not yet part of the host WSI image. DComp
+  therefore admits a composition swapchain only when the root client area
+  covers the complete outer window at the same screen origin. A title bar,
+  border, resize frame or any other non-client margin keeps the committed
+  scene in `LocalFallback`, preserving Wine's existing decorated-window path
+  until explicit frame composition is implemented.
 
 ## Contributor interception inventory
 
@@ -795,6 +801,13 @@ admitted.
   streams. The authority fixture terminated a host with A and the left mouse
   button held, observed both releases, and passed 660 checks with zero
   failures.
+- The framed-window admission fixture resized a `WS_OVERLAPPEDWINDOW` so its
+  DComp swapchain still exactly matched the 64x64 client area, then verified
+  that the non-client margin alone changes the scene from `HostedContent` to
+  `LocalFallback`. The full x86-64 Radeon authority suite passed 669 checks
+  with zero failures. Evidence is retained as
+  `/workspace/artifacts/framed-fallback-authority-x64.log` and
+  `/workspace/artifacts/framed-fallback-win32u-test-x64.exe`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -2092,6 +2092,8 @@ static void test_host_registration( const char *program, const char *test_name )
         }
         if (hosted_target && hosted_visual && hosted_swapchain)
         {
+            RECT framed_rect = {0, 0, 64, 64};
+
             hr = IDCompositionVisual_SetContent( hosted_visual, (IUnknown *)hosted_swapchain );
             ok( hr == S_OK, "Setting hosted DComp content returned %#lx.\n", hr );
             hr = IDCompositionTarget_SetRoot( hosted_target, hosted_visual );
@@ -2132,6 +2134,33 @@ static void test_host_registration( const char *program, const char *test_name )
                 state->command_status, state->contributor_owner_process_id,
                 state->contributor_producer_process_id, state->contributor_source,
                 state->contributor_target_layer, state->contributor_state );
+
+            ok( AdjustWindowRectEx( &framed_rect, WS_OVERLAPPEDWINDOW, FALSE, 0 ),
+                "Failed to calculate framed DComp root bounds, error %lu.\n",
+                GetLastError() );
+            SetLastError( 0 );
+            SetWindowLongW( hosted_root, GWL_STYLE, WS_OVERLAPPEDWINDOW );
+            ok( (GetWindowLongW( hosted_root, GWL_STYLE ) & WS_OVERLAPPEDWINDOW) ==
+                WS_OVERLAPPEDWINDOW,
+                "Failed to apply framed DComp root style, error %lu.\n", GetLastError() );
+            ok( SetWindowPos( hosted_root, NULL, 0, 0,
+                             framed_rect.right - framed_rect.left,
+                             framed_rect.bottom - framed_rect.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED ),
+                "Failed to resize framed DComp root, error %lu.\n", GetLastError() );
+            hr = IDCompositionVisual_SetContent( hosted_visual,
+                                                 (IUnknown *)hosted_swapchain );
+            ok( hr == S_OK, "Resetting framed DComp content returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Committing framed DComp root returned %#lx.\n", hr );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying framed DComp scene.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+                "Framed DComp scene returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
 
             hr = IDCompositionTarget_SetRoot( hosted_target, NULL );
             ok( hr == S_OK, "Clearing hosted DComp root returned %#lx.\n", hr );
