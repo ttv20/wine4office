@@ -4090,6 +4090,8 @@ static void dump_get_wayland_host_root_request( const struct get_wayland_host_ro
 static void dump_get_wayland_host_root_reply( const struct get_wayland_host_root_reply *req )
 {
     fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
     dump_uint64( ", scene_generation=", &req->scene_generation );
     dump_uint64( ", registry_generation=", &req->registry_generation );
 }

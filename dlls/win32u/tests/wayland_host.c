@@ -112,6 +112,8 @@ struct wayland_host_test_state
     UINT64 reuse_value;
     UINT64 enumeration_cursor;
     UINT64 enumerated_root;
+    UINT64 root_identity;
+    UINT64 root_generation;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -185,6 +187,8 @@ struct wayland_scene_info
 struct wayland_host_root_info
 {
     UINT64 root;
+    UINT64 root_identity;
+    UINT64 root_generation;
     UINT64 scene_generation;
     UINT64 registry_generation;
 };
@@ -401,6 +405,8 @@ static NTSTATUS get_host_root( UINT64 host_epoch, UINT64 previous_root,
         if (!(status = p_wine_server_call( req )))
         {
             info->root = (UINT_PTR)wine_server_ptr_handle( reply->root );
+            info->root_identity = reply->root_identity;
+            info->root_generation = reply->root_generation;
             info->scene_generation = reply->scene_generation;
             info->registry_generation = reply->registry_generation;
         }
@@ -1130,6 +1136,8 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->command_status = get_host_root( state->host_epoch,
                     state->enumeration_cursor, &host_root );
             state->enumerated_root = host_root.root;
+            state->root_identity = host_root.root_identity;
+            state->root_generation = host_root.root_generation;
             state->scene_generation = host_root.scene_generation;
             state->registry_generation = host_root.registry_generation;
             break;
@@ -1363,6 +1371,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
     UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
     UINT64 import_registry_generation;
+    UINT64 root_identity = 0, pre_ready_root_identity = 0;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL;
@@ -1522,7 +1531,8 @@ static void test_host_registration( const char *program, const char *test_name )
         info.device_uuid[1], info.device_uuid[2], info.device_uuid[3] );
 
     status = get_host_root( old_epoch, 0, &host_root );
-    ok( status == STATUS_ACCESS_DENIED && !host_root.root &&
+    ok( status == STATUS_ACCESS_DENIED && !host_root.root && !host_root.root_identity &&
+        !host_root.root_generation &&
         !host_root.scene_generation && !host_root.registry_generation,
         "Non-host root enumeration returned %#lx, root %s, scene %s, registry %s.\n",
         status, wine_dbgstr_longlong( host_root.root ),
@@ -1535,15 +1545,23 @@ static void test_host_registration( const char *program, const char *test_name )
                                     HOST_CHILD_COMMAND_GET_ROOT ),
             "Timed out enumerating host root %u.\n", i );
         if (state->command_status == STATUS_NO_MORE_ENTRIES) break;
-        ok( !state->command_status && state->enumerated_root && state->scene_generation,
+        ok( !state->command_status && state->enumerated_root && state->root_identity &&
+            state->root_generation && state->scene_generation,
             "Host root %u returned %#lx, root %s, scene %s, registry %s.\n", i,
             state->command_status, wine_dbgstr_longlong( state->enumerated_root ),
             wine_dbgstr_longlong( state->scene_generation ),
             wine_dbgstr_longlong( state->registry_generation ) );
         if (state->command_status || !state->enumerated_root) break;
-        if ((HWND)(UINT_PTR)state->enumerated_root == root) saw_root = TRUE;
+        if ((HWND)(UINT_PTR)state->enumerated_root == root)
+        {
+            saw_root = TRUE;
+            root_identity = state->root_identity;
+        }
         else if ((HWND)(UINT_PTR)state->enumerated_root == pre_ready_root)
+        {
             saw_pre_ready_root = TRUE;
+            pre_ready_root_identity = state->root_identity;
+        }
         else
             ok( 0, "Enumerated unexpected host root %s.\n",
                 wine_dbgstr_longlong( state->enumerated_root ) );
@@ -1554,6 +1572,9 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( saw_root && (!pre_ready_root || saw_pre_ready_root),
         "Host root enumeration saw retained %u and pre-ready %u.\n",
         saw_root, saw_pre_ready_root );
+    ok( !pre_ready_root_identity || root_identity != pre_ready_root_identity,
+        "Distinct roots returned the same server identity %s.\n",
+        wine_dbgstr_longlong( root_identity ) );
     state->enumeration_cursor = 0;
 
     ok( send_host_child_command( state, command_event, result_event,

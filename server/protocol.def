@@ -4877,6 +4877,8 @@ enum inproc_sync_type
     unsigned __int64 host_epoch;
 @REPLY
     user_handle_t    root;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
     unsigned __int64 scene_generation;
     unsigned __int64 registry_generation;
 @END

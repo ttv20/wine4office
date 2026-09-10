@@ -7025,6 +7025,8 @@ struct get_wayland_host_root_reply
     struct reply_header __header;
     user_handle_t    root;
     char __pad_12[4];
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
     unsigned __int64 scene_generation;
     unsigned __int64 registry_generation;
 };
@@ -8093,6 +8095,6 @@ union generic_reply
     struct get_wayland_host_root_reply get_wayland_host_root_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 982
+#define SERVER_PROTOCOL_VERSION 983
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

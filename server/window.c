@@ -4814,8 +4814,11 @@ DECL_HANDLER(get_wayland_host_root)
     struct window *root;
     struct desktop *desktop;
     user_handle_t handle = req->previous_root;
+    struct obj_locator locator;
 
     reply->root = 0;
+    reply->root_identity = 0;
+    reply->root_generation = 0;
     reply->scene_generation = 0;
     reply->registry_generation = 0;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
@@ -4826,7 +4829,10 @@ DECL_HANDLER(get_wayland_host_root)
         if (root->desktop != desktop || root->parent != desktop->top_window ||
             (!root->wayland_scene_generation && !root->wayland_scene_registry))
             continue;
+        locator = get_shared_object_locator( root->shared );
         reply->root = root->handle;
+        reply->root_identity = locator.id;
+        reply->root_generation = root->handle >> 16;
         reply->scene_generation = root->wayland_scene_generation;
         if (root->wayland_scene_registry)
             reply->registry_generation = root->wayland_scene_registry->generation;

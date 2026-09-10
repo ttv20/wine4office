@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 982.
+Generated server protocol version: 983.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -124,6 +124,15 @@ or transport fixture is not Outlook support.
   retires its imports before acknowledging the server tombstone. This first
   host fixture polls at 20 ms and retains the initial two-pool renderer cap.
   An event-driven wakeup and per-window pool scaling remain pending.
+- Root enumeration now returns a server shared-object identity and the USER
+  handle lifetime generation in addition to the HWND. The renderer keys native
+  roots by that pair, not by the reusable HWND value. A transport-capable host
+  creates and retains one unmapped `wl_surface`, `xdg_surface` and
+  `xdg_toplevel` per enumerated root, dispatches its configure events, and
+  destroys the native objects when the root disappears from a complete scan.
+  Repeating a root update is idempotent, while a new lifetime generation first
+  replaces the old native objects. The root remains unmapped because no buffer
+  is attached; WSI creation and presentation are the next tranche.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -434,6 +443,21 @@ admitted.
   bounded event pump without creating a visible window. Evidence and hashes
   are retained as `/workspace/artifacts/xdg-toplevel-{x64,i386}.log` and
   `/workspace/artifacts/xdg-toplevel-SHA256SUMS`.
+- Protocol 983 adds explicit server root identity and lifetime generation.
+  The complete x86-64 authority regression passed 476 checks with zero
+  failures on the Radeon task environment. The new persistent-root fixture
+  passed through both x86-64 and i386 Unix-call paths on Intel Iris Xe; each
+  received and acknowledged one initial configure, preserved the same native
+  objects on an idempotent update, replaced them for a new generation, and
+  proved that retiring the old generation does not destroy the replacement.
+  Evidence and hashes are retained as
+  `/workspace/artifacts/root-identity-{authority-x64.log,SHA256SUMS}` in
+  `dcomp-host-probe-20260909`, and under
+  `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/root-identity-{self-test-x64.log,self-test-i386.log,SHA256SUMS}`.
+  Both PE architectures compiled. The standalone i386 authority executable
+  could not run in the available pure-win64 test prefixes because their WoW64
+  system directory lacks a 32-bit `kernel32.dll`; this was a harness failure
+  before test entry, not a product result.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

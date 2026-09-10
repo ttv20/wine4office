@@ -27,6 +27,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 40);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -176,6 +178,85 @@ static int test_shell(void)
     return 0;
 }
 
+static int test_roots(void)
+{
+    struct winewayland_host_renderer_root_retire retire;
+    struct winewayland_host_renderer_root root;
+    struct winewayland_host_probe probe;
+    NTSTATUS status;
+    unsigned int configure_count, i;
+
+    if ((status = get_backend_probe(&probe)))
+    {
+        fprintf(stderr, "root_self_test=unavailable probe_status=%#lx\n", status);
+        return 4;
+    }
+    if (!(probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        printf("root_self_test=unsupported capabilities=%#x\n", probe.capabilities);
+        return 0;
+    }
+    if ((status = create_renderer(&probe)))
+    {
+        fprintf(stderr, "root_self_test=failed renderer_status=%#lx\n", status);
+        return 5;
+    }
+
+    memset(&root, 0, sizeof(root));
+    root.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    root.size = sizeof(root);
+    root.root_identity = 1;
+    root.root_generation = 1;
+    status = WINE_UNIX_CALL(unix_renderer_root_sync, &root);
+    if (status || !(root.flags & WINEWAYLAND_HOST_ROOT_CREATED)) goto failed;
+    for (i = 0; i < 100 && !(root.flags & WINEWAYLAND_HOST_ROOT_CONFIGURED); ++i)
+    {
+        Sleep(10);
+        if ((status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL))) goto failed;
+        root.flags = 0;
+        if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+    }
+    if (!(root.flags & WINEWAYLAND_HOST_ROOT_CONFIGURED) ||
+        (root.flags & WINEWAYLAND_HOST_ROOT_CREATED))
+    {
+        status = STATUS_IO_TIMEOUT;
+        goto failed;
+    }
+    configure_count = root.configure_count;
+
+    root.root_generation = 2;
+    root.flags = 0;
+    status = WINE_UNIX_CALL(unix_renderer_root_sync, &root);
+    if (status || !(root.flags & WINEWAYLAND_HOST_ROOT_CREATED)) goto failed;
+
+    memset(&retire, 0, sizeof(retire));
+    retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    retire.size = sizeof(retire);
+    retire.root_identity = root.root_identity;
+    retire.root_generation = 1;
+    status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
+    if (status) goto failed;
+    root.flags = 0;
+    status = WINE_UNIX_CALL(unix_renderer_root_sync, &root);
+    if (status) goto failed;
+    if (root.flags & WINEWAYLAND_HOST_ROOT_CREATED)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
+    retire.root_generation = root.root_generation;
+    status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
+    if (status) goto failed;
+    destroy_renderer();
+    printf("root_self_test=passed configure_count=%u\n", configure_count);
+    return 0;
+
+failed:
+    fprintf(stderr, "root_self_test=failed status=%#lx flags=%#x\n", status, root.flags);
+    destroy_renderer();
+    return 5;
+}
+
 static NTSTATUS request_host_startup(const struct winewayland_host_probe *probe,
         uint64_t *token_low, uint64_t *token_high)
 {
@@ -275,12 +356,23 @@ struct registered_host_info
 };
 
 #define HOST_RENDERER_MAX_POOLS 2
+#define HOST_RENDERER_MAX_ROOTS 64
 
 struct host_root_info
 {
     user_handle_t root;
+    uint64_t root_identity;
+    uint64_t root_generation;
     uint64_t scene_generation;
     uint64_t registry_generation;
+};
+
+struct host_renderer_root
+{
+    user_handle_t root;
+    uint64_t root_identity;
+    uint64_t root_generation;
+    BOOL seen;
 };
 
 struct host_contributor_info
@@ -338,6 +430,7 @@ struct host_renderer_pool
 };
 
 static struct host_renderer_pool renderer_pools[HOST_RENDERER_MAX_POOLS];
+static struct host_renderer_root renderer_roots[HOST_RENDERER_MAX_ROOTS];
 static uint64_t next_renderer_pool_generation;
 
 static NTSTATUS get_registered_host(struct registered_host_info *info)
@@ -379,6 +472,8 @@ static NTSTATUS get_next_host_root(uint64_t host_epoch, user_handle_t previous_r
         if (!(status = wine_server_call(req)))
         {
             info->root = reply->root;
+            info->root_identity = reply->root_identity;
+            info->root_generation = reply->root_generation;
             info->scene_generation = reply->scene_generation;
             info->registry_generation = reply->registry_generation;
         }
@@ -794,11 +889,70 @@ static NTSTATUS process_contributor(user_handle_t root, uint64_t host_epoch,
     return process_contributor_frames(root, host_epoch, contributor->contributor_id);
 }
 
+static NTSTATUS retire_renderer_root(struct host_renderer_root *root)
+{
+    struct winewayland_host_renderer_root_retire retire;
+    NTSTATUS status;
+
+    memset(&retire, 0, sizeof(retire));
+    retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    retire.size = sizeof(retire);
+    retire.root_identity = root->root_identity;
+    retire.root_generation = root->root_generation;
+    status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
+    if (!status) memset(root, 0, sizeof(*root));
+    return status;
+}
+
+static NTSTATUS ensure_renderer_root(const struct host_root_info *root)
+{
+    struct winewayland_host_renderer_root sync;
+    struct host_renderer_root *free_root = NULL;
+    NTSTATUS status;
+    unsigned int i;
+
+    if (!root->root_identity || !root->root_generation) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+    {
+        struct host_renderer_root *entry = &renderer_roots[i];
+
+        if (entry->root_identity == root->root_identity &&
+            entry->root_generation == root->root_generation)
+        {
+            memset(&sync, 0, sizeof(sync));
+            sync.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+            sync.size = sizeof(sync);
+            sync.root_identity = root->root_identity;
+            sync.root_generation = root->root_generation;
+            if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync))) return status;
+            entry->root = root->root;
+            entry->seen = TRUE;
+            return STATUS_SUCCESS;
+        }
+        if (!entry->root_identity && !free_root) free_root = entry;
+    }
+    if (!free_root) return STATUS_QUOTA_EXCEEDED;
+
+    memset(&sync, 0, sizeof(sync));
+    sync.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    sync.size = sizeof(sync);
+    sync.root_identity = root->root_identity;
+    sync.root_generation = root->root_generation;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync))) return status;
+    free_root->root = root->root;
+    free_root->root_identity = root->root_identity;
+    free_root->root_generation = root->root_generation;
+    free_root->seen = TRUE;
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t host_epoch)
 {
     struct host_contributor_info contributor;
     uint64_t previous_contributor = 0;
     NTSTATUS status;
+
+    if ((status = ensure_renderer_root(root))) return status;
 
     while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,
             &contributor)))
@@ -817,6 +971,7 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     unsigned int i;
 
     for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i) renderer_pools[i].seen = FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i) renderer_roots[i].seen = FALSE;
     while (!(status = get_next_host_root(host_epoch, previous_root, &root)))
     {
         previous_root = root.root;
@@ -827,6 +982,10 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
         if (renderer_pools[i].renderer_generation && !renderer_pools[i].seen &&
             (status = retire_renderer_pool(&renderer_pools[i])))
+            return status;
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+        if (renderer_roots[i].root_identity && !renderer_roots[i].seen &&
+            (status = retire_renderer_root(&renderer_roots[i])))
             return status;
     return STATUS_SUCCESS;
 }
@@ -880,6 +1039,7 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
     if (host_epoch) release_host(host_epoch);
     destroy_renderer();
     memset(renderer_pools, 0, sizeof(renderer_pools));
+    memset(renderer_roots, 0, sizeof(renderer_roots));
     next_renderer_pool_generation = 0;
     UnmapViewOfFile(startup);
     return status ? 6 : 0;
@@ -1012,13 +1172,14 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--transport-self-test"))
         return test_headless_transport();
     if (argc == 2 && !wcscmp(argv[1], L"--shell-self-test")) return test_shell();
+    if (argc == 2 && !wcscmp(argv[1], L"--root-self-test")) return test_roots();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --registration-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --registration-test\n",
             argv[0]);
     return 2;
 }

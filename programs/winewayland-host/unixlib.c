@@ -45,6 +45,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 40);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 
 struct registry_probe
 {
@@ -129,6 +131,21 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define MAX_RENDERER_POOLS 2
 #define RENDERER_POOL_SLOTS 3
 #define MAX_RENDERER_FRAMES 32
+#define MAX_RENDERER_ROOTS 64
+
+struct renderer_root
+{
+    uint64_t root_identity;
+    uint64_t root_generation;
+    struct wl_surface *surface;
+    struct xdg_surface *xdg_surface;
+    struct xdg_toplevel *xdg_toplevel;
+    uint32_t configure_count;
+    int32_t width;
+    int32_t height;
+    BOOL configured;
+    BOOL closed;
+};
 
 struct renderer_slot
 {
@@ -223,9 +240,70 @@ struct vulkan_renderer
     struct renderer_deferred_resources deferred;
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
     struct renderer_frame frames[MAX_RENDERER_FRAMES];
+    struct renderer_root roots[MAX_RENDERER_ROOTS];
 };
 
 static struct vulkan_renderer renderer;
+
+static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
+        uint32_t serial)
+{
+    struct renderer_root *root = data;
+
+    xdg_surface_ack_configure(xdg_surface, serial);
+    root->configured = TRUE;
+    ++root->configure_count;
+}
+
+static const struct xdg_surface_listener renderer_root_xdg_surface_listener =
+{
+    renderer_root_xdg_surface_configure,
+};
+
+static void renderer_root_toplevel_configure(void *data, struct xdg_toplevel *toplevel,
+        int32_t width, int32_t height, struct wl_array *states)
+{
+    struct renderer_root *root = data;
+
+    (void)toplevel;
+    (void)states;
+    if (width > 0) root->width = width;
+    if (height > 0) root->height = height;
+}
+
+static void renderer_root_toplevel_close(void *data, struct xdg_toplevel *toplevel)
+{
+    struct renderer_root *root = data;
+
+    (void)toplevel;
+    root->closed = TRUE;
+}
+
+static const struct xdg_toplevel_listener renderer_root_toplevel_listener =
+{
+    renderer_root_toplevel_configure,
+    renderer_root_toplevel_close,
+};
+
+static void destroy_renderer_root(struct renderer_root *root)
+{
+    if (root->xdg_toplevel) xdg_toplevel_destroy(root->xdg_toplevel);
+    if (root->xdg_surface) xdg_surface_destroy(root->xdg_surface);
+    if (root->surface) wl_surface_destroy(root->surface);
+    memset(root, 0, sizeof(*root));
+}
+
+static struct renderer_root *find_renderer_root(uint64_t root_identity,
+        uint64_t root_generation)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if (renderer.roots[i].root_identity == root_identity &&
+            renderer.roots[i].root_generation == root_generation)
+            return &renderer.roots[i];
+    return NULL;
+}
 
 static void destroy_renderer_slot(struct renderer_slot *slot)
 {
@@ -319,6 +397,8 @@ static NTSTATUS destroy_renderer(void)
         if ((status = destroy_renderer_frame(&renderer.frames[i]))) return status;
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
         destroy_renderer_slot(&renderer.slots[i]);
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        destroy_renderer_root(&renderer.roots[i]);
     if (renderer.command_pool && renderer.p_vkDestroyCommandPool)
         renderer.p_vkDestroyCommandPool(renderer.device, renderer.command_pool, NULL);
     if (renderer.device && renderer.p_vkDestroyDevice)
@@ -1330,6 +1410,84 @@ static NTSTATUS dispatch_renderer(void *args)
     return dispatch_wayland_display(renderer.display, 0);
 }
 
+static NTSTATUS sync_renderer_root(void *args)
+{
+    struct winewayland_host_renderer_root *params = args;
+    struct renderer_root *root = NULL, *free_root = NULL;
+    char title[96];
+    unsigned int i;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    params->flags = 0;
+    params->width = params->height = 0;
+    params->configure_count = 0;
+    if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
+    if (!renderer.display || !renderer.compositor || !renderer.xdg_wm_base)
+        return STATUS_DEVICE_NOT_READY;
+
+    if ((root = find_renderer_root(params->root_identity, params->root_generation)))
+        goto done;
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+    {
+        if (renderer.roots[i].root_identity == params->root_identity)
+            destroy_renderer_root(&renderer.roots[i]);
+        if (!renderer.roots[i].root_identity && !free_root) free_root = &renderer.roots[i];
+    }
+    if (!free_root) return STATUS_QUOTA_EXCEEDED;
+    root = free_root;
+    root->root_identity = params->root_identity;
+    root->root_generation = params->root_generation;
+    if (!(root->surface = wl_compositor_create_surface(renderer.compositor)) ||
+        !(root->xdg_surface = xdg_wm_base_get_xdg_surface(renderer.xdg_wm_base,
+                root->surface)) ||
+        xdg_surface_add_listener(root->xdg_surface,
+                &renderer_root_xdg_surface_listener, root) == -1 ||
+        !(root->xdg_toplevel = xdg_surface_get_toplevel(root->xdg_surface)) ||
+        xdg_toplevel_add_listener(root->xdg_toplevel,
+                &renderer_root_toplevel_listener, root) == -1)
+    {
+        destroy_renderer_root(root);
+        return STATUS_NOT_SUPPORTED;
+    }
+    snprintf(title, sizeof(title), "Wine hosted window %016llx",
+            (unsigned long long)root->root_identity);
+    xdg_toplevel_set_title(root->xdg_toplevel, title);
+    xdg_toplevel_set_app_id(root->xdg_toplevel, "winewayland-host");
+    wl_surface_commit(root->surface);
+    if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+    {
+        destroy_renderer_root(root);
+        return STATUS_PORT_DISCONNECTED;
+    }
+    params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
+
+done:
+    if (root->configured) params->flags |= WINEWAYLAND_HOST_ROOT_CONFIGURED;
+    if (root->closed) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
+    params->width = root->width;
+    params->height = root->height;
+    params->configure_count = root->configure_count;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS retire_renderer_root(void *args)
+{
+    struct winewayland_host_renderer_root_retire *params = args;
+    struct renderer_root *root;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
+    if ((root = find_renderer_root(params->root_identity, params->root_generation)))
+        destroy_renderer_root(root);
+    if (renderer.display && wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+        return STATUS_PORT_DISCONNECTED;
+    return STATUS_SUCCESS;
+}
+
 struct shell_test_state
 {
     BOOL configured;
@@ -1930,6 +2088,18 @@ static NTSTATUS dispatch_renderer(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS sync_renderer_root(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS retire_renderer_root(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS shell_self_test(void *args)
 {
     (void)args;
@@ -2042,6 +2212,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     retire_renderer_pool,
     process_renderer_frame,
     dispatch_renderer,
+    sync_renderer_root,
+    retire_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
@@ -2057,6 +2229,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     retire_renderer_pool,
     process_renderer_frame,
     dispatch_renderer,
+    sync_renderer_root,
+    retire_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
