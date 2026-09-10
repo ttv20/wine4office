@@ -701,8 +701,36 @@ admitted.
   caught the previous permanent `imports=3` stall and now reports
   `imports=6`, `host_activations=2` and `local_activations=1`. A separate
   transformed local-fallback probe exposed the older Vulkan CPU-composition
-  path creating a staging resource on its command-stream thread; fixing that
-  fallback path remains pending and the identity transport does not claim it.
+  path creating and publicly mapping staging resources on its command-stream
+  thread. Vulkan swapchains now prepare and retain two size-matched CPU staging
+  textures on the caller thread before queuing Present; the command-stream path
+  only maps those prepared resources through their internal operations. The
+  Intel fixture now completes Hosted -> transformed LocalFallback -> Hosted,
+  with `imports=9`, `presented=6`, `host_activations=3`,
+  `local_activations=2`, and no Wine process left afterward. Evidence is in
+  `artifacts/composition-thread-transform-rehost-x64.log`.
+- DComp now starts `winewayland-host.exe --launch` on the first eligible
+  committed composition when no host is registered. The launcher uses the
+  server startup permit to select one resident child, while concurrent
+  launchers wait for that child and reuse its epoch. The resident registers as
+  a Wine system process and waits for the server shutdown event, so it stays
+  available while user applications run without keeping the prefix alive
+  afterward. It is detached from the console; an earlier console child kept a
+  `conhost.exe` user process alive and formed a shutdown cycle, which the Intel
+  lifecycle fixture caught. The server also rejects DComp contributors when a
+  fallback-only host lacks Vulkan transport. The x86-64 authority regression
+  now passes 634 checks with no failures. On Intel Iris Xe, the automatic DComp
+  fixture launched one host, submitted seven presents and exited with no Wine
+  processes left. Two concurrent launchers selected the same PID and epoch,
+  and the full manual round-trip fixture still reports `imports=6`,
+  `presented=6`, `host_activations=2` and `local_activations=1`. A second run
+  against the final staging-resource fix also passed automatic startup with
+  seven presents. Evidence is in
+  `artifacts/auto-host-{lifecycle-detached,dcomp-pipeline,race-1,race-2,regression-manual-pipeline}-x64.log`
+  and `artifacts/auto-host-dcomp-pipeline-final-x64.log`
+  in the Intel task directory and `artifacts/auto-host-authority-x64-v4.log` in
+  the Radeon task environment. The Intel task still has 62 GiB free and every
+  test prefix has zero Wine processes.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -265,6 +265,40 @@ static NTSTATUS dcomp_publish_scene(struct dcomp_scene *scene, UINT disposition,
 static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scene *scene,
         UINT *target_layer);
 
+static NTSTATUS dcomp_start_wayland_host(void)
+{
+    static const WCHAR host_name[] = L"\\winewayland-host.exe";
+    static const WCHAR arguments[] = L"winewayland-host.exe --launch";
+    STARTUPINFOW startup = {sizeof(startup)};
+    PROCESS_INFORMATION process;
+    WCHAR path[MAX_PATH], command[ARRAY_SIZE(arguments)];
+    DWORD length, exit_code, wait;
+
+    length = GetSystemDirectoryW(path, ARRAY_SIZE(path) - ARRAY_SIZE(host_name));
+    if (!length || length >= ARRAY_SIZE(path) - ARRAY_SIZE(host_name))
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+    lstrcpyW(path + length, host_name);
+    lstrcpyW(command, arguments);
+    if (!CreateProcessW(path, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+            &startup, &process))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    CloseHandle(process.hThread);
+    /* The launcher owns a 30 second registration deadline and a short child
+     * cleanup interval.  Let it finish that cleanup instead of killing it at
+     * the registration boundary and potentially orphaning the resident. */
+    wait = WaitForSingleObject(process.hProcess, 40000);
+    if (wait != WAIT_OBJECT_0)
+    {
+        TerminateProcess(process.hProcess, 1);
+        CloseHandle(process.hProcess);
+        return wait == WAIT_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_UNSUCCESSFUL;
+    }
+    if (!GetExitCodeProcess(process.hProcess, &exit_code)) exit_code = 1;
+    CloseHandle(process.hProcess);
+    return exit_code ? STATUS_DEVICE_NOT_READY : STATUS_SUCCESS;
+}
+
 static NTSTATUS dcomp_scene_create_hosted_binding(struct dcomp_scene *scene,
         IDXGISwapChain1 *swapchain, UINT target_layer)
 {
@@ -360,6 +394,8 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
     {
         if (scene->hosted_swapchain) dcomp_scene_revoke_hosted_binding(scene);
         status = dcomp_scene_create_hosted_binding(scene, candidate, target_layer);
+        if (status == STATUS_DEVICE_NOT_READY && !dcomp_start_wayland_host())
+            status = dcomp_scene_create_hosted_binding(scene, candidate, target_layer);
         if (status && status != STATUS_DEVICE_NOT_READY)
             TRACE("Could not bind hosted candidate for %p, status %#lx.\n", scene->hwnd, status);
     }

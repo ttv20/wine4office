@@ -4013,6 +4013,11 @@ DECL_HANDLER(create_wayland_contributor)
         set_error( STATUS_DEVICE_NOT_READY );
         goto done;
     }
+    if (!(desktop->wayland_host_capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        set_error( STATUS_NOT_SUPPORTED );
+        goto done;
+    }
     if (!(registry = root->wayland_scene_registry))
     {
         if (!(registry = mem_alloc( sizeof(*registry) ))) goto done;

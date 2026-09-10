@@ -1736,6 +1736,7 @@ static void test_host_registration( const char *program, const char *test_name )
 {
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     struct wayland_host_test_state *state = NULL;
+    struct wayland_host_test_state no_transport = {0};
     struct wayland_host_info info;
     struct wayland_scene_info scene;
     struct wayland_contributor_info contributor;
@@ -3979,6 +3980,34 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out checking stream without a host.\n" );
     ok( state->producer_status == STATUS_DEVICE_NOT_READY,
         "Stream check without a host returned %#lx.\n", state->producer_status );
+
+    state->capabilities = TEST_CAPABILITIES & ~WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT;
+    memset( state->host_device_uuid, 0, sizeof(state->host_device_uuid) );
+    status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION, state->capabilities,
+            TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,
+            &state->token_low, &state->token_high );
+    ok( !status, "Fallback-only host startup request returned %#lx.\n", status );
+    reset_child_state( state, ready_event, command_event, result_event );
+    created = start_host_child( program, test_name, mapping, ready_event, command_event,
+                                result_event, &process );
+    ok( created, "Failed to start fallback-only host, error %lu.\n", GetLastError() );
+    if (!created) goto done;
+    ok( WaitForSingleObject( ready_event, 30000 ) == WAIT_OBJECT_0,
+        "Timed out waiting for fallback-only host.\n" );
+    ok( !state->register_status && !state->ready_status,
+        "Fallback-only host returned register %#lx, ready %#lx.\n",
+        state->register_status, state->ready_status );
+    status = create_contributor( root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                 WINE_WAYLAND_TARGET_BELOW, 9, &no_transport );
+    ok( status == STATUS_NOT_SUPPORTED,
+        "Contributor creation without Vulkan transport returned %#lx.\n", status );
+    stop_host_child( state, command_event, result_event, &process );
+
+    state->capabilities = TEST_CAPABILITIES;
+    state->host_device_uuid[0] = TEST_DEVICE_UUID_0;
+    state->host_device_uuid[1] = TEST_DEVICE_UUID_1;
+    state->host_device_uuid[2] = TEST_DEVICE_UUID_2;
+    state->host_device_uuid[3] = TEST_DEVICE_UUID_3;
 
     status = request_host_startup( WINE_WAYLAND_HOST_PROTOCOL_VERSION, TEST_CAPABILITIES,
             TEST_ENDPOINT_DEVICE, TEST_ENDPOINT_INODE, TEST_SEAT,

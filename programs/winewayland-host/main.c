@@ -1886,12 +1886,16 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     return first_error;
 }
 
-static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_event)
+static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_event,
+        BOOL system_process)
 {
     struct winewayland_host_startup *startup;
     struct winewayland_host_probe probe;
+    HANDLE shutdown_event = NULL;
+    HANDLE wait_handles[2];
     uint64_t host_epoch = 0;
     NTSTATUS status, work_status, last_work_status = STATUS_SUCCESS;
+    DWORD wait_count;
     DWORD wait;
 
     if (!(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
@@ -1908,6 +1912,9 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
         if (!status && (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
             status = create_renderer(&probe);
     }
+    if (!status && system_process)
+        status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineMakeProcessSystem,
+                &shutdown_event, sizeof(shutdown_event));
     if (!status) status = set_host_ready(host_epoch);
 
     startup->process_id = GetCurrentProcessId();
@@ -1917,7 +1924,10 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
 
     if (!status)
     {
-        active_fixture_startup = startup;
+        if (!system_process) active_fixture_startup = startup;
+        wait_handles[0] = stop_event;
+        wait_count = 1;
+        if (shutdown_event) wait_handles[wait_count++] = shutdown_event;
         do
         {
             if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
@@ -1928,47 +1938,171 @@ static int run_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_even
                     fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
                 last_work_status = work_status;
             }
-            wait = WaitForSingleObject(stop_event, 20);
+            wait = WaitForMultipleObjects(wait_count, wait_handles, FALSE, 20);
         }
         while (wait == WAIT_TIMEOUT);
         active_fixture_startup = NULL;
-        if (wait != WAIT_OBJECT_0) status = STATUS_UNSUCCESSFUL;
+        if (wait == WAIT_FAILED || wait >= WAIT_OBJECT_0 + wait_count)
+            status = STATUS_UNSUCCESSFUL;
     }
     if (host_epoch) release_host(host_epoch);
     destroy_renderer();
     memset(renderer_pools, 0, sizeof(renderer_pools));
     memset(renderer_roots, 0, sizeof(renderer_roots));
     next_renderer_pool_generation = 0;
+    if (shutdown_event) CloseHandle(shutdown_event);
     UnmapViewOfFile(startup);
     return status ? 6 : 0;
 }
 
 static BOOL start_host_fixture(HANDLE mapping, HANDLE ready_event, HANDLE stop_event,
-        PROCESS_INFORMATION *process)
+        BOOL system_process, PROCESS_INFORMATION *process)
 {
     STARTUPINFOEXW startup = {{sizeof(startup)}};
     HANDLE handles[] = {mapping, ready_event, stop_event};
     WCHAR command[MAX_PATH * 2], path[MAX_PATH];
     SIZE_T attribute_size = 0;
+    DWORD creation_flags;
     BOOL initialized, ret = FALSE;
 
     if (!GetModuleFileNameW(NULL, path, ARRAY_SIZE(path))) return FALSE;
-    swprintf(command, ARRAY_SIZE(command), L"\"%s\" --host-fixture 0x%Ix 0x%Ix 0x%Ix",
-            path, (UINT_PTR)mapping, (UINT_PTR)ready_event, (UINT_PTR)stop_event);
+    swprintf(command, ARRAY_SIZE(command), L"\"%s\" %s 0x%Ix 0x%Ix 0x%Ix", path,
+            system_process ? L"--host-resident" : L"--host-fixture", (UINT_PTR)mapping,
+            (UINT_PTR)ready_event, (UINT_PTR)stop_event);
 
     InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
     if (!attribute_size) return FALSE;
     if (!(startup.lpAttributeList = HeapAlloc(GetProcessHeap(), 0, attribute_size))) return FALSE;
     initialized = InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
             &attribute_size);
+    creation_flags = EXTENDED_STARTUPINFO_PRESENT |
+            (system_process ? DETACHED_PROCESS : CREATE_NO_WINDOW);
     if (initialized &&
             UpdateProcThreadAttribute(startup.lpAttributeList, 0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), NULL, NULL))
-        ret = CreateProcessW(path, command, NULL, NULL, TRUE,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, NULL, NULL,
+        ret = CreateProcessW(path, command, NULL, NULL, TRUE, creation_flags, NULL, NULL,
                 &startup.StartupInfo, process);
     if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
     HeapFree(GetProcessHeap(), 0, startup.lpAttributeList);
+    return ret;
+}
+
+static BOOL registered_host_matches(const struct registered_host_info *info,
+        const struct winewayland_host_probe *probe)
+{
+    return info->ready && info->endpoint_device == probe->endpoint_device &&
+            info->endpoint_inode == probe->endpoint_inode && info->seat == probe->seat_global;
+}
+
+static int launch_host(void)
+{
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    struct winewayland_host_startup *startup = NULL;
+    struct winewayland_host_probe probe;
+    struct registered_host_info info;
+    PROCESS_INFORMATION process = {0};
+    HANDLE mapping = NULL, ready_event = NULL, stop_event = NULL;
+    uint64_t token_low = 0, token_high = 0;
+    ULONGLONG deadline;
+    NTSTATUS status;
+    DWORD wait;
+    int ret = 5;
+
+    if ((status = get_backend_probe(&probe)))
+    {
+        fprintf(stderr, "launch=unavailable probe_status=%#lx\n", status);
+        return 4;
+    }
+
+    deadline = GetTickCount64() + 30000;
+    for (;;)
+    {
+        status = request_host_startup(&probe, &token_low, &token_high);
+        if (!status) break;
+        if (status != STATUS_DEVICE_BUSY)
+        {
+            fprintf(stderr, "launch=failed startup_status=%#lx\n", status);
+            return 5;
+        }
+        status = get_registered_host(&info);
+        if (!status && registered_host_matches(&info, &probe))
+        {
+            printf("launch=existing host_pid=%u host_epoch=%I64u\n",
+                    info.process_id, info.host_epoch);
+            return 0;
+        }
+        if (!status && info.ready)
+        {
+            fprintf(stderr, "launch=failed host_context_mismatch\n");
+            return 5;
+        }
+        if (GetTickCount64() >= deadline)
+        {
+            fprintf(stderr, "launch=failed startup_wait_status=%#lx\n", status);
+            return 5;
+        }
+        Sleep(25);
+    }
+
+    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
+            sizeof(*startup), NULL);
+    ready_event = CreateEventW(&security, TRUE, FALSE, NULL);
+    stop_event = CreateEventW(&security, TRUE, FALSE, NULL);
+    if (!mapping || !ready_event || !stop_event ||
+            !(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
+    {
+        fprintf(stderr, "launch=failed ipc_error=%lu\n", GetLastError());
+        goto done;
+    }
+    memset(startup, 0, sizeof(*startup));
+    startup->version = WINEWAYLAND_HOST_STARTUP_VERSION;
+    startup->size = sizeof(*startup);
+    startup->token_low = token_low;
+    startup->token_high = token_high;
+    startup->status = STATUS_PENDING;
+
+    if (!start_host_fixture(mapping, ready_event, stop_event, TRUE, &process))
+    {
+        fprintf(stderr, "launch=failed create_error=%lu\n", GetLastError());
+        goto done;
+    }
+    wait = WaitForSingleObject(ready_event, 30000);
+    if (wait != WAIT_OBJECT_0)
+    {
+        fprintf(stderr, "launch=failed ready_wait=%#lx\n", wait);
+        goto done;
+    }
+    status = InterlockedCompareExchange((LONG *)&startup->status, 0, 0);
+    if (status || (status = get_registered_host(&info)) ||
+            !registered_host_matches(&info, &probe) ||
+            info.process_id != startup->process_id || info.host_epoch != startup->host_epoch)
+    {
+        fprintf(stderr, "launch=failed child_status=%#lx query_status=%#lx\n",
+                (NTSTATUS)startup->status, status);
+        goto done;
+    }
+
+    printf("launch=ready host_pid=%u host_epoch=%I64u\n", info.process_id, info.host_epoch);
+    token_low = token_high = 0;
+    ret = 0;
+
+done:
+    if (ret && stop_event) SetEvent(stop_event);
+    if (process.hProcess)
+    {
+        if (ret)
+        {
+            wait = WaitForSingleObject(process.hProcess, 5000);
+            if (wait != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 1);
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    if (token_low || token_high) cancel_host_startup(token_low, token_high);
+    if (startup) UnmapViewOfFile(startup);
+    if (stop_event) CloseHandle(stop_event);
+    if (ready_event) CloseHandle(ready_event);
+    if (mapping) CloseHandle(mapping);
     return ret;
 }
 
@@ -2013,7 +2147,7 @@ static int test_registration(void)
     startup->token_high = token_high;
     startup->status = STATUS_PENDING;
 
-    if (!start_host_fixture(mapping, ready_event, stop_event, &process))
+    if (!start_host_fixture(mapping, ready_event, stop_event, FALSE, &process))
     {
         fprintf(stderr, "registration=failed create_error=%lu\n", GetLastError());
         goto done;
@@ -2063,7 +2197,7 @@ done:
     return ret;
 }
 
-static int test_dcomp_pipeline(void)
+static int test_dcomp_pipeline(BOOL automatic_host)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2075,6 +2209,7 @@ static int test_dcomp_pipeline(void)
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     struct winewayland_host_startup *startup = NULL;
     struct winewayland_host_probe probe;
+    struct registered_host_info host_info, final_host_info;
     PROCESS_INFORMATION process = {0};
     ID3D11DeviceContext *context = NULL;
     ID3D11Device *d3d_device = NULL;
@@ -2111,30 +2246,35 @@ static int test_dcomp_pipeline(void)
         printf("dcomp_pipeline=unsupported capabilities=%#x\n", probe.capabilities);
         return 0;
     }
-    if ((status = request_host_startup(&probe, &token_low, &token_high)))
+    if (!automatic_host)
     {
-        fprintf(stderr, "dcomp_pipeline=unavailable startup_status=%#lx\n", status);
-        return 5;
-    }
+        if ((status = request_host_startup(&probe, &token_low, &token_high)))
+        {
+            fprintf(stderr, "dcomp_pipeline=unavailable startup_status=%#lx\n", status);
+            return 5;
+        }
 
-    mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
-            sizeof(*startup), NULL);
-    ready_event = CreateEventW(&security, TRUE, FALSE, NULL);
-    stop_event = CreateEventW(&security, TRUE, FALSE, NULL);
-    if (!mapping || !ready_event || !stop_event ||
-            !(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
-        goto done;
-    memset(startup, 0, sizeof(*startup));
-    startup->version = WINEWAYLAND_HOST_STARTUP_VERSION;
-    startup->size = sizeof(*startup);
-    startup->token_low = token_low;
-    startup->token_high = token_high;
-    startup->status = STATUS_PENDING;
-    if (!start_host_fixture(mapping, ready_event, stop_event, &process)) goto done;
-    if (WaitForSingleObject(ready_event, 30000) != WAIT_OBJECT_0 || startup->status)
-    {
-        fprintf(stderr, "dcomp_pipeline=failed host_status=%#lx\n", (NTSTATUS)startup->status);
-        goto done;
+        mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
+                sizeof(*startup), NULL);
+        ready_event = CreateEventW(&security, TRUE, FALSE, NULL);
+        stop_event = CreateEventW(&security, TRUE, FALSE, NULL);
+        if (!mapping || !ready_event || !stop_event ||
+                !(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                sizeof(*startup))))
+            goto done;
+        memset(startup, 0, sizeof(*startup));
+        startup->version = WINEWAYLAND_HOST_STARTUP_VERSION;
+        startup->size = sizeof(*startup);
+        startup->token_low = token_low;
+        startup->token_high = token_high;
+        startup->status = STATUS_PENDING;
+        if (!start_host_fixture(mapping, ready_event, stop_event, FALSE, &process)) goto done;
+        if (WaitForSingleObject(ready_event, 30000) != WAIT_OBJECT_0 || startup->status)
+        {
+            fprintf(stderr, "dcomp_pipeline=failed host_status=%#lx\n",
+                    (NTSTATUS)startup->status);
+            goto done;
+        }
     }
 
     if (!(d3d11_module = LoadLibraryW(L"d3d11.dll")) ||
@@ -2201,6 +2341,59 @@ static int test_dcomp_pipeline(void)
         if (view) ID3D11RenderTargetView_Release(view);
         ID3D11Texture2D_Release(texture);
         if (FAILED(hr)) goto done;
+    }
+
+    if (automatic_host)
+    {
+        if ((status = get_registered_host(&host_info)) || !host_info.ready ||
+                !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+        {
+            fprintf(stderr, "dcomp_auto_host=failed host_status=%#lx ready=%u capabilities=%#x\n",
+                    status, host_info.ready, host_info.capabilities);
+            goto done;
+        }
+        for (i = 0; i < 6; ++i)
+        {
+            static const float colors[][4] =
+            {
+                {1.0f, 0.0f, 0.0f, 1.0f},
+                {0.0f, 1.0f, 0.0f, 1.0f},
+                {0.0f, 0.0f, 1.0f, 1.0f},
+            };
+            ID3D11RenderTargetView *view = NULL;
+            ID3D11Texture2D *texture = NULL;
+            MSG message;
+
+            if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
+                    (void **)&texture))) break;
+            hr = ID3D11Device_CreateRenderTargetView(d3d_device, (ID3D11Resource *)texture,
+                    NULL, &view);
+            if (SUCCEEDED(hr))
+            {
+                ID3D11DeviceContext_ClearRenderTargetView(context, view, colors[i % 3]);
+                ID3D11DeviceContext_Flush(context);
+                hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+            }
+            if (view) ID3D11RenderTargetView_Release(view);
+            ID3D11Texture2D_Release(texture);
+            if (FAILED(hr)) break;
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            Sleep(50);
+        }
+        if (FAILED(hr) || (status = get_registered_host(&final_host_info)) ||
+                !final_host_info.ready || final_host_info.host_epoch != host_info.host_epoch)
+        {
+            fprintf(stderr, "dcomp_auto_host=failed hr=%#lx host_status=%#lx\n", hr, status);
+            goto done;
+        }
+        printf("dcomp_auto_host=passed host_pid=%u host_epoch=%I64u presents=%u\n",
+                host_info.process_id, host_info.host_epoch, i + 1);
+        ret = 0;
+        goto done;
     }
 
     for (i = 0; i < 500 && InterlockedCompareExchange(
@@ -2365,7 +2558,73 @@ static int test_dcomp_pipeline(void)
         goto done;
     }
 
-    printf("dcomp_pipeline=passed imports=%u presented=%u discarded=%u host_activations=%u local_activations=%u\n",
+    if (FAILED(hr = IDCompositionVisual_SetOffsetX(visual, 4.0f)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+        goto done;
+    for (i = 0; i < 500 && InterlockedCompareExchange(
+            (LONG *)&startup->native_local_activations, 0, 0) < 2; ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange((LONG *)&startup->native_local_activations, 0, 0) < 2 ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)) ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)))
+    {
+        fprintf(stderr, "dcomp_pipeline=failed transformed fallback hr=%#lx local_activations=%u\n",
+                hr, startup->native_local_activations);
+        goto done;
+    }
+
+    if (FAILED(hr = IDCompositionVisual_SetOffsetX(visual, 0.0f)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)) ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)))
+        goto done;
+    for (i = 0; i < 500 && InterlockedCompareExchange(
+            (LONG *)&startup->imported_slots, 0, 0) < 3 * WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange((LONG *)&startup->imported_slots, 0, 0) <
+            3 * WINE_WAYLAND_BUFFER_POOL_SLOTS ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)))
+    {
+        fprintf(stderr, "dcomp_pipeline=failed post-transform rehost hr=%#lx imports=%u\n",
+                hr, startup->imported_slots);
+        goto done;
+    }
+    for (i = 0; i < 500 && InterlockedCompareExchange(
+            (LONG *)&startup->native_host_activations, 0, 0) < 3; ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange((LONG *)&startup->native_host_activations, 0, 0) < 3)
+    {
+        fprintf(stderr, "dcomp_pipeline=failed post-transform host activation\n");
+        goto done;
+    }
+
+    printf("dcomp_pipeline=passed imports=%u presented=%u discarded=%u host_activations=%u local_activations=%u transformed_fallback=passed\n",
             startup->imported_slots, startup->presented_frames, startup->discarded_frames,
             startup->native_host_activations, startup->native_local_activations);
     ret = 0;
@@ -2382,7 +2641,7 @@ done:
 
         IDCompositionTarget_SetRoot(target, NULL);
         IDCompositionDevice_Commit(dcomp_device);
-        for (i = 0; i < 500 && !InterlockedCompareExchange(
+        for (i = 0; !automatic_host && i < 500 && !InterlockedCompareExchange(
                 (LONG *)&startup->empty_scenes_applied, 0, 0); ++i)
         {
             MSG message;
@@ -2394,7 +2653,7 @@ done:
             }
             Sleep(10);
         }
-        if (!startup->empty_scenes_applied)
+        if (!automatic_host && !startup->empty_scenes_applied)
         {
             fprintf(stderr, "dcomp_pipeline=failed empty scene was not applied\n");
             ret = 5;
@@ -2439,14 +2698,22 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--shell-self-test")) return test_shell();
     if (argc == 2 && !wcscmp(argv[1], L"--root-self-test")) return test_roots();
     if (argc == 2 && !wcscmp(argv[1], L"--wsi-self-test")) return test_wsi();
+    if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
-    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test")) return test_dcomp_pipeline();
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
+        return test_dcomp_pipeline(FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
+        return test_dcomp_pipeline(TRUE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
-        return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
+        return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
-                (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
+                (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), FALSE);
+    if (argc == 5 && !wcscmp(argv[1], L"--host-resident"))
+        return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
+                (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
+                (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --registration-test | --dcomp-pipeline-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-auto-host-test\n",
             argv[0]);
     return 2;
 }
