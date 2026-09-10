@@ -311,7 +311,10 @@ or transport fixture is not Outlook support.
   copies that full frame first and the host-owned GPU image into the exact
   client offset second. Snapshot, content and geometry revisions are checked
   together; replacement waits until an older Present stops reading the
-  buffer.
+  buffer. DComp exposes a process-local hosted-frame hint only after the
+  server accepts `HostedContent`, and removes it on fallback or scene release;
+  ordinary local DComp windows therefore do not pay for snapshot allocation
+  and copying. The server still supplies all authority.
 
 ## Contributor interception inventory
 

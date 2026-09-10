@@ -122,6 +122,7 @@ struct dcomp_visual_child
 
 static const WCHAR dcomp_target_below_prop[] = L"__wine_dcomp_target_below";
 static const WCHAR dcomp_target_above_prop[] = L"__wine_dcomp_target_above";
+static const WCHAR dcomp_hosted_frame_prop[] = L"__wine_dcomp_hosted_frame";
 
 static INIT_ONCE dcomp_global_once = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION dcomp_global_lock;
@@ -204,6 +205,7 @@ static void dcomp_scene_release(struct dcomp_scene *scene)
 {
     if (!--scene->refcount)
     {
+        RemovePropW(scene->hwnd, dcomp_hosted_frame_prop);
         dcomp_scene_clear_hosted_binding(scene);
         free(scene);
     }
@@ -436,9 +438,13 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
         {
             scene->hosted_binding.scene_generation = scene_generation;
             dcomp_set_wayland_host_binding(scene->hosted_swapchain, &scene->hosted_binding);
+            SetPropW(scene->hwnd, dcomp_hosted_frame_prop, ULongToHandle(1));
         }
-        else if (scene->hosted_swapchain)
-            dcomp_scene_revoke_hosted_binding(scene);
+        else
+        {
+            RemovePropW(scene->hwnd, dcomp_hosted_frame_prop);
+            if (scene->hosted_swapchain) dcomp_scene_revoke_hosted_binding(scene);
+        }
         TRACE("Published committed scene %#x for %p at generation %s.\n",
                 disposition, scene->hwnd, wine_dbgstr_longlong(scene->scene_generation));
     }
@@ -446,7 +452,10 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
         TRACE("Could not publish committed scene for %p, status %#lx.\n",
                 scene->hwnd, status);
     if (status && disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+    {
+        RemovePropW(scene->hwnd, dcomp_hosted_frame_prop);
         dcomp_scene_revoke_hosted_binding(scene);
+    }
 }
 
 static void dcomp_device_publish_committed_scenes(struct dcomp_device *device)

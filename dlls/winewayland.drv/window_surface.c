@@ -41,10 +41,8 @@ static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
 static const WCHAR dcomp_caption_overlay_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
-static const WCHAR dcomp_target_below_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t','_','b','e','l','o','w',0};
-static const WCHAR dcomp_target_above_prop[] =
-    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t','_','a','b','o','v','e',0};
+static const WCHAR dcomp_hosted_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','h','o','s','t','e','d','_','f','r','a','m','e',0};
 
 static LONG64 frame_snapshot_revision;
 
@@ -486,7 +484,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
     BOOL flushed = FALSE;
     BOOL update_full_shape = shape_changed;
-    BOOL dcomp_host, dcomp_target;
+    BOOL dcomp_host, dcomp_hosted;
     BOOL reapply_clip;
     HWND popup_restack_owner;
     HRGN surface_damage_region = NULL;
@@ -503,8 +501,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     dcomp_host = NtUserGetProp(window_surface->hwnd, dcomp_detached_window_prop) &&
                  !NtUserGetProp(window_surface->hwnd, dcomp_background_prop) &&
                  !NtUserGetProp(window_surface->hwnd, dcomp_caption_overlay_prop);
-    dcomp_target = NtUserGetProp(window_surface->hwnd, dcomp_target_below_prop) ||
-                   NtUserGetProp(window_surface->hwnd, dcomp_target_above_prop);
+    dcomp_hosted = !!NtUserGetProp(window_surface->hwnd, dcomp_hosted_frame_prop);
     wayland_window_surface_presented(window_surface->hwnd);
     window_surface_lock(window_surface);
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
@@ -583,9 +580,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     if (shape_bits)
         wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
                                       shape_info, shape_bits);
-    TRACE("Flushing %p with DComp target %u and detached host %u.\n",
-            window_surface->hwnd, dcomp_target, dcomp_host);
-    if (dcomp_target) publish_frame_snapshot(window_surface->hwnd, shm_buffer);
+    if (dcomp_hosted) publish_frame_snapshot(window_surface->hwnd, shm_buffer);
     if (dcomp_host)
     {
         UINT32 *pixel = shm_buffer->map_data;
