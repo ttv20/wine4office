@@ -265,20 +265,31 @@ PY
         fi
         ;;
     appimage)
-        fake_appimagetool=$tmp/fake-appimagetool
-        cat > "$fake_appimagetool" <<'EOF'
+        fake_mkdwarfs=$tmp/fake-mkdwarfs
+        cat > "$fake_mkdwarfs" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-appdir=${@: -2:1}
-output=${@: -1}
+appdir=
+output=
+runtime=
+while (($#)); do
+    case $1 in
+        --input) appdir=$2; shift 2 ;;
+        --output) output=$2; shift 2 ;;
+        --header) runtime=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+[[ -d $appdir && -n $output && -x $runtime ]]
 tar -C "$appdir" -cf "${WINE4OFFICE_TEST_APPDIR_CAPTURE:?}" .
 : > "$output"
 EOF
-        chmod 0755 "$fake_appimagetool"
+        chmod 0755 "$fake_mkdwarfs"
         : > "$tmp/fake-runtime"
+        chmod 0755 "$tmp/fake-runtime"
         capture=$tmp/AppDir.tar
-        APPIMAGETOOL="$fake_appimagetool" \
         APPIMAGE_RUNTIME="$tmp/fake-runtime" \
+        APPIMAGE_MKDWARFS="$fake_mkdwarfs" \
         WINE4OFFICE_TEST_APPDIR_CAPTURE="$capture" \
             "$distribution/build-appimage.sh" \
             "$release/Wine4OfficeManager-${version}-x86_64" \
@@ -297,6 +308,12 @@ EOF
         [[ $(cat "$tmp/appdir/payload/VERSION") == 2.3.4 ]]
         [[ $(cat "$tmp/appdir/payload/METADATA_URL") == \
             https://updates.example/releases/release.json ]]
+        grep -Fx 'X-AppImage-Name=Wine4Office' \
+            "$tmp/appdir/wine4office.desktop" >/dev/null
+        grep -Fx 'X-AppImage-Version=2.3.4' \
+            "$tmp/appdir/wine4office.desktop" >/dev/null
+        grep -Fx 'X-AppImage-Arch=x86_64' \
+            "$tmp/appdir/wine4office.desktop" >/dev/null
         [[ ! -e $tmp/appdir/payload/PACKAGE-INSTALLATION.json ]]
 
         appimage_home=$tmp/appimage-home

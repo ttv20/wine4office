@@ -229,20 +229,20 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'
-          tool="$RUNNER_TEMP/appimagetool-uruntime-x86_64.AppImage"
-          runtime="$RUNNER_TEMP/uruntime-appimage-squashfs-lite-x86_64"
+          mkdwarfs="$RUNNER_TEMP/mkdwarfs"
+          runtime="$RUNNER_TEMP/uruntime-appimage-dwarfs-lite-x86_64"
           curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
-            --output "$tool" \
-            https://github.com/pkgforge-dev/appimagetool-uruntime/releases/download/continuous/appimagetool-x86_64.AppImage
-          echo "4cfda236f46c425aef5bfe397c572663fe1bf7d0a8f62fd31197bad37438c1ca  $tool" \
+            --output "$mkdwarfs" \
+            https://github.com/mhx/dwarfs/releases/download/v0.15.6/dwarfs-universal-0.15.6-Linux-x86_64
+          echo "50891c38ba359db8271819a6cbf6aaa8068681523f0c4f2b8242007a45edaa28  $mkdwarfs" \
             | sha256sum --check
           curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
             --output "$runtime" \
-            https://github.com/VHSgunzo/uruntime/releases/download/v0.6.1/uruntime-appimage-squashfs-lite-x86_64
-          echo "e5463fa896fc583cab3b03e498fde5d311b6661bb6e184797081dfdb863bab82  $runtime" \
+            https://github.com/VHSgunzo/uruntime/releases/download/v0.7.1/uruntime-appimage-dwarfs-lite-x86_64
+          echo "f19d2a58b5f7cb372b8a88b1e9414fd118d8da6d2c555cf3e7c0bac9373b8af9  $runtime" \
             | sha256sum --check
-          chmod 0755 "$tool"
-          APPIMAGETOOL="$tool" APPIMAGE_RUNTIME="$runtime" \
+          chmod 0755 "$mkdwarfs" "$runtime"
+          APPIMAGE_MKDWARFS="$mkdwarfs" APPIMAGE_RUNTIME="$runtime" \
             tools/wine4office-manager/packaging/distribution/build-appimage.sh \
               "release/Wine4OfficeManager-${version}-x86_64" \
               "release/wine4office-${version}-x86_64.tar.zst" \

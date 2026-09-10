@@ -11,19 +11,19 @@ wine_archive=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 release_json=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 installer=$(cd "$(dirname "$4")" && pwd)/$(basename "$4")
 output_dir=$5
-appimagetool=${APPIMAGETOOL:-}
 appimage_runtime=${APPIMAGE_RUNTIME:-}
+appimage_mkdwarfs=${APPIMAGE_MKDWARFS:-}
 
 [[ -x $manager ]] || { echo "Manager binary is not executable" >&2; exit 1; }
 [[ -f $wine_archive && ! -L $wine_archive ]] || { echo "Wine archive is missing" >&2; exit 1; }
 [[ -f $release_json && ! -L $release_json ]] || { echo "release.json is missing" >&2; exit 1; }
 [[ -x $installer ]] || { echo "Installer is not executable" >&2; exit 1; }
-[[ -n $appimagetool && -x $appimagetool ]] || {
-    echo "APPIMAGETOOL must name an executable appimagetool" >&2
+[[ -n $appimage_runtime && -x $appimage_runtime && ! -L $appimage_runtime ]] || {
+    echo "APPIMAGE_RUNTIME must name an executable pinned AppImage runtime" >&2
     exit 1
 }
-[[ -n $appimage_runtime && -f $appimage_runtime && ! -L $appimage_runtime ]] || {
-    echo "APPIMAGE_RUNTIME must name a pinned AppImage runtime" >&2
+[[ -n $appimage_mkdwarfs && -x $appimage_mkdwarfs && ! -L $appimage_mkdwarfs ]] || {
+    echo "APPIMAGE_MKDWARFS must name an executable pinned mkdwarfs" >&2
     exit 1
 }
 for command in ldd python3 readlink sha256sum stat; do
@@ -100,6 +100,23 @@ printf '%s\n' "$version" > "$payload_dir/VERSION"
 printf '%s\n' "$metadata_url" > "$payload_dir/METADATA_URL"
 
 install -m 0644 "$here/wine4office.desktop" "$appdir/wine4office.desktop"
+python3 - "$appdir/wine4office.desktop" "$version" <<'PY'
+from pathlib import Path
+import sys
+
+desktop = Path(sys.argv[1])
+version = sys.argv[2]
+lines = [
+    line for line in desktop.read_text(encoding="utf-8").splitlines()
+    if not line.startswith(("X-AppImage-Name=", "X-AppImage-Version=", "X-AppImage-Arch="))
+]
+lines.extend((
+    "X-AppImage-Name=Wine4Office",
+    f"X-AppImage-Version={version}",
+    "X-AppImage-Arch=x86_64",
+))
+desktop.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
 install -m 0644 "$here/../../icons/wine4office-manager.png" \
     "$appdir/wine4office-manager.png"
 ln -s wine4office-manager.png "$appdir/.DirIcon"
@@ -123,9 +140,10 @@ epoch=${SOURCE_DATE_EPOCH:-0}
 [[ $epoch =~ ^[0-9]+$ ]] || { echo "SOURCE_DATE_EPOCH must be an integer" >&2; exit 1; }
 find "$appdir" -print0 | xargs -0 touch -h -d "@$epoch"
 output=$output_dir/Wine4Office-${version}-x86_64.AppImage
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 SOURCE_DATE_EPOCH=$epoch \
-    "$appimagetool" --no-appstream --comp zstd --runtime-file "$appimage_runtime" \
-        "$appdir" "$output"
+"$appimage_mkdwarfs" --tool=mkdwarfs --force --order=path \
+    --set-owner 0 --set-group 0 --no-history --no-create-timestamp \
+    --header "$appimage_runtime" --input "$appdir" \
+    -C zstd:level=22 -S26 -B6 --output "$output"
 chmod 0755 "$output"
 (cd "$output_dir" && sha256sum "$(basename "$output")" > "$(basename "$output").sha256")
 printf 'Created Wine4Office AppImage: %s\n' "$output"
