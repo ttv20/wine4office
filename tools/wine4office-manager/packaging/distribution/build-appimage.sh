@@ -140,7 +140,9 @@ epoch=${SOURCE_DATE_EPOCH:-0}
 [[ $epoch =~ ^[0-9]+$ ]] || { echo "SOURCE_DATE_EPOCH must be an integer" >&2; exit 1; }
 find "$appdir" -print0 | xargs -0 touch -h -d "@$epoch"
 output=$output_dir/Wine4Office-${version}-x86_64.AppImage
-"$appimage_mkdwarfs" --tool=mkdwarfs --force --order=path \
+mkdwarfs=$tmp/mkdwarfs
+install -m 0755 "$appimage_mkdwarfs" "$mkdwarfs"
+"$mkdwarfs" --force --order=path \
     --set-owner 0 --set-group 0 --no-history --no-create-timestamp \
     --header "$appimage_runtime" --input "$appdir" \
     -C zstd:level=22 -S26 -B6 --output "$output"
