@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,7 +46,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 56);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
@@ -134,6 +135,44 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define RENDERER_POOL_SLOTS 3
 #define MAX_RENDERER_FRAMES 32
 #define MAX_RENDERER_ROOTS 64
+#define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES + MAX_RENDERER_ROOTS)
+
+struct renderer_frame;
+struct renderer_root;
+
+enum renderer_queue_job_type
+{
+    RENDERER_QUEUE_JOB_FRAME,
+    RENDERER_QUEUE_JOB_PRESENT,
+};
+
+struct renderer_queue_job
+{
+    enum renderer_queue_job_type type;
+    union
+    {
+        struct
+        {
+            struct renderer_frame *frame;
+            VkCommandBuffer command_buffer;
+            VkSemaphore wait_semaphore;
+            VkSemaphore signal_semaphore;
+            VkFence fence;
+            uint64_t wait_value;
+            uint64_t signal_value;
+        } frame;
+        struct
+        {
+            struct renderer_root *root;
+            VkCommandBuffer command_buffer;
+            VkSemaphore acquire_semaphore;
+            VkSemaphore present_semaphore;
+            VkSwapchainKHR swapchain;
+            VkFence fence;
+            uint32_t image_index;
+        } present;
+    } u;
+};
 
 struct renderer_root
 {
@@ -162,6 +201,10 @@ struct renderer_root
     int32_t height;
     BOOL configured;
     BOOL closed;
+    BOOL present_job_done;
+    BOOL present_complete;
+    NTSTATUS present_job_status;
+    VkResult present_result;
 };
 
 struct renderer_slot
@@ -192,6 +235,8 @@ struct renderer_frame
     VkCommandBuffer command_buffer;
     VkFence fence;
     BOOL complete;
+    BOOL submit_done;
+    NTSTATUS submit_status;
 };
 
 struct renderer_deferred_resources
@@ -270,9 +315,164 @@ struct vulkan_renderer
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
     struct renderer_frame frames[MAX_RENDERER_FRAMES];
     struct renderer_root roots[MAX_RENDERER_ROOTS];
+    pthread_t queue_thread;
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_cond;
+    struct renderer_queue_job queue_jobs[MAX_RENDERER_QUEUE_JOBS];
+    unsigned int queue_head;
+    unsigned int queue_count;
+    BOOL queue_thread_started;
+    BOOL queue_stop;
 };
 
 static struct vulkan_renderer renderer;
+
+static NTSTATUS renderer_queue_status(VkResult vr)
+{
+    if (vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
+    if (vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY)
+        return STATUS_NO_MEMORY;
+    return STATUS_UNSUCCESSFUL;
+}
+
+static void execute_renderer_queue_job(const struct renderer_queue_job *job)
+{
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkTimelineSemaphoreSubmitInfo timeline_info =
+            {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    NTSTATUS status = STATUS_SUCCESS;
+    VkResult present_result = VK_SUCCESS, vr;
+
+    if (job->type == RENDERER_QUEUE_JOB_FRAME)
+    {
+        timeline_info.waitSemaphoreValueCount = 1;
+        timeline_info.pWaitSemaphoreValues = &job->u.frame.wait_value;
+        timeline_info.signalSemaphoreValueCount = 1;
+        timeline_info.pSignalSemaphoreValues = &job->u.frame.signal_value;
+        submit_info.pNext = &timeline_info;
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &job->u.frame.wait_semaphore;
+        submit_info.pWaitDstStageMask = &wait_stage;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &job->u.frame.command_buffer;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &job->u.frame.signal_semaphore;
+        if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info,
+                job->u.frame.fence)))
+            status = renderer_queue_status(vr);
+
+        pthread_mutex_lock(&renderer.queue_mutex);
+        job->u.frame.frame->submit_status = status;
+        job->u.frame.frame->submit_done = TRUE;
+        pthread_mutex_unlock(&renderer.queue_mutex);
+        return;
+    }
+
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &job->u.present.command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &job->u.present.present_semaphore;
+    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
+        status = renderer_queue_status(vr);
+    else
+    {
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores = &job->u.present.present_semaphore;
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &job->u.present.swapchain;
+        present_info.pImageIndices = &job->u.present.image_index;
+        present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
+        vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, job->u.present.fence);
+        if (vr) status = renderer_queue_status(vr);
+    }
+
+    pthread_mutex_lock(&renderer.queue_mutex);
+    job->u.present.root->present_result = present_result;
+    job->u.present.root->present_job_status = status;
+    job->u.present.root->present_job_done = TRUE;
+    pthread_mutex_unlock(&renderer.queue_mutex);
+}
+
+static void *renderer_queue_worker(void *arg)
+{
+    struct renderer_queue_job job;
+
+    (void)arg;
+    for (;;)
+    {
+        pthread_mutex_lock(&renderer.queue_mutex);
+        while (!renderer.queue_count && !renderer.queue_stop)
+            pthread_cond_wait(&renderer.queue_cond, &renderer.queue_mutex);
+        if (!renderer.queue_count && renderer.queue_stop)
+        {
+            pthread_mutex_unlock(&renderer.queue_mutex);
+            return NULL;
+        }
+        job = renderer.queue_jobs[renderer.queue_head];
+        renderer.queue_head = (renderer.queue_head + 1) % ARRAY_SIZE(renderer.queue_jobs);
+        --renderer.queue_count;
+        pthread_mutex_unlock(&renderer.queue_mutex);
+        execute_renderer_queue_job(&job);
+    }
+}
+
+static NTSTATUS start_renderer_queue(void)
+{
+    int ret;
+
+    if ((ret = pthread_mutex_init(&renderer.queue_mutex, NULL)))
+        return STATUS_NO_MEMORY;
+    if ((ret = pthread_cond_init(&renderer.queue_cond, NULL)))
+    {
+        pthread_mutex_destroy(&renderer.queue_mutex);
+        return STATUS_NO_MEMORY;
+    }
+    if ((ret = pthread_create(&renderer.queue_thread, NULL, renderer_queue_worker, NULL)))
+    {
+        pthread_cond_destroy(&renderer.queue_cond);
+        pthread_mutex_destroy(&renderer.queue_mutex);
+        return STATUS_NO_MEMORY;
+    }
+    renderer.queue_thread_started = TRUE;
+    return STATUS_SUCCESS;
+}
+
+static void stop_renderer_queue(void)
+{
+    if (!renderer.queue_thread_started) return;
+    pthread_mutex_lock(&renderer.queue_mutex);
+    renderer.queue_stop = TRUE;
+    pthread_cond_signal(&renderer.queue_cond);
+    pthread_mutex_unlock(&renderer.queue_mutex);
+    pthread_join(renderer.queue_thread, NULL);
+    pthread_cond_destroy(&renderer.queue_cond);
+    pthread_mutex_destroy(&renderer.queue_mutex);
+    renderer.queue_thread_started = FALSE;
+}
+
+static NTSTATUS enqueue_renderer_queue_job(const struct renderer_queue_job *job)
+{
+    unsigned int tail;
+
+    if (!renderer.queue_thread_started) return STATUS_DEVICE_NOT_READY;
+    pthread_mutex_lock(&renderer.queue_mutex);
+    if (renderer.queue_count == ARRAY_SIZE(renderer.queue_jobs))
+    {
+        pthread_mutex_unlock(&renderer.queue_mutex);
+        return STATUS_DEVICE_BUSY;
+    }
+    tail = (renderer.queue_head + renderer.queue_count) % ARRAY_SIZE(renderer.queue_jobs);
+    renderer.queue_jobs[tail] = *job;
+    ++renderer.queue_count;
+    pthread_cond_signal(&renderer.queue_cond);
+    pthread_mutex_unlock(&renderer.queue_mutex);
+    return STATUS_SUCCESS;
+}
 
 static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
         uint32_t serial)
@@ -316,9 +516,17 @@ static const struct xdg_toplevel_listener renderer_root_toplevel_listener =
 
 static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
 {
+    NTSTATUS status;
+    BOOL job_done;
     VkResult vr;
 
     if (!root->present_fence) return STATUS_SUCCESS;
+    pthread_mutex_lock(&renderer.queue_mutex);
+    job_done = root->present_job_done;
+    status = root->present_job_status;
+    pthread_mutex_unlock(&renderer.queue_mutex);
+    if (!job_done) return STATUS_PENDING;
+    if (status) return status;
     vr = renderer.p_vkGetFenceStatus(renderer.device, root->present_fence);
     if (vr == VK_NOT_READY) return STATUS_PENDING;
     if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
@@ -333,6 +541,7 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     root->acquire_semaphore = VK_NULL_HANDLE;
     root->present_source_pool_generation = 0;
     root->present_source_frame_id = 0;
+    root->present_complete = TRUE;
     return STATUS_SUCCESS;
 }
 
@@ -379,9 +588,17 @@ static void destroy_renderer_slot(struct renderer_slot *slot)
 
 static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
 {
+    NTSTATUS status;
+    BOOL submit_done;
     VkResult vr;
 
     if (!frame->fence) return STATUS_SUCCESS;
+    pthread_mutex_lock(&renderer.queue_mutex);
+    submit_done = frame->submit_done;
+    status = frame->submit_status;
+    pthread_mutex_unlock(&renderer.queue_mutex);
+    if (!submit_done) return STATUS_PENDING;
+    if (status) return status;
     vr = renderer.p_vkGetFenceStatus(renderer.device, frame->fence);
     if (vr == VK_NOT_READY) return STATUS_PENDING;
     if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
@@ -477,6 +694,7 @@ static NTSTATUS destroy_renderer(void)
         if (renderer.frames[i].frame_id &&
             (status = poll_renderer_frame(&renderer.frames[i])))
             return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
+    stop_renderer_queue();
     if ((status = destroy_deferred_resources())) return status;
     for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
         if ((status = destroy_renderer_frame(&renderer.frames[i]))) return status;
@@ -1050,6 +1268,7 @@ static NTSTATUS create_renderer(void *args)
         status = STATUS_PROCEDURE_NOT_FOUND;
         goto failed;
     }
+    if ((status = start_renderer_queue())) goto failed;
     return STATUS_SUCCESS;
 
 failed:
@@ -1241,8 +1460,6 @@ done:
 static NTSTATUS process_renderer_frame(void *args)
 {
     struct winewayland_host_renderer_frame *params = args;
-    VkTimelineSemaphoreSubmitInfo timeline_info =
-            {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
     VkCommandBufferAllocateInfo command_allocate =
             {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     VkCommandBufferBeginInfo command_begin =
@@ -1250,11 +1467,10 @@ static NTSTATUS process_renderer_frame(void *args)
     VkMemoryAllocateInfo memory_allocate = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    struct renderer_queue_job queue_job = {0};
     VkImageMemoryBarrier acquire[2], release[2];
     VkImageCopy copy;
     VkMemoryRequirements requirements;
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     struct renderer_slot *slot = NULL;
     struct renderer_frame pending = {0}, *frame = NULL;
     uint64_t pool_generation, frame_id, ready_value, reuse_value;
@@ -1413,21 +1629,6 @@ static NTSTATUS process_renderer_frame(void *args)
         (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &pending.fence)))
         goto failed;
 
-    timeline_info.waitSemaphoreValueCount = 1;
-    timeline_info.pWaitSemaphoreValues = &ready_value;
-    timeline_info.signalSemaphoreValueCount = 1;
-    timeline_info.pSignalSemaphoreValues = &reuse_value;
-    submit_info.pNext = &timeline_info;
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &slot->ready;
-    submit_info.pWaitDstStageMask = &wait_stage;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &pending.command_buffer;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &slot->reuse;
-    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, pending.fence)))
-        goto failed;
-
     pending.pool_generation = pool_generation;
     pending.frame_id = frame_id;
     pending.ready_value = ready_value;
@@ -1436,6 +1637,21 @@ static NTSTATUS process_renderer_frame(void *args)
     pending.width = slot->width;
     pending.height = slot->height;
     *frame = pending;
+    queue_job.type = RENDERER_QUEUE_JOB_FRAME;
+    queue_job.u.frame.frame = frame;
+    queue_job.u.frame.command_buffer = frame->command_buffer;
+    queue_job.u.frame.wait_semaphore = slot->ready;
+    queue_job.u.frame.signal_semaphore = slot->reuse;
+    queue_job.u.frame.fence = frame->fence;
+    queue_job.u.frame.wait_value = ready_value;
+    queue_job.u.frame.signal_value = reuse_value;
+    if ((status = enqueue_renderer_queue_job(&queue_job)))
+    {
+        pending = *frame;
+        memset(frame, 0, sizeof(*frame));
+        vr = status == STATUS_NO_MEMORY ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_UNKNOWN;
+        goto failed;
+    }
     return STATUS_PENDING;
 
 failed:
@@ -1662,6 +1878,8 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags = 0;
     params->width = params->height = 0;
     params->configure_count = 0;
+    params->present_result = VK_NOT_READY;
+    params->present_status = STATUS_PENDING;
     if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
     if (!renderer.display || !renderer.compositor || !renderer.xdg_wm_base)
         return STATUS_DEVICE_NOT_READY;
@@ -1723,6 +1941,12 @@ done:
     if (root->configured) params->flags |= WINEWAYLAND_HOST_ROOT_CONFIGURED;
     if (root->closed) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
     if (root->swapchain) params->flags |= WINEWAYLAND_HOST_ROOT_WSI_READY;
+    if (root->present_complete)
+    {
+        params->flags |= WINEWAYLAND_HOST_ROOT_PRESENT_COMPLETE;
+        params->present_result = root->present_result;
+        params->present_status = root->present_job_status;
+    }
     params->width = root->swapchain ? root->swapchain_width : root->width;
     params->height = root->swapchain ? root->swapchain_height : root->height;
     params->configure_count = root->configure_count;
@@ -1740,9 +1964,7 @@ static NTSTATUS present_renderer_root(void *args)
     VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     VkImageMemoryBarrier source_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     VkImageCopy image_copy;
-    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    struct renderer_queue_job queue_job = {0};
     VkClearColorValue color;
     struct renderer_frame *source = NULL;
     struct renderer_root *root;
@@ -1750,7 +1972,7 @@ static NTSTATUS present_renderer_root(void *args)
     VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     uint32_t image_index = UINT32_MAX;
-    VkResult present_result = VK_SUCCESS, vr;
+    VkResult vr;
     NTSTATUS status;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
@@ -1758,7 +1980,7 @@ static NTSTATUS present_renderer_root(void *args)
         return STATUS_REVISION_MISMATCH;
     params->image_index = UINT32_MAX;
     params->image_count = 0;
-    params->present_result = VK_SUCCESS;
+    params->present_result = VK_NOT_READY;
     if (params->reserved || !params->root_identity || !params->root_generation)
         return STATUS_INVALID_PARAMETER;
     if (!params->source_pool_generation != !params->source_frame_id)
@@ -1882,37 +2104,40 @@ static NTSTATUS present_renderer_root(void *args)
     }
     if ((vr = renderer.p_vkEndCommandBuffer(command_buffer))) goto failed;
 
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &acquire_semaphore;
-    submit_info.pWaitDstStageMask = &wait_stage;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &present_semaphore;
-    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
-        goto failed;
     root->acquire_semaphore = acquire_semaphore;
     root->present_semaphore = present_semaphore;
     root->present_command_buffer = command_buffer;
     root->present_fence = fence;
     root->present_source_pool_generation = params->source_pool_generation;
     root->present_source_frame_id = params->source_frame_id;
+    root->present_job_done = FALSE;
+    root->present_complete = FALSE;
+    root->present_job_status = STATUS_PENDING;
+    root->present_result = VK_NOT_READY;
+
+    queue_job.type = RENDERER_QUEUE_JOB_PRESENT;
+    queue_job.u.present.root = root;
+    queue_job.u.present.command_buffer = command_buffer;
+    queue_job.u.present.acquire_semaphore = acquire_semaphore;
+    queue_job.u.present.present_semaphore = present_semaphore;
+    queue_job.u.present.swapchain = root->swapchain;
+    queue_job.u.present.fence = fence;
+    queue_job.u.present.image_index = image_index;
+    if ((status = enqueue_renderer_queue_job(&queue_job)))
+    {
+        root->acquire_semaphore = root->present_semaphore = VK_NULL_HANDLE;
+        root->present_command_buffer = VK_NULL_HANDLE;
+        root->present_fence = VK_NULL_HANDLE;
+        root->present_source_pool_generation = 0;
+        root->present_source_frame_id = 0;
+        goto done;
+    }
     acquire_semaphore = present_semaphore = VK_NULL_HANDLE;
     command_buffer = VK_NULL_HANDLE;
     fence = VK_NULL_HANDLE;
-
-    present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &root->present_semaphore;
-    present_info.swapchainCount = 1;
-    present_info.pSwapchains = &root->swapchain;
-    present_info.pImageIndices = &image_index;
-    present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
     root->swapchain_image_initialized[image_index] = TRUE;
-    vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, root->present_fence);
-    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
     params->image_index = image_index;
     params->image_count = root->swapchain_image_count;
-    params->present_result = present_result;
     return STATUS_PENDING;
 
 failed:
@@ -2476,9 +2701,9 @@ readback_done:
                                 status = STATUS_UNSUCCESSFUL;
                             else if ((poll_status = poll_renderer_root_present(root)) && !status)
                                 status = poll_status;
-                            if (!status && present.present_result != VK_SUCCESS &&
-                                present.present_result != VK_SUBOPTIMAL_KHR)
-                                status = present.present_result == VK_ERROR_OUT_OF_DATE_KHR ?
+                            if (!status && root->present_result != VK_SUCCESS &&
+                                root->present_result != VK_SUBOPTIMAL_KHR)
+                                status = root->present_result == VK_ERROR_OUT_OF_DATE_KHR ?
                                         STATUS_RETRY : STATUS_UNSUCCESSFUL;
                         }
                         if (!status)

@@ -33,7 +33,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame_release) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 56);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
@@ -283,7 +283,9 @@ static NTSTATUS wait_for_test_present(struct winewayland_host_renderer_root *roo
             status = WINE_UNIX_CALL(unix_renderer_root_sync, root);
             if (status == STATUS_PENDING) continue;
             if (status) return status;
-            return present->present_result ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+            present->present_result = root->present_result;
+            return root->present_status ? root->present_status :
+                    (present->present_result ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS);
         }
     }
     return STATUS_IO_TIMEOUT;
@@ -1110,6 +1112,9 @@ static NTSTATUS poll_root_present(struct host_renderer_root *root, uint64_t host
     if (status)
         return complete_root_frame(root, host_epoch, WINE_WAYLAND_FRAME_RESULT_FAILED,
                 status);
+    if (!(sync.flags & WINEWAYLAND_HOST_ROOT_PRESENT_COMPLETE)) return STATUS_SUCCESS;
+    root->present_result = sync.present_result;
+    root->present_backend_status = sync.present_status;
     root->present_submitted = FALSE;
     return complete_root_present(root, host_epoch);
 }

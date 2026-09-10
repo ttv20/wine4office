@@ -145,10 +145,15 @@ or transport fixture is not Outlook support.
   host-owned transport frame instead of clearing the WSI image. That source
   frame is pinned through the queue-ordered fence, so pool retirement cannot
   destroy it during the WSI read. Frame release now explicitly destroys the
-  immutable host copy after its final WSI reader. Vulkan submission and fence
-  processing are nonblocking, but `vkQueuePresentKHR` itself still runs on the
-  host event-loop thread and must move to the bounded per-window executor
-  before multi-window admission.
+  immutable host copy after its final WSI reader. Queue submission and
+  `vkQueuePresentKHR` now run on a bounded 96-entry renderer executor instead
+  of the host event-loop thread. Each root and copied frame retains its own
+  completion state, so the event loop can continue dispatching Wayland and
+  server work while Vulkan is pending. The current executor owns the
+  renderer's single Vulkan queue; a wedged queue therefore no longer blocks
+  event dispatch, but it still stalls GPU work for every root on that renderer.
+  Per-window device isolation and a timeout quarantine remain pending before
+  multi-window admission.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -551,6 +556,15 @@ admitted.
   `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/dcomp-pipeline-reuse-x64.log`.
   The existing Intel i386 prefix failed during Wine display initialization
   before entering the fixture, so no i386 end-to-end result is claimed yet.
+- The renderer queue executor rebuilt for the Unix library and both PE
+  architectures. The transport-to-WSI lifecycle fixture passed through both
+  x86-64 and i386 Unix-call tables on Intel Iris Xe, including pixel
+  verification, source pinning, two swapchain extents and terminal cleanup.
+  The real x86-64 DComp fixture again imported three slots and presented seven
+  frames without discard or failure. Evidence is retained as
+  `artifacts/wsi-executor-{x64,i386}.log`,
+  `artifacts/dcomp-pipeline-executor-x64.log` and
+  `artifacts/executor-x64-SHA256SUMS` in the Intel task directory.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

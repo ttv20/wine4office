@@ -57,12 +57,13 @@ struct winewayland_host_startup
     volatile uint32_t failed_frames;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 1
+#define WINEWAYLAND_HOST_RENDERER_VERSION 2
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
 #define WINEWAYLAND_HOST_ROOT_CLOSED     0x00000004
 #define WINEWAYLAND_HOST_ROOT_WSI_READY  0x00000008
+#define WINEWAYLAND_HOST_ROOT_PRESENT_COMPLETE 0x00000010
 
 #define WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED 0x00000001
 #define WINEWAYLAND_HOST_TEST_WSI_PRESENTED   0x00000002
@@ -136,6 +137,8 @@ struct winewayland_host_renderer_root
     int32_t width;
     int32_t height;
     uint32_t configure_count;
+    int32_t present_result;
+    int32_t present_status;
 };
 
 struct winewayland_host_renderer_root_retire
