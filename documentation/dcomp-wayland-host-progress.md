@@ -315,6 +315,12 @@ or transport fixture is not Outlook support.
   server accepts `HostedContent`, and removes it on fallback or scene release;
   ordinary local DComp windows therefore do not pay for snapshot allocation
   and copying. The server still supplies all authority.
+- DComp admission now rejects layered logical roots and visible HWND children
+  or owned windows, while excluding only its identified internal DXGI helper.
+  Wineserver independently invalidates an already hosted scene when such a
+  visible family member appears, revokes the active contributor and starts the
+  whole-root return to `LocalFallback`. Hidden input-only child HWNDs retain
+  normal Windows focus routing without claiming visible content coverage.
 
 ## Contributor interception inventory
 
@@ -338,10 +344,11 @@ The initial source inspection found these visible-content publication points:
 - Direct OpenGL/EGL surface creation in `dlls/winewayland.drv/opengl.c`, with
   swaps crossing `win32u_wglSwapBuffers()` in `dlls/win32u/opengl.c`.
 
-This list is not yet the complete admission proof. Child/owner topology, both
-DComp target layers, multiple DComp devices, visibility changes and popup
-families still need deterministic fixtures before generic applications can be
-admitted.
+This list is not yet the complete admission proof. Both DComp target layers
+and multiple DComp devices have deterministic authority coverage, and visible
+child creation now forces whole-root fallback. Visibility changes, owned popup
+families and direct WGL/Vulkan contributors still need complete fixtures before
+generic applications can be admitted.
 
 ## Verification record
 
@@ -853,6 +860,13 @@ admitted.
   `artifacts/decorated-admission-popup-regression-x64.log` and
   `artifacts/decorated-admission-SHA256SUMS` in the Intel task directory. Both
   runs ended with zero task-prefix Wine processes and 62 GiB free.
+- A visible child created under an already hosted root now advances the server
+  scene to `LocalFallback` and revokes the old stream, while hidden child HWNDs
+  still receive the focus-changing keyboard authority test. The full x86-64
+  Radeon authority suite passed 706 checks with zero failures. Evidence and
+  hashes are retained as
+  `/workspace/artifacts/window-family-admission-authority-x64.log` and
+  `/workspace/artifacts/window-family-admission-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

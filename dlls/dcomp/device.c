@@ -681,6 +681,22 @@ static BOOL dcomp_description_is_hosted_identity(const struct wine_dcomp_visual_
             desc->composite_mode <= 1;
 }
 
+static BOOL dcomp_scene_has_unsupported_window_content(HWND root)
+{
+    HWND window;
+
+    if (GetWindowLongW(root, GWL_EXSTYLE) & WS_EX_LAYERED) return TRUE;
+    for (window = GetWindow(root, GW_CHILD); window; window = GetWindow(window, GW_HWNDNEXT))
+        if (IsWindowVisible(window) &&
+            GetPropW(window, L"__wine_dcomp_detached_window") != root)
+            return TRUE;
+    for (window = GetWindow(root, GW_HWNDFIRST); window; window = GetWindow(window, GW_HWNDNEXT))
+        if (window != root && IsWindowVisible(window) && GetWindow(window, GW_OWNER) == root &&
+            GetPropW(window, L"__wine_dcomp_detached_window") != root)
+            return TRUE;
+    return FALSE;
+}
+
 static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scene *scene,
         UINT *target_layer)
 {
@@ -693,6 +709,11 @@ static IDXGISwapChain1 *dcomp_scene_get_hosted_candidate(const struct dcomp_scen
 
     if (!GetClientRect(scene->hwnd, &client_rect) || client_rect.right <= 0 || client_rect.bottom <= 0)
         return NULL;
+    if (dcomp_scene_has_unsupported_window_content(scene->hwnd))
+    {
+        TRACE("Hosted candidate for %p rejected by window-family content.\n", scene->hwnd);
+        return NULL;
+    }
 
     for (device = dcomp_devices; device; device = device->next_global)
     {

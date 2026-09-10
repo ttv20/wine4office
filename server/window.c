@@ -279,6 +279,7 @@ C_ASSERT( sizeof(window_shm_t) == offsetof(window_shm_t, extra[0]) );
 
 static void window_dump( struct object *obj, int verbose );
 static void window_destroy( struct object *obj );
+static void invalidate_wayland_hosted_window_family( struct window *win );
 
 static const struct object_ops window_ops =
 {
@@ -2601,6 +2602,7 @@ DECL_HANDLER(set_parent)
     reply->old_parent  = win->parent->handle;
     reply->full_parent = parent ? parent->handle : 0;
     set_parent_window( win, parent );
+    invalidate_wayland_hosted_window_family( win );
 }
 
 
@@ -2761,6 +2763,7 @@ DECL_HANDLER(set_window_owner)
 
     reply->prev_owner = win->owner;
     reply->full_owner = win->owner = owner ? owner->handle : 0;
+    invalidate_wayland_hosted_window_family( win );
 }
 
 
@@ -2870,7 +2873,10 @@ DECL_HANDLER(set_window_info)
     }
     SHARED_WRITE_END;
     if (win->style != old_style || win->ex_style != old_ex_style)
+    {
         bump_wayland_window_state_revision( win );
+        invalidate_wayland_hosted_window_family( win );
+    }
 }
 
 
@@ -3138,6 +3144,7 @@ DECL_HANDLER(set_window_pos)
         bump_wayland_window_state_revision( win );
 
     if (win->paint_flags & SET_WINPOS_LAYERED_WINDOW) validate_whole_window( win );
+    invalidate_wayland_hosted_window_family( win );
 
     reply->new_style = win->style;
     reply->new_ex_style = win->ex_style;
@@ -3901,6 +3908,71 @@ static void update_wayland_native_lease_scene( struct window *root )
     }
     else if (state == WINE_WAYLAND_NATIVE_LEASE_HOSTED)
         root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+}
+
+static int is_wayland_dcomp_helper_window( struct window *win, struct window *root )
+{
+    static const WCHAR nameW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
+                                  'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w'};
+    const struct unicode_str name = {nameW, sizeof(nameW)};
+    atom_t atom = find_atom( get_global_atom_table(), name );
+
+    return atom && get_property( win, atom ) == root->handle;
+}
+
+static void invalidate_wayland_hosted_window_family( struct window *win )
+{
+    struct wayland_scene_contributor *contributor = NULL;
+    struct window *root = win, *owner;
+    unsigned int i;
+
+    if (!win->desktop || !win->desktop->top_window) return;
+    while (root->parent && root->parent != root->desktop->top_window) root = root->parent;
+    if (root == win && win->owner)
+    {
+        if (!(owner = get_window( win->owner ))) return;
+        root = owner;
+        while (root->parent && root->parent != root->desktop->top_window) root = root->parent;
+    }
+    else if (root == win)
+    {
+        if (!(win->ex_style & WS_EX_LAYERED)) return;
+    }
+    if (!is_visible( win ) || root->parent != root->desktop->top_window ||
+        is_wayland_dcomp_helper_window( win, root ) ||
+        root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+        return;
+
+    if (root->wayland_scene_registry)
+        for (i = 0; i < MAX_WAYLAND_SCENE_CONTRIBUTORS; ++i)
+            if (root->wayland_scene_registry->contributors[i].contributor_id ==
+                root->wayland_scene_contributor_id)
+            {
+                contributor = &root->wayland_scene_registry->contributors[i];
+                break;
+            }
+    if (contributor)
+    {
+        contributor->state = WINE_WAYLAND_CONTRIBUTOR_REVOKED;
+        contributor->owner = NULL;
+        contributor->producer = NULL;
+        contributor->grant_low = 0;
+        contributor->grant_high = 0;
+        reset_wayland_contributor_frames( contributor );
+        if (!++root->wayland_scene_registry->generation)
+            ++root->wayland_scene_registry->generation;
+    }
+    if (!++root->wayland_scene_generation) ++root->wayland_scene_generation;
+    root->wayland_scene_applied_generation = 0;
+    root->wayland_scene_host_epoch = root->desktop->wayland_host_process &&
+            root->desktop->wayland_host_ready ? root->desktop->wayland_host_epoch : 0;
+    root->wayland_scene_contributor_id = 0;
+    root->wayland_scene_stream_id = 0;
+    root->wayland_scene_binding_generation = 0;
+    root->wayland_scene_disposition = WINE_WAYLAND_SCENE_LOCAL_FALLBACK;
+    update_wayland_native_lease_scene( root );
+    if (contributor)
+        contributor->revocation_scene_generation = root->wayland_scene_generation;
 }
 
 static void invalidate_wayland_contributor( struct window *root,
