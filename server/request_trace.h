@@ -4214,6 +4214,26 @@ static void dump_cancel_wayland_frame_reply( const struct cancel_wayland_frame_r
     fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
 }
 
+static void dump_manage_wayland_window_native_lease_request( const struct manage_wayland_window_native_lease_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", operation=%08x", req->operation );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+    dump_uint64( ", request_id=", &req->request_id );
+}
+
+static void dump_manage_wayland_window_native_lease_reply( const struct manage_wayland_window_native_lease_reply *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+    dump_uint64( ", request_id=", &req->request_id );
+    fprintf( stderr, ", state=%08x", req->state );
+    fprintf( stderr, ", action=%08x", req->action );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4574,6 +4594,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_window_configure_applied_request,
     (dump_func)dump_get_wayland_window_configure_result_request,
     (dump_func)dump_cancel_wayland_frame_request,
+    (dump_func)dump_manage_wayland_window_native_lease_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4934,6 +4955,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_window_configure_applied_reply,
     (dump_func)dump_get_wayland_window_configure_result_reply,
     (dump_func)dump_cancel_wayland_frame_reply,
+    (dump_func)dump_manage_wayland_window_native_lease_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5294,6 +5316,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_wayland_window_configure_applied",
     "get_wayland_window_configure_result",
     "cancel_wayland_frame",
+    "manage_wayland_window_native_lease",
 };
 
 static const struct

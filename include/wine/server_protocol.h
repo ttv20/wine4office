@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 5
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 6
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -46,6 +46,25 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
 #define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
+
+#define WINE_WAYLAND_NATIVE_LEASE_LOCAL                0x00000001
+#define WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST       0x00000002
+#define WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST 0x00000003
+#define WINE_WAYLAND_NATIVE_LEASE_HOSTED               0x00000004
+#define WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL      0x00000005
+#define WINE_WAYLAND_NATIVE_LEASE_UNAVAILABLE          0x00000006
+
+#define WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE           0x00000000
+#define WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL   0x00000001
+#define WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST    0x00000002
+#define WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL 0x00000003
+
+#define WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST          0x00000001
+#define WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER 0x00000002
+#define WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION    0x00000003
+#define WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED       0x00000004
+#define WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED        0x00000005
+#define WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE        0x00000006
 
 #define WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED  0x00000001
 #define WINE_WAYLAND_CONFIGURE_STATE_RESIZING   0x00000002
@@ -7186,6 +7205,30 @@ struct cancel_wayland_frame_reply
     char __pad_12[4];
 };
 
+/* Advance or query the server-owned native window lease.  Keep new requests
+ * appended so existing protocol operation numbers remain stable. */
+struct manage_wayland_window_native_lease_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     operation;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 scene_generation;
+    unsigned __int64 request_id;
+};
+struct manage_wayland_window_native_lease_reply
+{
+    struct reply_header __header;
+    unsigned __int64 host_epoch;
+    unsigned __int64 scene_generation;
+    unsigned __int64 request_id;
+    unsigned int     state;
+    unsigned int     action;
+};
+
 
 enum request
 {
@@ -7545,6 +7588,7 @@ enum request
     REQ_set_wayland_window_configure_applied,
     REQ_get_wayland_window_configure_result,
     REQ_cancel_wayland_frame,
+    REQ_manage_wayland_window_native_lease,
     REQ_NB_REQUESTS
 };
 
@@ -7908,6 +7952,7 @@ union generic_request
     struct set_wayland_window_configure_applied_request set_wayland_window_configure_applied_request;
     struct get_wayland_window_configure_result_request get_wayland_window_configure_result_request;
     struct cancel_wayland_frame_request cancel_wayland_frame_request;
+    struct manage_wayland_window_native_lease_request manage_wayland_window_native_lease_request;
 };
 union generic_reply
 {
@@ -8269,8 +8314,9 @@ union generic_reply
     struct set_wayland_window_configure_applied_reply set_wayland_window_configure_applied_reply;
     struct get_wayland_window_configure_result_reply get_wayland_window_configure_result_reply;
     struct cancel_wayland_frame_reply cancel_wayland_frame_reply;
+    struct manage_wayland_window_native_lease_reply manage_wayland_window_native_lease_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 992
+#define SERVER_PROTOCOL_VERSION 993
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

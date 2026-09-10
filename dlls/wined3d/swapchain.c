@@ -2166,7 +2166,16 @@ static HRESULT wined3d_swapchain_vk_submit_wayland_frame(struct wined3d_swapchai
     {
         NTSTATUS retire_status;
 
-        if ((retire_status = wined3d_wayland_retire_pool_record(swapchain_vk)))
+        retire_status = wined3d_wayland_retire_pool_record(swapchain_vk);
+        /* Revocation and host replacement can remove the old server record
+         * before the producer observes the replacement binding.  Those stale
+         * identity results are terminal for that record; keeping its local
+         * Vulkan objects would otherwise prevent every later binding from
+         * creating a fresh pool. */
+        if (retire_status && retire_status != STATUS_NOT_FOUND &&
+                retire_status != STATUS_ACCESS_DENIED &&
+                retire_status != STATUS_REVISION_MISMATCH &&
+                retire_status != STATUS_INVALID_HANDLE)
             return HRESULT_FROM_NT(retire_status);
         wined3d_swapchain_vk_destroy_wayland_pool(swapchain_vk);
     }

@@ -194,6 +194,9 @@ struct window
     unsigned __int64 wayland_configure_request_id;
     unsigned __int64 wayland_configure_applied_id;
     unsigned __int64 wayland_configure_applied_revision;
+    unsigned __int64 wayland_native_lease_host_epoch;
+    unsigned __int64 wayland_native_lease_scene_generation;
+    unsigned __int64 wayland_native_lease_request_id;
     unsigned int     wayland_configure_width;
     unsigned int     wayland_configure_height;
     unsigned int     wayland_configure_state;
@@ -202,6 +205,9 @@ struct window
     unsigned int     wayland_configure_applied_height;
     unsigned int     wayland_configure_applied_state;
     unsigned int     wayland_configure_message_posted;
+    unsigned int     wayland_native_lease_state;
+    unsigned int     wayland_native_lease_action;
+    unsigned int     wayland_native_lease_message_posted;
     unsigned int     wayland_scene_disposition;
     struct wayland_scene_registry *wayland_scene_registry;
 };
@@ -866,6 +872,12 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_applied_height = 0;
     win->wayland_configure_applied_state = 0;
     win->wayland_configure_message_posted = 0;
+    win->wayland_native_lease_host_epoch = 0;
+    win->wayland_native_lease_scene_generation = 0;
+    win->wayland_native_lease_request_id = 0;
+    win->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_LOCAL;
+    win->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+    win->wayland_native_lease_message_posted = 0;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
     win->wayland_window_state_revision = 1;
     win->wayland_geometry_revision = 1;
@@ -3728,6 +3740,100 @@ static int wayland_scene_uses_contributor( const struct window *root,
            root->wayland_scene_binding_generation == contributor->binding_generation;
 }
 
+static void post_wayland_native_lease_message( struct window *root )
+{
+    if (root->wayland_native_lease_message_posted ||
+        (root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL &&
+         root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL))
+        return;
+
+    post_message( root->handle, WM_WINE_WAYLAND_NATIVE_LEASE, 0, 0 );
+    if (get_error()) clear_error();
+    else root->wayland_native_lease_message_posted = 1;
+}
+
+static void set_wayland_native_lease_local( struct window *root )
+{
+    root->wayland_native_lease_host_epoch = 0;
+    root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+    root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_LOCAL;
+    root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+    root->wayland_native_lease_message_posted = 0;
+}
+
+static int next_wayland_native_lease_request( struct window *root )
+{
+    if (root->wayland_native_lease_request_id == ~(unsigned __int64)0)
+    {
+        root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_UNAVAILABLE;
+        root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+        root->wayland_native_lease_message_posted = 0;
+        return 0;
+    }
+    ++root->wayland_native_lease_request_id;
+    return 1;
+}
+
+static void update_wayland_native_lease_scene( struct window *root )
+{
+    unsigned int state = root->wayland_native_lease_state;
+
+    if (root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+    {
+        if (state == WINE_WAYLAND_NATIVE_LEASE_LOCAL ||
+            state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)
+        {
+            root->wayland_native_lease_host_epoch = root->wayland_scene_host_epoch;
+            root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+            root->wayland_native_lease_message_posted = 0;
+        }
+        else if (state == WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+        {
+            root->wayland_native_lease_host_epoch = root->wayland_scene_host_epoch;
+            root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+        }
+        return;
+    }
+
+    if (root->wayland_scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK)
+    {
+        if (state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)
+            set_wayland_native_lease_local( root );
+        else if (state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST)
+        {
+            root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL;
+            root->wayland_native_lease_message_posted = 0;
+            post_wayland_native_lease_message( root );
+        }
+        else if (state == WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+        {
+            root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST;
+            root->wayland_native_lease_message_posted = 0;
+            next_wayland_native_lease_request( root );
+        }
+        return;
+    }
+
+    if (state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)
+        set_wayland_native_lease_local( root );
+    else if (state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST)
+    {
+        root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+        root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL;
+        root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL;
+        root->wayland_native_lease_message_posted = 0;
+        post_wayland_native_lease_message( root );
+    }
+    else if (state == WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+        root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+}
+
 static void invalidate_wayland_contributor( struct window *root,
                                             struct wayland_scene_contributor *contributor )
 {
@@ -3751,6 +3857,7 @@ static void invalidate_wayland_contributor( struct window *root,
         root->wayland_scene_stream_id = 0;
         root->wayland_scene_binding_generation = 0;
         root->wayland_scene_disposition = WINE_WAYLAND_SCENE_EMPTY;
+        update_wayland_native_lease_scene( root );
         contributor->revocation_scene_generation = root->wayland_scene_generation;
     }
 }
@@ -3815,6 +3922,7 @@ DECL_HANDLER(publish_wayland_scene)
         root->wayland_scene_stream_id = req->stream_id;
         root->wayland_scene_binding_generation = req->binding_generation;
         root->wayland_scene_disposition = req->disposition;
+        update_wayland_native_lease_scene( root );
         reply->scene_generation = root->wayland_scene_generation;
         reply->owner_revision = root->wayland_scene_owner_revision;
     }
@@ -4702,6 +4810,12 @@ DECL_HANDLER(submit_wayland_frame)
              root->wayland_scene_host_epoch != desktop->wayland_host_epoch ||
              !wayland_scene_uses_contributor( root, contributor ))
         set_error( STATUS_INVALID_DEVICE_STATE );
+    else if (root->wayland_native_lease_host_epoch != desktop->wayland_host_epoch ||
+             (root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST &&
+              root->wayland_native_lease_state !=
+                      WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+              root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED))
+        set_error( STATUS_INVALID_DEVICE_STATE );
     else if (submission.scene_generation != root->wayland_scene_generation)
         set_error( STATUS_REVISION_MISMATCH );
     else if (!(pool = find_wayland_buffer_pool( contributor, submission.pool_generation )))
@@ -5271,6 +5385,210 @@ DECL_HANDLER(get_wayland_window_configure_result)
     reply->applied_state = root->wayland_configure_applied_state;
 }
 
+static void fill_wayland_native_lease_reply( struct window *root,
+                                             struct manage_wayland_window_native_lease_reply *reply )
+{
+    reply->host_epoch = root->wayland_native_lease_host_epoch;
+    reply->scene_generation = root->wayland_native_lease_scene_generation;
+    reply->request_id = root->wayland_native_lease_request_id;
+    reply->state = root->wayland_native_lease_state;
+    reply->action = root->wayland_native_lease_action;
+}
+
+static int validate_wayland_native_lease_root( struct window *root,
+                                               const struct manage_wayland_window_native_lease_request *req )
+{
+    struct obj_locator locator;
+
+    if (!req->root_identity || !req->root_generation)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return 0;
+    }
+    locator = get_shared_object_locator( root->shared );
+    if (locator.id != req->root_identity || (root->handle >> 16) != req->root_generation)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return 0;
+    }
+    return 1;
+}
+
+DECL_HANDLER(manage_wayland_window_native_lease)
+{
+    struct window *root;
+    int host_operation;
+
+    reply->host_epoch = 0;
+    reply->scene_generation = 0;
+    reply->request_id = 0;
+    reply->state = 0;
+    reply->action = 0;
+    if (req->operation < WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST ||
+        req->operation > WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+
+    host_operation = req->operation == WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST ||
+            req->operation == WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER ||
+            req->operation == WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED;
+    if (host_operation)
+    {
+        if (!is_current_wayland_host( root->desktop, req->host_epoch ) ||
+            !validate_wayland_native_lease_root( root, req ))
+            return;
+    }
+    else if (!root->thread || root->thread != current)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
+    switch (req->operation)
+    {
+    case WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST:
+        post_wayland_native_lease_message( root );
+        break;
+
+    case WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER:
+        if (!req->scene_generation ||
+            root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+            root->wayland_scene_host_epoch != req->host_epoch ||
+            root->wayland_scene_generation != req->scene_generation)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+        if (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST &&
+            root->wayland_native_lease_host_epoch == req->host_epoch &&
+            root->wayland_native_lease_scene_generation == req->scene_generation)
+        {
+            if (!next_wayland_native_lease_request( root ))
+            {
+                set_error( STATUS_INTEGER_OVERFLOW );
+                return;
+            }
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL;
+            root->wayland_native_lease_message_posted = 0;
+            post_wayland_native_lease_message( root );
+        }
+        else if (root->wayland_native_lease_state ==
+                         WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+                 root->wayland_native_lease_host_epoch == req->host_epoch)
+            post_wayland_native_lease_message( root );
+        else if (root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+                 root->wayland_native_lease_host_epoch != req->host_epoch)
+        {
+            set_error( root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_UNAVAILABLE ?
+                       STATUS_DEVICE_NOT_READY : STATUS_DEVICE_BUSY );
+            return;
+        }
+        break;
+
+    case WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION:
+        if (root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL &&
+            root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL)
+        {
+            set_error( STATUS_NOT_FOUND );
+            return;
+        }
+        root->wayland_native_lease_message_posted = 0;
+        break;
+
+    case WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED:
+        if (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+            root->wayland_native_lease_host_epoch == req->host_epoch &&
+            root->wayland_native_lease_request_id == req->request_id)
+            break;
+        if (!req->host_epoch || !req->scene_generation || !req->request_id ||
+            root->wayland_native_lease_state !=
+                    WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST ||
+            root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL ||
+            root->wayland_native_lease_host_epoch != req->host_epoch ||
+            root->wayland_native_lease_scene_generation != req->scene_generation ||
+            root->wayland_native_lease_request_id != req->request_id ||
+            !root->desktop->wayland_host_process || !root->desktop->wayland_host_ready ||
+            root->desktop->wayland_host_epoch != req->host_epoch ||
+            root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+            root->wayland_scene_host_epoch != req->host_epoch)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+        root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+        root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_HOSTED;
+        root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+        root->wayland_native_lease_message_posted = 0;
+        break;
+
+    case WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED:
+        if (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+            root->wayland_native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL &&
+            root->wayland_native_lease_host_epoch == req->host_epoch &&
+            root->wayland_native_lease_request_id == req->request_id)
+        {
+            post_wayland_native_lease_message( root );
+            break;
+        }
+        if (!req->scene_generation || !req->request_id ||
+            root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL ||
+            root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST ||
+            root->wayland_native_lease_host_epoch != req->host_epoch ||
+            root->wayland_native_lease_scene_generation != req->scene_generation ||
+            root->wayland_native_lease_request_id != req->request_id)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+        root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+        root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL;
+        root->wayland_native_lease_message_posted = 0;
+        post_wayland_native_lease_message( root );
+        break;
+
+    case WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE:
+        if ((root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_LOCAL ||
+             root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST) &&
+            root->wayland_native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE &&
+            root->wayland_native_lease_request_id == req->request_id)
+            break;
+        if (!req->host_epoch || !req->scene_generation || !req->request_id ||
+            root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL ||
+            root->wayland_native_lease_action != WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL ||
+            root->wayland_native_lease_host_epoch != req->host_epoch ||
+            root->wayland_native_lease_scene_generation != req->scene_generation ||
+            root->wayland_native_lease_request_id != req->request_id)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+        if (root->desktop->wayland_host_process && root->desktop->wayland_host_ready &&
+            root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+            root->wayland_scene_host_epoch == root->desktop->wayland_host_epoch)
+        {
+            root->wayland_native_lease_host_epoch = root->wayland_scene_host_epoch;
+            root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+            root->wayland_native_lease_message_posted = 0;
+        }
+        else
+            set_wayland_native_lease_local( root );
+        break;
+    }
+
+    fill_wayland_native_lease_reply( root, reply );
+}
+
 void cleanup_process_wayland_scenes( struct process *process )
 {
     struct window *root;
@@ -5308,6 +5626,33 @@ void revoke_wayland_desktop_streams( struct desktop *desktop )
                     &root->wayland_scene_registry->contributors[i];
             if (contributor->state != WINE_WAYLAND_CONTRIBUTOR_REVOKED)
                 invalidate_wayland_contributor( root, contributor );
+        }
+    }
+}
+
+void revoke_wayland_desktop_native_leases( struct desktop *desktop )
+{
+    struct window *root;
+    user_handle_t handle = 0;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (root->desktop != desktop ||
+            root->wayland_native_lease_host_epoch != desktop->wayland_host_epoch)
+            continue;
+
+        if (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)
+            set_wayland_native_lease_local( root );
+        else if (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+                 root->wayland_native_lease_state ==
+                         WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST ||
+                 (root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+                  root->wayland_native_lease_action ==
+                          WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST))
+        {
+            root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_UNAVAILABLE;
+            root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
+            root->wayland_native_lease_message_posted = 0;
         }
     }
 }

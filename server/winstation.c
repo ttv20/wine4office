@@ -146,6 +146,7 @@ static void expire_wayland_host_startup( void *private )
 static void clear_wayland_host_registration( struct desktop *desktop )
 {
     revoke_wayland_desktop_streams( desktop );
+    revoke_wayland_desktop_native_leases( desktop );
     if (desktop->wayland_host_process)
         release_object( desktop->wayland_host_process );
     desktop->wayland_host_process = NULL;

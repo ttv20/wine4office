@@ -679,6 +679,30 @@ admitted.
   `elkana`, the two WSI fixtures and x86-64 DComp fixture above used the existing
   runner and prefixes, kept 61 GiB free, and left no Wine process for those
   test prefixes.
+- Protocol 993 adds a server-owned native-window lease with acknowledged
+  `Local`, `PreparingHost`, `TransferringToHost`, `Hosted`, `ReturningLocal`
+  and failure states. The guest Wayland driver now suppresses its local role,
+  detaches the client surface and waits for an asynchronous compositor sync
+  before the host may map. The reverse path drains and unmaps the host root
+  before the server authorizes the guest to recreate its role. The x86-64
+  authority regression passed 628 checks with no failures. On Intel Iris Xe,
+  the real DComp pipeline imported two successive three-slot pools, transferred
+  the same HWND to the host twice and restored local ownership once when a
+  second target layer forced whole-window fallback. It then re-entered hosted
+  mode and applied `Empty` without leaving a Wine process running. Evidence is
+  retained as `artifacts/native-lease-authority-x64.log` on the Radeon task
+  environment and `artifacts/native-lease-roundtrip-dcomp-pipeline-x64.log`
+  in the Intel task directory. The i386 authority and affected production
+  binaries compile; the existing i386 DComp prefix still exits before fixture
+  setup, so no i386 end-to-end DComp result is claimed.
+- Re-entering hosted mode after contributor revocation now treats stale
+  server-side pool identities as terminal and destroys the old producer-local
+  Vulkan pool before creating one for the new binding. The round-trip fixture
+  caught the previous permanent `imports=3` stall and now reports
+  `imports=6`, `host_activations=2` and `local_activations=1`. A separate
+  transformed local-fallback probe exposed the older Vulkan CPU-composition
+  path creating a staging resource on its command-stream thread; fixing that
+  fallback path remains pending and the identity transport does not claim it.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

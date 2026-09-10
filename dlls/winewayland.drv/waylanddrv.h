@@ -75,6 +75,7 @@ enum wayland_window_message
     WM_WAYLAND_DCOMP_EXPORT,
     WM_WAYLAND_SET_KEYBOARD_LAYOUT,
     WM_WAYLAND_HOST_CONFIGURE = WM_WINE_WAYLAND_HOST_CONFIGURE,
+    WM_WAYLAND_NATIVE_LEASE = WM_WINE_WAYLAND_NATIVE_LEASE,
 };
 
 enum wayland_surface_config_state
@@ -436,6 +437,9 @@ struct wayland_win_data
     BOOL dcomp_overlay;
     BOOL dcomp_notification;
     BOOL dcomp_base_presentation;
+    BOOL native_host_suppressed;
+    BOOL native_lease_sync_pending;
+    BOOL native_lease_retired;
 };
 
 struct wayland_win_data *wayland_win_data_get(HWND hwnd);

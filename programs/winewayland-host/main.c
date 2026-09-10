@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 64);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 72);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
@@ -616,6 +616,15 @@ struct host_configure_result
     uint32_t state;
 };
 
+struct host_native_lease_info
+{
+    uint64_t host_epoch;
+    uint64_t scene_generation;
+    uint64_t request_id;
+    uint32_t state;
+    uint32_t action;
+};
+
 struct host_renderer_root
 {
     user_handle_t root;
@@ -628,7 +637,12 @@ struct host_renderer_root
     uint64_t present_contributor_id;
     uint64_t present_frame_id;
     uint64_t present_renderer_pool_generation;
+    uint64_t native_lease_host_epoch;
+    uint64_t native_lease_scene_generation;
+    uint64_t native_lease_request_id;
     uint32_t scene_disposition;
+    uint32_t native_lease_state;
+    uint32_t native_lease_action;
     uint64_t close_request_id;
     uint64_t configure_request_id;
     uint32_t configure_width;
@@ -855,6 +869,96 @@ static NTSTATUS get_host_window_configure_result(user_handle_t root, uint64_t ho
         }
     }
     SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS manage_host_native_lease(const struct host_renderer_root *root,
+        uint64_t host_epoch, uint32_t operation, struct host_native_lease_info *lease)
+{
+    NTSTATUS status;
+
+    memset(lease, 0, sizeof(*lease));
+    SERVER_START_REQ(manage_wayland_window_native_lease)
+    {
+        req->root = root->root;
+        req->operation = operation;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        if (operation == WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER)
+            req->scene_generation = root->scene_generation;
+        else if (operation == WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED)
+        {
+            req->scene_generation = root->native_lease_scene_generation;
+            req->request_id = root->native_lease_request_id;
+        }
+        if (!(status = wine_server_call(req)))
+        {
+            lease->host_epoch = reply->host_epoch;
+            lease->scene_generation = reply->scene_generation;
+            lease->request_id = reply->request_id;
+            lease->state = reply->state;
+            lease->action = reply->action;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void update_host_native_lease(struct host_renderer_root *root,
+                                     const struct host_native_lease_info *lease)
+{
+    root->native_lease_host_epoch = lease->host_epoch;
+    root->native_lease_scene_generation = lease->scene_generation;
+    root->native_lease_request_id = lease->request_id;
+    root->native_lease_state = lease->state;
+    root->native_lease_action = lease->action;
+}
+
+static NTSTATUS query_host_native_lease(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    struct host_native_lease_info lease;
+    uint32_t previous_state = root->native_lease_state;
+    NTSTATUS status;
+
+    if (!(status = manage_host_native_lease(root, host_epoch,
+            WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST, &lease)))
+    {
+        update_host_native_lease(root, &lease);
+        if (active_fixture_startup &&
+            previous_state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+            lease.state == WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+            InterlockedIncrement((LONG *)&active_fixture_startup->native_host_activations);
+        else if (active_fixture_startup &&
+                 previous_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+                 (lease.state == WINE_WAYLAND_NATIVE_LEASE_LOCAL ||
+                  lease.state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST))
+            InterlockedIncrement((LONG *)&active_fixture_startup->native_local_activations);
+    }
+    return status;
+}
+
+static NTSTATUS begin_host_native_transfer(struct host_renderer_root *root,
+                                           uint64_t host_epoch)
+{
+    struct host_native_lease_info lease;
+    NTSTATUS status;
+
+    if (!(status = manage_host_native_lease(root, host_epoch,
+            WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER, &lease)))
+        update_host_native_lease(root, &lease);
+    return status;
+}
+
+static NTSTATUS set_host_native_retired(struct host_renderer_root *root,
+                                        uint64_t host_epoch)
+{
+    struct host_native_lease_info lease;
+    NTSTATUS status;
+
+    if (!(status = manage_host_native_lease(root, host_epoch,
+            WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED, &lease)))
+        update_host_native_lease(root, &lease);
     return status;
 }
 
@@ -1414,6 +1518,15 @@ static NTSTATUS process_contributor_frames(struct host_renderer_root *root,
         if (!(renderer_pool = find_renderer_pool(root->root, contributor->contributor_id,
                 frame.pool_generation)))
             continue;
+        if (frame.scene_generation == root->scene_generation &&
+            frame.geometry_revision == root->geometry_revision &&
+            frame.binding_generation == contributor->binding_generation)
+        {
+            if (root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)
+                return begin_host_native_transfer(root, host_epoch);
+            if (root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+                continue;
+        }
         if (!frame.reusable)
         {
             memset(&renderer_frame, 0, sizeof(renderer_frame));
@@ -1626,8 +1739,7 @@ static NTSTATUS process_empty_scene(struct host_renderer_root *root, uint64_t ho
     uint32_t width, height;
     NTSTATUS status;
 
-    if (root->scene_applied_generation == root->scene_generation ||
-        !root->native_owned || root->present_active)
+    if (root->scene_applied_generation == root->scene_generation || root->present_active)
         return STATUS_SUCCESS;
     width = state->client.right > state->client.left ?
             state->client.right - state->client.left : 0;
@@ -1702,19 +1814,33 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     renderer_root->scene_generation = scene.scene_generation;
     renderer_root->scene_applied_generation = scene.applied_generation;
     renderer_root->scene_disposition = scene.disposition;
-    if (renderer_root->configure_request_id &&
+    if ((status = query_host_native_lease(renderer_root, host_epoch))) return status;
+    if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        renderer_root->configure_request_id &&
         renderer_root->configure_request_id != configure.applied_id &&
         (status = post_host_window_configure(renderer_root, host_epoch)))
         return status;
-    if (renderer_root->native_closed && !renderer_root->close_posted &&
+    if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        renderer_root->native_closed && !renderer_root->close_posted &&
         (status = post_host_window_close(renderer_root, host_epoch)))
         return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
-    if ((renderer_root->scene_disposition == WINE_WAYLAND_SCENE_HIDDEN ||
-         renderer_root->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK) &&
-        (status = process_unmapped_scene(renderer_root, host_epoch)))
-        return status;
-    if (renderer_root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY &&
+    if ((renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+         (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+          renderer_root->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST)) &&
+        (renderer_root->scene_disposition == WINE_WAYLAND_SCENE_HIDDEN ||
+         renderer_root->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK))
+    {
+        if ((status = process_unmapped_scene(renderer_root, host_epoch))) return status;
+        if (renderer_root->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK &&
+            renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+            renderer_root->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST &&
+            renderer_root->scene_applied_generation == renderer_root->scene_generation &&
+            (status = set_host_native_retired(renderer_root, host_epoch)))
+            return status;
+    }
+    if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        renderer_root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY &&
         (status = process_empty_scene(renderer_root, host_epoch, root, &window_state,
                 &configure)))
         return status;
@@ -1957,7 +2083,9 @@ static int test_dcomp_pipeline(void)
     IDXGISwapChain1 *swapchain = NULL;
     IDCompositionDevice *dcomp_device = NULL;
     IDCompositionTarget *target = NULL;
+    IDCompositionTarget *fallback_target = NULL;
     IDCompositionVisual *visual = NULL;
+    IDCompositionVisual *fallback_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, stop_event = NULL;
     HMODULE d3d11_module = NULL, dxgi_module = NULL, dcomp_module = NULL;
     d3d11_create_device_t create_device;
@@ -2159,11 +2287,95 @@ static int test_dcomp_pipeline(void)
                 startup->discarded_frames, startup->failed_frames);
         goto done;
     }
-    printf("dcomp_pipeline=passed imports=%u presented=%u discarded=%u\n",
-            startup->imported_slots, startup->presented_frames, startup->discarded_frames);
+    if (!InterlockedCompareExchange((LONG *)&startup->native_host_activations, 0, 0))
+    {
+        fprintf(stderr, "dcomp_pipeline=failed local retirement was not acknowledged\n");
+        goto done;
+    }
+
+    /* Two visible target layers cannot be flattened by the V1 transport.  The
+     * committed family-wide fallback must retire the host root and remap the
+     * original Wine-owned root before removing the second layer may transfer
+     * the remaining identity visual again. */
+    if (FAILED(hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, window,
+            TRUE, &fallback_target)) ||
+            FAILED(hr = IDCompositionDevice_CreateVisual(dcomp_device, &fallback_visual)) ||
+            FAILED(hr = IDCompositionVisual_SetContent(fallback_visual,
+            (IUnknown *)swapchain)) ||
+            FAILED(hr = IDCompositionTarget_SetRoot(fallback_target, fallback_visual)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+        goto done;
+    for (i = 0; i < 500 && !InterlockedCompareExchange(
+            (LONG *)&startup->native_local_activations, 0, 0); ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (!InterlockedCompareExchange((LONG *)&startup->native_local_activations, 0, 0))
+    {
+        fprintf(stderr, "dcomp_pipeline=failed local ownership was not restored\n");
+        goto done;
+    }
+
+    if (FAILED(hr = IDCompositionTarget_SetRoot(fallback_target, NULL)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)) ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)))
+        goto done;
+    for (i = 0; i < 500 && InterlockedCompareExchange(
+            (LONG *)&startup->imported_slots, 0, 0) < 2 * WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange((LONG *)&startup->imported_slots, 0, 0) <
+            2 * WINE_WAYLAND_BUFFER_POOL_SLOTS ||
+            FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0)))
+    {
+        fprintf(stderr, "dcomp_pipeline=failed rehost import/present hr=%#lx imports=%u\n",
+                hr, startup->imported_slots);
+        goto done;
+    }
+    for (i = 0; i < 500 && InterlockedCompareExchange(
+            (LONG *)&startup->native_host_activations, 0, 0) < 2; ++i)
+    {
+        MSG message;
+
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(10);
+    }
+    if (InterlockedCompareExchange((LONG *)&startup->native_host_activations, 0, 0) < 2)
+    {
+        fprintf(stderr, "dcomp_pipeline=failed second local retirement was not acknowledged\n");
+        goto done;
+    }
+
+    printf("dcomp_pipeline=passed imports=%u presented=%u discarded=%u host_activations=%u local_activations=%u\n",
+            startup->imported_slots, startup->presented_frames, startup->discarded_frames,
+            startup->native_host_activations, startup->native_local_activations);
     ret = 0;
 
 done:
+    if (fallback_target)
+    {
+        IDCompositionTarget_SetRoot(fallback_target, NULL);
+        if (dcomp_device) IDCompositionDevice_Commit(dcomp_device);
+    }
     if (target && visual)
     {
         unsigned int i;
@@ -2188,6 +2400,8 @@ done:
             ret = 5;
         }
     }
+    if (fallback_visual) IDCompositionVisual_Release(fallback_visual);
+    if (fallback_target) IDCompositionTarget_Release(fallback_target);
     if (visual) IDCompositionVisual_Release(visual);
     if (target) IDCompositionTarget_Release(target);
     if (dcomp_device) IDCompositionDevice_Release(dcomp_device);

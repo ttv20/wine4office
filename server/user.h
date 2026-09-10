@@ -193,6 +193,7 @@ extern void free_window_handle( struct window *win );
 extern void destroy_thread_windows( struct thread *thread );
 extern void cleanup_process_wayland_scenes( struct process *process );
 extern void revoke_wayland_desktop_streams( struct desktop *desktop );
+extern void revoke_wayland_desktop_native_leases( struct desktop *desktop );
 extern void activate_wayland_desktop_scenes( struct desktop *desktop );
 extern int is_child_window( user_handle_t parent, user_handle_t child );
 extern struct thread *make_window_foreground( struct desktop *desktop, user_handle_t window,

@@ -468,7 +468,8 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     /* A DirectComposition-only notification host is a logical Win32 target,
      * not a presentation surface. Keep it role-less and let the detached
      * composition window be the only compositor-visible surface. */
-    if (!visible || (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
+    if (!visible || data->native_host_suppressed ||
+        (data->dcomp_only_host && (state->exstyle & WS_EX_NOREDIRECTIONBITMAP)))
         role = WAYLAND_SURFACE_ROLE_NONE;
     else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
@@ -991,6 +992,181 @@ struct wayland_host_configure
     UINT previous_state;
 };
 
+struct wayland_native_lease
+{
+    UINT64 host_epoch;
+    UINT64 scene_generation;
+    UINT64 request_id;
+    UINT state;
+    UINT action;
+};
+
+struct wayland_native_lease_sync
+{
+    struct wl_callback *callback;
+    HWND hwnd;
+};
+
+static NTSTATUS manage_wayland_native_lease(HWND hwnd, UINT operation,
+        const struct wayland_native_lease *input, struct wayland_native_lease *lease)
+{
+    NTSTATUS status;
+
+    memset(lease, 0, sizeof(*lease));
+    SERVER_START_REQ(manage_wayland_window_native_lease)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        req->operation = operation;
+        if (input)
+        {
+            req->host_epoch = input->host_epoch;
+            req->scene_generation = input->scene_generation;
+            req->request_id = input->request_id;
+        }
+        if (!(status = wine_server_call(req)))
+        {
+            lease->host_epoch = reply->host_epoch;
+            lease->scene_generation = reply->scene_generation;
+            lease->request_id = reply->request_id;
+            lease->state = reply->state;
+            lease->action = reply->action;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static void wayland_native_lease_sync_done(void *private, struct wl_callback *callback,
+                                           uint32_t serial)
+{
+    struct wayland_native_lease_sync *sync = private;
+    struct wayland_win_data *data;
+    BOOL notify = FALSE;
+
+    if ((data = wayland_win_data_get(sync->hwnd)))
+    {
+        if (data->native_host_suppressed && data->native_lease_sync_pending)
+        {
+            data->native_lease_sync_pending = FALSE;
+            data->native_lease_retired = TRUE;
+            notify = TRUE;
+        }
+        wayland_win_data_release(data);
+    }
+    wl_callback_destroy(callback);
+    if (notify) NtUserPostMessage(sync->hwnd, WM_WINE_WAYLAND_NATIVE_LEASE, 0, 0);
+    free(sync);
+}
+
+static const struct wl_callback_listener wayland_native_lease_sync_listener =
+{
+    wayland_native_lease_sync_done,
+};
+
+static BOOL begin_wayland_local_retirement(HWND hwnd)
+{
+    struct wayland_native_lease_sync *sync;
+    struct wayland_win_data *data;
+    BOOL retired = FALSE;
+
+    if (!(data = wayland_win_data_get(hwnd))) return TRUE;
+    if (!data->native_host_suppressed)
+    {
+        data->native_host_suppressed = TRUE;
+        data->native_lease_retired = FALSE;
+        if (data->client_surface)
+            wayland_client_surface_attach(data->client_surface, NULL, NULL);
+        if (data->wayland_surface &&
+            data->wayland_surface->role != WAYLAND_SURFACE_ROLE_NONE)
+        {
+            wayland_surface_clear_role(data->wayland_surface);
+            if ((sync = calloc(1, sizeof(*sync))))
+            {
+                sync->hwnd = hwnd;
+                sync->callback = wl_display_sync(process_wayland.wl_display);
+                if (sync->callback)
+                {
+                    wl_proxy_set_queue((struct wl_proxy *)sync->callback,
+                                       process_wayland.wl_event_queue);
+                    wl_callback_add_listener(sync->callback,
+                                             &wayland_native_lease_sync_listener, sync);
+                    data->native_lease_sync_pending = TRUE;
+                    wl_display_flush(process_wayland.wl_display);
+                }
+                else
+                    free(sync);
+            }
+        }
+        else
+            data->native_lease_retired = TRUE;
+    }
+    retired = data->native_lease_retired;
+    wayland_win_data_release(data);
+    return retired;
+}
+
+static void activate_wayland_local_window(HWND hwnd)
+{
+    struct wayland_window_state state;
+    struct wayland_win_data *data;
+    BOOL reapply_clip = FALSE;
+
+    get_wayland_window_state(hwnd, &state);
+    if (!(data = wayland_win_data_get(hwnd))) return;
+    if (data->native_lease_sync_pending)
+    {
+        wayland_win_data_release(data);
+        return;
+    }
+    data->native_host_suppressed = FALSE;
+    data->native_lease_retired = FALSE;
+    if (wayland_win_data_create_wayland_surface(data, NULL, &state, &reapply_clip, NULL))
+        wayland_win_data_update_wayland_state(data);
+    wayland_win_data_release(data);
+
+    update_client_surfaces(hwnd);
+    wayland_win_data_restack_client_surfaces(hwnd);
+    if (reapply_clip) wayland_reapply_cursor_clipping(hwnd);
+}
+
+static void wayland_handle_native_lease(HWND hwnd)
+{
+    struct wayland_native_lease lease, result;
+    struct wayland_win_data *data;
+    NTSTATUS status;
+
+    if ((status = manage_wayland_native_lease(hwnd,
+            WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION, NULL, &lease)))
+    {
+        TRACE("No native lease action for hwnd %p, status %#x.\n", hwnd, status);
+        return;
+    }
+
+    if (lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL)
+    {
+        if (!begin_wayland_local_retirement(hwnd)) return;
+        status = manage_wayland_native_lease(hwnd, WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED,
+                                             &lease, &result);
+    }
+    else if (lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL)
+    {
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            BOOL pending = data->native_lease_sync_pending;
+            wayland_win_data_release(data);
+            if (pending) return;
+        }
+        activate_wayland_local_window(hwnd);
+        status = manage_wayland_native_lease(hwnd, WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE,
+                                             &lease, &result);
+    }
+    else
+        return;
+
+    if (status) WARN("Failed native lease action %#x for hwnd %p, status %#x.\n",
+                     lease.action, hwnd, status);
+}
+
 static NTSTATUS get_wayland_host_configure(HWND hwnd, struct wayland_host_configure *configure)
 {
     NTSTATUS status;
@@ -1292,6 +1468,9 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_HOST_CONFIGURE:
         wayland_configure_hosted_window(hwnd);
         return 0;
+    case WM_WAYLAND_NATIVE_LEASE:
+        wayland_handle_native_lease(hwnd);
+        return 0;
     case WM_WAYLAND_SET_FOREGROUND:
         NtUserSetForegroundWindowInternal(hwnd);
         return 0;
@@ -1559,8 +1738,11 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
     offscreen = InterlockedCompareExchange(&new_client->client.offscreen, 0, 0);
     if (!(data = wayland_win_data_get(hwnd))) return;
-    if (toplevel && (toplevel_data = wayland_win_data_get_nolock(toplevel)) &&
-        toplevel_data->wayland_surface)
+    toplevel_data = toplevel ? wayland_win_data_get_nolock(toplevel) : NULL;
+    if (data->native_host_suppressed ||
+        (toplevel_data && toplevel_data->native_host_suppressed))
+        visible = FALSE;
+    if (toplevel_data && toplevel_data->wayland_surface)
         parent_surface = toplevel_data->wayland_surface->wl_surface;
 
     TRACE("hwnd %p old client %p new client %p\n", hwnd, data->client_surface, new_client);

@@ -363,6 +363,7 @@ DECL_HANDLER(get_wayland_window_configure);
 DECL_HANDLER(set_wayland_window_configure_applied);
 DECL_HANDLER(get_wayland_window_configure_result);
 DECL_HANDLER(cancel_wayland_frame);
+DECL_HANDLER(manage_wayland_window_native_lease);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -723,6 +724,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_wayland_window_configure_applied,
     (req_handler)req_get_wayland_window_configure_result,
     (req_handler)req_cancel_wayland_frame,
+    (req_handler)req_manage_wayland_window_native_lease,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2892,3 +2894,17 @@ C_ASSERT( offsetof(struct cancel_wayland_frame_request, frame_id) == 40 );
 C_ASSERT( sizeof(struct cancel_wayland_frame_request) == 48 );
 C_ASSERT( offsetof(struct cancel_wayland_frame_reply, outstanding_frames) == 8 );
 C_ASSERT( sizeof(struct cancel_wayland_frame_reply) == 16 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, root) == 12 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, operation) == 16 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, host_epoch) == 24 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, root_identity) == 32 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, root_generation) == 40 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, scene_generation) == 48 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_request, request_id) == 56 );
+C_ASSERT( sizeof(struct manage_wayland_window_native_lease_request) == 64 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, host_epoch) == 8 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, scene_generation) == 16 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, request_id) == 24 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, state) == 32 );
+C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, action) == 36 );
+C_ASSERT( sizeof(struct manage_wayland_window_native_lease_reply) == 40 );

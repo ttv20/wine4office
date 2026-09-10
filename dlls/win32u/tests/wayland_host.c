@@ -67,6 +67,10 @@ enum host_child_command
     HOST_CHILD_COMMAND_POST_CONFIGURE,
     HOST_CHILD_COMMAND_GET_CONFIGURE,
     HOST_CHILD_COMMAND_GET_CONFIGURE_RESULT,
+    HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE,
+    HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER,
+    HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
+    HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -135,6 +139,9 @@ struct wayland_host_test_state
     UINT64 configure_request_id;
     UINT64 configure_applied_id;
     UINT64 configure_applied_revision;
+    UINT64 native_lease_host_epoch;
+    UINT64 native_lease_scene_generation;
+    UINT64 native_lease_request_id;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -177,6 +184,8 @@ struct wayland_host_test_state
     DWORD configure_state;
     DWORD configure_scale_120;
     DWORD configure_previous_state;
+    DWORD native_lease_state;
+    DWORD native_lease_action;
     struct rectangle window_rect;
     struct rectangle client_rect;
     WCHAR window_title[64];
@@ -254,6 +263,15 @@ struct wayland_configure_result_info
     DWORD width;
     DWORD height;
     DWORD state;
+};
+
+struct wayland_native_lease_info
+{
+    UINT64 host_epoch;
+    UINT64 scene_generation;
+    UINT64 request_id;
+    DWORD state;
+    DWORD action;
 };
 
 struct wayland_contributor_info
@@ -628,6 +646,37 @@ static NTSTATUS get_window_configure_result( HWND root, UINT64 host_epoch,
             info->width = reply->applied_width;
             info->height = reply->applied_height;
             info->state = reply->applied_state;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS manage_native_lease( HWND root, DWORD operation, UINT64 host_epoch,
+                                     UINT64 root_identity, UINT64 root_generation,
+                                     UINT64 scene_generation, UINT64 request_id,
+                                     struct wayland_native_lease_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( manage_wayland_window_native_lease )
+    {
+        req->root = wine_server_user_handle( root );
+        req->operation = operation;
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->scene_generation = scene_generation;
+        req->request_id = request_id;
+        status = p_wine_server_call( req );
+        if (!status)
+        {
+            info->host_epoch = reply->host_epoch;
+            info->scene_generation = reply->scene_generation;
+            info->request_id = reply->request_id;
+            info->state = reply->state;
+            info->action = reply->action;
         }
     }
     SERVER_END_REQ;
@@ -1232,6 +1281,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_window_state_info window_state;
     struct wayland_configure_info configure;
     struct wayland_configure_result_info configure_result;
+    struct wayland_native_lease_info native_lease;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -1435,6 +1485,44 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->configure_width = configure_result.width;
             state->configure_height = configure_result.height;
             state->configure_state = configure_result.state;
+            break;
+        case HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE:
+            state->command_status = manage_native_lease( (HWND)(UINT_PTR)state->root,
+                    WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST, state->host_epoch,
+                    state->root_identity, state->root_generation, 0, 0, &native_lease );
+            state->native_lease_host_epoch = native_lease.host_epoch;
+            state->native_lease_scene_generation = native_lease.scene_generation;
+            state->native_lease_request_id = native_lease.request_id;
+            state->native_lease_state = native_lease.state;
+            state->native_lease_action = native_lease.action;
+            break;
+        case HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER:
+            state->command_status = manage_native_lease( (HWND)(UINT_PTR)state->root,
+                    WINE_WAYLAND_NATIVE_LEASE_BEGIN_HOST_TRANSFER, state->host_epoch,
+                    state->root_identity, state->root_generation, state->scene_generation,
+                    state->native_lease_request_id, &native_lease );
+            state->native_lease_host_epoch = native_lease.host_epoch;
+            state->native_lease_scene_generation = native_lease.scene_generation;
+            state->native_lease_request_id = native_lease.request_id;
+            state->native_lease_state = native_lease.state;
+            state->native_lease_action = native_lease.action;
+            break;
+        case HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION:
+            state->command_status = manage_native_lease( (HWND)(UINT_PTR)state->root,
+                    WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION, 0, 0, 0, 0, 0,
+                    &native_lease );
+            break;
+        case HOST_CHILD_COMMAND_SET_HOST_RETIRED:
+            state->command_status = manage_native_lease( (HWND)(UINT_PTR)state->root,
+                    WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED, state->host_epoch,
+                    state->root_identity, state->root_generation,
+                    state->native_lease_scene_generation, state->native_lease_request_id,
+                    &native_lease );
+            state->native_lease_host_epoch = native_lease.host_epoch;
+            state->native_lease_scene_generation = native_lease.scene_generation;
+            state->native_lease_request_id = native_lease.request_id;
+            state->native_lease_state = native_lease.state;
+            state->native_lease_action = native_lease.action;
             break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
@@ -1657,6 +1745,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_host_root_info host_root;
     struct wayland_window_state_info window_state;
     struct wayland_configure_info configure;
+    struct wayland_native_lease_info native_lease;
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
     IDCompositionDevice *below_device = NULL, *above_device = NULL;
@@ -2586,6 +2675,111 @@ static void test_host_registration( const char *program, const char *test_name )
         "Hosted scene publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
+
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST, old_epoch,
+                                  root_identity, root_generation, 0, 0, &native_lease );
+    ok( status == STATUS_ACCESS_DENIED && !native_lease.state,
+        "Non-host native lease query returned %#lx, state %#lx.\n",
+        status, native_lease.state );
+    state->root = (UINT_PTR)root;
+    state->root_identity = root_identity;
+    state->root_generation = root_generation;
+    state->scene_generation = scene_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the prepared native lease.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE &&
+        state->native_lease_host_epoch == old_epoch &&
+        state->native_lease_scene_generation == scene_generation &&
+        !state->native_lease_request_id,
+        "Prepared native lease returned %#lx, state %#lx, action %#lx, epoch %s, scene %s, request %s.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action,
+        wine_dbgstr_longlong( state->native_lease_host_epoch ),
+        wine_dbgstr_longlong( state->native_lease_scene_generation ),
+        wine_dbgstr_longlong( state->native_lease_request_id ) );
+    state->root_identity ^= 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out beginning a transfer for the wrong root identity.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Wrong-identity native transfer returned %#lx.\n", state->command_status );
+    state->root_identity ^= 1;
+    state->scene_generation--;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out beginning a stale-scene transfer.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Stale-scene native transfer returned %#lx.\n", state->command_status );
+    state->scene_generation++;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out beginning the native transfer.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL &&
+        state->native_lease_request_id,
+        "Native transfer returned %#lx, state %#lx, action %#lx, request %s.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action,
+        wine_dbgstr_longlong( state->native_lease_request_id ) );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out replaying the native transfer.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL,
+        "Replayed native transfer returned %#lx, state %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION ),
+        "Timed out attempting a foreign local lease action query.\n" );
+    ok( state->command_status == STATUS_ACCESS_DENIED,
+        "Foreign local lease action query returned %#lx.\n", state->command_status );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION,
+                                  0, 0, 0, 0, 0, &native_lease );
+    ok( !status &&
+        native_lease.state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+        native_lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL &&
+        native_lease.host_epoch == old_epoch &&
+        native_lease.scene_generation == scene_generation && native_lease.request_id,
+        "Local retirement action returned %#lx, state %#lx, action %#lx, epoch %s, scene %s, request %s.\n",
+        status, native_lease.state, native_lease.action,
+        wine_dbgstr_longlong( native_lease.host_epoch ),
+        wine_dbgstr_longlong( native_lease.scene_generation ),
+        wine_dbgstr_longlong( native_lease.request_id ) );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id + 1,
+                                  &native_lease );
+    ok( status == STATUS_REVISION_MISMATCH,
+        "Stale local retirement returned %#lx.\n", status );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION,
+                                  0, 0, 0, 0, 0, &native_lease );
+    ok( !status, "Repeated local retirement action query returned %#lx.\n", status );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id,
+                                  &native_lease );
+    ok( !status && native_lease.state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        native_lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
+        "Local retirement returned %#lx, state %#lx, action %#lx.\n",
+        status, native_lease.state, native_lease.action );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id,
+                                  &native_lease );
+    ok( !status && native_lease.state == WINE_WAYLAND_NATIVE_LEASE_HOSTED,
+        "Repeated local retirement returned %#lx, state %#lx.\n",
+        status, native_lease.state );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the hosted native lease.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
+        "Hosted native lease returned %#lx, state %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action );
     state->binding_generation++;
     status = revoke_contributor( root, state );
     ok( status == STATUS_REVISION_MISMATCH,
@@ -3184,6 +3378,87 @@ static void test_host_registration( const char *program, const char *test_name )
         "Local-fallback publication returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the returning native lease.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST &&
+        state->native_lease_host_epoch == old_epoch &&
+        state->native_lease_scene_generation == scene_generation,
+        "Returning native lease returned %#lx, state %#lx, action %#lx, epoch %s, scene %s.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action,
+        wine_dbgstr_longlong( state->native_lease_host_epoch ),
+        wine_dbgstr_longlong( state->native_lease_scene_generation ) );
+    state->native_lease_scene_generation++;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_HOST_RETIRED ),
+        "Timed out acknowledging stale host retirement.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Stale host retirement returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out restoring the returning native lease query.\n" );
+    ok( !state->command_status &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST,
+        "Restored returning lease returned %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_action );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_HOST_RETIRED ),
+        "Timed out acknowledging host retirement.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL,
+        "Host retirement returned %#lx, state %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SET_HOST_RETIRED ),
+        "Timed out replaying host retirement.\n" );
+    ok( !state->command_status &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL,
+        "Replayed host retirement returned %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_action );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION,
+                                  0, 0, 0, 0, 0, &native_lease );
+    ok( !status &&
+        native_lease.state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
+        native_lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_ACTIVATE_LOCAL &&
+        native_lease.scene_generation == scene_generation,
+        "Local activation action returned %#lx, state %#lx, action %#lx, scene %s.\n",
+        status, native_lease.state, native_lease.action,
+        wine_dbgstr_longlong( native_lease.scene_generation ) );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id + 1,
+                                  &native_lease );
+    ok( status == STATUS_REVISION_MISMATCH,
+        "Stale local activation returned %#lx.\n", status );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION,
+                                  0, 0, 0, 0, 0, &native_lease );
+    ok( !status, "Repeated local activation action query returned %#lx.\n", status );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id,
+                                  &native_lease );
+    ok( !status && native_lease.state == WINE_WAYLAND_NATIVE_LEASE_LOCAL &&
+        native_lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
+        "Local activation returned %#lx, state %#lx, action %#lx.\n",
+        status, native_lease.state, native_lease.action );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_ACTIVE,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id,
+                                  &native_lease );
+    ok( !status && native_lease.state == WINE_WAYLAND_NATIVE_LEASE_LOCAL,
+        "Repeated local activation returned %#lx, state %#lx.\n",
+        status, native_lease.state );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the restored local lease.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_LOCAL &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
+        "Restored local lease returned %#lx, state %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action );
     state->frame_scene_generation = scene_generation;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
@@ -3209,6 +3484,41 @@ static void test_host_registration( const char *program, const char *test_name )
         "Frame-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
+    state->scene_generation = scene_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the rehost preparation.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST,
+        "Rehost preparation returned %#lx, state %#lx.\n",
+        state->command_status, state->native_lease_state );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER ),
+        "Timed out beginning the rehost transfer.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_TRANSFERRING_TO_HOST &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL,
+        "Rehost transfer returned %#lx, state %#lx, action %#lx.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_GET_LOCAL_ACTION,
+                                  0, 0, 0, 0, 0, &native_lease );
+    ok( !status && native_lease.action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_LOCAL,
+        "Rehost local retirement action returned %#lx, action %#lx.\n",
+        status, native_lease.action );
+    status = manage_native_lease( root, WINE_WAYLAND_NATIVE_LEASE_LOCAL_RETIRED,
+                                  native_lease.host_epoch, 0, 0,
+                                  native_lease.scene_generation, native_lease.request_id,
+                                  &native_lease );
+    ok( !status && native_lease.state == WINE_WAYLAND_NATIVE_LEASE_HOSTED,
+        "Rehost local retirement returned %#lx, state %#lx.\n",
+        status, native_lease.state );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the rehosted lease.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED,
+        "Rehosted lease returned %#lx, state %#lx.\n",
+        state->command_status, state->native_lease_state );
     state->frame_scene_generation = scene_generation - 1;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
@@ -3689,6 +3999,16 @@ static void test_host_registration( const char *program, const char *test_name )
     state->root = (UINT_PTR)root;
     state->root_identity = root_identity;
     state->root_generation = root_generation;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE ),
+        "Timed out querying the lease after host replacement.\n" );
+    ok( !state->command_status &&
+        state->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_UNAVAILABLE &&
+        state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE &&
+        state->native_lease_host_epoch == old_epoch,
+        "Replacement lease query returned %#lx, state %#lx, action %#lx, epoch %s.\n",
+        state->command_status, state->native_lease_state, state->native_lease_action,
+        wine_dbgstr_longlong( state->native_lease_host_epoch ) );
     state->configure_request_id = 1;
     state->configure_width = 100;
     state->configure_height = 82;

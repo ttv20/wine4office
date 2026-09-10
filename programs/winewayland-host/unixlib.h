@@ -40,7 +40,7 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
-#define WINEWAYLAND_HOST_STARTUP_VERSION 2
+#define WINEWAYLAND_HOST_STARTUP_VERSION 3
 
 struct winewayland_host_startup
 {
@@ -56,6 +56,8 @@ struct winewayland_host_startup
     volatile uint32_t discarded_frames;
     volatile uint32_t failed_frames;
     volatile uint32_t empty_scenes_applied;
+    volatile uint32_t native_host_activations;
+    volatile uint32_t native_local_activations;
     uint32_t reserved;
 };
 
