@@ -4124,7 +4124,33 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
 
+    while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
+    SetFocus( root );
+    state->input_event_id = 6;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending the host-exit key down.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( 'A' ) & 0x8000) &&
+        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
+        "Host-exit key down returned %#lx without pressed state or message.\n",
+        state->command_status );
+    state->input_event_id = 7;
+    state->input_type = INPUT_MOUSE;
+    state->input_flags = MOUSEEVENTF_LEFTDOWN;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending the host-exit pointer down.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Host-exit pointer down returned %#lx without pressed state.\n",
+        state->command_status );
     stop_host_child( state, command_event, result_event, &process );
+    ok( !(GetAsyncKeyState( 'A' ) & 0x8000) &&
+        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Host exit left the key pressed or did not queue key-up.\n" );
+    ok( !(GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Host exit left the pointer button pressed.\n" );
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Host query after peer exit returned %#lx.\n", status );
     ok( !info.process_id && !info.host_epoch && !info.ready,

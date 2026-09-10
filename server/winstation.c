@@ -145,6 +145,7 @@ static void expire_wayland_host_startup( void *private )
 
 static void clear_wayland_host_registration( struct desktop *desktop )
 {
+    release_wayland_host_inputs( desktop, 0 );
     revoke_wayland_desktop_streams( desktop );
     revoke_wayland_desktop_native_leases( desktop );
     if (desktop->wayland_host_process)
@@ -451,6 +452,7 @@ static bool desktop_init( struct object *obj, const void *init_data )
     memset( desktop->wayland_startup_device_uuid, 0,
             sizeof(desktop->wayland_startup_device_uuid) );
     desktop->wayland_host_ready = 0;
+    desktop->wayland_host_input_state = NULL;
     memset( &desktop->key_repeat, 0, sizeof(desktop->key_repeat) );
     list_init( &desktop->threads );
     list_init( &desktop->hotkeys );

@@ -282,8 +282,8 @@ or transport fixture is not Outlook support.
   releases Wine's depressed keys or pointer buttons. If a pure-edge burst
   fills the queue, the host replaces one edge with a full input reset instead
   of risking a permanently pressed key. Physical modifier reconciliation,
-  host-crash cleanup, IME/text input and a compositor-originated
-  pointer-recipient fixture remain pending.
+  IME/text input and a compositor-originated pointer-recipient fixture remain
+  pending.
 
 ## Contributor interception inventory
 
@@ -770,7 +770,12 @@ admitted.
   same reset used for keyboard leave and seat loss; the Intel DComp fixture
   still delivered one key-down and one key-up, completed seven Presents and
   left no task-prefix Wine process. That evidence is retained as
-  `artifacts/host-input-seat-reset-x64.log`.
+  `artifacts/host-input-seat-reset-x64.log`. Wineserver now also tracks the
+  exact hosted key and button downs in bounded per-desktop state. Host exit
+  releases only those tracked inputs before revoking its native leases and
+  streams. The authority fixture terminated a host with A and the left mouse
+  button held, observed both releases, and passed 660 checks with zero
+  failures.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

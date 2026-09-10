@@ -103,6 +103,7 @@ struct desktop
     unsigned int         wayland_host_device_uuid[4];
     unsigned int         wayland_startup_device_uuid[4];
     unsigned int         wayland_host_ready;
+    struct wayland_host_input_state *wayland_host_input_state;
 };
 
 /* user handles functions */
@@ -198,6 +199,7 @@ extern void activate_wayland_desktop_scenes( struct desktop *desktop );
 extern struct desktop *get_wayland_host_input_desktop( user_handle_t root,
         unsigned __int64 host_epoch, unsigned __int64 root_identity,
         unsigned __int64 root_generation, unsigned __int64 event_id );
+extern void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root );
 extern int is_child_window( user_handle_t parent, user_handle_t child );
 extern struct thread *make_window_foreground( struct desktop *desktop, user_handle_t window,
                                               int *is_desktop, int *set_foreground );

@@ -3843,6 +3843,8 @@ static void update_wayland_native_lease_scene( struct window *root )
         return;
     }
 
+    release_wayland_host_inputs( root->desktop, root->handle );
+
     if (root->wayland_scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK)
     {
         if (state == WINE_WAYLAND_NATIVE_LEASE_PREPARING_HOST)

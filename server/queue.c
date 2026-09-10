@@ -2352,6 +2352,112 @@ static void stop_key_repeat( struct desktop *desktop )
     memset( &desktop->key_repeat.input, 0, sizeof(desktop->key_repeat.input) );
 }
 
+#define WAYLAND_HOST_KEY_SLOTS 512
+#define WAYLAND_HOST_BUTTON_SLOTS 5
+
+struct wayland_host_input_state
+{
+    union hw_input keys[WAYLAND_HOST_KEY_SLOTS];
+    user_handle_t key_roots[WAYLAND_HOST_KEY_SLOTS];
+    union hw_input buttons[WAYLAND_HOST_BUTTON_SLOTS];
+    user_handle_t button_roots[WAYLAND_HOST_BUTTON_SLOTS];
+    unsigned int active_count;
+};
+
+static unsigned int get_wayland_host_key_slot( const union hw_input *input )
+{
+    return (input->kbd.scan & 0xff) |
+           ((input->kbd.flags & KEYEVENTF_EXTENDEDKEY) ? 0x100 : 0);
+}
+
+static int get_wayland_host_button_slot( unsigned int flags, int *released )
+{
+    *released = 0;
+    if (flags & MOUSEEVENTF_LEFTDOWN) return 0;
+    if (flags & MOUSEEVENTF_RIGHTDOWN) return 1;
+    if (flags & MOUSEEVENTF_MIDDLEDOWN) return 2;
+    if (flags & MOUSEEVENTF_XDOWN) return 3;
+    *released = 1;
+    if (flags & MOUSEEVENTF_LEFTUP) return 0;
+    if (flags & MOUSEEVENTF_RIGHTUP) return 1;
+    if (flags & MOUSEEVENTF_MIDDLEUP) return 2;
+    if (flags & MOUSEEVENTF_XUP) return 3;
+    return -1;
+}
+
+static int prepare_wayland_host_input_state( struct desktop *desktop,
+                                             const union hw_input *input )
+{
+    int released, slot;
+
+    if (desktop->wayland_host_input_state) return 1;
+    if (input->type == INPUT_KEYBOARD && (input->kbd.flags & KEYEVENTF_KEYUP)) return 1;
+    if (input->type == INPUT_MOUSE &&
+        ((slot = get_wayland_host_button_slot( input->mouse.flags, &released )) < 0 || released))
+        return 1;
+    if (!(desktop->wayland_host_input_state =
+            mem_alloc( sizeof(*desktop->wayland_host_input_state) )))
+        return 0;
+    memset( desktop->wayland_host_input_state, 0,
+            sizeof(*desktop->wayland_host_input_state) );
+    return 1;
+}
+
+static void update_wayland_host_input_state( struct desktop *desktop, user_handle_t root,
+                                             const union hw_input *input )
+{
+    struct wayland_host_input_state *state = desktop->wayland_host_input_state;
+    unsigned int key_slot;
+    int released, slot;
+
+    if (!state) return;
+    if (input->type == INPUT_KEYBOARD)
+    {
+        key_slot = get_wayland_host_key_slot( input );
+        if (input->kbd.flags & KEYEVENTF_KEYUP)
+        {
+            if (state->key_roots[key_slot])
+            {
+                memset( &state->keys[key_slot], 0, sizeof(state->keys[key_slot]) );
+                state->key_roots[key_slot] = 0;
+                --state->active_count;
+            }
+        }
+        else
+        {
+            if (!state->key_roots[key_slot]) ++state->active_count;
+            state->keys[key_slot] = *input;
+            state->key_roots[key_slot] = get_user_full_handle( root );
+        }
+    }
+    else if (input->type == INPUT_MOUSE &&
+             (slot = get_wayland_host_button_slot( input->mouse.flags, &released )) >= 0)
+    {
+        if (input->mouse.flags & (MOUSEEVENTF_XDOWN | MOUSEEVENTF_XUP))
+            slot += input->mouse.data == XBUTTON2;
+        if (released)
+        {
+            if (state->button_roots[slot])
+            {
+                memset( &state->buttons[slot], 0, sizeof(state->buttons[slot]) );
+                state->button_roots[slot] = 0;
+                --state->active_count;
+            }
+        }
+        else
+        {
+            if (!state->button_roots[slot]) ++state->active_count;
+            state->buttons[slot] = *input;
+            state->button_roots[slot] = get_user_full_handle( root );
+        }
+    }
+    if (!state->active_count)
+    {
+        free( state );
+        desktop->wayland_host_input_state = NULL;
+    }
+}
+
 /* queue a hardware message for a keyboard event */
 static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
                                    unsigned int origin, struct msg_queue *sender, int repeat )
@@ -2517,6 +2623,45 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
         queue_hardware_message( desktop, msg, 1 );
 
     return wait;
+}
+
+void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
+{
+    struct wayland_host_input_state *state = desktop->wayland_host_input_state;
+    union hw_input input;
+    unsigned int error, i;
+
+    if (!state) return;
+    error = get_error();
+    clear_error();
+    if (root) root = get_user_full_handle( root );
+    for (i = 0; i < ARRAY_SIZE(state->keys); ++i)
+    {
+        if (!state->key_roots[i] || (root && state->key_roots[i] != root)) continue;
+        input = state->keys[i];
+        input.kbd.flags |= KEYEVENTF_KEYUP;
+        queue_keyboard_message( desktop, 0, &input, IMO_HARDWARE, NULL, 0 );
+        memset( &state->keys[i], 0, sizeof(state->keys[i]) );
+        state->key_roots[i] = 0;
+        --state->active_count;
+    }
+    for (i = 0; i < ARRAY_SIZE(state->buttons); ++i)
+    {
+        if (!state->button_roots[i] || (root && state->button_roots[i] != root)) continue;
+        input = state->buttons[i];
+        input.mouse.flags <<= 1;
+        queue_mouse_message( desktop, 0, &input, IMO_HARDWARE, NULL, TRUE, NULL, 0 );
+        memset( &state->buttons[i], 0, sizeof(state->buttons[i]) );
+        state->button_roots[i] = 0;
+        --state->active_count;
+    }
+    if (!state->active_count)
+    {
+        free( state );
+        desktop->wayland_host_input_state = NULL;
+    }
+    if (error) set_error( error );
+    else clear_error();
 }
 
 struct pointer
@@ -3323,12 +3468,21 @@ DECL_HANDLER(send_wayland_host_input)
         set_error( STATUS_ACCESS_DENIED );
         goto done;
     }
+    if (!prepare_wayland_host_input_state( desktop, &input )) goto done;
 
     if (input.type == INPUT_MOUSE)
         queue_mouse_message( desktop, req->root, &input, IMO_HARDWARE, NULL,
                 !!(req->flags & SEND_HWMSG_RAWINPUT), NULL, 0 );
     else
         queue_keyboard_message( desktop, req->root, &input, IMO_HARDWARE, NULL, 0 );
+    if (!get_error())
+        update_wayland_host_input_state( desktop, req->root, &input );
+    else if (desktop->wayland_host_input_state &&
+            !desktop->wayland_host_input_state->active_count)
+    {
+        free( desktop->wayland_host_input_state );
+        desktop->wayland_host_input_state = NULL;
+    }
 
 done:
     release_object( desktop );
