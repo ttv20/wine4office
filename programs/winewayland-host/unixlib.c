@@ -48,6 +48,7 @@ struct registry_probe
     uint32_t capabilities;
     uint32_t seats[16];
     unsigned int seat_count;
+    struct wl_compositor *compositor;
 };
 
 static void registry_global(void *data, struct wl_registry *registry, uint32_t name,
@@ -55,10 +56,13 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
 {
     struct registry_probe *probe = data;
 
-    (void)registry;
-    (void)version;
     if (!strcmp(interface, wl_compositor_interface.name))
+    {
         probe->capabilities |= WINEWAYLAND_HOST_CAP_COMPOSITOR;
+        if (!probe->compositor)
+            probe->compositor = wl_registry_bind(registry, name,
+                    &wl_compositor_interface, min(version, 4));
+    }
     else if (!strcmp(interface, wl_shm_interface.name))
         probe->capabilities |= WINEWAYLAND_HOST_CAP_SHM;
     else if (!strcmp(interface, wl_seat_interface.name))
@@ -89,6 +93,12 @@ static const struct wl_registry_listener registry_listener =
     registry_global,
     registry_global_remove,
 };
+
+static void destroy_registry_probe(struct registry_probe *probe)
+{
+    if (probe->compositor) wl_compositor_destroy(probe->compositor);
+    probe->compositor = NULL;
+}
 
 #ifdef SONAME_LIBVULKAN
 
@@ -332,7 +342,7 @@ done:
 
 static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr,
         VkInstance instance, VkPhysicalDevice physical_device, struct wl_display *display,
-        const uint32_t expected_uuid[4], uint32_t device_uuid[4],
+        VkSurfaceKHR surface, const uint32_t expected_uuid[4], uint32_t device_uuid[4],
         struct vulkan_renderer *out_renderer)
 {
     static const char *const required_extensions[] =
@@ -367,15 +377,23 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
     PFN_vkEnumerateDeviceExtensionProperties p_vkEnumerateDeviceExtensionProperties;
     PFN_vkGetPhysicalDeviceImageFormatProperties2 p_vkGetPhysicalDeviceImageFormatProperties2;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties p_vkGetPhysicalDeviceQueueFamilyProperties;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR p_vkGetPhysicalDeviceSurfaceFormatsKHR;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR p_vkGetPhysicalDeviceSurfaceSupportKHR;
     PFN_vkGetPhysicalDeviceProperties2 p_vkGetPhysicalDeviceProperties2;
     PFN_vkGetPhysicalDeviceFeatures2 p_vkGetPhysicalDeviceFeatures2;
     PFN_vkDestroyDevice p_vkDestroyDevice;
     PFN_vkCreateDevice p_vkCreateDevice;
     VkQueueFamilyProperties *queues = NULL;
+    VkSurfaceFormatKHR *surface_formats = NULL;
+    VkSurfaceCapabilitiesKHR surface_capabilities;
     const char *extensions[ARRAY_SIZE(required_extensions)];
     VkExternalMemoryFeatureFlags memory_features;
     VkExternalSemaphoreFeatureFlags semaphore_features;
     uint32_t extension_count = ARRAY_SIZE(required_extensions), queue_count = 0, queue_family;
+    uint32_t surface_format_count = 0, surface_format_index;
+    VkBool32 surface_supported;
+    BOOL surface_format_supported = FALSE;
     float queue_priority = 1.0f;
     VkDevice device = VK_NULL_HANDLE;
     VkResult vr;
@@ -390,6 +408,9 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
     LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceWaylandPresentationSupportKHR);
     LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceImageFormatProperties2);
     LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceExternalSemaphoreProperties);
+    LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+    LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceSurfaceFormatsKHR);
+    LOAD_INSTANCE_FUNC(vkGetPhysicalDeviceSurfaceSupportKHR);
     LOAD_INSTANCE_FUNC(vkCreateDevice);
     LOAD_INSTANCE_FUNC(vkDestroyDevice);
 #undef LOAD_INSTANCE_FUNC
@@ -425,12 +446,50 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
         if ((queues[queue_family].queueFlags & VK_QUEUE_GRAPHICS_BIT) &&
             (!display || p_vkGetPhysicalDeviceWaylandPresentationSupportKHR(physical_device,
                     queue_family, display)))
-            break;
+        {
+            if (!surface || (!p_vkGetPhysicalDeviceSurfaceSupportKHR(physical_device,
+                    queue_family, surface, &surface_supported) && surface_supported))
+                break;
+        }
     free(queues);
     if (queue_family == queue_count)
     {
         fprintf(stderr, "Vulkan transport rejected device: no graphics Wayland presentation queue.\n");
         return FALSE;
+    }
+    if (surface)
+    {
+        if (p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface,
+                &surface_capabilities) ||
+            (surface_capabilities.supportedUsageFlags &
+             (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) !=
+             (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+            p_vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface,
+                    &surface_format_count, NULL) || !surface_format_count ||
+            !(surface_formats = calloc(surface_format_count, sizeof(*surface_formats))) ||
+            p_vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface,
+                    &surface_format_count, surface_formats))
+        {
+            free(surface_formats);
+            fprintf(stderr, "Vulkan transport rejected device: Wayland surface capabilities unavailable.\n");
+            return FALSE;
+        }
+        for (surface_format_index = 0; surface_format_index < surface_format_count;
+             ++surface_format_index)
+            if ((surface_formats[surface_format_index].format == VK_FORMAT_B8G8R8A8_UNORM ||
+                 surface_formats[surface_format_index].format == VK_FORMAT_UNDEFINED) &&
+                surface_formats[surface_format_index].colorSpace ==
+                        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+            {
+                surface_format_supported = TRUE;
+                break;
+            }
+        free(surface_formats);
+        if (!surface_format_supported)
+        {
+            fprintf(stderr, "Vulkan transport rejected device: BGRA8 Wayland surface format unavailable.\n");
+            return FALSE;
+        }
     }
 
     external_image_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
@@ -508,7 +567,8 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
 }
 
 static BOOL probe_vulkan_transport(struct wl_display *display,
-        const uint32_t expected_uuid[4], uint32_t device_uuid[4],
+        struct wl_surface *wayland_surface, const uint32_t expected_uuid[4],
+        uint32_t device_uuid[4],
         struct vulkan_renderer *out_renderer)
 {
     static const char *const instance_extensions[] =
@@ -521,10 +581,13 @@ static BOOL probe_vulkan_transport(struct wl_display *display,
     PFN_vkEnumeratePhysicalDevices p_vkEnumeratePhysicalDevices;
     PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
     PFN_vkDestroyInstance p_vkDestroyInstance = NULL;
+    PFN_vkDestroySurfaceKHR p_vkDestroySurfaceKHR = NULL;
+    PFN_vkCreateWaylandSurfaceKHR p_vkCreateWaylandSurfaceKHR;
     PFN_vkCreateInstance p_vkCreateInstance;
     VkPhysicalDevice *physical_devices = NULL;
     uint32_t count = 0, i;
     VkInstance instance = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
     void *vulkan_handle;
     VkResult vr;
     BOOL ret = FALSE;
@@ -551,6 +614,25 @@ static BOOL probe_vulkan_transport(struct wl_display *display,
         !(p_vkEnumeratePhysicalDevices = (void *)p_vkGetInstanceProcAddr(instance,
             "vkEnumeratePhysicalDevices")))
         goto done;
+    if (wayland_surface)
+    {
+        VkWaylandSurfaceCreateInfoKHR surface_info =
+                {VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR};
+
+        if (!(p_vkCreateWaylandSurfaceKHR = (void *)p_vkGetInstanceProcAddr(instance,
+                "vkCreateWaylandSurfaceKHR")) ||
+            !(p_vkDestroySurfaceKHR = (void *)p_vkGetInstanceProcAddr(instance,
+                "vkDestroySurfaceKHR")))
+            goto done;
+        surface_info.display = display;
+        surface_info.surface = wayland_surface;
+        if ((vr = p_vkCreateWaylandSurfaceKHR(instance, &surface_info, NULL, &surface)))
+        {
+            fprintf(stderr, "Vulkan transport unavailable: Wayland surface creation returned %d.\n",
+                    vr);
+            goto done;
+        }
+    }
     if ((vr = p_vkEnumeratePhysicalDevices(instance, &count, NULL)) || !count ||
         !(physical_devices = calloc(count, sizeof(*physical_devices))))
     {
@@ -561,11 +643,14 @@ static BOOL probe_vulkan_transport(struct wl_display *display,
     if ((vr = p_vkEnumeratePhysicalDevices(instance, &count, physical_devices))) goto done;
     for (i = 0; i < count; ++i)
         if ((ret = probe_vulkan_physical_device(p_vkGetInstanceProcAddr, instance,
-                physical_devices[i], display, expected_uuid, device_uuid, out_renderer)))
+                physical_devices[i], display, surface, expected_uuid, device_uuid,
+                out_renderer)))
             break;
 
 done:
     free(physical_devices);
+    if (surface && p_vkDestroySurfaceKHR)
+        p_vkDestroySurfaceKHR(instance, surface, NULL);
     if (ret && out_renderer)
     {
         out_renderer->vulkan_handle = vulkan_handle;
@@ -583,9 +668,11 @@ done:
 #else
 
 static BOOL probe_vulkan_transport(struct wl_display *display,
-        const uint32_t expected_uuid[4], uint32_t device_uuid[4], void *out_renderer)
+        struct wl_surface *wayland_surface, const uint32_t expected_uuid[4],
+        uint32_t device_uuid[4], void *out_renderer)
 {
     (void)display;
+    (void)wayland_surface;
     (void)expected_uuid;
     (void)device_uuid;
     (void)out_renderer;
@@ -692,8 +779,11 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
 static NTSTATUS create_renderer(void *args)
 {
     struct winewayland_host_renderer_create *params = args;
+    struct registry_probe registry_probe = {0};
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
     struct stat before, after;
+    struct wl_registry *registry = NULL;
+    struct wl_surface *surface = NULL;
     struct wl_display *display = NULL;
     uint32_t device_uuid[4] = {0};
     NTSTATUS status = STATUS_NOT_SUPPORTED;
@@ -719,8 +809,22 @@ static NTSTATUS create_renderer(void *args)
         status = STATUS_REPARSE_POINT_ENCOUNTERED;
         goto failed;
     }
-    if (!probe_vulkan_transport(display, params->device_uuid, device_uuid, &renderer))
+    if (!(registry = wl_display_get_registry(display)) ||
+        wl_registry_add_listener(registry, &registry_listener, &registry_probe) == -1 ||
+        wl_display_roundtrip(display) == -1)
+    {
+        status = STATUS_PORT_DISCONNECTED;
         goto failed;
+    }
+    if (!registry_probe.compositor ||
+        !(surface = wl_compositor_create_surface(registry_probe.compositor)) ||
+        !probe_vulkan_transport(display, surface, params->device_uuid, device_uuid, &renderer))
+        goto failed;
+    wl_surface_destroy(surface);
+    surface = NULL;
+    destroy_registry_probe(&registry_probe);
+    wl_registry_destroy(registry);
+    registry = NULL;
     renderer.display = display;
     display = NULL;
     memcpy(renderer.device_uuid, device_uuid, sizeof(renderer.device_uuid));
@@ -733,6 +837,9 @@ static NTSTATUS create_renderer(void *args)
     return STATUS_SUCCESS;
 
 failed:
+    if (surface) wl_surface_destroy(surface);
+    destroy_registry_probe(&registry_probe);
+    if (registry) wl_registry_destroy(registry);
     if (display) wl_display_disconnect(display);
     destroy_renderer();
     return status;
@@ -1595,7 +1702,7 @@ static NTSTATUS renderer_headless_self_test(void *args)
     (void)args;
     fprintf(stderr, "Vulkan transport headless test: selecting device.\n");
     if (renderer.device) return STATUS_DEVICE_BUSY;
-    if (!probe_vulkan_transport(NULL, NULL, device_uuid, &renderer))
+    if (!probe_vulkan_transport(NULL, NULL, NULL, device_uuid, &renderer))
         return STATUS_NOT_SUPPORTED;
     fprintf(stderr, "Vulkan transport headless test: device selected.\n");
     memcpy(renderer.device_uuid, device_uuid, sizeof(renderer.device_uuid));
@@ -1676,6 +1783,7 @@ static NTSTATUS probe_backend(void *args)
     struct registry_probe registry_probe = {0};
     struct stat before, after;
     struct wl_registry *registry = NULL;
+    struct wl_surface *surface = NULL;
     struct wl_display *display = NULL;
     const char *display_name;
     NTSTATUS status;
@@ -1732,11 +1840,16 @@ static NTSTATUS probe_backend(void *args)
     }
     if (registry_probe.seat_count > 1)
         params->capabilities |= WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS;
-    if (probe_vulkan_transport(display, NULL, params->device_uuid, NULL))
+    if (registry_probe.compositor)
+        surface = wl_compositor_create_surface(registry_probe.compositor);
+    if (surface && probe_vulkan_transport(display, surface, NULL,
+            params->device_uuid, NULL))
         params->capabilities |= WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT;
     status = STATUS_SUCCESS;
 
 done:
+    if (surface) wl_surface_destroy(surface);
+    destroy_registry_probe(&registry_probe);
     if (registry) wl_registry_destroy(registry);
     wl_display_disconnect(display);
     return status;

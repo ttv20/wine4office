@@ -22,12 +22,14 @@ or transport fixture is not Outlook support.
   ownership.
 - The host now probes a native Vulkan device before advertising transport
   support. Admission requires a graphics queue that can present to the probed
-  Wayland connection, opaque-FD import and export for the fixed BGRA8 transfer
-  image and timeline semaphore type, Vulkan 1.2, swapchain support and a
-  nonzero device UUID. It also creates and destroys a logical Vulkan device
-  with that exact extension set. Failure leaves the transport capability off
-  and reports the rejected requirement; basic host registration and local
-  fallback remain available.
+  Wayland connection and to a real unmapped `wl_surface` created on that exact
+  socket. The surface must expose an sRGB BGRA8 format and both color-attachment
+  and transfer-destination usage. Admission also requires opaque-FD import and
+  export for the fixed BGRA8 transfer image and timeline semaphore type,
+  Vulkan 1.2, swapchain support and a nonzero device UUID. It creates and
+  destroys a logical Vulkan device with that exact extension set. Failure
+  leaves the transport capability off and reports the rejected requirement;
+  basic host registration and local fallback remain available.
 - The host Unix renderer now has a bounded native Vulkan import primitive. It
   recreates the fixed BGRA8 optimal-tiling transfer image, requires the exact
   producer allocation size and memory-type index, imports opaque-FD dedicated
@@ -404,6 +406,16 @@ admitted.
   runner binaries and hashes are retained on `elkana-scadasudo` under
   `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/pixel-copy-{x64,i386}.log`
   and `pixel-copy-SHA256SUMS`.
+- Vulkan transport admission now creates a temporary compositor surface and a
+  matching `VkSurfaceKHR`, then checks the selected queue, usages and format
+  against that object before advertising transport. The surface remains
+  unmapped and has no shell role. The updated headless pixel regression still
+  passed in x86-64 and i386 on Intel. On the Radeon Wayland environment, both
+  probes passed the new surface checks and then honestly withheld transport at
+  the later unsupported opaque-FD semaphore gate, retaining capabilities
+  `0xf`. Logs and hashes are retained as `surface-gate-*` under the existing
+  Intel artifact directory and `/workspace/artifacts/` in
+  `dcomp-host-probe-20260909`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
