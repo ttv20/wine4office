@@ -74,6 +74,7 @@ enum wayland_window_message
     WM_WAYLAND_SET_FOREGROUND,
     WM_WAYLAND_DCOMP_EXPORT,
     WM_WAYLAND_SET_KEYBOARD_LAYOUT,
+    WM_WAYLAND_HOST_CONFIGURE = WM_WINE_WAYLAND_HOST_CONFIGURE,
 };
 
 enum wayland_surface_config_state

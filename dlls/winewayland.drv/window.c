@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 
 #include "ntstatus.h"
@@ -32,6 +33,7 @@
 #include "waylanddrv.h"
 
 #include "wine/debug.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
@@ -978,6 +980,147 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     }
 }
 
+struct wayland_host_configure
+{
+    UINT64 host_epoch;
+    UINT64 request_id;
+    UINT width;
+    UINT height;
+    UINT state;
+    UINT scale_120;
+    UINT previous_state;
+};
+
+static NTSTATUS get_wayland_host_configure(HWND hwnd, struct wayland_host_configure *configure)
+{
+    NTSTATUS status;
+
+    memset(configure, 0, sizeof(*configure));
+    SERVER_START_REQ(get_wayland_window_configure)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        if (!(status = wine_server_call(req)))
+        {
+            configure->host_epoch = reply->host_epoch;
+            configure->request_id = reply->request_id;
+            configure->width = reply->width;
+            configure->height = reply->height;
+            configure->state = reply->state;
+            configure->scale_120 = reply->scale_120;
+            configure->previous_state = reply->previous_state;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_wayland_host_configure_applied(HWND hwnd,
+        const struct wayland_host_configure *configure, UINT width, UINT height)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(set_wayland_window_configure_applied)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        req->width = width;
+        req->height = height;
+        req->state = configure->state;
+        req->host_epoch = configure->host_epoch;
+        req->request_id = configure->request_id;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static BOOL scale_wayland_host_dimension(UINT dimension, UINT scale_120, INT *result)
+{
+    UINT64 scaled = (UINT64)dimension * scale_120;
+
+    scaled = (scaled + 60) / 120;
+    if (scaled > INT_MAX) return FALSE;
+    *result = scaled;
+    return TRUE;
+}
+
+static void wayland_configure_hosted_window(HWND hwnd)
+{
+    struct wayland_host_configure configure;
+    BOOL needs_enter_size_move, needs_exit_size_move;
+    UINT applied_width = 0, applied_height = 0;
+    INT width = 0, height = 0;
+    INT64 right, bottom;
+    UINT flags = 0, dpi;
+    DWORD style;
+    RECT rect;
+    NTSTATUS status;
+
+    if ((status = get_wayland_host_configure(hwnd, &configure)))
+    {
+        TRACE("No hosted configure for hwnd %p, status %#x.\n", hwnd, status);
+        return;
+    }
+    if (!configure.host_epoch || !configure.request_id || !configure.scale_120)
+    {
+        WARN("Ignoring malformed hosted configure for hwnd %p.\n", hwnd);
+        return;
+    }
+
+    needs_enter_size_move = (configure.state & WINE_WAYLAND_CONFIGURE_STATE_RESIZING) &&
+                            !(configure.previous_state & WINE_WAYLAND_CONFIGURE_STATE_RESIZING);
+    needs_exit_size_move = !(configure.state & WINE_WAYLAND_CONFIGURE_STATE_RESIZING) &&
+                           (configure.previous_state & WINE_WAYLAND_CONFIGURE_STATE_RESIZING);
+    if (needs_enter_size_move) send_message(hwnd, WM_ENTERSIZEMOVE, 0, 0);
+    if (needs_exit_size_move) send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
+
+    dpi = NtUserGetDpiForWindow(hwnd);
+    if (!NtUserGetWindowRect(hwnd, &rect, dpi)) return;
+    style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+    if ((configure.state ^ configure.previous_state) &
+        (WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED |
+         WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN))
+        flags |= SWP_FRAMECHANGED;
+
+    if (!(configure.state & WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN) &&
+        (!(configure.state & WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED) !=
+         !(style & WS_MAXIMIZE)))
+        NtUserSetWindowLong(hwnd, GWL_STYLE, style ^ WS_MAXIMIZE, FALSE);
+
+    if (!configure.state || !configure.width || !configure.height ||
+        !scale_wayland_host_dimension(configure.width, configure.scale_120, &width) ||
+        !scale_wayland_host_dimension(configure.height, configure.scale_120, &height) ||
+        (right = (INT64)rect.left + width) > INT_MAX || right < INT_MIN ||
+        (bottom = (INT64)rect.top + height) > INT_MAX || bottom < INT_MIN)
+    {
+        flags |= SWP_NOSIZE;
+    }
+    else
+    {
+        rect.right = right;
+        rect.bottom = bottom;
+    }
+
+    flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOMOVE;
+    if (configure.state & (WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED |
+                           WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN |
+                           WINE_WAYLAND_CONFIGURE_STATE_TILED))
+        flags |= SWP_NOSENDCHANGING;
+    NtUserSetRawWindowPos(hwnd, rect, flags, FALSE);
+
+    if (!(flags & SWP_NOSIZE) && NtUserGetWindowRect(hwnd, &rect, dpi) &&
+        rect.right >= rect.left && rect.bottom >= rect.top)
+    {
+        applied_width = ((UINT64)(rect.right - rect.left) * 120 + configure.scale_120 / 2) /
+                        configure.scale_120;
+        applied_height = ((UINT64)(rect.bottom - rect.top) * 120 + configure.scale_120 / 2) /
+                         configure.scale_120;
+    }
+    status = set_wayland_host_configure_applied(hwnd, &configure,
+                                                applied_width, applied_height);
+    if (status) WARN("Failed to publish hosted configure %s for hwnd %p, status %#x.\n",
+                     wine_dbgstr_longlong(configure.request_id), hwnd, status);
+}
+
 static void wayland_configure_window(HWND hwnd)
 {
     struct wayland_surface *surface;
@@ -1145,6 +1288,9 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_WAYLAND_CONFIGURE:
         wayland_configure_window(hwnd);
+        return 0;
+    case WM_WAYLAND_HOST_CONFIGURE:
+        wayland_configure_hosted_window(hwnd);
         return 0;
     case WM_WAYLAND_SET_FOREGROUND:
         NtUserSetForegroundWindowInternal(hwnd);

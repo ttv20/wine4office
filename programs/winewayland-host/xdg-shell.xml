@@ -47,6 +47,16 @@
   </interface>
 
   <interface name="xdg_toplevel" version="1">
+    <enum name="state">
+      <entry name="maximized" value="1"/>
+      <entry name="fullscreen" value="2"/>
+      <entry name="resizing" value="3"/>
+      <entry name="activated" value="4"/>
+      <entry name="tiled_left" value="5"/>
+      <entry name="tiled_right" value="6"/>
+      <entry name="tiled_top" value="7"/>
+      <entry name="tiled_bottom" value="8"/>
+    </enum>
     <request name="destroy" type="destructor"/>
     <request name="set_parent">
       <arg name="parent" type="object" interface="xdg_toplevel" allow-null="true"/>

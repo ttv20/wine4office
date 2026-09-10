@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 986.
+Generated server protocol version: 987.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -235,6 +235,19 @@ or transport fixture is not Outlook support.
   normal Windows message queue. Replaying the same ID is idempotent and an
   older ID or recycled-root tuple is rejected, so a host retry cannot deliver
   two close requests or close a new window that reused the HWND value.
+- Xdg configure events now cross a bounded request/apply/ack path instead of
+  being acknowledged immediately by the host. The Unix renderer retains the
+  raw Wayland serial locally and exposes only a host-monotonic request ID,
+  dimensions and shell state. Wineserver authenticates the host epoch plus the
+  shared root identity and USER generation, keeps one coalescing configure slot
+  per logical window, and posts a payload-free driver doorbell to the owner
+  thread. `winewayland.drv` pulls that slot, applies sizing through the normal
+  Wine window path, and publishes the resulting state revision and logical
+  extent. The host acknowledges only the matching retained serial after that
+  applied ID returns. Stale applies are harmless, conflicting replays fail,
+  and a replacement host can restart its request numbering without accepting
+  an old epoch's response. The current host reports scale 120 because its
+  minimal shell adapter does not yet bind fractional-scale output state.
 
 ## Contributor interception inventory
 
@@ -606,6 +619,22 @@ admitted.
   `WM_CLOSE` delivery, idempotent replay and stale request rejection. Evidence
   is retained as `/workspace/artifacts/native-close-authority-{x64,i386}.log`,
   with exact binaries and hashes under `/workspace/artifacts/native-close-*`.
+- Protocol 987 configure-token authority and owner-thread dispatch passed 565
+  checks with zero failures and zero skips in both x86-64 and i386 on the
+  Radeon task environment. The tests cover foreign host and owner rejection,
+  root identity mismatch, invalid scale, one-slot coalescing, stale and
+  conflicting apply, zero-size configure, exact applied geometry, and request
+  numbering across a replacement host epoch. The coupled wineserver, ntdll,
+  host, win32u tests and Wayland driver rebuilt for both PE architectures and
+  the Unix libraries. Evidence is retained as
+  `/workspace/artifacts/configure-token-authority-{x64,i386}.log`, with exact
+  binaries and hashes under `/workspace/artifacts/configure-token-*` and the
+  coherent runner at `/workspace/runner-configure-token`.
+- A new Intel WSL validation environment was offered for this work, but its
+  SSH endpoint timed out during this tranche. No Wine process or prefix was
+  created there, and no replacement Intel runtime result is claimed. The
+  personal `elkana` laptop was not contacted after the user prohibited further
+  runs there.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

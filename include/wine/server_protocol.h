@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 4
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 5
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -46,6 +46,12 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_SCENE_HIDDEN         0x00000002
 #define WINE_WAYLAND_SCENE_HOSTED_CONTENT 0x00000003
 #define WINE_WAYLAND_SCENE_LOCAL_FALLBACK 0x00000004
+
+#define WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED  0x00000001
+#define WINE_WAYLAND_CONFIGURE_STATE_RESIZING   0x00000002
+#define WINE_WAYLAND_CONFIGURE_STATE_TILED      0x00000004
+#define WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN 0x00000008
+#define WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED  0x00000010
 
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
@@ -7072,6 +7078,88 @@ struct post_wayland_window_close_reply
 };
 
 
+struct post_wayland_window_configure_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     state;
+    unsigned int     scale_120;
+    unsigned int     flags;
+    char __pad_36[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 request_id;
+};
+struct post_wayland_window_configure_reply
+{
+    struct reply_header __header;
+    unsigned __int64 state_revision;
+    unsigned __int64 applied_id;
+    unsigned __int64 applied_revision;
+};
+
+
+struct get_wayland_window_configure_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+};
+struct get_wayland_window_configure_reply
+{
+    struct reply_header __header;
+    unsigned __int64 host_epoch;
+    unsigned __int64 request_id;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     state;
+    unsigned int     scale_120;
+    unsigned int     previous_state;
+    char __pad_44[4];
+};
+
+
+struct set_wayland_window_configure_applied_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     state;
+    char __pad_28[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 request_id;
+};
+struct set_wayland_window_configure_applied_reply
+{
+    struct reply_header __header;
+    unsigned __int64 applied_id;
+    unsigned __int64 state_revision;
+};
+
+
+
+struct get_wayland_window_configure_result_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+};
+struct get_wayland_window_configure_result_reply
+{
+    struct reply_header __header;
+    unsigned __int64 request_id;
+    unsigned __int64 applied_id;
+    unsigned __int64 applied_revision;
+    unsigned int     applied_width;
+    unsigned int     applied_height;
+    unsigned int     applied_state;
+    char __pad_44[4];
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7425,6 +7513,10 @@ enum request
     REQ_get_wayland_host_root,
     REQ_get_wayland_window_state,
     REQ_post_wayland_window_close,
+    REQ_post_wayland_window_configure,
+    REQ_get_wayland_window_configure,
+    REQ_set_wayland_window_configure_applied,
+    REQ_get_wayland_window_configure_result,
     REQ_NB_REQUESTS
 };
 
@@ -7783,6 +7875,10 @@ union generic_request
     struct get_wayland_host_root_request get_wayland_host_root_request;
     struct get_wayland_window_state_request get_wayland_window_state_request;
     struct post_wayland_window_close_request post_wayland_window_close_request;
+    struct post_wayland_window_configure_request post_wayland_window_configure_request;
+    struct get_wayland_window_configure_request get_wayland_window_configure_request;
+    struct set_wayland_window_configure_applied_request set_wayland_window_configure_applied_request;
+    struct get_wayland_window_configure_result_request get_wayland_window_configure_result_request;
 };
 union generic_reply
 {
@@ -8139,8 +8235,12 @@ union generic_reply
     struct get_wayland_host_root_reply get_wayland_host_root_reply;
     struct get_wayland_window_state_reply get_wayland_window_state_reply;
     struct post_wayland_window_close_reply post_wayland_window_close_reply;
+    struct post_wayland_window_configure_reply post_wayland_window_configure_reply;
+    struct get_wayland_window_configure_reply get_wayland_window_configure_reply;
+    struct set_wayland_window_configure_applied_reply set_wayland_window_configure_applied_reply;
+    struct get_wayland_window_configure_result_reply get_wayland_window_configure_result_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 986
+#define SERVER_PROTOCOL_VERSION 988
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

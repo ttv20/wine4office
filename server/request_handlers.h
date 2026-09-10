@@ -358,6 +358,10 @@ DECL_HANDLER(get_wayland_frame_result);
 DECL_HANDLER(get_wayland_host_root);
 DECL_HANDLER(get_wayland_window_state);
 DECL_HANDLER(post_wayland_window_close);
+DECL_HANDLER(post_wayland_window_configure);
+DECL_HANDLER(get_wayland_window_configure);
+DECL_HANDLER(set_wayland_window_configure_applied);
+DECL_HANDLER(get_wayland_window_configure_result);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -713,6 +717,10 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_wayland_host_root,
     (req_handler)req_get_wayland_window_state,
     (req_handler)req_post_wayland_window_close,
+    (req_handler)req_post_wayland_window_configure,
+    (req_handler)req_get_wayland_window_configure,
+    (req_handler)req_set_wayland_window_configure_applied,
+    (req_handler)req_get_wayland_window_configure_result,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2827,3 +2835,48 @@ C_ASSERT( offsetof(struct post_wayland_window_close_request, request_id) == 40 )
 C_ASSERT( sizeof(struct post_wayland_window_close_request) == 48 );
 C_ASSERT( offsetof(struct post_wayland_window_close_reply, state_revision) == 8 );
 C_ASSERT( sizeof(struct post_wayland_window_close_reply) == 16 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, root) == 12 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, width) == 16 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, height) == 20 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, state) == 24 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, scale_120) == 28 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, flags) == 32 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, host_epoch) == 40 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, root_identity) == 48 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, root_generation) == 56 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_request, request_id) == 64 );
+C_ASSERT( sizeof(struct post_wayland_window_configure_request) == 72 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_reply, state_revision) == 8 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_reply, applied_id) == 16 );
+C_ASSERT( offsetof(struct post_wayland_window_configure_reply, applied_revision) == 24 );
+C_ASSERT( sizeof(struct post_wayland_window_configure_reply) == 32 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_request, root) == 12 );
+C_ASSERT( sizeof(struct get_wayland_window_configure_request) == 16 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, host_epoch) == 8 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, request_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, width) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, height) == 28 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, state) == 32 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, scale_120) == 36 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, previous_state) == 40 );
+C_ASSERT( sizeof(struct get_wayland_window_configure_reply) == 48 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, root) == 12 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, width) == 16 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, height) == 20 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, state) == 24 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, host_epoch) == 32 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, request_id) == 40 );
+C_ASSERT( sizeof(struct set_wayland_window_configure_applied_request) == 48 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_reply, applied_id) == 8 );
+C_ASSERT( offsetof(struct set_wayland_window_configure_applied_reply, state_revision) == 16 );
+C_ASSERT( sizeof(struct set_wayland_window_configure_applied_reply) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_request, root) == 12 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_request, host_epoch) == 16 );
+C_ASSERT( sizeof(struct get_wayland_window_configure_result_request) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, request_id) == 8 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_id) == 16 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_revision) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_width) == 32 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_height) == 36 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_state) == 40 );
+C_ASSERT( sizeof(struct get_wayland_window_configure_result_reply) == 48 );

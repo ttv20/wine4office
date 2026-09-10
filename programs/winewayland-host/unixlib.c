@@ -46,7 +46,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 320);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 376);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
@@ -198,6 +198,11 @@ struct renderer_root
     uint32_t swapchain_height;
     BOOL swapchain_image_initialized[8];
     uint32_t configure_count;
+    uint32_t pending_configure_width;
+    uint32_t pending_configure_height;
+    uint32_t pending_configure_state;
+    uint32_t configure_serial;
+    uint64_t configure_request_id;
     int32_t width;
     int32_t height;
     BOOL configured;
@@ -266,6 +271,7 @@ struct vulkan_renderer
     VkQueue queue;
     VkCommandPool command_pool;
     uint32_t queue_family;
+    uint64_t next_configure_request_id;
     uint32_t device_uuid[4];
     VkPhysicalDeviceMemoryProperties memory_properties;
     PFN_vkDestroyInstance p_vkDestroyInstance;
@@ -493,9 +499,12 @@ static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *
 {
     struct renderer_root *root = data;
 
-    xdg_surface_ack_configure(xdg_surface, serial);
-    root->configured = TRUE;
-    ++root->configure_count;
+    (void)xdg_surface;
+    root->configure_serial = serial;
+    if (!++renderer.next_configure_request_id) ++renderer.next_configure_request_id;
+    root->configure_request_id = renderer.next_configure_request_id;
+    root->width = root->pending_configure_width;
+    root->height = root->pending_configure_height;
 }
 
 static const struct xdg_surface_listener renderer_root_xdg_surface_listener =
@@ -507,11 +516,36 @@ static void renderer_root_toplevel_configure(void *data, struct xdg_toplevel *to
         int32_t width, int32_t height, struct wl_array *states)
 {
     struct renderer_root *root = data;
+    uint32_t *state;
 
     (void)toplevel;
-    (void)states;
-    if (width > 0) root->width = width;
-    if (height > 0) root->height = height;
+    root->pending_configure_width = max(width, 0);
+    root->pending_configure_height = max(height, 0);
+    root->pending_configure_state = 0;
+    wl_array_for_each(state, states)
+    {
+        switch (*state)
+        {
+        case XDG_TOPLEVEL_STATE_MAXIMIZED:
+            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED;
+            break;
+        case XDG_TOPLEVEL_STATE_RESIZING:
+            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_RESIZING;
+            break;
+        case XDG_TOPLEVEL_STATE_TILED_LEFT:
+        case XDG_TOPLEVEL_STATE_TILED_RIGHT:
+        case XDG_TOPLEVEL_STATE_TILED_TOP:
+        case XDG_TOPLEVEL_STATE_TILED_BOTTOM:
+            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_TILED;
+            break;
+        case XDG_TOPLEVEL_STATE_FULLSCREEN:
+            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN;
+            break;
+        case XDG_TOPLEVEL_STATE_ACTIVATED:
+            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_ACTIVATED;
+            break;
+        }
+    }
 }
 
 static void renderer_root_toplevel_close(void *data, struct xdg_toplevel *toplevel)
@@ -1898,6 +1932,11 @@ static NTSTATUS sync_renderer_root(void *args)
     char title[96];
     uint32_t requested_width = params->requested_width;
     uint32_t requested_height = params->requested_height;
+    uint64_t configure_applied_id = params->configure_applied_id;
+    uint64_t configure_applied_revision = params->configure_applied_revision;
+    uint32_t configure_applied_width = params->configure_applied_width;
+    uint32_t configure_applied_height = params->configure_applied_height;
+    uint32_t configure_applied_state = params->configure_applied_state;
     NTSTATUS status;
     unsigned int i;
 
@@ -1907,6 +1946,11 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags = 0;
     params->width = params->height = 0;
     params->configure_count = 0;
+    params->configure_request_id = 0;
+    params->configure_width = 0;
+    params->configure_height = 0;
+    params->configure_state = 0;
+    params->configure_scale_120 = 0;
     params->present_result = VK_NOT_READY;
     params->present_status = STATUS_PENDING;
     if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
@@ -1962,6 +2006,26 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
 
 done:
+    if (configure_applied_id)
+    {
+        if (configure_applied_id > root->configure_request_id)
+            return STATUS_REVISION_MISMATCH;
+        if (configure_applied_id == root->configure_request_id && root->configure_serial)
+        {
+            if (configure_applied_state != root->pending_configure_state)
+                return STATUS_REVISION_MISMATCH;
+            if (configure_applied_width && configure_applied_height)
+                xdg_surface_set_window_geometry(root->xdg_surface, 0, 0,
+                        configure_applied_width, configure_applied_height);
+            xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
+            root->configure_serial = 0;
+            root->configured = TRUE;
+            ++root->configure_count;
+            root->window_state_revision = configure_applied_revision;
+            if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+                return STATUS_PORT_DISCONNECTED;
+        }
+    }
     if (params->window_state_revision &&
         params->window_state_revision != root->window_state_revision)
     {
@@ -1987,6 +2051,14 @@ done:
     params->width = root->swapchain ? root->swapchain_width : root->width;
     params->height = root->swapchain ? root->swapchain_height : root->height;
     params->configure_count = root->configure_count;
+    if (root->configure_serial)
+    {
+        params->configure_request_id = root->configure_request_id;
+        params->configure_width = root->pending_configure_width;
+        params->configure_height = root->pending_configure_height;
+        params->configure_state = root->pending_configure_state;
+        params->configure_scale_120 = 120;
+    }
     return STATUS_SUCCESS;
 }
 

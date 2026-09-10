@@ -4129,6 +4129,75 @@ static void dump_post_wayland_window_close_reply( const struct post_wayland_wind
     dump_uint64( " state_revision=", &req->state_revision );
 }
 
+static void dump_post_wayland_window_configure_request( const struct post_wayland_window_configure_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", state=%08x", req->state );
+    fprintf( stderr, ", scale_120=%08x", req->scale_120 );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", request_id=", &req->request_id );
+}
+
+static void dump_post_wayland_window_configure_reply( const struct post_wayland_window_configure_reply *req )
+{
+    dump_uint64( " state_revision=", &req->state_revision );
+    dump_uint64( ", applied_id=", &req->applied_id );
+    dump_uint64( ", applied_revision=", &req->applied_revision );
+}
+
+static void dump_get_wayland_window_configure_request( const struct get_wayland_window_configure_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+}
+
+static void dump_get_wayland_window_configure_reply( const struct get_wayland_window_configure_reply *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+    dump_uint64( ", request_id=", &req->request_id );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", state=%08x", req->state );
+    fprintf( stderr, ", scale_120=%08x", req->scale_120 );
+    fprintf( stderr, ", previous_state=%08x", req->previous_state );
+}
+
+static void dump_set_wayland_window_configure_applied_request( const struct set_wayland_window_configure_applied_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", state=%08x", req->state );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", request_id=", &req->request_id );
+}
+
+static void dump_set_wayland_window_configure_applied_reply( const struct set_wayland_window_configure_applied_reply *req )
+{
+    dump_uint64( " applied_id=", &req->applied_id );
+    dump_uint64( ", state_revision=", &req->state_revision );
+}
+
+static void dump_get_wayland_window_configure_result_request( const struct get_wayland_window_configure_result_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+}
+
+static void dump_get_wayland_window_configure_result_reply( const struct get_wayland_window_configure_result_reply *req )
+{
+    dump_uint64( " request_id=", &req->request_id );
+    dump_uint64( ", applied_id=", &req->applied_id );
+    dump_uint64( ", applied_revision=", &req->applied_revision );
+    fprintf( stderr, ", applied_width=%08x", req->applied_width );
+    fprintf( stderr, ", applied_height=%08x", req->applied_height );
+    fprintf( stderr, ", applied_state=%08x", req->applied_state );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4484,6 +4553,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_host_root_request,
     (dump_func)dump_get_wayland_window_state_request,
     (dump_func)dump_post_wayland_window_close_request,
+    (dump_func)dump_post_wayland_window_configure_request,
+    (dump_func)dump_get_wayland_window_configure_request,
+    (dump_func)dump_set_wayland_window_configure_applied_request,
+    (dump_func)dump_get_wayland_window_configure_result_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4839,6 +4912,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_host_root_reply,
     (dump_func)dump_get_wayland_window_state_reply,
     (dump_func)dump_post_wayland_window_close_reply,
+    (dump_func)dump_post_wayland_window_configure_reply,
+    (dump_func)dump_get_wayland_window_configure_reply,
+    (dump_func)dump_set_wayland_window_configure_applied_reply,
+    (dump_func)dump_get_wayland_window_configure_result_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5194,6 +5271,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_host_root",
     "get_wayland_window_state",
     "post_wayland_window_close",
+    "post_wayland_window_configure",
+    "get_wayland_window_configure",
+    "set_wayland_window_configure_applied",
+    "get_wayland_window_configure_result",
 };
 
 static const struct

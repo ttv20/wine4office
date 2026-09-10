@@ -186,6 +186,18 @@ struct window
     unsigned __int64 wayland_window_state_revision;
     unsigned __int64 wayland_close_host_epoch;
     unsigned __int64 wayland_close_request_id;
+    unsigned __int64 wayland_configure_host_epoch;
+    unsigned __int64 wayland_configure_request_id;
+    unsigned __int64 wayland_configure_applied_id;
+    unsigned __int64 wayland_configure_applied_revision;
+    unsigned int     wayland_configure_width;
+    unsigned int     wayland_configure_height;
+    unsigned int     wayland_configure_state;
+    unsigned int     wayland_configure_scale_120;
+    unsigned int     wayland_configure_applied_width;
+    unsigned int     wayland_configure_applied_height;
+    unsigned int     wayland_configure_applied_state;
+    unsigned int     wayland_configure_message_posted;
     unsigned int     wayland_scene_disposition;
     struct wayland_scene_registry *wayland_scene_registry;
 };
@@ -832,6 +844,18 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_scene_binding_generation = 0;
     win->wayland_scene_disposition = 0;
     win->wayland_scene_registry = NULL;
+    win->wayland_configure_host_epoch = 0;
+    win->wayland_configure_request_id = 0;
+    win->wayland_configure_applied_id = 0;
+    win->wayland_configure_applied_revision = 0;
+    win->wayland_configure_width = 0;
+    win->wayland_configure_height = 0;
+    win->wayland_configure_state = 0;
+    win->wayland_configure_scale_120 = 0;
+    win->wayland_configure_applied_width = 0;
+    win->wayland_configure_applied_height = 0;
+    win->wayland_configure_applied_state = 0;
+    win->wayland_configure_message_posted = 0;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
     win->wayland_window_state_revision = 1;
     list_init( &win->children );
@@ -4953,6 +4977,217 @@ DECL_HANDLER(post_wayland_window_close)
     if (req->request_id == root->wayland_close_request_id) return;
     post_message( root->handle, WM_CLOSE, 0, 0 );
     if (!get_error()) root->wayland_close_request_id = req->request_id;
+}
+
+static void reset_wayland_window_configure( struct window *root,
+                                            unsigned __int64 host_epoch )
+{
+    root->wayland_configure_host_epoch = host_epoch;
+    root->wayland_configure_request_id = 0;
+    root->wayland_configure_applied_id = 0;
+    root->wayland_configure_applied_revision = 0;
+    root->wayland_configure_width = 0;
+    root->wayland_configure_height = 0;
+    root->wayland_configure_state = 0;
+    root->wayland_configure_scale_120 = 0;
+    root->wayland_configure_applied_width = 0;
+    root->wayland_configure_applied_height = 0;
+    root->wayland_configure_applied_state = 0;
+    root->wayland_configure_message_posted = 0;
+}
+
+DECL_HANDLER(post_wayland_window_configure)
+{
+    const unsigned int valid_state = WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED |
+            WINE_WAYLAND_CONFIGURE_STATE_RESIZING | WINE_WAYLAND_CONFIGURE_STATE_TILED |
+            WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN | WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED;
+    struct obj_locator locator;
+    struct window *root;
+
+    reply->state_revision = 0;
+    reply->applied_id = 0;
+    reply->applied_revision = 0;
+    if (!req->root_identity || !req->root_generation || !req->request_id ||
+        req->width > 0x7fffffff || req->height > 0x7fffffff ||
+        !req->scale_120 || req->scale_120 > 960 || (req->state & ~valid_state) || req->flags)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    locator = get_shared_object_locator( root->shared );
+    if (locator.id != req->root_identity || (root->handle >> 16) != req->root_generation)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (root->wayland_configure_host_epoch != req->host_epoch)
+        reset_wayland_window_configure( root, req->host_epoch );
+    if (req->request_id < root->wayland_configure_request_id)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (req->request_id == root->wayland_configure_request_id &&
+        (req->width != root->wayland_configure_width ||
+         req->height != root->wayland_configure_height ||
+         req->state != root->wayland_configure_state ||
+         req->scale_120 != root->wayland_configure_scale_120))
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (req->request_id > root->wayland_configure_request_id)
+    {
+        root->wayland_configure_request_id = req->request_id;
+        root->wayland_configure_width = req->width;
+        root->wayland_configure_height = req->height;
+        root->wayland_configure_state = req->state;
+        root->wayland_configure_scale_120 = req->scale_120;
+    }
+    reply->state_revision = root->wayland_window_state_revision;
+    reply->applied_id = root->wayland_configure_applied_id;
+    reply->applied_revision = root->wayland_configure_applied_revision;
+    if (root->wayland_configure_applied_id != root->wayland_configure_request_id &&
+        !root->wayland_configure_message_posted)
+    {
+        post_message( root->handle, WM_WINE_WAYLAND_HOST_CONFIGURE, 0, 0 );
+        if (!get_error()) root->wayland_configure_message_posted = 1;
+    }
+}
+
+DECL_HANDLER(get_wayland_window_configure)
+{
+    struct window *root;
+
+    reply->host_epoch = 0;
+    reply->request_id = 0;
+    reply->width = 0;
+    reply->height = 0;
+    reply->state = 0;
+    reply->scale_120 = 0;
+    reply->previous_state = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!root->thread || root->thread != current)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!root->desktop->wayland_host_process || !root->desktop->wayland_host_ready ||
+        root->wayland_configure_host_epoch != root->desktop->wayland_host_epoch)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (!root->wayland_configure_request_id ||
+        root->wayland_configure_applied_id == root->wayland_configure_request_id)
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->host_epoch = root->wayland_configure_host_epoch;
+    reply->request_id = root->wayland_configure_request_id;
+    reply->width = root->wayland_configure_width;
+    reply->height = root->wayland_configure_height;
+    reply->state = root->wayland_configure_state;
+    reply->scale_120 = root->wayland_configure_scale_120;
+    reply->previous_state = root->wayland_configure_applied_state;
+    root->wayland_configure_message_posted = 0;
+}
+
+DECL_HANDLER(set_wayland_window_configure_applied)
+{
+    const unsigned int valid_state = WINE_WAYLAND_CONFIGURE_STATE_MAXIMIZED |
+            WINE_WAYLAND_CONFIGURE_STATE_RESIZING | WINE_WAYLAND_CONFIGURE_STATE_TILED |
+            WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN | WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED;
+    struct window *root;
+
+    reply->applied_id = 0;
+    reply->state_revision = 0;
+    if (req->width > 0x7fffffff || req->height > 0x7fffffff || (req->state & ~valid_state))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!root->thread || root->thread != current)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    reply->applied_id = root->wayland_configure_applied_id;
+    reply->state_revision = root->wayland_window_state_revision;
+    if (!root->desktop->wayland_host_process || !root->desktop->wayland_host_ready ||
+        req->host_epoch != root->desktop->wayland_host_epoch ||
+        req->host_epoch != root->wayland_configure_host_epoch)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (!req->request_id || req->request_id > root->wayland_configure_request_id)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    if (req->request_id < root->wayland_configure_request_id) return;
+    if (root->wayland_configure_applied_id == req->request_id)
+    {
+        reply->state_revision = root->wayland_configure_applied_revision;
+        if (req->width != root->wayland_configure_applied_width ||
+            req->height != root->wayland_configure_applied_height ||
+            req->state != root->wayland_configure_applied_state)
+            set_error( STATUS_REVISION_MISMATCH );
+        return;
+    }
+    root->wayland_configure_applied_id = req->request_id;
+    root->wayland_configure_applied_revision = root->wayland_window_state_revision;
+    root->wayland_configure_applied_width = req->width;
+    root->wayland_configure_applied_height = req->height;
+    root->wayland_configure_applied_state = req->state;
+    reply->applied_id = root->wayland_configure_applied_id;
+    reply->state_revision = root->wayland_configure_applied_revision;
+}
+
+DECL_HANDLER(get_wayland_window_configure_result)
+{
+    struct window *root;
+
+    reply->request_id = 0;
+    reply->applied_id = 0;
+    reply->applied_revision = 0;
+    reply->applied_width = 0;
+    reply->applied_height = 0;
+    reply->applied_state = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (root->wayland_configure_host_epoch != req->host_epoch) return;
+    reply->request_id = root->wayland_configure_request_id;
+    reply->applied_id = root->wayland_configure_applied_id;
+    reply->applied_revision = root->wayland_configure_applied_revision;
+    reply->applied_width = root->wayland_configure_applied_width;
+    reply->applied_height = root->wayland_configure_applied_height;
+    reply->applied_state = root->wayland_configure_applied_state;
 }
 
 void cleanup_process_wayland_scenes( struct process *process )
