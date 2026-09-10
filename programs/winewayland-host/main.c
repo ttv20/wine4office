@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 96);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 104);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -2047,6 +2047,16 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS arm_renderer_root_test_block(const struct host_root_info *root,
+        const struct host_window_state *state, const struct host_configure_result *configure)
+{
+    struct winewayland_host_renderer_root sync;
+
+    prepare_renderer_root_sync(&sync, root, state, configure);
+    sync.flags = WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT;
+    return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
+}
+
 static NTSTATUS process_root_frame_snapshot(struct host_renderer_root *root,
         uint64_t host_epoch, const struct host_window_state *state)
 {
@@ -2291,6 +2301,15 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     if ((status = get_host_scene(root->root, host_epoch, &scene))) return status;
     if ((status = ensure_renderer_root(root, &window_state, &configure, &renderer_root)))
         return status;
+    if (active_fixture_startup &&
+        InterlockedCompareExchange((LONG *)&active_fixture_startup->block_next_present,
+        0, 0) && !strcmp(window_state.title, "DComp host blocked root"))
+    {
+        if ((status = arm_renderer_root_test_block(root, &window_state, &configure)))
+            return status;
+        InterlockedExchange((LONG *)&active_fixture_startup->block_next_present, 0);
+        InterlockedIncrement((LONG *)&active_fixture_startup->block_present_armed);
+    }
     renderer_root->scene_generation = scene.scene_generation;
     renderer_root->scene_applied_generation = scene.applied_generation;
     renderer_root->scene_disposition = scene.disposition;
@@ -2752,7 +2771,29 @@ done:
     return ret;
 }
 
-static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test)
+static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *device,
+        ID3D11DeviceContext *context, const float color[4])
+{
+    ID3D11RenderTargetView *view = NULL;
+    ID3D11Texture2D *texture = NULL;
+    HRESULT hr;
+
+    if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
+            (void **)&texture))) return hr;
+    hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)texture, NULL, &view);
+    if (SUCCEEDED(hr))
+    {
+        ID3D11DeviceContext_ClearRenderTargetView(context, view, color);
+        ID3D11DeviceContext_Flush(context);
+        hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+    }
+    if (view) ID3D11RenderTargetView_Release(view);
+    ID3D11Texture2D_Release(texture);
+    return hr;
+}
+
+static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
+        BOOL multi_root)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2771,10 +2812,13 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     IDXGIDevice *dxgi_device = NULL;
     IDXGIFactory2 *factory = NULL;
     IDXGISwapChain1 *swapchain = NULL;
+    IDXGISwapChain1 *second_swapchain = NULL;
     IDCompositionDevice *dcomp_device = NULL;
     IDCompositionTarget *target = NULL;
+    IDCompositionTarget *second_target = NULL;
     IDCompositionTarget *fallback_target = NULL;
     IDCompositionVisual *visual = NULL;
+    IDCompositionVisual *second_visual = NULL;
     IDCompositionVisual *fallback_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, stop_event = NULL;
     HMODULE d3d11_module = NULL, dxgi_module = NULL, dcomp_module = NULL;
@@ -2787,10 +2831,13 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     RECT client_rect = {0}, window_rect = {0, 0, 64, 64};
     DWORD window_style = frame_test ? WS_OVERLAPPEDWINDOW : WS_POPUP;
     HWND window = NULL;
+    HWND second_window = NULL;
     NTSTATUS status;
     HRESULT hr = E_FAIL;
     DWORD wait;
     unsigned int i, present_count = 0;
+    uint32_t expected_imports = multi_root ? 2 * WINE_WAYLAND_BUFFER_POOL_SLOTS :
+            WINE_WAYLAND_BUFFER_POOL_SLOTS;
     int ret = 7;
 
     if ((status = get_backend_probe(&probe)))
@@ -2852,7 +2899,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         window_rect.bottom = 192;
         if (!AdjustWindowRectEx(&window_rect, window_style, FALSE, 0)) goto done;
     }
-    if (!(window = CreateWindowExW(0, L"static", L"DComp host pipeline", window_style,
+    if (!(window = CreateWindowExW(0, L"static", multi_root ? L"DComp host blocked root" :
+            L"DComp host pipeline", window_style,
             0, 0, window_rect.right - window_rect.left,
             window_rect.bottom - window_rect.top, NULL, NULL, NULL, NULL)) ||
             !GetClientRect(window, &client_rect) || client_rect.right <= 0 ||
@@ -2894,6 +2942,26 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
         goto done;
 
+    if (multi_root)
+    {
+        if (!(second_window = CreateWindowExW(0, L"static", L"DComp host second root",
+                WS_POPUP, 400, 0, client_rect.right, client_rect.bottom,
+                NULL, NULL, NULL, NULL)))
+            goto done;
+        ShowWindow(second_window, SW_SHOW);
+        if (FAILED(hr = IDXGIFactory2_CreateSwapChainForComposition(factory,
+                (IUnknown *)d3d_device, &desc, NULL, &second_swapchain)) ||
+                FAILED(hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device,
+                second_window, FALSE, &second_target)) ||
+                FAILED(hr = IDCompositionDevice_CreateVisual(dcomp_device,
+                &second_visual)) ||
+                FAILED(hr = IDCompositionVisual_SetContent(second_visual,
+                (IUnknown *)second_swapchain)) ||
+                FAILED(hr = IDCompositionTarget_SetRoot(second_target, second_visual)) ||
+                FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+            goto done;
+    }
+
     if (frame_test && !RedrawWindow(window, NULL, NULL,
             RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW))
     {
@@ -2906,22 +2974,11 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
      * first submission may finish before the asynchronous host import. */
     {
         static const float color[4] = {1.0f, 0.0f, 0.0f, 1.0f};
-        ID3D11RenderTargetView *view = NULL;
-        ID3D11Texture2D *texture = NULL;
 
-        if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
-                (void **)&texture))) goto done;
-        hr = ID3D11Device_CreateRenderTargetView(d3d_device, (ID3D11Resource *)texture,
-                NULL, &view);
-        if (SUCCEEDED(hr))
-        {
-            ID3D11DeviceContext_ClearRenderTargetView(context, view, color);
-            ID3D11DeviceContext_Flush(context);
-            hr = IDXGISwapChain1_Present(swapchain, 0, 0);
-        }
-        if (view) ID3D11RenderTargetView_Release(view);
-        ID3D11Texture2D_Release(texture);
-        if (FAILED(hr)) goto done;
+        if (FAILED(hr = present_test_color(swapchain, d3d_device, context, color)) ||
+                (multi_root && FAILED(hr = present_test_color(second_swapchain,
+                d3d_device, context, color))))
+            goto done;
     }
 
     if (automatic_host)
@@ -3015,7 +3072,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     }
 
     for (i = 0; i < 500 && InterlockedCompareExchange(
-            (LONG *)&startup->imported_slots, 0, 0) != WINE_WAYLAND_BUFFER_POOL_SLOTS; ++i)
+            (LONG *)&startup->imported_slots, 0, 0) != expected_imports; ++i)
     {
         MSG message;
 
@@ -3027,11 +3084,144 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         Sleep(10);
     }
     if (InterlockedCompareExchange((LONG *)&startup->imported_slots, 0, 0) !=
-            WINE_WAYLAND_BUFFER_POOL_SLOTS)
+            expected_imports)
     {
         hr = HRESULT_FROM_NT(STATUS_IO_TIMEOUT);
         fprintf(stderr, "dcomp_pipeline=failed waiting for imports=%u\n",
                 startup->imported_slots);
+        goto done;
+    }
+
+    if (multi_root)
+    {
+        static const float colors[][4] =
+        {
+            {1.0f, 0.0f, 0.0f, 1.0f},
+            {0.0f, 1.0f, 0.0f, 1.0f},
+            {0.0f, 0.0f, 1.0f, 1.0f},
+        };
+
+        for (i = 0; i < 8; ++i)
+        {
+            IDXGISwapChain1 *current = i & 1 ? second_swapchain : swapchain;
+            uint32_t completed_before, completed_after;
+            unsigned int wait_count;
+
+            completed_before = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (FAILED(hr = present_test_color(current, d3d_device, context,
+                    colors[i % ARRAY_SIZE(colors)])))
+                break;
+            for (wait_count = 0; wait_count < 500; ++wait_count)
+            {
+                MSG message;
+
+                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                completed_after = InterlockedCompareExchange(
+                        (LONG *)&startup->presented_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+                if (completed_after > completed_before) break;
+                Sleep(10);
+            }
+            if (wait_count == 500)
+            {
+                hr = HRESULT_FROM_NT(STATUS_IO_TIMEOUT);
+                break;
+            }
+        }
+        if (FAILED(hr) || i != 8 || startup->imported_slots != expected_imports ||
+                startup->presented_frames < 8 || startup->failed_frames ||
+                startup->native_host_activations < 2)
+        {
+            fprintf(stderr, "dcomp_multi_root=failed hr=%#lx iterations=%u imports=%u presented=%u discarded=%u failed=%u host_activations=%u\n",
+                    hr, i, startup->imported_slots, startup->presented_frames,
+                    startup->discarded_frames, startup->failed_frames,
+                    startup->native_host_activations);
+            goto done;
+        }
+
+        {
+            uint32_t armed_before = InterlockedCompareExchange(
+                    (LONG *)&startup->block_present_armed, 0, 0);
+            uint32_t completed_before, completed_after;
+            unsigned int wait_count;
+
+            InterlockedExchange((LONG *)&startup->block_next_present, 1);
+            for (wait_count = 0; wait_count < 500 && InterlockedCompareExchange(
+                    (LONG *)&startup->block_present_armed, 0, 0) == armed_before; ++wait_count)
+            {
+                MSG message;
+
+                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                Sleep(10);
+            }
+            if (wait_count == 500)
+            {
+                fprintf(stderr, "dcomp_multi_root=failed blocked root was not armed\n");
+                goto done;
+            }
+            completed_before = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (FAILED(hr = present_test_color(swapchain, d3d_device, context, colors[0])))
+                goto done;
+            Sleep(100);
+            if (FAILED(hr = present_test_color(second_swapchain, d3d_device, context,
+                    colors[1])))
+                goto done;
+            for (wait_count = 0; wait_count < 150; ++wait_count)
+            {
+                MSG message;
+
+                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                completed_after = InterlockedCompareExchange(
+                        (LONG *)&startup->presented_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+                if (completed_after > completed_before) break;
+                Sleep(10);
+            }
+            if (wait_count == 150)
+            {
+                fprintf(stderr, "dcomp_multi_root=failed second root stalled behind blocked root\n");
+                goto done;
+            }
+            for (wait_count = 0; wait_count < 500; ++wait_count)
+            {
+                completed_after = InterlockedCompareExchange(
+                        (LONG *)&startup->presented_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+                if (completed_after >= completed_before + 2) break;
+                Sleep(10);
+            }
+            if (wait_count == 500 || startup->failed_frames)
+            {
+                fprintf(stderr, "dcomp_multi_root=failed blocked root did not recover, completed=%u expected=%u failed=%u\n",
+                        completed_after, completed_before + 2, startup->failed_frames);
+                goto done;
+            }
+        }
+        printf("dcomp_multi_root=passed imports=%u presented=%u discarded=%u host_activations=%u alternating=passed blocked_fairness=passed\n",
+                startup->imported_slots, startup->presented_frames,
+                startup->discarded_frames, startup->native_host_activations);
+        ret = 0;
         goto done;
     }
 
@@ -3329,6 +3519,11 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     ret = 0;
 
 done:
+    if (second_target)
+    {
+        IDCompositionTarget_SetRoot(second_target, NULL);
+        if (dcomp_device) IDCompositionDevice_Commit(dcomp_device);
+    }
     if (fallback_target)
     {
         IDCompositionTarget_SetRoot(fallback_target, NULL);
@@ -3360,15 +3555,19 @@ done:
     }
     if (fallback_visual) IDCompositionVisual_Release(fallback_visual);
     if (fallback_target) IDCompositionTarget_Release(fallback_target);
+    if (second_visual) IDCompositionVisual_Release(second_visual);
+    if (second_target) IDCompositionTarget_Release(second_target);
     if (visual) IDCompositionVisual_Release(visual);
     if (target) IDCompositionTarget_Release(target);
     if (dcomp_device) IDCompositionDevice_Release(dcomp_device);
     if (swapchain) IDXGISwapChain1_Release(swapchain);
+    if (second_swapchain) IDXGISwapChain1_Release(second_swapchain);
     if (factory) IDXGIFactory2_Release(factory);
     if (dxgi_device) IDXGIDevice_Release(dxgi_device);
     if (context) ID3D11DeviceContext_Release(context);
     if (d3d_device) ID3D11Device_Release(d3d_device);
     if (window) DestroyWindow(window);
+    if (second_window) DestroyWindow(second_window);
     if (stop_event) SetEvent(stop_event);
     if (process.hProcess)
     {
@@ -3401,13 +3600,15 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, TRUE);
+        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE, FALSE);
+        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -3417,7 +3618,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
             argv[0]);
     return 2;
 }

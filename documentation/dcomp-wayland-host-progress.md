@@ -146,14 +146,10 @@ or transport fixture is not Outlook support.
   frame is pinned through the queue-ordered fence, so pool retirement cannot
   destroy it during the WSI read. Frame release now explicitly destroys the
   immutable host copy after its final WSI reader. Queue submission and
-  `vkQueuePresentKHR` now run on a bounded 96-entry renderer executor instead
-  of the host event-loop thread. Each root and copied frame retains its own
-  completion state, so the event loop can continue dispatching Wayland and
-  server work while Vulkan is pending. The current executor owns the
-  renderer's single Vulkan queue; a wedged queue therefore no longer blocks
-  event dispatch, but it still stalls GPU work for every root on that renderer.
-  Per-window device isolation and a timeout quarantine remain pending before
-  multi-window admission.
+  `vkQueuePresentKHR` run on each root's bounded 18-entry executor instead of
+  the host event-loop thread. Each root and copied frame retains its own
+  completion state, device and queue, so the event loop and unrelated roots
+  continue progressing while one Vulkan present is pending.
   Transport admission also requires `VK_KHR_present_id` and
   `VK_KHR_present_wait`. Every WSI submission carries a nonzero per-root
   present ID, and the executor waits up to one second for that exact ID before
@@ -171,7 +167,8 @@ or transport fixture is not Outlook support.
   frame records, while contributor revocation or host replacement cancels the
   queue and credits without releasing pinned resources before tombstone
   acknowledgement. The real host now enumerates these accepted frames and
-  copies each ready producer slot into one of 32 bounded host-owned records.
+  copies each ready producer slot into a host-owned record, with no more than
+  16 records admitted for any one root.
   It marks the source slot reusable only after fence completion. A frame-level
   failure cannot become terminal until the host has made the source slot safe;
   recovery for permanent pre-submit failures remains pending.
@@ -298,10 +295,10 @@ or transport fixture is not Outlook support.
   their last frame and WSI reader are gone before destroying it. A stalled
   present-wait on one root therefore cannot block GPU submission or present
   completion on another root. The renderer ABI carries the server-issued root
-  identity on every import. Wineserver still temporarily admits contributors
-  on only one root until the simultaneous-root authority and blocked-window
-  fixtures pass; this is now a validation gate rather than a shared-queue
-  limitation.
+  identity on every import. Host-owned frame records are partitioned into a
+  16-frame budget per root, so one producer cannot consume the global record
+  pool. Wineserver now admits independent contributors on multiple logical
+  roots in the same desktop.
 - Native non-client rendering is part of the host WSI image. DComp may admit
   an identity composition swapchain whose extent matches the client area even
   when the root has a title bar, border or resize frame. The guest invalidates
@@ -901,6 +898,21 @@ fixtures before generic applications can be admitted.
   `artifacts/window-hide-restore-{final-x64,popup-regression-x64,wsi-i386}.log`
   in the Intel task directory. Both laptops ended with zero task-owned Wine
   processes; the Intel laptop retained 62 GiB free.
+- Multi-root admission removed the former desktop-wide one-root gate. The
+  updated x86-64 authority suite accepted a second simultaneous root and
+  passed all 721 checks with zero failures on Radeon. On Intel Iris Xe, one
+  host created two xdg roots and two root-private Vulkan devices, imported six
+  transport slots and completed ten alternating frames without a discard or
+  failure. The fixture then delayed the first root's worker by three seconds;
+  the second root completed within 1.5 seconds and the first subsequently
+  recovered, proving the absence of cross-root queue head-of-line blocking.
+  The x86-64 decorated, popup/rehost and WSI regressions and the i386 WSI path
+  remained green. Evidence is retained as
+  `/workspace/artifacts/multi-root-authority-x64.log` on the Radeon task
+  environment and `artifacts/multi-root-blocked-20260911-023723.log` plus
+  `artifacts/per-root-device-20260911-023526-*.log` in the Intel task
+  directory. Both environments ended with zero task-owned Wine processes;
+  the Intel laptop retained 62 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

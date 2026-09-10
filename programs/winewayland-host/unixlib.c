@@ -146,11 +146,12 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #ifdef SONAME_LIBVULKAN
 
 #define RENDERER_POOL_SLOTS 3
-#define MAX_RENDERER_FRAMES 32
 #define MAX_RENDERER_ROOTS 64
 #define MAX_RENDERER_POOLS_PER_ROOT 2
 #define MAX_RENDERER_POOLS (MAX_RENDERER_ROOTS * MAX_RENDERER_POOLS_PER_ROOT)
-#define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES + MAX_RENDERER_ROOTS)
+#define MAX_RENDERER_FRAMES_PER_ROOT 16
+#define MAX_RENDERER_FRAMES (MAX_RENDERER_ROOTS * MAX_RENDERER_FRAMES_PER_ROOT)
+#define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES_PER_ROOT + 2)
 #define MAX_RENDERER_INPUT_EVENTS 256
 
 struct renderer_frame;
@@ -188,6 +189,7 @@ struct renderer_queue_job
             VkFence fence;
             uint64_t present_id;
             uint32_t image_index;
+            uint32_t test_delay_ms;
             VkResult present_result;
         } present;
     } u;
@@ -255,6 +257,7 @@ struct renderer_root
     BOOL present_fence_submitted;
     BOOL present_complete;
     BOOL recreate_swapchain;
+    BOOL test_block_next_present;
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
@@ -944,6 +947,8 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
 
     if (job->type == RENDERER_QUEUE_JOB_PRESENT)
     {
+        if (job->u.present.test_delay_ms)
+            usleep((useconds_t)job->u.present.test_delay_ms * 1000);
         submit_info.waitSemaphoreCount = 1;
         submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
         submit_info.pWaitDstStageMask = &wait_stage;
@@ -2338,7 +2343,7 @@ static NTSTATUS process_renderer_frame(void *args)
     uint64_t ready_counter, reuse_counter;
     uint32_t slot_index;
     uint32_t memory_type;
-    unsigned int i;
+    unsigned int i, root_frame_count = 0;
     NTSTATUS status;
     VkResult vr;
 
@@ -2381,6 +2386,10 @@ static NTSTATUS process_renderer_frame(void *args)
         }
     if (!slot) return STATUS_NOT_FOUND;
     queue = slot->device_queue;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].frame_id && renderer.frames[i].device_queue == queue)
+            ++root_frame_count;
+    if (root_frame_count >= MAX_RENDERER_FRAMES_PER_ROOT) return STATUS_PENDING;
     if ((vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->ready,
             &ready_counter)) ||
         (vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->reuse,
@@ -2804,6 +2813,8 @@ static NTSTATUS sync_renderer_root(void *args)
     uint32_t configure_applied_width = params->configure_applied_width;
     uint32_t configure_applied_height = params->configure_applied_height;
     uint32_t configure_applied_state = params->configure_applied_state;
+    BOOL test_block_next_present = !!(params->flags &
+            WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT);
     NTSTATUS status, wsi_status = STATUS_SUCCESS;
     unsigned int i;
 
@@ -2879,6 +2890,7 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
 
 done:
+    if (test_block_next_present) root->test_block_next_present = TRUE;
     if (configure_applied_id)
     {
         if (configure_applied_id > root->configure_request_id)
@@ -3306,6 +3318,11 @@ static NTSTATUS present_renderer_root(void *args)
     if (!++root->next_present_id) ++root->next_present_id;
     queue_job.u.present.present_id = root->next_present_id;
     queue_job.u.present.image_index = image_index;
+    if (root->test_block_next_present)
+    {
+        queue_job.u.present.test_delay_ms = 3000;
+        root->test_block_next_present = FALSE;
+    }
     if ((status = enqueue_renderer_queue_job(queue, &queue_job)))
     {
         root->acquire_semaphore = root->present_semaphore = VK_NULL_HANDLE;

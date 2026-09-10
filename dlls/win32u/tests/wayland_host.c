@@ -2973,9 +2973,13 @@ static void test_host_registration( const char *program, const char *test_name )
         wine_dbgstr_longlong( state->registry_generation ) );
     status = create_contributor( second_root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
                                  WINE_WAYLAND_TARGET_BELOW, 1, &second_root_state );
-    ok( status == STATUS_DEVICE_BUSY && !second_root_state.contributor_id,
+    ok( !status && second_root_state.contributor_id &&
+        (second_root_state.grant_low || second_root_state.grant_high) &&
+        second_root_state.registry_generation == 1,
         "Second hosted root returned %#lx, contributor %s.\n", status,
         wine_dbgstr_longlong( second_root_state.contributor_id ) );
+    DestroyWindow( second_root );
+    second_root = NULL;
     status = get_contributor( root, old_epoch, 0, &contributor );
     ok( status == STATUS_ACCESS_DENIED, "Non-host contributor query returned %#lx.\n", status );
 
