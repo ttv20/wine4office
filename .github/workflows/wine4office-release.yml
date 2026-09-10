@@ -109,9 +109,22 @@ jobs:
         run: python3 programs/wine4officeauth/tests/test_authorize_url.py
       - name: Test canonical Wine build contract
         run: tools/wine-build-env/tests/test_build_contract.sh
+      - name: Test AppImage packaging contract
+        run: tools/wine4office-manager/packaging/distribution/tests/test-package-builders.sh appimage
 
       - name: Configure and build Wine4Office
+        env:
+          WINE4OFFICE_RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: tools/wine-build-env/run-build-container.sh full "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/build" "$GITHUB_WORKSPACE/stage"
+
+      - name: Verify Wine4Office version branding
+        run: |
+          expected='wine4office-${{ steps.version.outputs.version }} (Wine '
+          actual=$(stage/opt/wine4office/bin/wine --version)
+          [[ $actual == "$expected"*')' ]] || {
+            echo "Unexpected Wine version: $actual" >&2
+            exit 1
+          }
 
       - name: Bundle Wine Gecko and Mono
         shell: bash
@@ -172,8 +185,143 @@ jobs:
             '${{ steps.version.outputs.version }}' \
             "$CONFIGURED_METADATA_URL" \
             "$release_base_url" \
-            '${{ steps.version.outputs.channel }}'
+            '${{ steps.version.outputs.channel }}' \
+            "$(sed -n 's/^Wine version //p' VERSION)"
           install -m 0755 install.sh release/install.sh
+
+      - name: Build distribution packages from release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          container_workspace=/work
+          workspace_args=(--mount "type=bind,src=$GITHUB_WORKSPACE,dst=$container_workspace")
+          if [[ -n ${HOSTNAME:-} ]] && docker container inspect "$HOSTNAME" >/dev/null 2>&1; then
+            workspace_args=(--volumes-from "$HOSTNAME")
+            container_workspace=$GITHUB_WORKSPACE
+          fi
+          manager="$container_workspace/release/Wine4OfficeManager-${version}-x86_64"
+          runner="$container_workspace/release/wine4office-${version}-x86_64.tar.zst"
+          docker run --rm --init \
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" ubuntu:24.04 bash -eu -c '
+              apt-get update
+              apt-get install -y --no-install-recommends dpkg-dev python3 zstd
+              tools/wine4office-manager/packaging/distribution/build-deb.sh \
+                "$1" "$2" "$3" apt wine4office "$4/release"
+            ' -- "$manager" "$runner" "$version" "$container_workspace"
+          docker run --rm --init \
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" fedora:latest bash -eu -c '
+              dnf install -y python3 rpm-build tar zstd
+              tools/wine4office-manager/packaging/distribution/build-rpm.sh \
+                "$1" "$2" "$3" dnf wine4office "$4/release"
+            ' -- "$manager" "$runner" "$version" "$container_workspace"
+          python3 tools/wine4office-manager/packaging/distribution/generate-community-packages.py \
+            release/release.json release/community
+          tar -C release/community --sort=name --mtime=@0 --owner=0 --group=0 \
+            --numeric-owner -czf "release/wine4office-${version}-aur.tar.gz" aur
+          tar -C release/community --sort=name --mtime=@0 --owner=0 --group=0 \
+            --numeric-owner -czf "release/wine4office-${version}-nix.tar.gz" nix
+
+      - name: Build and smoke-test AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          mkdwarfs="$RUNNER_TEMP/mkdwarfs"
+          runtime="$RUNNER_TEMP/uruntime-appimage-dwarfs-lite-x86_64"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
+            --output "$mkdwarfs" \
+            https://github.com/mhx/dwarfs/releases/download/v0.15.6/dwarfs-universal-0.15.6-Linux-x86_64
+          echo "50891c38ba359db8271819a6cbf6aaa8068681523f0c4f2b8242007a45edaa28  $mkdwarfs" \
+            | sha256sum --check
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --show-error \
+            --output "$runtime" \
+            https://github.com/VHSgunzo/uruntime/releases/download/v0.7.1/uruntime-appimage-dwarfs-lite-x86_64
+          echo "f19d2a58b5f7cb372b8a88b1e9414fd118d8da6d2c555cf3e7c0bac9373b8af9  $runtime" \
+            | sha256sum --check
+          chmod 0755 "$mkdwarfs" "$runtime"
+          APPIMAGE_MKDWARFS="$mkdwarfs" APPIMAGE_RUNTIME="$runtime" \
+            tools/wine4office-manager/packaging/distribution/build-appimage.sh \
+              "release/Wine4OfficeManager-${version}-x86_64" \
+              "release/wine4office-${version}-x86_64.tar.zst" \
+              release/release.json release/install.sh release
+
+          appimage="$GITHUB_WORKSPACE/release/Wine4Office-${version}-x86_64.AppImage"
+          test_home=$(mktemp -d)
+          APPIMAGE_EXTRACT_AND_RUN=1 HOME="$test_home" \
+          XDG_DATA_HOME="$test_home/.local/share" \
+          WINE4OFFICE_HOME="$test_home/.local/share/wine4office" \
+          WINE4OFFICE_BIN_HOME="$test_home/.local/bin" \
+            "$appimage" --appimage-install-only
+          mv "$appimage" "$appimage.after-install"
+          QT_QPA_PLATFORM=offscreen \
+            "$test_home/.local/share/wine4office/bin/Wine4OfficeManager" --smoke-test
+          "$test_home/.local/share/wine4office/runner/bin/wine" --version \
+            | grep -Fx "wine4office-${version} (Wine $(sed -n 's/^Wine version //p' VERSION))"
+          mv "$appimage.after-install" "$appimage"
+
+      - name: Build testable static repository trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ steps.version.outputs.version }}'
+          mkdir -p release/repositories
+          deb=$(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -name 'wine4office_*_amd64.deb' -print -quit)
+          rpm=$(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -name 'wine4office-*.x86_64.rpm' -print -quit)
+          test -n "$deb" && test -n "$rpm"
+          container_workspace=/work
+          workspace_args=(--mount "type=bind,src=$GITHUB_WORKSPACE,dst=$container_workspace")
+          if [[ -n ${HOSTNAME:-} ]] && docker container inspect "$HOSTNAME" >/dev/null 2>&1; then
+            workspace_args=(--volumes-from "$HOSTNAME")
+            container_workspace=$GITHUB_WORKSPACE
+          fi
+          deb="$container_workspace/release/$(basename "$deb")"
+          rpm="$container_workspace/release/$(basename "$rpm")"
+          manager="$container_workspace/release/Wine4OfficeManager-${version}-x86_64"
+          repositories="$container_workspace/release/repositories"
+          docker run --rm --init \
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" ubuntu:24.04 bash -eu -c '
+              apt-get update
+              apt-get install -y --no-install-recommends apt-utils
+              tools/wine4office-manager/packaging/distribution/build-apt-repository.sh \
+                "$3/apt" stable "$1"
+              printf "deb [trusted=yes] file:$3/apt stable main\n" \
+                > /etc/apt/sources.list.d/wine4office-test.list
+              apt-get update
+              apt-get install -y --no-install-recommends wine4office
+              cmp /opt/wine4office/bin/Wine4OfficeManager "$2"
+              useradd --create-home package-test
+              runuser -u package-test -- env QT_QPA_PLATFORM=offscreen \
+                /opt/wine4office/bin/Wine4OfficeManager --smoke-test
+              runuser -u package-test -- \
+                /opt/wine4office/runner/bin/wine --version
+            ' -- "$deb" "$manager" "$repositories"
+          docker run --rm --init \
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" fedora:latest bash -eu -c '
+              dnf install -y createrepo_c diffutils shadow-utils util-linux
+              tools/wine4office-manager/packaging/distribution/build-rpm-repository.sh \
+                "$3" "$1"
+              printf "%s\n" \
+                "[wine4office-test]" \
+                "name=Wine4Office test" \
+                "baseurl=file://$3/rpm/x86_64" \
+                "enabled=1" \
+                "gpgcheck=0" \
+                > /etc/yum.repos.d/wine4office-test.repo
+              dnf install -y wine4office
+              cmp /opt/wine4office/bin/Wine4OfficeManager "$2"
+              useradd --create-home package-test
+              runuser -u package-test -- env QT_QPA_PLATFORM=offscreen \
+                /opt/wine4office/bin/Wine4OfficeManager --smoke-test
+              runuser -u package-test -- \
+                /opt/wine4office/runner/bin/wine --version
+            ' -- "$rpm" "$manager" "$repositories"
+          tar -C release/repositories --sort=name --mtime=@0 --owner=0 --group=0 \
+            --numeric-owner -czf "release/wine4office-${version}-repositories-unsigned.tar.gz" .
 
       - name: Upload Wine4OfficeManager CI artifact
         uses: actions/upload-artifact@v4
@@ -204,6 +352,21 @@ jobs:
             release/install.sh
           if-no-files-found: error
 
+      - name: Upload distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine4office-distribution-packages-${{ steps.version.outputs.version }}
+          path: |
+            release/*.deb
+            release/*.rpm
+            release/Wine4Office-${{ steps.version.outputs.version }}-x86_64.AppImage
+            release/Wine4Office-${{ steps.version.outputs.version }}-x86_64.AppImage.sha256
+            release/wine4office-${{ steps.version.outputs.version }}-aur.tar.gz
+            release/wine4office-${{ steps.version.outputs.version }}-nix.tar.gz
+            release/wine4office-${{ steps.version.outputs.version }}-repositories-unsigned.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
       - name: Publish tagged GitHub release
         if: steps.version.outputs.tagged_release == 'true'
         shell: bash
@@ -222,6 +385,13 @@ jobs:
             "release/wine4office-${version}-x86_64.tar.zst.sha256"
             "release/install.sh"
             "release/release.json"
+            "release/"*.deb
+            "release/"*.rpm
+            "release/Wine4Office-${version}-x86_64.AppImage"
+            "release/Wine4Office-${version}-x86_64.AppImage.sha256"
+            "release/wine4office-${version}-aur.tar.gz"
+            "release/wine4office-${version}-nix.tar.gz"
+            "release/wine4office-${version}-repositories-unsigned.tar.gz"
           )
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \

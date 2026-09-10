@@ -3,10 +3,10 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 RUNNER_DIR MANAGER_BINARY OUTPUT_DIR VERSION METADATA_URL [RELEASE_BASE_URL] [CHANNEL]" >&2
+    echo "Usage: $0 RUNNER_DIR MANAGER_BINARY OUTPUT_DIR VERSION METADATA_URL [RELEASE_BASE_URL] [CHANNEL] [WINE_BASE_VERSION]" >&2
     exit 2
 }
-[[ $# -ge 5 && $# -le 7 ]] || usage
+[[ $# -ge 5 && $# -le 8 ]] || usage
 
 RUNNER=$(cd "$1" && pwd)
 MANAGER=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
@@ -15,6 +15,7 @@ VERSION=$4
 METADATA_URL=$5
 RELEASE_BASE_URL=${6:-}
 CHANNEL=${7:-stable}
+WINE_BASE_VERSION=${8:-}
 
 [[ -x "$RUNNER/bin/wine" ]] || { echo "Runner has no executable bin/wine: $RUNNER" >&2; exit 1; }
 [[ -x "$MANAGER" ]] || { echo "Wine4Office Manager binary is missing or not executable: $MANAGER" >&2; exit 1; }
@@ -28,6 +29,15 @@ mono="$RUNNER/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi"
 [[ -f "$mono" ]] || { echo "Runner is missing bundled Wine Mono: $mono" >&2; exit 1; }
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
+if [[ -n $WINE_BASE_VERSION ]]; then
+    [[ $WINE_BASE_VERSION =~ ^[0-9]+([.][0-9A-Za-z]+)+([-+][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
+        echo "Unsafe Wine base version: $WINE_BASE_VERSION" >&2; exit 1;
+    }
+    [[ $("$RUNNER/bin/wine" --version) == "wine4office-${VERSION} (Wine ${WINE_BASE_VERSION})" ]] || {
+        echo "Wine runner branding does not match the release and base versions" >&2
+        exit 1
+    }
+fi
 command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
@@ -81,6 +91,7 @@ tar --zstd -tf "$TMP/$WINE_NAME" \
 )
 
 VERSION="$VERSION" CHANNEL="$CHANNEL" METADATA_URL="$METADATA_URL" \
+WINE_BASE_VERSION="$WINE_BASE_VERSION" \
 RELEASE_BASE_URL="$RELEASE_BASE_URL" MANAGER_NAME="$MANAGER_NAME" WINE_NAME="$WINE_NAME" \
 MANAGER_SHA256="$(sha256sum "$TMP/$MANAGER_NAME" | cut -d ' ' -f 1)" \
 MANAGER_SIZE="$(stat -c '%s' "$TMP/$MANAGER_NAME")" \
@@ -129,6 +140,8 @@ release = {
         "format": "tar.zst",
     },
 }
+if os.environ["WINE_BASE_VERSION"]:
+    release["wine"]["base_version"] = os.environ["WINE_BASE_VERSION"]
 with open(sys.argv[1], "w", encoding="utf-8") as destination:
     json.dump(release, destination, indent=2)
     destination.write("\n")

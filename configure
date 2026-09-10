@@ -891,6 +891,7 @@ build_os
 build_vendor
 build_cpu
 build
+WINE4OFFICE_VERSION
 system_dllpath
 ECHO_T
 ECHO_N
@@ -945,6 +946,7 @@ enable_silent_rules
 enable_werror
 with_alsa
 with_capi
+with_wine4office_version
 with_coreaudio
 with_cups
 with_dbus
@@ -2624,6 +2626,9 @@ Optional Packages:
   --without-PACKAGE       do not use PACKAGE (same as --with-PACKAGE=no)
   --without-alsa          do not use the Alsa sound support
   --without-capi          do not use CAPI (ISDN support)
+  --with-wine4office-version=VERSION
+                          brand the Wine build with a Wine4Office release
+                          version
   --without-coreaudio     do not use the CoreAudio sound support
   --without-cups          do not use CUPS
   --without-dbus          do not use DBus (dynamic device support)
@@ -4355,6 +4360,13 @@ then :
 fi
 
 
+# Check whether --with-wine4office-version was given.
+if test ${with_wine4office_version+y}
+then :
+  withval=$with_wine4office_version;
+fi
+
+
 # Check whether --with-coreaudio was given.
 if test ${with_coreaudio+y}
 then :
@@ -4684,6 +4696,32 @@ if test ${with_wine64+y}
 then :
   withval=$with_wine64;
 fi
+
+
+case $with_wine4office_version in #(
+  no) :
+    with_wine4office_version= ;; #(
+  yes) :
+    as_fn_error $? "--with-wine4office-version requires an explicit VERSION value" "$LINENO" 5 ;; #(
+  *[!A-Za-z0-9._+-]*) :
+    as_fn_error $? "invalid Wine4Office release version: $with_wine4office_version" "$LINENO" 5 ;; #(
+  *) :
+     ;;
+esac
+if test -n "$with_wine4office_version"
+then :
+  case $with_wine4office_version in #(
+  [A-Za-z0-9]*) :
+     ;; #(
+  *) :
+    as_fn_error $? "invalid Wine4Office release version: $with_wine4office_version" "$LINENO" 5 ;;
+esac
+  if test ${#with_wine4office_version} -gt 128
+then :
+  as_fn_error $? "Wine4Office release version is longer than 128 characters" "$LINENO" 5
+fi
+fi
+WINE4OFFICE_VERSION=$with_wine4office_version
 
 
 
@@ -23787,7 +23825,7 @@ fi
 
 as_fn_append wine_rules "
 dlls/ntdll/unix/version.c: dummy
-	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[] = \"\\1\";/p'\` && (echo \$\$version | cmp -s - \$@) || echo \$\$version >\$@ || (rm -f \$@ && exit 1)
+	@if test -n \"\$(WINE4OFFICE_VERSION)\"; then version='const char wine_build[] = \"wine4office-\$(WINE4OFFICE_VERSION) (Wine \$(PACKAGE_VERSION))\";'; else version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[] = \"\\1\";/p'\`; fi && (echo \$\$version | cmp -s - \$@) || echo \$\$version >\$@ || (rm -f \$@ && exit 1)
 programs/winetest/build.rc: dummy
 	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$@) || echo \$\$build >\$@ || (rm -f \$@ && exit 1)
 dlls/wineandroid.drv/wine-debug.apk: dlls/wineandroid.drv/build.gradle ${wine_srcdir}dlls/wineandroid.drv/AndroidManifest.xml ${wine_srcdir}dlls/wineandroid.drv/WineActivity.java ${wine_srcdir}dlls/wineandroid.drv/wine.svg
@@ -24501,6 +24539,7 @@ ECHO_C = $ECHO_C
 ECHO_N = $ECHO_N
 ECHO_T = $ECHO_T
 system_dllpath = $system_dllpath
+WINE4OFFICE_VERSION = $WINE4OFFICE_VERSION
 build = $build
 build_cpu = $build_cpu
 build_vendor = $build_vendor

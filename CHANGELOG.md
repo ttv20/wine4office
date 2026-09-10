@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
+- Add AppImage, AUR, Nix, Ubuntu, and Fedora packages with durable user installs, package-manager updates, and startup checks.
+- Keep Authenticode verification working with multi-digit OpenSSL patch versions.
+- Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.
 - Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.

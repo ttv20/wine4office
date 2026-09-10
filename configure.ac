@@ -28,6 +28,7 @@ AC_ARG_ENABLE(werror, AS_HELP_STRING([--enable-werror],[treat compilation warnin
 
 AC_ARG_WITH(alsa,      AS_HELP_STRING([--without-alsa],[do not use the Alsa sound support]))
 AC_ARG_WITH(capi,      AS_HELP_STRING([--without-capi],[do not use CAPI (ISDN support)]))
+AC_ARG_WITH(wine4office-version, AS_HELP_STRING([--with-wine4office-version=VERSION],[brand the Wine build with a Wine4Office release version]))
 AC_ARG_WITH(coreaudio, AS_HELP_STRING([--without-coreaudio],[do not use the CoreAudio sound support]))
 AC_ARG_WITH(cups,      AS_HELP_STRING([--without-cups],[do not use CUPS]))
 AC_ARG_WITH(dbus,      AS_HELP_STRING([--without-dbus],[do not use DBus (dynamic device support)]))
@@ -90,6 +91,18 @@ AC_ARG_WITH(system-dllpath,AS_HELP_STRING([--with-system-dllpath=PATH],[load ext
             AC_SUBST(system_dllpath,[$withval]))
 AC_ARG_WITH(wine-tools,AS_HELP_STRING([--with-wine-tools=DIR],[use Wine tools from directory DIR]))
 AC_ARG_WITH(wine64,    AS_HELP_STRING([--with-wine64=DIR],[use the 64-bit Wine in DIR for a Wow64 build]))
+
+AS_CASE([$with_wine4office_version],
+        [no], [with_wine4office_version=],
+        [yes], [AC_MSG_ERROR([--with-wine4office-version requires an explicit VERSION value])],
+        [*[[!A-Za-z0-9._+-]]*], [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])
+AS_IF([test -n "$with_wine4office_version"],
+      [AS_CASE([$with_wine4office_version],
+               [[A-Za-z0-9]]*, [],
+               [AC_MSG_ERROR([invalid Wine4Office release version: $with_wine4office_version])])
+       AS_IF([test ${#with_wine4office_version} -gt 128],
+             [AC_MSG_ERROR([Wine4Office release version is longer than 128 characters])])])
+AC_SUBST([WINE4OFFICE_VERSION], [$with_wine4office_version])
 
 AC_CANONICAL_HOST
 AC_SUBST(srcdir)
@@ -3846,7 +3859,7 @@ dnl Rules for generated source files
 
 WINE_APPEND_RULE(
 [dlls/ntdll/unix/version.c: dummy
-	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1\";/p'\` && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
+	@if test -n \"\$(WINE4OFFICE_VERSION)\"; then version='const char wine_build[[]] = \"wine4office-\$(WINE4OFFICE_VERSION) (Wine \$(PACKAGE_VERSION))\";'; else version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1\";/p'\`; fi && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
 programs/winetest/build.rc: dummy
 	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$[@]) || echo \$\$build >\$[@] || (rm -f \$[@] && exit 1)
 dlls/wineandroid.drv/wine-debug.apk: dlls/wineandroid.drv/build.gradle ${wine_srcdir}dlls/wineandroid.drv/AndroidManifest.xml ${wine_srcdir}dlls/wineandroid.drv/WineActivity.java ${wine_srcdir}dlls/wineandroid.drv/wine.svg

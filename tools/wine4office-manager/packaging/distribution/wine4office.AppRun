@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Install the bundled Wine4Office release once, then run the durable user installation.
+set -euo pipefail
+
+APPDIR=${APPDIR:-$(cd "$(dirname "$0")" && pwd)}
+PAYLOAD=$APPDIR/payload
+DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+ROOT=${WINE4OFFICE_HOME:-$DATA_HOME/wine4office}
+MANAGER=$ROOT/bin/Wine4OfficeManager
+INSTALL_ONLY=false
+
+if [[ ${1:-} == --appimage-install-only ]]; then
+    INSTALL_ONLY=true
+    shift
+fi
+
+[[ -r $PAYLOAD/VERSION && -r $PAYLOAD/METADATA_URL ]] || {
+    echo "Wine4Office AppImage payload metadata is missing." >&2
+    exit 1
+}
+BUNDLED_VERSION=$(<"$PAYLOAD/VERSION")
+METADATA_URL=$(<"$PAYLOAD/METADATA_URL")
+
+version_order() {
+    python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
+
+def split_version(value):
+    if not pattern.fullmatch(value):
+        raise SystemExit(f"invalid installed version: {value!r}")
+    precedence = value.split("+", 1)[0]
+    release, separator, prerelease = precedence.partition("-")
+    release_parts = []
+    for token in re.findall(r"[0-9]+|[A-Za-z]+", release):
+        release_parts.append((1, int(token)) if token.isdigit() else (0, token.lower()))
+    return release_parts, prerelease.split(".") if separator else None
+
+def compare(left, right):
+    left_release, left_pre = split_version(left)
+    right_release, right_pre = split_version(right)
+    for index in range(max(len(left_release), len(right_release))):
+        left_part = left_release[index] if index < len(left_release) else (1, 0)
+        right_part = right_release[index] if index < len(right_release) else (1, 0)
+        if left_part != right_part:
+            return 1 if left_part > right_part else -1
+    if left_pre is None or right_pre is None:
+        if left_pre is right_pre:
+            return 0
+        return 1 if left_pre is None else -1
+    for index in range(max(len(left_pre), len(right_pre))):
+        if index >= len(left_pre):
+            return -1
+        if index >= len(right_pre):
+            return 1
+        left_part, right_part = left_pre[index], right_pre[index]
+        if left_part == right_part:
+            continue
+        left_numeric, right_numeric = left_part.isdigit(), right_part.isdigit()
+        if left_numeric and right_numeric:
+            return 1 if int(left_part) > int(right_part) else -1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return 1 if left_part.lower() > right_part.lower() else -1
+    return 0
+
+print(compare(sys.argv[1], sys.argv[2]))
+PY
+}
+
+INSTALL=true
+if [[ -x $MANAGER && -x $ROOT/runner/bin/wine && -r $ROOT/VERSION ]]; then
+    INSTALLED_VERSION=$(<"$ROOT/VERSION")
+    if ORDER=$(version_order "$INSTALLED_VERSION" "$BUNDLED_VERSION" 2>/dev/null); then
+        if ((ORDER >= 0)); then
+            INSTALL=false
+            if ((ORDER > 0)); then
+                printf 'Wine4Office %s is already installed; not downgrading to %s.\n' \
+                    "$INSTALLED_VERSION" "$BUNDLED_VERSION"
+            fi
+        fi
+    fi
+fi
+
+if $INSTALL; then
+    PATH="$APPDIR/usr/bin:$PATH" \
+    WINE4OFFICE_BUNDLE_DIR="$PAYLOAD" \
+    WINE4OFFICE_METADATA_URL="$METADATA_URL" \
+    WINE4OFFICE_LAUNCH_MANAGER=no \
+        "$PAYLOAD/install.sh"
+fi
+
+$INSTALL_ONLY && exit 0
+[[ -x $MANAGER ]] || {
+    echo "Wine4Office installation did not provide an executable Manager: $MANAGER" >&2
+    exit 1
+}
+exec "$MANAGER" "$@"

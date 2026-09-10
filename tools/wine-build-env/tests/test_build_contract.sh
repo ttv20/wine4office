@@ -6,6 +6,27 @@ contract=$root/tools/wine-build-env
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
 
+mkdir "$tmp/configure-sentinel"
+if (cd "$tmp/configure-sentinel" && \
+        "$root/configure" --with-wine4office-version) \
+        >"$tmp/configure-sentinel.log" 2>&1; then
+    echo "Configure accepted Wine4Office branding without an explicit version" >&2
+    exit 1
+fi
+grep -F -- '--with-wine4office-version requires an explicit VERSION value' \
+    "$tmp/configure-sentinel.log" >/dev/null
+overlong_version=$(printf 'a%.0s' {1..129})
+for invalid_version in -rc1 "$overlong_version"; do
+    invalid_dir=$tmp/configure-invalid-${invalid_version:0:8}
+    mkdir "$invalid_dir"
+    if (cd "$invalid_dir" && \
+            "$root/configure" "--with-wine4office-version=$invalid_version") \
+            >"$invalid_dir.log" 2>&1; then
+        echo "Configure accepted an invalid Wine4Office version" >&2
+        exit 1
+    fi
+done
+
 assert_absent() {
     local pattern=$1
     local file=$2
@@ -31,7 +52,7 @@ mkdir -p "$source_dir/tools/wine4office-manager/packaging/linux-uapi" \
     "$build_dir/include" "$stage_dir" "$fake_bin"
 printf '#!/bin/sh\nexit 99\n' > "$source_dir/configure"
 chmod 0755 "$source_dir/configure"
-printf 'srcdir = %s\n' "$source_dir" > "$build_dir/Makefile"
+printf 'srcdir = %s\nWINE4OFFICE_VERSION = \n' "$source_dir" > "$build_dir/Makefile"
 cat > "$build_dir/config.status" <<'EOF'
 ac_cs_config='--prefix=/opt/wine4office --enable-archs=i386,x86_64 --with-gssapi --with-krb5'
 EOF
@@ -58,6 +79,8 @@ build_env=(
 env "${build_env[@]}" "$contract/build.sh" configure
 grep -qx 'configure_archs=i386,x86_64' "$build_dir/WINE4OFFICE_BUILD.env"
 grep -qx 'jobs=12' "$build_dir/WINE4OFFICE_BUILD.env"
+grep -qx 'wine4office_release_version=development' \
+    "$build_dir/WINE4OFFICE_BUILD.env"
 provenance_before=$(sha256sum "$build_dir/WINE4OFFICE_BUILD.env")
 if env "${build_env[@]}" "$contract/build.sh" invalid >"$tmp/invalid-mode.log" 2>&1; then
     echo "Build contract accepted an invalid mode" >&2
@@ -67,6 +90,30 @@ fi
     echo "Invalid mode changed build provenance" >&2
     exit 1
 }
+
+sed -i "s/--with-krb5/--with-krb5 --with-wine4office-version=0.2.2/" \
+    "$build_dir/config.status"
+sed -i 's/^WINE4OFFICE_VERSION = $/WINE4OFFICE_VERSION = 0.2.2/' \
+    "$build_dir/Makefile"
+env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.2 \
+    "$contract/build.sh" configure
+grep -qx 'wine4office_release_version=0.2.2' \
+    "$build_dir/WINE4OFFICE_BUILD.env"
+sed -i 's/0.2.2/0.2.22/g' "$build_dir/config.status" "$build_dir/Makefile"
+if env "${build_env[@]}" WINE4OFFICE_RELEASE_VERSION=0.2.2 \
+        "$contract/build.sh" configure >"$tmp/wrong-brand.log" 2>&1; then
+    echo "Build contract accepted a prefix-matching Wine4Office brand" >&2
+    exit 1
+fi
+grep -F 'branded for a different Wine4Office release' \
+    "$tmp/wrong-brand.log" >/dev/null
+sed -i 's/ --with-wine4office-version=0.2.22//' "$build_dir/config.status"
+sed -i 's/^WINE4OFFICE_VERSION = 0.2.22$/WINE4OFFICE_VERSION = /' \
+    "$build_dir/Makefile"
+env "${build_env[@]}" "$contract/build.sh" configure
+
+grep -F 'wine4office-\$(WINE4OFFICE_VERSION) (Wine \$(PACKAGE_VERSION))' \
+    "$root/configure.ac" >/dev/null
 
 cp "$build_dir/include/config.h" "$tmp/config.good"
 sed -i '/SONAME_LIBGSSAPI_KRB5/d' "$build_dir/include/config.h"
@@ -149,7 +196,17 @@ grep -F 'libfreetype-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'libfontconfig-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'tools/wine-build-env/run-build-container.sh full' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
-assert_absent 'apt-get install' "$root/.github/workflows/wine4office-release.yml"
+grep -F -- '--workdir "$container_workspace" ubuntu:24.04' \
+    "$root/.github/workflows/wine4office-release.yml" >/dev/null
+grep -F 'dnf install -y createrepo_c diffutils shadow-utils util-linux' \
+    "$root/.github/workflows/wine4office-release.yml" >/dev/null
+[[ $(grep -Fc 'workspace_args=(--volumes-from "$HOSTNAME")' \
+    "$root/.github/workflows/wine4office-release.yml") -eq 2 ]] || {
+    echo "Release package containers must inherit a containerized runner workspace" >&2
+    exit 1
+}
+assert_absent 'Install build dependencies when permitted' \
+    "$root/.github/workflows/wine4office-release.yml"
 grep -F -- '--exclude=/.git' "$contract/sync-agent-source.sh" >/dev/null
 assert_absent '--exclude=/.git/' "$contract/sync-agent-source.sh"
 grep -F 'docker container inspect "$HOSTNAME"' "$contract/run-build-container.sh" >/dev/null

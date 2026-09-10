@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Wine4Office Manager
+Comment=Install and manage Microsoft Office with Wine4Office
+Exec=Wine4OfficeManager
+Icon=wine4office-manager
+Terminal=false
+Categories=Office;Utility;
+StartupNotify=true
+StartupWMClass=Wine4OfficeManager

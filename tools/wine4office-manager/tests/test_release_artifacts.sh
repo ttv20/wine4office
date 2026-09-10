@@ -17,7 +17,7 @@ mkdir -p "$RUNNER/bin" "$RUNNER/lib/wine/x86_64-windows" \
     "$RUNNER/share/wine4office" "$RUNNER/share/wine/gecko" "$RUNNER/share/wine/mono"
 cat > "$RUNNER/bin/wine" <<'SH'
 #!/bin/sh
-exit 0
+echo 'wine4office-2.3.4 (Wine 11.17-rc1)'
 SH
 chmod 0755 "$RUNNER/bin/wine"
 printf 'runner payload\n' > "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
@@ -64,14 +64,14 @@ grep -F "Runner is missing bundled Wine Mono:" "$TMP/missing-mono.log" >/dev/nul
 
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$RELEASE" "$VERSION" \
-    "https://updates.example/releases/stable/release.json" "downloads" stable >/dev/null
+    "https://updates.example/releases/stable/release.json" "downloads" stable 11.17-rc1 >/dev/null
 # Reading source files may update access times on strict-atime filesystems. Archive
 # reproducibility must not depend on that filesystem policy.
 touch -a -d '@123456789' "$RUNNER/lib/wine/x86_64-windows/kernel32.dll"
 REPEAT_RELEASE="$TMP/release-repeat"
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$REPEAT_RELEASE" "$VERSION" \
-    "https://updates.example/releases/stable/release.json" "downloads" stable >/dev/null
+    "https://updates.example/releases/stable/release.json" "downloads" stable 11.17-rc1 >/dev/null
 
 MANAGER_NAME="Wine4OfficeManager-${VERSION}-x86_64"
 WINE_NAME="${ROOT}.tar.zst"
@@ -166,6 +166,7 @@ assert metadata["manager"] == {
 }
 assert metadata["wine"] == {
     "version": version,
+    "base_version": "11.17-rc1",
     "url": f"downloads/{wine_name}",
     "sha256": hashlib.sha256((release_dir / wine_name).read_bytes()).hexdigest(),
     "size": (release_dir / wine_name).stat().st_size,
