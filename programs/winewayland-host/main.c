@@ -29,7 +29,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -285,6 +286,7 @@ static int test_wsi(void)
     struct winewayland_host_renderer_root_retire retire;
     struct winewayland_host_renderer_present present;
     struct winewayland_host_renderer_root root;
+    struct winewayland_host_renderer_test renderer_test;
     struct winewayland_host_probe probe;
     uint32_t first_width, first_height, image_count;
     NTSTATUS status;
@@ -346,6 +348,20 @@ static int test_wsi(void)
     }
     image_count = present.image_count;
 
+    memset(&renderer_test, 0, sizeof(renderer_test));
+    renderer_test.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    renderer_test.size = sizeof(renderer_test);
+    if ((status = WINE_UNIX_CALL(unix_renderer_self_test, &renderer_test))) goto failed;
+    if ((renderer_test.flags & (WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED |
+            WINEWAYLAND_HOST_TEST_WSI_PRESENTED)) !=
+            (WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED |
+            WINEWAYLAND_HOST_TEST_WSI_PRESENTED) ||
+        !renderer_test.present_image_count)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
+
     root.requested_width = 96;
     root.requested_height = 80;
     root.flags = 0;
@@ -366,8 +382,9 @@ static int test_wsi(void)
     retire.root_generation = root.root_generation;
     if ((status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire))) goto failed;
     destroy_renderer();
-    printf("wsi_self_test=passed images=%u first=%ux%u second=%ux%u\n", image_count,
-            first_width, first_height, root.width, root.height);
+    printf("wsi_self_test=passed images=%u transported_images=%u first=%ux%u second=%ux%u\n",
+            image_count, renderer_test.present_image_count, first_width, first_height,
+            root.width, root.height);
     return 0;
 
 failed:

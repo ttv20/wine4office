@@ -141,7 +141,10 @@ or transport fixture is not Outlook support.
   and presents it. A queue-ordered fence retains the command buffer and binary
   semaphores until Vulkan has processed the presentation operation. A bounded
   timeout returns pending and prevents root or renderer destruction while those
-  objects are still in flight. This synchronous primitive is currently a
+  objects are still in flight. The same primitive can copy a completed
+  host-owned transport frame instead of clearing the WSI image. That source
+  frame is pinned through the queue-ordered fence, so pool retirement cannot
+  destroy it during the WSI read. This synchronous primitive is currently a
   lifecycle fixture, not the final per-window presentation executor.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
@@ -477,6 +480,15 @@ admitted.
   swapchain, a present-wait commit boundary, or scanout. Logs and hashes are
   retained on `elkana-scadasudo` under
   `/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/wsi-lifecycle-{x64.log,i386.log,SHA256SUMS}`.
+- The combined transport-to-WSI fixture passed through x86-64 and i386 on the
+  same Intel setup. It exported an opaque-FD producer image, synchronized and
+  copied it through the real host transport path, verified every red pixel in
+  the immutable host record, copied that record into an acquired WSI image and
+  completed `vkQueuePresentKHR`. Both runs used four-image swapchains and also
+  repeated the independent 96x80 recreation/present step. Evidence and hashes
+  are retained as `transport-wsi-pipeline-{x64.log,i386.log,SHA256SUMS}` in the
+  Intel artifact directory. The fixture is not yet a server-authorized DComp
+  Present and does not claim scanout or a present-wait commit boundary.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

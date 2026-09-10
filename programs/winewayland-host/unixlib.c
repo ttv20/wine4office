@@ -47,7 +47,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 48);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 
 struct registry_probe
 {
@@ -148,6 +149,8 @@ struct renderer_root
     VkSemaphore present_semaphore;
     VkCommandBuffer present_command_buffer;
     VkFence present_fence;
+    uint64_t present_source_pool_generation;
+    uint64_t present_source_frame_id;
     uint32_t swapchain_image_count;
     uint32_t requested_width;
     uint32_t requested_height;
@@ -182,6 +185,8 @@ struct renderer_frame
     uint64_t ready_value;
     uint64_t reuse_value;
     uint32_t slot;
+    uint32_t width;
+    uint32_t height;
     VkImage image;
     VkDeviceMemory memory;
     VkCommandBuffer command_buffer;
@@ -326,6 +331,8 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     root->present_command_buffer = VK_NULL_HANDLE;
     root->present_semaphore = VK_NULL_HANDLE;
     root->acquire_semaphore = VK_NULL_HANDLE;
+    root->present_source_pool_generation = 0;
+    root->present_source_frame_id = 0;
     return STATUS_SUCCESS;
 }
 
@@ -390,6 +397,13 @@ static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
 static NTSTATUS destroy_renderer_frame(struct renderer_frame *frame)
 {
     NTSTATUS status;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if (renderer.roots[i].present_source_pool_generation == frame->pool_generation &&
+            renderer.roots[i].present_source_frame_id == frame->frame_id &&
+            (status = poll_renderer_root_present(&renderer.roots[i])))
+            return status;
 
     if ((status = poll_renderer_frame(frame))) return status;
     if (frame->image && renderer.p_vkDestroyImage)
@@ -1400,6 +1414,8 @@ static NTSTATUS process_renderer_frame(void *args)
     pending.ready_value = ready_value;
     pending.reuse_value = reuse_value;
     pending.slot = slot_index;
+    pending.width = slot->width;
+    pending.height = slot->height;
     *frame = pending;
     return STATUS_PENDING;
 
@@ -1703,10 +1719,13 @@ static NTSTATUS present_renderer_root(void *args)
     VkSemaphoreCreateInfo semaphore_info = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    VkImageMemoryBarrier source_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    VkImageCopy image_copy;
     VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkClearColorValue color;
+    struct renderer_frame *source = NULL;
     struct renderer_root *root;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
@@ -1723,10 +1742,30 @@ static NTSTATUS present_renderer_root(void *args)
     params->present_result = VK_SUCCESS;
     if (params->reserved || !params->root_identity || !params->root_generation)
         return STATUS_INVALID_PARAMETER;
+    if (!params->source_pool_generation != !params->source_frame_id)
+        return STATUS_INVALID_PARAMETER;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
     if (!root->swapchain) return STATUS_DEVICE_NOT_READY;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (params->source_frame_id)
+    {
+        unsigned int i;
+
+        for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+            if (renderer.frames[i].pool_generation == params->source_pool_generation &&
+                renderer.frames[i].frame_id == params->source_frame_id)
+            {
+                source = &renderer.frames[i];
+                break;
+            }
+        if (!source) return STATUS_NOT_FOUND;
+        if ((status = poll_renderer_frame(source))) return status;
+        if (!source->complete) return STATUS_PENDING;
+        if (source->width != root->swapchain_width ||
+            source->height != root->swapchain_height)
+            return STATUS_INVALID_PARAMETER;
+    }
 
     if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
             &acquire_semaphore)) ||
@@ -1766,20 +1805,62 @@ static NTSTATUS present_renderer_root(void *args)
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.layerCount = 1;
+    if (source)
+    {
+        source_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        source_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        source_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        source_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        source_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        source_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        source_barrier.image = source->image;
+        source_barrier.subresourceRange = barrier.subresourceRange;
+        renderer.p_vkCmdPipelineBarrier(command_buffer,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, NULL, 0, NULL, 1, &source_barrier);
+    }
     renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
-    color.float32[0] = ((params->clear_color >> 16) & 0xff) / 255.0f;
-    color.float32[1] = ((params->clear_color >> 8) & 0xff) / 255.0f;
-    color.float32[2] = (params->clear_color & 0xff) / 255.0f;
-    color.float32[3] = ((params->clear_color >> 24) & 0xff) / 255.0f;
-    renderer.p_vkCmdClearColorImage(command_buffer, root->swapchain_images[image_index],
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &barrier.subresourceRange);
+    if (source)
+    {
+        memset(&image_copy, 0, sizeof(image_copy));
+        image_copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        image_copy.srcSubresource.layerCount = 1;
+        image_copy.dstSubresource = image_copy.srcSubresource;
+        image_copy.extent.width = source->width;
+        image_copy.extent.height = source->height;
+        image_copy.extent.depth = 1;
+        renderer.p_vkCmdCopyImage(command_buffer, source->image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, root->swapchain_images[image_index],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_copy);
+    }
+    else
+    {
+        color.float32[0] = ((params->clear_color >> 16) & 0xff) / 255.0f;
+        color.float32[1] = ((params->clear_color >> 8) & 0xff) / 255.0f;
+        color.float32[2] = (params->clear_color & 0xff) / 255.0f;
+        color.float32[3] = ((params->clear_color >> 24) & 0xff) / 255.0f;
+        renderer.p_vkCmdClearColorImage(command_buffer,
+                root->swapchain_images[image_index],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
+                &barrier.subresourceRange);
+    }
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = 0;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+    if (source)
+    {
+        source_barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        source_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        source_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        source_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1,
+                &source_barrier);
+    }
     if ((vr = renderer.p_vkEndCommandBuffer(command_buffer))) goto failed;
 
     submit_info.waitSemaphoreCount = 1;
@@ -1795,6 +1876,8 @@ static NTSTATUS present_renderer_root(void *args)
     root->present_semaphore = present_semaphore;
     root->present_command_buffer = command_buffer;
     root->present_fence = fence;
+    root->present_source_pool_generation = params->source_pool_generation;
+    root->present_source_frame_id = params->source_frame_id;
     acquire_semaphore = present_semaphore = VK_NULL_HANDLE;
     command_buffer = VK_NULL_HANDLE;
     fence = VK_NULL_HANDLE;
@@ -1978,6 +2061,7 @@ static NTSTATUS renderer_self_test(void *args)
     struct winewayland_host_renderer_import import;
     struct winewayland_host_renderer_retire retire;
     struct winewayland_host_renderer_frame frame_params;
+    struct winewayland_host_renderer_test *test_params = args;
     VkMemoryRequirements requirements;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceMemory buffer_memory = VK_NULL_HANDLE;
@@ -1996,7 +2080,14 @@ static NTSTATUS renderer_self_test(void *args)
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     VkResult vr;
 
-    (void)args;
+    if (test_params)
+    {
+        if (test_params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+            test_params->size != sizeof(*test_params))
+            return STATUS_REVISION_MISMATCH;
+        test_params->flags = 0;
+        test_params->present_image_count = 0;
+    }
     fprintf(stderr, "Vulkan transport self-test: begin.\n");
     if (!renderer.device) return STATUS_DEVICE_NOT_READY;
     if (renderer.deferred.image || renderer.deferred.memory || renderer.deferred.buffer ||
@@ -2325,6 +2416,39 @@ static NTSTATUS renderer_self_test(void *args)
                 fprintf(stderr, "Vulkan transport self-test: pixel copy returned %#x.\n",
                         status);
 readback_done:
+                if (!status && test_params)
+                {
+                    struct winewayland_host_renderer_present present;
+                    struct renderer_root *root = NULL;
+
+                    test_params->flags |= WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED;
+                    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+                        if (renderer.roots[i].swapchain &&
+                            renderer.roots[i].swapchain_width == copied_frame->width &&
+                            renderer.roots[i].swapchain_height == copied_frame->height)
+                        {
+                            root = &renderer.roots[i];
+                            break;
+                        }
+                    if (root)
+                    {
+                        memset(&present, 0, sizeof(present));
+                        present.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+                        present.size = sizeof(present);
+                        present.root_identity = root->root_identity;
+                        present.root_generation = root->root_generation;
+                        present.source_pool_generation = copied_frame->pool_generation;
+                        present.source_frame_id = copied_frame->frame_id;
+                        status = present_renderer_root(&present);
+                        if (!status)
+                        {
+                            test_params->flags |= WINEWAYLAND_HOST_TEST_WSI_PRESENTED;
+                            test_params->present_image_count = present.image_count;
+                        }
+                        fprintf(stderr, "Vulkan transport self-test: WSI present returned %#x.\n",
+                                status);
+                    }
+                }
                 if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
                 if (buffer_memory) renderer.p_vkFreeMemory(renderer.device,
                         buffer_memory, NULL);
