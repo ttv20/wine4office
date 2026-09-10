@@ -60,16 +60,101 @@ struct producer_objects
     IDCompositionVisual *visual;
 };
 
+struct window_message_state
+{
+    UINT close_count;
+    UINT key_down_count;
+    UINT key_up_count;
+};
+
 static LRESULT CALLBACK host_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
-    UINT *close_count = (UINT *)GetWindowLongPtrW(window, GWLP_USERDATA);
+    struct window_message_state *state =
+            (struct window_message_state *)GetWindowLongPtrW(window, GWLP_USERDATA);
 
     if (message == WM_CLOSE)
     {
-        if (close_count) ++*close_count;
+        if (state) ++state->close_count;
         return 0;
     }
+    if (state && message == WM_KEYDOWN && wparam == 'A') ++state->key_down_count;
+    if (state && message == WM_KEYUP && wparam == 'A') ++state->key_up_count;
     return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static void pump_messages(DWORD timeout)
+{
+    DWORD start = GetTickCount();
+    MSG message;
+
+    do
+    {
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (GetTickCount() - start >= timeout) break;
+        Sleep(1);
+    }
+    while (TRUE);
+}
+
+static void test_focus_release_routing(HWND parent, const WCHAR *class_name, HINSTANCE instance)
+{
+    struct window_message_state state_a = {0}, state_b = {0};
+    INPUT input = {0};
+    HWND child_a, child_b;
+    UINT sent;
+
+    child_a = CreateWindowW(class_name, L"input A", WS_CHILD | WS_VISIBLE,
+            0, 0, 32, 32, parent, NULL, instance, NULL);
+    child_b = CreateWindowW(class_name, L"input B", WS_CHILD | WS_VISIBLE,
+            32, 0, 32, 32, parent, NULL, instance, NULL);
+    ok(!!child_a && !!child_b, "Failed to create focus-routing windows, error %lu.\n",
+            GetLastError());
+    if (!child_a || !child_b) goto done;
+    SetWindowLongPtrW(child_a, GWLP_USERDATA, (LONG_PTR)&state_a);
+    SetWindowLongPtrW(child_b, GWLP_USERDATA, (LONG_PTR)&state_b);
+    if (!SetForegroundWindow(parent))
+    {
+        win_skip("Could not make the native input fixture foreground.\n");
+        goto done;
+    }
+    SetFocus(child_a);
+    ok(GetFocus() == child_a, "Initial native input focus is %p instead of %p.\n",
+            GetFocus(), child_a);
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = 'A';
+    sent = SendInput(1, &input, sizeof(input));
+    ok(sent == 1, "Native key down sent %u events, error %lu.\n", sent, GetLastError());
+    pump_messages(50);
+    ok(state_a.key_down_count == 1 && !state_b.key_down_count,
+            "Native key down counts are A %u, B %u.\n",
+            state_a.key_down_count, state_b.key_down_count);
+
+    SetFocus(child_b);
+    ok(GetFocus() == child_b, "Native release focus is %p instead of %p.\n",
+            GetFocus(), child_b);
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    sent = SendInput(1, &input, sizeof(input));
+    ok(sent == 1, "Native key up sent %u events, error %lu.\n", sent, GetLastError());
+    pump_messages(50);
+    ok(!state_a.key_up_count && state_b.key_up_count == 1,
+            "Native key up counts are A %u, B %u.\n",
+            state_a.key_up_count, state_b.key_up_count);
+
+done:
+    if (GetAsyncKeyState('A') & 0x8000)
+    {
+        memset(&input, 0, sizeof(input));
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = 'A';
+        input.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(input));
+    }
+    if (child_b) DestroyWindow(child_b);
+    if (child_a) DestroyWindow(child_a);
 }
 
 static void release_producer_objects(struct producer_objects *objects)
@@ -267,7 +352,8 @@ static void test_cross_process_host_contract(const char *program)
     HWND window = NULL;
     char command[1024];
     DWORD owner_pid, wait;
-    UINT close_count = 0, present_count;
+    struct window_message_state message_state = {0};
+    UINT present_count;
     BOOL created, producer_ready, local_ready;
 
     class.lpfnWndProc = host_window_proc;
@@ -282,7 +368,7 @@ static void test_cross_process_host_contract(const char *program)
         win_skip("Failed to create host fixture window, error %lu.\n", GetLastError());
         goto done;
     }
-    SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)&close_count);
+    SetWindowLongPtrW(window, GWLP_USERDATA, (LONG_PTR)&message_state);
     ShowWindow(window, SW_SHOW);
     UpdateWindow(window);
 
@@ -395,8 +481,11 @@ static void test_cross_process_host_contract(const char *program)
     }
 
     SendMessageW(window, WM_CLOSE, 0, 0);
-    ok(close_count == 1, "Close callback count is %u.\n", close_count);
+    ok(message_state.close_count == 1, "Close callback count is %u.\n",
+            message_state.close_count);
     ok(IsWindow(window), "Canceled close destroyed the logical window.\n");
+
+    test_focus_release_routing(window, class_name, class.hInstance);
 
     if (local_ready)
     {

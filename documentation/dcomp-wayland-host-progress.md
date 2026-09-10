@@ -332,12 +332,22 @@ admitted.
   `/workspace/artifacts/winewayland-host-build.sha256` in environment
   `dcomp-host-probe-20260909`.
 - A public DComp host oracle now runs a window owner and composition producer
-  as separate processes. Native Windows x86-64 and i386 each passed 36 checks.
+  as separate processes. Its initial Native Windows x86-64 and i386 runs each
+  passed 36 checks.
   Windows rejects a foreign-process `CreateTargetForHwnd()` with
   `E_ACCESSDENIED`; the producer can still create windowless composition
   content and owns no visible top-level window. The logical owner preserves
   its HWND identity, publishes `SetRoot(NULL)` without another Present, can
   cancel `WM_CLOSE`, and receives `S_OK` from a hidden-window Present.
+- The same public oracle now also injects a native A key-down while child A is
+  focused, changes focus to child B, and injects key-up. Windows routes the
+  release to B rather than pinning it to the key-down recipient. The extended
+  oracle passed 43 checks with zero failures in both x86-64 and i386 on
+  `testing-laptop`, and 43 checks with zero failures in the x86-64 Wine
+  comparison. Native evidence remains at
+  `C:\wine365-tests\dcomp-host-20260909-{x64,i386}\native-interactive.log`;
+  the Wine binary is `/workspace/artifacts/dcomp-focus-oracle-test-x64.exe` in
+  environment `dcomp-host-probe-20260909`.
 - The same oracle on Wine matched those results in both architectures. The
   initial Wine run contained one test-harness failure because the matching
   foreign-target rejection was incorrectly marked `todo_wine`; no product
