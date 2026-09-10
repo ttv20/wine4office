@@ -319,8 +319,10 @@ or transport fixture is not Outlook support.
   or owned windows, while excluding only its identified internal DXGI helper.
   Wineserver independently invalidates an already hosted scene when such a
   visible family member appears, revokes the active contributor and starts the
-  whole-root return to `LocalFallback`. Hidden input-only child HWNDs retain
-  normal Windows focus routing without claiming visible content coverage.
+  whole-root return to `LocalFallback`. Removing the child and recommitting an
+  identity scene creates a fresh binding; a later visible owned popup causes
+  the same authoritative fallback. Hidden input-only child HWNDs retain normal
+  Windows focus routing without claiming visible content coverage.
 
 ## Contributor interception inventory
 
@@ -345,10 +347,10 @@ The initial source inspection found these visible-content publication points:
   swaps crossing `win32u_wglSwapBuffers()` in `dlls/win32u/opengl.c`.
 
 This list is not yet the complete admission proof. Both DComp target layers
-and multiple DComp devices have deterministic authority coverage, and visible
-child creation now forces whole-root fallback. Visibility changes, owned popup
-families and direct WGL/Vulkan contributors still need complete fixtures before
-generic applications can be admitted.
+and multiple DComp devices have deterministic authority coverage, while
+visible child and owned-popup creation now force whole-root fallback.
+Visibility transitions and direct WGL/Vulkan contributors still need complete
+fixtures before generic applications can be admitted.
 
 ## Verification record
 
@@ -867,6 +869,13 @@ generic applications can be admitted.
   hashes are retained as
   `/workspace/artifacts/window-family-admission-authority-x64.log` and
   `/workspace/artifacts/window-family-admission-SHA256SUMS`.
+- The family fixture now also removes the child, forces a complete fallback
+  Commit, rehosts with a fresh contributor binding and creates a visible owned
+  popup. The popup independently returns the server scene to `LocalFallback`.
+  The expanded x86-64 Radeon suite passed 715 checks with zero failures.
+  Evidence and hashes are retained as
+  `/workspace/artifacts/popup-family-admission-authority-x64.log` and
+  `/workspace/artifacts/popup-family-admission-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

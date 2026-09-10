@@ -1931,7 +1931,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
-    HWND hosted_child = NULL;
+    HWND hosted_child = NULL, hosted_popup = NULL;
     HWND second_root = NULL;
     HWND input_a = NULL, input_b = NULL;
     HWND previous_focus = NULL;
@@ -2411,6 +2411,38 @@ static void test_host_registration( const char *program, const char *test_name )
                 state->scene_disposition );
             if (hosted_child) DestroyWindow( hosted_child );
             hosted_child = NULL;
+
+            hr = IDCompositionVisual_SetOffsetX( hosted_visual, 1.0f );
+            ok( hr == S_OK, "Setting child-family fallback offset returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Committing child-family fallback returned %#lx.\n", hr );
+            hr = IDCompositionVisual_SetOffsetX( hosted_visual, 0.0f );
+            ok( hr == S_OK, "Restoring child-family hosted offset returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Rehosting after child-family fallback returned %#lx.\n", hr );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying the child-family rehost.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
+                "Child-family rehost returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+
+            hosted_popup = CreateWindowExW( 0, L"static", L"Visible hosted popup",
+                    WS_POPUP | WS_VISIBLE, 0, 0, 24, 24, hosted_root, NULL, NULL, NULL );
+            ok( !!hosted_popup, "Failed to create visible hosted popup, error %lu.\n",
+                GetLastError() );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying popup-family DComp scene.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+                "Popup-family DComp scene returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+            if (hosted_popup) DestroyWindow( hosted_popup );
+            hosted_popup = NULL;
 
             hr = IDCompositionTarget_SetRoot( hosted_target, NULL );
             ok( hr == S_OK, "Clearing hosted DComp root returned %#lx.\n", hr );
@@ -4735,6 +4767,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !status, "Startup cancellation returned %#lx.\n", status );
 
 done:
+    if (hosted_popup) DestroyWindow( hosted_popup );
     if (hosted_child) DestroyWindow( hosted_child );
     if (hosted_visual) IDCompositionVisual_Release( hosted_visual );
     if (hosted_target) IDCompositionTarget_Release( hosted_target );
