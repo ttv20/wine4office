@@ -198,6 +198,8 @@ grep -F 'tools/wine-build-env/run-build-container.sh full' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
 grep -F -- '--workdir "$container_workspace" ubuntu:24.04' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
+grep -F 'dnf install -y createrepo_c diffutils shadow-utils util-linux' \
+    "$root/.github/workflows/wine4office-release.yml" >/dev/null
 [[ $(grep -Fc 'workspace_args=(--volumes-from "$HOSTNAME")' \
     "$root/.github/workflows/wine4office-release.yml") -eq 2 ]] || {
     echo "Release package containers must inherit a containerized runner workspace" >&2

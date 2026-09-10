@@ -302,7 +302,7 @@ jobs:
           docker run --rm --init \
             "${workspace_args[@]}" \
             --workdir "$container_workspace" fedora:latest bash -eu -c '
-              dnf install -y createrepo_c
+              dnf install -y createrepo_c diffutils shadow-utils util-linux
               tools/wine4office-manager/packaging/distribution/build-rpm-repository.sh \
                 "$3" "$1"
               printf "%s\n" \
