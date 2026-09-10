@@ -110,6 +110,10 @@ struct wayland_host_test_state
     UINT64 frame_id;
     UINT64 ready_value;
     UINT64 reuse_value;
+    UINT64 frame_scene_generation;
+    UINT64 frame_binding_generation;
+    UINT64 enumerated_frame_scene_generation;
+    UINT64 enumerated_frame_binding_generation;
     UINT64 enumeration_cursor;
     UINT64 enumerated_root;
     UINT64 root_identity;
@@ -243,6 +247,8 @@ struct wayland_frame_info
     UINT64 frame_id;
     UINT64 ready_value;
     UINT64 reuse_value;
+    UINT64 scene_generation;
+    UINT64 binding_generation;
     DWORD slot;
     DWORD reusable;
     DWORD outstanding_frames;
@@ -772,6 +778,8 @@ static NTSTATUS submit_frame_with_size( HWND root, struct wayland_host_test_stat
     submission.frame_id = state->frame_id;
     submission.ready_value = state->ready_value;
     submission.reuse_value = state->reuse_value;
+    submission.scene_generation = state->frame_scene_generation;
+    submission.binding_generation = state->frame_binding_generation;
     submission.slot = state->slot;
     SERVER_START_REQ( submit_wayland_frame )
     {
@@ -810,6 +818,8 @@ static NTSTATUS get_frame( HWND root, UINT64 host_epoch, UINT64 contributor_id,
         info->frame_id = reply->frame_id;
         info->ready_value = reply->ready_value;
         info->reuse_value = reply->reuse_value;
+        info->scene_generation = reply->scene_generation;
+        info->binding_generation = reply->binding_generation;
         info->slot = reply->slot;
         info->reusable = reply->reusable;
         info->outstanding_frames = reply->outstanding_frames;
@@ -1117,6 +1127,8 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->frame_id = frame.frame_id;
             state->ready_value = frame.ready_value;
             state->reuse_value = frame.reuse_value;
+            state->enumerated_frame_scene_generation = frame.scene_generation;
+            state->enumerated_frame_binding_generation = frame.binding_generation;
             state->slot = frame.slot;
             state->frame_reusable = frame.reusable;
             state->outstanding_frames = frame.outstanding_frames;
@@ -2432,6 +2444,8 @@ static void test_host_registration( const char *program, const char *test_name )
     state->frame_id = 1;
     state->ready_value = 1;
     state->reuse_value = 1;
+    state->frame_scene_generation = scene_generation;
+    state->frame_binding_generation = state->binding_generation;
     state->slot = 0;
     status = submit_frame_with_size( root, state,
             sizeof(struct wayland_frame_submission) - sizeof(DWORD) );
@@ -2440,6 +2454,56 @@ static void test_host_registration( const char *program, const char *test_name )
     status = submit_frame( root, state );
     ok( status == STATUS_ACCESS_DENIED,
         "Foreign frame submission returned %#lx.\n", status );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a frame for a hidden scene.\n" );
+    ok( state->producer_status == STATUS_INVALID_DEVICE_STATE,
+        "Hidden-scene frame returned %#lx.\n", state->producer_status );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_LOCAL_FALLBACK, scene_generation, 5,
+                            0, 0, 0, &next_generation, NULL );
+    ok( !status && next_generation == scene_generation + 1,
+        "Local-fallback publication returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+    state->frame_scene_generation = scene_generation;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a frame for a local-fallback scene.\n" );
+    ok( state->producer_status == STATUS_INVALID_DEVICE_STATE,
+        "Local-fallback frame returned %#lx.\n", state->producer_status );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_EMPTY, scene_generation, 6,
+                            0, 0, 0, &next_generation, NULL );
+    ok( !status && next_generation == scene_generation + 1,
+        "Empty publication returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+    state->frame_scene_generation = scene_generation;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a frame for an empty scene.\n" );
+    ok( state->producer_status == STATUS_INVALID_DEVICE_STATE,
+        "Empty-scene frame returned %#lx.\n", state->producer_status );
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 7,
+                            state->contributor_id, state->stream_id,
+                            state->binding_generation, &next_generation, NULL );
+    ok( !status && next_generation == scene_generation + 1,
+        "Frame-test hosted scene returned %#lx, generation %s.\n",
+        status, wine_dbgstr_longlong( next_generation ) );
+    scene_generation = next_generation;
+    state->frame_scene_generation = scene_generation - 1;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a stale-scene frame.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Stale-scene frame returned %#lx.\n", state->producer_status );
+    state->frame_scene_generation = scene_generation;
+    state->frame_binding_generation++;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a stale-binding frame.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Stale-binding frame returned %#lx.\n", state->producer_status );
+    state->frame_binding_generation--;
     state->pool_generation = 2;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
@@ -2522,10 +2586,13 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out enumerating frame 1.\n" );
     ok( !state->command_status && state->frame_id == 1 && state->pool_generation == 3 &&
         !state->slot && state->ready_value == 1 && state->reuse_value == 1 &&
+        state->enumerated_frame_scene_generation == scene_generation &&
+        state->enumerated_frame_binding_generation == state->binding_generation &&
         !state->frame_reusable && state->outstanding_frames == 3,
-        "Frame 1 enumeration returned %#lx, frame %s, slot %lu, values %s/%s.\n",
+        "Frame 1 enumeration returned %#lx, frame %s, slot %lu, values %s/%s, scene %s.\n",
         state->command_status, wine_dbgstr_longlong( state->frame_id ), state->slot,
-        wine_dbgstr_longlong( state->ready_value ), wine_dbgstr_longlong( state->reuse_value ) );
+        wine_dbgstr_longlong( state->ready_value ), wine_dbgstr_longlong( state->reuse_value ),
+        wine_dbgstr_longlong( state->enumerated_frame_scene_generation ) );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_FRAME ),
         "Timed out enumerating frame 2.\n" );
@@ -2794,13 +2861,24 @@ static void test_host_registration( const char *program, const char *test_name )
         "Host-replacement frame returned %#lx, outstanding %lu.\n",
         state->producer_status, state->outstanding_frames );
 
-    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 5,
+    status = publish_scene( root, WINE_WAYLAND_SCENE_HOSTED_CONTENT, scene_generation, 8,
                             state->contributor_id, state->stream_id,
                             state->binding_generation, &next_generation, NULL );
     ok( !status && next_generation == scene_generation + 1,
         "Replacement-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
+    state->frame_id = 5;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out enumerating the frame submitted before scene replacement.\n" );
+    ok( !state->command_status && state->frame_id == 6 &&
+        state->enumerated_frame_scene_generation == scene_generation - 1 &&
+        state->enumerated_frame_binding_generation == state->binding_generation,
+        "Replaced-scene frame returned %#lx, frame %s, scene %s, binding %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->frame_id ),
+        wine_dbgstr_longlong( state->enumerated_frame_scene_generation ),
+        wine_dbgstr_longlong( state->enumerated_frame_binding_generation ) );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SET_READY ),
         "Timed out repeating HostReady for hosted content.\n" );
@@ -2810,7 +2888,7 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying hosted content after duplicate HostReady.\n" );
     ok( !state->command_status && state->scene_generation == scene_generation &&
-        state->owner_revision == 5 &&
+        state->owner_revision == 8 &&
         state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
         "HostReady changed hosted content %#lx, generation %s, revision %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
@@ -2945,7 +3023,7 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying retained scene from replacement host.\n" );
     ok( !state->command_status && state->scene_generation == scene_generation &&
-        state->owner_revision == 5 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
+        state->owner_revision == 8 && state->scene_disposition == WINE_WAYLAND_SCENE_EMPTY,
         "Retained replacement scene returned status %#lx, generation %s, revision %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );

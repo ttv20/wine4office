@@ -4028,6 +4028,8 @@ static void dump_get_wayland_frame_reply( const struct get_wayland_frame_reply *
     dump_uint64( ", frame_id=", &req->frame_id );
     dump_uint64( ", ready_value=", &req->ready_value );
     dump_uint64( ", reuse_value=", &req->reuse_value );
+    dump_uint64( ", scene_generation=", &req->scene_generation );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
     fprintf( stderr, ", slot=%08x", req->slot );
     fprintf( stderr, ", reusable=%08x", req->reusable );
     fprintf( stderr, ", outstanding_frames=%08x", req->outstanding_frames );

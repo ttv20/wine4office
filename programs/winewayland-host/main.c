@@ -553,6 +553,8 @@ struct host_frame_info
     uint64_t frame_id;
     uint64_t ready_value;
     uint64_t reuse_value;
+    uint64_t scene_generation;
+    uint64_t binding_generation;
     uint32_t slot;
     uint32_t reusable;
 };
@@ -745,6 +747,8 @@ static NTSTATUS get_next_frame(user_handle_t root, uint64_t host_epoch,
             info->frame_id = reply->frame_id;
             info->ready_value = reply->ready_value;
             info->reuse_value = reply->reuse_value;
+            info->scene_generation = reply->scene_generation;
+            info->binding_generation = reply->binding_generation;
             info->slot = reply->slot;
             info->reusable = reply->reusable;
         }

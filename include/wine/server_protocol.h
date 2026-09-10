@@ -85,6 +85,8 @@ struct wayland_frame_submission
     unsigned __int64 frame_id;
     unsigned __int64 ready_value;
     unsigned __int64 reuse_value;
+    unsigned __int64 scene_generation;
+    unsigned __int64 binding_generation;
     unsigned int     slot;
     unsigned int     reserved;
 };
@@ -6951,10 +6953,12 @@ struct get_wayland_frame_reply
     unsigned __int64 frame_id;
     unsigned __int64 ready_value;
     unsigned __int64 reuse_value;
+    unsigned __int64 scene_generation;
+    unsigned __int64 binding_generation;
     unsigned int     slot;
     unsigned int     reusable;
     unsigned int     outstanding_frames;
-    char __pad_52[4];
+    char __pad_68[4];
 };
 
 
@@ -8095,6 +8099,6 @@ union generic_reply
     struct get_wayland_host_root_reply get_wayland_host_root_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 983
+#define SERVER_PROTOCOL_VERSION 984
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

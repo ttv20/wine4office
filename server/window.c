@@ -81,6 +81,8 @@ struct wayland_frame
     unsigned __int64 frame_id;
     unsigned __int64 ready_value;
     unsigned __int64 reuse_value;
+    unsigned __int64 scene_generation;
+    unsigned __int64 binding_generation;
     unsigned int     slot;
     unsigned int     reusable;
     unsigned int     result;
@@ -4596,7 +4598,8 @@ DECL_HANDLER(submit_wayland_frame)
     }
     memcpy( &submission, get_req_data(), sizeof(submission) );
     if (!submission.pool_generation || !submission.frame_id || !submission.ready_value ||
-        !submission.reuse_value || submission.reserved)
+        !submission.reuse_value || !submission.scene_generation ||
+        !submission.binding_generation || submission.reserved)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
@@ -4613,7 +4616,15 @@ DECL_HANDLER(submit_wayland_frame)
     if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
             req->stream_id, req->binding_generation ))) goto done;
     reply->outstanding_frames = contributor->outstanding_frames;
-    if (!(pool = find_wayland_buffer_pool( contributor, submission.pool_generation )))
+    if (submission.binding_generation != req->binding_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+             root->wayland_scene_host_epoch != desktop->wayland_host_epoch ||
+             !wayland_scene_uses_contributor( root, contributor ))
+        set_error( STATUS_INVALID_DEVICE_STATE );
+    else if (submission.scene_generation != root->wayland_scene_generation)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (!(pool = find_wayland_buffer_pool( contributor, submission.pool_generation )))
         set_error( STATUS_NOT_FOUND );
     else if (submission.slot >= pool->slot_count)
         set_error( STATUS_INVALID_PARAMETER );
@@ -4643,6 +4654,8 @@ DECL_HANDLER(submit_wayland_frame)
             frame->frame_id = submission.frame_id;
             frame->ready_value = submission.ready_value;
             frame->reuse_value = submission.reuse_value;
+            frame->scene_generation = submission.scene_generation;
+            frame->binding_generation = submission.binding_generation;
             frame->slot = submission.slot;
             slot->last_ready_value = submission.ready_value;
             slot->last_reuse_value = submission.reuse_value;
@@ -4670,6 +4683,8 @@ DECL_HANDLER(get_wayland_frame)
     reply->frame_id = 0;
     reply->ready_value = 0;
     reply->reuse_value = 0;
+    reply->scene_generation = 0;
+    reply->binding_generation = 0;
     reply->slot = 0;
     reply->reusable = 0;
     reply->outstanding_frames = 0;
@@ -4697,6 +4712,8 @@ DECL_HANDLER(get_wayland_frame)
     reply->frame_id = frame->frame_id;
     reply->ready_value = frame->ready_value;
     reply->reuse_value = frame->reuse_value;
+    reply->scene_generation = frame->scene_generation;
+    reply->binding_generation = frame->binding_generation;
     reply->slot = frame->slot;
     reply->reusable = frame->reusable;
 }

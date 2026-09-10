@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 983.
+Generated server protocol version: 984.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -160,6 +160,14 @@ or transport fixture is not Outlook support.
   failure cannot become terminal until the host has made the source slot safe;
   recovery for permanent pre-submit failures remains pending. Local WSI,
   composition and terminal Present results are not implemented yet.
+- Each accepted frame now records the aggregate scene generation and binding
+  generation observed by its producer. The server accepts it only while the
+  current scene is `HostedContent` for the same contributor, stream and
+  binding under the current host epoch. `Empty`, `Hidden`, `LocalFallback`, a
+  stale scene generation and a mismatched binding are rejected before queue
+  state changes. Host enumeration returns both generations, including the
+  original scene generation after a newer scene replaces an already accepted
+  frame, so the host can safely drain and discard stale GPU work.
 - DComp now publishes committed per-root scene state at the successful
   `Commit()` boundary. Targets above and below one HWND share a private scene
   transaction even when they belong to different DComp devices. A root in the
@@ -489,6 +497,16 @@ admitted.
   are retained as `transport-wsi-pipeline-{x64.log,i386.log,SHA256SUMS}` in the
   Intel artifact directory. The fixture is not yet a server-authorized DComp
   Present and does not claim scanout or a present-wait commit boundary.
+- Protocol 984 frame-scene authority passed 491 checks with zero failures in
+  x86-64 on the Radeon task environment. It covers frame rejection for
+  `Hidden`, `LocalFallback` and `Empty` scenes, stale scene and binding
+  generations, exact generation round trips, and retention of the accepted
+  generation across a later scene replacement. Both PE architectures and the
+  coupled wineserver, ntdll and host targets rebuilt. The matching runner,
+  test binaries, log and hashes are retained as
+  `/workspace/runner-dcomp-frame-scene` and
+  `/workspace/artifacts/frame-scene-{authority-x64b.log,win32u-test-x64.exe,win32u-test-i386.exe,SHA256SUMS}`
+  in environment `dcomp-host-probe-20260909`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

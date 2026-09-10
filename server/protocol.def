@@ -101,6 +101,8 @@ struct wayland_frame_submission
     unsigned __int64 frame_id;
     unsigned __int64 ready_value;
     unsigned __int64 reuse_value;
+    unsigned __int64 scene_generation;
+    unsigned __int64 binding_generation;
     unsigned int     slot;
     unsigned int     reserved;
 };
@@ -4827,6 +4829,8 @@ enum inproc_sync_type
     unsigned __int64 frame_id;
     unsigned __int64 ready_value;
     unsigned __int64 reuse_value;
+    unsigned __int64 scene_generation;
+    unsigned __int64 binding_generation;
     unsigned int     slot;
     unsigned int     reusable;
     unsigned int     outstanding_frames;
