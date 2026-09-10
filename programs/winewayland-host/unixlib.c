@@ -44,7 +44,7 @@
 
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
-C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
@@ -145,10 +145,11 @@ static void destroy_registry_probe(struct registry_probe *probe)
 
 #ifdef SONAME_LIBVULKAN
 
-#define MAX_RENDERER_POOLS 2
 #define RENDERER_POOL_SLOTS 3
 #define MAX_RENDERER_FRAMES 32
 #define MAX_RENDERER_ROOTS 64
+#define MAX_RENDERER_POOLS_PER_ROOT 2
+#define MAX_RENDERER_POOLS (MAX_RENDERER_ROOTS * MAX_RENDERER_POOLS_PER_ROOT)
 #define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES + MAX_RENDERER_ROOTS)
 #define MAX_RENDERER_INPUT_EVENTS 256
 
@@ -192,6 +193,21 @@ struct renderer_queue_job
     } u;
 };
 
+struct renderer_device_queue
+{
+    VkDevice device;
+    VkQueue queue;
+    VkCommandPool command_pool;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    struct renderer_queue_job jobs[MAX_RENDERER_QUEUE_JOBS];
+    unsigned int head;
+    unsigned int count;
+    BOOL thread_started;
+    BOOL stop;
+};
+
 struct renderer_root
 {
     uint64_t root_identity;
@@ -200,6 +216,7 @@ struct renderer_root
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
     struct wl_callback *unmap_callback;
+    struct renderer_device_queue device_queue;
     char title[96];
     VkSurfaceKHR vulkan_surface;
     VkSwapchainKHR swapchain;
@@ -257,6 +274,8 @@ struct renderer_root
 
 struct renderer_slot
 {
+    struct renderer_root *root;
+    struct renderer_device_queue *device_queue;
     uint64_t pool_generation;
     uint64_t allocation_size;
     uint32_t width;
@@ -271,6 +290,8 @@ struct renderer_slot
 
 struct renderer_frame
 {
+    struct renderer_root *root;
+    struct renderer_device_queue *device_queue;
     uint64_t pool_generation;
     uint64_t frame_id;
     uint64_t ready_value;
@@ -289,6 +310,7 @@ struct renderer_frame
 
 struct renderer_deferred_resources
 {
+    struct renderer_device_queue *work_queue;
     VkImage image;
     VkDeviceMemory memory;
     VkBuffer buffer;
@@ -318,13 +340,29 @@ struct vulkan_renderer
     uint32_t pointer_axis_value120;
     VkInstance instance;
     VkPhysicalDevice physical_device;
-    VkDevice device;
-    VkQueue queue;
-    VkCommandPool command_pool;
+    union
+    {
+        struct renderer_device_queue default_device_queue;
+        struct
+        {
+            VkDevice device;
+            VkQueue queue;
+            VkCommandPool command_pool;
+            pthread_t queue_thread;
+            pthread_mutex_t queue_mutex;
+            pthread_cond_t queue_cond;
+            struct renderer_queue_job queue_jobs[MAX_RENDERER_QUEUE_JOBS];
+            unsigned int queue_head;
+            unsigned int queue_count;
+            BOOL queue_thread_started;
+            BOOL queue_stop;
+        };
+    };
     uint32_t queue_family;
     uint64_t next_configure_request_id;
     uint32_t device_uuid[4];
     VkPhysicalDeviceMemoryProperties memory_properties;
+    PFN_vkCreateDevice p_vkCreateDevice;
     PFN_vkDestroyInstance p_vkDestroyInstance;
     PFN_vkCreateWaylandSurfaceKHR p_vkCreateWaylandSurfaceKHR;
     PFN_vkDestroySurfaceKHR p_vkDestroySurfaceKHR;
@@ -377,14 +415,6 @@ struct vulkan_renderer
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
     struct renderer_frame frames[MAX_RENDERER_FRAMES];
     struct renderer_root roots[MAX_RENDERER_ROOTS];
-    pthread_t queue_thread;
-    pthread_mutex_t queue_mutex;
-    pthread_cond_t queue_cond;
-    struct renderer_queue_job queue_jobs[MAX_RENDERER_QUEUE_JOBS];
-    unsigned int queue_head;
-    unsigned int queue_count;
-    BOOL queue_thread_started;
-    BOOL queue_stop;
     struct winewayland_host_input_event input_events[MAX_RENDERER_INPUT_EVENTS];
     unsigned int input_head;
     unsigned int input_count;
@@ -861,8 +891,9 @@ static const struct wl_seat_listener renderer_seat_listener =
     renderer_seat_name,
 };
 
-static NTSTATUS enqueue_renderer_queue_job_internal(const struct renderer_queue_job *job,
-        BOOL retry);
+static NTSTATUS enqueue_renderer_queue_job_internal(struct renderer_device_queue *queue,
+        const struct renderer_queue_job *job, BOOL retry);
+static void destroy_renderer_device_queue(struct renderer_device_queue *queue);
 
 static NTSTATUS renderer_queue_status(VkResult vr)
 {
@@ -872,7 +903,8 @@ static NTSTATUS renderer_queue_status(VkResult vr)
     return STATUS_UNSUCCESSFUL;
 }
 
-static void execute_renderer_queue_job(const struct renderer_queue_job *job)
+static void execute_renderer_queue_job(struct renderer_device_queue *queue,
+        const struct renderer_queue_job *job)
 {
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkTimelineSemaphoreSubmitInfo timeline_info =
@@ -899,14 +931,14 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
         submit_info.pCommandBuffers = &job->u.frame.command_buffer;
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &job->u.frame.signal_semaphore;
-        if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info,
+        if ((vr = renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info,
                 job->u.frame.fence)))
             status = renderer_queue_status(vr);
 
-        pthread_mutex_lock(&renderer.queue_mutex);
+        pthread_mutex_lock(&queue->mutex);
         job->u.frame.frame->submit_status = status;
         job->u.frame.frame->submit_done = TRUE;
-        pthread_mutex_unlock(&renderer.queue_mutex);
+        pthread_mutex_unlock(&queue->mutex);
         return;
     }
 
@@ -919,7 +951,7 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
         submit_info.pCommandBuffers = &job->u.present.command_buffer;
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &job->u.present.present_semaphore;
-        if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
+        if ((vr = renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info, VK_NULL_HANDLE)))
             status = renderer_queue_status(vr);
         else
         {
@@ -932,7 +964,7 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
             present_id_info.swapchainCount = 1;
             present_id_info.pPresentIds = &job->u.present.present_id;
             present_info.pNext = &present_id_info;
-            present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
+            present_result = renderer.p_vkQueuePresentKHR(queue->queue, &present_info);
         }
     }
     else
@@ -942,13 +974,13 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
     {
         struct renderer_queue_job wait_job = *job;
 
-        vr = renderer.p_vkWaitForPresentKHR(renderer.device, job->u.present.swapchain,
+        vr = renderer.p_vkWaitForPresentKHR(queue->device, job->u.present.swapchain,
                 job->u.present.present_id, 1000000000ull);
         if (vr == VK_TIMEOUT)
         {
             wait_job.type = RENDERER_QUEUE_JOB_PRESENT_WAIT;
             wait_job.u.present.present_result = present_result;
-            if (!enqueue_renderer_queue_job_internal(&wait_job, TRUE)) return;
+            if (!enqueue_renderer_queue_job_internal(queue, &wait_job, TRUE)) return;
             status = STATUS_DEVICE_BUSY;
         }
         else if (vr)
@@ -956,7 +988,7 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
     }
     if (queue_work_submitted)
     {
-        vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, job->u.present.fence);
+        vr = renderer.p_vkQueueSubmit(queue->queue, 0, NULL, job->u.present.fence);
         if (vr)
         {
             if (!status) status = renderer_queue_status(vr);
@@ -965,95 +997,95 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
             fence_submitted = TRUE;
     }
 
-    pthread_mutex_lock(&renderer.queue_mutex);
+    pthread_mutex_lock(&queue->mutex);
     job->u.present.root->present_result = present_result;
     job->u.present.root->present_job_status = status;
     job->u.present.root->present_fence_submitted = fence_submitted;
     job->u.present.root->present_job_done = TRUE;
-    pthread_mutex_unlock(&renderer.queue_mutex);
+    pthread_mutex_unlock(&queue->mutex);
 }
 
 static void *renderer_queue_worker(void *arg)
 {
+    struct renderer_device_queue *queue = arg;
     struct renderer_queue_job job;
 
-    (void)arg;
     for (;;)
     {
-        pthread_mutex_lock(&renderer.queue_mutex);
-        while (!renderer.queue_count && !renderer.queue_stop)
-            pthread_cond_wait(&renderer.queue_cond, &renderer.queue_mutex);
-        if (!renderer.queue_count && renderer.queue_stop)
+        pthread_mutex_lock(&queue->mutex);
+        while (!queue->count && !queue->stop)
+            pthread_cond_wait(&queue->cond, &queue->mutex);
+        if (!queue->count && queue->stop)
         {
-            pthread_mutex_unlock(&renderer.queue_mutex);
+            pthread_mutex_unlock(&queue->mutex);
             return NULL;
         }
-        job = renderer.queue_jobs[renderer.queue_head];
-        renderer.queue_head = (renderer.queue_head + 1) % ARRAY_SIZE(renderer.queue_jobs);
-        --renderer.queue_count;
-        pthread_mutex_unlock(&renderer.queue_mutex);
-        execute_renderer_queue_job(&job);
+        job = queue->jobs[queue->head];
+        queue->head = (queue->head + 1) % ARRAY_SIZE(queue->jobs);
+        --queue->count;
+        pthread_mutex_unlock(&queue->mutex);
+        execute_renderer_queue_job(queue, &job);
     }
 }
 
-static NTSTATUS start_renderer_queue(void)
+static NTSTATUS start_renderer_queue(struct renderer_device_queue *queue)
 {
     int ret;
 
-    if ((ret = pthread_mutex_init(&renderer.queue_mutex, NULL)))
+    if ((ret = pthread_mutex_init(&queue->mutex, NULL)))
         return STATUS_NO_MEMORY;
-    if ((ret = pthread_cond_init(&renderer.queue_cond, NULL)))
+    if ((ret = pthread_cond_init(&queue->cond, NULL)))
     {
-        pthread_mutex_destroy(&renderer.queue_mutex);
+        pthread_mutex_destroy(&queue->mutex);
         return STATUS_NO_MEMORY;
     }
-    if ((ret = pthread_create(&renderer.queue_thread, NULL, renderer_queue_worker, NULL)))
+    if ((ret = pthread_create(&queue->thread, NULL, renderer_queue_worker, queue)))
     {
-        pthread_cond_destroy(&renderer.queue_cond);
-        pthread_mutex_destroy(&renderer.queue_mutex);
+        pthread_cond_destroy(&queue->cond);
+        pthread_mutex_destroy(&queue->mutex);
         return STATUS_NO_MEMORY;
     }
-    renderer.queue_thread_started = TRUE;
+    queue->thread_started = TRUE;
     return STATUS_SUCCESS;
 }
 
-static void stop_renderer_queue(void)
+static void stop_renderer_queue(struct renderer_device_queue *queue)
 {
-    if (!renderer.queue_thread_started) return;
-    pthread_mutex_lock(&renderer.queue_mutex);
-    renderer.queue_stop = TRUE;
-    pthread_cond_signal(&renderer.queue_cond);
-    pthread_mutex_unlock(&renderer.queue_mutex);
-    pthread_join(renderer.queue_thread, NULL);
-    pthread_cond_destroy(&renderer.queue_cond);
-    pthread_mutex_destroy(&renderer.queue_mutex);
-    renderer.queue_thread_started = FALSE;
+    if (!queue->thread_started) return;
+    pthread_mutex_lock(&queue->mutex);
+    queue->stop = TRUE;
+    pthread_cond_signal(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+    pthread_join(queue->thread, NULL);
+    pthread_cond_destroy(&queue->cond);
+    pthread_mutex_destroy(&queue->mutex);
+    queue->thread_started = FALSE;
 }
 
-static NTSTATUS enqueue_renderer_queue_job_internal(const struct renderer_queue_job *job,
-        BOOL retry)
+static NTSTATUS enqueue_renderer_queue_job_internal(struct renderer_device_queue *queue,
+        const struct renderer_queue_job *job, BOOL retry)
 {
     unsigned int tail;
 
-    if (!renderer.queue_thread_started) return STATUS_DEVICE_NOT_READY;
-    pthread_mutex_lock(&renderer.queue_mutex);
-    if (renderer.queue_stop || renderer.queue_count >=
-            ARRAY_SIZE(renderer.queue_jobs) - (retry ? 0 : 1))
+    if (!queue->thread_started) return STATUS_DEVICE_NOT_READY;
+    pthread_mutex_lock(&queue->mutex);
+    if (queue->stop || queue->count >= ARRAY_SIZE(queue->jobs) - (retry ? 0 : 1))
     {
-        pthread_mutex_unlock(&renderer.queue_mutex);
-        return renderer.queue_stop ? STATUS_CANCELLED : STATUS_DEVICE_BUSY;
+        pthread_mutex_unlock(&queue->mutex);
+        return queue->stop ? STATUS_CANCELLED : STATUS_DEVICE_BUSY;
     }
-    tail = (renderer.queue_head + renderer.queue_count) % ARRAY_SIZE(renderer.queue_jobs);
-    renderer.queue_jobs[tail] = *job;
-    ++renderer.queue_count;
-    pthread_cond_signal(&renderer.queue_cond);
-    pthread_mutex_unlock(&renderer.queue_mutex);
+    tail = (queue->head + queue->count) % ARRAY_SIZE(queue->jobs);
+    queue->jobs[tail] = *job;
+    ++queue->count;
+    pthread_cond_signal(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS enqueue_renderer_queue_job(const struct renderer_queue_job *job)
+static NTSTATUS enqueue_renderer_queue_job(struct renderer_device_queue *queue,
+        const struct renderer_queue_job *job)
 {
-    return enqueue_renderer_queue_job_internal(job, FALSE);
+    return enqueue_renderer_queue_job_internal(queue, job, FALSE);
 }
 
 static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
@@ -1153,28 +1185,29 @@ static const struct wl_callback_listener renderer_root_unmap_listener =
 
 static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
 {
+    struct renderer_device_queue *queue = &root->device_queue;
     NTSTATUS status;
     BOOL job_done;
     VkResult vr;
 
     if (!root->present_fence) return STATUS_SUCCESS;
-    pthread_mutex_lock(&renderer.queue_mutex);
+    pthread_mutex_lock(&queue->mutex);
     job_done = root->present_job_done;
     status = root->present_job_status;
-    pthread_mutex_unlock(&renderer.queue_mutex);
+    pthread_mutex_unlock(&queue->mutex);
     if (!job_done) return STATUS_PENDING;
     if (root->present_fence_submitted)
     {
-        vr = renderer.p_vkGetFenceStatus(renderer.device, root->present_fence);
+        vr = renderer.p_vkGetFenceStatus(queue->device, root->present_fence);
         if (vr == VK_NOT_READY) return STATUS_PENDING;
         if (vr && !status)
             status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
     }
-    renderer.p_vkDestroyFence(renderer.device, root->present_fence, NULL);
-    renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+    renderer.p_vkDestroyFence(queue->device, root->present_fence, NULL);
+    renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
             &root->present_command_buffer);
-    renderer.p_vkDestroySemaphore(renderer.device, root->present_semaphore, NULL);
-    renderer.p_vkDestroySemaphore(renderer.device, root->acquire_semaphore, NULL);
+    renderer.p_vkDestroySemaphore(queue->device, root->present_semaphore, NULL);
+    renderer.p_vkDestroySemaphore(queue->device, root->acquire_semaphore, NULL);
     root->present_fence = VK_NULL_HANDLE;
     root->present_command_buffer = VK_NULL_HANDLE;
     root->present_semaphore = VK_NULL_HANDLE;
@@ -1192,7 +1225,7 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
 static void destroy_renderer_root_swapchain(struct renderer_root *root)
 {
     if (root->swapchain && renderer.p_vkDestroySwapchainKHR)
-        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+        renderer.p_vkDestroySwapchainKHR(root->device_queue.device, root->swapchain, NULL);
     root->swapchain = VK_NULL_HANDLE;
     memset(root->swapchain_images, 0, sizeof(root->swapchain_images));
     memset(root->swapchain_image_initialized, 0,
@@ -1205,17 +1238,24 @@ static void destroy_renderer_root_swapchain(struct renderer_root *root)
 static NTSTATUS destroy_renderer_root(struct renderer_root *root)
 {
     NTSTATUS status;
+    unsigned int i;
 
     if ((status = poll_renderer_root_present(root))) return status;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].frame_id && renderer.frames[i].root == root)
+            return STATUS_PENDING;
+    for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
+        if (renderer.slots[i].pool_generation && renderer.slots[i].root == root)
+            return STATUS_PENDING;
     if (renderer.pointer_root == root)
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
     if (renderer.keyboard_root == root)
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
     destroy_renderer_root_swapchain(root);
     if (root->snapshot_buffer)
-        renderer.p_vkDestroyBuffer(renderer.device, root->snapshot_buffer, NULL);
+        renderer.p_vkDestroyBuffer(root->device_queue.device, root->snapshot_buffer, NULL);
     if (root->snapshot_memory)
-        renderer.p_vkFreeMemory(renderer.device, root->snapshot_memory, NULL);
+        renderer.p_vkFreeMemory(root->device_queue.device, root->snapshot_memory, NULL);
     if (root->unmap_callback) wl_callback_destroy(root->unmap_callback);
     if (root->vulkan_surface && renderer.p_vkDestroySurfaceKHR)
         renderer.p_vkDestroySurfaceKHR(renderer.instance, root->vulkan_surface, NULL);
@@ -1224,6 +1264,7 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     if (root->surface) wl_surface_destroy(root->surface);
     if (renderer.pointer_root == root) renderer.pointer_root = NULL;
     if (renderer.keyboard_root == root) renderer.keyboard_root = NULL;
+    destroy_renderer_device_queue(&root->device_queue);
     memset(root, 0, sizeof(*root));
     return STATUS_SUCCESS;
 }
@@ -1242,35 +1283,43 @@ static struct renderer_root *find_renderer_root(uint64_t root_identity,
 
 static void destroy_renderer_slot(struct renderer_slot *slot)
 {
+    struct renderer_device_queue *queue = slot->device_queue;
+
+    if (!queue)
+    {
+        memset(slot, 0, sizeof(*slot));
+        return;
+    }
     if (slot->reuse && renderer.p_vkDestroySemaphore)
-        renderer.p_vkDestroySemaphore(renderer.device, slot->reuse, NULL);
+        renderer.p_vkDestroySemaphore(queue->device, slot->reuse, NULL);
     if (slot->ready && renderer.p_vkDestroySemaphore)
-        renderer.p_vkDestroySemaphore(renderer.device, slot->ready, NULL);
+        renderer.p_vkDestroySemaphore(queue->device, slot->ready, NULL);
     if (slot->image && renderer.p_vkDestroyImage)
-        renderer.p_vkDestroyImage(renderer.device, slot->image, NULL);
+        renderer.p_vkDestroyImage(queue->device, slot->image, NULL);
     if (slot->memory && renderer.p_vkFreeMemory)
-        renderer.p_vkFreeMemory(renderer.device, slot->memory, NULL);
+        renderer.p_vkFreeMemory(queue->device, slot->memory, NULL);
     memset(slot, 0, sizeof(*slot));
 }
 
 static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
 {
+    struct renderer_device_queue *queue = frame->device_queue;
     NTSTATUS status;
     BOOL submit_done;
     VkResult vr;
 
     if (!frame->fence) return STATUS_SUCCESS;
-    pthread_mutex_lock(&renderer.queue_mutex);
+    pthread_mutex_lock(&queue->mutex);
     submit_done = frame->submit_done;
     status = frame->submit_status;
-    pthread_mutex_unlock(&renderer.queue_mutex);
+    pthread_mutex_unlock(&queue->mutex);
     if (!submit_done) return STATUS_PENDING;
     if (status) return status;
-    vr = renderer.p_vkGetFenceStatus(renderer.device, frame->fence);
+    vr = renderer.p_vkGetFenceStatus(queue->device, frame->fence);
     if (vr == VK_NOT_READY) return STATUS_PENDING;
     if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
-    renderer.p_vkDestroyFence(renderer.device, frame->fence, NULL);
-    renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+    renderer.p_vkDestroyFence(queue->device, frame->fence, NULL);
+    renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
             &frame->command_buffer);
     frame->fence = VK_NULL_HANDLE;
     frame->command_buffer = VK_NULL_HANDLE;
@@ -1291,9 +1340,9 @@ static NTSTATUS destroy_renderer_frame(struct renderer_frame *frame)
 
     if ((status = poll_renderer_frame(frame))) return status;
     if (frame->image && renderer.p_vkDestroyImage)
-        renderer.p_vkDestroyImage(renderer.device, frame->image, NULL);
+        renderer.p_vkDestroyImage(frame->device_queue->device, frame->image, NULL);
     if (frame->memory && renderer.p_vkFreeMemory)
-        renderer.p_vkFreeMemory(renderer.device, frame->memory, NULL);
+        renderer.p_vkFreeMemory(frame->device_queue->device, frame->memory, NULL);
     memset(frame, 0, sizeof(*frame));
     return STATUS_SUCCESS;
 }
@@ -1317,26 +1366,28 @@ static NTSTATUS release_renderer_frame(void *args)
 static NTSTATUS destroy_deferred_resources(void)
 {
     struct renderer_deferred_resources *resources = &renderer.deferred;
+    struct renderer_device_queue *work_queue = resources->work_queue ?
+            resources->work_queue : &renderer.default_device_queue;
     VkResult vr;
 
     if (resources->fence)
     {
-        vr = renderer.p_vkGetFenceStatus(renderer.device, resources->fence);
+        vr = renderer.p_vkGetFenceStatus(work_queue->device, resources->fence);
         if (vr == VK_NOT_READY) return STATUS_DEVICE_BUSY;
         if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
-        renderer.p_vkDestroyFence(renderer.device, resources->fence, NULL);
+        renderer.p_vkDestroyFence(work_queue->device, resources->fence, NULL);
         resources->fence = VK_NULL_HANDLE;
     }
     if (resources->command_buffer)
     {
-        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+        renderer.p_vkFreeCommandBuffers(work_queue->device, work_queue->command_pool, 1,
                 &resources->command_buffer);
         resources->command_buffer = VK_NULL_HANDLE;
     }
     if (resources->buffer)
-        renderer.p_vkDestroyBuffer(renderer.device, resources->buffer, NULL);
+        renderer.p_vkDestroyBuffer(work_queue->device, resources->buffer, NULL);
     if (resources->buffer_memory)
-        renderer.p_vkFreeMemory(renderer.device, resources->buffer_memory, NULL);
+        renderer.p_vkFreeMemory(work_queue->device, resources->buffer_memory, NULL);
     if (resources->reuse)
         renderer.p_vkDestroySemaphore(renderer.device, resources->reuse, NULL);
     if (resources->ready)
@@ -1361,7 +1412,7 @@ static NTSTATUS destroy_renderer(void)
         if (renderer.frames[i].frame_id &&
             (status = poll_renderer_frame(&renderer.frames[i])))
             return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
-    stop_renderer_queue();
+    stop_renderer_queue(&renderer.default_device_queue);
     if ((status = destroy_deferred_resources())) return status;
     for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
         if ((status = destroy_renderer_frame(&renderer.frames[i]))) return status;
@@ -1836,12 +1887,13 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
 {
     VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties;
-    PFN_vkGetDeviceProcAddr get_device_proc_addr;
 
-    if (!(get_device_proc_addr = (void *)get_instance_proc_addr(renderer.instance,
-            "vkGetDeviceProcAddr")) ||
-        !(get_memory_properties = (void *)get_instance_proc_addr(renderer.instance,
+    if (!(get_memory_properties = (void *)get_instance_proc_addr(renderer.instance,
             "vkGetPhysicalDeviceMemoryProperties")) ||
+        !(renderer.p_vkCreateDevice = (void *)get_instance_proc_addr(
+            renderer.instance, "vkCreateDevice")) ||
+        !(renderer.p_vkDestroyDevice = (void *)get_instance_proc_addr(
+            renderer.instance, "vkDestroyDevice")) ||
         !(renderer.p_vkCreateWaylandSurfaceKHR = (void *)get_instance_proc_addr(
             renderer.instance, "vkCreateWaylandSurfaceKHR")) ||
         !(renderer.p_vkDestroySurfaceKHR = (void *)get_instance_proc_addr(
@@ -1858,7 +1910,7 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
         return FALSE;
 
 #define LOAD_RENDERER_FUNC(name) \
-    if (!(renderer.p_##name = (void *)get_device_proc_addr(renderer.device, #name))) return FALSE
+    if (!(renderer.p_##name = (void *)get_instance_proc_addr(renderer.instance, #name))) return FALSE
     LOAD_RENDERER_FUNC(vkCreateImage);
     LOAD_RENDERER_FUNC(vkDestroyImage);
     LOAD_RENDERER_FUNC(vkGetImageMemoryRequirements);
@@ -1910,6 +1962,74 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
             &renderer.command_pool))
         return FALSE;
     return TRUE;
+}
+
+static void destroy_renderer_device_queue(struct renderer_device_queue *queue)
+{
+    stop_renderer_queue(queue);
+    if (queue->command_pool)
+        renderer.p_vkDestroyCommandPool(queue->device, queue->command_pool, NULL);
+    if (queue->device)
+        renderer.p_vkDestroyDevice(queue->device, NULL);
+    memset(queue, 0, sizeof(*queue));
+}
+
+static NTSTATUS create_renderer_root_device(struct renderer_root *root)
+{
+    static const char *const extensions[] =
+    {
+        VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+        VK_KHR_PRESENT_ID_EXTENSION_NAME,
+        VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    };
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline =
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    VkPhysicalDevicePresentIdFeaturesKHR present_id =
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait =
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
+    VkDeviceQueueCreateInfo queue_info = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    VkDeviceCreateInfo device_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    VkCommandPoolCreateInfo pool_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    struct renderer_device_queue *queue = &root->device_queue;
+    float priority = 1.0f;
+    VkResult vr;
+    NTSTATUS status;
+
+    timeline.timelineSemaphore = VK_TRUE;
+    timeline.pNext = &present_id;
+    present_id.presentId = VK_TRUE;
+    present_id.pNext = &present_wait;
+    present_wait.presentWait = VK_TRUE;
+    queue_info.queueFamilyIndex = renderer.queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    device_info.pNext = &timeline;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = ARRAY_SIZE(extensions);
+    device_info.ppEnabledExtensionNames = extensions;
+    if ((vr = renderer.p_vkCreateDevice(renderer.physical_device, &device_info, NULL,
+            &queue->device)))
+        return renderer_queue_status(vr);
+    renderer.p_vkGetDeviceQueue(queue->device, renderer.queue_family, 0, &queue->queue);
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = renderer.queue_family;
+    if ((vr = renderer.p_vkCreateCommandPool(queue->device, &pool_info, NULL,
+            &queue->command_pool)))
+    {
+        status = renderer_queue_status(vr);
+        destroy_renderer_device_queue(queue);
+        return status;
+    }
+    if ((status = start_renderer_queue(queue)))
+    {
+        destroy_renderer_device_queue(queue);
+        return status;
+    }
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS create_renderer(void *args)
@@ -1990,7 +2110,7 @@ static NTSTATUS create_renderer(void *args)
         status = STATUS_PROCEDURE_NOT_FOUND;
         goto failed;
     }
-    if ((status = start_renderer_queue())) goto failed;
+    if ((status = start_renderer_queue(&renderer.default_device_queue))) goto failed;
     return STATUS_SUCCESS;
 
 failed:
@@ -2002,7 +2122,8 @@ failed:
     return status;
 }
 
-static VkResult import_timeline_semaphore(int *fd, VkSemaphore *semaphore)
+static VkResult import_timeline_semaphore(struct renderer_device_queue *queue, int *fd,
+        VkSemaphore *semaphore)
 {
     VkSemaphoreTypeCreateInfo type_info =
             {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
@@ -2013,14 +2134,14 @@ static VkResult import_timeline_semaphore(int *fd, VkSemaphore *semaphore)
 
     type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     create_info.pNext = &type_info;
-    if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &create_info, NULL, semaphore)))
+    if ((vr = renderer.p_vkCreateSemaphore(queue->device, &create_info, NULL, semaphore)))
         return vr;
     import_info.semaphore = *semaphore;
     import_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
     import_info.fd = *fd;
-    if ((vr = renderer.p_vkImportSemaphoreFdKHR(renderer.device, &import_info)))
+    if ((vr = renderer.p_vkImportSemaphoreFdKHR(queue->device, &import_info)))
     {
-        renderer.p_vkDestroySemaphore(renderer.device, *semaphore, NULL);
+        renderer.p_vkDestroySemaphore(queue->device, *semaphore, NULL);
         *semaphore = VK_NULL_HANDLE;
         return vr;
     }
@@ -2039,6 +2160,8 @@ static NTSTATUS import_renderer_slot(void *args)
     VkMemoryAllocateInfo allocate_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     VkImageCreateInfo image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     VkMemoryRequirements requirements;
+    struct renderer_device_queue *queue = &renderer.default_device_queue;
+    struct renderer_root *root = NULL;
     struct renderer_slot imported = {0}, *slot = NULL;
     uint64_t pool_generations[MAX_RENDERER_POOLS] = {0};
     uint64_t counter_value;
@@ -2055,7 +2178,8 @@ static NTSTATUS import_renderer_slot(void *args)
         status = STATUS_DEVICE_NOT_READY;
         goto done;
     }
-    if (!params->pool_generation || !params->width || !params->height ||
+    if (!params->root_identity != !params->root_generation ||
+        !params->pool_generation || !params->width || !params->height ||
         params->width > 16384 || params->height > 16384 ||
         params->allocation_size < (uint64_t)params->width * params->height * 4 ||
         params->format != WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM ||
@@ -2068,13 +2192,24 @@ static NTSTATUS import_renderer_slot(void *args)
     }
     if (params->memory_fd < 0 || params->ready_fd < 0 || params->reuse_fd < 0)
         goto done;
+    if (params->root_identity)
+    {
+        if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        {
+            status = STATUS_NOT_FOUND;
+            goto done;
+        }
+        queue = &root->device_queue;
+    }
+    else
+        queue = &renderer.default_device_queue;
 
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
     {
         struct renderer_slot *candidate = &renderer.slots[i];
 
         if (!candidate->pool_generation && !slot) slot = candidate;
-        if (candidate->pool_generation)
+        if (candidate->pool_generation && candidate->device_queue == queue)
         {
             if (candidate->pool_generation == params->pool_generation)
                 generation_known = TRUE;
@@ -2083,7 +2218,8 @@ static NTSTATUS import_renderer_slot(void *args)
             if (j == pool_count && pool_count < ARRAY_SIZE(pool_generations))
                 pool_generations[pool_count++] = candidate->pool_generation;
         }
-        if (candidate->pool_generation != params->pool_generation ||
+        if (candidate->device_queue != queue ||
+            candidate->pool_generation != params->pool_generation ||
             candidate->slot != params->slot)
             continue;
         status = candidate->allocation_size == params->allocation_size &&
@@ -2092,7 +2228,7 @@ static NTSTATUS import_renderer_slot(void *args)
                 STATUS_SUCCESS : STATUS_REVISION_MISMATCH;
         goto done;
     }
-    if (!generation_known && pool_count >= MAX_RENDERER_POOLS)
+    if (!generation_known && pool_count >= MAX_RENDERER_POOLS_PER_ROOT)
     {
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto done;
@@ -2118,9 +2254,9 @@ static NTSTATUS import_renderer_slot(void *args)
     image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if ((vr = renderer.p_vkCreateImage(renderer.device, &image_info, NULL, &imported.image)))
+    if ((vr = renderer.p_vkCreateImage(queue->device, &image_info, NULL, &imported.image)))
         goto vulkan_failed;
-    renderer.p_vkGetImageMemoryRequirements(renderer.device, imported.image, &requirements);
+    renderer.p_vkGetImageMemoryRequirements(queue->device, imported.image, &requirements);
     if (params->allocation_size != requirements.size ||
         !(requirements.memoryTypeBits & (1u << params->memory_type_index)))
     {
@@ -2135,22 +2271,24 @@ static NTSTATUS import_renderer_slot(void *args)
     allocate_info.pNext = &dedicated_info;
     allocate_info.allocationSize = params->allocation_size;
     allocate_info.memoryTypeIndex = params->memory_type_index;
-    if ((vr = renderer.p_vkAllocateMemory(renderer.device, &allocate_info, NULL,
+    if ((vr = renderer.p_vkAllocateMemory(queue->device, &allocate_info, NULL,
             &imported.memory)))
         goto vulkan_failed;
     params->memory_fd = -1;
-    if ((vr = renderer.p_vkBindImageMemory(renderer.device, imported.image,
+    if ((vr = renderer.p_vkBindImageMemory(queue->device, imported.image,
             imported.memory, 0)))
         goto vulkan_failed;
-    if ((vr = import_timeline_semaphore(&params->ready_fd, &imported.ready)) ||
-        (vr = import_timeline_semaphore(&params->reuse_fd, &imported.reuse)))
+    if ((vr = import_timeline_semaphore(queue, &params->ready_fd, &imported.ready)) ||
+        (vr = import_timeline_semaphore(queue, &params->reuse_fd, &imported.reuse)))
         goto vulkan_failed;
-    if ((vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, imported.ready,
+    if ((vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, imported.ready,
             &counter_value)) ||
-        (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, imported.reuse,
+        (vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, imported.reuse,
             &counter_value)))
         goto vulkan_failed;
 
+    imported.root = root;
+    imported.device_queue = queue;
     imported.pool_generation = params->pool_generation;
     imported.allocation_size = params->allocation_size;
     imported.width = params->width;
@@ -2168,10 +2306,10 @@ vulkan_failed:
             STATUS_NO_MEMORY : STATUS_INVALID_HANDLE;
 
 done:
-    if (imported.reuse) renderer.p_vkDestroySemaphore(renderer.device, imported.reuse, NULL);
-    if (imported.ready) renderer.p_vkDestroySemaphore(renderer.device, imported.ready, NULL);
-    if (imported.image) renderer.p_vkDestroyImage(renderer.device, imported.image, NULL);
-    if (imported.memory) renderer.p_vkFreeMemory(renderer.device, imported.memory, NULL);
+    if (imported.reuse) renderer.p_vkDestroySemaphore(queue->device, imported.reuse, NULL);
+    if (imported.ready) renderer.p_vkDestroySemaphore(queue->device, imported.ready, NULL);
+    if (imported.image) renderer.p_vkDestroyImage(queue->device, imported.image, NULL);
+    if (imported.memory) renderer.p_vkFreeMemory(queue->device, imported.memory, NULL);
     if (params->reuse_fd >= 0) close(params->reuse_fd);
     if (params->ready_fd >= 0) close(params->ready_fd);
     if (params->memory_fd >= 0) close(params->memory_fd);
@@ -2195,6 +2333,7 @@ static NTSTATUS process_renderer_frame(void *args)
     VkMemoryRequirements requirements;
     struct renderer_slot *slot = NULL;
     struct renderer_frame pending = {0}, *frame = NULL;
+    struct renderer_device_queue *queue = NULL;
     uint64_t pool_generation, frame_id, ready_value, reuse_value;
     uint64_t ready_counter, reuse_counter;
     uint32_t slot_index;
@@ -2241,9 +2380,10 @@ static NTSTATUS process_renderer_frame(void *args)
             break;
         }
     if (!slot) return STATUS_NOT_FOUND;
-    if ((vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, slot->ready,
+    queue = slot->device_queue;
+    if ((vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->ready,
             &ready_counter)) ||
-        (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device, slot->reuse,
+        (vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->reuse,
             &reuse_counter)))
         goto failed;
     if (ready_counter < ready_value) return STATUS_PENDING;
@@ -2265,9 +2405,9 @@ static NTSTATUS process_renderer_frame(void *args)
     image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if ((vr = renderer.p_vkCreateImage(renderer.device, &image_info, NULL, &pending.image)))
+    if ((vr = renderer.p_vkCreateImage(queue->device, &image_info, NULL, &pending.image)))
         goto failed;
-    renderer.p_vkGetImageMemoryRequirements(renderer.device, pending.image, &requirements);
+    renderer.p_vkGetImageMemoryRequirements(queue->device, pending.image, &requirements);
     for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
          ++memory_type)
         if ((requirements.memoryTypeBits & (1u << memory_type)) &&
@@ -2285,15 +2425,15 @@ static NTSTATUS process_renderer_frame(void *args)
     }
     memory_allocate.allocationSize = requirements.size;
     memory_allocate.memoryTypeIndex = memory_type;
-    if ((vr = renderer.p_vkAllocateMemory(renderer.device, &memory_allocate, NULL,
+    if ((vr = renderer.p_vkAllocateMemory(queue->device, &memory_allocate, NULL,
             &pending.memory)) ||
-        (vr = renderer.p_vkBindImageMemory(renderer.device, pending.image, pending.memory, 0)))
+        (vr = renderer.p_vkBindImageMemory(queue->device, pending.image, pending.memory, 0)))
         goto failed;
 
-    command_allocate.commandPool = renderer.command_pool;
+    command_allocate.commandPool = queue->command_pool;
     command_allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     command_allocate.commandBufferCount = 1;
-    if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device, &command_allocate,
+    if ((vr = renderer.p_vkAllocateCommandBuffers(queue->device, &command_allocate,
             &pending.command_buffer)) ||
         (vr = renderer.p_vkBeginCommandBuffer(pending.command_buffer, &command_begin)))
         goto failed;
@@ -2348,9 +2488,11 @@ static NTSTATUS process_renderer_frame(void *args)
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
             0, NULL, 0, NULL, ARRAY_SIZE(release), release);
     if ((vr = renderer.p_vkEndCommandBuffer(pending.command_buffer)) ||
-        (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &pending.fence)))
+        (vr = renderer.p_vkCreateFence(queue->device, &fence_info, NULL, &pending.fence)))
         goto failed;
 
+    pending.root = slot->root;
+    pending.device_queue = queue;
     pending.pool_generation = pool_generation;
     pending.frame_id = frame_id;
     pending.ready_value = ready_value;
@@ -2367,7 +2509,7 @@ static NTSTATUS process_renderer_frame(void *args)
     queue_job.u.frame.fence = frame->fence;
     queue_job.u.frame.wait_value = ready_value;
     queue_job.u.frame.signal_value = reuse_value;
-    if ((status = enqueue_renderer_queue_job(&queue_job)))
+    if ((status = enqueue_renderer_queue_job(queue, &queue_job)))
     {
         pending = *frame;
         memset(frame, 0, sizeof(*frame));
@@ -2378,12 +2520,12 @@ static NTSTATUS process_renderer_frame(void *args)
 
 failed:
     fprintf(stderr, "Vulkan transport frame copy returned %d.\n", vr);
-    if (pending.fence) renderer.p_vkDestroyFence(renderer.device, pending.fence, NULL);
+    if (pending.fence) renderer.p_vkDestroyFence(queue->device, pending.fence, NULL);
     if (pending.command_buffer)
-        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+        renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
                 &pending.command_buffer);
-    if (pending.image) renderer.p_vkDestroyImage(renderer.device, pending.image, NULL);
-    if (pending.memory) renderer.p_vkFreeMemory(renderer.device, pending.memory, NULL);
+    if (pending.image) renderer.p_vkDestroyImage(queue->device, pending.image, NULL);
+    if (pending.memory) renderer.p_vkFreeMemory(queue->device, pending.memory, NULL);
     return vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY ?
             STATUS_NO_MEMORY : STATUS_UNSUCCESSFUL;
 }
@@ -2506,6 +2648,7 @@ static NTSTATUS test_renderer_input(void *args)
 static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
         uint32_t requested_width, uint32_t requested_height)
 {
+    struct renderer_device_queue *queue = &root->device_queue;
     VkSwapchainCreateInfoKHR create_info = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     VkSurfaceCapabilitiesKHR capabilities;
     VkSurfaceFormatKHR *formats = NULL, selected_format = {0};
@@ -2618,15 +2761,15 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     create_info.clipped = VK_TRUE;
     create_info.oldSwapchain = root->swapchain;
-    if ((vr = renderer.p_vkCreateSwapchainKHR(renderer.device, &create_info, NULL,
+    if ((vr = renderer.p_vkCreateSwapchainKHR(queue->device, &create_info, NULL,
             &swapchain)))
         goto done;
     image_count = ARRAY_SIZE(images);
-    if ((vr = renderer.p_vkGetSwapchainImagesKHR(renderer.device, swapchain, &image_count,
+    if ((vr = renderer.p_vkGetSwapchainImagesKHR(queue->device, swapchain, &image_count,
             images)) || !image_count || image_count > ARRAY_SIZE(images))
         goto done;
     if (root->swapchain)
-        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+        renderer.p_vkDestroySwapchainKHR(queue->device, root->swapchain, NULL);
     root->swapchain = swapchain;
     swapchain = VK_NULL_HANDLE;
     memcpy(root->swapchain_images, images, image_count * sizeof(images[0]));
@@ -2640,7 +2783,7 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     status = STATUS_SUCCESS;
 
 done:
-    if (swapchain) renderer.p_vkDestroySwapchainKHR(renderer.device, swapchain, NULL);
+    if (swapchain) renderer.p_vkDestroySwapchainKHR(queue->device, swapchain, NULL);
     free(present_modes);
     free(formats);
     if (status && vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
@@ -2722,6 +2865,11 @@ static NTSTATUS sync_renderer_root(void *args)
     {
         destroy_renderer_root(root);
         return STATUS_NOT_SUPPORTED;
+    }
+    if ((status = create_renderer_root_device(root)))
+    {
+        destroy_renderer_root(root);
+        return status;
     }
     if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
     {
@@ -2849,6 +2997,7 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkMemoryRequirements requirements;
     struct renderer_root *root;
+    struct renderer_device_queue *queue;
     uint32_t memory_type;
     void *mapped = NULL;
     uint64_t size;
@@ -2869,6 +3018,7 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
         return STATUS_INVALID_PARAMETER;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
+    queue = &root->device_queue;
     if (params->geometry_revision != root->geometry_revision)
         return STATUS_REVISION_MISMATCH;
     if (params->snapshot_revision == root->snapshot_revision)
@@ -2890,9 +3040,9 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     buffer_info.size = size;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if ((vr = renderer.p_vkCreateBuffer(renderer.device, &buffer_info, NULL, &buffer)))
+    if ((vr = renderer.p_vkCreateBuffer(queue->device, &buffer_info, NULL, &buffer)))
         goto failed;
-    renderer.p_vkGetBufferMemoryRequirements(renderer.device, buffer, &requirements);
+    renderer.p_vkGetBufferMemoryRequirements(queue->device, buffer, &requirements);
     for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
          ++memory_type)
         if ((requirements.memoryTypeBits & (1u << memory_type)) &&
@@ -2907,18 +3057,18 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     }
     allocate_info.allocationSize = requirements.size;
     allocate_info.memoryTypeIndex = memory_type;
-    if ((vr = renderer.p_vkAllocateMemory(renderer.device, &allocate_info, NULL, &memory)) ||
-        (vr = renderer.p_vkBindBufferMemory(renderer.device, buffer, memory, 0)) ||
-        (vr = renderer.p_vkMapMemory(renderer.device, memory, 0, size, 0, &mapped)))
+    if ((vr = renderer.p_vkAllocateMemory(queue->device, &allocate_info, NULL, &memory)) ||
+        (vr = renderer.p_vkBindBufferMemory(queue->device, buffer, memory, 0)) ||
+        (vr = renderer.p_vkMapMemory(queue->device, memory, 0, size, 0, &mapped)))
         goto failed;
     memcpy(mapped, (const void *)(uintptr_t)params->pixels, size);
-    renderer.p_vkUnmapMemory(renderer.device, memory);
+    renderer.p_vkUnmapMemory(queue->device, memory);
     mapped = NULL;
 
     if (root->snapshot_buffer)
-        renderer.p_vkDestroyBuffer(renderer.device, root->snapshot_buffer, NULL);
+        renderer.p_vkDestroyBuffer(queue->device, root->snapshot_buffer, NULL);
     if (root->snapshot_memory)
-        renderer.p_vkFreeMemory(renderer.device, root->snapshot_memory, NULL);
+        renderer.p_vkFreeMemory(queue->device, root->snapshot_memory, NULL);
     root->snapshot_buffer = buffer;
     root->snapshot_memory = memory;
     root->snapshot_revision = params->snapshot_revision;
@@ -2932,9 +3082,9 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     return STATUS_SUCCESS;
 
 failed:
-    if (mapped) renderer.p_vkUnmapMemory(renderer.device, memory);
-    if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
-    if (memory) renderer.p_vkFreeMemory(renderer.device, memory, NULL);
+    if (mapped) renderer.p_vkUnmapMemory(queue->device, memory);
+    if (buffer) renderer.p_vkDestroyBuffer(queue->device, buffer, NULL);
+    if (memory) renderer.p_vkFreeMemory(queue->device, memory, NULL);
     return vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY ?
             STATUS_NO_MEMORY : STATUS_UNSUCCESSFUL;
 }
@@ -2956,6 +3106,7 @@ static NTSTATUS present_renderer_root(void *args)
     VkClearColorValue color;
     struct renderer_frame *source = NULL;
     struct renderer_root *root;
+    struct renderer_device_queue *queue;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -2976,6 +3127,7 @@ static NTSTATUS present_renderer_root(void *args)
         return STATUS_INVALID_PARAMETER;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
+    queue = &root->device_queue;
     if (!root->swapchain) return STATUS_DEVICE_NOT_READY;
     if ((status = poll_renderer_root_present(root))) return status;
     use_snapshot = !!params->snapshot_revision;
@@ -2997,6 +3149,7 @@ static NTSTATUS present_renderer_root(void *args)
                 break;
             }
         if (!source) return STATUS_NOT_FOUND;
+        if (source->device_queue != queue) return STATUS_INVALID_DEVICE_STATE;
         if ((status = poll_renderer_frame(source))) return status;
         if (!source->complete) return STATUS_PENDING;
         if ((!use_snapshot && (source->width != root->swapchain_width ||
@@ -3008,13 +3161,13 @@ static NTSTATUS present_renderer_root(void *args)
     if ((status = authorize_renderer_root_present(root,
             params->geometry_revision))) return status;
 
-    if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
+    if ((vr = renderer.p_vkCreateSemaphore(queue->device, &semaphore_info, NULL,
             &acquire_semaphore)) ||
-        (vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
+        (vr = renderer.p_vkCreateSemaphore(queue->device, &semaphore_info, NULL,
             &present_semaphore)) ||
-        (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL, &fence)))
+        (vr = renderer.p_vkCreateFence(queue->device, &fence_info, NULL, &fence)))
         goto failed;
-    vr = renderer.p_vkAcquireNextImageKHR(renderer.device, root->swapchain, 0,
+    vr = renderer.p_vkAcquireNextImageKHR(queue->device, root->swapchain, 0,
             acquire_semaphore, VK_NULL_HANDLE, &image_index);
     if (vr == VK_NOT_READY || vr == VK_TIMEOUT)
     {
@@ -3029,10 +3182,10 @@ static NTSTATUS present_renderer_root(void *args)
         goto done;
     }
 
-    allocate_info.commandPool = renderer.command_pool;
+    allocate_info.commandPool = queue->command_pool;
     allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocate_info.commandBufferCount = 1;
-    if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device, &allocate_info,
+    if ((vr = renderer.p_vkAllocateCommandBuffers(queue->device, &allocate_info,
             &command_buffer)) ||
         (vr = renderer.p_vkBeginCommandBuffer(command_buffer, &begin_info)))
         goto failed;
@@ -3153,7 +3306,7 @@ static NTSTATUS present_renderer_root(void *args)
     if (!++root->next_present_id) ++root->next_present_id;
     queue_job.u.present.present_id = root->next_present_id;
     queue_job.u.present.image_index = image_index;
-    if ((status = enqueue_renderer_queue_job(&queue_job)))
+    if ((status = enqueue_renderer_queue_job(queue, &queue_job)))
     {
         root->acquire_semaphore = root->present_semaphore = VK_NULL_HANDLE;
         root->present_command_buffer = VK_NULL_HANDLE;
@@ -3177,14 +3330,14 @@ failed:
     status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
 done:
     if (!root->present_fence) root->geometry_token_revision = 0;
-    if (fence) renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+    if (fence) renderer.p_vkDestroyFence(queue->device, fence, NULL);
     if (command_buffer)
-        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+        renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
                 &command_buffer);
     if (present_semaphore)
-        renderer.p_vkDestroySemaphore(renderer.device, present_semaphore, NULL);
+        renderer.p_vkDestroySemaphore(queue->device, present_semaphore, NULL);
     if (acquire_semaphore)
-        renderer.p_vkDestroySemaphore(renderer.device, acquire_semaphore, NULL);
+        renderer.p_vkDestroySemaphore(queue->device, acquire_semaphore, NULL);
     return status;
 }
 
@@ -3375,6 +3528,8 @@ static NTSTATUS renderer_self_test(void *args)
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     struct renderer_frame *copied_frame = NULL;
+    struct renderer_root *test_root = NULL;
+    struct renderer_device_queue *consumer_queue = &renderer.default_device_queue;
     struct winewayland_host_renderer_frame_release frame_release;
     unsigned char *pixels;
     uint32_t memory_type_index, readback_memory_type;
@@ -3513,6 +3668,19 @@ static NTSTATUS renderer_self_test(void *args)
     memset(&import, 0, sizeof(import));
     import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
     import.size = sizeof(import);
+    if (test_params)
+    {
+        for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+            if (renderer.roots[i].swapchain && renderer.roots[i].swapchain_width == 64 &&
+                renderer.roots[i].swapchain_height == 64)
+            {
+                test_root = &renderer.roots[i];
+                consumer_queue = &test_root->device_queue;
+                import.root_identity = test_root->root_identity;
+                import.root_generation = test_root->root_generation;
+                break;
+            }
+    }
     import.pool_generation = ~(uint64_t)0;
     import.allocation_size = requirements.size;
     import.width = import.height = 64;
@@ -3544,9 +3712,9 @@ static NTSTATUS renderer_self_test(void *args)
                 renderer.slots[i].slot == import.slot)
                 break;
         if (i == ARRAY_SIZE(renderer.slots) ||
-            (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device,
+            (vr = renderer.p_vkGetSemaphoreCounterValue(consumer_queue->device,
                     renderer.slots[i].ready, &ready_value)) ||
-            (vr = renderer.p_vkGetSemaphoreCounterValue(renderer.device,
+            (vr = renderer.p_vkGetSemaphoreCounterValue(consumer_queue->device,
                     renderer.slots[i].reuse, &reuse_value)) ||
             ready_value != 7 || reuse_value)
         {
@@ -3578,7 +3746,7 @@ static NTSTATUS renderer_self_test(void *args)
                         renderer.frames[i].frame_id == frame_params.frame_id)
                         break;
                 if (i == ARRAY_SIZE(renderer.frames) ||
-                    (vr = renderer.p_vkWaitForFences(renderer.device, 1,
+                    (vr = renderer.p_vkWaitForFences(consumer_queue->device, 1,
                             &renderer.frames[i].fence, VK_TRUE, 1000000000ull)))
                 {
                     defer_resources = i != ARRAY_SIZE(renderer.frames);
@@ -3610,10 +3778,11 @@ static NTSTATUS renderer_self_test(void *args)
                 buffer_info.size = 64 * 64 * 4;
                 buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                if ((vr = renderer.p_vkCreateBuffer(renderer.device, &buffer_info, NULL,
+                if ((vr = renderer.p_vkCreateBuffer(consumer_queue->device, &buffer_info, NULL,
                         &buffer)))
                     goto failed;
-                renderer.p_vkGetBufferMemoryRequirements(renderer.device, buffer, &requirements);
+                renderer.p_vkGetBufferMemoryRequirements(consumer_queue->device, buffer,
+                        &requirements);
                 for (readback_memory_type = 0;
                      readback_memory_type < renderer.memory_properties.memoryTypeCount;
                      ++readback_memory_type)
@@ -3632,16 +3801,17 @@ static NTSTATUS renderer_self_test(void *args)
                 allocate_info.pNext = NULL;
                 allocate_info.allocationSize = requirements.size;
                 allocate_info.memoryTypeIndex = readback_memory_type;
-                if ((vr = renderer.p_vkAllocateMemory(renderer.device, &allocate_info, NULL,
+                if ((vr = renderer.p_vkAllocateMemory(consumer_queue->device,
+                        &allocate_info, NULL,
                         &buffer_memory)) ||
-                    (vr = renderer.p_vkBindBufferMemory(renderer.device, buffer,
+                    (vr = renderer.p_vkBindBufferMemory(consumer_queue->device, buffer,
                             buffer_memory, 0)))
                     goto failed;
 
-                command_allocate.commandPool = renderer.command_pool;
+                command_allocate.commandPool = consumer_queue->command_pool;
                 command_allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
                 command_allocate.commandBufferCount = 1;
-                if ((vr = renderer.p_vkAllocateCommandBuffers(renderer.device,
+                if ((vr = renderer.p_vkAllocateCommandBuffers(consumer_queue->device,
                         &command_allocate, &command_buffer)) ||
                     (vr = renderer.p_vkBeginCommandBuffer(command_buffer, &command_begin)))
                     goto failed;
@@ -3691,23 +3861,24 @@ static NTSTATUS renderer_self_test(void *args)
                 transition_submit.commandBufferCount = 1;
                 transition_submit.pCommandBuffers = &command_buffer;
                 if ((vr = renderer.p_vkEndCommandBuffer(command_buffer)) ||
-                    (vr = renderer.p_vkCreateFence(renderer.device, &fence_info, NULL,
+                    (vr = renderer.p_vkCreateFence(consumer_queue->device, &fence_info, NULL,
                             &fence)) ||
-                    (vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &transition_submit,
+                    (vr = renderer.p_vkQueueSubmit(consumer_queue->queue, 1,
+                            &transition_submit,
                             fence)))
                     goto failed;
-                if ((vr = renderer.p_vkWaitForFences(renderer.device, 1, &fence,
+                if ((vr = renderer.p_vkWaitForFences(consumer_queue->device, 1, &fence,
                         VK_TRUE, 1000000000ull)))
                 {
                     defer_resources = TRUE;
                     goto failed;
                 }
-                renderer.p_vkDestroyFence(renderer.device, fence, NULL);
-                renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
-                        &command_buffer);
+                renderer.p_vkDestroyFence(consumer_queue->device, fence, NULL);
+                renderer.p_vkFreeCommandBuffers(consumer_queue->device,
+                        consumer_queue->command_pool, 1, &command_buffer);
                 fence = VK_NULL_HANDLE;
                 command_buffer = VK_NULL_HANDLE;
-                if ((vr = renderer.p_vkMapMemory(renderer.device, buffer_memory, 0,
+                if ((vr = renderer.p_vkMapMemory(consumer_queue->device, buffer_memory, 0,
                         VK_WHOLE_SIZE, 0, (void **)&pixels)))
                     goto failed;
                 for (i = 0; i < 64 * 64; ++i)
@@ -3717,24 +3888,16 @@ static NTSTATUS renderer_self_test(void *args)
                         status = STATUS_DATA_ERROR;
                         break;
                     }
-                renderer.p_vkUnmapMemory(renderer.device, buffer_memory);
+                renderer.p_vkUnmapMemory(consumer_queue->device, buffer_memory);
                 fprintf(stderr, "Vulkan transport self-test: pixel copy returned %#x.\n",
                         status);
 readback_done:
                 if (!status && test_params)
                 {
                     struct winewayland_host_renderer_present present;
-                    struct renderer_root *root = NULL;
+                    struct renderer_root *root = test_root;
 
                     test_params->flags |= WINEWAYLAND_HOST_TEST_PIXELS_VERIFIED;
-                    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
-                        if (renderer.roots[i].swapchain &&
-                            renderer.roots[i].swapchain_width == copied_frame->width &&
-                            renderer.roots[i].swapchain_height == copied_frame->height)
-                        {
-                            root = &renderer.roots[i];
-                            break;
-                        }
                     if (root)
                     {
                         memset(&present, 0, sizeof(present));
@@ -3761,7 +3924,7 @@ readback_done:
                             }
                             else
                                 status = STATUS_INVALID_HANDLE;
-                            vr = renderer.p_vkWaitForFences(renderer.device, 1,
+                            vr = renderer.p_vkWaitForFences(root->device_queue.device, 1,
                                     &root->present_fence, VK_TRUE, 1000000000ull);
                             if (vr == VK_TIMEOUT)
                                 status = STATUS_IO_TIMEOUT;
@@ -3783,8 +3946,8 @@ readback_done:
                                 status);
                     }
                 }
-                if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
-                if (buffer_memory) renderer.p_vkFreeMemory(renderer.device,
+                if (buffer) renderer.p_vkDestroyBuffer(consumer_queue->device, buffer, NULL);
+                if (buffer_memory) renderer.p_vkFreeMemory(consumer_queue->device,
                         buffer_memory, NULL);
                 buffer = VK_NULL_HANDLE;
                 buffer_memory = VK_NULL_HANDLE;
@@ -3825,6 +3988,7 @@ failed:
 done:
     if (defer_resources)
     {
+        renderer.deferred.work_queue = consumer_queue;
         renderer.deferred.image = image;
         renderer.deferred.memory = memory;
         renderer.deferred.buffer = buffer;
@@ -3842,12 +4006,13 @@ done:
         command_buffer = VK_NULL_HANDLE;
         fence = VK_NULL_HANDLE;
     }
-    if (fence) renderer.p_vkDestroyFence(renderer.device, fence, NULL);
+    if (fence) renderer.p_vkDestroyFence(consumer_queue->device, fence, NULL);
     if (command_buffer)
-        renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
+        renderer.p_vkFreeCommandBuffers(consumer_queue->device,
+                consumer_queue->command_pool, 1,
                 &command_buffer);
-    if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
-    if (buffer_memory) renderer.p_vkFreeMemory(renderer.device, buffer_memory, NULL);
+    if (buffer) renderer.p_vkDestroyBuffer(consumer_queue->device, buffer, NULL);
+    if (buffer_memory) renderer.p_vkFreeMemory(consumer_queue->device, buffer_memory, NULL);
     if (reuse) renderer.p_vkDestroySemaphore(renderer.device, reuse, NULL);
     if (ready) renderer.p_vkDestroySemaphore(renderer.device, ready, NULL);
     if (image) renderer.p_vkDestroyImage(renderer.device, image, NULL);

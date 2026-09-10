@@ -292,15 +292,16 @@ or transport fixture is not Outlook support.
   of risking a permanently pressed key. Physical modifier reconciliation,
   IME/text input and a compositor-originated pointer-recipient fixture remain
   pending.
-- The current Vulkan renderer still has one queue worker and one logical
-  device for every native root. Until per-window queue and device isolation is
-  implemented and the blocked-window fixture passes, wineserver admits active
-  contributor records on only one logical root per Windows desktop. A second
-  root receives `STATUS_DEVICE_BUSY`, which leaves DComp on its existing local
-  presentation path. Contributors above and below the same root remain
-  supported. The authority fixture verified the cross-root rejection while
-  retaining the existing same-root registry tests and passed 662 checks with
-  zero failures.
+- Each native root now owns a separate Vulkan logical device, presentation
+  queue, command pool and bounded worker. Imported pool slots and immutable
+  host copies are bound to that root's device, and root retirement waits until
+  their last frame and WSI reader are gone before destroying it. A stalled
+  present-wait on one root therefore cannot block GPU submission or present
+  completion on another root. The renderer ABI carries the server-issued root
+  identity on every import. Wineserver still temporarily admits contributors
+  on only one root until the simultaneous-root authority and blocked-window
+  fixtures pass; this is now a validation gate rather than a shared-queue
+  limitation.
 - Native non-client rendering is part of the host WSI image. DComp may admit
   an identity composition swapchain whose extent matches the client area even
   when the root has a title bar, border or resize frame. The guest invalidates

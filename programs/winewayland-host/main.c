@@ -29,7 +29,7 @@
 C_ASSERT(sizeof(struct winewayland_host_startup) == 96);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
-C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame_release) == 24);
@@ -619,8 +619,8 @@ struct registered_host_info
     uint32_t device_uuid[4];
 };
 
-#define HOST_RENDERER_MAX_POOLS 2
 #define HOST_RENDERER_MAX_ROOTS 64
+#define HOST_RENDERER_MAX_POOLS (HOST_RENDERER_MAX_ROOTS * 2)
 
 struct host_root_info
 {
@@ -781,6 +781,8 @@ struct host_frame_info
 struct host_renderer_pool
 {
     user_handle_t root;
+    uint64_t root_identity;
+    uint64_t root_generation;
     uint64_t contributor_id;
     uint64_t server_generation;
     uint64_t renderer_generation;
@@ -1480,20 +1482,22 @@ static struct host_renderer_pool *find_renderer_pool(user_handle_t root,
     return NULL;
 }
 
-static struct host_renderer_pool *allocate_renderer_pool(user_handle_t root,
+static struct host_renderer_pool *allocate_renderer_pool(const struct host_renderer_root *root,
         uint64_t contributor_id, uint64_t server_generation, uint32_t width,
         uint32_t height)
 {
     struct host_renderer_pool *pool;
     unsigned int i;
 
-    if ((pool = find_renderer_pool(root, contributor_id, server_generation))) return pool;
+    if ((pool = find_renderer_pool(root->root, contributor_id, server_generation))) return pool;
     for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
         if (!renderer_pools[i].renderer_generation)
         {
             pool = &renderer_pools[i];
             if (!++next_renderer_pool_generation) ++next_renderer_pool_generation;
-            pool->root = root;
+            pool->root = root->root;
+            pool->root_identity = root->root_identity;
+            pool->root_generation = root->root_generation;
             pool->contributor_id = contributor_id;
             pool->server_generation = server_generation;
             pool->renderer_generation = next_renderer_pool_generation;
@@ -1558,6 +1562,8 @@ static NTSTATUS import_buffer_slot(user_handle_t root, uint64_t host_epoch,
     memset(&import, 0, sizeof(import));
     import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
     import.size = sizeof(import);
+    import.root_identity = renderer_pool->root_identity;
+    import.root_generation = renderer_pool->root_generation;
     import.pool_generation = renderer_pool->renderer_generation;
     import.allocation_size = pool->allocation_size;
     import.width = pool->width;
@@ -1586,7 +1592,7 @@ static NTSTATUS import_buffer_slot(user_handle_t root, uint64_t host_epoch,
     return report_status ? report_status : status;
 }
 
-static NTSTATUS process_buffer_pool(user_handle_t root, uint64_t host_epoch,
+static NTSTATUS process_buffer_pool(struct host_renderer_root *root, uint64_t host_epoch,
         uint64_t contributor_id, const struct host_pool_info *pool)
 {
     struct host_renderer_pool *renderer_pool;
@@ -1595,7 +1601,7 @@ static NTSTATUS process_buffer_pool(user_handle_t root, uint64_t host_epoch,
 
     registered = WINE_WAYLAND_BUFFER_SLOT_INFO_REGISTERED(pool->slot_info);
     failed = WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(pool->slot_info);
-    renderer_pool = find_renderer_pool(root, contributor_id, pool->pool_generation);
+    renderer_pool = find_renderer_pool(root->root, contributor_id, pool->pool_generation);
     if (renderer_pool) renderer_pool->seen = TRUE;
     if (registered != pool->slot_count) return STATUS_SUCCESS;
     if (!renderer_pool && !failed)
@@ -1605,7 +1611,7 @@ static NTSTATUS process_buffer_pool(user_handle_t root, uint64_t host_epoch,
 
     for (slot = 0; slot < pool->slot_count; ++slot)
     {
-        slot_status = import_buffer_slot(root, host_epoch, contributor_id, pool,
+        slot_status = import_buffer_slot(root->root, host_epoch, contributor_id, pool,
                 renderer_pool, slot, failed || !renderer_pool || status);
         if (slot_status && !status) status = slot_status;
     }
@@ -1910,7 +1916,7 @@ static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t ho
             previous_pool, &pool)))
     {
         previous_pool = pool.pool_generation;
-        if ((status = process_buffer_pool(root->root, host_epoch, contributor->contributor_id,
+        if ((status = process_buffer_pool(root, host_epoch, contributor->contributor_id,
                 &pool))) return status;
     }
     if (status != STATUS_NO_MORE_ENTRIES) return status;
@@ -2356,15 +2362,15 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     }
     if (status != STATUS_NO_MORE_ENTRIES) return status;
 
-    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
-        if (renderer_roots[i].root_identity && !renderer_roots[i].seen &&
-            (status = retire_renderer_root(&renderer_roots[i], host_epoch)))
-        {
-            if (!first_error) first_error = status;
-        }
     for (i = 0; i < ARRAY_SIZE(renderer_pools); ++i)
         if (renderer_pools[i].renderer_generation && !renderer_pools[i].seen &&
             (status = retire_renderer_pool(&renderer_pools[i])))
+        {
+            if (!first_error) first_error = status;
+        }
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+        if (renderer_roots[i].root_identity && !renderer_roots[i].seen &&
+            (status = retire_renderer_root(&renderer_roots[i], host_epoch)))
         {
             if (!first_error) first_error = status;
         }

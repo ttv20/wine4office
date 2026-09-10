@@ -67,7 +67,7 @@ struct winewayland_host_startup
     volatile uint32_t restored_windows;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 8
+#define WINEWAYLAND_HOST_RENDERER_VERSION 9
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -139,6 +139,8 @@ struct winewayland_host_renderer_import
 {
     uint32_t version;
     uint32_t size;
+    uint64_t root_identity;
+    uint64_t root_generation;
     uint64_t pool_generation;
     uint64_t allocation_size;
     uint32_t width;
