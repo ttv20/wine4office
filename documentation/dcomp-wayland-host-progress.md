@@ -427,6 +427,13 @@ admitted.
   shell global; logs and hashes are retained as
   `/workspace/artifacts/xdg-dispatch-registration-{x64,i386}.log` and
   `/workspace/artifacts/xdg-dispatch-SHA256SUMS`.
+- A dedicated shell fixture now creates an unmapped `wl_surface`, assigns
+  `xdg_surface` and `xdg_toplevel` roles, commits without a buffer, dispatches
+  the first configure and acknowledges its serial. It passed on the task KWin
+  compositor in x86-64 and i386, proving the minimal protocol's wire layout and
+  bounded event pump without creating a visible window. Evidence and hashes
+  are retained as `/workspace/artifacts/xdg-toplevel-{x64,i386}.log` and
+  `/workspace/artifacts/xdg-toplevel-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

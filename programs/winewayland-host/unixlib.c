@@ -1287,42 +1287,139 @@ static NTSTATUS retire_renderer_pool(void *args)
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS dispatch_renderer(void *args)
+static NTSTATUS dispatch_wayland_display(struct wl_display *display, int timeout)
 {
     struct pollfd pollfd;
     int ret;
 
-    (void)args;
-    if (!renderer.display) return STATUS_DEVICE_NOT_READY;
-    while (wl_display_prepare_read(renderer.display) == -1)
-        if (wl_display_dispatch_pending(renderer.display) == -1)
+    while (wl_display_prepare_read(display) == -1)
+        if (wl_display_dispatch_pending(display) == -1)
             return STATUS_PORT_DISCONNECTED;
-    if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+    if (wl_display_flush(display) == -1 && errno != EAGAIN)
     {
-        wl_display_cancel_read(renderer.display);
+        wl_display_cancel_read(display);
         return STATUS_PORT_DISCONNECTED;
     }
-    pollfd.fd = wl_display_get_fd(renderer.display);
+    pollfd.fd = wl_display_get_fd(display);
     pollfd.events = POLLIN;
     pollfd.revents = 0;
-    if ((ret = poll(&pollfd, 1, 0)) == -1)
+    if ((ret = poll(&pollfd, 1, timeout)) == -1)
     {
-        wl_display_cancel_read(renderer.display);
+        wl_display_cancel_read(display);
         return errno == EINTR ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
     }
     if (ret && (pollfd.revents & POLLIN))
     {
-        if (wl_display_read_events(renderer.display) == -1)
+        if (wl_display_read_events(display) == -1)
             return STATUS_PORT_DISCONNECTED;
     }
     else
     {
-        wl_display_cancel_read(renderer.display);
+        wl_display_cancel_read(display);
         if (pollfd.revents & (POLLERR | POLLHUP | POLLNVAL))
             return STATUS_PORT_DISCONNECTED;
     }
-    return wl_display_dispatch_pending(renderer.display) == -1 ?
+    return wl_display_dispatch_pending(display) == -1 ?
             STATUS_PORT_DISCONNECTED : STATUS_SUCCESS;
+}
+
+static NTSTATUS dispatch_renderer(void *args)
+{
+    (void)args;
+    if (!renderer.display) return STATUS_DEVICE_NOT_READY;
+    return dispatch_wayland_display(renderer.display, 0);
+}
+
+struct shell_test_state
+{
+    BOOL configured;
+    BOOL closed;
+};
+
+static void shell_test_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
+        uint32_t serial)
+{
+    struct shell_test_state *state = data;
+
+    xdg_surface_ack_configure(xdg_surface, serial);
+    state->configured = TRUE;
+}
+
+static const struct xdg_surface_listener shell_test_xdg_surface_listener =
+{
+    shell_test_xdg_surface_configure,
+};
+
+static void shell_test_toplevel_configure(void *data, struct xdg_toplevel *toplevel,
+        int32_t width, int32_t height, struct wl_array *states)
+{
+    (void)data;
+    (void)toplevel;
+    (void)width;
+    (void)height;
+    (void)states;
+}
+
+static void shell_test_toplevel_close(void *data, struct xdg_toplevel *toplevel)
+{
+    struct shell_test_state *state = data;
+
+    (void)toplevel;
+    state->closed = TRUE;
+}
+
+static const struct xdg_toplevel_listener shell_test_toplevel_listener =
+{
+    shell_test_toplevel_configure,
+    shell_test_toplevel_close,
+};
+
+static NTSTATUS shell_self_test(void *args)
+{
+    struct registry_probe registry_probe = {0};
+    struct shell_test_state state = {0};
+    struct xdg_toplevel *toplevel = NULL;
+    struct xdg_surface *xdg_surface = NULL;
+    struct wl_surface *surface = NULL;
+    struct wl_registry *registry = NULL;
+    struct wl_display *display = NULL;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    unsigned int i;
+
+    (void)args;
+    if (!(display = wl_display_connect(NULL))) return STATUS_PORT_DISCONNECTED;
+    if (!(registry = wl_display_get_registry(display)) ||
+        wl_registry_add_listener(registry, &registry_listener, &registry_probe) == -1 ||
+        wl_display_roundtrip(display) == -1)
+    {
+        status = STATUS_PORT_DISCONNECTED;
+        goto done;
+    }
+    if (!registry_probe.compositor || !registry_probe.xdg_wm_base ||
+        !(surface = wl_compositor_create_surface(registry_probe.compositor)) ||
+        !(xdg_surface = xdg_wm_base_get_xdg_surface(registry_probe.xdg_wm_base, surface)) ||
+        xdg_surface_add_listener(xdg_surface, &shell_test_xdg_surface_listener, &state) == -1 ||
+        !(toplevel = xdg_surface_get_toplevel(xdg_surface)) ||
+        xdg_toplevel_add_listener(toplevel, &shell_test_toplevel_listener, &state) == -1)
+    {
+        status = STATUS_NOT_SUPPORTED;
+        goto done;
+    }
+    xdg_toplevel_set_title(toplevel, "Wine Wayland host probe");
+    xdg_toplevel_set_app_id(toplevel, "winewayland-host-probe");
+    wl_surface_commit(surface);
+    for (i = 0; i < 20 && !state.configured && !state.closed; ++i)
+        if ((status = dispatch_wayland_display(display, 50))) goto done;
+    status = state.configured && !state.closed ? STATUS_SUCCESS : STATUS_IO_TIMEOUT;
+
+done:
+    if (toplevel) xdg_toplevel_destroy(toplevel);
+    if (xdg_surface) xdg_surface_destroy(xdg_surface);
+    if (surface) wl_surface_destroy(surface);
+    destroy_registry_probe(&registry_probe);
+    if (registry) wl_registry_destroy(registry);
+    if (display) wl_display_disconnect(display);
+    return status;
 }
 
 static NTSTATUS renderer_self_test(void *args)
@@ -1833,6 +1930,12 @@ static NTSTATUS dispatch_renderer(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS shell_self_test(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS renderer_self_test(void *args)
 {
     (void)args;
@@ -1939,6 +2042,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     retire_renderer_pool,
     process_renderer_frame,
     dispatch_renderer,
+    shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,
@@ -1953,6 +2057,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     retire_renderer_pool,
     process_renderer_frame,
     dispatch_renderer,
+    shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
     destroy_renderer_call,

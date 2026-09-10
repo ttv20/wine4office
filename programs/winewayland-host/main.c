@@ -161,6 +161,21 @@ static int test_headless_transport(void)
     return 0;
 }
 
+static int test_shell(void)
+{
+    NTSTATUS status;
+
+    if (__wine_init_unix_call()) status = STATUS_DLL_NOT_FOUND;
+    else status = WINE_UNIX_CALL(unix_shell_self_test, NULL);
+    if (status)
+    {
+        fprintf(stderr, "shell_self_test=failed status=%#lx\n", status);
+        return 5;
+    }
+    printf("shell_self_test=passed\n");
+    return 0;
+}
+
 static NTSTATUS request_host_startup(const struct winewayland_host_probe *probe,
         uint64_t *token_low, uint64_t *token_high)
 {
@@ -996,13 +1011,14 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--renderer-test")) return test_renderer();
     if (argc == 2 && !wcscmp(argv[1], L"--transport-self-test"))
         return test_headless_transport();
+    if (argc == 2 && !wcscmp(argv[1], L"--shell-self-test")) return test_shell();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_host_fixture((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0));
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --registration-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --registration-test\n",
             argv[0]);
     return 2;
 }
