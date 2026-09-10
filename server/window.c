@@ -63,6 +63,8 @@ enum property_type
 #define MAX_WAYLAND_FRAME_RECORDS (WINE_WAYLAND_MAX_FRAME_CREDITS * 2)
 #define MAX_WAYLAND_ROOT_POOL_BYTES (256ull * 1024 * 1024)
 #define MAX_WAYLAND_DESKTOP_POOL_BYTES (1024ull * 1024 * 1024)
+#define MAX_WAYLAND_FRAME_SNAPSHOT_BYTES (64ull * 1024 * 1024)
+#define MAX_WAYLAND_DESKTOP_SNAPSHOT_BYTES (512ull * 1024 * 1024)
 
 struct wayland_buffer_slot
 {
@@ -211,6 +213,15 @@ struct window
     unsigned int     wayland_native_lease_action;
     unsigned int     wayland_native_lease_message_posted;
     unsigned int     wayland_scene_disposition;
+    struct object   *wayland_frame_snapshot;
+    unsigned __int64 wayland_frame_snapshot_revision;
+    unsigned __int64 wayland_frame_snapshot_geometry_revision;
+    mem_size_t       wayland_frame_snapshot_size;
+    unsigned int     wayland_frame_snapshot_width;
+    unsigned int     wayland_frame_snapshot_height;
+    unsigned int     wayland_frame_snapshot_stride;
+    unsigned int     wayland_frame_snapshot_format;
+    unsigned int     wayland_frame_snapshot_flags;
     struct wayland_scene_registry *wayland_scene_registry;
 };
 
@@ -328,6 +339,7 @@ static void window_destroy( struct object *obj )
     if (win->update_region) free_region( win->update_region );
     if (win->class) release_class( win->class );
     free( win->text );
+    if (win->wayland_frame_snapshot) release_object( win->wayland_frame_snapshot );
     release_wayland_scene_registry( win->wayland_scene_registry );
 
     if (win->shared) free_shared_object( win->shared );
@@ -861,6 +873,15 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_scene_stream_id = 0;
     win->wayland_scene_binding_generation = 0;
     win->wayland_scene_disposition = 0;
+    win->wayland_frame_snapshot = NULL;
+    win->wayland_frame_snapshot_revision = 0;
+    win->wayland_frame_snapshot_geometry_revision = 0;
+    win->wayland_frame_snapshot_size = 0;
+    win->wayland_frame_snapshot_width = 0;
+    win->wayland_frame_snapshot_height = 0;
+    win->wayland_frame_snapshot_stride = 0;
+    win->wayland_frame_snapshot_format = 0;
+    win->wayland_frame_snapshot_flags = 0;
     win->wayland_scene_registry = NULL;
     win->wayland_configure_host_epoch = 0;
     win->wayland_configure_request_id = 0;
@@ -4439,6 +4460,23 @@ static unsigned __int64 wayland_desktop_pool_bytes( const struct desktop *deskto
     return total;
 }
 
+static unsigned __int64 wayland_desktop_snapshot_bytes( const struct desktop *desktop )
+{
+    struct window *root;
+    unsigned __int64 total = 0;
+    user_handle_t handle = 0;
+
+    while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+    {
+        if (root->desktop != desktop || !root->wayland_frame_snapshot) continue;
+        if (total > MAX_WAYLAND_DESKTOP_SNAPSHOT_BYTES - min(root->wayland_frame_snapshot_size,
+                MAX_WAYLAND_DESKTOP_SNAPSHOT_BYTES))
+            return MAX_WAYLAND_DESKTOP_SNAPSHOT_BYTES + 1;
+        total += root->wayland_frame_snapshot_size;
+    }
+    return total;
+}
+
 static struct wayland_scene_contributor *get_current_wayland_stream(
         struct window *root, struct desktop *desktop, unsigned __int64 contributor_id,
         unsigned __int64 stream_id, unsigned __int64 binding_generation )
@@ -5210,6 +5248,117 @@ DECL_HANDLER(get_wayland_window_state)
     reply->title_length = root->text_len / sizeof(WCHAR);
     if (root->text_len)
         set_reply_data( root->text, min( root->text_len, get_reply_max_size() ));
+}
+
+DECL_HANDLER(publish_wayland_frame_snapshot)
+{
+    struct mapping *mapping = NULL;
+    struct window *root;
+    struct desktop *desktop;
+    unsigned __int64 expected_size, desktop_size, old_size;
+    unsigned int window_width, window_height;
+    mem_size_t mapping_size;
+
+    reply->snapshot_revision = 0;
+    reply->geometry_revision = 0;
+    if (!req->snapshot_revision || !req->geometry_revision || !req->width || !req->height ||
+        req->width > 16384 || req->height > 16384 ||
+        req->format != WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM ||
+        req->flags != WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED ||
+        req->stride != req->width * 4)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    expected_size = (unsigned __int64)req->stride * req->height;
+    if (expected_size > MAX_WAYLAND_FRAME_SNAPSHOT_BYTES)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!is_owned_wayland_scene_root( root, desktop )) goto done;
+    reply->snapshot_revision = root->wayland_frame_snapshot_revision;
+    reply->geometry_revision = root->wayland_geometry_revision;
+    window_width = root->window_rect.right > root->window_rect.left ?
+            root->window_rect.right - root->window_rect.left : 0;
+    window_height = root->window_rect.bottom > root->window_rect.top ?
+            root->window_rect.bottom - root->window_rect.top : 0;
+    if (req->geometry_revision != root->wayland_geometry_revision ||
+        req->width != window_width || req->height != window_height)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (req->snapshot_revision <= root->wayland_frame_snapshot_revision)
+        set_error( STATUS_REVISION_MISMATCH );
+    else if (!(mapping = get_mapping_obj( current->process, req->mapping, SECTION_MAP_READ )))
+        goto done;
+    else
+    {
+        mapping_size = get_mapping_size( mapping );
+        old_size = root->wayland_frame_snapshot ? root->wayland_frame_snapshot_size : 0;
+        desktop_size = wayland_desktop_snapshot_bytes( desktop );
+        if (mapping_size < expected_size || mapping_size > MAX_WAYLAND_FRAME_SNAPSHOT_BYTES)
+            set_error( STATUS_INVALID_BUFFER_SIZE );
+        else if (desktop_size < old_size ||
+                 desktop_size - old_size > MAX_WAYLAND_DESKTOP_SNAPSHOT_BYTES - mapping_size)
+            set_error( STATUS_INSUFFICIENT_RESOURCES );
+        else
+        {
+            if (root->wayland_frame_snapshot)
+                release_object( root->wayland_frame_snapshot );
+            root->wayland_frame_snapshot = (struct object *)mapping;
+            mapping = NULL;
+            root->wayland_frame_snapshot_revision = req->snapshot_revision;
+            root->wayland_frame_snapshot_geometry_revision = req->geometry_revision;
+            root->wayland_frame_snapshot_size = mapping_size;
+            root->wayland_frame_snapshot_width = req->width;
+            root->wayland_frame_snapshot_height = req->height;
+            root->wayland_frame_snapshot_stride = req->stride;
+            root->wayland_frame_snapshot_format = req->format;
+            root->wayland_frame_snapshot_flags = req->flags;
+            reply->snapshot_revision = req->snapshot_revision;
+        }
+    }
+
+done:
+    if (mapping) release_object( (struct object *)mapping );
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_frame_snapshot)
+{
+    struct window *root;
+
+    reply->mapping = 0;
+    reply->width = 0;
+    reply->height = 0;
+    reply->stride = 0;
+    reply->format = 0;
+    reply->flags = 0;
+    reply->snapshot_revision = 0;
+    reply->geometry_revision = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+    if (!root->wayland_frame_snapshot)
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    if (root->wayland_frame_snapshot_revision <= req->previous_snapshot_revision)
+    {
+        set_error( STATUS_NO_MORE_ENTRIES );
+        return;
+    }
+    if (!(reply->mapping = alloc_handle( current->process, root->wayland_frame_snapshot,
+                                         SECTION_MAP_READ, 0 )))
+        return;
+    reply->width = root->wayland_frame_snapshot_width;
+    reply->height = root->wayland_frame_snapshot_height;
+    reply->stride = root->wayland_frame_snapshot_stride;
+    reply->format = root->wayland_frame_snapshot_format;
+    reply->flags = root->wayland_frame_snapshot_flags;
+    reply->snapshot_revision = root->wayland_frame_snapshot_revision;
+    reply->geometry_revision = root->wayland_frame_snapshot_geometry_revision;
 }
 
 DECL_HANDLER(post_wayland_window_close)

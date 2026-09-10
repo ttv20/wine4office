@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 994.
+Generated server protocol version: 995.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -299,6 +299,13 @@ or transport fixture is not Outlook support.
   border, resize frame or any other non-client margin keeps the committed
   scene in `LocalFallback`, preserving Wine's existing decorated-window path
   until explicit frame composition is implemented.
+- Protocol 995 adds the immutable software frame-snapshot authority boundary.
+  The logical root owner may replace only a strictly newer BGRA8
+  premultiplied snapshot for the current geometry revision. Wineserver pins
+  the section after the publisher closes its handle, limits it to 64 MiB per
+  root and 512 MiB per desktop, and duplicates read-only handles only to the
+  current Ready host. This establishes snapshot identity and lifetime; the
+  Wayland driver publication hook and Vulkan upload/composition still follow.
 
 ## Contributor interception inventory
 
@@ -808,6 +815,14 @@ admitted.
   with zero failures. Evidence is retained as
   `/workspace/artifacts/framed-fallback-authority-x64.log` and
   `/workspace/artifacts/framed-fallback-win32u-test-x64.exe`.
+- The frame-snapshot authority fixture rejects a non-host reader and a stale
+  geometry revision, accepts the current owner publication, closes the
+  publisher handle, and verifies the current host can still map and read the
+  exact pixel. Repeated revision and completed-cursor queries are rejected.
+  The full x86-64 Radeon authority suite passed 679 checks with zero failures.
+  Evidence is retained as `/workspace/artifacts/frame-snapshot-authority-x64.log`,
+  `/workspace/artifacts/frame-snapshot-win32u-test-x64.exe` and
+  `/workspace/artifacts/frame-snapshot-authority-SHA256SUMS`.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -72,6 +72,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_SEND_INPUT,
+    HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -144,6 +145,8 @@ struct wayland_host_test_state
     UINT64 native_lease_scene_generation;
     UINT64 native_lease_request_id;
     UINT64 input_event_id;
+    UINT64 snapshot_revision;
+    UINT64 snapshot_geometry_revision;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -193,6 +196,12 @@ struct wayland_host_test_state
     LONG input_x;
     LONG input_y;
     DWORD input_data;
+    DWORD snapshot_width;
+    DWORD snapshot_height;
+    DWORD snapshot_stride;
+    DWORD snapshot_format;
+    DWORD snapshot_flags;
+    DWORD snapshot_pixel;
     struct rectangle window_rect;
     struct rectangle client_rect;
     WCHAR window_title[64];
@@ -238,6 +247,18 @@ struct wayland_host_root_info
     UINT64 root_generation;
     UINT64 scene_generation;
     UINT64 registry_generation;
+};
+
+struct wayland_frame_snapshot_info
+{
+    HANDLE mapping;
+    UINT64 revision;
+    UINT64 geometry_revision;
+    DWORD width;
+    DWORD height;
+    DWORD stride;
+    DWORD format;
+    DWORD flags;
 };
 
 struct wayland_window_state_info
@@ -528,6 +549,62 @@ static NTSTATUS get_window_state( HWND root, UINT64 host_epoch,
             info->client = reply->client;
             length = wine_server_reply_size( reply ) / sizeof(WCHAR);
             info->title[min( length, ARRAY_SIZE(info->title) - 1 )] = 0;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS publish_frame_snapshot( HWND root, HANDLE mapping, DWORD width,
+                                        DWORD height, UINT64 revision,
+                                        UINT64 geometry_revision,
+                                        UINT64 *current_revision,
+                                        UINT64 *current_geometry_revision )
+{
+    NTSTATUS status;
+
+    *current_revision = *current_geometry_revision = 0;
+    SERVER_START_REQ( publish_wayland_frame_snapshot )
+    {
+        req->root = wine_server_user_handle( root );
+        req->mapping = wine_server_obj_handle( mapping );
+        req->width = width;
+        req->height = height;
+        req->stride = width * 4;
+        req->format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
+        req->flags = WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED;
+        req->snapshot_revision = revision;
+        req->geometry_revision = geometry_revision;
+        status = p_wine_server_call( req );
+        *current_revision = reply->snapshot_revision;
+        *current_geometry_revision = reply->geometry_revision;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_frame_snapshot( HWND root, UINT64 host_epoch,
+                                    UINT64 previous_revision,
+                                    struct wayland_frame_snapshot_info *info )
+{
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( get_wayland_frame_snapshot )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->previous_snapshot_revision = previous_revision;
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->mapping = wine_server_ptr_handle( reply->mapping );
+            info->revision = reply->snapshot_revision;
+            info->geometry_revision = reply->geometry_revision;
+            info->width = reply->width;
+            info->height = reply->height;
+            info->stride = reply->stride;
+            info->format = reply->format;
+            info->flags = reply->flags;
         }
     }
     SERVER_END_REQ;
@@ -1326,6 +1403,8 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_configure_info configure;
     struct wayland_configure_result_info configure_result;
     struct wayland_native_lease_info native_lease;
+    struct wayland_frame_snapshot_info snapshot;
+    DWORD *snapshot_bits;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -1574,6 +1653,30 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->input_event_id, state->input_type, state->input_flags,
                     state->input_x, state->input_y, state->input_data );
             break;
+        case HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT:
+            state->command_status = get_frame_snapshot( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->snapshot_revision, &snapshot );
+            state->snapshot_revision = snapshot.revision;
+            state->snapshot_geometry_revision = snapshot.geometry_revision;
+            state->snapshot_width = snapshot.width;
+            state->snapshot_height = snapshot.height;
+            state->snapshot_stride = snapshot.stride;
+            state->snapshot_format = snapshot.format;
+            state->snapshot_flags = snapshot.flags;
+            state->snapshot_pixel = 0;
+            if (snapshot.mapping)
+            {
+                if ((snapshot_bits = MapViewOfFile( snapshot.mapping, FILE_MAP_READ,
+                                                    0, 0, 0 )))
+                {
+                    state->snapshot_pixel = snapshot_bits[0];
+                    UnmapViewOfFile( snapshot_bits );
+                }
+                else if (!state->command_status)
+                    state->command_status = STATUS_UNSUCCESSFUL;
+                CloseHandle( snapshot.mapping );
+            }
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -1797,6 +1900,7 @@ static void test_host_registration( const char *program, const char *test_name )
     struct wayland_window_state_info window_state;
     struct wayland_configure_info configure;
     struct wayland_native_lease_info native_lease;
+    struct wayland_frame_snapshot_info snapshot;
     struct wayland_host_test_state second_root_state = {0};
     PROCESS_INFORMATION process = {0};
     PROCESS_INFORMATION producer = {0};
@@ -1814,6 +1918,7 @@ static void test_host_registration( const char *program, const char *test_name )
     IDCompositionTarget *hosted_target = NULL;
     IDCompositionVisual *hosted_visual = NULL;
     HANDLE mapping = NULL, ready_event = NULL, command_event = NULL, result_event = NULL;
+    HANDLE snapshot_mapping = NULL;
     HANDLE producer_command_event = NULL, producer_result_event = NULL;
     UINT64 token_low, token_high, old_epoch, scene_generation, next_generation;
     UINT64 dcomp_generation = 0, dcomp_revision = 0, current_owner_revision;
@@ -1821,6 +1926,7 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 import_registry_generation;
     UINT64 root_identity = 0, root_generation = 0, pre_ready_root_identity = 0;
     UINT64 window_state_revision, window_geometry_revision;
+    UINT64 snapshot_revision, snapshot_geometry_revision;
     UINT64 configure_applied_id, configure_applied_revision;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
@@ -1836,6 +1942,7 @@ static void test_host_registration( const char *program, const char *test_name )
     unsigned int i;
     DWORD registered_slots, imported_slots, failed_slots;
     MSG msg;
+    DWORD *snapshot_bits;
 
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Initial host query returned %#lx.\n", status );
@@ -2036,6 +2143,78 @@ static void test_host_registration( const char *program, const char *test_name )
         wine_dbgstr_w( state->window_title ), state->window_rect.left,
         state->window_rect.top, state->window_rect.right - state->window_rect.left,
         state->window_rect.bottom - state->window_rect.top );
+
+    status = get_frame_snapshot( root, old_epoch, 0, &snapshot );
+    ok( status == STATUS_ACCESS_DENIED && !snapshot.mapping,
+        "Non-host frame snapshot query returned %#lx, mapping %p.\n",
+        status, snapshot.mapping );
+    snapshot_mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                           0, 80 * 72 * 4, NULL );
+    ok( !!snapshot_mapping, "Failed to create frame snapshot, error %lu.\n",
+        GetLastError() );
+    if (snapshot_mapping)
+    {
+        snapshot_bits = MapViewOfFile( snapshot_mapping, FILE_MAP_WRITE, 0, 0, 0 );
+        ok( !!snapshot_bits, "Failed to map frame snapshot, error %lu.\n", GetLastError() );
+        if (snapshot_bits)
+        {
+            snapshot_bits[0] = 0xff123456;
+            UnmapViewOfFile( snapshot_bits );
+        }
+        status = publish_frame_snapshot( root, snapshot_mapping, 80, 72, 1,
+                state->window_geometry_revision + 1, &snapshot_revision,
+                &snapshot_geometry_revision );
+        ok( status == STATUS_REVISION_MISMATCH && !snapshot_revision &&
+            snapshot_geometry_revision == state->window_geometry_revision,
+            "Wrong-geometry frame snapshot returned %#lx, revision %s, geometry %s.\n",
+            status, wine_dbgstr_longlong( snapshot_revision ),
+            wine_dbgstr_longlong( snapshot_geometry_revision ) );
+        status = publish_frame_snapshot( root, snapshot_mapping, 80, 72, 1,
+                state->window_geometry_revision, &snapshot_revision,
+                &snapshot_geometry_revision );
+        ok( !status && snapshot_revision == 1 &&
+            snapshot_geometry_revision == state->window_geometry_revision,
+            "Frame snapshot publication returned %#lx, revision %s, geometry %s.\n",
+            status, wine_dbgstr_longlong( snapshot_revision ),
+            wine_dbgstr_longlong( snapshot_geometry_revision ) );
+        CloseHandle( snapshot_mapping );
+        snapshot_mapping = NULL;
+
+        state->snapshot_revision = 0;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT ),
+            "Timed out querying the first frame snapshot.\n" );
+        ok( !state->command_status && state->snapshot_revision == 1 &&
+            state->snapshot_geometry_revision == state->window_geometry_revision &&
+            state->snapshot_width == 80 && state->snapshot_height == 72 &&
+            state->snapshot_stride == 80 * 4 &&
+            state->snapshot_format == WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM &&
+            state->snapshot_flags == WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED &&
+            state->snapshot_pixel == 0xff123456,
+            "First frame snapshot returned %#lx, revision %s, geometry %s, size %lux%lu, "
+            "stride %lu, format %#lx, flags %#lx, pixel %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->snapshot_revision ),
+            wine_dbgstr_longlong( state->snapshot_geometry_revision ),
+            state->snapshot_width, state->snapshot_height, state->snapshot_stride,
+            state->snapshot_format, state->snapshot_flags, state->snapshot_pixel );
+
+        status = publish_frame_snapshot( root, NULL, 80, 72, 1,
+                state->window_geometry_revision, &snapshot_revision,
+                &snapshot_geometry_revision );
+        ok( status == STATUS_REVISION_MISMATCH && snapshot_revision == 1,
+            "Repeated frame snapshot returned %#lx, revision %s.\n", status,
+            wine_dbgstr_longlong( snapshot_revision ) );
+
+        state->snapshot_revision = 1;
+        ok( send_host_child_command( state, command_event, result_event,
+                                    HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT ),
+            "Timed out checking the frame snapshot cursor.\n" );
+        ok( state->command_status == STATUS_NO_MORE_ENTRIES &&
+            !state->snapshot_revision && !state->snapshot_pixel,
+            "Completed frame snapshot enumeration returned %#lx, revision %s, pixel %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->snapshot_revision ),
+            state->snapshot_pixel );
+    }
 
     hosted_root = CreateWindowExW( 0, L"static", L"Hosted DComp identity root", WS_POPUP,
                                    0, 0, 64, 64, NULL, NULL, NULL, NULL );
@@ -4436,6 +4615,7 @@ done:
     if (result_event) CloseHandle( result_event );
     if (command_event) CloseHandle( command_event );
     if (ready_event) CloseHandle( ready_event );
+    if (snapshot_mapping) CloseHandle( snapshot_mapping );
     if (mapping) CloseHandle( mapping );
     if (pre_ready_root) DestroyWindow( pre_ready_root );
     if (hosted_root) DestroyWindow( hosted_root );

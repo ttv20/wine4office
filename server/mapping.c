@@ -1762,9 +1762,14 @@ struct mapping *create_fd_mapping( struct object *root, struct unicode_str name,
     return create_named_object( &params );
 }
 
-static struct mapping *get_mapping_obj( struct process *process, obj_handle_t handle, unsigned int access )
+struct mapping *get_mapping_obj( struct process *process, obj_handle_t handle, unsigned int access )
 {
     return (struct mapping *)get_handle_obj( process, handle, access, &mapping_ops );
+}
+
+mem_size_t get_mapping_size( const struct mapping *mapping )
+{
+    return mapping->size;
 }
 
 /* open a new file for the file descriptor backing the view */

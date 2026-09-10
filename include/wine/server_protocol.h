@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 6
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 7
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -96,6 +96,8 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
 #define WINE_WAYLAND_FRAME_RESULT_DISCARDED 2
 #define WINE_WAYLAND_FRAME_RESULT_FAILED    3
+
+#define WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED 0x00000001
 
 struct wayland_buffer_pool_metadata
 {
@@ -7249,6 +7251,48 @@ struct send_wayland_host_input_reply
 };
 
 
+struct publish_wayland_frame_snapshot_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    obj_handle_t     mapping;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     stride;
+    unsigned int     format;
+    unsigned int     flags;
+    unsigned __int64 snapshot_revision;
+    unsigned __int64 geometry_revision;
+};
+struct publish_wayland_frame_snapshot_reply
+{
+    struct reply_header __header;
+    unsigned __int64 snapshot_revision;
+    unsigned __int64 geometry_revision;
+};
+
+
+struct get_wayland_frame_snapshot_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 host_epoch;
+    unsigned __int64 previous_snapshot_revision;
+};
+struct get_wayland_frame_snapshot_reply
+{
+    struct reply_header __header;
+    obj_handle_t     mapping;
+    unsigned int     width;
+    unsigned int     height;
+    unsigned int     stride;
+    unsigned int     format;
+    unsigned int     flags;
+    unsigned __int64 snapshot_revision;
+    unsigned __int64 geometry_revision;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7609,6 +7653,8 @@ enum request
     REQ_cancel_wayland_frame,
     REQ_manage_wayland_window_native_lease,
     REQ_send_wayland_host_input,
+    REQ_publish_wayland_frame_snapshot,
+    REQ_get_wayland_frame_snapshot,
     REQ_NB_REQUESTS
 };
 
@@ -7974,6 +8020,8 @@ union generic_request
     struct cancel_wayland_frame_request cancel_wayland_frame_request;
     struct manage_wayland_window_native_lease_request manage_wayland_window_native_lease_request;
     struct send_wayland_host_input_request send_wayland_host_input_request;
+    struct publish_wayland_frame_snapshot_request publish_wayland_frame_snapshot_request;
+    struct get_wayland_frame_snapshot_request get_wayland_frame_snapshot_request;
 };
 union generic_reply
 {
@@ -8337,8 +8385,10 @@ union generic_reply
     struct cancel_wayland_frame_reply cancel_wayland_frame_reply;
     struct manage_wayland_window_native_lease_reply manage_wayland_window_native_lease_reply;
     struct send_wayland_host_input_reply send_wayland_host_input_reply;
+    struct publish_wayland_frame_snapshot_reply publish_wayland_frame_snapshot_reply;
+    struct get_wayland_frame_snapshot_reply get_wayland_frame_snapshot_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 994
+#define SERVER_PROTOCOL_VERSION 995
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

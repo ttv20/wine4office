@@ -4245,6 +4245,44 @@ static void dump_send_wayland_host_input_request( const struct send_wayland_host
     dump_varargs_bytes( ", input=", cur_size );
 }
 
+static void dump_publish_wayland_frame_snapshot_request( const struct publish_wayland_frame_snapshot_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", mapping=%04x", req->mapping );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", stride=%08x", req->stride );
+    fprintf( stderr, ", format=%08x", req->format );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_uint64( ", snapshot_revision=", &req->snapshot_revision );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
+}
+
+static void dump_publish_wayland_frame_snapshot_reply( const struct publish_wayland_frame_snapshot_reply *req )
+{
+    dump_uint64( " snapshot_revision=", &req->snapshot_revision );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
+}
+
+static void dump_get_wayland_frame_snapshot_request( const struct get_wayland_frame_snapshot_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", previous_snapshot_revision=", &req->previous_snapshot_revision );
+}
+
+static void dump_get_wayland_frame_snapshot_reply( const struct get_wayland_frame_snapshot_reply *req )
+{
+    fprintf( stderr, " mapping=%04x", req->mapping );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", stride=%08x", req->stride );
+    fprintf( stderr, ", format=%08x", req->format );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_uint64( ", snapshot_revision=", &req->snapshot_revision );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4607,6 +4645,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_cancel_wayland_frame_request,
     (dump_func)dump_manage_wayland_window_native_lease_request,
     (dump_func)dump_send_wayland_host_input_request,
+    (dump_func)dump_publish_wayland_frame_snapshot_request,
+    (dump_func)dump_get_wayland_frame_snapshot_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4969,6 +5009,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_cancel_wayland_frame_reply,
     (dump_func)dump_manage_wayland_window_native_lease_reply,
     NULL,
+    (dump_func)dump_publish_wayland_frame_snapshot_reply,
+    (dump_func)dump_get_wayland_frame_snapshot_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5331,6 +5373,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "cancel_wayland_frame",
     "manage_wayland_window_native_lease",
     "send_wayland_host_input",
+    "publish_wayland_frame_snapshot",
+    "get_wayland_frame_snapshot",
 };
 
 static const struct
