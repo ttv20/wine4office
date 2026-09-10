@@ -7229,6 +7229,25 @@ struct manage_wayland_window_native_lease_reply
     unsigned int     action;
 };
 
+/* Route one native input event from the current Wayland host.  Input edges
+ * are never retried; the event ID rejects stale or duplicate delivery. */
+struct send_wayland_host_input_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     flags;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+    /* VARARG(input,bytes); */
+};
+struct send_wayland_host_input_reply
+{
+    struct reply_header __header;
+};
+
 
 enum request
 {
@@ -7589,6 +7608,7 @@ enum request
     REQ_get_wayland_window_configure_result,
     REQ_cancel_wayland_frame,
     REQ_manage_wayland_window_native_lease,
+    REQ_send_wayland_host_input,
     REQ_NB_REQUESTS
 };
 
@@ -7953,6 +7973,7 @@ union generic_request
     struct get_wayland_window_configure_result_request get_wayland_window_configure_result_request;
     struct cancel_wayland_frame_request cancel_wayland_frame_request;
     struct manage_wayland_window_native_lease_request manage_wayland_window_native_lease_request;
+    struct send_wayland_host_input_request send_wayland_host_input_request;
 };
 union generic_reply
 {
@@ -8315,8 +8336,9 @@ union generic_reply
     struct get_wayland_window_configure_result_reply get_wayland_window_configure_result_reply;
     struct cancel_wayland_frame_reply cancel_wayland_frame_reply;
     struct manage_wayland_window_native_lease_reply manage_wayland_window_native_lease_reply;
+    struct send_wayland_host_input_reply send_wayland_host_input_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 993
+#define SERVER_PROTOCOL_VERSION 994
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -2197,7 +2197,8 @@ static void dispatch_rawinput_message( struct desktop *desktop, const struct raw
 
 /* queue a hardware message for a mouse event */
 static int queue_mouse_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
-                                unsigned int origin, struct msg_queue *sender, bool rawinput )
+                                unsigned int origin, struct msg_queue *sender, bool rawinput,
+                                const POINT *raw_data, unsigned int raw_count )
 {
     static const POINT empty_raw = {0};
 
@@ -2232,12 +2233,12 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
         WM_MOUSEHWHEEL   /* 0x1000 = MOUSEEVENTF_HWHEEL */
     };
 
-    if (input->mouse.raw_count != get_req_data_size() / sizeof(*raw))
+    if (input->mouse.raw_count != raw_count)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return 0;
     }
-    if (input->mouse.raw_count) raw = get_req_data();
+    if (input->mouse.raw_count) raw = raw_data;
 
     SHARED_WRITE_BEGIN( desktop_shm, desktop_shm_t )
     {
@@ -3276,7 +3277,8 @@ DECL_HANDLER(send_hardware_message)
     switch (req->input.type)
     {
     case INPUT_MOUSE:
-        wait = queue_mouse_message( desktop, req->win, &req->input, origin, sender, rawinput );
+        wait = queue_mouse_message( desktop, req->win, &req->input, origin, sender, rawinput,
+                get_req_data(), get_req_data_size() / sizeof(POINT) );
         break;
     case INPUT_KEYBOARD:
         wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, 0 );
@@ -3291,6 +3293,44 @@ DECL_HANDLER(send_hardware_message)
     reply->wait = sender ? wait : 0;
     reply->new_x = desktop_shm->cursor.x;
     reply->new_y = desktop_shm->cursor.y;
+    release_object( desktop );
+}
+
+DECL_HANDLER(send_wayland_host_input)
+{
+    struct desktop *desktop;
+    union hw_input input;
+
+    if (get_req_data_size() != sizeof(input))
+    {
+        set_error( STATUS_INFO_LENGTH_MISMATCH );
+        return;
+    }
+    memcpy( &input, get_req_data(), sizeof(input) );
+    if (!req->event_id || req->event_id == ~(unsigned __int64)0 ||
+        (req->flags & ~SEND_HWMSG_RAWINPUT) ||
+        (input.type != INPUT_MOUSE && input.type != INPUT_KEYBOARD) ||
+        (input.type == INPUT_MOUSE && input.mouse.raw_count))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(desktop = get_wayland_host_input_desktop( req->root, req->host_epoch,
+            req->root_identity, req->root_generation, req->event_id )))
+        return;
+    if (!set_input_desktop( desktop->winstation, desktop ))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        goto done;
+    }
+
+    if (input.type == INPUT_MOUSE)
+        queue_mouse_message( desktop, req->root, &input, IMO_HARDWARE, NULL,
+                !!(req->flags & SEND_HWMSG_RAWINPUT), NULL, 0 );
+    else
+        queue_keyboard_message( desktop, req->root, &input, IMO_HARDWARE, NULL, 0 );
+
+done:
     release_object( desktop );
 }
 

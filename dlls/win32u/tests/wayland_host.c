@@ -71,6 +71,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER,
     HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
+    HOST_CHILD_COMMAND_SEND_INPUT,
     HOST_CHILD_COMMAND_EXIT,
 };
 
@@ -142,6 +143,7 @@ struct wayland_host_test_state
     UINT64 native_lease_host_epoch;
     UINT64 native_lease_scene_generation;
     UINT64 native_lease_request_id;
+    UINT64 input_event_id;
     DWORD capabilities;
     DWORD seat;
     DWORD process_id;
@@ -186,6 +188,11 @@ struct wayland_host_test_state
     DWORD configure_previous_state;
     DWORD native_lease_state;
     DWORD native_lease_action;
+    DWORD input_type;
+    DWORD input_flags;
+    LONG input_x;
+    LONG input_y;
+    DWORD input_data;
     struct rectangle window_rect;
     struct rectangle client_rect;
     WCHAR window_title[64];
@@ -543,6 +550,43 @@ static NTSTATUS post_window_close( HWND root, UINT64 host_epoch, UINT64 root_ide
         req->request_id = request_id;
         if (!(status = p_wine_server_call( req )))
             *state_revision = reply->state_revision;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS send_host_input( HWND root, UINT64 host_epoch, UINT64 root_identity,
+                                 UINT64 root_generation, UINT64 event_id,
+                                 DWORD input_type, DWORD input_flags,
+                                 LONG input_x, LONG input_y, DWORD input_data )
+{
+    union hw_input input = {0};
+    NTSTATUS status;
+
+    input.type = input_type;
+    if (input_type == INPUT_KEYBOARD)
+    {
+        input.kbd.vkey = 'A';
+        input.kbd.scan = 0x1e;
+        input.kbd.flags = input_flags;
+    }
+    else if (input_type == INPUT_MOUSE)
+    {
+        input.mouse.x = input_x;
+        input.mouse.y = input_y;
+        input.mouse.data = input_data;
+        input.mouse.flags = input_flags;
+    }
+    SERVER_START_REQ( send_wayland_host_input )
+    {
+        req->root = wine_server_user_handle( root );
+        req->flags = 0;
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->event_id = event_id;
+        wine_server_add_data( req, &input, sizeof(input) );
+        status = p_wine_server_call( req );
     }
     SERVER_END_REQ;
     return status;
@@ -1524,6 +1568,12 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->native_lease_state = native_lease.state;
             state->native_lease_action = native_lease.action;
             break;
+        case HOST_CHILD_COMMAND_SEND_INPUT:
+            state->command_status = send_host_input( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->root_identity, state->root_generation,
+                    state->input_event_id, state->input_type, state->input_flags,
+                    state->input_x, state->input_y, state->input_data );
+            break;
         case HOST_CHILD_COMMAND_EXIT:
             state->command_status = STATUS_SUCCESS;
             SetEvent( result_event );
@@ -1774,7 +1824,9 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
+    HWND previous_focus = NULL;
     RECT pool_client_rect;
+    POINT input_point, cursor_point;
     HRESULT hr;
     NTSTATUS status;
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
@@ -2781,6 +2833,90 @@ static void test_host_registration( const char *program, const char *test_name )
         state->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE,
         "Hosted native lease returned %#lx, state %#lx, action %#lx.\n",
         state->command_status, state->native_lease_state, state->native_lease_action );
+
+    while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
+    previous_focus = SetFocus( root );
+    ok( GetFocus() == root, "Hosted input test focus is %p instead of %p.\n",
+        GetFocus(), root );
+    status = send_host_input( root, old_epoch, root_identity, root_generation, 1,
+                              INPUT_KEYBOARD, 0, 0, 0, 0 );
+    ok( status == STATUS_ACCESS_DENIED,
+        "Non-host native input returned %#lx.\n", status );
+    state->root_identity ^= 1;
+    state->input_event_id = 1;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending mismatched native input.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Mismatched native input returned %#lx.\n", state->command_status );
+    state->root_identity ^= 1;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native key down.\n" );
+    ok( !state->command_status &&
+        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
+        "Native key down returned %#lx without the expected message.\n",
+        state->command_status );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out replaying native key down.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH &&
+        !PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ),
+        "Replayed native key down returned %#lx or queued a duplicate.\n",
+        state->command_status );
+    state->input_event_id = 2;
+    state->input_flags = KEYEVENTF_KEYUP;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native key up.\n" );
+    ok( !state->command_status &&
+        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Native key up returned %#lx without the expected message.\n",
+        state->command_status );
+
+    SetWindowPos( root, HWND_TOP, 100, 100, 64, 64,
+                  SWP_SHOWWINDOW | SWP_NOACTIVATE );
+    input_point.x = 8;
+    input_point.y = 9;
+    ClientToScreen( root, &input_point );
+    while (PeekMessageW( &msg, root, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
+    state->input_event_id = 3;
+    state->input_type = INPUT_MOUSE;
+    state->input_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    state->input_x = input_point.x;
+    state->input_y = input_point.y;
+    state->input_data = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native pointer motion.\n" );
+    GetCursorPos( &cursor_point );
+    ok( !state->command_status && cursor_point.x == input_point.x &&
+        cursor_point.y == input_point.y,
+        "Native pointer motion returned %#lx at %ld,%ld instead of %ld,%ld.\n",
+        state->command_status, cursor_point.x, cursor_point.y,
+        input_point.x, input_point.y );
+    state->input_event_id = 4;
+    state->input_flags = MOUSEEVENTF_LEFTDOWN;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native pointer down.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Native pointer down returned %#lx without pressed button state.\n",
+        state->command_status );
+    state->input_event_id = 5;
+    state->input_flags = MOUSEEVENTF_LEFTUP;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native pointer up.\n" );
+    ok( !state->command_status && !(GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Native pointer up returned %#lx with pressed button state.\n",
+        state->command_status );
+    while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
+    ShowWindow( root, SW_HIDE );
+    SetFocus( previous_focus );
+
     state->binding_generation++;
     status = revoke_contributor( root, state );
     ok( status == STATUS_REVISION_MISMATCH,
@@ -2793,6 +2929,14 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( state->registry_generation ),
         wine_dbgstr_longlong( state->revocation_scene_generation ) );
     scene_generation = state->revocation_scene_generation;
+    state->input_event_id = 6;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending input after scene revocation.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
+        "Input after scene revocation returned %#lx.\n", state->command_status );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CHECK ),
         "Timed out checking revoked producer stream.\n" );

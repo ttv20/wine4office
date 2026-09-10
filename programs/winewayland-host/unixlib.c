@@ -17,6 +17,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <linux/input-event-codes.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stddef.h>
@@ -42,7 +43,7 @@
 #include "unixlib.h"
 
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
-C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
+C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
@@ -50,11 +51,19 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 72);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
+C_ASSERT(sizeof(struct winewayland_host_input_event) == 64);
+C_ASSERT(sizeof(struct winewayland_host_input_test) == 24);
+
+struct registry_seat
+{
+    uint32_t name;
+    uint32_t version;
+};
 
 struct registry_probe
 {
     uint32_t capabilities;
-    uint32_t seats[16];
+    struct registry_seat seats[16];
     unsigned int seat_count;
     struct wl_compositor *compositor;
     struct xdg_wm_base *xdg_wm_base;
@@ -95,7 +104,11 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     else if (!strcmp(interface, wl_seat_interface.name))
     {
         if (probe->seat_count < ARRAY_SIZE(probe->seats))
-            probe->seats[probe->seat_count++] = name;
+        {
+            probe->seats[probe->seat_count].name = name;
+            probe->seats[probe->seat_count].version = version;
+            ++probe->seat_count;
+        }
     }
 }
 
@@ -107,7 +120,7 @@ static void registry_global_remove(void *data, struct wl_registry *registry, uin
     (void)registry;
     for (i = 0; i < probe->seat_count; ++i)
     {
-        if (probe->seats[i] != name) continue;
+        if (probe->seats[i].name != name) continue;
         memmove(&probe->seats[i], &probe->seats[i + 1],
                 (probe->seat_count - i - 1) * sizeof(probe->seats[0]));
         --probe->seat_count;
@@ -136,6 +149,7 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define MAX_RENDERER_FRAMES 32
 #define MAX_RENDERER_ROOTS 64
 #define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES + MAX_RENDERER_ROOTS)
+#define MAX_RENDERER_INPUT_EVENTS 256
 
 struct renderer_frame;
 struct renderer_root;
@@ -280,6 +294,17 @@ struct vulkan_renderer
     struct wl_display *display;
     struct wl_compositor *compositor;
     struct xdg_wm_base *xdg_wm_base;
+    struct wl_seat *seat;
+    struct wl_keyboard *keyboard;
+    struct wl_pointer *pointer;
+    struct renderer_root *keyboard_root;
+    struct renderer_root *pointer_root;
+    uint32_t pointer_serial;
+    int64_t pointer_axis_fixed[2];
+    int32_t pointer_axis_remainder[2];
+    uint32_t pointer_axis_time[2];
+    uint32_t pointer_axis_pending;
+    uint32_t pointer_axis_value120;
     VkInstance instance;
     VkPhysicalDevice physical_device;
     VkDevice device;
@@ -348,9 +373,448 @@ struct vulkan_renderer
     unsigned int queue_count;
     BOOL queue_thread_started;
     BOOL queue_stop;
+    struct winewayland_host_input_event input_events[MAX_RENDERER_INPUT_EVENTS];
+    unsigned int input_head;
+    unsigned int input_count;
+    BOOL input_overflow;
 };
 
 static struct vulkan_renderer renderer;
+
+static void queue_renderer_input(struct renderer_root *root,
+        struct winewayland_host_input_event *event, BOOL coalesce)
+{
+    struct winewayland_host_input_event *tail;
+    unsigned int index;
+
+    if (!root) return;
+    event->version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    event->size = sizeof(*event);
+    event->root_identity = root->root_identity;
+    event->root_generation = root->root_generation;
+    if (coalesce && renderer.input_count)
+    {
+        index = (renderer.input_head + renderer.input_count - 1) %
+                ARRAY_SIZE(renderer.input_events);
+        tail = &renderer.input_events[index];
+        if (tail->type == event->type && tail->root_identity == event->root_identity &&
+            tail->root_generation == event->root_generation)
+        {
+            *tail = *event;
+            return;
+        }
+    }
+    if (renderer.input_count == ARRAY_SIZE(renderer.input_events))
+    {
+        unsigned int offset;
+
+        if (coalesce) return;
+        for (offset = 0; offset < renderer.input_count; ++offset)
+        {
+            unsigned int current = (renderer.input_head + offset) %
+                    ARRAY_SIZE(renderer.input_events);
+            unsigned int next;
+
+            if (renderer.input_events[current].type !=
+                    WINEWAYLAND_HOST_INPUT_POINTER_MOTION)
+                continue;
+            for (; offset + 1 < renderer.input_count; ++offset)
+            {
+                next = (current + 1) % ARRAY_SIZE(renderer.input_events);
+                renderer.input_events[current] = renderer.input_events[next];
+                current = next;
+            }
+            memset(&renderer.input_events[current], 0,
+                    sizeof(renderer.input_events[current]));
+            --renderer.input_count;
+            break;
+        }
+        if (renderer.input_count == ARRAY_SIZE(renderer.input_events))
+        {
+            renderer.input_overflow = TRUE;
+            return;
+        }
+    }
+    index = (renderer.input_head + renderer.input_count) % ARRAY_SIZE(renderer.input_events);
+    renderer.input_events[index] = *event;
+    ++renderer.input_count;
+}
+
+static uint32_t renderer_key_to_scan(uint32_t key)
+{
+    if (key <= KEY_KPDOT) return key;
+    switch (key)
+    {
+    case KEY_SYSRQ: return 0x0054;
+    case KEY_102ND: return 0x0056;
+    case KEY_F11: return 0x0057;
+    case KEY_F12: return 0x0058;
+    case KEY_COMPOSE: return 0x005f;
+    case KEY_F13: return 0x0064;
+    case KEY_F14: return 0x0065;
+    case KEY_F15: return 0x0066;
+    case KEY_F16: return 0x0067;
+    case KEY_F17: return 0x0068;
+    case KEY_F18: return 0x0069;
+    case KEY_F19: return 0x006a;
+    case KEY_F20: return 0x006b;
+    case KEY_F21: return 0x006c;
+    case KEY_F22: return 0x006d;
+    case KEY_F23: return 0x006e;
+    case KEY_F24: return 0x0076;
+    case KEY_PREVIOUSSONG: return 0x0110;
+    case KEY_NEXTSONG: return 0x0119;
+    case KEY_KPENTER: return 0x011c;
+    case KEY_RIGHTCTRL: return 0x011d;
+    case KEY_MUTE: return 0x0120;
+    case KEY_PROG2: return 0x0121;
+    case KEY_PLAYPAUSE: return 0x0122;
+    case KEY_STOPCD: return 0x0124;
+    case KEY_VOLUMEDOWN: return 0x012e;
+    case KEY_VOLUMEUP: return 0x0130;
+    case KEY_HOMEPAGE: return 0x0132;
+    case KEY_KPSLASH: return 0x0135;
+    case KEY_PRINT: return 0x0137;
+    case KEY_RIGHTALT: return 0x0138;
+    case KEY_CANCEL: return 0x0146;
+    case KEY_HOME: return 0x0147;
+    case KEY_UP: return 0x0148;
+    case KEY_PAGEUP: return 0x0149;
+    case KEY_LEFT: return 0x014b;
+    case KEY_RIGHT: return 0x014d;
+    case KEY_END: return 0x014f;
+    case KEY_DOWN: return 0x0150;
+    case KEY_PAGEDOWN: return 0x0151;
+    case KEY_INSERT: return 0x0152;
+    case KEY_DELETE: return 0x0153;
+    case KEY_LEFTMETA: return 0x015b;
+    case KEY_RIGHTMETA: return 0x015c;
+    case KEY_MENU: return 0x015d;
+    case KEY_POWER: return 0x015e;
+    case KEY_SLEEP: return 0x015f;
+    case KEY_FIND: return 0x0165;
+    case KEY_BOOKMARKS: return 0x0166;
+    case KEY_REFRESH: return 0x0167;
+    case KEY_STOP: return 0x0168;
+    case KEY_FORWARD: return 0x0169;
+    case KEY_BACK: return 0x016a;
+    case KEY_PROG1: return 0x016b;
+    case KEY_MAIL: return 0x016c;
+    case KEY_MEDIA: return 0x016d;
+    case KEY_PAUSE: return 0x021d;
+    default: return 0x0200 | (key & 0x7f);
+    }
+}
+
+static void renderer_pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
+        struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
+{
+    struct winewayland_host_input_event event = {0};
+
+    (void)data;
+    (void)pointer;
+    renderer.pointer_root = surface ? wl_surface_get_user_data(surface) : NULL;
+    renderer.pointer_serial = serial;
+    if (!renderer.pointer_root) return;
+    event.type = WINEWAYLAND_HOST_INPUT_POINTER_MOTION;
+    event.serial = serial;
+    event.x = x;
+    event.y = y;
+    queue_renderer_input(renderer.pointer_root, &event, TRUE);
+}
+
+static void renderer_pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
+        struct wl_surface *surface)
+{
+    (void)data;
+    (void)pointer;
+    (void)surface;
+    renderer.pointer_serial = serial;
+    renderer.pointer_root = NULL;
+    renderer.pointer_axis_pending = 0;
+    renderer.pointer_axis_value120 = 0;
+    memset(renderer.pointer_axis_fixed, 0, sizeof(renderer.pointer_axis_fixed));
+    memset(renderer.pointer_axis_remainder, 0, sizeof(renderer.pointer_axis_remainder));
+    memset(renderer.pointer_axis_time, 0, sizeof(renderer.pointer_axis_time));
+}
+
+static void renderer_pointer_motion(void *data, struct wl_pointer *pointer, uint32_t time,
+        wl_fixed_t x, wl_fixed_t y)
+{
+    struct winewayland_host_input_event event = {0};
+
+    (void)data;
+    (void)pointer;
+    event.type = WINEWAYLAND_HOST_INPUT_POINTER_MOTION;
+    event.serial = renderer.pointer_serial;
+    event.time = time;
+    event.x = x;
+    event.y = y;
+    queue_renderer_input(renderer.pointer_root, &event, TRUE);
+}
+
+static void renderer_pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial,
+        uint32_t time, uint32_t button, uint32_t state)
+{
+    struct winewayland_host_input_event event = {0};
+
+    (void)data;
+    (void)pointer;
+    renderer.pointer_serial = serial;
+    event.type = WINEWAYLAND_HOST_INPUT_POINTER_BUTTON;
+    event.serial = serial;
+    event.time = time;
+    event.code = button;
+    event.state = state;
+    queue_renderer_input(renderer.pointer_root, &event, FALSE);
+}
+
+static void renderer_pointer_axis_event(uint32_t axis, int32_t value120, uint32_t time)
+{
+    struct winewayland_host_input_event event = {0};
+
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL || !value120) return;
+    event.type = WINEWAYLAND_HOST_INPUT_POINTER_AXIS;
+    event.serial = renderer.pointer_serial;
+    event.time = time;
+    event.code = axis;
+    event.value120 = value120;
+    queue_renderer_input(renderer.pointer_root, &event, FALSE);
+}
+
+static void renderer_pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
+        uint32_t axis, wl_fixed_t value)
+{
+    int64_t scaled;
+
+    (void)data;
+    (void)time;
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    renderer.pointer_axis_fixed[axis] += value;
+    renderer.pointer_axis_time[axis] = time;
+    renderer.pointer_axis_pending |= 1u << axis;
+    if (wl_proxy_get_version((struct wl_proxy *)pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
+        return;
+    scaled = renderer.pointer_axis_fixed[axis] * 12 +
+            renderer.pointer_axis_remainder[axis];
+    renderer.pointer_axis_fixed[axis] = 0;
+    renderer.pointer_axis_remainder[axis] = scaled % 256;
+    scaled /= 256;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) scaled = -scaled;
+    renderer_pointer_axis_event(axis, scaled, time);
+    renderer.pointer_axis_pending &= ~(1u << axis);
+}
+
+static void renderer_pointer_frame(void *data, struct wl_pointer *pointer)
+{
+    unsigned int axis;
+
+    (void)data;
+    (void)pointer;
+    for (axis = 0; axis <= WL_POINTER_AXIS_HORIZONTAL_SCROLL; ++axis)
+    {
+        int64_t scaled;
+
+        if (!(renderer.pointer_axis_pending & (1u << axis)) ||
+            (renderer.pointer_axis_value120 & (1u << axis)))
+            continue;
+        scaled = renderer.pointer_axis_fixed[axis] * 12 +
+                renderer.pointer_axis_remainder[axis];
+        renderer.pointer_axis_remainder[axis] = scaled % 256;
+        scaled /= 256;
+        if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) scaled = -scaled;
+        renderer_pointer_axis_event(axis, scaled, renderer.pointer_axis_time[axis]);
+    }
+    memset(renderer.pointer_axis_fixed, 0, sizeof(renderer.pointer_axis_fixed));
+    memset(renderer.pointer_axis_time, 0, sizeof(renderer.pointer_axis_time));
+    renderer.pointer_axis_pending = 0;
+    renderer.pointer_axis_value120 = 0;
+}
+
+static void renderer_pointer_axis_source(void *data, struct wl_pointer *pointer,
+        uint32_t source)
+{
+    (void)data;
+    (void)pointer;
+    (void)source;
+}
+
+static void renderer_pointer_axis_stop(void *data, struct wl_pointer *pointer,
+        uint32_t time, uint32_t axis)
+{
+    (void)data;
+    (void)pointer;
+    (void)time;
+    (void)axis;
+}
+
+static void renderer_pointer_axis_discrete(void *data, struct wl_pointer *pointer,
+        uint32_t axis, int32_t discrete)
+{
+    (void)data;
+    (void)pointer;
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    renderer.pointer_axis_value120 |= 1u << axis;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) discrete = -discrete;
+    renderer_pointer_axis_event(axis, discrete * 120, renderer.pointer_axis_time[axis]);
+}
+
+#ifdef WL_POINTER_AXIS_VALUE120_SINCE_VERSION
+static void renderer_pointer_axis_value120(void *data, struct wl_pointer *pointer,
+        uint32_t axis, int32_t value120)
+{
+    (void)data;
+    (void)pointer;
+    if (axis > WL_POINTER_AXIS_HORIZONTAL_SCROLL) return;
+    renderer.pointer_axis_value120 |= 1u << axis;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) value120 = -value120;
+    renderer_pointer_axis_event(axis, value120, renderer.pointer_axis_time[axis]);
+}
+#endif
+
+static const struct wl_pointer_listener renderer_pointer_listener =
+{
+    renderer_pointer_enter,
+    renderer_pointer_leave,
+    renderer_pointer_motion,
+    renderer_pointer_button,
+    renderer_pointer_axis,
+    renderer_pointer_frame,
+    renderer_pointer_axis_source,
+    renderer_pointer_axis_stop,
+    renderer_pointer_axis_discrete,
+#ifdef WL_POINTER_AXIS_VALUE120_SINCE_VERSION
+    renderer_pointer_axis_value120,
+#endif
+};
+
+static void renderer_keyboard_keymap(void *data, struct wl_keyboard *keyboard,
+        uint32_t format, int fd, uint32_t size)
+{
+    (void)data;
+    (void)keyboard;
+    (void)format;
+    (void)size;
+    close(fd);
+}
+
+static void renderer_keyboard_enter(void *data, struct wl_keyboard *keyboard,
+        uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
+{
+    (void)data;
+    (void)keyboard;
+    (void)serial;
+    (void)keys;
+    renderer.keyboard_root = surface ? wl_surface_get_user_data(surface) : NULL;
+}
+
+static void renderer_keyboard_leave(void *data, struct wl_keyboard *keyboard,
+        uint32_t serial, struct wl_surface *surface)
+{
+    (void)data;
+    (void)keyboard;
+    (void)serial;
+    (void)surface;
+    renderer.keyboard_root = NULL;
+}
+
+static void renderer_keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+        uint32_t time, uint32_t key, uint32_t state)
+{
+    struct winewayland_host_input_event event = {0};
+
+    (void)data;
+    (void)keyboard;
+    event.type = WINEWAYLAND_HOST_INPUT_KEY;
+    event.serial = serial;
+    event.time = time;
+    event.code = renderer_key_to_scan(key);
+    event.state = state;
+    queue_renderer_input(renderer.keyboard_root, &event, FALSE);
+}
+
+static void renderer_keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
+        uint32_t serial, uint32_t depressed, uint32_t latched, uint32_t locked,
+        uint32_t group)
+{
+    (void)data;
+    (void)keyboard;
+    (void)serial;
+    (void)depressed;
+    (void)latched;
+    (void)locked;
+    (void)group;
+}
+
+static void renderer_keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
+        int32_t rate, int32_t delay)
+{
+    (void)data;
+    (void)keyboard;
+    (void)rate;
+    (void)delay;
+}
+
+static const struct wl_keyboard_listener renderer_keyboard_listener =
+{
+    renderer_keyboard_keymap,
+    renderer_keyboard_enter,
+    renderer_keyboard_leave,
+    renderer_keyboard_key,
+    renderer_keyboard_modifiers,
+    renderer_keyboard_repeat_info,
+};
+
+static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
+        uint32_t capabilities)
+{
+    (void)data;
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !renderer.pointer)
+    {
+        renderer.pointer = wl_seat_get_pointer(seat);
+        if (renderer.pointer)
+            wl_pointer_add_listener(renderer.pointer, &renderer_pointer_listener, NULL);
+    }
+    else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && renderer.pointer)
+    {
+        if (wl_proxy_get_version((struct wl_proxy *)renderer.pointer) >=
+                WL_POINTER_RELEASE_SINCE_VERSION)
+            wl_pointer_release(renderer.pointer);
+        else
+            wl_pointer_destroy(renderer.pointer);
+        renderer.pointer = NULL;
+        renderer.pointer_root = NULL;
+    }
+    if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !renderer.keyboard)
+    {
+        renderer.keyboard = wl_seat_get_keyboard(seat);
+        if (renderer.keyboard)
+            wl_keyboard_add_listener(renderer.keyboard, &renderer_keyboard_listener, NULL);
+    }
+    else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && renderer.keyboard)
+    {
+        if (wl_proxy_get_version((struct wl_proxy *)renderer.keyboard) >=
+                WL_KEYBOARD_RELEASE_SINCE_VERSION)
+            wl_keyboard_release(renderer.keyboard);
+        else
+            wl_keyboard_destroy(renderer.keyboard);
+        renderer.keyboard = NULL;
+        renderer.keyboard_root = NULL;
+    }
+}
+
+static void renderer_seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+    (void)data;
+    (void)seat;
+    (void)name;
+}
+
+static const struct wl_seat_listener renderer_seat_listener =
+{
+    renderer_seat_capabilities,
+    renderer_seat_name,
+};
 
 static NTSTATUS enqueue_renderer_queue_job_internal(const struct renderer_queue_job *job,
         BOOL retry);
@@ -705,6 +1169,8 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     if (root->xdg_toplevel) xdg_toplevel_destroy(root->xdg_toplevel);
     if (root->xdg_surface) xdg_surface_destroy(root->xdg_surface);
     if (root->surface) wl_surface_destroy(root->surface);
+    if (renderer.pointer_root == root) renderer.pointer_root = NULL;
+    if (renderer.keyboard_root == root) renderer.keyboard_root = NULL;
     memset(root, 0, sizeof(*root));
     return STATUS_SUCCESS;
 }
@@ -851,6 +1317,30 @@ static NTSTATUS destroy_renderer(void)
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
         if ((status = destroy_renderer_root(&renderer.roots[i])))
             return status == STATUS_PENDING ? STATUS_DEVICE_BUSY : status;
+    if (renderer.keyboard)
+    {
+        if (wl_proxy_get_version((struct wl_proxy *)renderer.keyboard) >=
+                WL_KEYBOARD_RELEASE_SINCE_VERSION)
+            wl_keyboard_release(renderer.keyboard);
+        else
+            wl_keyboard_destroy(renderer.keyboard);
+    }
+    if (renderer.pointer)
+    {
+        if (wl_proxy_get_version((struct wl_proxy *)renderer.pointer) >=
+                WL_POINTER_RELEASE_SINCE_VERSION)
+            wl_pointer_release(renderer.pointer);
+        else
+            wl_pointer_destroy(renderer.pointer);
+    }
+    if (renderer.seat)
+    {
+        if (wl_proxy_get_version((struct wl_proxy *)renderer.seat) >=
+                WL_SEAT_RELEASE_SINCE_VERSION)
+            wl_seat_release(renderer.seat);
+        else
+            wl_seat_destroy(renderer.seat);
+    }
     if (renderer.command_pool && renderer.p_vkDestroyCommandPool)
         renderer.p_vkDestroyCommandPool(renderer.device, renderer.command_pool, NULL);
     if (renderer.device && renderer.p_vkDestroyDevice)
@@ -1378,6 +1868,7 @@ static NTSTATUS create_renderer(void *args)
     struct wl_surface *surface = NULL;
     struct wl_display *display = NULL;
     uint32_t device_uuid[4] = {0};
+    unsigned int i;
     NTSTATUS status = STATUS_NOT_SUPPORTED;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
@@ -1386,7 +1877,8 @@ static NTSTATUS create_renderer(void *args)
     if (!memchr(params->display_name, 0, sizeof(params->display_name)) ||
         !memchr(params->endpoint_path, 0, sizeof(params->endpoint_path)) ||
         !(params->device_uuid[0] | params->device_uuid[1] |
-          params->device_uuid[2] | params->device_uuid[3]))
+          params->device_uuid[2] | params->device_uuid[3]) ||
+        !params->seat_global || params->reserved)
         return STATUS_INVALID_PARAMETER;
     if (renderer.device) return STATUS_DEVICE_BUSY;
     if (lstat(params->endpoint_path, &before) == -1 || !S_ISSOCK(before.st_mode) ||
@@ -1412,6 +1904,20 @@ static NTSTATUS create_renderer(void *args)
         !(surface = wl_compositor_create_surface(registry_probe.compositor)) ||
         !probe_vulkan_transport(display, surface, params->device_uuid, device_uuid, &renderer))
         goto failed;
+    for (i = 0; i < registry_probe.seat_count; ++i)
+        if (registry_probe.seats[i].name == params->seat_global)
+        {
+            renderer.seat = wl_registry_bind(registry, registry_probe.seats[i].name,
+                    &wl_seat_interface, min(registry_probe.seats[i].version, 5));
+            break;
+        }
+    if (!renderer.seat ||
+        wl_seat_add_listener(renderer.seat, &renderer_seat_listener, NULL) == -1 ||
+        wl_display_roundtrip(display) == -1)
+    {
+        status = STATUS_PORT_DISCONNECTED;
+        goto failed;
+    }
     wl_surface_destroy(surface);
     surface = NULL;
     renderer.compositor = registry_probe.compositor;
@@ -1894,6 +2400,53 @@ static NTSTATUS dispatch_renderer(void *args)
     return dispatch_wayland_display(renderer.display, 0);
 }
 
+static NTSTATUS get_renderer_input(void *args)
+{
+    struct winewayland_host_input_event *params = args;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (renderer.input_count)
+    {
+        *params = renderer.input_events[renderer.input_head];
+        memset(&renderer.input_events[renderer.input_head], 0,
+                sizeof(renderer.input_events[renderer.input_head]));
+        renderer.input_head = (renderer.input_head + 1) %
+                ARRAY_SIZE(renderer.input_events);
+        --renderer.input_count;
+        return STATUS_SUCCESS;
+    }
+    if (renderer.input_overflow)
+    {
+        renderer.input_overflow = FALSE;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    return STATUS_NO_MORE_ENTRIES;
+}
+
+static NTSTATUS test_renderer_input(void *args)
+{
+    struct winewayland_host_input_test *params = args;
+    struct winewayland_host_input_event event = {0};
+    struct renderer_root *root;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        return STATUS_NOT_FOUND;
+    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) - 2)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    event.type = WINEWAYLAND_HOST_INPUT_KEY;
+    event.code = 0x1e;
+    event.state = 1;
+    queue_renderer_input(root, &event, FALSE);
+    event.state = 0;
+    queue_renderer_input(root, &event, FALSE);
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
         uint32_t requested_width, uint32_t requested_height)
 {
@@ -2100,6 +2653,7 @@ static NTSTATUS sync_renderer_root(void *args)
         destroy_renderer_root(root);
         return STATUS_NOT_SUPPORTED;
     }
+    wl_surface_set_user_data(root->surface, root);
     snprintf(title, sizeof(title), "Wine hosted window %016llx",
             (unsigned long long)root->root_identity);
     xdg_toplevel_set_title(root->xdg_toplevel, title);
@@ -3178,6 +3732,18 @@ static NTSTATUS dispatch_renderer(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS get_renderer_input(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS test_renderer_input(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS sync_renderer_root(void *args)
 {
     (void)args;
@@ -3281,7 +3847,7 @@ static NTSTATUS probe_backend(void *args)
     if (registry_probe.seat_count)
     {
         params->capabilities |= WINEWAYLAND_HOST_CAP_SEAT;
-        params->seat_global = registry_probe.seats[0];
+        params->seat_global = registry_probe.seats[0].name;
     }
     if (registry_probe.seat_count > 1)
         params->capabilities |= WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS;
@@ -3317,6 +3883,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     renderer_headless_self_test,
     destroy_renderer_call,
     release_renderer_frame,
+    get_renderer_input,
+    test_renderer_input,
 };
 
 #ifdef _WIN64
@@ -3337,6 +3905,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     renderer_headless_self_test,
     destroy_renderer_call,
     release_renderer_frame,
+    get_renderer_input,
+    test_renderer_input,
 };
 #endif
 

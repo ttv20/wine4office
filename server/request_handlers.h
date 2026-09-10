@@ -364,6 +364,7 @@ DECL_HANDLER(set_wayland_window_configure_applied);
 DECL_HANDLER(get_wayland_window_configure_result);
 DECL_HANDLER(cancel_wayland_frame);
 DECL_HANDLER(manage_wayland_window_native_lease);
+DECL_HANDLER(send_wayland_host_input);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -725,6 +726,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_wayland_window_configure_result,
     (req_handler)req_cancel_wayland_frame,
     (req_handler)req_manage_wayland_window_native_lease,
+    (req_handler)req_send_wayland_host_input,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2908,3 +2910,10 @@ C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, request_id) 
 C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, state) == 32 );
 C_ASSERT( offsetof(struct manage_wayland_window_native_lease_reply, action) == 36 );
 C_ASSERT( sizeof(struct manage_wayland_window_native_lease_reply) == 40 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, root) == 12 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, flags) == 16 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, host_epoch) == 24 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, root_identity) == 32 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, root_generation) == 40 );
+C_ASSERT( offsetof(struct send_wayland_host_input_request, event_id) == 48 );
+C_ASSERT( sizeof(struct send_wayland_host_input_request) == 56 );

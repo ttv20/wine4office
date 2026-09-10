@@ -61,7 +61,7 @@ struct winewayland_host_startup
     uint32_t reserved;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 5
+#define WINEWAYLAND_HOST_RENDERER_VERSION 6
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -89,6 +89,40 @@ struct winewayland_host_renderer_create
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
     uint64_t endpoint_device;
     uint64_t endpoint_inode;
+    uint32_t seat_global;
+    uint32_t reserved;
+};
+
+#define WINEWAYLAND_HOST_INPUT_NONE           0
+#define WINEWAYLAND_HOST_INPUT_POINTER_MOTION 1
+#define WINEWAYLAND_HOST_INPUT_POINTER_BUTTON 2
+#define WINEWAYLAND_HOST_INPUT_POINTER_AXIS   3
+#define WINEWAYLAND_HOST_INPUT_KEY            4
+
+struct winewayland_host_input_event
+{
+    uint32_t version;
+    uint32_t size;
+    uint32_t type;
+    uint32_t flags;
+    uint64_t root_identity;
+    uint64_t root_generation;
+    uint32_t serial;
+    uint32_t time;
+    uint32_t code;
+    uint32_t state;
+    int32_t x;
+    int32_t y;
+    int32_t value120;
+    uint32_t reserved;
+};
+
+struct winewayland_host_input_test
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t root_identity;
+    uint64_t root_generation;
 };
 
 struct winewayland_host_renderer_import
@@ -213,6 +247,8 @@ enum winewayland_host_unix_func
     unix_renderer_headless_self_test,
     unix_renderer_destroy,
     unix_renderer_release_frame,
+    unix_renderer_get_input,
+    unix_renderer_test_input,
     winewayland_host_unix_func_count,
 };
 

@@ -4234,6 +4234,17 @@ static void dump_manage_wayland_window_native_lease_reply( const struct manage_w
     fprintf( stderr, ", action=%08x", req->action );
 }
 
+static void dump_send_wayland_host_input_request( const struct send_wayland_host_input_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", event_id=", &req->event_id );
+    dump_varargs_bytes( ", input=", cur_size );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4595,6 +4606,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_window_configure_result_request,
     (dump_func)dump_cancel_wayland_frame_request,
     (dump_func)dump_manage_wayland_window_native_lease_request,
+    (dump_func)dump_send_wayland_host_input_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4956,6 +4968,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_window_configure_result_reply,
     (dump_func)dump_cancel_wayland_frame_reply,
     (dump_func)dump_manage_wayland_window_native_lease_reply,
+    NULL,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5317,6 +5330,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_window_configure_result",
     "cancel_wayland_frame",
     "manage_wayland_window_native_lease",
+    "send_wayland_host_input",
 };
 
 static const struct

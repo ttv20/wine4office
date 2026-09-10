@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 992.
+Generated server protocol version: 994.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -14,14 +14,14 @@ or transport fixture is not Outlook support.
 - The first probe opens its own Wayland connection, verifies that the selected
   endpoint is a local Unix socket, protects against a path replacement during
   connection, and records compositor, shared-memory and seat globals.
-- The executable can consume a startup permit through inherited handles,
-  independently re-probe the Wayland endpoint, register with wineserver and
-  publish Ready. The launcher/child path is currently exposed only by
-  `--registration-test`; no application path launches a resident host yet.
-  The host now binds the version-1 `xdg_wm_base` subset needed for toplevel
-  creation and pumps pending Wayland events without blocking the server scan.
-  It answers compositor pings on its own connection. The host still does not
-  create a native role or take window ownership.
+- The executable consumes a startup permit through inherited handles,
+  independently re-probes the Wayland endpoint, registers with wineserver and
+  publishes Ready. DComp launches it on demand for the first eligible commit.
+  Concurrent launchers converge on one detached Wine system process, which
+  remains resident until the matching wineserver shuts down. The host binds
+  the version-1 `xdg_wm_base` subset, creates retained native roots after an
+  authenticated ownership transfer, answers compositor pings and pumps
+  Wayland events without blocking the server scan.
 - The host now probes a native Vulkan device before advertising transport
   support. Admission requires a graphics queue that can present to the probed
   Wayland connection and to a real unmapped `wl_surface` created on that exact
@@ -269,6 +269,17 @@ or transport fixture is not Outlook support.
   bufferless commit, receives and applies a fresh configure, and only then
   recreates WSI and presents. Xdg title and app-id state are restored because
   the protocol discards toplevel attributes on unmap.
+- The resident host now binds the exact admitted `wl_seat` and drains bounded
+  256-entry keyboard and pointer queues. Pointer motion coalesces at the tail;
+  a queued motion is evicted before a new button, wheel or key edge when the
+  queue is full. The PE side translates surface-local pointer coordinates,
+  Linux button codes and evdev key codes into Wine's normal hardware-input
+  path. Wineserver accepts an event only from the current Ready host for the
+  exact root identity and USER lifetime generation while the scene and native
+  lease are both Hosted, and rejects duplicate or stale event IDs. Stale
+  events are discarded rather than retried. Physical modifier reconciliation,
+  held-key and held-button release on seat loss, IME/text input and a
+  compositor-originated pointer-recipient fixture remain pending.
 
 ## Contributor interception inventory
 
@@ -674,11 +685,16 @@ admitted.
   as `artifacts/scene-transition-dcomp-x64.log`. The i386 executable still exits
   before entering the DComp fixture in both available prefixes, so only its
   transport/WSI and server-authority coverage is claimed.
-- The authorized Intel WSL endpoint remained unreachable at
-  `testing-laptop:8022`. After the user separately authorized a bounded run on
-  `elkana`, the two WSI fixtures and x86-64 DComp fixture above used the existing
-  runner and prefixes, kept 61 GiB free, and left no Wine process for those
-  test prefixes.
+- The authorized Intel WSL endpoint at `testing-laptop:8022` is now reachable.
+  Its XFS development volume has reflinks enabled and retained more than
+  306 GiB free. Protocol 994 rebuilt there for wineserver, ntdll, the host and
+  win32u tests in both PE architectures. WSLg accepted the authenticated
+  Wayland endpoint and exposed a seat, but no installed Vulkan ICD met the
+  transport contract: the native Intel ICD enumerated no device, gfxstream
+  lacked the required Wayland instance extension, and lavapipe lacked a
+  required device extension. This is build and fallback-probe coverage, not an
+  Intel GPU transport result. Each probe ended with zero task-prefix Wine
+  processes.
 - Protocol 993 adds a server-owned native-window lease with acknowledged
   `Local`, `PreparingHost`, `TransferringToHost`, `Hosted`, `ReturningLocal`
   and failure states. The guest Wayland driver now suppresses its local role,
@@ -731,6 +747,20 @@ admitted.
   in the Intel task directory and `artifacts/auto-host-authority-x64-v4.log` in
   the Radeon task environment. The Intel task still has 62 GiB free and every
   test prefix has zero Wine processes.
+- Protocol 994 routes authenticated hosted input. The x86-64 authority fixture
+  passed 652 checks with zero failures on the Radeon environment, including
+  foreign-host and wrong-root rejection, replay prevention, key down/up,
+  pointer motion and button state, and rejection after scene revocation. On
+  Intel Iris Xe, the automatic DComp fixture delivered synthetic A down/up
+  through the resident host to `WM_KEYDOWN` and `WM_KEYUP` while also
+  completing seven Presents. The final queue and wheel-timestamp revision
+  repeated that result with exit status zero, no remaining task-prefix Wine
+  process and 62 GiB free. Evidence is retained as
+  `/workspace/artifacts/host-input-authority-x64-v3.log` and
+  `artifacts/host-input-synthetic-v3-x64.log` in the respective task
+  environments. The isolated KWin compositor does not advertise the virtual
+  keyboard protocol, so this does not yet prove externally injected physical
+  compositor input.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

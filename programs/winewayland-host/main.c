@@ -28,7 +28,7 @@
 
 C_ASSERT(sizeof(struct winewayland_host_startup) == 72);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
-C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
+C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
@@ -37,6 +37,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 72);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
+C_ASSERT(sizeof(struct winewayland_host_input_event) == 64);
+C_ASSERT(sizeof(struct winewayland_host_input_test) == 24);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -49,6 +51,14 @@ C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_RESIZING == WINE_WAYLAND_CONFIGURE_STA
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_TILED == WINE_WAYLAND_CONFIGURE_STATE_TILED);
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN == WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN);
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_ACTIVATED == WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED);
+
+#define HOST_BTN_LEFT    0x110
+#define HOST_BTN_RIGHT   0x111
+#define HOST_BTN_MIDDLE  0x112
+#define HOST_BTN_SIDE    0x113
+#define HOST_BTN_EXTRA   0x114
+#define HOST_BTN_FORWARD 0x115
+#define HOST_BTN_BACK    0x116
 
 static NTSTATUS get_backend_probe(struct winewayland_host_probe *probe)
 {
@@ -76,6 +86,7 @@ static NTSTATUS create_renderer(const struct winewayland_host_probe *probe)
     memcpy(params.endpoint_path, probe->endpoint_path, sizeof(params.endpoint_path));
     params.endpoint_device = probe->endpoint_device;
     params.endpoint_inode = probe->endpoint_inode;
+    params.seat_global = probe->seat_global;
     return WINE_UNIX_CALL(unix_renderer_create, &params);
 }
 
@@ -640,6 +651,7 @@ struct host_renderer_root
     uint64_t native_lease_host_epoch;
     uint64_t native_lease_scene_generation;
     uint64_t native_lease_request_id;
+    uint64_t input_event_id;
     uint32_t scene_disposition;
     uint32_t native_lease_state;
     uint32_t native_lease_action;
@@ -649,6 +661,7 @@ struct host_renderer_root
     uint32_t configure_height;
     uint32_t configure_state;
     uint32_t configure_scale_120;
+    struct rectangle client;
     uint32_t present_width;
     uint32_t present_height;
     int32_t present_result;
@@ -1005,6 +1018,100 @@ static NTSTATUS post_host_window_close(struct host_renderer_root *root, uint64_t
     }
     SERVER_END_REQ;
     if (!status) root->close_posted = TRUE;
+    return status;
+}
+
+static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_epoch,
+        const struct winewayland_host_input_event *event)
+{
+    union hw_input input;
+    uint32_t scan;
+    NTSTATUS status;
+
+    memset(&input, 0, sizeof(input));
+    switch (event->type)
+    {
+    case WINEWAYLAND_HOST_INPUT_POINTER_MOTION:
+        if (root->client.right <= root->client.left ||
+            root->client.bottom <= root->client.top)
+            return STATUS_INVALID_DEVICE_STATE;
+        input.mouse.type = INPUT_MOUSE;
+        input.mouse.x = root->client.left + event->x / 256;
+        input.mouse.y = root->client.top + event->y / 256;
+        if (input.mouse.x < root->client.left) input.mouse.x = root->client.left;
+        if (input.mouse.y < root->client.top) input.mouse.y = root->client.top;
+        if (input.mouse.x >= root->client.right) input.mouse.x = root->client.right - 1;
+        if (input.mouse.y >= root->client.bottom) input.mouse.y = root->client.bottom - 1;
+        input.mouse.flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+        input.mouse.time = event->time;
+        break;
+    case WINEWAYLAND_HOST_INPUT_POINTER_BUTTON:
+        input.mouse.type = INPUT_MOUSE;
+        input.mouse.time = event->time;
+        switch (event->code)
+        {
+        case HOST_BTN_LEFT: input.mouse.flags = MOUSEEVENTF_LEFTDOWN; break;
+        case HOST_BTN_RIGHT: input.mouse.flags = MOUSEEVENTF_RIGHTDOWN; break;
+        case HOST_BTN_MIDDLE: input.mouse.flags = MOUSEEVENTF_MIDDLEDOWN; break;
+        case HOST_BTN_SIDE:
+        case HOST_BTN_BACK:
+            input.mouse.flags = MOUSEEVENTF_XDOWN;
+            input.mouse.data = XBUTTON1;
+            break;
+        case HOST_BTN_EXTRA:
+        case HOST_BTN_FORWARD:
+            input.mouse.flags = MOUSEEVENTF_XDOWN;
+            input.mouse.data = XBUTTON2;
+            break;
+        default:
+            return STATUS_NOT_SUPPORTED;
+        }
+        if (!event->state) input.mouse.flags <<= 1;
+        break;
+    case WINEWAYLAND_HOST_INPUT_POINTER_AXIS:
+        input.mouse.type = INPUT_MOUSE;
+        input.mouse.time = event->time;
+        if (!event->code)
+        {
+            input.mouse.flags = MOUSEEVENTF_WHEEL;
+            input.mouse.data = event->value120;
+        }
+        else if (event->code == 1)
+        {
+            input.mouse.flags = MOUSEEVENTF_HWHEEL;
+            input.mouse.data = event->value120;
+        }
+        else
+            return STATUS_NOT_SUPPORTED;
+        break;
+    case WINEWAYLAND_HOST_INPUT_KEY:
+        input.kbd.type = INPUT_KEYBOARD;
+        input.kbd.time = event->time;
+        scan = event->code;
+        input.kbd.scan = scan & 0xff;
+        if (scan & ~0xff) input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
+        if (!event->state) input.kbd.flags |= KEYEVENTF_KEYUP;
+        if (scan & 0x300) scan += 0xdf00;
+        input.kbd.vkey = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX,
+                GetKeyboardLayout(0));
+        break;
+    default:
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(send_wayland_host_input)
+    {
+        req->root = root->root;
+        req->flags = event->type == WINEWAYLAND_HOST_INPUT_KEY ? 0 : SEND_HWMSG_RAWINPUT;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->event_id = root->input_event_id;
+        wine_server_add_data(req, &input, sizeof(input));
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
     return status;
 }
 
@@ -1706,6 +1813,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
             entry->root = root->root;
             entry->scene_generation = root->scene_generation;
             entry->geometry_revision = state->geometry_revision;
+            entry->client = state->client;
             entry->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
             update_renderer_root_configure(entry, &sync);
             entry->seen = TRUE;
@@ -1723,6 +1831,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     free_root->root_generation = root->root_generation;
     free_root->scene_generation = root->scene_generation;
     free_root->geometry_revision = state->geometry_revision;
+    free_root->client = state->client;
     free_root->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
     update_renderer_root_configure(free_root, &sync);
     free_root->seen = TRUE;
@@ -1886,6 +1995,57 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     return first_error;
 }
 
+static NTSTATUS process_host_input(uint64_t host_epoch)
+{
+    struct winewayland_host_input_event event;
+    struct host_renderer_root *root;
+    NTSTATUS status;
+    unsigned int i;
+
+    for (;;)
+    {
+        memset(&event, 0, sizeof(event));
+        event.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        event.size = sizeof(event);
+        status = WINE_UNIX_CALL(unix_renderer_get_input, &event);
+        if (status == STATUS_NO_MORE_ENTRIES) return STATUS_SUCCESS;
+        if (status) return status;
+
+        root = NULL;
+        for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+            if (renderer_roots[i].root_identity == event.root_identity &&
+                renderer_roots[i].root_generation == event.root_generation)
+            {
+                root = &renderer_roots[i];
+                break;
+            }
+        if (!root) continue;
+        status = send_host_input(root, host_epoch, &event);
+        if (status == STATUS_NOT_FOUND || status == STATUS_REVISION_MISMATCH ||
+            status == STATUS_INVALID_DEVICE_STATE || status == STATUS_NOT_SUPPORTED)
+            continue;
+        if (status) return status;
+    }
+}
+
+static NTSTATUS queue_host_test_input(void)
+{
+    struct winewayland_host_input_test test;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+    {
+        if (!renderer_roots[i].root_identity || !renderer_roots[i].native_owned) continue;
+        memset(&test, 0, sizeof(test));
+        test.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        test.size = sizeof(test);
+        test.root_identity = renderer_roots[i].root_identity;
+        test.root_generation = renderer_roots[i].root_generation;
+        return WINE_UNIX_CALL(unix_renderer_test_input, &test);
+    }
+    return STATUS_DEVICE_NOT_READY;
+}
+
 static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_event,
         BOOL system_process)
 {
@@ -1895,6 +2055,8 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
     HANDLE wait_handles[2];
     uint64_t host_epoch = 0;
     NTSTATUS status, work_status, last_work_status = STATUS_SUCCESS;
+    char test_input[2];
+    BOOL test_input_pending;
     DWORD wait_count;
     DWORD wait;
 
@@ -1903,6 +2065,9 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
         SetEvent(ready_event);
         return 5;
     }
+    test_input_pending = system_process &&
+            GetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", test_input,
+            sizeof(test_input)) == 1 && test_input[0] == '1';
     if (startup->version != WINEWAYLAND_HOST_STARTUP_VERSION ||
             startup->size != sizeof(*startup))
         status = STATUS_REVISION_MISMATCH;
@@ -1934,6 +2099,14 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
             {
                 work_status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL);
                 if (!work_status) work_status = process_host_work(host_epoch);
+                if (!work_status && test_input_pending)
+                {
+                    work_status = queue_host_test_input();
+                    if (!work_status) test_input_pending = FALSE;
+                    else if (work_status == STATUS_DEVICE_NOT_READY)
+                        work_status = STATUS_SUCCESS;
+                }
+                if (!work_status) work_status = process_host_input(host_epoch);
                 if (work_status && work_status != last_work_status)
                     fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
                 last_work_status = work_status;
@@ -2197,7 +2370,7 @@ done:
     return ret;
 }
 
-static int test_dcomp_pipeline(BOOL automatic_host)
+static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2233,7 +2406,7 @@ static int test_dcomp_pipeline(BOOL automatic_host)
     NTSTATUS status;
     HRESULT hr = E_FAIL;
     DWORD wait;
-    unsigned int i;
+    unsigned int i, present_count = 0;
     int ret = 7;
 
     if ((status = get_backend_probe(&probe)))
@@ -2292,6 +2465,12 @@ static int test_dcomp_pipeline(BOOL automatic_host)
     if (!(window = CreateWindowExW(0, L"static", L"DComp host pipeline", WS_POPUP,
             0, 0, 64, 64, NULL, NULL, NULL, NULL)))
         goto done;
+    if (input_test)
+    {
+        SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
+        SetActiveWindow(window);
+        SetFocus(window);
+    }
     if (FAILED(hr = create_device(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0, D3D11_SDK_VERSION, &d3d_device,
             &feature_level, &context)))
@@ -2345,6 +2524,8 @@ static int test_dcomp_pipeline(BOOL automatic_host)
 
     if (automatic_host)
     {
+        BOOL key_down = FALSE, key_up = FALSE;
+
         if ((status = get_registered_host(&host_info)) || !host_info.ready ||
                 !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
         {
@@ -2379,6 +2560,11 @@ static int test_dcomp_pipeline(BOOL automatic_host)
             if (FAILED(hr)) break;
             while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
             {
+                if (input_test && message.hwnd == window && message.wParam == 'A')
+                {
+                    if (message.message == WM_KEYDOWN) key_down = TRUE;
+                    if (message.message == WM_KEYUP) key_up = TRUE;
+                }
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
@@ -2390,8 +2576,38 @@ static int test_dcomp_pipeline(BOOL automatic_host)
             fprintf(stderr, "dcomp_auto_host=failed hr=%#lx host_status=%#lx\n", hr, status);
             goto done;
         }
+        present_count = i + 1;
+        if (input_test)
+        {
+            SetFocus(window);
+            printf("dcomp_input=synthetic_dispatch\n");
+            fflush(stdout);
+            for (i = 0; i < 1000 && (!key_down || !key_up); ++i)
+            {
+                MSG message;
+
+                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+                {
+                    if (message.hwnd == window && message.wParam == 'A')
+                    {
+                        if (message.message == WM_KEYDOWN) key_down = TRUE;
+                        if (message.message == WM_KEYUP) key_up = TRUE;
+                    }
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                Sleep(10);
+            }
+            if (!key_down || !key_up)
+            {
+                fprintf(stderr, "dcomp_input=failed key_down=%u key_up=%u\n",
+                        key_down, key_up);
+                goto done;
+            }
+            printf("dcomp_input=passed key_down=1 key_up=1\n");
+        }
         printf("dcomp_auto_host=passed host_pid=%u host_epoch=%I64u presents=%u\n",
-                host_info.process_id, host_info.host_epoch, i + 1);
+                host_info.process_id, host_info.host_epoch, present_count);
         ret = 0;
         goto done;
     }
@@ -2686,6 +2902,7 @@ done:
     if (dcomp_module) FreeLibrary(dcomp_module);
     if (dxgi_module) FreeLibrary(dxgi_module);
     if (d3d11_module) FreeLibrary(d3d11_module);
+    if (input_test) SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", NULL);
     return ret;
 }
 
@@ -2701,9 +2918,11 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE);
+        return test_dcomp_pipeline(TRUE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
+        return test_dcomp_pipeline(TRUE, TRUE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -2713,7 +2932,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-auto-host-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
             argv[0]);
     return 2;
 }

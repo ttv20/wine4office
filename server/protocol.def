@@ -5033,3 +5033,15 @@ enum inproc_sync_type
     unsigned int     state;
     unsigned int     action;
 @END
+
+/* Route one native input event from the current Wayland host.  Input edges
+ * are never retried; the event ID rejects stale or duplicate delivery. */
+@REQ(send_wayland_host_input)
+    user_handle_t    root;
+    unsigned int     flags;
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+    VARARG(input,bytes);          /* exactly one union hw_input */
+@END

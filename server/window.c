@@ -190,6 +190,8 @@ struct window
     unsigned __int64 wayland_geometry_revision;
     unsigned __int64 wayland_close_host_epoch;
     unsigned __int64 wayland_close_request_id;
+    unsigned __int64 wayland_input_host_epoch;
+    unsigned __int64 wayland_input_event_id;
     unsigned __int64 wayland_configure_host_epoch;
     unsigned __int64 wayland_configure_request_id;
     unsigned __int64 wayland_configure_applied_id;
@@ -872,6 +874,8 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_applied_height = 0;
     win->wayland_configure_applied_state = 0;
     win->wayland_configure_message_posted = 0;
+    win->wayland_input_host_epoch = 0;
+    win->wayland_input_event_id = 0;
     win->wayland_native_lease_host_epoch = 0;
     win->wayland_native_lease_scene_generation = 0;
     win->wayland_native_lease_request_id = 0;
@@ -3729,6 +3733,48 @@ static int is_current_wayland_host( struct desktop *desktop, unsigned __int64 ho
     else
         return 1;
     return 0;
+}
+
+struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
+        unsigned __int64 host_epoch, unsigned __int64 root_identity,
+        unsigned __int64 root_generation, unsigned __int64 event_id )
+{
+    struct obj_locator locator;
+    struct window *root;
+
+    if (!(root = get_window( root_handle ))) return NULL;
+    if (!is_current_wayland_host( root->desktop, host_epoch )) return NULL;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return NULL;
+    }
+    locator = get_shared_object_locator( root->shared );
+    if (locator.id != root_identity || (root->handle >> 16) != root_generation)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return NULL;
+    }
+    if (root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+        root->wayland_scene_host_epoch != host_epoch ||
+        root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+        root->wayland_native_lease_host_epoch != host_epoch)
+    {
+        set_error( STATUS_INVALID_DEVICE_STATE );
+        return NULL;
+    }
+    if (root->wayland_input_host_epoch != host_epoch)
+    {
+        root->wayland_input_host_epoch = host_epoch;
+        root->wayland_input_event_id = 0;
+    }
+    if (event_id <= root->wayland_input_event_id)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        return NULL;
+    }
+    root->wayland_input_event_id = event_id;
+    return (struct desktop *)grab_object( root->desktop );
 }
 
 static int wayland_scene_uses_contributor( const struct window *root,
