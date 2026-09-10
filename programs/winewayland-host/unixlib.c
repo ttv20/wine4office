@@ -178,6 +178,7 @@ struct renderer_queue_job
             VkFence fence;
             uint64_t wait_value;
             uint64_t signal_value;
+            BOOL test_submit_failure;
         } frame;
         struct
         {
@@ -258,6 +259,7 @@ struct renderer_root
     BOOL present_complete;
     BOOL recreate_swapchain;
     BOOL test_block_next_present;
+    BOOL test_fail_next_frame_copy;
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
@@ -304,10 +306,12 @@ struct renderer_frame
     uint32_t height;
     VkImage image;
     VkDeviceMemory memory;
+    VkSemaphore reuse_semaphore;
     VkCommandBuffer command_buffer;
     VkFence fence;
     BOOL complete;
     BOOL submit_done;
+    BOOL reuse_recovered;
     NTSTATUS submit_status;
 };
 
@@ -390,6 +394,7 @@ struct vulkan_renderer
     PFN_vkGetMemoryFdKHR p_vkGetMemoryFdKHR;
     PFN_vkGetSemaphoreFdKHR p_vkGetSemaphoreFdKHR;
     PFN_vkGetSemaphoreCounterValue p_vkGetSemaphoreCounterValue;
+    PFN_vkSignalSemaphore p_vkSignalSemaphore;
     PFN_vkImportSemaphoreFdKHR p_vkImportSemaphoreFdKHR;
     PFN_vkGetDeviceQueue p_vkGetDeviceQueue;
     PFN_vkCreateCommandPool p_vkCreateCommandPool;
@@ -906,6 +911,19 @@ static NTSTATUS renderer_queue_status(VkResult vr)
     return STATUS_UNSUCCESSFUL;
 }
 
+static BOOL signal_renderer_reuse(struct renderer_device_queue *queue,
+        VkSemaphore semaphore, uint64_t value)
+{
+    VkSemaphoreSignalInfo signal_info = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+    VkResult vr;
+
+    signal_info.semaphore = semaphore;
+    signal_info.value = value;
+    if (!(vr = renderer.p_vkSignalSemaphore(queue->device, &signal_info))) return TRUE;
+    fprintf(stderr, "Vulkan transport reuse recovery returned %d.\n", vr);
+    return FALSE;
+}
+
 static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         const struct renderer_queue_job *job)
 {
@@ -918,6 +936,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     NTSTATUS status = STATUS_SUCCESS;
     BOOL queue_work_submitted = job->type == RENDERER_QUEUE_JOB_PRESENT_WAIT;
     BOOL fence_submitted = FALSE;
+    BOOL reuse_recovered = FALSE;
     VkResult present_result = VK_SUCCESS, vr;
 
     if (job->type == RENDERER_QUEUE_JOB_FRAME)
@@ -934,12 +953,19 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         submit_info.pCommandBuffers = &job->u.frame.command_buffer;
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &job->u.frame.signal_semaphore;
-        if ((vr = renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info,
-                job->u.frame.fence)))
+        vr = job->u.frame.test_submit_failure ? VK_ERROR_OUT_OF_DEVICE_MEMORY :
+                renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info,
+                job->u.frame.fence);
+        if (vr)
+        {
             status = renderer_queue_status(vr);
+            reuse_recovered = signal_renderer_reuse(queue,
+                    job->u.frame.signal_semaphore, job->u.frame.signal_value);
+        }
 
         pthread_mutex_lock(&queue->mutex);
         job->u.frame.frame->submit_status = status;
+        job->u.frame.frame->reuse_recovered = reuse_recovered;
         job->u.frame.frame->submit_done = TRUE;
         pthread_mutex_unlock(&queue->mutex);
         return;
@@ -1313,16 +1339,36 @@ static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
     BOOL submit_done;
     VkResult vr;
 
-    if (!frame->fence) return STATUS_SUCCESS;
+    if (!frame->fence) return frame->complete ? frame->submit_status : STATUS_SUCCESS;
     pthread_mutex_lock(&queue->mutex);
     submit_done = frame->submit_done;
     status = frame->submit_status;
     pthread_mutex_unlock(&queue->mutex);
     if (!submit_done) return STATUS_PENDING;
-    if (status) return status;
+    if (status)
+    {
+        renderer.p_vkDestroyFence(queue->device, frame->fence, NULL);
+        renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
+                &frame->command_buffer);
+        frame->fence = VK_NULL_HANDLE;
+        frame->command_buffer = VK_NULL_HANDLE;
+        frame->complete = TRUE;
+        return status;
+    }
     vr = renderer.p_vkGetFenceStatus(queue->device, frame->fence);
     if (vr == VK_NOT_READY) return STATUS_PENDING;
-    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    if (vr)
+    {
+        status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+        renderer.p_vkDestroyFence(queue->device, frame->fence, NULL);
+        renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
+                &frame->command_buffer);
+        frame->fence = VK_NULL_HANDLE;
+        frame->command_buffer = VK_NULL_HANDLE;
+        frame->complete = TRUE;
+        frame->submit_status = status;
+        return status;
+    }
     renderer.p_vkDestroyFence(queue->device, frame->fence, NULL);
     renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
             &frame->command_buffer);
@@ -1933,6 +1979,7 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkGetMemoryFdKHR);
     LOAD_RENDERER_FUNC(vkGetSemaphoreFdKHR);
     LOAD_RENDERER_FUNC(vkGetSemaphoreCounterValue);
+    LOAD_RENDERER_FUNC(vkSignalSemaphore);
     LOAD_RENDERER_FUNC(vkImportSemaphoreFdKHR);
     LOAD_RENDERER_FUNC(vkGetDeviceQueue);
     LOAD_RENDERER_FUNC(vkCreateCommandPool);
@@ -2344,6 +2391,7 @@ static NTSTATUS process_renderer_frame(void *args)
     uint32_t slot_index;
     uint32_t memory_type;
     unsigned int i, root_frame_count = 0;
+    BOOL source_ready = FALSE;
     NTSTATUS status;
     VkResult vr;
 
@@ -2371,7 +2419,24 @@ static NTSTATUS process_renderer_frame(void *args)
         if (candidate->ready_value != ready_value || candidate->reuse_value != reuse_value ||
             candidate->slot != slot_index)
             return STATUS_REVISION_MISMATCH;
-        if ((status = poll_renderer_frame(candidate))) return status;
+        if ((status = poll_renderer_frame(candidate)))
+        {
+            if (!candidate->reuse_recovered)
+                candidate->reuse_recovered = signal_renderer_reuse(candidate->device_queue,
+                        candidate->reuse_semaphore, candidate->reuse_value);
+            if (candidate->reuse_recovered)
+            {
+                struct renderer_device_queue *candidate_queue = candidate->device_queue;
+
+                params->reusable = 1;
+                if (candidate->image)
+                    renderer.p_vkDestroyImage(candidate_queue->device, candidate->image, NULL);
+                if (candidate->memory)
+                    renderer.p_vkFreeMemory(candidate_queue->device, candidate->memory, NULL);
+                memset(candidate, 0, sizeof(*candidate));
+            }
+            return status;
+        }
         if (!candidate->complete) return STATUS_PENDING;
         params->reusable = 1;
         return STATUS_SUCCESS;
@@ -2396,12 +2461,12 @@ static NTSTATUS process_renderer_frame(void *args)
             &reuse_counter)))
         goto failed;
     if (ready_counter < ready_value) return STATUS_PENDING;
+    source_ready = TRUE;
     if (reuse_counter >= reuse_value)
     {
         params->reusable = 1;
         return STATUS_REVISION_MISMATCH;
     }
-
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
     image_info.extent.width = slot->width;
@@ -2509,6 +2574,7 @@ static NTSTATUS process_renderer_frame(void *args)
     pending.slot = slot_index;
     pending.width = slot->width;
     pending.height = slot->height;
+    pending.reuse_semaphore = slot->reuse;
     *frame = pending;
     queue_job.type = RENDERER_QUEUE_JOB_FRAME;
     queue_job.u.frame.frame = frame;
@@ -2518,6 +2584,11 @@ static NTSTATUS process_renderer_frame(void *args)
     queue_job.u.frame.fence = frame->fence;
     queue_job.u.frame.wait_value = ready_value;
     queue_job.u.frame.signal_value = reuse_value;
+    if (slot->root && slot->root->test_fail_next_frame_copy)
+    {
+        queue_job.u.frame.test_submit_failure = TRUE;
+        slot->root->test_fail_next_frame_copy = FALSE;
+    }
     if ((status = enqueue_renderer_queue_job(queue, &queue_job)))
     {
         pending = *frame;
@@ -2528,6 +2599,8 @@ static NTSTATUS process_renderer_frame(void *args)
     return STATUS_PENDING;
 
 failed:
+    if (source_ready)
+        params->reusable = signal_renderer_reuse(queue, slot->reuse, reuse_value);
     fprintf(stderr, "Vulkan transport frame copy returned %d.\n", vr);
     if (pending.fence) renderer.p_vkDestroyFence(queue->device, pending.fence, NULL);
     if (pending.command_buffer)
@@ -2815,6 +2888,8 @@ static NTSTATUS sync_renderer_root(void *args)
     uint32_t configure_applied_state = params->configure_applied_state;
     BOOL test_block_next_present = !!(params->flags &
             WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT);
+    BOOL test_fail_next_frame_copy = !!(params->flags &
+            WINEWAYLAND_HOST_ROOT_TEST_FAIL_NEXT_FRAME_COPY);
     NTSTATUS status, wsi_status = STATUS_SUCCESS;
     unsigned int i;
 
@@ -2891,6 +2966,7 @@ static NTSTATUS sync_renderer_root(void *args)
 
 done:
     if (test_block_next_present) root->test_block_next_present = TRUE;
+    if (test_fail_next_frame_copy) root->test_fail_next_frame_copy = TRUE;
     if (configure_applied_id)
     {
         if (configure_applied_id > root->configure_request_id)

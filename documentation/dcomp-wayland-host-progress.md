@@ -170,8 +170,12 @@ or transport fixture is not Outlook support.
   copies each ready producer slot into a host-owned record, with no more than
   16 records admitted for any one root.
   It marks the source slot reusable only after fence completion. A frame-level
-  failure cannot become terminal until the host has made the source slot safe;
-  recovery for permanent pre-submit failures remains pending.
+  failure cannot become terminal until the host has made the source slot safe.
+  If local allocation, command preparation, executor admission or Vulkan queue
+  submission fails after producer readiness, the host signals the imported
+  reuse timeline without reading the source. It then destroys any partial
+  immutable copy and reports one terminal failure; an unsuccessful reuse
+  signal remains pending instead of releasing the producer unsafely.
 - Each accepted frame now records the aggregate scene generation and binding
   generation observed by its producer. The server accepts it only while the
   current scene is `HostedContent` for the same contributor, stream and
@@ -913,6 +917,17 @@ fixtures before generic applications can be admitted.
   `artifacts/per-root-device-20260911-023526-*.log` in the Intel task
   directory. Both environments ended with zero task-owned Wine processes;
   the Intel laptop retained 62 GiB free.
+- The permanent frame-copy failure fixture injects an asynchronous Vulkan
+  queue-submission failure after the producer's ready value becomes visible.
+  The host signaled source reuse, destroyed the unusable local record and
+  delivered exactly one failed terminal result. A following frame on the same
+  stream then presented successfully, proving credit and slot recovery. The
+  complete x86-64 decorated, fallback/rehost and multi-root fixtures plus both
+  x86-64 and i386 WSI paths remained green. Evidence is retained as
+  `artifacts/frame-copy-failure-20260911-024755.log` and
+  `artifacts/per-root-device-20260911-024805-*.log` in the Intel task
+  directory. The run ended with zero task-owned Wine processes and 62 GiB
+  free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

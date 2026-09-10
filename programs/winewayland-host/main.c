@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 104);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 112);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -2047,13 +2047,14 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS arm_renderer_root_test_block(const struct host_root_info *root,
-        const struct host_window_state *state, const struct host_configure_result *configure)
+static NTSTATUS set_renderer_root_test_flags(const struct host_root_info *root,
+        const struct host_window_state *state, const struct host_configure_result *configure,
+        uint32_t flags)
 {
     struct winewayland_host_renderer_root sync;
 
     prepare_renderer_root_sync(&sync, root, state, configure);
-    sync.flags = WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT;
+    sync.flags = flags;
     return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
 }
 
@@ -2305,10 +2306,21 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
         InterlockedCompareExchange((LONG *)&active_fixture_startup->block_next_present,
         0, 0) && !strcmp(window_state.title, "DComp host blocked root"))
     {
-        if ((status = arm_renderer_root_test_block(root, &window_state, &configure)))
+        if ((status = set_renderer_root_test_flags(root, &window_state, &configure,
+                WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT)))
             return status;
         InterlockedExchange((LONG *)&active_fixture_startup->block_next_present, 0);
         InterlockedIncrement((LONG *)&active_fixture_startup->block_present_armed);
+    }
+    if (active_fixture_startup &&
+        InterlockedCompareExchange((LONG *)&active_fixture_startup->fail_next_frame_copy,
+        0, 0) && !strcmp(window_state.title, "DComp host failed root"))
+    {
+        if ((status = set_renderer_root_test_flags(root, &window_state, &configure,
+                WINEWAYLAND_HOST_ROOT_TEST_FAIL_NEXT_FRAME_COPY)))
+            return status;
+        InterlockedExchange((LONG *)&active_fixture_startup->fail_next_frame_copy, 0);
+        InterlockedIncrement((LONG *)&active_fixture_startup->fail_frame_copy_armed);
     }
     renderer_root->scene_generation = scene.scene_generation;
     renderer_root->scene_applied_generation = scene.applied_generation;
@@ -2793,7 +2805,7 @@ static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *devi
 }
 
 static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
-        BOOL multi_root)
+        BOOL multi_root, BOOL failure_test)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2900,7 +2912,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         if (!AdjustWindowRectEx(&window_rect, window_style, FALSE, 0)) goto done;
     }
     if (!(window = CreateWindowExW(0, L"static", multi_root ? L"DComp host blocked root" :
-            L"DComp host pipeline", window_style,
+            failure_test ? L"DComp host failed root" : L"DComp host pipeline", window_style,
             0, 0, window_rect.right - window_rect.left,
             window_rect.bottom - window_rect.top, NULL, NULL, NULL, NULL)) ||
             !GetClientRect(window, &client_rect) || client_rect.right <= 0 ||
@@ -3221,6 +3233,125 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         printf("dcomp_multi_root=passed imports=%u presented=%u discarded=%u host_activations=%u alternating=passed blocked_fairness=passed\n",
                 startup->imported_slots, startup->presented_frames,
                 startup->discarded_frames, startup->native_host_activations);
+        ret = 0;
+        goto done;
+    }
+
+    if (failure_test)
+    {
+        static const float colors[][4] =
+        {
+            {1.0f, 0.0f, 0.0f, 1.0f},
+            {0.0f, 1.0f, 0.0f, 1.0f},
+        };
+        uint32_t armed_before;
+        uint32_t completed_before, completed_after = 0, failed_before;
+        unsigned int wait_count;
+
+        completed_before = InterlockedCompareExchange(
+                (LONG *)&startup->presented_frames, 0, 0) +
+                InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+        if (FAILED(hr = present_test_color(swapchain, d3d_device, context, colors[1])))
+            goto done;
+        for (wait_count = 0; wait_count < 500; ++wait_count)
+        {
+            MSG message;
+
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            completed_after = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (completed_after > completed_before) break;
+            Sleep(10);
+        }
+        if (wait_count == 500)
+        {
+            fprintf(stderr, "dcomp_frame_failure=failed warm frame did not complete\n");
+            goto done;
+        }
+        armed_before = InterlockedCompareExchange(
+                (LONG *)&startup->fail_frame_copy_armed, 0, 0);
+        InterlockedExchange((LONG *)&startup->fail_next_frame_copy, 1);
+        for (wait_count = 0; wait_count < 500 && InterlockedCompareExchange(
+                (LONG *)&startup->fail_frame_copy_armed, 0, 0) == armed_before; ++wait_count)
+        {
+            MSG message;
+
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            Sleep(10);
+        }
+        if (wait_count == 500)
+        {
+            fprintf(stderr, "dcomp_frame_failure=failed copy failure was not armed\n");
+            goto done;
+        }
+        completed_before = InterlockedCompareExchange(
+                (LONG *)&startup->presented_frames, 0, 0) +
+                InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+        failed_before = InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+        if (FAILED(hr = present_test_color(swapchain, d3d_device, context, colors[0])))
+            goto done;
+        for (wait_count = 0; wait_count < 500; ++wait_count)
+        {
+            MSG message;
+
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            completed_after = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (completed_after > completed_before) break;
+            Sleep(10);
+        }
+        if (wait_count == 500 || startup->failed_frames != failed_before + 1)
+        {
+            fprintf(stderr, "dcomp_frame_failure=failed missing terminal failure completed=%u failed=%u\n",
+                    completed_after, startup->failed_frames);
+            goto done;
+        }
+        completed_before = completed_after;
+        if (FAILED(hr = present_test_color(swapchain, d3d_device, context, colors[1])))
+            goto done;
+        for (wait_count = 0; wait_count < 500; ++wait_count)
+        {
+            MSG message;
+
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            completed_after = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (completed_after > completed_before) break;
+            Sleep(10);
+        }
+        if (wait_count == 500 || !startup->presented_frames ||
+                startup->failed_frames != failed_before + 1)
+        {
+            fprintf(stderr, "dcomp_frame_failure=failed recovery completed=%u presented=%u failed=%u\n",
+                    completed_after, startup->presented_frames, startup->failed_frames);
+            goto done;
+        }
+        printf("dcomp_frame_failure=passed failed=%u presented=%u reuse_recovery=passed\n",
+                startup->failed_frames, startup->presented_frames);
         ret = 0;
         goto done;
     }
@@ -3600,15 +3731,17 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -3618,7 +3751,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
             argv[0]);
     return 2;
 }
