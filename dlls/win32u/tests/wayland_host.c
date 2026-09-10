@@ -3322,6 +3322,33 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status );
     while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
     ShowWindow( root, SW_HIDE );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SCENE ),
+        "Timed out querying the auto-hidden scene.\n" );
+    ok( !state->command_status &&
+        state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+        state->scene_generation == scene_generation,
+        "Hidden window scene returned %#lx, generation %s, disposition %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+        state->scene_disposition );
+    state->input_event_id = 6;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending input to the auto-hidden scene.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
+        "Auto-hidden native input returned %#lx.\n", state->command_status );
+    ShowWindow( root, SW_SHOW );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_SCENE ),
+        "Timed out querying the auto-restored scene.\n" );
+    ok( !state->command_status &&
+        state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+        state->scene_generation == scene_generation,
+        "Restored window scene returned %#lx, generation %s, disposition %#lx.\n",
+        state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+        state->scene_disposition );
     SetFocus( previous_focus );
 
     state->binding_generation++;

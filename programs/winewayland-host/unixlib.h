@@ -41,7 +41,7 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
-#define WINEWAYLAND_HOST_STARTUP_VERSION 3
+#define WINEWAYLAND_HOST_STARTUP_VERSION 5
 
 struct winewayland_host_startup
 {
@@ -60,6 +60,11 @@ struct winewayland_host_startup
     volatile uint32_t native_host_activations;
     volatile uint32_t native_local_activations;
     volatile uint32_t frame_snapshots;
+    volatile uint32_t hidden_scenes_applied;
+    volatile uint32_t restore_sync_attempts;
+    volatile uint32_t restore_wsi_ready;
+    volatile uint32_t restore_presents;
+    volatile uint32_t restored_windows;
 };
 
 #define WINEWAYLAND_HOST_RENDERER_VERSION 8

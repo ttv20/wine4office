@@ -3783,7 +3783,8 @@ struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
         set_error( STATUS_REVISION_MISMATCH );
         return NULL;
     }
-    if (root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+    if (!(root->style & WS_VISIBLE) ||
+        root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
         root->wayland_scene_host_epoch != host_epoch ||
         root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
         root->wayland_native_lease_host_epoch != host_epoch)
@@ -4994,7 +4995,8 @@ DECL_HANDLER(submit_wayland_frame)
     reply->outstanding_frames = contributor->outstanding_frames;
     if (submission.binding_generation != req->binding_generation)
         set_error( STATUS_REVISION_MISMATCH );
-    else if (root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+    else if (!(root->style & WS_VISIBLE) ||
+             root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
              root->wayland_scene_host_epoch != desktop->wayland_host_epoch ||
              !wayland_scene_uses_contributor( root, contributor ))
         set_error( STATUS_INVALID_DEVICE_STATE );

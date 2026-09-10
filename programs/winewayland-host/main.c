@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 72);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 96);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
@@ -720,9 +720,11 @@ struct host_renderer_root
     NTSTATUS terminal_backend_status;
     BOOL present_submitted;
     BOOL present_active;
+    BOOL restore_present;
     BOOL native_owned;
     BOOL source_released;
     BOOL frame_snapshot_required;
+    BOOL window_hidden;
     BOOL native_closed;
     BOOL close_posted;
     BOOL seen;
@@ -1629,6 +1631,7 @@ static void clear_root_present(struct host_renderer_root *root)
     root->terminal_result = WINE_WAYLAND_FRAME_RESULT_PENDING;
     root->terminal_backend_status = STATUS_PENDING;
     root->present_submitted = FALSE;
+    root->restore_present = FALSE;
     root->source_released = FALSE;
 }
 
@@ -1695,6 +1698,12 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
         root->scene_applied_generation = root->scene_generation;
         if (root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY && active_fixture_startup)
             InterlockedIncrement((LONG *)&active_fixture_startup->empty_scenes_applied);
+    }
+    if (root->restore_present && result == WINE_WAYLAND_FRAME_RESULT_PRESENTED)
+    {
+        root->window_hidden = FALSE;
+        if (active_fixture_startup)
+            InterlockedIncrement((LONG *)&active_fixture_startup->restored_windows);
     }
     clear_root_present(root);
     return STATUS_SUCCESS;
@@ -1880,7 +1889,7 @@ static NTSTATUS process_contributor_frames(struct host_renderer_root *root,
 }
 
 static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t host_epoch,
-        const struct host_contributor_info *contributor)
+        const struct host_contributor_info *contributor, BOOL process_frames)
 {
     struct host_pool_info pool;
     uint64_t previous_pool = 0;
@@ -1905,7 +1914,25 @@ static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t ho
                 &pool))) return status;
     }
     if (status != STATUS_NO_MORE_ENTRIES) return status;
-    return process_contributor_frames(root, host_epoch, contributor);
+    return process_frames ? process_contributor_frames(root, host_epoch, contributor) :
+            STATUS_SUCCESS;
+}
+
+static NTSTATUS process_root_contributors(struct host_renderer_root *root,
+        uint64_t host_epoch, BOOL process_frames)
+{
+    struct host_contributor_info contributor;
+    uint64_t previous_contributor = 0;
+    NTSTATUS status;
+
+    while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,
+            &contributor)))
+    {
+        previous_contributor = contributor.contributor_id;
+        if ((status = process_contributor(root, host_epoch, &contributor, process_frames)))
+            return status;
+    }
+    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
 }
 
 static NTSTATUS process_host_input(uint64_t host_epoch);
@@ -2134,6 +2161,60 @@ static NTSTATUS process_empty_scene(struct host_renderer_root *root, uint64_t ho
     return complete_root_present(root, host_epoch);
 }
 
+static NTSTATUS process_restored_window(struct host_renderer_root *root, uint64_t host_epoch,
+        const struct host_root_info *root_info, const struct host_window_state *state,
+        const struct host_configure_result *configure)
+{
+    struct winewayland_host_renderer_present present;
+    struct winewayland_host_renderer_root sync;
+    uint32_t width, height;
+    NTSTATUS status;
+
+    if (!root->window_hidden || root->present_active) return STATUS_SUCCESS;
+    width = root->snapshot_revision &&
+            root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_width : (state->client.right > state->client.left ?
+            state->client.right - state->client.left : 0);
+    height = root->snapshot_revision &&
+            root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_height : (state->client.bottom > state->client.top ?
+            state->client.bottom - state->client.top : 0);
+    if (!width || !height) return STATUS_SUCCESS;
+
+    prepare_renderer_root_sync(&sync, root_info, state, configure);
+    sync.requested_width = width;
+    sync.requested_height = height;
+    if (active_fixture_startup)
+        InterlockedIncrement((LONG *)&active_fixture_startup->restore_sync_attempts);
+    status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
+    if (status == STATUS_PENDING || status == STATUS_DEVICE_NOT_READY) return STATUS_SUCCESS;
+    if (status) return status;
+    if (!(sync.flags & WINEWAYLAND_HOST_ROOT_WSI_READY)) return STATUS_SUCCESS;
+    if (active_fixture_startup)
+        InterlockedIncrement((LONG *)&active_fixture_startup->restore_wsi_ready);
+
+    memset(&present, 0, sizeof(present));
+    present.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    present.size = sizeof(present);
+    present.root_identity = root->root_identity;
+    present.root_generation = root->root_generation;
+    present.geometry_revision = root->geometry_revision;
+    present.snapshot_revision = root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_revision : 0;
+    present.clear_color = 0xff000000;
+    status = WINE_UNIX_CALL(unix_renderer_root_present, &present);
+    if (status == STATUS_PENDING && present.image_index == UINT32_MAX)
+        return STATUS_SUCCESS;
+    if (status && status != STATUS_PENDING) return status;
+    if (active_fixture_startup && present.image_index != UINT32_MAX)
+        InterlockedIncrement((LONG *)&active_fixture_startup->restore_presents);
+    set_root_present(root, 0, 0, 0, width, height,
+            present.image_index != UINT32_MAX, present.present_result, status, TRUE);
+    root->restore_present = TRUE;
+    if (status == STATUS_PENDING) return STATUS_SUCCESS;
+    return complete_root_present(root, host_epoch);
+}
+
 static NTSTATUS process_unmapped_scene(struct host_renderer_root *root, uint64_t host_epoch)
 {
     struct winewayland_host_renderer_root_retire hide;
@@ -2153,18 +2234,49 @@ static NTSTATUS process_unmapped_scene(struct host_renderer_root *root, uint64_t
     if ((status = set_host_scene_applied(root->root, host_epoch,
             root->scene_generation))) return status;
     root->scene_applied_generation = root->scene_generation;
+    if (root->scene_disposition == WINE_WAYLAND_SCENE_HIDDEN && active_fixture_startup)
+        InterlockedIncrement((LONG *)&active_fixture_startup->hidden_scenes_applied);
     root->native_owned = FALSE;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS process_hidden_window(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    struct winewayland_host_renderer_root_retire hide;
+    NTSTATUS status;
+
+    if (root->window_hidden) return STATUS_SUCCESS;
+    if (root->present_active) return STATUS_SUCCESS;
+    memset(&hide, 0, sizeof(hide));
+    hide.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    hide.size = sizeof(hide);
+    hide.root_identity = root->root_identity;
+    hide.root_generation = root->root_generation;
+    status = WINE_UNIX_CALL(unix_renderer_root_hide, &hide);
+    if (status == STATUS_PENDING) return STATUS_SUCCESS;
+    if (status) return status;
+    if (root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY &&
+        root->scene_applied_generation != root->scene_generation)
+    {
+        if ((status = set_host_scene_applied(root->root, host_epoch,
+                root->scene_generation))) return status;
+        root->scene_applied_generation = root->scene_generation;
+        if (active_fixture_startup)
+            InterlockedIncrement((LONG *)&active_fixture_startup->empty_scenes_applied);
+    }
+    root->window_hidden = TRUE;
+    root->native_owned = FALSE;
+    if (active_fixture_startup)
+        InterlockedIncrement((LONG *)&active_fixture_startup->hidden_scenes_applied);
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t host_epoch)
 {
-    struct host_contributor_info contributor;
     struct host_window_state window_state;
     struct host_configure_result configure;
     struct host_scene_info scene;
     struct host_renderer_root *renderer_root;
-    uint64_t previous_contributor = 0;
     NTSTATUS status;
 
     if ((status = get_host_window_state(root->root, host_epoch, &window_state))) return status;
@@ -2203,19 +2315,28 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
             (status = set_host_native_retired(renderer_root, host_epoch)))
             return status;
     }
+    if (!(window_state.style & WS_VISIBLE))
+    {
+        if ((status = process_hidden_window(renderer_root, host_epoch))) return status;
+        return process_root_contributors(renderer_root, host_epoch, FALSE);
+    }
+    if (renderer_root->window_hidden &&
+        renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        (renderer_root->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+         renderer_root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY))
+    {
+        if ((status = process_restored_window(renderer_root, host_epoch, root, &window_state,
+                &configure))) return status;
+        if (renderer_root->window_hidden)
+            return process_root_contributors(renderer_root, host_epoch, FALSE);
+    }
     if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
         renderer_root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY &&
         (status = process_empty_scene(renderer_root, host_epoch, root, &window_state,
                 &configure)))
         return status;
 
-    while (!(status = get_next_contributor(root->root, host_epoch, previous_contributor,
-            &contributor)))
-    {
-        previous_contributor = contributor.contributor_id;
-        if ((status = process_contributor(renderer_root, host_epoch, &contributor))) return status;
-    }
-    return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
+    return process_root_contributors(renderer_root, host_epoch, TRUE);
 }
 
 static NTSTATUS process_host_work(uint64_t host_epoch)
@@ -2731,11 +2852,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             !GetClientRect(window, &client_rect) || client_rect.right <= 0 ||
             client_rect.bottom <= 0)
         goto done;
-    if (frame_test)
-    {
-        ShowWindow(window, SW_SHOW);
-        UpdateWindow(window);
-    }
+    ShowWindow(window, SW_SHOW);
+    if (frame_test) UpdateWindow(window);
     if (input_test)
     {
         SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
@@ -2982,15 +3100,81 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
 
     if (frame_test)
     {
+        uint32_t completed_before, completed_after, hidden_before, presented_before;
+        unsigned int wait_count;
+        MSG message;
+
         if (!InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0))
         {
             fprintf(stderr, "dcomp_frame=failed no software frame snapshot was uploaded\n");
             goto done;
         }
-        printf("dcomp_frame=passed client=%ldx%ld snapshots=%u imports=%u presented=%u discarded=%u host_activations=%u\n",
+        hidden_before = InterlockedCompareExchange(
+                (LONG *)&startup->hidden_scenes_applied, 0, 0);
+        ShowWindow(window, SW_HIDE);
+        for (i = 0; i < 500 && InterlockedCompareExchange(
+                (LONG *)&startup->hidden_scenes_applied, 0, 0) == hidden_before; ++i)
+        {
+            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            Sleep(10);
+        }
+        if (InterlockedCompareExchange((LONG *)&startup->hidden_scenes_applied, 0, 0) ==
+                hidden_before)
+        {
+            fprintf(stderr, "dcomp_frame=failed hidden scene was not applied\n");
+            goto done;
+        }
+        presented_before = InterlockedCompareExchange(
+                (LONG *)&startup->presented_frames, 0, 0);
+        ShowWindow(window, SW_SHOW);
+        if (FAILED(hr = IDCompositionVisual_SetOffsetX(visual, 1.0f)) ||
+            FAILED(hr = IDCompositionVisual_SetOffsetX(visual, 0.0f)) ||
+            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+            goto done;
+        RedrawWindow(window, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+        for (i = 0; i < 12 && InterlockedCompareExchange(
+                (LONG *)&startup->presented_frames, 0, 0) == presented_before; ++i)
+        {
+            completed_before = InterlockedCompareExchange(
+                    (LONG *)&startup->presented_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                    InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+            if (FAILED(hr = IDXGISwapChain1_Present(swapchain, 0, 0))) goto done;
+            for (wait_count = 0; wait_count < 500; ++wait_count)
+            {
+                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                completed_after = InterlockedCompareExchange(
+                        (LONG *)&startup->presented_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
+                        InterlockedCompareExchange((LONG *)&startup->failed_frames, 0, 0);
+                if (completed_after > completed_before) break;
+                Sleep(10);
+            }
+            if (wait_count == 500) break;
+        }
+        if (InterlockedCompareExchange((LONG *)&startup->presented_frames, 0, 0) ==
+                presented_before)
+        {
+            fprintf(stderr, "dcomp_frame=failed restored scene was not presented, presented=%u discarded=%u failed=%u restore_sync=%u restore_ready=%u restore_present=%u restored=%u\n",
+                    startup->presented_frames, startup->discarded_frames,
+                    startup->failed_frames, startup->restore_sync_attempts,
+                    startup->restore_wsi_ready, startup->restore_presents,
+                    startup->restored_windows);
+            goto done;
+        }
+        printf("dcomp_frame=passed client=%ldx%ld snapshots=%u imports=%u presented=%u discarded=%u host_activations=%u hide_restore=passed restored=%u\n",
                 client_rect.right, client_rect.bottom, startup->frame_snapshots,
                 startup->imported_slots, startup->presented_frames,
-                startup->discarded_frames, startup->native_host_activations);
+                startup->discarded_frames, startup->native_host_activations,
+                startup->restored_windows);
         ret = 0;
         goto done;
     }

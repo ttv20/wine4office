@@ -269,6 +269,14 @@ or transport fixture is not Outlook support.
   bufferless commit, receives and applies a fresh configure, and only then
   recreates WSI and presents. Xdg title and app-id state are restored because
   the protocol discards toplevel attributes on unmap.
+- Win32 visibility now gates a hosted root without changing its committed
+  DComp scene generation. Hiding the logical root rejects new producer frames
+  and native input, drains the current presentation and unmaps the xdg root.
+  The host continues enumerating contributors and pools while hidden, so it
+  preserves valid Vulkan imports and still observes pool retirement or
+  contributor revocation. Showing the window first remaps the last authorized
+  frame snapshot through a fresh xdg configure, then resumes queued producer
+  frames only after that presentation completes.
 - The resident host now binds the exact admitted `wl_seat` and drains bounded
   256-entry keyboard and pointer queues. Pointer motion coalesces at the tail;
   a queued motion is evicted before a new button, wheel or key edge when the
@@ -876,6 +884,22 @@ fixtures before generic applications can be admitted.
   Evidence and hashes are retained as
   `/workspace/artifacts/popup-family-admission-authority-x64.log` and
   `/workspace/artifacts/popup-family-admission-SHA256SUMS`.
+- Visibility authority now preserves the same `HostedContent` generation
+  across `ShowWindow(SW_HIDE)` and `ShowWindow(SW_SHOW)`, while rejecting
+  native input and frame submission during the hidden interval. The full
+  x86-64 Radeon suite passed 721 checks with zero failures. On Intel Iris Xe,
+  the real decorated DComp path unmapped and remapped its native root, retained
+  all three imported slots, and completed a seventh producer frame after
+  restoration with no discard or failure. The popup fallback/rehost fixture
+  remained green with nine imports and six Presents. The i386 WSI path also
+  remapped two extents and copied four transported images; its full DComp
+  fixture still exits before setup, so no i386 DComp result is claimed.
+  Evidence is retained as
+  `/workspace/artifacts/window-visibility-authority-x64-final.log` on the
+  Radeon task environment and
+  `artifacts/window-hide-restore-{final-x64,popup-regression-x64,wsi-i386}.log`
+  in the Intel task directory. Both laptops ended with zero task-owned Wine
+  processes; the Intel laptop retained 62 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
