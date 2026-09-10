@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 987.
+Generated server protocol version: 992.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -157,8 +157,11 @@ or transport fixture is not Outlook support.
   Transport admission also requires `VK_KHR_present_id` and
   `VK_KHR_present_wait`. Every WSI submission carries a nonzero per-root
   present ID, and the executor waits up to one second for that exact ID before
-  publishing a terminal backend result. A timeout becomes an explicit backend
-  failure; it is not reported as `Presented`.
+  publishing a terminal backend result. A timeout retains the geometry token
+  and requeues a bounded wait-only job; it does not report `Presented` or let
+  newer geometry overtake the unresolved native commit. Terminal wait and
+  queue failures drain or retire the affected swapchain resources before
+  releasing the token.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -248,6 +251,24 @@ or transport fixture is not Outlook support.
   and a replacement host can restart its request numbering without accepting
   an old epoch's response. The current host reports scale 120 because its
   minimal shell adapter does not yet bind fractional-scale output state.
+- Window metadata and transport geometry now use separate revisions. Title,
+  style and other semantic changes still advance the window-state revision,
+  while only a client-extent change advances the geometry revision that binds
+  a pool and frame. A title-only update therefore cannot invalidate an
+  otherwise current transport pool.
+- WineD3D reserves each hosted frame with wineserver before submitting its GPU
+  copy. A server rejection is returned as the real failure instead of silently
+  presenting through the local helper window. If command-buffer allocation or
+  GPU submission then fails, the producer cancels the accepted frame through
+  an authenticated idempotent request and recovers its credit.
+- The host now applies non-content scenes to the native root. `Empty` submits
+  a current-generation black output without waiting for a producer frame.
+  `Hidden` and `LocalFallback` drain presentation, unmap the root with a null
+  attachment, and wait for an asynchronous display-sync callback before
+  reporting `SceneApplied`. Remapping performs the xdg-shell-required
+  bufferless commit, receives and applies a fresh configure, and only then
+  recreates WSI and presents. Xdg title and app-id state are restored because
+  the protocol discards toplevel attributes on unmap.
 
 ## Contributor interception inventory
 
@@ -630,11 +651,34 @@ admitted.
   `/workspace/artifacts/configure-token-authority-{x64,i386}.log`, with exact
   binaries and hashes under `/workspace/artifacts/configure-token-*` and the
   coherent runner at `/workspace/runner-configure-token`.
-- A new Intel WSL validation environment was offered for this work, but its
-  SSH endpoint timed out during this tranche. No Wine process or prefix was
-  created there, and no replacement Intel runtime result is claimed. The
-  personal `elkana` laptop was not contacted after the user prohibited further
-  runs there.
+- Protocol 992 scene-transition authority passed 581 checks with zero failures
+  and zero skips in both x86-64 and i386 on the Radeon task environment. It
+  covers semantic frame admission, title-only metadata changes, geometry-bound
+  pools, pre-GPU cancellation, idempotent cancellation and credit recovery.
+  Final logs, test binaries and hashes are retained as
+  `/workspace/artifacts/scene-transition-{authority-x64.log,authority-i386.log,win32u-test-x64.exe,win32u-test-i386.exe}`
+  and `/workspace/artifacts/scene-transition-authority-SHA256SUMS`.
+- The final remap fixture passed through both x86-64 and i386 Unix-call tables
+  on Intel Iris Xe. Each run verified all 4,096 transported pixels, two WSI
+  extents, the source-frame pin and release, a compositor-processed unmap, a
+  fresh xdg configure and a successful remap. The first run exposed the missing
+  post-unmap initial commit and failed with `STATUS_DEVICE_NOT_READY`; the
+  corrected runs are retained as `artifacts/scene-transition-wsi-{x64,i386}.log`
+  in the existing Intel task directory.
+- The server-authorized x86-64 DComp pipeline passed on the same Intel system
+  with three imported slots, six terminal presented frames, no discard or
+  failure, and successful `Empty` application after `SetRoot(NULL)` without a
+  new producer frame. The fixture now pumps its normal Windows message queue
+  while waiting for asynchronous import and frame completion, avoiding a
+  self-inflicted configure-versus-frame-credit deadlock. Evidence is retained
+  as `artifacts/scene-transition-dcomp-x64.log`. The i386 executable still exits
+  before entering the DComp fixture in both available prefixes, so only its
+  transport/WSI and server-authority coverage is claimed.
+- The authorized Intel WSL endpoint remained unreachable at
+  `testing-laptop:8022`. After the user separately authorized a bounded run on
+  `elkana`, the two WSI fixtures and x86-64 DComp fixture above used the existing
+  runner and prefixes, kept 61 GiB free, and left no Wine process for those
+  test prefixes.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

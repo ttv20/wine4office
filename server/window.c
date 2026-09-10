@@ -83,6 +83,7 @@ struct wayland_frame
     unsigned __int64 reuse_value;
     unsigned __int64 scene_generation;
     unsigned __int64 binding_generation;
+    unsigned __int64 geometry_revision;
     unsigned int     slot;
     unsigned int     reusable;
     unsigned int     result;
@@ -93,6 +94,7 @@ struct wayland_buffer_pool
 {
     unsigned __int64 generation;
     unsigned __int64 allocation_size;
+    unsigned __int64 geometry_revision;
     unsigned int     width;
     unsigned int     height;
     unsigned int     format;
@@ -125,6 +127,7 @@ struct wayland_scene_contributor
     unsigned int         state;
     unsigned __int64     latest_pool_generation;
     unsigned __int64     latest_frame_id;
+    unsigned __int64     latest_cancelled_frame_id;
     unsigned int         outstanding_frames;
     struct wayland_buffer_pool pools[MAX_WAYLAND_BUFFER_POOLS];
     struct wayland_frame frames[MAX_WAYLAND_FRAME_RECORDS];
@@ -184,6 +187,7 @@ struct window
     unsigned __int64 wayland_scene_stream_id;
     unsigned __int64 wayland_scene_binding_generation;
     unsigned __int64 wayland_window_state_revision;
+    unsigned __int64 wayland_geometry_revision;
     unsigned __int64 wayland_close_host_epoch;
     unsigned __int64 wayland_close_request_id;
     unsigned __int64 wayland_configure_host_epoch;
@@ -209,6 +213,12 @@ static unsigned __int64 wayland_binding_generation;
 static void bump_wayland_window_state_revision( struct window *win )
 {
     if (!++win->wayland_window_state_revision) ++win->wayland_window_state_revision;
+}
+
+static void bump_wayland_geometry_revision( struct window *win )
+{
+    bump_wayland_window_state_revision( win );
+    if (!++win->wayland_geometry_revision) ++win->wayland_geometry_revision;
 }
 
 static void release_wayland_buffer_pool( struct wayland_buffer_pool *pool )
@@ -858,6 +868,7 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_message_posted = 0;
     win->window_rect = win->visible_rect = win->surface_rect = win->client_rect = empty_rect;
     win->wayland_window_state_revision = 1;
+    win->wayland_geometry_revision = 1;
     list_init( &win->children );
     list_init( &win->unlinked );
 
@@ -3079,9 +3090,14 @@ DECL_HANDLER(set_window_pos)
     if ((win->style & old_style & WS_VISIBLE) && (memcmp( &old_client, &win->client_rect, sizeof(old_client) )
         || memcmp( &old_window, &win->window_rect, sizeof(old_window) )))
         update_cursor_pos( win->desktop );
-    if (win->style != old_style || win->ex_style != old_ex_style ||
-        memcmp( &old_client, &win->client_rect, sizeof(old_client) ) ||
-        memcmp( &old_window, &win->window_rect, sizeof(old_window) ))
+    if (old_client.right - old_client.left !=
+            win->client_rect.right - win->client_rect.left ||
+        old_client.bottom - old_client.top !=
+            win->client_rect.bottom - win->client_rect.top)
+        bump_wayland_geometry_revision( win );
+    else if (win->style != old_style || win->ex_style != old_ex_style ||
+             memcmp( &old_client, &win->client_rect, sizeof(old_client) ) ||
+             memcmp( &old_window, &win->window_rect, sizeof(old_window) ))
         bump_wayland_window_state_revision( win );
 
     if (win->paint_flags & SET_WINPOS_LAYERED_WINDOW) validate_whole_window( win );
@@ -4268,9 +4284,11 @@ DECL_HANDLER(create_wayland_buffer_pool)
     struct desktop *desktop;
     struct wayland_buffer_pool_metadata metadata;
     unsigned __int64 minimum_size, pool_size, root_size, desktop_size;
+    unsigned int client_width, client_height;
     unsigned int i;
 
     reply->registry_generation = 0;
+    reply->geometry_revision = 0;
     if (get_req_data_size() != sizeof(metadata))
     {
         set_error( STATUS_INFO_LENGTH_MISMATCH );
@@ -4301,12 +4319,19 @@ DECL_HANDLER(create_wayland_buffer_pool)
     if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
             req->stream_id, req->binding_generation ))) goto done;
     reply->registry_generation = root->wayland_scene_registry->generation;
+    reply->geometry_revision = root->wayland_geometry_revision;
+    client_width = root->client_rect.right > root->client_rect.left ?
+            root->client_rect.right - root->client_rect.left : 0;
+    client_height = root->client_rect.bottom > root->client_rect.top ?
+            root->client_rect.bottom - root->client_rect.top : 0;
     if (!(desktop->wayland_host_capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT) ||
         metadata.device_uuid[0] != desktop->wayland_host_device_uuid[0] ||
         metadata.device_uuid[1] != desktop->wayland_host_device_uuid[1] ||
         metadata.device_uuid[2] != desktop->wayland_host_device_uuid[2] ||
         metadata.device_uuid[3] != desktop->wayland_host_device_uuid[3])
         set_error( STATUS_NOT_SUPPORTED );
+    else if (metadata.width != client_width || metadata.height != client_height)
+        set_error( STATUS_REVISION_MISMATCH );
     else if (req->pool_generation == ~(unsigned __int64)0)
         set_error( STATUS_INTEGER_OVERFLOW );
     else if (req->pool_generation <= contributor->latest_pool_generation)
@@ -4331,6 +4356,7 @@ DECL_HANDLER(create_wayland_buffer_pool)
         {
             pool->generation = req->pool_generation;
             pool->allocation_size = metadata.allocation_size;
+            pool->geometry_revision = root->wayland_geometry_revision;
             pool->width = metadata.width;
             pool->height = metadata.height;
             pool->format = metadata.format;
@@ -4642,6 +4668,7 @@ DECL_HANDLER(submit_wayland_frame)
 
     reply->outstanding_frames = 0;
     reply->available_credits = 0;
+    reply->geometry_revision = 0;
     if (get_req_data_size() != sizeof(submission))
     {
         set_error( STATUS_INFO_LENGTH_MISMATCH );
@@ -4650,7 +4677,8 @@ DECL_HANDLER(submit_wayland_frame)
     memcpy( &submission, get_req_data(), sizeof(submission) );
     if (!submission.pool_generation || !submission.frame_id || !submission.ready_value ||
         !submission.reuse_value || !submission.scene_generation ||
-        !submission.binding_generation || submission.reserved)
+        !submission.binding_generation || !submission.geometry_revision ||
+        submission.reserved)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
@@ -4663,6 +4691,7 @@ DECL_HANDLER(submit_wayland_frame)
         return;
     }
     if (!(root = get_window( req->root ))) return;
+    reply->geometry_revision = root->wayland_geometry_revision;
     if (!(desktop = get_thread_desktop( current, 0 ))) return;
     if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
             req->stream_id, req->binding_generation ))) goto done;
@@ -4677,6 +4706,9 @@ DECL_HANDLER(submit_wayland_frame)
         set_error( STATUS_REVISION_MISMATCH );
     else if (!(pool = find_wayland_buffer_pool( contributor, submission.pool_generation )))
         set_error( STATUS_NOT_FOUND );
+    else if (submission.geometry_revision != pool->geometry_revision ||
+            submission.geometry_revision != root->wayland_geometry_revision)
+        set_error( STATUS_REVISION_MISMATCH );
     else if (submission.slot >= pool->slot_count)
         set_error( STATUS_INVALID_PARAMETER );
     else if (pool->registered_slots != pool->slot_count ||
@@ -4707,6 +4739,7 @@ DECL_HANDLER(submit_wayland_frame)
             frame->reuse_value = submission.reuse_value;
             frame->scene_generation = submission.scene_generation;
             frame->binding_generation = submission.binding_generation;
+            frame->geometry_revision = submission.geometry_revision;
             frame->slot = submission.slot;
             slot->last_ready_value = submission.ready_value;
             slot->last_reuse_value = submission.reuse_value;
@@ -4717,6 +4750,53 @@ DECL_HANDLER(submit_wayland_frame)
                     contributor->outstanding_frames;
         }
     }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(cancel_wayland_frame)
+{
+    struct wayland_scene_contributor *contributor;
+    struct wayland_buffer_pool *pool;
+    struct wayland_buffer_slot *slot;
+    struct wayland_frame *frame;
+    struct window *root;
+    struct desktop *desktop;
+
+    reply->outstanding_frames = 0;
+    if (!req->frame_id)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+    if (!(contributor = get_current_wayland_stream( root, desktop, req->contributor_id,
+            req->stream_id, req->binding_generation ))) goto done;
+    reply->outstanding_frames = contributor->outstanding_frames;
+    if (req->frame_id == contributor->latest_cancelled_frame_id) goto done;
+    if (!(frame = find_wayland_frame( contributor, req->frame_id )))
+    {
+        set_error( STATUS_NOT_FOUND );
+        goto done;
+    }
+    if (frame->result || frame->reusable ||
+        !(pool = find_wayland_buffer_pool( contributor, frame->pool_generation )))
+    {
+        set_error( STATUS_INVALID_DEVICE_STATE );
+        goto done;
+    }
+    slot = &pool->slots[frame->slot];
+    if (slot->active_frame_id != frame->frame_id)
+    {
+        set_error( STATUS_REVISION_MISMATCH );
+        goto done;
+    }
+    slot->active_frame_id = 0;
+    contributor->latest_cancelled_frame_id = frame->frame_id;
+    memset( frame, 0, sizeof(*frame) );
+    reply->outstanding_frames = --contributor->outstanding_frames;
 
 done:
     release_object( desktop );
@@ -4736,13 +4816,11 @@ DECL_HANDLER(get_wayland_frame)
     reply->reuse_value = 0;
     reply->scene_generation = 0;
     reply->binding_generation = 0;
-    reply->slot = 0;
-    reply->reusable = 0;
-    reply->outstanding_frames = 0;
+    reply->geometry_revision = 0;
+    reply->frame_info = 0;
     if (!(root = get_window( req->root ))) return;
     if (!(contributor = get_current_wayland_host_contributor( root, req->host_epoch,
                                                                req->contributor_id ))) return;
-    reply->outstanding_frames = contributor->outstanding_frames;
     for (i = 0; i < MAX_WAYLAND_FRAME_RECORDS; ++i)
     {
         struct wayland_frame *candidate = &contributor->frames[i];
@@ -4765,8 +4843,9 @@ DECL_HANDLER(get_wayland_frame)
     reply->reuse_value = frame->reuse_value;
     reply->scene_generation = frame->scene_generation;
     reply->binding_generation = frame->binding_generation;
-    reply->slot = frame->slot;
-    reply->reusable = frame->reusable;
+    reply->geometry_revision = frame->geometry_revision;
+    reply->frame_info = WINE_WAYLAND_FRAME_INFO( frame->slot, frame->reusable,
+                                                 contributor->outstanding_frames );
 }
 
 DECL_HANDLER(set_wayland_frame_reusable)
@@ -4917,6 +4996,7 @@ DECL_HANDLER(get_wayland_window_state)
     struct window *root;
 
     reply->state_revision = 0;
+    reply->geometry_revision = 0;
     reply->style = 0;
     reply->ex_style = 0;
     reply->window = empty_rect;
@@ -4930,6 +5010,7 @@ DECL_HANDLER(get_wayland_window_state)
         return;
     }
     reply->state_revision = root->wayland_window_state_revision;
+    reply->geometry_revision = root->wayland_geometry_revision;
     reply->style = root->style;
     reply->ex_style = root->ex_style;
     reply->window = root->window_rect;
@@ -5156,7 +5237,7 @@ DECL_HANDLER(set_wayland_window_configure_applied)
         return;
     }
     root->wayland_configure_applied_id = req->request_id;
-    root->wayland_configure_applied_revision = root->wayland_window_state_revision;
+    root->wayland_configure_applied_revision = root->wayland_geometry_revision;
     root->wayland_configure_applied_width = req->width;
     root->wayland_configure_applied_height = req->height;
     root->wayland_configure_applied_state = req->state;

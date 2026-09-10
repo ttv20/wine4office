@@ -67,6 +67,12 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE(info) (((info) >> 24) & 0xff)
 
+#define WINE_WAYLAND_FRAME_INFO(slot,reusable,outstanding) \
+    (((slot) & 0xff) | (((reusable) & 0x01) << 8) | (((outstanding) & 0xffff) << 16))
+#define WINE_WAYLAND_FRAME_INFO_SLOT(info) ((info) & 0xff)
+#define WINE_WAYLAND_FRAME_INFO_REUSABLE(info) (((info) >> 8) & 0x01)
+#define WINE_WAYLAND_FRAME_INFO_OUTSTANDING(info) (((info) >> 16) & 0xffff)
+
 #define WINE_WAYLAND_FRAME_RESULT_PENDING   0
 #define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
 #define WINE_WAYLAND_FRAME_RESULT_DISCARDED 2
@@ -93,6 +99,7 @@ struct wayland_frame_submission
     unsigned __int64 reuse_value;
     unsigned __int64 scene_generation;
     unsigned __int64 binding_generation;
+    unsigned __int64 geometry_revision;
     unsigned int     slot;
     unsigned int     reserved;
 };
@@ -6814,6 +6821,7 @@ struct create_wayland_buffer_pool_reply
 {
     struct reply_header __header;
     unsigned __int64 registry_generation;
+    unsigned __int64 geometry_revision;
 };
 
 
@@ -6941,6 +6949,7 @@ struct submit_wayland_frame_reply
     struct reply_header __header;
     unsigned int     outstanding_frames;
     unsigned int     available_credits;
+    unsigned __int64 geometry_revision;
 };
 
 
@@ -6961,9 +6970,8 @@ struct get_wayland_frame_reply
     unsigned __int64 reuse_value;
     unsigned __int64 scene_generation;
     unsigned __int64 binding_generation;
-    unsigned int     slot;
-    unsigned int     reusable;
-    unsigned int     outstanding_frames;
+    unsigned __int64 geometry_revision;
+    unsigned int     frame_info;
     char __pad_68[4];
 };
 
@@ -7052,13 +7060,14 @@ struct get_wayland_window_state_reply
 {
     struct reply_header __header;
     unsigned __int64 state_revision;
+    unsigned __int64 geometry_revision;
     unsigned int     style;
     unsigned int     ex_style;
     struct rectangle window;
     struct rectangle client;
     data_size_t      title_length;
     /* VARARG(title,unicode_str); */
-    char __pad_60[4];
+    char __pad_68[4];
 };
 
 
@@ -7157,6 +7166,24 @@ struct get_wayland_window_configure_result_reply
     unsigned int     applied_height;
     unsigned int     applied_state;
     char __pad_44[4];
+};
+
+/* Cancel an accepted frame before the producer submits its GPU work.  Keep new
+ * requests appended so existing protocol operation numbers remain stable. */
+struct cancel_wayland_frame_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 frame_id;
+};
+struct cancel_wayland_frame_reply
+{
+    struct reply_header __header;
+    unsigned int     outstanding_frames;
+    char __pad_12[4];
 };
 
 
@@ -7517,6 +7544,7 @@ enum request
     REQ_get_wayland_window_configure,
     REQ_set_wayland_window_configure_applied,
     REQ_get_wayland_window_configure_result,
+    REQ_cancel_wayland_frame,
     REQ_NB_REQUESTS
 };
 
@@ -7879,6 +7907,7 @@ union generic_request
     struct get_wayland_window_configure_request get_wayland_window_configure_request;
     struct set_wayland_window_configure_applied_request set_wayland_window_configure_applied_request;
     struct get_wayland_window_configure_result_request get_wayland_window_configure_result_request;
+    struct cancel_wayland_frame_request cancel_wayland_frame_request;
 };
 union generic_reply
 {
@@ -8239,8 +8268,9 @@ union generic_reply
     struct get_wayland_window_configure_reply get_wayland_window_configure_reply;
     struct set_wayland_window_configure_applied_reply set_wayland_window_configure_applied_reply;
     struct get_wayland_window_configure_result_reply get_wayland_window_configure_result_reply;
+    struct cancel_wayland_frame_reply cancel_wayland_frame_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 988
+#define SERVER_PROTOCOL_VERSION 992
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

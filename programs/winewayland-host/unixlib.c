@@ -46,9 +46,9 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 256);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 64);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 376);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 64);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 72);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 
 struct registry_probe
@@ -144,6 +144,7 @@ enum renderer_queue_job_type
 {
     RENDERER_QUEUE_JOB_FRAME,
     RENDERER_QUEUE_JOB_PRESENT,
+    RENDERER_QUEUE_JOB_PRESENT_WAIT,
 };
 
 struct renderer_queue_job
@@ -171,6 +172,7 @@ struct renderer_queue_job
             VkFence fence;
             uint64_t present_id;
             uint32_t image_index;
+            VkResult present_result;
         } present;
     } u;
 };
@@ -182,6 +184,8 @@ struct renderer_root
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
+    struct wl_callback *unmap_callback;
+    char title[96];
     VkSurfaceKHR vulkan_surface;
     VkSwapchainKHR swapchain;
     VkImage swapchain_images[8];
@@ -203,16 +207,27 @@ struct renderer_root
     uint32_t pending_configure_state;
     uint32_t configure_serial;
     uint64_t configure_request_id;
+    uint64_t configure_applied_id;
+    uint64_t configure_applied_revision;
+    uint64_t geometry_token_revision;
+    uint32_t configure_applied_width;
+    uint32_t configure_applied_height;
+    uint32_t configure_applied_state;
     int32_t width;
     int32_t height;
     BOOL configured;
+    BOOL unmapped;
+    BOOL remap_pending;
     BOOL closed;
     BOOL present_job_done;
+    BOOL present_fence_submitted;
     BOOL present_complete;
+    BOOL recreate_swapchain;
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
     uint64_t window_state_revision;
+    uint64_t geometry_revision;
 };
 
 struct renderer_slot
@@ -337,6 +352,9 @@ struct vulkan_renderer
 
 static struct vulkan_renderer renderer;
 
+static NTSTATUS enqueue_renderer_queue_job_internal(const struct renderer_queue_job *job,
+        BOOL retry);
+
 static NTSTATUS renderer_queue_status(VkResult vr)
 {
     if (vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
@@ -354,6 +372,8 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
     VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     VkPresentIdKHR present_id_info = {VK_STRUCTURE_TYPE_PRESENT_ID_KHR};
     NTSTATUS status = STATUS_SUCCESS;
+    BOOL queue_work_submitted = job->type == RENDERER_QUEUE_JOB_PRESENT_WAIT;
+    BOOL fence_submitted = FALSE;
     VkResult present_result = VK_SUCCESS, vr;
 
     if (job->type == RENDERER_QUEUE_JOB_FRAME)
@@ -381,39 +401,65 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
         return;
     }
 
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
-    submit_info.pWaitDstStageMask = &wait_stage;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &job->u.present.command_buffer;
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &job->u.present.present_semaphore;
-    if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
-        status = renderer_queue_status(vr);
-    else
+    if (job->type == RENDERER_QUEUE_JOB_PRESENT)
     {
-        present_info.waitSemaphoreCount = 1;
-        present_info.pWaitSemaphores = &job->u.present.present_semaphore;
-        present_info.swapchainCount = 1;
-        present_info.pSwapchains = &job->u.present.swapchain;
-        present_info.pImageIndices = &job->u.present.image_index;
-        present_id_info.swapchainCount = 1;
-        present_id_info.pPresentIds = &job->u.present.present_id;
-        present_info.pNext = &present_id_info;
-        present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
-        if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
+        submit_info.pWaitDstStageMask = &wait_stage;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &job->u.present.command_buffer;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &job->u.present.present_semaphore;
+        if ((vr = renderer.p_vkQueueSubmit(renderer.queue, 1, &submit_info, VK_NULL_HANDLE)))
+            status = renderer_queue_status(vr);
+        else
         {
-            vr = renderer.p_vkWaitForPresentKHR(renderer.device, job->u.present.swapchain,
-                    job->u.present.present_id, 1000000000ull);
-            if (vr) status = vr == VK_TIMEOUT ? STATUS_IO_TIMEOUT : renderer_queue_status(vr);
+            queue_work_submitted = TRUE;
+            present_info.waitSemaphoreCount = 1;
+            present_info.pWaitSemaphores = &job->u.present.present_semaphore;
+            present_info.swapchainCount = 1;
+            present_info.pSwapchains = &job->u.present.swapchain;
+            present_info.pImageIndices = &job->u.present.image_index;
+            present_id_info.swapchainCount = 1;
+            present_id_info.pPresentIds = &job->u.present.present_id;
+            present_info.pNext = &present_id_info;
+            present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
         }
+    }
+    else
+        present_result = job->u.present.present_result;
+
+    if (!status && (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR))
+    {
+        struct renderer_queue_job wait_job = *job;
+
+        vr = renderer.p_vkWaitForPresentKHR(renderer.device, job->u.present.swapchain,
+                job->u.present.present_id, 1000000000ull);
+        if (vr == VK_TIMEOUT)
+        {
+            wait_job.type = RENDERER_QUEUE_JOB_PRESENT_WAIT;
+            wait_job.u.present.present_result = present_result;
+            if (!enqueue_renderer_queue_job_internal(&wait_job, TRUE)) return;
+            status = STATUS_DEVICE_BUSY;
+        }
+        else if (vr)
+            status = renderer_queue_status(vr);
+    }
+    if (queue_work_submitted)
+    {
         vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, job->u.present.fence);
-        if (vr) status = renderer_queue_status(vr);
+        if (vr)
+        {
+            if (!status) status = renderer_queue_status(vr);
+        }
+        else
+            fence_submitted = TRUE;
     }
 
     pthread_mutex_lock(&renderer.queue_mutex);
     job->u.present.root->present_result = present_result;
     job->u.present.root->present_job_status = status;
+    job->u.present.root->present_fence_submitted = fence_submitted;
     job->u.present.root->present_job_done = TRUE;
     pthread_mutex_unlock(&renderer.queue_mutex);
 }
@@ -475,16 +521,18 @@ static void stop_renderer_queue(void)
     renderer.queue_thread_started = FALSE;
 }
 
-static NTSTATUS enqueue_renderer_queue_job(const struct renderer_queue_job *job)
+static NTSTATUS enqueue_renderer_queue_job_internal(const struct renderer_queue_job *job,
+        BOOL retry)
 {
     unsigned int tail;
 
     if (!renderer.queue_thread_started) return STATUS_DEVICE_NOT_READY;
     pthread_mutex_lock(&renderer.queue_mutex);
-    if (renderer.queue_count == ARRAY_SIZE(renderer.queue_jobs))
+    if (renderer.queue_stop || renderer.queue_count >=
+            ARRAY_SIZE(renderer.queue_jobs) - (retry ? 0 : 1))
     {
         pthread_mutex_unlock(&renderer.queue_mutex);
-        return STATUS_DEVICE_BUSY;
+        return renderer.queue_stop ? STATUS_CANCELLED : STATUS_DEVICE_BUSY;
     }
     tail = (renderer.queue_head + renderer.queue_count) % ARRAY_SIZE(renderer.queue_jobs);
     renderer.queue_jobs[tail] = *job;
@@ -492,6 +540,11 @@ static NTSTATUS enqueue_renderer_queue_job(const struct renderer_queue_job *job)
     pthread_cond_signal(&renderer.queue_cond);
     pthread_mutex_unlock(&renderer.queue_mutex);
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS enqueue_renderer_queue_job(const struct renderer_queue_job *job)
+{
+    return enqueue_renderer_queue_job_internal(job, FALSE);
 }
 
 static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
@@ -562,6 +615,33 @@ static const struct xdg_toplevel_listener renderer_root_toplevel_listener =
     renderer_root_toplevel_close,
 };
 
+static void renderer_root_unmap_done(void *data, struct wl_callback *callback,
+        uint32_t callback_data)
+{
+    struct renderer_root *root = data;
+
+    (void)callback_data;
+    if (root->unmap_callback == callback)
+    {
+        root->unmap_callback = NULL;
+        root->unmapped = TRUE;
+        root->remap_pending = FALSE;
+        root->configured = FALSE;
+        root->configure_serial = 0;
+        root->configure_applied_id = 0;
+        root->configure_applied_revision = 0;
+        root->configure_applied_width = 0;
+        root->configure_applied_height = 0;
+        root->configure_applied_state = 0;
+    }
+    wl_callback_destroy(callback);
+}
+
+static const struct wl_callback_listener renderer_root_unmap_listener =
+{
+    renderer_root_unmap_done,
+};
+
 static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
 {
     NTSTATUS status;
@@ -574,10 +654,13 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     status = root->present_job_status;
     pthread_mutex_unlock(&renderer.queue_mutex);
     if (!job_done) return STATUS_PENDING;
-    if (status) return status;
-    vr = renderer.p_vkGetFenceStatus(renderer.device, root->present_fence);
-    if (vr == VK_NOT_READY) return STATUS_PENDING;
-    if (vr) return vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    if (root->present_fence_submitted)
+    {
+        vr = renderer.p_vkGetFenceStatus(renderer.device, root->present_fence);
+        if (vr == VK_NOT_READY) return STATUS_PENDING;
+        if (vr && !status)
+            status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
+    }
     renderer.p_vkDestroyFence(renderer.device, root->present_fence, NULL);
     renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
             &root->present_command_buffer);
@@ -589,8 +672,25 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     root->acquire_semaphore = VK_NULL_HANDLE;
     root->present_source_pool_generation = 0;
     root->present_source_frame_id = 0;
+    root->geometry_token_revision = 0;
+    if (!root->present_fence_submitted) root->recreate_swapchain = TRUE;
+    root->present_fence_submitted = FALSE;
+    root->present_job_status = status;
     root->present_complete = TRUE;
     return STATUS_SUCCESS;
+}
+
+static void destroy_renderer_root_swapchain(struct renderer_root *root)
+{
+    if (root->swapchain && renderer.p_vkDestroySwapchainKHR)
+        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+    root->swapchain = VK_NULL_HANDLE;
+    memset(root->swapchain_images, 0, sizeof(root->swapchain_images));
+    memset(root->swapchain_image_initialized, 0,
+            sizeof(root->swapchain_image_initialized));
+    root->swapchain_image_count = 0;
+    root->requested_width = root->requested_height = 0;
+    root->swapchain_width = root->swapchain_height = 0;
 }
 
 static NTSTATUS destroy_renderer_root(struct renderer_root *root)
@@ -598,8 +698,8 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     NTSTATUS status;
 
     if ((status = poll_renderer_root_present(root))) return status;
-    if (root->swapchain && renderer.p_vkDestroySwapchainKHR)
-        renderer.p_vkDestroySwapchainKHR(renderer.device, root->swapchain, NULL);
+    destroy_renderer_root_swapchain(root);
+    if (root->unmap_callback) wl_callback_destroy(root->unmap_callback);
     if (root->vulkan_surface && renderer.p_vkDestroySurfaceKHR)
         renderer.p_vkDestroySurfaceKHR(renderer.instance, root->vulkan_surface, NULL);
     if (root->xdg_toplevel) xdg_toplevel_destroy(root->xdg_toplevel);
@@ -1810,11 +1910,27 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     BOOL has_fifo = FALSE;
     NTSTATUS status = STATUS_NOT_SUPPORTED;
 
-    if (!root->configured) return STATUS_DEVICE_NOT_READY;
+    /* The first buffer commit must acknowledge the compositor configure, but
+     * the swapchain needed for that commit has to be prepared first.  Once the
+     * guest has applied the matching configure it is safe to allocate the WSI
+     * images; authorize_renderer_root_present() performs the ordered geometry
+     * update and acknowledgement immediately before the first presentation. */
+    if (root->unmap_callback) return STATUS_PENDING;
+    if (!root->configured &&
+        (!root->configure_serial ||
+         root->configure_applied_id != root->configure_request_id ||
+         !root->configure_applied_revision ||
+         root->configure_applied_state != root->pending_configure_state))
+        return STATUS_DEVICE_NOT_READY;
     if (!requested_width || !requested_height || requested_width > 16384 ||
         requested_height > 16384)
         return STATUS_INVALID_PARAMETER;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->recreate_swapchain)
+    {
+        destroy_renderer_root_swapchain(root);
+        root->recreate_swapchain = FALSE;
+    }
     if (root->swapchain && root->requested_width == requested_width &&
         root->requested_height == requested_height)
         return STATUS_SUCCESS;
@@ -1912,7 +2028,6 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     root->requested_height = requested_height;
     root->swapchain_width = extent.width;
     root->swapchain_height = extent.height;
-    xdg_surface_set_window_geometry(root->xdg_surface, 0, 0, extent.width, extent.height);
     status = STATUS_SUCCESS;
 
 done:
@@ -1937,7 +2052,7 @@ static NTSTATUS sync_renderer_root(void *args)
     uint32_t configure_applied_width = params->configure_applied_width;
     uint32_t configure_applied_height = params->configure_applied_height;
     uint32_t configure_applied_state = params->configure_applied_state;
-    NTSTATUS status;
+    NTSTATUS status, wsi_status = STATUS_SUCCESS;
     unsigned int i;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
@@ -2014,30 +2129,42 @@ done:
         {
             if (configure_applied_state != root->pending_configure_state)
                 return STATUS_REVISION_MISMATCH;
-            if (configure_applied_width && configure_applied_height)
-                xdg_surface_set_window_geometry(root->xdg_surface, 0, 0,
-                        configure_applied_width, configure_applied_height);
-            xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
-            root->configure_serial = 0;
-            root->configured = TRUE;
-            ++root->configure_count;
-            root->window_state_revision = configure_applied_revision;
-            if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
-                return STATUS_PORT_DISCONNECTED;
+            root->configure_applied_id = configure_applied_id;
+            root->configure_applied_revision = configure_applied_revision;
+            root->configure_applied_width = configure_applied_width;
+            root->configure_applied_height = configure_applied_height;
+            root->configure_applied_state = configure_applied_state;
         }
     }
     if (params->window_state_revision &&
         params->window_state_revision != root->window_state_revision)
     {
         xdg_toplevel_set_title(root->xdg_toplevel, params->title);
+        memcpy(root->title, params->title, sizeof(root->title));
         root->window_state_revision = params->window_state_revision;
     }
+    if (params->geometry_revision)
+        root->geometry_revision = params->geometry_revision;
     if (requested_width || requested_height)
     {
         if (!requested_width || !requested_height) return STATUS_INVALID_PARAMETER;
-        if ((status = create_renderer_root_swapchain(root, requested_width,
-                requested_height)))
-            return status;
+        if (root->unmapped && !root->remap_pending)
+        {
+            /* xdg-shell discards toplevel state on unmap.  Reapply the
+             * metadata and perform the required bufferless initial commit;
+             * the resulting configure must be applied before WSI remaps. */
+            if (root->window_state_revision)
+                xdg_toplevel_set_title(root->xdg_toplevel, root->title);
+            xdg_toplevel_set_app_id(root->xdg_toplevel, "winewayland-host");
+            wl_surface_commit(root->surface);
+            root->remap_pending = TRUE;
+            if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+                return STATUS_PORT_DISCONNECTED;
+            wsi_status = STATUS_DEVICE_NOT_READY;
+        }
+        else
+            wsi_status = create_renderer_root_swapchain(root, requested_width,
+                    requested_height);
     }
     if (root->configured) params->flags |= WINEWAYLAND_HOST_ROOT_CONFIGURED;
     if (root->closed) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
@@ -2058,6 +2185,47 @@ done:
         params->configure_height = root->pending_configure_height;
         params->configure_state = root->pending_configure_state;
         params->configure_scale_120 = 120;
+    }
+    return wsi_status;
+}
+
+static NTSTATUS authorize_renderer_root_present(struct renderer_root *root,
+        uint64_t geometry_revision)
+{
+    uint32_t width, height;
+
+    if (!geometry_revision || geometry_revision != root->geometry_revision)
+        return STATUS_REVISION_MISMATCH;
+    if (root->geometry_token_revision) return STATUS_DEVICE_BUSY;
+    if (!root->configure_serial)
+    {
+        if (!root->configured) return STATUS_DEVICE_NOT_READY;
+        root->geometry_token_revision = geometry_revision;
+        return STATUS_SUCCESS;
+    }
+    if (root->configure_applied_id != root->configure_request_id ||
+        !root->configure_applied_revision ||
+        root->configure_applied_revision > geometry_revision ||
+        root->configure_applied_state != root->pending_configure_state)
+        return STATUS_DEVICE_NOT_READY;
+
+    width = root->configure_applied_width ? root->configure_applied_width :
+            root->swapchain_width;
+    height = root->configure_applied_height ? root->configure_applied_height :
+            root->swapchain_height;
+    if (!width || !height || width != root->swapchain_width ||
+        height != root->swapchain_height)
+        return STATUS_REVISION_MISMATCH;
+    xdg_surface_set_window_geometry(root->xdg_surface, 0, 0, width, height);
+    xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
+    root->configure_serial = 0;
+    root->configured = TRUE;
+    ++root->configure_count;
+    root->geometry_token_revision = geometry_revision;
+    if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+    {
+        root->geometry_token_revision = 0;
+        return STATUS_PORT_DISCONNECTED;
     }
     return STATUS_SUCCESS;
 }
@@ -2116,6 +2284,8 @@ static NTSTATUS present_renderer_root(void *args)
             source->height != root->swapchain_height)
             return STATUS_INVALID_PARAMETER;
     }
+    if ((status = authorize_renderer_root_present(root,
+            params->geometry_revision))) return status;
 
     if ((vr = renderer.p_vkCreateSemaphore(renderer.device, &semaphore_info, NULL,
             &acquire_semaphore)) ||
@@ -2128,6 +2298,7 @@ static NTSTATUS present_renderer_root(void *args)
     if (vr == VK_NOT_READY || vr == VK_TIMEOUT)
     {
         status = STATUS_PENDING;
+        root->geometry_token_revision = 0;
         goto done;
     }
     if (vr && vr != VK_SUBOPTIMAL_KHR) goto failed;
@@ -2220,6 +2391,7 @@ static NTSTATUS present_renderer_root(void *args)
     root->present_source_pool_generation = params->source_pool_generation;
     root->present_source_frame_id = params->source_frame_id;
     root->present_job_done = FALSE;
+    root->present_fence_submitted = FALSE;
     root->present_complete = FALSE;
     root->present_job_status = STATUS_PENDING;
     root->present_result = VK_NOT_READY;
@@ -2241,12 +2413,15 @@ static NTSTATUS present_renderer_root(void *args)
         root->present_fence = VK_NULL_HANDLE;
         root->present_source_pool_generation = 0;
         root->present_source_frame_id = 0;
+        root->geometry_token_revision = 0;
         goto done;
     }
     acquire_semaphore = present_semaphore = VK_NULL_HANDLE;
     command_buffer = VK_NULL_HANDLE;
     fence = VK_NULL_HANDLE;
     root->swapchain_image_initialized[image_index] = TRUE;
+    root->unmapped = FALSE;
+    root->remap_pending = FALSE;
     params->image_index = image_index;
     params->image_count = root->swapchain_image_count;
     return STATUS_PENDING;
@@ -2254,6 +2429,7 @@ static NTSTATUS present_renderer_root(void *args)
 failed:
     status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
 done:
+    if (!root->present_fence) root->geometry_token_revision = 0;
     if (fence) renderer.p_vkDestroyFence(renderer.device, fence, NULL);
     if (command_buffer)
         renderer.p_vkFreeCommandBuffers(renderer.device, renderer.command_pool, 1,
@@ -2263,6 +2439,39 @@ done:
     if (acquire_semaphore)
         renderer.p_vkDestroySemaphore(renderer.device, acquire_semaphore, NULL);
     return status;
+}
+
+static NTSTATUS hide_renderer_root(void *args)
+{
+    struct winewayland_host_renderer_root_retire *params = args;
+    struct renderer_root *root;
+    NTSTATUS status;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->root_identity || !params->root_generation)
+        return STATUS_INVALID_PARAMETER;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        return STATUS_NOT_FOUND;
+    if ((status = poll_renderer_root_present(root))) return status;
+    if (root->unmap_callback) return STATUS_PENDING;
+    if (root->unmapped) return STATUS_SUCCESS;
+
+    destroy_renderer_root_swapchain(root);
+    wl_surface_attach(root->surface, NULL, 0, 0);
+    wl_surface_commit(root->surface);
+    if (!(root->unmap_callback = wl_display_sync(renderer.display)) ||
+        wl_callback_add_listener(root->unmap_callback, &renderer_root_unmap_listener,
+                root) == -1)
+    {
+        if (root->unmap_callback) wl_callback_destroy(root->unmap_callback);
+        root->unmap_callback = NULL;
+        return STATUS_NO_MEMORY;
+    }
+    if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
+        return STATUS_PORT_DISCONNECTED;
+    return STATUS_PENDING;
 }
 
 static NTSTATUS retire_renderer_root(void *args)
@@ -2788,6 +2997,7 @@ readback_done:
                         present.root_generation = root->root_generation;
                         present.source_pool_generation = copied_frame->pool_generation;
                         present.source_frame_id = copied_frame->frame_id;
+                        present.geometry_revision = root->geometry_revision;
                         status = present_renderer_root(&present);
                         if (status == STATUS_PENDING && present.image_index != UINT32_MAX)
                         {
@@ -3101,6 +3311,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     sync_renderer_root,
     retire_renderer_root,
     present_renderer_root,
+    hide_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,
@@ -3120,6 +3331,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     sync_renderer_root,
     retire_renderer_root,
     present_renderer_root,
+    hide_renderer_root,
     shell_self_test,
     renderer_self_test,
     renderer_headless_self_test,

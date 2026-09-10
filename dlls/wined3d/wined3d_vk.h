@@ -1275,6 +1275,7 @@ struct wined3d_swapchain_vk
     uint64_t wayland_frame_id;
     uint64_t wayland_timeline_value;
     uint64_t wayland_pool_binding_generation;
+    uint64_t wayland_pool_geometry_revision;
     uint64_t wayland_pool_contributor_id;
     uint64_t wayland_pool_stream_id;
     HWND wayland_pool_root;

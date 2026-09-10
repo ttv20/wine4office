@@ -3903,6 +3903,7 @@ static void dump_create_wayland_buffer_pool_request( const struct create_wayland
 static void dump_create_wayland_buffer_pool_reply( const struct create_wayland_buffer_pool_reply *req )
 {
     dump_uint64( " registry_generation=", &req->registry_generation );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
 }
 
 static void dump_retire_wayland_buffer_pool_request( const struct retire_wayland_buffer_pool_request *req )
@@ -4012,6 +4013,7 @@ static void dump_submit_wayland_frame_reply( const struct submit_wayland_frame_r
 {
     fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
     fprintf( stderr, ", available_credits=%08x", req->available_credits );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
 }
 
 static void dump_get_wayland_frame_request( const struct get_wayland_frame_request *req )
@@ -4030,9 +4032,8 @@ static void dump_get_wayland_frame_reply( const struct get_wayland_frame_reply *
     dump_uint64( ", reuse_value=", &req->reuse_value );
     dump_uint64( ", scene_generation=", &req->scene_generation );
     dump_uint64( ", binding_generation=", &req->binding_generation );
-    fprintf( stderr, ", slot=%08x", req->slot );
-    fprintf( stderr, ", reusable=%08x", req->reusable );
-    fprintf( stderr, ", outstanding_frames=%08x", req->outstanding_frames );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
+    fprintf( stderr, ", frame_info=%08x", req->frame_info );
 }
 
 static void dump_set_wayland_frame_reusable_request( const struct set_wayland_frame_reusable_request *req )
@@ -4107,6 +4108,7 @@ static void dump_get_wayland_window_state_request( const struct get_wayland_wind
 static void dump_get_wayland_window_state_reply( const struct get_wayland_window_state_reply *req )
 {
     dump_uint64( " state_revision=", &req->state_revision );
+    dump_uint64( ", geometry_revision=", &req->geometry_revision );
     fprintf( stderr, ", style=%08x", req->style );
     fprintf( stderr, ", ex_style=%08x", req->ex_style );
     dump_rectangle( ", window=", &req->window );
@@ -4196,6 +4198,20 @@ static void dump_get_wayland_window_configure_result_reply( const struct get_way
     fprintf( stderr, ", applied_width=%08x", req->applied_width );
     fprintf( stderr, ", applied_height=%08x", req->applied_height );
     fprintf( stderr, ", applied_state=%08x", req->applied_state );
+}
+
+static void dump_cancel_wayland_frame_request( const struct cancel_wayland_frame_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    dump_uint64( ", contributor_id=", &req->contributor_id );
+    dump_uint64( ", stream_id=", &req->stream_id );
+    dump_uint64( ", binding_generation=", &req->binding_generation );
+    dump_uint64( ", frame_id=", &req->frame_id );
+}
+
+static void dump_cancel_wayland_frame_reply( const struct cancel_wayland_frame_reply *req )
+{
+    fprintf( stderr, " outstanding_frames=%08x", req->outstanding_frames );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -4557,6 +4573,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_window_configure_request,
     (dump_func)dump_set_wayland_window_configure_applied_request,
     (dump_func)dump_get_wayland_window_configure_result_request,
+    (dump_func)dump_cancel_wayland_frame_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4916,6 +4933,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_wayland_window_configure_reply,
     (dump_func)dump_set_wayland_window_configure_applied_reply,
     (dump_func)dump_get_wayland_window_configure_result_reply,
+    (dump_func)dump_cancel_wayland_frame_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5275,6 +5293,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_wayland_window_configure",
     "set_wayland_window_configure_applied",
     "get_wayland_window_configure_result",
+    "cancel_wayland_frame",
 };
 
 static const struct

@@ -83,6 +83,12 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_FAILED(info)     (((info) >> 16) & 0xff)
 #define WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE(info) (((info) >> 24) & 0xff)
 
+#define WINE_WAYLAND_FRAME_INFO(slot,reusable,outstanding) \
+    (((slot) & 0xff) | (((reusable) & 0x01) << 8) | (((outstanding) & 0xffff) << 16))
+#define WINE_WAYLAND_FRAME_INFO_SLOT(info) ((info) & 0xff)
+#define WINE_WAYLAND_FRAME_INFO_REUSABLE(info) (((info) >> 8) & 0x01)
+#define WINE_WAYLAND_FRAME_INFO_OUTSTANDING(info) (((info) >> 16) & 0xffff)
+
 #define WINE_WAYLAND_FRAME_RESULT_PENDING   0
 #define WINE_WAYLAND_FRAME_RESULT_PRESENTED 1
 #define WINE_WAYLAND_FRAME_RESULT_DISCARDED 2
@@ -109,6 +115,7 @@ struct wayland_frame_submission
     unsigned __int64 reuse_value;
     unsigned __int64 scene_generation;
     unsigned __int64 binding_generation;
+    unsigned __int64 geometry_revision;
     unsigned int     slot;
     unsigned int     reserved;
 };
@@ -4730,6 +4737,7 @@ enum inproc_sync_type
     VARARG(metadata,bytes);
 @REPLY
     unsigned __int64 registry_generation;
+    unsigned __int64 geometry_revision;
 @END
 
 /* Retire transport-pool metadata after producer-side resource retirement. */
@@ -4822,6 +4830,7 @@ enum inproc_sync_type
 @REPLY
     unsigned int     outstanding_frames;
     unsigned int     available_credits;
+    unsigned __int64 geometry_revision;
 @END
 
 /* Enumerate accepted nonterminal frames as the current host. */
@@ -4837,9 +4846,8 @@ enum inproc_sync_type
     unsigned __int64 reuse_value;
     unsigned __int64 scene_generation;
     unsigned __int64 binding_generation;
-    unsigned int     slot;
-    unsigned int     reusable;
-    unsigned int     outstanding_frames;
+    unsigned __int64 geometry_revision;
+    unsigned int     frame_info;
 @END
 
 /* Release a source slot after the host completed and synchronized its read. */
@@ -4899,6 +4907,7 @@ enum inproc_sync_type
     unsigned __int64 host_epoch;
 @REPLY
     unsigned __int64 state_revision;
+    unsigned __int64 geometry_revision;
     unsigned int     style;
     unsigned int     ex_style;
     struct rectangle window;
@@ -4974,4 +4983,16 @@ enum inproc_sync_type
     unsigned int     applied_width;
     unsigned int     applied_height;
     unsigned int     applied_state;
+@END
+
+/* Cancel an accepted frame before the producer submits its GPU work.  Keep new
+ * requests appended so existing protocol operation numbers remain stable. */
+@REQ(cancel_wayland_frame)
+    user_handle_t    root;
+    unsigned __int64 contributor_id;
+    unsigned __int64 stream_id;
+    unsigned __int64 binding_generation;
+    unsigned __int64 frame_id;
+@REPLY
+    unsigned int     outstanding_frames;
 @END

@@ -362,6 +362,7 @@ DECL_HANDLER(post_wayland_window_configure);
 DECL_HANDLER(get_wayland_window_configure);
 DECL_HANDLER(set_wayland_window_configure_applied);
 DECL_HANDLER(get_wayland_window_configure_result);
+DECL_HANDLER(cancel_wayland_frame);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -721,6 +722,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_wayland_window_configure,
     (req_handler)req_set_wayland_window_configure_applied,
     (req_handler)req_get_wayland_window_configure_result,
+    (req_handler)req_cancel_wayland_frame,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2690,7 +2692,8 @@ C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, binding_generation
 C_ASSERT( offsetof(struct create_wayland_buffer_pool_request, pool_generation) == 40 );
 C_ASSERT( sizeof(struct create_wayland_buffer_pool_request) == 48 );
 C_ASSERT( offsetof(struct create_wayland_buffer_pool_reply, registry_generation) == 8 );
-C_ASSERT( sizeof(struct create_wayland_buffer_pool_reply) == 16 );
+C_ASSERT( offsetof(struct create_wayland_buffer_pool_reply, geometry_revision) == 16 );
+C_ASSERT( sizeof(struct create_wayland_buffer_pool_reply) == 24 );
 C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, root) == 12 );
 C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, contributor_id) == 16 );
 C_ASSERT( offsetof(struct retire_wayland_buffer_pool_request, stream_id) == 24 );
@@ -2762,7 +2765,8 @@ C_ASSERT( offsetof(struct submit_wayland_frame_request, binding_generation) == 3
 C_ASSERT( sizeof(struct submit_wayland_frame_request) == 40 );
 C_ASSERT( offsetof(struct submit_wayland_frame_reply, outstanding_frames) == 8 );
 C_ASSERT( offsetof(struct submit_wayland_frame_reply, available_credits) == 12 );
-C_ASSERT( sizeof(struct submit_wayland_frame_reply) == 16 );
+C_ASSERT( offsetof(struct submit_wayland_frame_reply, geometry_revision) == 16 );
+C_ASSERT( sizeof(struct submit_wayland_frame_reply) == 24 );
 C_ASSERT( offsetof(struct get_wayland_frame_request, root) == 12 );
 C_ASSERT( offsetof(struct get_wayland_frame_request, host_epoch) == 16 );
 C_ASSERT( offsetof(struct get_wayland_frame_request, contributor_id) == 24 );
@@ -2774,9 +2778,8 @@ C_ASSERT( offsetof(struct get_wayland_frame_reply, ready_value) == 24 );
 C_ASSERT( offsetof(struct get_wayland_frame_reply, reuse_value) == 32 );
 C_ASSERT( offsetof(struct get_wayland_frame_reply, scene_generation) == 40 );
 C_ASSERT( offsetof(struct get_wayland_frame_reply, binding_generation) == 48 );
-C_ASSERT( offsetof(struct get_wayland_frame_reply, slot) == 56 );
-C_ASSERT( offsetof(struct get_wayland_frame_reply, reusable) == 60 );
-C_ASSERT( offsetof(struct get_wayland_frame_reply, outstanding_frames) == 64 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, geometry_revision) == 56 );
+C_ASSERT( offsetof(struct get_wayland_frame_reply, frame_info) == 64 );
 C_ASSERT( sizeof(struct get_wayland_frame_reply) == 72 );
 C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, root) == 12 );
 C_ASSERT( offsetof(struct set_wayland_frame_reusable_request, host_epoch) == 16 );
@@ -2821,12 +2824,13 @@ C_ASSERT( offsetof(struct get_wayland_window_state_request, root) == 12 );
 C_ASSERT( offsetof(struct get_wayland_window_state_request, host_epoch) == 16 );
 C_ASSERT( sizeof(struct get_wayland_window_state_request) == 24 );
 C_ASSERT( offsetof(struct get_wayland_window_state_reply, state_revision) == 8 );
-C_ASSERT( offsetof(struct get_wayland_window_state_reply, style) == 16 );
-C_ASSERT( offsetof(struct get_wayland_window_state_reply, ex_style) == 20 );
-C_ASSERT( offsetof(struct get_wayland_window_state_reply, window) == 24 );
-C_ASSERT( offsetof(struct get_wayland_window_state_reply, client) == 40 );
-C_ASSERT( offsetof(struct get_wayland_window_state_reply, title_length) == 56 );
-C_ASSERT( sizeof(struct get_wayland_window_state_reply) == 64 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, geometry_revision) == 16 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, style) == 24 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, ex_style) == 28 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, window) == 32 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, client) == 48 );
+C_ASSERT( offsetof(struct get_wayland_window_state_reply, title_length) == 64 );
+C_ASSERT( sizeof(struct get_wayland_window_state_reply) == 72 );
 C_ASSERT( offsetof(struct post_wayland_window_close_request, root) == 12 );
 C_ASSERT( offsetof(struct post_wayland_window_close_request, host_epoch) == 16 );
 C_ASSERT( offsetof(struct post_wayland_window_close_request, root_identity) == 24 );
@@ -2880,3 +2884,11 @@ C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_wid
 C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_height) == 36 );
 C_ASSERT( offsetof(struct get_wayland_window_configure_result_reply, applied_state) == 40 );
 C_ASSERT( sizeof(struct get_wayland_window_configure_result_reply) == 48 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_request, root) == 12 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_request, contributor_id) == 16 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_request, stream_id) == 24 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_request, binding_generation) == 32 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_request, frame_id) == 40 );
+C_ASSERT( sizeof(struct cancel_wayland_frame_request) == 48 );
+C_ASSERT( offsetof(struct cancel_wayland_frame_reply, outstanding_frames) == 8 );
+C_ASSERT( sizeof(struct cancel_wayland_frame_reply) == 16 );

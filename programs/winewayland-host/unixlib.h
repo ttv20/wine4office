@@ -55,9 +55,11 @@ struct winewayland_host_startup
     volatile uint32_t presented_frames;
     volatile uint32_t discarded_frames;
     volatile uint32_t failed_frames;
+    volatile uint32_t empty_scenes_applied;
+    uint32_t reserved;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 3
+#define WINEWAYLAND_HOST_RENDERER_VERSION 5
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -156,6 +158,7 @@ struct winewayland_host_renderer_root
     uint32_t configure_applied_height;
     uint32_t configure_applied_state;
     uint64_t window_state_revision;
+    uint64_t geometry_revision;
     char title[256];
 };
 
@@ -175,6 +178,7 @@ struct winewayland_host_renderer_present
     uint64_t root_generation;
     uint64_t source_pool_generation;
     uint64_t source_frame_id;
+    uint64_t geometry_revision;
     uint32_t clear_color;
     uint32_t image_index;
     uint32_t image_count;
@@ -201,6 +205,7 @@ enum winewayland_host_unix_func
     unix_renderer_root_sync,
     unix_renderer_root_retire,
     unix_renderer_root_present,
+    unix_renderer_root_hide,
     unix_shell_self_test,
     unix_renderer_self_test,
     unix_renderer_headless_self_test,

@@ -81,6 +81,7 @@ enum producer_child_command
     PRODUCER_CHILD_COMMAND_REGISTER_SLOT,
     PRODUCER_CHILD_COMMAND_CLOSE_SLOT_OBJECTS,
     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME,
+    PRODUCER_CHILD_COMMAND_CANCEL_FRAME,
     PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT,
     PRODUCER_CHILD_COMMAND_EXIT,
 };
@@ -113,19 +114,23 @@ struct wayland_host_test_state
     UINT64 contribution_revision;
     UINT64 revocation_scene_generation;
     UINT64 pool_generation;
+    UINT64 pool_geometry_revision;
     UINT64 allocation_size;
     UINT64 frame_id;
     UINT64 ready_value;
     UINT64 reuse_value;
     UINT64 frame_scene_generation;
     UINT64 frame_binding_generation;
+    UINT64 frame_geometry_revision;
     UINT64 enumerated_frame_scene_generation;
     UINT64 enumerated_frame_binding_generation;
+    UINT64 enumerated_frame_geometry_revision;
     UINT64 enumeration_cursor;
     UINT64 enumerated_root;
     UINT64 root_identity;
     UINT64 root_generation;
     UINT64 window_state_revision;
+    UINT64 window_geometry_revision;
     UINT64 close_request_id;
     UINT64 configure_request_id;
     UINT64 configure_applied_id;
@@ -222,6 +227,7 @@ struct wayland_host_root_info
 struct wayland_window_state_info
 {
     UINT64 revision;
+    UINT64 geometry_revision;
     DWORD style;
     DWORD ex_style;
     struct rectangle window;
@@ -302,6 +308,7 @@ struct wayland_frame_info
     UINT64 reuse_value;
     UINT64 scene_generation;
     UINT64 binding_generation;
+    UINT64 geometry_revision;
     DWORD slot;
     DWORD reusable;
     DWORD outstanding_frames;
@@ -489,6 +496,7 @@ static NTSTATUS get_window_state( HWND root, UINT64 host_epoch,
         if (!(status = p_wine_server_call( req )))
         {
             info->revision = reply->state_revision;
+            info->geometry_revision = reply->geometry_revision;
             info->style = reply->style;
             info->ex_style = reply->ex_style;
             info->window = reply->window;
@@ -783,6 +791,7 @@ static NTSTATUS create_pool_with_size( HWND root, struct wayland_host_test_state
         wine_server_add_data( req, &metadata, metadata_size );
         status = p_wine_server_call( req );
         state->registry_generation = reply->registry_generation;
+        state->pool_geometry_revision = reply->geometry_revision;
     }
     SERVER_END_REQ;
     return status;
@@ -985,6 +994,7 @@ static NTSTATUS submit_frame_with_size( HWND root, struct wayland_host_test_stat
     submission.reuse_value = state->reuse_value;
     submission.scene_generation = state->frame_scene_generation;
     submission.binding_generation = state->frame_binding_generation;
+    submission.geometry_revision = state->frame_geometry_revision;
     submission.slot = state->slot;
     SERVER_START_REQ( submit_wayland_frame )
     {
@@ -996,6 +1006,7 @@ static NTSTATUS submit_frame_with_size( HWND root, struct wayland_host_test_stat
         status = p_wine_server_call( req );
         state->outstanding_frames = reply->outstanding_frames;
         state->available_credits = reply->available_credits;
+        state->window_geometry_revision = reply->geometry_revision;
     }
     SERVER_END_REQ;
     return status;
@@ -1004,6 +1015,24 @@ static NTSTATUS submit_frame_with_size( HWND root, struct wayland_host_test_stat
 static NTSTATUS submit_frame( HWND root, struct wayland_host_test_state *state )
 {
     return submit_frame_with_size( root, state, sizeof(struct wayland_frame_submission) );
+}
+
+static NTSTATUS cancel_frame( HWND root, struct wayland_host_test_state *state )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( cancel_wayland_frame )
+    {
+        req->root = wine_server_user_handle( root );
+        req->contributor_id = state->contributor_id;
+        req->stream_id = state->stream_id;
+        req->binding_generation = state->binding_generation;
+        req->frame_id = state->frame_id;
+        status = p_wine_server_call( req );
+        state->outstanding_frames = reply->outstanding_frames;
+    }
+    SERVER_END_REQ;
+    return status;
 }
 
 static NTSTATUS get_frame( HWND root, UINT64 host_epoch, UINT64 contributor_id,
@@ -1025,9 +1054,10 @@ static NTSTATUS get_frame( HWND root, UINT64 host_epoch, UINT64 contributor_id,
         info->reuse_value = reply->reuse_value;
         info->scene_generation = reply->scene_generation;
         info->binding_generation = reply->binding_generation;
-        info->slot = reply->slot;
-        info->reusable = reply->reusable;
-        info->outstanding_frames = reply->outstanding_frames;
+        info->geometry_revision = reply->geometry_revision;
+        info->slot = WINE_WAYLAND_FRAME_INFO_SLOT( reply->frame_info );
+        info->reusable = WINE_WAYLAND_FRAME_INFO_REUSABLE( reply->frame_info );
+        info->outstanding_frames = WINE_WAYLAND_FRAME_INFO_OUTSTANDING( reply->frame_info );
     }
     SERVER_END_REQ;
     return status;
@@ -1337,6 +1367,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->reuse_value = frame.reuse_value;
             state->enumerated_frame_scene_generation = frame.scene_generation;
             state->enumerated_frame_binding_generation = frame.binding_generation;
+            state->enumerated_frame_geometry_revision = frame.geometry_revision;
             state->slot = frame.slot;
             state->frame_reusable = frame.reusable;
             state->outstanding_frames = frame.outstanding_frames;
@@ -1365,6 +1396,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->command_status = get_window_state( (HWND)(UINT_PTR)state->root,
                     state->host_epoch, &window_state );
             state->window_state_revision = window_state.revision;
+            state->window_geometry_revision = window_state.geometry_revision;
             state->window_style = window_state.style;
             state->window_ex_style = window_state.ex_style;
             state->window_rect = window_state.window;
@@ -1490,6 +1522,9 @@ static void run_producer_child( HANDLE mapping, HANDLE command_event, HANDLE res
             break;
         case PRODUCER_CHILD_COMMAND_SUBMIT_FRAME:
             state->producer_status = submit_frame( (HWND)(UINT_PTR)state->root, state );
+            break;
+        case PRODUCER_CHILD_COMMAND_CANCEL_FRAME:
+            state->producer_status = cancel_frame( (HWND)(UINT_PTR)state->root, state );
             break;
         case PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT:
             state->producer_status = get_frame_result( (HWND)(UINT_PTR)state->root,
@@ -1644,11 +1679,12 @@ static void test_host_registration( const char *program, const char *test_name )
     UINT64 pre_ready_generation = 0, pre_ready_revision = 0;
     UINT64 import_registry_generation;
     UINT64 root_identity = 0, root_generation = 0, pre_ready_root_identity = 0;
-    UINT64 window_state_revision;
+    UINT64 window_state_revision, window_geometry_revision;
     UINT64 configure_applied_id, configure_applied_revision;
     UINT64 bound_contributor_id, bound_stream_id, bound_binding_generation;
     UINT64 contributor_ids[16];
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
+    RECT pool_client_rect;
     HRESULT hr;
     NTSTATUS status;
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
@@ -1811,6 +1847,7 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
         "Timed out querying initial window state.\n" );
     ok( !state->command_status && state->window_state_revision &&
+        state->window_geometry_revision &&
         (state->window_style & WS_POPUP) && !wcscmp( state->window_title, L"Wayland scene root" ) &&
         state->client_rect.right - state->client_rect.left == 64 &&
         state->client_rect.bottom - state->client_rect.top == 64,
@@ -1820,14 +1857,27 @@ static void test_host_registration( const char *program, const char *test_name )
         state->client_rect.right - state->client_rect.left,
         state->client_rect.bottom - state->client_rect.top );
     window_state_revision = state->window_state_revision;
+    window_geometry_revision = state->window_geometry_revision;
     ok( SetWindowTextW( root, L"Updated hosted title" ),
         "Failed to update window title, error %lu.\n", GetLastError() );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
+        "Timed out querying title-only window state.\n" );
+    ok( !state->command_status && state->window_state_revision > window_state_revision &&
+        state->window_geometry_revision == window_geometry_revision &&
+        !wcscmp( state->window_title, L"Updated hosted title" ),
+        "Title-only state returned %#lx, state revision %s, geometry revision %s, title %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->window_state_revision ),
+        wine_dbgstr_longlong( state->window_geometry_revision ),
+        wine_dbgstr_w( state->window_title ) );
+    window_state_revision = state->window_state_revision;
     ok( SetWindowPos( root, NULL, 11, 13, 80, 72, SWP_NOACTIVATE | SWP_NOZORDER ),
         "Failed to update window bounds, error %lu.\n", GetLastError() );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_WINDOW_STATE ),
         "Timed out querying updated window state.\n" );
     ok( !state->command_status && state->window_state_revision > window_state_revision &&
+        state->window_geometry_revision > window_geometry_revision &&
         !wcscmp( state->window_title, L"Updated hosted title" ) &&
         state->window_rect.left == 11 && state->window_rect.top == 13 &&
         state->window_rect.right - state->window_rect.left == 80 &&
@@ -2216,9 +2266,10 @@ static void test_host_registration( const char *program, const char *test_name )
             "Timed out posting owner-thread configure.\n" );
         ok( !state->command_status, "Owner-thread configure returned %#lx.\n",
             state->command_status );
-        for (i = 0; i < 20 && state->configure_applied_id != 4; ++i)
+        for (i = 0; i < 100 && state->configure_applied_id != 4; ++i)
         {
-            PeekMessageW( &msg, root, 0, 0, PM_REMOVE );
+            while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE ))
+                DispatchMessageW( &msg );
             state->configure_request_id = 0;
             ok( send_host_child_command( state, command_event, result_event,
                                         HOST_CHILD_COMMAND_GET_CONFIGURE_RESULT ),
@@ -2693,9 +2744,10 @@ static void test_host_registration( const char *program, const char *test_name )
         state->producer_status );
 
     state->pool_generation = 1;
-    state->allocation_size = 64 * 64 * 4;
-    state->pool_width = 64;
-    state->pool_height = 64;
+    ok( GetClientRect( root, &pool_client_rect ), "Failed to query pool client rectangle.\n" );
+    state->pool_width = pool_client_rect.right - pool_client_rect.left;
+    state->pool_height = pool_client_rect.bottom - pool_client_rect.top;
+    state->allocation_size = (UINT64)state->pool_width * state->pool_height * 4;
     state->pool_format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
     state->pool_slot_count = WINE_WAYLAND_BUFFER_POOL_SLOTS;
     state->frame_credit_limit = 3;
@@ -2734,7 +2786,7 @@ static void test_host_registration( const char *program, const char *test_name )
     state->allocation_size = 256ull * 1024 * 1024 / WINE_WAYLAND_BUFFER_POOL_SLOTS + 1;
     status = create_pool( root, state );
     ok( status == STATUS_INVALID_PARAMETER, "Oversized pool allocation returned %#lx.\n", status );
-    state->allocation_size = 64 * 64 * 4;
+    state->allocation_size = (UINT64)state->pool_width * state->pool_height * 4;
     status = create_pool( root, state );
     ok( status == STATUS_ACCESS_DENIED,
         "Non-producer pool registration returned %#lx.\n", status );
@@ -2742,12 +2794,24 @@ static void test_host_registration( const char *program, const char *test_name )
     status = create_pool( root, state );
     ok( status == STATUS_INVALID_PARAMETER,
         "Invalid pool dimensions returned %#lx.\n", status );
-    state->pool_width = 64;
+    state->pool_width = pool_client_rect.right - pool_client_rect.left;
+    --state->pool_width;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CREATE_POOL ),
+        "Timed out registering a pool with stale geometry.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH &&
+        state->pool_geometry_revision,
+        "Stale pool geometry returned %#lx, window revision %s.\n",
+        state->producer_status,
+        wine_dbgstr_longlong( state->pool_geometry_revision ) );
+    ++state->pool_width;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CREATE_POOL ),
         "Timed out registering transport pool 1.\n" );
-    ok( !state->producer_status, "Pool 1 registration returned %#lx.\n",
-        state->producer_status );
+    ok( !state->producer_status && state->pool_geometry_revision,
+        "Pool 1 registration returned %#lx, window revision %s.\n",
+        state->producer_status,
+        wine_dbgstr_longlong( state->pool_geometry_revision ) );
     status = get_pool( root, old_epoch, state->contributor_id, 0, &pool );
     ok( status == STATUS_ACCESS_DENIED, "Non-host pool query returned %#lx.\n", status );
     state->pool_generation = 0;
@@ -2755,8 +2819,9 @@ static void test_host_registration( const char *program, const char *test_name )
                                 HOST_CHILD_COMMAND_GET_POOL ),
         "Timed out querying transport pool 1.\n" );
     ok( !state->command_status && state->pool_generation == 1 &&
-        state->allocation_size == 64 * 64 * 4 && state->pool_width == 64 &&
-        state->pool_height == 64 &&
+        state->allocation_size == (UINT64)state->pool_width * state->pool_height * 4 &&
+        state->pool_width == (DWORD)(pool_client_rect.right - pool_client_rect.left) &&
+        state->pool_height == (DWORD)(pool_client_rect.bottom - pool_client_rect.top) &&
         state->pool_format == WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM &&
         state->pool_slot_count == WINE_WAYLAND_BUFFER_POOL_SLOTS &&
         state->frame_credit_limit == 3 && state->memory_type_index == 7 &&
@@ -2975,7 +3040,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out testing the root pool budget.\n" );
     ok( state->producer_status == STATUS_INSUFFICIENT_RESOURCES,
         "Root pool budget overflow returned %#lx.\n", state->producer_status );
-    state->allocation_size = 64 * 64 * 4;
+    state->allocation_size = (UINT64)state->pool_width * state->pool_height * 4;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CREATE_POOL ),
         "Timed out registering transport pool 2.\n" );
@@ -3099,6 +3164,7 @@ static void test_host_registration( const char *program, const char *test_name )
     state->reuse_value = 1;
     state->frame_scene_generation = scene_generation;
     state->frame_binding_generation = state->binding_generation;
+    state->frame_geometry_revision = state->pool_geometry_revision;
     state->slot = 0;
     status = submit_frame_with_size( root, state,
             sizeof(struct wayland_frame_submission) - sizeof(DWORD) );
@@ -3157,6 +3223,13 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->producer_status == STATUS_REVISION_MISMATCH,
         "Stale-binding frame returned %#lx.\n", state->producer_status );
     state->frame_binding_generation--;
+    state->frame_geometry_revision++;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting a stale-window frame.\n" );
+    ok( state->producer_status == STATUS_REVISION_MISMATCH,
+        "Stale-window frame returned %#lx.\n", state->producer_status );
+    state->frame_geometry_revision--;
     state->pool_generation = 2;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
@@ -3185,9 +3258,11 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->producer_status == STATUS_INVALID_PARAMETER,
         "Out-of-range frame slot returned %#lx.\n", state->producer_status );
     state->slot = 0;
+    ok( SetWindowTextW( root, L"Title change keeps transport geometry" ),
+        "Failed to change the title before frame submission, error %lu.\n", GetLastError() );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
-        "Timed out submitting frame 1.\n" );
+        "Timed out submitting frame 1 after a title-only change.\n" );
     ok( !state->producer_status && state->outstanding_frames == 1 &&
         state->available_credits == 2,
         "Frame 1 submission returned %#lx, outstanding %lu, credits %lu.\n",
@@ -3241,6 +3316,8 @@ static void test_host_registration( const char *program, const char *test_name )
         !state->slot && state->ready_value == 1 && state->reuse_value == 1 &&
         state->enumerated_frame_scene_generation == scene_generation &&
         state->enumerated_frame_binding_generation == state->binding_generation &&
+        state->enumerated_frame_geometry_revision ==
+                state->frame_geometry_revision &&
         !state->frame_reusable && state->outstanding_frames == 3,
         "Frame 1 enumeration returned %#lx, frame %s, slot %lu, values %s/%s, scene %s.\n",
         state->command_status, wine_dbgstr_longlong( state->frame_id ), state->slot,
@@ -3470,40 +3547,74 @@ static void test_host_registration( const char *program, const char *test_name )
     state->ready_value = 3;
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
-        "Timed out submitting frame 5.\n" );
+        "Timed out reserving frame 5 for cancellation.\n" );
     ok( !state->producer_status && state->outstanding_frames == 1,
         "Frame 5 submission returned %#lx, outstanding %lu.\n",
+        state->producer_status, state->outstanding_frames );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CANCEL_FRAME ),
+        "Timed out cancelling frame 5 before GPU submission.\n" );
+    ok( !state->producer_status && !state->outstanding_frames,
+        "Frame 5 cancellation returned %#lx, outstanding %lu.\n",
+        state->producer_status, state->outstanding_frames );
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_CANCEL_FRAME ),
+        "Timed out repeating frame 5 cancellation.\n" );
+    ok( !state->producer_status && !state->outstanding_frames,
+        "Repeated frame 5 cancellation returned %#lx, outstanding %lu.\n",
+        state->producer_status, state->outstanding_frames );
+    state->frame_id = 4;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_GET_FRAME ),
+        "Timed out checking enumeration after frame cancellation.\n" );
+    ok( state->command_status == STATUS_NO_MORE_ENTRIES,
+        "Cancelled frame remained visible to the host, status %#lx.\n",
+        state->command_status );
+
+    state->pool_generation = 3;
+    state->frame_scene_generation = scene_generation;
+    state->frame_binding_generation = state->binding_generation;
+    state->frame_geometry_revision = state->pool_geometry_revision;
+    state->slot = 0;
+    state->frame_id = 6;
+    state->ready_value = 4;
+    state->reuse_value = 4;
+    ok( send_producer_child_command( state, producer_command_event, producer_result_event,
+                                    PRODUCER_CHILD_COMMAND_SUBMIT_FRAME ),
+        "Timed out submitting frame 6.\n" );
+    ok( !state->producer_status && state->outstanding_frames == 1,
+        "Frame 6 submission returned %#lx, outstanding %lu.\n",
         state->producer_status, state->outstanding_frames );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_RETIRE_POOL ),
         "Timed out retiring a pool with a live frame.\n" );
     ok( state->producer_status == STATUS_DEVICE_BUSY,
         "Pool retirement with a live frame returned %#lx.\n", state->producer_status );
-    state->frame_id = 5;
-    state->ready_value = 3;
-    state->reuse_value = 3;
+    state->frame_id = 6;
+    state->ready_value = 4;
+    state->reuse_value = 4;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SET_FRAME_REUSABLE ),
-        "Timed out releasing frame 5.\n" );
-    ok( !state->command_status, "Frame 5 reuse returned %#lx.\n",
+        "Timed out releasing frame 6.\n" );
+    ok( !state->command_status, "Frame 6 reuse returned %#lx.\n",
         state->command_status );
     state->frame_result = WINE_WAYLAND_FRAME_RESULT_PRESENTED;
     state->backend_status = STATUS_SUCCESS;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SET_FRAME_RESULT ),
-        "Timed out presenting frame 5.\n" );
+        "Timed out presenting frame 6.\n" );
     ok( !state->command_status && !state->outstanding_frames,
-        "Frame 5 result returned %#lx, outstanding %lu.\n",
+        "Frame 6 result returned %#lx, outstanding %lu.\n",
         state->command_status, state->outstanding_frames );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_GET_FRAME_RESULT ),
-        "Timed out consuming frame 5 result.\n" );
+        "Timed out consuming frame 6 result.\n" );
     ok( !state->producer_status &&
         state->frame_result == WINE_WAYLAND_FRAME_RESULT_PRESENTED,
-        "Frame 5 result query returned %#lx, result %lu.\n",
+        "Frame 6 result query returned %#lx, result %lu.\n",
         state->producer_status, state->frame_result );
     state->pool_generation = 3;
-    state->frame_id = 6;
+    state->frame_id = 7;
     state->slot = 1;
     state->ready_value = 6;
     state->reuse_value = 8;
@@ -3521,11 +3632,11 @@ static void test_host_registration( const char *program, const char *test_name )
         "Replacement-test hosted scene returned %#lx, generation %s.\n",
         status, wine_dbgstr_longlong( next_generation ) );
     scene_generation = next_generation;
-    state->frame_id = 5;
+    state->frame_id = 6;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_FRAME ),
         "Timed out enumerating the frame submitted before scene replacement.\n" );
-    ok( !state->command_status && state->frame_id == 6 &&
+    ok( !state->command_status && state->frame_id == 7 &&
         state->enumerated_frame_scene_generation == scene_generation - 1 &&
         state->enumerated_frame_binding_generation == state->binding_generation,
         "Replaced-scene frame returned %#lx, frame %s, scene %s, binding %s.\n",
