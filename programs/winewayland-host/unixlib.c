@@ -169,6 +169,7 @@ struct renderer_queue_job
             VkSemaphore present_semaphore;
             VkSwapchainKHR swapchain;
             VkFence fence;
+            uint64_t present_id;
             uint32_t image_index;
         } present;
     } u;
@@ -205,6 +206,7 @@ struct renderer_root
     BOOL present_complete;
     NTSTATUS present_job_status;
     VkResult present_result;
+    uint64_t next_present_id;
 };
 
 struct renderer_slot
@@ -311,6 +313,7 @@ struct vulkan_renderer
     PFN_vkGetSwapchainImagesKHR p_vkGetSwapchainImagesKHR;
     PFN_vkAcquireNextImageKHR p_vkAcquireNextImageKHR;
     PFN_vkQueuePresentKHR p_vkQueuePresentKHR;
+    PFN_vkWaitForPresentKHR p_vkWaitForPresentKHR;
     struct renderer_deferred_resources deferred;
     struct renderer_slot slots[MAX_RENDERER_POOLS * RENDERER_POOL_SLOTS];
     struct renderer_frame frames[MAX_RENDERER_FRAMES];
@@ -342,6 +345,7 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
             {VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
     VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     VkPresentInfoKHR present_info = {VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    VkPresentIdKHR present_id_info = {VK_STRUCTURE_TYPE_PRESENT_ID_KHR};
     NTSTATUS status = STATUS_SUCCESS;
     VkResult present_result = VK_SUCCESS, vr;
 
@@ -386,7 +390,16 @@ static void execute_renderer_queue_job(const struct renderer_queue_job *job)
         present_info.swapchainCount = 1;
         present_info.pSwapchains = &job->u.present.swapchain;
         present_info.pImageIndices = &job->u.present.image_index;
+        present_id_info.swapchainCount = 1;
+        present_id_info.pPresentIds = &job->u.present.present_id;
+        present_info.pNext = &present_id_info;
         present_result = renderer.p_vkQueuePresentKHR(renderer.queue, &present_info);
+        if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)
+        {
+            vr = renderer.p_vkWaitForPresentKHR(renderer.device, job->u.present.swapchain,
+                    job->u.present.present_id, 1000000000ull);
+            if (vr) status = vr == VK_TIMEOUT ? STATUS_IO_TIMEOUT : renderer_queue_status(vr);
+        }
         vr = renderer.p_vkQueueSubmit(renderer.queue, 0, NULL, job->u.present.fence);
         if (vr) status = renderer_queue_status(vr);
     }
@@ -761,6 +774,8 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
     {
         VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+        VK_KHR_PRESENT_ID_EXTENSION_NAME,
+        VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
     VkPhysicalDeviceExternalSemaphoreInfo semaphore_info =
@@ -779,6 +794,10 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
             {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
     VkPhysicalDeviceTimelineSemaphoreFeatures timeline_features =
             {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    VkPhysicalDevicePresentIdFeaturesKHR present_id_features =
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR present_wait_features =
+            {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
     VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     VkPhysicalDeviceIDProperties id = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
     VkPhysicalDeviceProperties2 properties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -844,10 +863,17 @@ static BOOL probe_vulkan_physical_device(PFN_vkGetInstanceProcAddr p_vkGetInstan
     }
 
     features.pNext = &timeline_features;
+    timeline_features.pNext = &present_id_features;
+    present_id_features.pNext = &present_wait_features;
     p_vkGetPhysicalDeviceFeatures2(physical_device, &features);
     if (!timeline_features.timelineSemaphore)
     {
         fprintf(stderr, "Vulkan transport rejected device: timeline semaphores unsupported.\n");
+        return FALSE;
+    }
+    if (!present_id_features.presentId || !present_wait_features.presentWait)
+    {
+        fprintf(stderr, "Vulkan transport rejected device: present ID/wait unsupported.\n");
         return FALSE;
     }
 
@@ -1194,6 +1220,7 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkGetSwapchainImagesKHR);
     LOAD_RENDERER_FUNC(vkAcquireNextImageKHR);
     LOAD_RENDERER_FUNC(vkQueuePresentKHR);
+    LOAD_RENDERER_FUNC(vkWaitForPresentKHR);
 #undef LOAD_RENDERER_FUNC
 
     get_memory_properties(renderer.physical_device, &renderer.memory_properties);
@@ -2122,6 +2149,8 @@ static NTSTATUS present_renderer_root(void *args)
     queue_job.u.present.present_semaphore = present_semaphore;
     queue_job.u.present.swapchain = root->swapchain;
     queue_job.u.present.fence = fence;
+    if (!++root->next_present_id) ++root->next_present_id;
+    queue_job.u.present.present_id = root->next_present_id;
     queue_job.u.present.image_index = image_index;
     if ((status = enqueue_renderer_queue_job(&queue_job)))
     {

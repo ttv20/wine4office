@@ -154,6 +154,11 @@ or transport fixture is not Outlook support.
   event dispatch, but it still stalls GPU work for every root on that renderer.
   Per-window device isolation and a timeout quarantine remain pending before
   multi-window admission.
+  Transport admission also requires `VK_KHR_present_id` and
+  `VK_KHR_present_wait`. Every WSI submission carries a nonzero per-root
+  present ID, and the executor waits up to one second for that exact ID before
+  publishing a terminal backend result. A timeout becomes an explicit backend
+  failure; it is not reported as `Presented`.
 - Producers can now submit frames through a server-authorized bounded queue
   after all three slots in a pool have imported successfully. Frame, ready and
   reuse values are nonzero and monotonic, each slot admits only one active
@@ -565,6 +570,13 @@ admitted.
   `artifacts/wsi-executor-{x64,i386}.log`,
   `artifacts/dcomp-pipeline-executor-x64.log` and
   `artifacts/executor-x64-SHA256SUMS` in the Intel task directory.
+- The present-ID/present-wait boundary passed the same WSI fixture through
+  x86-64 and i386 on Intel Iris Xe. The real x86-64 DComp path then imported
+  all three slots and completed six frames only after their matching present
+  IDs reached the compositor boundary, with no discard or failure. Evidence is
+  retained as `artifacts/present-wait-wsi-{x64,i386}.log`,
+  `artifacts/present-wait-dcomp-x64.log` and
+  `artifacts/present-wait-SHA256SUMS` in the Intel task directory.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
