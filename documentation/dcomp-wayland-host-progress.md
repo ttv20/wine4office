@@ -304,8 +304,15 @@ or transport fixture is not Outlook support.
   premultiplied snapshot for the current geometry revision. Wineserver pins
   the section after the publisher closes its handle, limits it to 64 MiB per
   root and 512 MiB per desktop, and duplicates read-only handles only to the
-  current Ready host. This establishes snapshot identity and lifetime; the
-  Wayland driver publication hook and Vulkan upload/composition still follow.
+  current Ready host. The Wayland window-surface flush now copies the complete
+  software frame, makes the GPU-covered client rectangle transparent and
+  publishes it after a DComp target exists. The host maps the section only
+  long enough to upload an immutable coherent Vulkan buffer. A WSI command
+  copies that full frame first and the host-owned GPU image into the exact
+  client offset second. Snapshot, content and geometry revisions are checked
+  together; replacement waits until an older Present stops reading the
+  buffer. Decorated admission remains guarded until its full pipeline fixture
+  proves the driver publication and combined image.
 
 ## Contributor interception inventory
 
@@ -818,11 +825,20 @@ admitted.
 - The frame-snapshot authority fixture rejects a non-host reader and a stale
   geometry revision, accepts the current owner publication, closes the
   publisher handle, and verifies the current host can still map and read the
-  exact pixel. Repeated revision and completed-cursor queries are rejected.
-  The full x86-64 Radeon authority suite passed 679 checks with zero failures.
-  Evidence is retained as `/workspace/artifacts/frame-snapshot-authority-x64.log`,
-  `/workspace/artifacts/frame-snapshot-win32u-test-x64.exe` and
-  `/workspace/artifacts/frame-snapshot-authority-SHA256SUMS`.
+  exact pixel. It then atomically binds a replacement publication to the
+  server's current geometry, closes that publisher handle and verifies the
+  replacement pixel through the host. Repeated revision and completed-cursor
+  queries are rejected. The full x86-64 Radeon authority suite passed 684
+  checks with zero failures. Evidence is retained as
+  `/workspace/artifacts/frame-snapshot-replacement-authority-x64.log` and
+  `/workspace/artifacts/frame-snapshot-replacement-SHA256SUMS`.
+- Renderer ABI 8 uploaded a synthetic 96x80 frame snapshot, submitted it to
+  WSI, unmapped and remapped the xdg root, and repeated the presentation in
+  both x86-64 and i386 Unix-call paths on Intel Iris Xe. The existing transport
+  pixel verification and source-release checks also remained green. Evidence
+  is retained as `artifacts/frame-snapshot-composite-wsi-{x64,i386}.log` in the
+  Intel task directory. Both runs ended with zero task-prefix Wine processes;
+  the laptop retained 62 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

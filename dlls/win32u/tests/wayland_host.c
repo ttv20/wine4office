@@ -2214,6 +2214,42 @@ static void test_host_registration( const char *program, const char *test_name )
             "Completed frame snapshot enumeration returned %#lx, revision %s, pixel %#lx.\n",
             state->command_status, wine_dbgstr_longlong( state->snapshot_revision ),
             state->snapshot_pixel );
+
+        snapshot_mapping = CreateFileMappingW( INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                               0, 80 * 72 * 4, NULL );
+        ok( !!snapshot_mapping, "Failed to create replacement frame snapshot, error %lu.\n",
+            GetLastError() );
+        if (snapshot_mapping)
+        {
+            snapshot_bits = MapViewOfFile( snapshot_mapping, FILE_MAP_WRITE, 0, 0, 0 );
+            ok( !!snapshot_bits, "Failed to map replacement frame snapshot, error %lu.\n",
+                GetLastError() );
+            if (snapshot_bits)
+            {
+                snapshot_bits[0] = 0xffabcdef;
+                UnmapViewOfFile( snapshot_bits );
+            }
+            status = publish_frame_snapshot( root, snapshot_mapping, 80, 72, 2, 0,
+                    &snapshot_revision, &snapshot_geometry_revision );
+            ok( !status && snapshot_revision == 2 &&
+                snapshot_geometry_revision == state->window_geometry_revision,
+                "Current-geometry frame snapshot returned %#lx, revision %s, geometry %s.\n",
+                status, wine_dbgstr_longlong( snapshot_revision ),
+                wine_dbgstr_longlong( snapshot_geometry_revision ) );
+            CloseHandle( snapshot_mapping );
+            snapshot_mapping = NULL;
+            state->snapshot_revision = 1;
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT ),
+                "Timed out querying the replacement frame snapshot.\n" );
+            ok( !state->command_status && state->snapshot_revision == 2 &&
+                state->snapshot_geometry_revision == state->window_geometry_revision &&
+                state->snapshot_pixel == 0xffabcdef,
+                "Replacement frame snapshot returned %#lx, revision %s, geometry %s, pixel %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->snapshot_revision ),
+                wine_dbgstr_longlong( state->snapshot_geometry_revision ),
+                state->snapshot_pixel );
+        }
     }
 
     hosted_root = CreateWindowExW( 0, L"static", L"Hosted DComp identity root", WS_POPUP,

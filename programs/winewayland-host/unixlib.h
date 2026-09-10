@@ -24,6 +24,7 @@
 #define WINEWAYLAND_HOST_CAP_MULTIPLE_SEATS 0x00000010
 #define WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT 0x00000020
 #define WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM 1
+#define WINEWAYLAND_HOST_SNAPSHOT_PREMULTIPLIED 1
 #define WINEWAYLAND_HOST_VK_SUBOPTIMAL_KHR 1000001003
 #define WINEWAYLAND_HOST_VK_ERROR_OUT_OF_DATE_KHR (-1000001004)
 
@@ -58,10 +59,10 @@ struct winewayland_host_startup
     volatile uint32_t empty_scenes_applied;
     volatile uint32_t native_host_activations;
     volatile uint32_t native_local_activations;
-    uint32_t reserved;
+    volatile uint32_t frame_snapshots;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 7
+#define WINEWAYLAND_HOST_RENDERER_VERSION 8
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -210,6 +211,25 @@ struct winewayland_host_renderer_root_retire
     uint64_t root_generation;
 };
 
+struct winewayland_host_renderer_snapshot
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t root_identity;
+    uint64_t root_generation;
+    uint64_t snapshot_revision;
+    uint64_t geometry_revision;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t flags;
+    int32_t client_x;
+    int32_t client_y;
+    uint32_t client_width;
+    uint32_t client_height;
+    uint64_t pixels;
+};
+
 struct winewayland_host_renderer_present
 {
     uint32_t version;
@@ -219,6 +239,7 @@ struct winewayland_host_renderer_present
     uint64_t source_pool_generation;
     uint64_t source_frame_id;
     uint64_t geometry_revision;
+    uint64_t snapshot_revision;
     uint32_t clear_color;
     uint32_t image_index;
     uint32_t image_count;
@@ -253,6 +274,7 @@ enum winewayland_host_unix_func
     unix_renderer_release_frame,
     unix_renderer_get_input,
     unix_renderer_test_input,
+    unix_renderer_root_snapshot,
     winewayland_host_unix_func_count,
 };
 

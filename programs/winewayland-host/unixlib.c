@@ -49,7 +49,8 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 72);
+C_ASSERT(sizeof(struct winewayland_host_renderer_snapshot) == 80);
+C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 C_ASSERT(sizeof(struct winewayland_host_input_event) == 64);
 C_ASSERT(sizeof(struct winewayland_host_input_test) == 24);
@@ -242,6 +243,16 @@ struct renderer_root
     uint64_t next_present_id;
     uint64_t window_state_revision;
     uint64_t geometry_revision;
+    uint64_t snapshot_revision;
+    uint64_t snapshot_geometry_revision;
+    VkBuffer snapshot_buffer;
+    VkDeviceMemory snapshot_memory;
+    uint32_t snapshot_width;
+    uint32_t snapshot_height;
+    int32_t snapshot_client_x;
+    int32_t snapshot_client_y;
+    uint32_t snapshot_client_width;
+    uint32_t snapshot_client_height;
 };
 
 struct renderer_slot
@@ -349,6 +360,7 @@ struct vulkan_renderer
     PFN_vkCmdPipelineBarrier p_vkCmdPipelineBarrier;
     PFN_vkCmdClearColorImage p_vkCmdClearColorImage;
     PFN_vkCmdCopyImage p_vkCmdCopyImage;
+    PFN_vkCmdCopyBufferToImage p_vkCmdCopyBufferToImage;
     PFN_vkCmdCopyImageToBuffer p_vkCmdCopyImageToBuffer;
     PFN_vkCreateFence p_vkCreateFence;
     PFN_vkDestroyFence p_vkDestroyFence;
@@ -1200,6 +1212,10 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     if (renderer.keyboard_root == root)
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
     destroy_renderer_root_swapchain(root);
+    if (root->snapshot_buffer)
+        renderer.p_vkDestroyBuffer(renderer.device, root->snapshot_buffer, NULL);
+    if (root->snapshot_memory)
+        renderer.p_vkFreeMemory(renderer.device, root->snapshot_memory, NULL);
     if (root->unmap_callback) wl_callback_destroy(root->unmap_callback);
     if (root->vulkan_surface && renderer.p_vkDestroySurfaceKHR)
         renderer.p_vkDestroySurfaceKHR(renderer.instance, root->vulkan_surface, NULL);
@@ -1871,6 +1887,7 @@ static BOOL load_renderer_functions(PFN_vkGetInstanceProcAddr get_instance_proc_
     LOAD_RENDERER_FUNC(vkCmdPipelineBarrier);
     LOAD_RENDERER_FUNC(vkCmdClearColorImage);
     LOAD_RENDERER_FUNC(vkCmdCopyImage);
+    LOAD_RENDERER_FUNC(vkCmdCopyBufferToImage);
     LOAD_RENDERER_FUNC(vkCmdCopyImageToBuffer);
     LOAD_RENDERER_FUNC(vkCreateFence);
     LOAD_RENDERER_FUNC(vkDestroyFence);
@@ -2823,6 +2840,105 @@ static NTSTATUS authorize_renderer_root_present(struct renderer_root *root,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS update_renderer_root_snapshot(void *args)
+{
+    struct winewayland_host_renderer_snapshot *params = args;
+    VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    VkMemoryAllocateInfo allocate_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkMemoryRequirements requirements;
+    struct renderer_root *root;
+    uint32_t memory_type;
+    void *mapped = NULL;
+    uint64_t size;
+    NTSTATUS status;
+    VkResult vr;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->root_identity || !params->root_generation ||
+        !params->snapshot_revision || !params->geometry_revision ||
+        !params->width || !params->height || params->width > 16384 ||
+        params->height > 16384 || params->stride != params->width * 4 ||
+        params->flags != WINEWAYLAND_HOST_SNAPSHOT_PREMULTIPLIED || !params->pixels ||
+        params->client_x < 0 || params->client_y < 0 || !params->client_width ||
+        !params->client_height || (uint64_t)params->client_x + params->client_width >
+        params->width || (uint64_t)params->client_y + params->client_height > params->height)
+        return STATUS_INVALID_PARAMETER;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        return STATUS_NOT_FOUND;
+    if (params->geometry_revision != root->geometry_revision)
+        return STATUS_REVISION_MISMATCH;
+    if (params->snapshot_revision == root->snapshot_revision)
+    {
+        if (params->geometry_revision != root->snapshot_geometry_revision ||
+            params->width != root->snapshot_width || params->height != root->snapshot_height ||
+            params->client_x != root->snapshot_client_x ||
+            params->client_y != root->snapshot_client_y ||
+            params->client_width != root->snapshot_client_width ||
+            params->client_height != root->snapshot_client_height)
+            return STATUS_REVISION_MISMATCH;
+        return STATUS_SUCCESS;
+    }
+    if (params->snapshot_revision < root->snapshot_revision)
+        return STATUS_REVISION_MISMATCH;
+    if ((status = poll_renderer_root_present(root))) return status;
+
+    size = (uint64_t)params->stride * params->height;
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if ((vr = renderer.p_vkCreateBuffer(renderer.device, &buffer_info, NULL, &buffer)))
+        goto failed;
+    renderer.p_vkGetBufferMemoryRequirements(renderer.device, buffer, &requirements);
+    for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
+         ++memory_type)
+        if ((requirements.memoryTypeBits & (1u << memory_type)) &&
+            (renderer.memory_properties.memoryTypes[memory_type].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+            (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+            break;
+    if (memory_type == renderer.memory_properties.memoryTypeCount)
+    {
+        vr = VK_ERROR_FEATURE_NOT_PRESENT;
+        goto failed;
+    }
+    allocate_info.allocationSize = requirements.size;
+    allocate_info.memoryTypeIndex = memory_type;
+    if ((vr = renderer.p_vkAllocateMemory(renderer.device, &allocate_info, NULL, &memory)) ||
+        (vr = renderer.p_vkBindBufferMemory(renderer.device, buffer, memory, 0)) ||
+        (vr = renderer.p_vkMapMemory(renderer.device, memory, 0, size, 0, &mapped)))
+        goto failed;
+    memcpy(mapped, (const void *)(uintptr_t)params->pixels, size);
+    renderer.p_vkUnmapMemory(renderer.device, memory);
+    mapped = NULL;
+
+    if (root->snapshot_buffer)
+        renderer.p_vkDestroyBuffer(renderer.device, root->snapshot_buffer, NULL);
+    if (root->snapshot_memory)
+        renderer.p_vkFreeMemory(renderer.device, root->snapshot_memory, NULL);
+    root->snapshot_buffer = buffer;
+    root->snapshot_memory = memory;
+    root->snapshot_revision = params->snapshot_revision;
+    root->snapshot_geometry_revision = params->geometry_revision;
+    root->snapshot_width = params->width;
+    root->snapshot_height = params->height;
+    root->snapshot_client_x = params->client_x;
+    root->snapshot_client_y = params->client_y;
+    root->snapshot_client_width = params->client_width;
+    root->snapshot_client_height = params->client_height;
+    return STATUS_SUCCESS;
+
+failed:
+    if (mapped) renderer.p_vkUnmapMemory(renderer.device, memory);
+    if (buffer) renderer.p_vkDestroyBuffer(renderer.device, buffer, NULL);
+    if (memory) renderer.p_vkFreeMemory(renderer.device, memory, NULL);
+    return vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY ?
+            STATUS_NO_MEMORY : STATUS_UNSUCCESSFUL;
+}
+
 static NTSTATUS present_renderer_root(void *args)
 {
     struct winewayland_host_renderer_present *params = args;
@@ -2833,6 +2949,8 @@ static NTSTATUS present_renderer_root(void *args)
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     VkImageMemoryBarrier source_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    VkBufferMemoryBarrier snapshot_barrier = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    VkBufferImageCopy buffer_copy;
     VkImageCopy image_copy;
     struct renderer_queue_job queue_job = {0};
     VkClearColorValue color;
@@ -2842,6 +2960,7 @@ static NTSTATUS present_renderer_root(void *args)
     VkSemaphore acquire_semaphore = VK_NULL_HANDLE, present_semaphore = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     uint32_t image_index = UINT32_MAX;
+    BOOL use_snapshot;
     VkResult vr;
     NTSTATUS status;
 
@@ -2859,6 +2978,13 @@ static NTSTATUS present_renderer_root(void *args)
         return STATUS_NOT_FOUND;
     if (!root->swapchain) return STATUS_DEVICE_NOT_READY;
     if ((status = poll_renderer_root_present(root))) return status;
+    use_snapshot = !!params->snapshot_revision;
+    if (use_snapshot && (!root->snapshot_buffer ||
+        params->snapshot_revision != root->snapshot_revision ||
+        params->geometry_revision != root->snapshot_geometry_revision ||
+        root->snapshot_width != root->swapchain_width ||
+        root->snapshot_height != root->swapchain_height))
+        return STATUS_REVISION_MISMATCH;
     if (params->source_frame_id)
     {
         unsigned int i;
@@ -2873,8 +2999,10 @@ static NTSTATUS present_renderer_root(void *args)
         if (!source) return STATUS_NOT_FOUND;
         if ((status = poll_renderer_frame(source))) return status;
         if (!source->complete) return STATUS_PENDING;
-        if (source->width != root->swapchain_width ||
-            source->height != root->swapchain_height)
+        if ((!use_snapshot && (source->width != root->swapchain_width ||
+             source->height != root->swapchain_height)) ||
+            (use_snapshot && (source->width != root->snapshot_client_width ||
+             source->height != root->snapshot_client_height)))
             return STATUS_INVALID_PARAMETER;
     }
     if ((status = authorize_renderer_root_present(root,
@@ -2935,12 +3063,38 @@ static NTSTATUS present_renderer_root(void *args)
     }
     renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+    if (use_snapshot)
+    {
+        snapshot_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        snapshot_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        snapshot_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        snapshot_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        snapshot_barrier.buffer = root->snapshot_buffer;
+        snapshot_barrier.size = VK_WHOLE_SIZE;
+        renderer.p_vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1, &snapshot_barrier,
+                0, NULL);
+        memset(&buffer_copy, 0, sizeof(buffer_copy));
+        buffer_copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        buffer_copy.imageSubresource.layerCount = 1;
+        buffer_copy.imageExtent.width = root->snapshot_width;
+        buffer_copy.imageExtent.height = root->snapshot_height;
+        buffer_copy.imageExtent.depth = 1;
+        renderer.p_vkCmdCopyBufferToImage(command_buffer, root->snapshot_buffer,
+                root->swapchain_images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &buffer_copy);
+    }
     if (source)
     {
         memset(&image_copy, 0, sizeof(image_copy));
         image_copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         image_copy.srcSubresource.layerCount = 1;
         image_copy.dstSubresource = image_copy.srcSubresource;
+        if (use_snapshot)
+        {
+            image_copy.dstOffset.x = root->snapshot_client_x;
+            image_copy.dstOffset.y = root->snapshot_client_y;
+        }
         image_copy.extent.width = source->width;
         image_copy.extent.height = source->height;
         image_copy.extent.depth = 1;
@@ -2948,7 +3102,7 @@ static NTSTATUS present_renderer_root(void *args)
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, root->swapchain_images[image_index],
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &image_copy);
     }
-    else
+    else if (!use_snapshot)
     {
         color.float32[0] = ((params->clear_color >> 16) & 0xff) / 255.0f;
         color.float32[1] = ((params->clear_color >> 8) & 0xff) / 255.0f;
@@ -3801,6 +3955,12 @@ static NTSTATUS present_renderer_root(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS update_renderer_root_snapshot(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS shell_self_test(void *args)
 {
     (void)args;
@@ -3924,6 +4084,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     release_renderer_frame,
     get_renderer_input,
     test_renderer_input,
+    update_renderer_root_snapshot,
 };
 
 #ifdef _WIN64
@@ -3946,6 +4107,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     release_renderer_frame,
     get_renderer_input,
     test_renderer_input,
+    update_renderer_root_snapshot,
 };
 #endif
 

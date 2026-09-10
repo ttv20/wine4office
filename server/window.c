@@ -5261,7 +5261,7 @@ DECL_HANDLER(publish_wayland_frame_snapshot)
 
     reply->snapshot_revision = 0;
     reply->geometry_revision = 0;
-    if (!req->snapshot_revision || !req->geometry_revision || !req->width || !req->height ||
+    if (!req->snapshot_revision || !req->width || !req->height ||
         req->width > 16384 || req->height > 16384 ||
         req->format != WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM ||
         req->flags != WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED ||
@@ -5285,7 +5285,7 @@ DECL_HANDLER(publish_wayland_frame_snapshot)
             root->window_rect.right - root->window_rect.left : 0;
     window_height = root->window_rect.bottom > root->window_rect.top ?
             root->window_rect.bottom - root->window_rect.top : 0;
-    if (req->geometry_revision != root->wayland_geometry_revision ||
+    if ((req->geometry_revision && req->geometry_revision != root->wayland_geometry_revision) ||
         req->width != window_width || req->height != window_height)
         set_error( STATUS_REVISION_MISMATCH );
     else if (req->snapshot_revision <= root->wayland_frame_snapshot_revision)
@@ -5309,7 +5309,7 @@ DECL_HANDLER(publish_wayland_frame_snapshot)
             root->wayland_frame_snapshot = (struct object *)mapping;
             mapping = NULL;
             root->wayland_frame_snapshot_revision = req->snapshot_revision;
-            root->wayland_frame_snapshot_geometry_revision = req->geometry_revision;
+            root->wayland_frame_snapshot_geometry_revision = root->wayland_geometry_revision;
             root->wayland_frame_snapshot_size = mapping_size;
             root->wayland_frame_snapshot_width = req->width;
             root->wayland_frame_snapshot_height = req->height;

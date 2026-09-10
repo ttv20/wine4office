@@ -27,8 +27,11 @@
 #include <limits.h>
 #include <stdlib.h>
 
+#include "ntstatus.h"
+
 #include "waylanddrv.h"
 #include "wine/debug.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
@@ -38,6 +41,12 @@ static const WCHAR dcomp_background_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','o','m','p','o','s','i','t','e','_','a','l','p','h','a','_','b','a','c','k','g','r','o','u','n','d',0};
 static const WCHAR dcomp_caption_overlay_prop[] =
     {'_','_','w','i','n','e','_','d','c','o','m','p','_','c','a','p','t','i','o','n','_','o','v','e','r','l','a','y',0};
+static const WCHAR dcomp_target_below_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t','_','b','e','l','o','w',0};
+static const WCHAR dcomp_target_above_prop[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','t','a','r','g','e','t','_','a','b','o','v','e',0};
+
+static LONG64 frame_snapshot_revision;
 
 struct wayland_buffer_queue
 {
@@ -374,6 +383,80 @@ static void wayland_shm_buffer_copy_shape(struct wayland_shm_buffer *buffer, con
     }
 }
 
+static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *source)
+{
+    RECT window_rect, client_rect;
+    POINT client_origin = {0};
+    LARGE_INTEGER section_size;
+    SIZE_T view_size = 0;
+    HANDLE mapping = 0;
+    UINT64 revision;
+    UINT32 *bits;
+    unsigned int width, height, y;
+    int client_left, client_top, client_right, client_bottom;
+    NTSTATUS status;
+
+    if (!NtUserGetWindowRect(hwnd, &window_rect, NtUserGetDpiForWindow(hwnd)) ||
+        !NtUserGetClientRect(hwnd, &client_rect, NtUserGetDpiForWindow(hwnd)) ||
+        !NtUserClientToScreen(hwnd, &client_origin) ||
+        window_rect.right <= window_rect.left || window_rect.bottom <= window_rect.top)
+        return;
+    width = window_rect.right - window_rect.left;
+    height = window_rect.bottom - window_rect.top;
+    if (width > source->width || height > source->height || width > 16384 || height > 16384 ||
+        (UINT64)width * height * sizeof(*bits) > 64ull * 1024 * 1024)
+        return;
+
+    section_size.QuadPart = (UINT64)width * height * sizeof(*bits);
+    status = NtCreateSection(&mapping, SECTION_MAP_READ | SECTION_MAP_WRITE, NULL,
+            &section_size, PAGE_READWRITE, SEC_COMMIT, 0);
+    if (status) return;
+    status = NtMapViewOfSection(mapping, GetCurrentProcess(), (void **)&bits, 0, 0, NULL,
+            &view_size, ViewUnmap, 0, PAGE_READWRITE);
+    if (status) goto done;
+    for (y = 0; y < height; ++y)
+        memcpy(bits + y * width, (const UINT32 *)source->map_data + y * source->width,
+                width * sizeof(*bits));
+
+    client_left = client_origin.x - window_rect.left;
+    client_top = client_origin.y - window_rect.top;
+    client_right = client_left + client_rect.right - client_rect.left;
+    client_bottom = client_top + client_rect.bottom - client_rect.top;
+    client_left = max(client_left, 0);
+    client_top = max(client_top, 0);
+    client_right = min(client_right, (int)width);
+    client_bottom = min(client_bottom, (int)height);
+    client_right = max(client_right, client_left);
+    client_bottom = max(client_bottom, client_top);
+    for (y = client_top; y < client_bottom; ++y)
+        memset(bits + y * width + client_left, 0,
+                (client_right - client_left) * sizeof(*bits));
+    NtUnmapViewOfSection(GetCurrentProcess(), bits);
+
+    revision = InterlockedIncrement64(&frame_snapshot_revision);
+    if (!revision) revision = InterlockedIncrement64(&frame_snapshot_revision);
+    SERVER_START_REQ(publish_wayland_frame_snapshot)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        req->mapping = wine_server_obj_handle(mapping);
+        req->width = width;
+        req->height = height;
+        req->stride = width * sizeof(*bits);
+        req->format = WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM;
+        req->flags = WINE_WAYLAND_FRAME_SNAPSHOT_PREMULTIPLIED;
+        req->snapshot_revision = revision;
+        req->geometry_revision = 0; /* atomically bind to the server's current geometry */
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    if (status != STATUS_SUCCESS && status != STATUS_REVISION_MISMATCH &&
+        status != STATUS_DEVICE_NOT_READY)
+        TRACE("Frame snapshot publication for %p returned %#x.\n", hwnd, status);
+
+done:
+    NtClose(mapping);
+}
+
 /***********************************************************************
  *           wayland_window_surface_flush
  */
@@ -386,7 +469,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
     BOOL flushed = FALSE;
     BOOL update_full_shape = shape_changed;
-    BOOL dcomp_host;
+    BOOL dcomp_host, dcomp_target;
     BOOL reapply_clip;
     HWND popup_restack_owner;
     HRGN surface_damage_region = NULL;
@@ -403,6 +486,8 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     dcomp_host = NtUserGetProp(window_surface->hwnd, dcomp_detached_window_prop) &&
                  !NtUserGetProp(window_surface->hwnd, dcomp_background_prop) &&
                  !NtUserGetProp(window_surface->hwnd, dcomp_caption_overlay_prop);
+    dcomp_target = NtUserGetProp(window_surface->hwnd, dcomp_target_below_prop) ||
+                   NtUserGetProp(window_surface->hwnd, dcomp_target_above_prop);
     wayland_window_surface_presented(window_surface->hwnd);
     window_surface_lock(window_surface);
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
@@ -481,6 +566,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     if (shape_bits)
         wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
                                       shape_info, shape_bits);
+    if (dcomp_target) publish_frame_snapshot(window_surface->hwnd, shm_buffer);
     if (dcomp_host)
     {
         UINT32 *pixel = shm_buffer->map_data;
