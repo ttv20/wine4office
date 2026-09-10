@@ -194,23 +194,29 @@ jobs:
         run: |
           set -euo pipefail
           version='${{ steps.version.outputs.version }}'
-          manager="/work/release/Wine4OfficeManager-${version}-x86_64"
-          runner="/work/release/wine4office-${version}-x86_64.tar.zst"
+          container_workspace=/work
+          workspace_args=(--mount "type=bind,src=$GITHUB_WORKSPACE,dst=$container_workspace")
+          if [[ -n ${HOSTNAME:-} ]] && docker container inspect "$HOSTNAME" >/dev/null 2>&1; then
+            workspace_args=(--volumes-from "$HOSTNAME")
+            container_workspace=$GITHUB_WORKSPACE
+          fi
+          manager="$container_workspace/release/Wine4OfficeManager-${version}-x86_64"
+          runner="$container_workspace/release/wine4office-${version}-x86_64.tar.zst"
           docker run --rm --init \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
-            --workdir /work ubuntu:24.04 bash -eu -c '
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" ubuntu:24.04 bash -eu -c '
               apt-get update
               apt-get install -y --no-install-recommends dpkg-dev python3 zstd
               tools/wine4office-manager/packaging/distribution/build-deb.sh \
-                "$1" "$2" "$3" apt wine4office /work/release
-            ' -- "$manager" "$runner" "$version"
+                "$1" "$2" "$3" apt wine4office "$4/release"
+            ' -- "$manager" "$runner" "$version" "$container_workspace"
           docker run --rm --init \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
-            --workdir /work fedora:latest bash -eu -c '
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" fedora:latest bash -eu -c '
               dnf install -y python3 rpm-build tar zstd
               tools/wine4office-manager/packaging/distribution/build-rpm.sh \
-                "$1" "$2" "$3" dnf wine4office /work/release
-            ' -- "$manager" "$runner" "$version"
+                "$1" "$2" "$3" dnf wine4office "$4/release"
+            ' -- "$manager" "$runner" "$version" "$container_workspace"
           python3 tools/wine4office-manager/packaging/distribution/generate-community-packages.py \
             release/release.json release/community
           tar -C release/community --sort=name --mtime=@0 --owner=0 --group=0 \
@@ -265,16 +271,24 @@ jobs:
           deb=$(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -name 'wine4office_*_amd64.deb' -print -quit)
           rpm=$(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -name 'wine4office-*.x86_64.rpm' -print -quit)
           test -n "$deb" && test -n "$rpm"
-          deb="/work/release/$(basename "$deb")"
-          rpm="/work/release/$(basename "$rpm")"
+          container_workspace=/work
+          workspace_args=(--mount "type=bind,src=$GITHUB_WORKSPACE,dst=$container_workspace")
+          if [[ -n ${HOSTNAME:-} ]] && docker container inspect "$HOSTNAME" >/dev/null 2>&1; then
+            workspace_args=(--volumes-from "$HOSTNAME")
+            container_workspace=$GITHUB_WORKSPACE
+          fi
+          deb="$container_workspace/release/$(basename "$deb")"
+          rpm="$container_workspace/release/$(basename "$rpm")"
+          manager="$container_workspace/release/Wine4OfficeManager-${version}-x86_64"
+          repositories="$container_workspace/release/repositories"
           docker run --rm --init \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
-            --workdir /work ubuntu:24.04 bash -eu -c '
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" ubuntu:24.04 bash -eu -c '
               apt-get update
               apt-get install -y --no-install-recommends apt-utils
               tools/wine4office-manager/packaging/distribution/build-apt-repository.sh \
-                /work/release/repositories/apt stable "$1"
-              printf "deb [trusted=yes] file:/work/release/repositories/apt stable main\n" \
+                "$3/apt" stable "$1"
+              printf "deb [trusted=yes] file:$3/apt stable main\n" \
                 > /etc/apt/sources.list.d/wine4office-test.list
               apt-get update
               apt-get install -y --no-install-recommends wine4office
@@ -284,17 +298,17 @@ jobs:
                 /opt/wine4office/bin/Wine4OfficeManager --smoke-test
               runuser -u package-test -- \
                 /opt/wine4office/runner/bin/wine --version
-            ' -- "$deb" "/work/release/Wine4OfficeManager-${version}-x86_64"
+            ' -- "$deb" "$manager" "$repositories"
           docker run --rm --init \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
-            --workdir /work fedora:latest bash -eu -c '
+            "${workspace_args[@]}" \
+            --workdir "$container_workspace" fedora:latest bash -eu -c '
               dnf install -y createrepo_c
               tools/wine4office-manager/packaging/distribution/build-rpm-repository.sh \
-                /work/release/repositories "$1"
+                "$3" "$1"
               printf "%s\n" \
                 "[wine4office-test]" \
                 "name=Wine4Office test" \
-                "baseurl=file:///work/release/repositories/rpm/x86_64" \
+                "baseurl=file://$3/rpm/x86_64" \
                 "enabled=1" \
                 "gpgcheck=0" \
                 > /etc/yum.repos.d/wine4office-test.repo
@@ -305,7 +319,7 @@ jobs:
                 /opt/wine4office/bin/Wine4OfficeManager --smoke-test
               runuser -u package-test -- \
                 /opt/wine4office/runner/bin/wine --version
-            ' -- "$rpm" "/work/release/Wine4OfficeManager-${version}-x86_64"
+            ' -- "$rpm" "$manager" "$repositories"
           tar -C release/repositories --sort=name --mtime=@0 --owner=0 --group=0 \
             --numeric-owner -czf "release/wine4office-${version}-repositories-unsigned.tar.gz" .
 

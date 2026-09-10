@@ -196,8 +196,13 @@ grep -F 'libfreetype-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'libfontconfig-dev:i386' "$contract/image/Dockerfile" >/dev/null
 grep -F 'tools/wine-build-env/run-build-container.sh full' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
-grep -F -- '--workdir /work ubuntu:24.04' \
+grep -F -- '--workdir "$container_workspace" ubuntu:24.04' \
     "$root/.github/workflows/wine4office-release.yml" >/dev/null
+[[ $(grep -Fc 'workspace_args=(--volumes-from "$HOSTNAME")' \
+    "$root/.github/workflows/wine4office-release.yml") -eq 2 ]] || {
+    echo "Release package containers must inherit a containerized runner workspace" >&2
+    exit 1
+}
 assert_absent 'Install build dependencies when permitted' \
     "$root/.github/workflows/wine4office-release.yml"
 grep -F -- '--exclude=/.git' "$contract/sync-agent-source.sh" >/dev/null
