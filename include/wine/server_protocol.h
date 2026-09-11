@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 9
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 10
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -71,6 +71,17 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_CONFIGURE_STATE_TILED      0x00000004
 #define WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN 0x00000008
 #define WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED  0x00000010
+
+#define WINE_WAYLAND_KEYBOARD_MOD_SHIFT       0x00000001
+#define WINE_WAYLAND_KEYBOARD_MOD_CONTROL     0x00000002
+#define WINE_WAYLAND_KEYBOARD_MOD_ALT         0x00000004
+#define WINE_WAYLAND_KEYBOARD_MOD_ALTGR       0x00000008
+#define WINE_WAYLAND_KEYBOARD_LOCK_CAPS       0x00000100
+#define WINE_WAYLAND_KEYBOARD_LOCK_NUM        0x00000200
+#define WINE_WAYLAND_KEYBOARD_LOCK_SCROLL     0x00000400
+#define WINE_WAYLAND_KEYBOARD_GROUP_SHIFT     24
+#define WINE_WAYLAND_KEYBOARD_GROUP_MASK      0xff000000
+#define WINE_WAYLAND_KEYBOARD_STATE_MASK      0x0000070f
 
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
@@ -7308,6 +7319,25 @@ struct manage_wayland_window_direct_surface_reply
     char __pad_12[4];
 };
 
+/* Reconcile effective and locked keyboard state without manufacturing key
+ * messages.  The high byte carries the bounded XKB layout group.  Keep new
+ * requests appended so existing protocol operation numbers remain stable. */
+struct sync_wayland_host_keyboard_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     modifiers;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+};
+struct sync_wayland_host_keyboard_reply
+{
+    struct reply_header __header;
+};
+
 
 enum request
 {
@@ -7672,6 +7702,7 @@ enum request
     REQ_publish_wayland_frame_snapshot,
     REQ_get_wayland_frame_snapshot,
     REQ_manage_wayland_window_direct_surface,
+    REQ_sync_wayland_host_keyboard,
     REQ_NB_REQUESTS
 };
 
@@ -8040,6 +8071,7 @@ union generic_request
     struct publish_wayland_frame_snapshot_request publish_wayland_frame_snapshot_request;
     struct get_wayland_frame_snapshot_request get_wayland_frame_snapshot_request;
     struct manage_wayland_window_direct_surface_request manage_wayland_window_direct_surface_request;
+    struct sync_wayland_host_keyboard_request sync_wayland_host_keyboard_request;
 };
 union generic_reply
 {
@@ -8406,8 +8438,9 @@ union generic_reply
     struct publish_wayland_frame_snapshot_reply publish_wayland_frame_snapshot_reply;
     struct get_wayland_frame_snapshot_reply get_wayland_frame_snapshot_reply;
     struct manage_wayland_window_direct_surface_reply manage_wayland_window_direct_surface_reply;
+    struct sync_wayland_host_keyboard_reply sync_wayland_host_keyboard_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 998
+#define SERVER_PROTOCOL_VERSION 1000
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

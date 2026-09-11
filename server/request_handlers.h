@@ -368,6 +368,7 @@ DECL_HANDLER(send_wayland_host_input);
 DECL_HANDLER(publish_wayland_frame_snapshot);
 DECL_HANDLER(get_wayland_frame_snapshot);
 DECL_HANDLER(manage_wayland_window_direct_surface);
+DECL_HANDLER(sync_wayland_host_keyboard);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -733,6 +734,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_publish_wayland_frame_snapshot,
     (req_handler)req_get_wayland_frame_snapshot,
     (req_handler)req_manage_wayland_window_direct_surface,
+    (req_handler)req_sync_wayland_host_keyboard,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2955,3 +2957,10 @@ C_ASSERT( offsetof(struct manage_wayland_window_direct_surface_request, active) 
 C_ASSERT( sizeof(struct manage_wayland_window_direct_surface_request) == 24 );
 C_ASSERT( offsetof(struct manage_wayland_window_direct_surface_reply, active_count) == 8 );
 C_ASSERT( sizeof(struct manage_wayland_window_direct_surface_reply) == 16 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, root) == 12 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, modifiers) == 16 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, host_epoch) == 24 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, root_identity) == 32 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, root_generation) == 40 );
+C_ASSERT( offsetof(struct sync_wayland_host_keyboard_request, event_id) == 48 );
+C_ASSERT( sizeof(struct sync_wayland_host_keyboard_request) == 56 );

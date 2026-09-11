@@ -2209,6 +2209,8 @@ static void set_window_pos( struct window *win, struct window *previous,
     if (!(swp_flags & SWP_NOZORDER) && win->parent) zorder_changed |= link_window( win, previous );
     if (swp_flags & SWP_SHOWWINDOW) win->style |= WS_VISIBLE;
     else if (swp_flags & SWP_HIDEWINDOW) win->style &= ~WS_VISIBLE;
+    if ((swp_flags & SWP_HIDEWINDOW) && is_toplevel( win ))
+        release_wayland_host_inputs( win->desktop, win->handle );
 
     /* update window monitor dpi for toplevel windows */
     if (is_toplevel( win )) set_window_monitor_dpi( win );

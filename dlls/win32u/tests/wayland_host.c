@@ -73,6 +73,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_SEND_INPUT,
+    HOST_CHILD_COMMAND_SYNC_KEYBOARD,
     HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE,
     HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT,
     HOST_CHILD_COMMAND_EXIT,
@@ -701,6 +702,26 @@ static NTSTATUS send_host_input( HWND root, UINT64 host_epoch, UINT64 root_ident
         req->root_generation = root_generation;
         req->event_id = event_id;
         wine_server_add_data( req, &input, sizeof(input) );
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS sync_host_keyboard( HWND root, UINT64 host_epoch, UINT64 root_identity,
+                                    UINT64 root_generation, UINT64 event_id,
+                                    DWORD modifiers )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( sync_wayland_host_keyboard )
+    {
+        req->root = wine_server_user_handle( root );
+        req->modifiers = modifiers;
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->event_id = event_id;
         status = p_wine_server_call( req );
     }
     SERVER_END_REQ;
@@ -1803,6 +1824,11 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->input_event_id, state->input_type, state->input_flags,
                     state->input_x, state->input_y, state->input_data );
             break;
+        case HOST_CHILD_COMMAND_SYNC_KEYBOARD:
+            state->command_status = sync_host_keyboard( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->root_identity, state->root_generation,
+                    state->input_event_id, state->input_flags );
+            break;
         case HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE:
             state->command_status = manage_direct_surface( (HWND)(UINT_PTR)state->root,
                     state->direct_surface_active, &state->direct_surface_count );
@@ -2095,7 +2121,7 @@ static void test_host_registration( const char *program, const char *test_name )
     NTSTATUS status;
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
     unsigned int i;
-    DWORD registered_slots, imported_slots, failed_slots;
+    DWORD registered_slots, imported_slots, failed_slots, initial_caps;
     MSG msg;
     DWORD *snapshot_bits;
 
@@ -3585,13 +3611,57 @@ static void test_host_registration( const char *program, const char *test_name )
         "Direct native key up returned %#lx without the expected root message.\n",
         state->command_status );
 
+    initial_caps = GetKeyState( VK_CAPITAL ) & 1;
+    while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
+    state->input_event_id = 5;
+    state->input_flags = 0x00008000;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out sending invalid native keyboard state.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER,
+        "Invalid native keyboard state returned %#lx.\n", state->command_status );
+    state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
+            (initial_caps ? 0 : WINE_WAYLAND_KEYBOARD_LOCK_CAPS) |
+            (1u << WINE_WAYLAND_KEYBOARD_GROUP_SHIFT);
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out reconciling native keyboard state.\n" );
+    ok( !state->command_status && (GetKeyState( VK_SHIFT ) & 0x8000) &&
+        !!(GetKeyState( VK_CAPITAL ) & 1) != !!initial_caps,
+        "Native keyboard state returned %#lx, Shift %#x, Caps %#x.\n",
+        state->command_status, GetKeyState( VK_SHIFT ), GetKeyState( VK_CAPITAL ) );
+    ok( !PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ),
+        "Native keyboard reconciliation manufactured message %#x.\n", msg.message );
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out replaying native keyboard state.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Replayed native keyboard state returned %#lx.\n", state->command_status );
+    state->input_event_id = 6;
+    state->input_flags &= ~WINE_WAYLAND_KEYBOARD_MOD_SHIFT;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out clearing native effective modifiers.\n" );
+    ok( !state->command_status && !(GetKeyState( VK_SHIFT ) & 0x8000),
+        "Clearing native modifiers returned %#lx, Shift %#x.\n",
+        state->command_status, GetKeyState( VK_SHIFT ) );
+    state->input_event_id = 7;
+    state->input_flags = initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out restoring native lock state.\n" );
+    ok( !state->command_status &&
+        !!(GetKeyState( VK_CAPITAL ) & 1) == !!initial_caps,
+        "Restoring native lock state returned %#lx, Caps %#x.\n",
+        state->command_status, GetKeyState( VK_CAPITAL ) );
+
     SetActiveWindow( root );
     SetFocus( root );
     input_point.x = 8;
     input_point.y = 9;
     ClientToScreen( root, &input_point );
     while (PeekMessageW( &msg, root, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
-    state->input_event_id = 5;
+    state->input_event_id = 8;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     state->input_x = input_point.x;
@@ -3606,7 +3676,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Native pointer motion returned %#lx at %ld,%ld instead of %ld,%ld.\n",
         state->command_status, cursor_point.x, cursor_point.y,
         input_point.x, input_point.y );
-    state->input_event_id = 6;
+    state->input_event_id = 9;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
@@ -3614,7 +3684,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
         "Native pointer down returned %#lx without pressed button state.\n",
         state->command_status );
-    state->input_event_id = 7;
+    state->input_event_id = 10;
     state->input_flags = MOUSEEVENTF_LEFTUP;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
@@ -3623,7 +3693,32 @@ static void test_host_registration( const char *program, const char *test_name )
         "Native pointer up returned %#lx with pressed button state.\n",
         state->command_status );
     while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
+    state->input_event_id = 11;
+    state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
+            (initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0);
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out setting native modifiers before hide.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( VK_SHIFT ) & 0x8000),
+        "Pre-hide native modifiers returned %#lx without Shift state.\n",
+        state->command_status );
+    state->input_event_id = 12;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out pressing the pre-hide native key.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( 'A' ) & 0x8000) &&
+        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
+        "Pre-hide native key returned %#lx without pressed state or message.\n",
+        state->command_status );
     ShowWindow( root, SW_HIDE );
+    ok( !(GetAsyncKeyState( 'A' ) & 0x8000) &&
+        !(GetAsyncKeyState( VK_SHIFT ) & 0x8000) &&
+        !!(GetKeyState( VK_CAPITAL ) & 1) == !!initial_caps,
+        "Hiding the native root did not release key/modifier state or changed Caps.\n" );
+    ok( PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Hiding the native root did not queue key-up.\n" );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
         "Timed out querying the auto-hidden scene.\n" );
@@ -3633,7 +3728,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Hidden window scene returned %#lx, generation %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         state->scene_disposition );
-    state->input_event_id = 8;
+    state->input_event_id = 13;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -3641,6 +3736,14 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out sending input to the auto-hidden scene.\n" );
     ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
         "Auto-hidden native input returned %#lx.\n", state->command_status );
+    state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out reconciling modifiers for the auto-hidden scene.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE &&
+        !(GetAsyncKeyState( VK_SHIFT ) & 0x8000),
+        "Auto-hidden modifier state returned %#lx, Shift %#x.\n",
+        state->command_status, GetAsyncKeyState( VK_SHIFT ) );
     ShowWindow( root, SW_SHOW );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
@@ -3665,7 +3768,7 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( state->registry_generation ),
         wine_dbgstr_longlong( state->revocation_scene_generation ) );
     scene_generation = state->revocation_scene_generation;
-    state->input_event_id = 9;
+    state->input_event_id = 13;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4851,7 +4954,16 @@ static void test_host_registration( const char *program, const char *test_name )
 
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
-    state->input_event_id = 10;
+    state->input_event_id = 13;
+    state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
+            (initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0);
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
+        "Timed out setting the host-exit modifier state.\n" );
+    ok( !state->command_status && (GetKeyState( VK_SHIFT ) & 0x8000),
+        "Host-exit modifier state returned %#lx, Shift %#x.\n",
+        state->command_status, GetKeyState( VK_SHIFT ) );
+    state->input_event_id = 14;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4861,7 +4973,7 @@ static void test_host_registration( const char *program, const char *test_name )
         PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Host-exit key down returned %#lx without pressed state or message.\n",
         state->command_status );
-    state->input_event_id = 11;
+    state->input_event_id = 15;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4871,11 +4983,18 @@ static void test_host_registration( const char *program, const char *test_name )
         "Host-exit pointer down returned %#lx without pressed state.\n",
         state->command_status );
     stop_host_child( state, command_event, result_event, &process );
-    ok( !(GetAsyncKeyState( 'A' ) & 0x8000) &&
+    ok( !(GetAsyncKeyState( 'A' ) & 0x8000),
+        "Host exit left the key pressed.\n" );
+    ok( !(GetAsyncKeyState( VK_SHIFT ) & 0x8000),
+        "Host exit left the effective modifier pressed globally.\n" );
+    ok(
         PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
-        "Host exit left the key pressed or did not queue key-up.\n" );
+        "Host exit did not queue key-up.\n" );
     ok( !(GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
         "Host exit left the pointer button pressed.\n" );
+    while (PeekMessageW( &msg, root, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
+    ok( !(GetKeyState( VK_SHIFT ) & 0x8000),
+        "Host exit left the effective modifier pressed after input drain.\n" );
     status = get_host( &info );
     ok( status == STATUS_NOT_FOUND, "Host query after peer exit returned %#lx.\n", status );
     ok( !info.process_id && !info.host_epoch && !info.ready,

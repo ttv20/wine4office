@@ -25,11 +25,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-names.h>
 
 #include "xdg-shell-client-protocol.h"
 
@@ -263,9 +266,13 @@ struct renderer_root
     BOOL test_fail_next_frame_copy;
     BOOL input_authorized;
     BOOL keyboard_snapshot_pending;
+    BOOL keyboard_modifiers_valid;
+    BOOL keyboard_modifiers_pending;
     uint32_t keyboard_serial;
     uint32_t keyboard_key_count;
     uint32_t keyboard_keys[MAX_RENDERER_ENTER_KEYS];
+    uint32_t keyboard_modifiers;
+    uint32_t keyboard_group;
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
@@ -345,6 +352,9 @@ struct vulkan_renderer
     struct wl_pointer *pointer;
     struct renderer_root *keyboard_root;
     struct renderer_root *pointer_root;
+    struct xkb_context *xkb_context;
+    struct xkb_keymap *xkb_keymap;
+    struct xkb_state *xkb_state;
     uint32_t pointer_serial;
     int64_t pointer_axis_fixed[2];
     int32_t pointer_axis_remainder[2];
@@ -613,11 +623,11 @@ static uint32_t renderer_key_to_scan(uint32_t key)
 static void queue_renderer_keyboard_snapshot(struct renderer_root *root)
 {
     struct winewayland_host_input_event event = {0};
-    unsigned int i;
+    unsigned int count, i;
 
     if (!root || !root->input_authorized || !root->keyboard_snapshot_pending) return;
-    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) -
-            root->keyboard_key_count - 1)
+    count = root->keyboard_key_count + 1 + root->keyboard_modifiers_valid;
+    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) - count)
     {
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
         return;
@@ -631,7 +641,33 @@ static void queue_renderer_keyboard_snapshot(struct renderer_root *root)
         event.state = WL_KEYBOARD_KEY_STATE_PRESSED;
         queue_renderer_input(root, &event, FALSE);
     }
+    if (root->keyboard_modifiers_valid)
+    {
+        memset(&event, 0, sizeof(event));
+        event.type = WINEWAYLAND_HOST_INPUT_MODIFIERS;
+        event.serial = root->keyboard_serial;
+        event.flags = root->keyboard_modifiers;
+        event.code = root->keyboard_group;
+        queue_renderer_input(root, &event, FALSE);
+        root->keyboard_modifiers_pending = FALSE;
+    }
     root->keyboard_snapshot_pending = FALSE;
+}
+
+static void queue_renderer_keyboard_modifiers(struct renderer_root *root)
+{
+    struct winewayland_host_input_event event = {0};
+
+    if (!root || !root->input_authorized || !root->keyboard_modifiers_valid ||
+        !root->keyboard_modifiers_pending || root->keyboard_snapshot_pending ||
+        renderer.input_count == ARRAY_SIZE(renderer.input_events))
+        return;
+    event.type = WINEWAYLAND_HOST_INPUT_MODIFIERS;
+    event.serial = root->keyboard_serial;
+    event.flags = root->keyboard_modifiers;
+    event.code = root->keyboard_group;
+    queue_renderer_input(root, &event, FALSE);
+    root->keyboard_modifiers_pending = FALSE;
 }
 
 static NTSTATUS store_renderer_keyboard_enter(struct renderer_root *root, uint32_t serial,
@@ -688,9 +724,12 @@ static void set_renderer_input_authorized(struct renderer_root *root, BOOL autho
     {
         discard_renderer_input(root);
         root->keyboard_snapshot_pending = renderer.keyboard_root == root;
+        root->keyboard_modifiers_pending = renderer.keyboard_root == root &&
+                root->keyboard_modifiers_valid;
         return;
     }
     queue_renderer_keyboard_snapshot(root);
+    queue_renderer_keyboard_modifiers(root);
 }
 
 static void queue_pending_renderer_keyboard_snapshots(void)
@@ -698,7 +737,10 @@ static void queue_pending_renderer_keyboard_snapshots(void)
     unsigned int i;
 
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+    {
         queue_renderer_keyboard_snapshot(&renderer.roots[i]);
+        queue_renderer_keyboard_modifiers(&renderer.roots[i]);
+    }
 }
 
 static NTSTATUS get_renderer_input(void *args);
@@ -888,11 +930,95 @@ static const struct wl_pointer_listener renderer_pointer_listener =
 static void renderer_keyboard_keymap(void *data, struct wl_keyboard *keyboard,
         uint32_t format, int fd, uint32_t size)
 {
+    struct xkb_keymap *keymap = NULL;
+    struct xkb_state *state = NULL;
+    const char *string = MAP_FAILED;
+
     (void)data;
     (void)keyboard;
-    (void)format;
-    (void)size;
+    if (!renderer.xkb_context || format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 ||
+        !size || size > 4 * 1024 * 1024 ||
+        (string = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED ||
+        string[size - 1] ||
+        !(keymap = xkb_keymap_new_from_string(renderer.xkb_context, string,
+                XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS)) ||
+        !(state = xkb_state_new(keymap)))
+        goto done;
+    if (renderer.xkb_state) xkb_state_unref(renderer.xkb_state);
+    if (renderer.xkb_keymap) xkb_keymap_unref(renderer.xkb_keymap);
+    renderer.xkb_keymap = keymap;
+    renderer.xkb_state = state;
+    keymap = NULL;
+    state = NULL;
+
+done:
+    if (state) xkb_state_unref(state);
+    if (keymap) xkb_keymap_unref(keymap);
+    if (string != MAP_FAILED) munmap((void *)string, size);
     close(fd);
+}
+
+static BOOL renderer_xkb_mod_active(struct xkb_state *state, const char *name,
+        enum xkb_state_component component)
+{
+    return xkb_state_mod_name_is_active(state, name, component) > 0;
+}
+
+static uint32_t get_renderer_keyboard_modifiers(struct xkb_state *state)
+{
+    uint32_t modifiers = 0;
+
+    if (renderer_xkb_mod_active(state, XKB_MOD_NAME_SHIFT,
+            XKB_STATE_MODS_EFFECTIVE))
+        modifiers |= WINEWAYLAND_HOST_MOD_SHIFT;
+    if (renderer_xkb_mod_active(state, XKB_MOD_NAME_CTRL,
+            XKB_STATE_MODS_EFFECTIVE))
+        modifiers |= WINEWAYLAND_HOST_MOD_CONTROL;
+    if (renderer_xkb_mod_active(state, XKB_MOD_NAME_ALT,
+            XKB_STATE_MODS_EFFECTIVE))
+        modifiers |= WINEWAYLAND_HOST_MOD_ALT;
+    if (renderer_xkb_mod_active(state, "Mod5",
+            XKB_STATE_MODS_EFFECTIVE))
+        modifiers |= WINEWAYLAND_HOST_MOD_ALTGR;
+    if (renderer_xkb_mod_active(state, XKB_MOD_NAME_CAPS,
+            XKB_STATE_MODS_LOCKED))
+        modifiers |= WINEWAYLAND_HOST_LOCK_CAPS;
+    if (renderer_xkb_mod_active(state, XKB_MOD_NAME_NUM,
+            XKB_STATE_MODS_LOCKED))
+        modifiers |= WINEWAYLAND_HOST_LOCK_NUM;
+    if (renderer_xkb_mod_active(state, "Mod3",
+            XKB_STATE_MODS_LOCKED))
+        modifiers |= WINEWAYLAND_HOST_LOCK_SCROLL;
+    return modifiers;
+}
+
+static void store_renderer_keyboard_modifiers(struct renderer_root *root, uint32_t serial,
+        uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group)
+{
+    if (!root || !renderer.xkb_state || group > 0xff) return;
+    xkb_state_update_mask(renderer.xkb_state, depressed, latched, locked, 0, 0, group);
+    root->keyboard_serial = serial;
+    root->keyboard_modifiers = get_renderer_keyboard_modifiers(renderer.xkb_state);
+    root->keyboard_group = group;
+    root->keyboard_modifiers_valid = TRUE;
+    root->keyboard_modifiers_pending = TRUE;
+    queue_renderer_keyboard_modifiers(root);
+}
+
+static void leave_renderer_keyboard_root(struct renderer_root *root)
+{
+    if (!root) return;
+    root->keyboard_key_count = 0;
+    root->keyboard_snapshot_pending = FALSE;
+    if (root->keyboard_modifiers_valid)
+    {
+        root->keyboard_modifiers &= WINEWAYLAND_HOST_LOCK_CAPS |
+                WINEWAYLAND_HOST_LOCK_NUM | WINEWAYLAND_HOST_LOCK_SCROLL;
+        root->keyboard_modifiers_pending = TRUE;
+        queue_renderer_keyboard_modifiers(root);
+    }
+    if (root->input_authorized)
+        queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
 }
 
 static void renderer_keyboard_enter(void *data, struct wl_keyboard *keyboard,
@@ -903,13 +1029,7 @@ static void renderer_keyboard_enter(void *data, struct wl_keyboard *keyboard,
     (void)data;
     (void)keyboard;
     if (renderer.keyboard_root && renderer.keyboard_root != root)
-    {
-        if (renderer.keyboard_root->input_authorized)
-            queue_renderer_input_reset(renderer.keyboard_root,
-                    WINEWAYLAND_HOST_INPUT_RESET_KEYS);
-        renderer.keyboard_root->keyboard_key_count = 0;
-        renderer.keyboard_root->keyboard_snapshot_pending = FALSE;
-    }
+        leave_renderer_keyboard_root(renderer.keyboard_root);
     renderer.keyboard_root = root;
     if (renderer.keyboard_root)
         store_renderer_keyboard_enter(renderer.keyboard_root, serial, keys);
@@ -925,13 +1045,7 @@ static void renderer_keyboard_leave(void *data, struct wl_keyboard *keyboard,
     (void)serial;
     (void)surface;
     renderer.keyboard_root = NULL;
-    if (root)
-    {
-        root->keyboard_key_count = 0;
-        root->keyboard_snapshot_pending = FALSE;
-        if (root->input_authorized)
-            queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
-    }
+    leave_renderer_keyboard_root(root);
 }
 
 static void renderer_keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial,
@@ -983,11 +1097,8 @@ static void renderer_keyboard_modifiers(void *data, struct wl_keyboard *keyboard
 {
     (void)data;
     (void)keyboard;
-    (void)serial;
-    (void)depressed;
-    (void)latched;
-    (void)locked;
-    (void)group;
+    store_renderer_keyboard_modifiers(renderer.keyboard_root, serial, depressed,
+            latched, locked, group);
 }
 
 static void renderer_keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
@@ -1016,6 +1127,8 @@ static NTSTATUS renderer_keyboard_enter_self_test(void)
     struct winewayland_host_input_event queued = {0}, dequeued;
     struct winewayland_host_input_event *saved_events, *event;
     struct renderer_root root = {0}, other_root = {0}, *pending_root = NULL;
+    struct xkb_state *test_xkb_state = NULL;
+    xkb_mod_index_t shift_index, caps_index;
     struct wl_array keys = {0};
     unsigned int saved_head, saved_count, i;
     BOOL saved_overflow;
@@ -1167,13 +1280,60 @@ static NTSTATUS renderer_keyboard_enter_self_test(void)
         renderer.input_events[renderer.input_head].root_generation != other_root.root_generation)
         status = STATUS_DATA_ERROR;
 
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+    root.input_authorized = TRUE;
+    root.keyboard_snapshot_pending = FALSE;
+    root.keyboard_modifiers_valid = TRUE;
+    root.keyboard_modifiers_pending = TRUE;
+    root.keyboard_modifiers = WINEWAYLAND_HOST_MOD_SHIFT | WINEWAYLAND_HOST_LOCK_CAPS;
+    root.keyboard_group = 2;
+    queue_renderer_keyboard_modifiers(&root);
+    event = &renderer.input_events[renderer.input_head];
+    if (renderer.input_count != 1 || root.keyboard_modifiers_pending ||
+        event->type != WINEWAYLAND_HOST_INPUT_MODIFIERS ||
+        event->flags != (WINEWAYLAND_HOST_MOD_SHIFT | WINEWAYLAND_HOST_LOCK_CAPS) ||
+        event->code != 2)
+        status = STATUS_DATA_ERROR;
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    root.keyboard_modifiers_pending = FALSE;
+    leave_renderer_keyboard_root(&root);
+    if (renderer.input_count != 2 ||
+        renderer.input_events[0].type != WINEWAYLAND_HOST_INPUT_MODIFIERS ||
+        renderer.input_events[0].flags != WINEWAYLAND_HOST_LOCK_CAPS ||
+        renderer.input_events[1].type != WINEWAYLAND_HOST_INPUT_RESET ||
+        renderer.input_events[1].flags != WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+        status = STATUS_DATA_ERROR;
+
+    if (renderer.xkb_keymap &&
+        (test_xkb_state = xkb_state_new(renderer.xkb_keymap)))
+    {
+        shift_index = xkb_keymap_mod_get_index(renderer.xkb_keymap, XKB_MOD_NAME_SHIFT);
+        caps_index = xkb_keymap_mod_get_index(renderer.xkb_keymap, XKB_MOD_NAME_CAPS);
+        if (shift_index == XKB_MOD_INVALID || shift_index >= 32 ||
+            caps_index == XKB_MOD_INVALID || caps_index >= 32)
+            status = STATUS_DATA_ERROR;
+        else
+        {
+            xkb_state_update_mask(test_xkb_state, 0, 1u << shift_index,
+                    1u << caps_index, 0, 0, 0);
+            if ((get_renderer_keyboard_modifiers(test_xkb_state) &
+                 (WINEWAYLAND_HOST_MOD_SHIFT | WINEWAYLAND_HOST_LOCK_CAPS)) !=
+                (WINEWAYLAND_HOST_MOD_SHIFT | WINEWAYLAND_HOST_LOCK_CAPS))
+                status = STATUS_DATA_ERROR;
+        }
+        xkb_state_unref(test_xkb_state);
+    }
+
     memcpy(renderer.input_events, saved_events, sizeof(renderer.input_events));
     renderer.input_head = saved_head;
     renderer.input_count = saved_count;
     renderer.input_overflow = saved_overflow;
     free(saved_events);
     if (!status)
-        fprintf(stderr, "Vulkan transport self-test: keyboard enter reconciliation passed.\n");
+        fprintf(stderr, "Vulkan transport self-test: keyboard state reconciliation passed.\n");
     return status;
 }
 
@@ -1207,14 +1367,7 @@ static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
     }
     else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && renderer.keyboard)
     {
-        if (renderer.keyboard_root)
-        {
-            renderer.keyboard_root->keyboard_key_count = 0;
-            renderer.keyboard_root->keyboard_snapshot_pending = FALSE;
-            if (renderer.keyboard_root->input_authorized)
-                queue_renderer_input_reset(renderer.keyboard_root,
-                        WINEWAYLAND_HOST_INPUT_RESET_KEYS);
-        }
+        leave_renderer_keyboard_root(renderer.keyboard_root);
         if (wl_proxy_get_version((struct wl_proxy *)renderer.keyboard) >=
                 WL_KEYBOARD_RELEASE_SINCE_VERSION)
             wl_keyboard_release(renderer.keyboard);
@@ -1819,6 +1972,9 @@ static NTSTATUS destroy_renderer(void)
         else
             wl_keyboard_destroy(renderer.keyboard);
     }
+    if (renderer.xkb_state) xkb_state_unref(renderer.xkb_state);
+    if (renderer.xkb_keymap) xkb_keymap_unref(renderer.xkb_keymap);
+    if (renderer.xkb_context) xkb_context_unref(renderer.xkb_context);
     if (renderer.pointer)
     {
         if (wl_proxy_get_version((struct wl_proxy *)renderer.pointer) >=
@@ -2451,6 +2607,11 @@ static NTSTATUS create_renderer(void *args)
         return STATUS_REPARSE_POINT_ENCOUNTERED;
     if (!(display = wl_display_connect(params->display_name)))
         return STATUS_PORT_DISCONNECTED;
+    if (!(renderer.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS)))
+    {
+        status = STATUS_NO_MEMORY;
+        goto failed;
+    }
     if (!connected_to_endpoint(display, params->endpoint_path) ||
         lstat(params->endpoint_path, &after) == -1 || !S_ISSOCK(after.st_mode) ||
         before.st_dev != after.st_dev || before.st_ino != after.st_ino)
@@ -3057,7 +3218,8 @@ static NTSTATUS test_renderer_input(void *args)
         return STATUS_REVISION_MISMATCH;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
-    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) - 3)
+    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) -
+            3 - root->keyboard_modifiers_valid)
         return STATUS_INSUFFICIENT_RESOURCES;
     keys.size = keys.alloc = sizeof(key_data);
     keys.data = &key_data;

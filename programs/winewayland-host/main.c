@@ -54,6 +54,14 @@ C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_RESIZING == WINE_WAYLAND_CONFIGURE_STA
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_TILED == WINE_WAYLAND_CONFIGURE_STATE_TILED);
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN == WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN);
 C_ASSERT(WINEWAYLAND_HOST_CONFIGURE_STATE_ACTIVATED == WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED);
+C_ASSERT(WINEWAYLAND_HOST_MOD_SHIFT == WINE_WAYLAND_KEYBOARD_MOD_SHIFT);
+C_ASSERT(WINEWAYLAND_HOST_MOD_CONTROL == WINE_WAYLAND_KEYBOARD_MOD_CONTROL);
+C_ASSERT(WINEWAYLAND_HOST_MOD_ALT == WINE_WAYLAND_KEYBOARD_MOD_ALT);
+C_ASSERT(WINEWAYLAND_HOST_MOD_ALTGR == WINE_WAYLAND_KEYBOARD_MOD_ALTGR);
+C_ASSERT(WINEWAYLAND_HOST_LOCK_CAPS == WINE_WAYLAND_KEYBOARD_LOCK_CAPS);
+C_ASSERT(WINEWAYLAND_HOST_LOCK_NUM == WINE_WAYLAND_KEYBOARD_LOCK_NUM);
+C_ASSERT(WINEWAYLAND_HOST_LOCK_SCROLL == WINE_WAYLAND_KEYBOARD_LOCK_SCROLL);
+C_ASSERT(WINEWAYLAND_HOST_MODIFIER_MASK == WINE_WAYLAND_KEYBOARD_STATE_MASK);
 
 #define HOST_BTN_LEFT    0x110
 #define HOST_BTN_RIGHT   0x111
@@ -1126,6 +1134,29 @@ static NTSTATUS submit_host_input(struct host_renderer_root *root, uint64_t host
     return status;
 }
 
+static NTSTATUS sync_host_keyboard_state(struct host_renderer_root *root,
+        uint64_t host_epoch, uint32_t modifiers, uint32_t group)
+{
+    NTSTATUS status;
+
+    if ((modifiers & ~WINEWAYLAND_HOST_MODIFIER_MASK) || group > 0xff)
+        return STATUS_INVALID_PARAMETER;
+    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(sync_wayland_host_keyboard)
+    {
+        req->root = root->root;
+        req->modifiers = modifiers |
+                (group << WINE_WAYLAND_KEYBOARD_GROUP_SHIFT);
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->event_id = root->input_event_id;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS reset_host_input(struct host_renderer_root *root, uint64_t host_epoch,
         uint32_t flags)
 {
@@ -1259,6 +1290,10 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
         input.kbd.vkey = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX,
                 GetKeyboardLayout(0));
         break;
+    case WINEWAYLAND_HOST_INPUT_MODIFIERS:
+        if (event->time || event->state || event->x || event->y || event->value120)
+            return STATUS_INVALID_PARAMETER;
+        return sync_host_keyboard_state(root, host_epoch, event->flags, event->code);
     case WINEWAYLAND_HOST_INPUT_RESET:
         return reset_host_input(root, host_epoch, event->flags);
     default:

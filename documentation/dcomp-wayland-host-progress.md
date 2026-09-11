@@ -1038,6 +1038,29 @@ Unsupported combinations return the complete root to the legacy local path.
   task directory. The focused wineserver and x86-64/i386 authority binaries
   rebuilt without warnings. No task Wine process remained on either laptop;
   the personal laptop retained 57 GiB free and WSL retained 304 GiB free.
+- Host protocol 10, server protocol 1000 and renderer ABI 11 add native
+  keyboard-state reconciliation. The Wayland host parses the compositor's
+  bounded XKB keymap and publishes effective Shift, Control, Alt and AltGr,
+  the Caps/Num/Scroll lock toggles, and an eight-bit layout-group index. The
+  server authenticates every snapshot against the current host, root identity,
+  root generation and input event sequence, then updates Wine's shared key
+  state without manufacturing Win32 key messages. Effective modifiers are
+  released on seat leave, host exit, scene revocation and root hide; lock
+  toggles survive those transitions. A hidden root also rejects both ordinary
+  key input and modifier snapshots. The server request was appended after all
+  existing requests so it does not renumber the established private protocol.
+  The x86-64 authority suite passed 907 checks with zero failures on Radeon and
+  WSLg. Intel Iris Xe passed the x86-64 and i386 WSI fixtures and the automatic
+  host input fixture completed seven presentations. Evidence is retained as
+  `/workspace/artifacts/keyboard-state-authority-x64-final4.log` in the Radeon
+  task environment, `artifacts/keyboard-modifiers-authority-wslg-x64-final.log`
+  under the WSL build agent, and
+  `artifacts/keyboard-modifiers-{final-wsi-x64,final-wsi-i386,auto-host-input-hide-release-x64}.log`
+  in the personal Intel task directory. The Intel fixtures use synthetic input;
+  physical compositor injection, Windows layout activation, Hebrew/English
+  switching and IME text sessions remain separate work. No task Wine process
+  remained on either laptop; Intel retained 57 GiB free and WSL retained
+  304 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

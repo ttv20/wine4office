@@ -2372,8 +2372,102 @@ struct wayland_host_input_state
     user_handle_t key_roots[WAYLAND_HOST_KEY_SLOTS];
     union hw_input buttons[WAYLAND_HOST_BUTTON_SLOTS];
     user_handle_t button_roots[WAYLAND_HOST_BUTTON_SLOTS];
+    user_handle_t modifier_root;
+    unsigned int modifiers;
     unsigned int active_count;
 };
+
+#define WAYLAND_HOST_EFFECTIVE_MODIFIERS (WINE_WAYLAND_KEYBOARD_MOD_SHIFT | \
+        WINE_WAYLAND_KEYBOARD_MOD_CONTROL | WINE_WAYLAND_KEYBOARD_MOD_ALT | \
+        WINE_WAYLAND_KEYBOARD_MOD_ALTGR)
+
+static void set_wayland_host_key_down( volatile unsigned char *keystate,
+                                       unsigned int vkey, int down )
+{
+    if (down) keystate[vkey] |= 0x80;
+    else keystate[vkey] &= ~0x80;
+}
+
+static void set_wayland_host_key_locked( volatile unsigned char *keystate,
+                                         unsigned int vkey, int locked )
+{
+    if (locked) keystate[vkey] |= 0x01;
+    else keystate[vkey] &= ~0x01;
+}
+
+static void apply_wayland_host_keyboard_state( struct desktop *desktop,
+                                                unsigned int modifiers,
+                                                int update_locks )
+{
+    int altgr = !!(modifiers & WINE_WAYLAND_KEYBOARD_MOD_ALTGR);
+
+    SHARED_WRITE_BEGIN( desktop->shared, desktop_shm_t )
+    {
+        set_wayland_host_key_down( shared->keystate, VK_SHIFT,
+                modifiers & WINE_WAYLAND_KEYBOARD_MOD_SHIFT );
+        set_wayland_host_key_down( shared->keystate, VK_CONTROL,
+                (modifiers & WINE_WAYLAND_KEYBOARD_MOD_CONTROL) || altgr );
+        set_wayland_host_key_down( shared->keystate, VK_MENU,
+                (modifiers & WINE_WAYLAND_KEYBOARD_MOD_ALT) || altgr );
+        if (update_locks)
+        {
+            set_wayland_host_key_locked( shared->keystate, VK_CAPITAL,
+                    modifiers & WINE_WAYLAND_KEYBOARD_LOCK_CAPS );
+            set_wayland_host_key_locked( shared->keystate, VK_NUMLOCK,
+                    modifiers & WINE_WAYLAND_KEYBOARD_LOCK_NUM );
+            set_wayland_host_key_locked( shared->keystate, VK_SCROLL,
+                    modifiers & WINE_WAYLAND_KEYBOARD_LOCK_SCROLL );
+        }
+        ++shared->keystate_serial;
+    }
+    SHARED_WRITE_END;
+}
+
+static int update_wayland_host_keyboard_state( struct desktop *desktop,
+                                                user_handle_t root,
+                                                unsigned int modifiers )
+{
+    struct wayland_host_input_state *state = desktop->wayland_host_input_state;
+    unsigned int effective = modifiers & WAYLAND_HOST_EFFECTIVE_MODIFIERS;
+    user_handle_t full_root = get_user_full_handle( root );
+
+    if (effective && !state)
+    {
+        if (!(state = mem_alloc( sizeof(*state) ))) return 0;
+        memset( state, 0, sizeof(*state) );
+        desktop->wayland_host_input_state = state;
+    }
+    if (!state)
+    {
+        apply_wayland_host_keyboard_state( desktop, modifiers, 1 );
+        return 1;
+    }
+    if (effective)
+    {
+        if (!state->modifier_root) ++state->active_count;
+        state->modifier_root = full_root;
+        state->modifiers = modifiers;
+    }
+    else if (state->modifier_root == full_root)
+    {
+        state->modifier_root = 0;
+        state->modifiers = 0;
+        --state->active_count;
+    }
+    else
+    {
+        modifiers = (state->modifiers & WAYLAND_HOST_EFFECTIVE_MODIFIERS) |
+                (modifiers & ~WAYLAND_HOST_EFFECTIVE_MODIFIERS);
+        state->modifiers = modifiers;
+    }
+    apply_wayland_host_keyboard_state( desktop, modifiers, 1 );
+    if (!state->active_count)
+    {
+        free( state );
+        desktop->wayland_host_input_state = NULL;
+    }
+    return 1;
+}
 
 static unsigned int get_wayland_host_key_slot( const union hw_input *input )
 {
@@ -2669,6 +2763,13 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
         queue_mouse_message( desktop, 0, &input, IMO_HARDWARE, NULL, TRUE, NULL, 0 );
         memset( &state->buttons[i], 0, sizeof(state->buttons[i]) );
         state->button_roots[i] = 0;
+        --state->active_count;
+    }
+    if (state->modifier_root && (!root || state->modifier_root == root))
+    {
+        apply_wayland_host_keyboard_state( desktop, 0, 0 );
+        state->modifier_root = 0;
+        state->modifiers = 0;
         --state->active_count;
     }
     if (!state->active_count)
@@ -3499,6 +3600,32 @@ DECL_HANDLER(send_wayland_host_input)
         free( desktop->wayland_host_input_state );
         desktop->wayland_host_input_state = NULL;
     }
+
+done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(sync_wayland_host_keyboard)
+{
+    struct desktop *desktop;
+
+    if (!req->event_id || req->event_id == ~(unsigned __int64)0 ||
+        (req->modifiers & ~(WINE_WAYLAND_KEYBOARD_STATE_MASK |
+                           WINE_WAYLAND_KEYBOARD_GROUP_MASK)))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(desktop = get_wayland_host_input_desktop( req->root, req->host_epoch,
+            req->root_identity, req->root_generation, req->event_id )))
+        return;
+    if (!set_input_desktop( desktop->winstation, desktop ))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        goto done;
+    }
+    if (!update_wayland_host_keyboard_state( desktop, req->root, req->modifiers ))
+        set_error( STATUS_NO_MEMORY );
 
 done:
     release_object( desktop );

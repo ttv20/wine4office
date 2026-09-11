@@ -4295,6 +4295,16 @@ static void dump_manage_wayland_window_direct_surface_reply( const struct manage
     fprintf( stderr, " active_count=%08x", req->active_count );
 }
 
+static void dump_sync_wayland_host_keyboard_request( const struct sync_wayland_host_keyboard_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", modifiers=%08x", req->modifiers );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", event_id=", &req->event_id );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4660,6 +4670,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_publish_wayland_frame_snapshot_request,
     (dump_func)dump_get_wayland_frame_snapshot_request,
     (dump_func)dump_manage_wayland_window_direct_surface_request,
+    (dump_func)dump_sync_wayland_host_keyboard_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -5025,6 +5036,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_publish_wayland_frame_snapshot_reply,
     (dump_func)dump_get_wayland_frame_snapshot_reply,
     (dump_func)dump_manage_wayland_window_direct_surface_reply,
+    NULL,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5390,6 +5402,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "publish_wayland_frame_snapshot",
     "get_wayland_frame_snapshot",
     "manage_wayland_window_direct_surface",
+    "sync_wayland_host_keyboard",
 };
 
 static const struct
