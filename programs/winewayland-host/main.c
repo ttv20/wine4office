@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 112);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 120);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -560,7 +560,8 @@ static NTSTATUS cancel_host_startup(uint64_t token_low, uint64_t token_high)
 }
 
 static NTSTATUS register_host(const struct winewayland_host_startup *startup,
-        const struct winewayland_host_probe *probe, uint64_t *host_epoch)
+        const struct winewayland_host_probe *probe, HANDLE work_event,
+        uint64_t *host_epoch)
 {
     NTSTATUS status;
 
@@ -574,6 +575,7 @@ static NTSTATUS register_host(const struct winewayland_host_startup *startup,
         req->endpoint_device = probe->endpoint_device;
         req->endpoint_inode = probe->endpoint_inode;
         req->seat = probe->seat_global;
+        req->work_event = wine_server_obj_handle(work_event);
         wine_server_add_data(req, probe->device_uuid, sizeof(probe->device_uuid));
         if (!(status = wine_server_call(req))) *host_epoch = reply->host_epoch;
     }
@@ -2464,13 +2466,15 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
 {
     struct winewayland_host_startup *startup;
     struct winewayland_host_probe probe;
-    HANDLE shutdown_event = NULL;
-    HANDLE wait_handles[2];
+    HANDLE shutdown_event = NULL, work_event = NULL;
+    HANDLE wait_handles[3];
     uint64_t host_epoch = 0;
     NTSTATUS status, work_status, last_work_status = STATUS_SUCCESS;
+    ULONGLONG activity_deadline = 0, next_server_scan = 0, reconciliation_deadline = 0;
     char test_input[2];
     BOOL test_input_pending;
-    DWORD wait_count;
+    BOOL server_work_pending = TRUE;
+    DWORD wait_count, work_event_index;
     DWORD wait;
 
     if (!(startup = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*startup))))
@@ -2484,9 +2488,11 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
     if (startup->version != WINEWAYLAND_HOST_STARTUP_VERSION ||
             startup->size != sizeof(*startup))
         status = STATUS_REVISION_MISMATCH;
+    else if (!(work_event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        status = STATUS_NO_MEMORY;
     else if (!(status = get_backend_probe(&probe)))
     {
-        status = register_host(startup, &probe, &host_epoch);
+        status = register_host(startup, &probe, work_event, &host_epoch);
         if (!status && (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
             status = create_renderer(&probe);
     }
@@ -2506,12 +2512,26 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
         wait_handles[0] = stop_event;
         wait_count = 1;
         if (shutdown_event) wait_handles[wait_count++] = shutdown_event;
+        work_event_index = wait_count;
+        wait_handles[wait_count++] = work_event;
+        activity_deadline = reconciliation_deadline = GetTickCount64() + 1000;
         do
         {
             if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
             {
                 work_status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL);
-                if (!work_status) work_status = process_host_work(host_epoch);
+                if (!work_status && GetTickCount64() >= next_server_scan &&
+                    (server_work_pending ||
+                    GetTickCount64() < activity_deadline ||
+                    GetTickCount64() >= reconciliation_deadline))
+                {
+                    work_status = process_host_work(host_epoch);
+                    if (active_fixture_startup)
+                        InterlockedIncrement((LONG *)&active_fixture_startup->server_work_scans);
+                    server_work_pending = !!work_status;
+                    next_server_scan = GetTickCount64() + 20;
+                    reconciliation_deadline = GetTickCount64() + 1000;
+                }
                 if (!work_status && test_input_pending)
                 {
                     work_status = queue_host_test_input();
@@ -2525,8 +2545,15 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
                 last_work_status = work_status;
             }
             wait = WaitForMultipleObjects(wait_count, wait_handles, FALSE, 20);
+            if (wait == WAIT_OBJECT_0 + work_event_index)
+            {
+                server_work_pending = TRUE;
+                activity_deadline = GetTickCount64() + 1000;
+                if (active_fixture_startup)
+                    InterlockedIncrement((LONG *)&active_fixture_startup->server_work_wakeups);
+            }
         }
-        while (wait == WAIT_TIMEOUT);
+        while (wait == WAIT_TIMEOUT || wait == WAIT_OBJECT_0 + work_event_index);
         active_fixture_startup = NULL;
         if (wait == WAIT_FAILED || wait >= WAIT_OBJECT_0 + wait_count)
             status = STATUS_UNSUCCESSFUL;
@@ -2537,6 +2564,7 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
     memset(renderer_roots, 0, sizeof(renderer_roots));
     next_renderer_pool_generation = 0;
     if (shutdown_event) CloseHandle(shutdown_event);
+    if (work_event) CloseHandle(work_event);
     UnmapViewOfFile(startup);
     return status ? 6 : 0;
 }
@@ -3103,6 +3131,13 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
                 startup->imported_slots);
         goto done;
     }
+    if (InterlockedCompareExchange((LONG *)&startup->server_work_wakeups, 0, 0) < 2)
+    {
+        hr = HRESULT_FROM_NT(STATUS_IO_TIMEOUT);
+        fprintf(stderr, "dcomp_pipeline=failed server work wakeups=%u scans=%u\n",
+                startup->server_work_wakeups, startup->server_work_scans);
+        goto done;
+    }
 
     if (multi_root)
     {
@@ -3407,16 +3442,18 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         if (wait_count == 500)
         {
             hr = HRESULT_FROM_NT(STATUS_IO_TIMEOUT);
-            fprintf(stderr, "dcomp_pipeline=failed waiting for frame %u\n", i + 1);
+            fprintf(stderr, "dcomp_pipeline=failed waiting for frame %u wakeups=%u scans=%u\n",
+                    i + 1, startup->server_work_wakeups, startup->server_work_scans);
             break;
         }
     }
     if (FAILED(hr) || startup->imported_slots != WINE_WAYLAND_BUFFER_POOL_SLOTS ||
             startup->presented_frames < 6 || startup->failed_frames)
     {
-        fprintf(stderr, "dcomp_pipeline=failed hr=%#lx imports=%u presented=%u discarded=%u failed=%u\n",
+        fprintf(stderr, "dcomp_pipeline=failed hr=%#lx imports=%u presented=%u discarded=%u failed=%u wakeups=%u scans=%u\n",
                 hr, startup->imported_slots, startup->presented_frames,
-                startup->discarded_frames, startup->failed_frames);
+                startup->discarded_frames, startup->failed_frames,
+                startup->server_work_wakeups, startup->server_work_scans);
         goto done;
     }
     if (!InterlockedCompareExchange((LONG *)&startup->native_host_activations, 0, 0))
@@ -3650,6 +3687,9 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     ret = 0;
 
 done:
+    if (!ret && startup)
+        printf("host_work=event_driven wakeups=%u scans=%u\n",
+                startup->server_work_wakeups, startup->server_work_scans);
     if (second_target)
     {
         IDCompositionTarget_SetRoot(second_target, NULL);

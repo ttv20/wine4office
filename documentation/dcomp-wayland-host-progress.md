@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 995.
+Generated server protocol version: 996.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -121,9 +121,9 @@ or transport fixture is not Outlook support.
   unconsumed FD. Host-local pool identities keep equal producer generation
   numbers from aliasing across roots or contributors. A complete scan also
   retires native imports for pools that disappeared; contributor revocation
-  retires its imports before acknowledging the server tombstone. This first
-  host fixture polls at 20 ms and retains the initial two-pool renderer cap.
-  An event-driven wakeup and per-window pool scaling remain pending.
+  retires its imports before acknowledging the server tombstone. Pool and
+  copied-frame budgets are partitioned per root rather than shared across the
+  desktop.
 - Root enumeration now returns a server shared-object identity and the USER
   handle lifetime generation in addition to the HWND. The renderer keys native
   roots by that pair, not by the reusable HWND value. A transport-capable host
@@ -333,6 +333,16 @@ or transport fixture is not Outlook support.
   identity scene creates a fresh binding; a later visible owned popup causes
   the same authoritative fallback. Hidden input-only child HWNDs retain normal
   Windows focus routing without claiming visible content coverage.
+- Protocol 996 replaces the resident host's unconditional 20 ms wineserver
+  scan with a server-owned auto-reset work event. Registration validates and
+  retains an event handle, and every scene, root, contributor, pool, frame,
+  snapshot, configure and native-lease mutation that can change host work
+  signals it. The host scans immediately after a signal, then coalesces scans
+  to at most one every 20 ms during a one-second activity interval so local
+  Vulkan fences and presentation completions still advance. At idle it performs
+  one reconciliation scan per second to recover from a missed signal without
+  continuously waking the server. Closing the registering process's handle
+  cannot invalidate the server-held event object.
 
 ## Contributor interception inventory
 
@@ -928,6 +938,20 @@ fixtures before generic applications can be admitted.
   `artifacts/per-root-device-20260911-024805-*.log` in the Intel task
   directory. The run ended with zero task-owned Wine processes and 62 GiB
   free.
+- The event-driven host loop passed the full Intel Iris Xe matrix after the
+  20 ms coalescing correction: the decorated frame fixture recorded 160 event
+  wakeups and 50 scans, popup fallback/rehost recorded 108 and 47, multi-root
+  fairness recorded 200 and 83, and permanent frame-copy failure recovery
+  recorded 66 and 19. The x86-64 and i386 WSI fixtures remained green. The
+  Radeon authority regression rejects a file-mapping handle in the event slot,
+  observes the initial Ready signal, closes the client handle while the server
+  registration remains live, and passes all 723 checks with zero failures.
+  Evidence is retained as
+  `/workspace/artifacts/work-event-authority-x64-v2.log` and
+  `/workspace/artifacts/work-event-authority-v2-SHA256SUMS` on the Radeon task
+  environment, and `artifacts/per-root-device-20260911-030100-*.log` in the
+  Intel task directory. Both systems ended with zero task-owned Wine processes;
+  the personal Intel laptop retained 62 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -33,6 +33,7 @@ struct hook_table;
 struct window_class;
 struct atom_table;
 struct clipboard;
+struct event;
 
 #define DESKTOP_ATOM  ((atom_t)32769)
 
@@ -87,6 +88,7 @@ struct desktop
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
     struct process      *wayland_host_process; /* registered presentation host */
+    struct event        *wayland_host_work_event; /* pending host work */
     struct process      *wayland_host_launcher; /* owner of the startup permit */
     struct timeout_user *wayland_host_startup_timeout;
     unsigned __int64     wayland_host_token_low;
@@ -241,6 +243,7 @@ extern void set_process_default_desktop( struct process *process, struct desktop
                                          obj_handle_t handle );
 extern void close_process_desktop( struct process *process );
 extern void cleanup_process_wayland_hosts( struct process *process );
+extern void signal_wayland_host_work( struct desktop *desktop );
 extern void set_thread_default_desktop( struct thread *thread, struct desktop *desktop, obj_handle_t handle );
 extern void release_thread_desktop( struct thread *thread, int close );
 

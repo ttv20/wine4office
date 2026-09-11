@@ -3712,6 +3712,7 @@ static void dump_register_wayland_host_request( const struct register_wayland_ho
     dump_uint64( ", endpoint_device=", &req->endpoint_device );
     dump_uint64( ", endpoint_inode=", &req->endpoint_inode );
     fprintf( stderr, ", seat=%08x", req->seat );
+    fprintf( stderr, ", work_event=%04x", req->work_event );
     dump_varargs_bytes( ", device_uuid=", cur_size );
 }
 

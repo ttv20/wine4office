@@ -210,8 +210,10 @@ struct wayland_host_test_state
     NTSTATUS length_status;
     NTSTATUS uuid_mismatch_status;
     NTSTATUS mismatch_status;
+    NTSTATUS work_event_status;
     NTSTATUS register_status;
     NTSTATUS ready_status;
+    DWORD work_event_wait;
     NTSTATUS command_status;
     NTSTATUS producer_status;
     NTSTATUS slot_memory_status;
@@ -422,9 +424,9 @@ static NTSTATUS cancel_host_startup( UINT64 token_low, UINT64 token_high )
     return status;
 }
 
-static NTSTATUS register_host_with_size( const struct wayland_host_test_state *state,
-                                         UINT64 endpoint_device, UINT data_size,
-                                         UINT64 *host_epoch )
+static NTSTATUS register_host_with_size_and_event(
+        const struct wayland_host_test_state *state, UINT64 endpoint_device,
+        UINT data_size, HANDLE work_event, UINT64 *host_epoch )
 {
     NTSTATUS status;
 
@@ -438,10 +440,26 @@ static NTSTATUS register_host_with_size( const struct wayland_host_test_state *s
         req->endpoint_device = endpoint_device;
         req->endpoint_inode = state->endpoint_inode;
         req->seat = state->seat;
+        req->work_event = wine_server_obj_handle( work_event );
         wine_server_add_data( req, state->host_device_uuid, data_size );
         if (!(status = p_wine_server_call( req ))) *host_epoch = reply->host_epoch;
     }
     SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS register_host_with_size( const struct wayland_host_test_state *state,
+                                         UINT64 endpoint_device, UINT data_size,
+                                         UINT64 *host_epoch )
+{
+    HANDLE work_event;
+    NTSTATUS status;
+
+    if (!(work_event = CreateEventW( NULL, FALSE, FALSE, NULL )))
+        return STATUS_NO_MEMORY;
+    status = register_host_with_size_and_event( state, endpoint_device, data_size,
+                                                work_event, host_epoch );
+    CloseHandle( work_event );
     return status;
 }
 
@@ -1405,6 +1423,7 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
     struct wayland_native_lease_info native_lease;
     struct wayland_frame_snapshot_info snapshot;
     DWORD *snapshot_bits;
+    HANDLE work_event;
     DWORD wait;
 
     if (!(state = MapViewOfFile( mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*state) )))
@@ -1413,18 +1432,34 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
         return;
     }
     state->process_id = GetCurrentProcessId();
-    state->length_status = register_host_with_size( state, state->endpoint_device,
-            sizeof(state->host_device_uuid) - sizeof(DWORD), &state->host_epoch );
+    if (!(work_event = CreateEventW( NULL, FALSE, FALSE, NULL )))
+    {
+        state->register_status = STATUS_NO_MEMORY;
+        SetEvent( ready_event );
+        UnmapViewOfFile( state );
+        return;
+    }
+    state->work_event_status = register_host_with_size_and_event( state,
+            state->endpoint_device, sizeof(state->host_device_uuid), mapping,
+            &state->host_epoch );
+    state->length_status = register_host_with_size_and_event( state, state->endpoint_device,
+            sizeof(state->host_device_uuid) - sizeof(DWORD), work_event,
+            &state->host_epoch );
     state->host_device_uuid[0] ^= 1;
-    state->uuid_mismatch_status = register_host( state, state->endpoint_device,
-                                                 &state->host_epoch );
+    state->uuid_mismatch_status = register_host_with_size_and_event( state,
+            state->endpoint_device, sizeof(state->host_device_uuid), work_event,
+            &state->host_epoch );
     state->host_device_uuid[0] ^= 1;
-    state->mismatch_status = register_host( state, state->endpoint_device ^ 1,
-                                            &state->host_epoch );
-    state->register_status = register_host( state, state->endpoint_device,
-                                            &state->host_epoch );
+    state->mismatch_status = register_host_with_size_and_event( state,
+            state->endpoint_device ^ 1, sizeof(state->host_device_uuid), work_event,
+            &state->host_epoch );
+    state->register_status = register_host_with_size_and_event( state,
+            state->endpoint_device, sizeof(state->host_device_uuid), work_event,
+            &state->host_epoch );
     state->ready_status = state->register_status ? state->register_status :
             set_host_ready( state->host_epoch );
+    state->work_event_wait = WaitForSingleObject( work_event, 0 );
+    CloseHandle( work_event );
     SetEvent( ready_event );
 
     while ((wait = WaitForSingleObject( command_event, 30000 )) == WAIT_OBJECT_0)
@@ -2073,8 +2108,12 @@ static void test_host_registration( const char *program, const char *test_name )
         "Registration UUID mismatch returned %#lx.\n", state->uuid_mismatch_status );
     ok( state->mismatch_status == STATUS_ACCESS_DENIED,
         "Endpoint mismatch returned %#lx.\n", state->mismatch_status );
+    ok( state->work_event_status == STATUS_OBJECT_TYPE_MISMATCH,
+        "Non-event work notification returned %#lx.\n", state->work_event_status );
     ok( !state->register_status, "Host registration returned %#lx.\n", state->register_status );
     ok( !state->ready_status, "Host ready returned %#lx.\n", state->ready_status );
+    ok( state->work_event_wait == WAIT_OBJECT_0,
+        "Initial host work event wait returned %#lx.\n", state->work_event_wait );
     ok( !!state->host_epoch, "Host registration returned a zero epoch.\n" );
     old_epoch = state->host_epoch;
 

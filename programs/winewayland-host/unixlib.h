@@ -41,7 +41,7 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
-#define WINEWAYLAND_HOST_STARTUP_VERSION 7
+#define WINEWAYLAND_HOST_STARTUP_VERSION 8
 
 struct winewayland_host_startup
 {
@@ -69,6 +69,8 @@ struct winewayland_host_startup
     volatile uint32_t block_present_armed;
     volatile uint32_t fail_next_frame_copy;
     volatile uint32_t fail_frame_copy_armed;
+    volatile uint32_t server_work_scans;
+    volatile uint32_t server_work_wakeups;
 };
 
 #define WINEWAYLAND_HOST_RENDERER_VERSION 9

@@ -150,11 +150,20 @@ static void clear_wayland_host_registration( struct desktop *desktop )
     revoke_wayland_desktop_native_leases( desktop );
     if (desktop->wayland_host_process)
         release_object( desktop->wayland_host_process );
+    if (desktop->wayland_host_work_event)
+        release_object( desktop->wayland_host_work_event );
     desktop->wayland_host_process = NULL;
+    desktop->wayland_host_work_event = NULL;
     desktop->wayland_host_capabilities = 0;
     desktop->wayland_host_ready = 0;
     memset( desktop->wayland_host_device_uuid, 0,
             sizeof(desktop->wayland_host_device_uuid) );
+}
+
+void signal_wayland_host_work( struct desktop *desktop )
+{
+    if (desktop->wayland_host_ready && desktop->wayland_host_work_event)
+        set_event( desktop->wayland_host_work_event );
 }
 
 static int validate_wayland_host_context( unsigned int version, unsigned int capabilities,
@@ -435,6 +444,7 @@ static bool desktop_init( struct object *obj, const void *init_data )
     desktop->cursor_win = 0;
     desktop->alt_pressed = 0;
     desktop->wayland_host_process = NULL;
+    desktop->wayland_host_work_event = NULL;
     desktop->wayland_host_launcher = NULL;
     desktop->wayland_host_startup_timeout = NULL;
     desktop->wayland_host_token_low = 0;
@@ -1246,6 +1256,7 @@ DECL_HANDLER(cancel_wayland_host_startup)
 DECL_HANDLER(register_wayland_host)
 {
     struct desktop *desktop;
+    struct event *work_event;
     unsigned int device_uuid[4];
 
     reply->host_epoch = 0;
@@ -1255,10 +1266,12 @@ DECL_HANDLER(register_wayland_host)
         return;
     }
     memcpy( device_uuid, get_req_data(), sizeof(device_uuid) );
+    if (!(work_event = get_event_obj( current->process, req->work_event,
+                                      EVENT_MODIFY_STATE ))) return;
     if (!validate_wayland_host_context( req->version, req->capabilities,
                                         req->endpoint_device, req->endpoint_inode,
-                                        req->seat, device_uuid )) return;
-    if (!(desktop = get_thread_desktop( current, 0 ))) return;
+                                        req->seat, device_uuid )) goto done;
+    if (!(desktop = get_thread_desktop( current, 0 ))) goto done;
 
     if (desktop->wayland_host_process)
         set_error( STATUS_DEVICE_BUSY );
@@ -1280,6 +1293,8 @@ DECL_HANDLER(register_wayland_host)
     else
     {
         desktop->wayland_host_process = (struct process *)grab_object( current->process );
+        desktop->wayland_host_work_event = work_event;
+        work_event = NULL;
         if (!++wayland_host_epoch) ++wayland_host_epoch;
         desktop->wayland_host_epoch = wayland_host_epoch;
         desktop->wayland_host_endpoint_device = req->endpoint_device;
@@ -1293,6 +1308,8 @@ DECL_HANDLER(register_wayland_host)
         clear_wayland_host_startup( desktop );
     }
     release_object( desktop );
+done:
+    if (work_event) release_object( work_event );
 }
 
 DECL_HANDLER(set_wayland_host_ready)
@@ -1310,6 +1327,7 @@ DECL_HANDLER(set_wayland_host_ready)
     {
         desktop->wayland_host_ready = 1;
         activate_wayland_desktop_scenes( desktop );
+        signal_wayland_host_work( desktop );
     }
     release_object( desktop );
 }

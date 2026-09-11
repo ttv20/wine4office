@@ -2586,6 +2586,7 @@ C_ASSERT( offsetof(struct register_wayland_host_request, token_high) == 32 );
 C_ASSERT( offsetof(struct register_wayland_host_request, endpoint_device) == 40 );
 C_ASSERT( offsetof(struct register_wayland_host_request, endpoint_inode) == 48 );
 C_ASSERT( offsetof(struct register_wayland_host_request, seat) == 56 );
+C_ASSERT( offsetof(struct register_wayland_host_request, work_event) == 60 );
 C_ASSERT( sizeof(struct register_wayland_host_request) == 64 );
 C_ASSERT( offsetof(struct register_wayland_host_reply, host_epoch) == 8 );
 C_ASSERT( sizeof(struct register_wayland_host_reply) == 16 );

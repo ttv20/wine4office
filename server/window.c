@@ -232,6 +232,7 @@ static unsigned __int64 wayland_binding_generation;
 static void bump_wayland_window_state_revision( struct window *win )
 {
     if (!++win->wayland_window_state_revision) ++win->wayland_window_state_revision;
+    signal_wayland_host_work( win->desktop );
 }
 
 static void bump_wayland_geometry_revision( struct window *win )
@@ -329,6 +330,8 @@ static void window_destroy( struct object *obj )
     struct window *win = (struct window *)obj;
 
     assert( !win->handle );
+    if (win->wayland_scene_generation || win->wayland_scene_registry)
+        signal_wayland_host_work( win->desktop );
 
     if (win->parent)
     {
@@ -3974,6 +3977,7 @@ static void invalidate_wayland_hosted_window_family( struct window *win )
     update_wayland_native_lease_scene( root );
     if (contributor)
         contributor->revocation_scene_generation = root->wayland_scene_generation;
+    signal_wayland_host_work( root->desktop );
 }
 
 static void invalidate_wayland_contributor( struct window *root,
@@ -4002,6 +4006,7 @@ static void invalidate_wayland_contributor( struct window *root,
         update_wayland_native_lease_scene( root );
         contributor->revocation_scene_generation = root->wayland_scene_generation;
     }
+    signal_wayland_host_work( root->desktop );
 }
 
 DECL_HANDLER(publish_wayland_scene)
@@ -4067,6 +4072,7 @@ DECL_HANDLER(publish_wayland_scene)
         update_wayland_native_lease_scene( root );
         reply->scene_generation = root->wayland_scene_generation;
         reply->owner_revision = root->wayland_scene_owner_revision;
+        signal_wayland_host_work( desktop );
     }
     release_object( desktop );
 }
@@ -4200,6 +4206,7 @@ DECL_HANDLER(create_wayland_contributor)
     reply->grant_low = contributor->grant_low;
     reply->grant_high = contributor->grant_high;
     reply->registry_generation = ++registry->generation;
+    signal_wayland_host_work( desktop );
 
 done:
     release_object( desktop );
@@ -4247,6 +4254,7 @@ DECL_HANDLER(bind_wayland_stream)
         reply->binding_generation = contributor->binding_generation;
         reply->host_epoch = contributor->host_epoch;
         reply->registry_generation = ++root->wayland_scene_registry->generation;
+        signal_wayland_host_work( desktop );
     }
     release_object( desktop );
 }
@@ -4638,6 +4646,7 @@ DECL_HANDLER(create_wayland_buffer_pool)
             pool->memory_type_index = metadata.memory_type_index;
             contributor->latest_pool_generation = req->pool_generation;
             reply->registry_generation = ++root->wayland_scene_registry->generation;
+            signal_wayland_host_work( desktop );
         }
     }
 
@@ -4668,6 +4677,7 @@ DECL_HANDLER(retire_wayland_buffer_pool)
     {
         release_wayland_buffer_pool( pool );
         reply->registry_generation = ++root->wayland_scene_registry->generation;
+        signal_wayland_host_work( desktop );
     }
 
 done:
@@ -4792,6 +4802,7 @@ DECL_HANDLER(register_wayland_buffer_slot)
             memory = ready_sync = reuse_sync = NULL;
             reply->registered_slots = ++pool->registered_slots;
             reply->registry_generation = ++root->wayland_scene_registry->generation;
+            signal_wayland_host_work( desktop );
         }
     }
 
@@ -5027,6 +5038,7 @@ DECL_HANDLER(submit_wayland_frame)
             reply->outstanding_frames = ++contributor->outstanding_frames;
             reply->available_credits = pool->frame_credit_limit -
                     contributor->outstanding_frames;
+            signal_wayland_host_work( desktop );
         }
     }
 
@@ -5076,6 +5088,7 @@ DECL_HANDLER(cancel_wayland_frame)
     contributor->latest_cancelled_frame_id = frame->frame_id;
     memset( frame, 0, sizeof(*frame) );
     reply->outstanding_frames = --contributor->outstanding_frames;
+    signal_wayland_host_work( desktop );
 
 done:
     release_object( desktop );
@@ -5366,6 +5379,7 @@ DECL_HANDLER(publish_wayland_frame_snapshot)
             root->wayland_frame_snapshot_format = req->format;
             root->wayland_frame_snapshot_flags = req->flags;
             reply->snapshot_revision = req->snapshot_revision;
+            signal_wayland_host_work( desktop );
         }
     }
 
@@ -5633,6 +5647,7 @@ DECL_HANDLER(set_wayland_window_configure_applied)
     root->wayland_configure_applied_state = req->state;
     reply->applied_id = root->wayland_configure_applied_id;
     reply->state_revision = root->wayland_configure_applied_revision;
+    signal_wayland_host_work( root->desktop );
 }
 
 DECL_HANDLER(get_wayland_window_configure_result)
@@ -5832,6 +5847,7 @@ DECL_HANDLER(manage_wayland_window_native_lease)
         root->wayland_native_lease_state = WINE_WAYLAND_NATIVE_LEASE_HOSTED;
         root->wayland_native_lease_action = WINE_WAYLAND_NATIVE_LEASE_ACTION_NONE;
         root->wayland_native_lease_message_posted = 0;
+        signal_wayland_host_work( root->desktop );
         break;
 
     case WINE_WAYLAND_NATIVE_LEASE_HOST_RETIRED:
@@ -5887,6 +5903,7 @@ DECL_HANDLER(manage_wayland_window_native_lease)
         }
         else
             set_wayland_native_lease_local( root );
+        signal_wayland_host_work( root->desktop );
         break;
     }
 

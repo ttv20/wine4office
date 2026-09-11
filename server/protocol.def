@@ -49,7 +49,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 7
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 8
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -4600,6 +4600,7 @@ enum inproc_sync_type
     unsigned __int64 endpoint_device;
     unsigned __int64 endpoint_inode;
     unsigned int     seat;
+    obj_handle_t     work_event;
     VARARG(device_uuid,bytes);
 @REPLY
     unsigned __int64 host_epoch;
