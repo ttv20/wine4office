@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 1000.
+Generated server protocol version: 1001.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -379,6 +379,20 @@ or transport fixture is not Outlook support.
   surface used by both OpenGL and Vulkan after its Wayland objects succeed,
   retains that exclusion while an unused surface is cached, and unregisters
   it on final detach or destruction using the original HWND identity.
+
+- Protocol 1001 and renderer ABI 14 forward native keyboard focus independently
+  of configure completion. Only the current host can publish focus for a
+  visible, hosted root with matching identity, lifetime and event sequence.
+  The window's owner thread pulls the current server state before applying
+  Windows activation; queued notifications cannot replay an obsolete enter.
+  Hide, scene retirement, root destruction and host exit invalidate this state.
+  Focus preceding admission is retained ahead of the held-key snapshot. Queue
+  overflow reconciles the root's latest state if it evicts a focus event.
+  Root-work errors no longer skip the desktop's input drain, and one rejected
+  input event no longer prevents processing other roots' queued events.
+  Review rejected a second keyboard-repeat timer: the existing Wayland driver
+  publishes the desktop repeat settings and the server already schedules
+  hardware repeats, including the authenticated host route.
 
 ## Contributor interception inventory
 
@@ -1134,6 +1148,27 @@ Unsupported combinations return the complete root to the legacy local path.
   This tests native event accounting and remap metadata; an externally issued
   compositor close followed by application cancellation remains a separate
   interaction gate.
+- Native-focus authority passed 940 checks on Intel's isolated KWin, including
+  rejection of foreign, mismatched, replayed and hidden-root requests,
+  coalesced leave/enter, owner-thread activation/deactivation and host-exit
+  invalidation. The x86-64 and i386 host, driver, win32u tests, ntdll and server
+  compiled through the canonical focused build. Its first combined dry run
+  exceeded the 80-command gate because the protocol and USER headers changed;
+  the reviewed dependency rebuild was split by module without a full build.
+  The final i386 WSI fixture passed transported pixels and presentation, plus
+  delayed-focus and input-overflow reconciliation. Evidence is retained as
+  `artifacts/astra-focus-authority-x64-final.log`,
+  `artifacts/astra-focus-wsi-i386-final.log` and
+  `artifacts/astra-focus-SHA256SUMS` in the personal Intel task directory.
+  The final x86-64 input pipeline delivered A down/up and all 11 native-host
+  events successfully, completed six presentations with nine imports, and
+  passed three host activations and two returns to local rendering. Its log
+  is `artifacts/astra-focus-pipeline-x64-final.log` in the same directory.
+  No task-prefix Wine process remained; the personal laptop retained 56 GiB
+  free. No test prefix, runner, container or artifact was deleted.
+  The root-work error isolation is source-reviewed; a dedicated failing-root
+  input fairness run and physical mixed hosted/local focus switching remain
+  open. This does not complete IME, clipboard or desktop interaction coverage.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

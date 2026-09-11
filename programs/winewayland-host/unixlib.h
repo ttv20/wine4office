@@ -77,7 +77,7 @@ struct winewayland_host_startup
     volatile uint32_t test_input_success_count;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 13
+#define WINEWAYLAND_HOST_RENDERER_VERSION 14
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -121,6 +121,7 @@ struct winewayland_host_renderer_create
 #define WINEWAYLAND_HOST_INPUT_KEY            4
 #define WINEWAYLAND_HOST_INPUT_RESET          5
 #define WINEWAYLAND_HOST_INPUT_MODIFIERS      6
+#define WINEWAYLAND_HOST_INPUT_FOCUS          7
 
 #define WINEWAYLAND_HOST_INPUT_RESET_KEYS    0x00000001
 #define WINEWAYLAND_HOST_INPUT_RESET_BUTTONS 0x00000002

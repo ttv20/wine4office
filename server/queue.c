@@ -2740,6 +2740,7 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
     union hw_input input;
     unsigned int error, i;
 
+    clear_wayland_host_focus( desktop, root );
     if (!state) return;
     error = get_error();
     clear_error();

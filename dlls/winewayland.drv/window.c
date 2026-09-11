@@ -1167,6 +1167,25 @@ static void wayland_handle_native_lease(HWND hwnd)
                      lease.action, hwnd, status);
 }
 
+static void wayland_update_host_focus(HWND hwnd)
+{
+    BOOL focused = FALSE;
+    NTSTATUS status;
+
+    SERVER_START_REQ(get_wayland_host_focus)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        if (!(status = wine_server_call(req))) focused = reply->focused;
+    }
+    SERVER_END_REQ;
+    if (status) return;
+    /* Like the local keyboard adapter, activate on the window's own thread.
+     * An obsolete leave must not deactivate a different foreground window. */
+    if (focused) NtUserSetForegroundWindowInternal(hwnd);
+    else if (NtUserGetForegroundWindow() == hwnd)
+        NtUserSetForegroundWindowInternal(NtUserGetDesktopWindow());
+}
+
 static NTSTATUS get_wayland_host_configure(HWND hwnd, struct wayland_host_configure *configure)
 {
     NTSTATUS status;
@@ -1491,6 +1510,9 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_WAYLAND_HOST_KEYBOARD_GROUP:
         wayland_keyboard_activate_host_group(hwnd, wp);
+        return 0;
+    case WM_WAYLAND_HOST_FOCUS:
+        wayland_update_host_focus(hwnd);
         return 0;
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);

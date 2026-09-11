@@ -74,6 +74,8 @@ enum host_child_command
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_SEND_INPUT,
     HOST_CHILD_COMMAND_SYNC_KEYBOARD,
+    HOST_CHILD_COMMAND_SET_FOCUS,
+    HOST_CHILD_COMMAND_GET_FOCUS,
     HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE,
     HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT,
     HOST_CHILD_COMMAND_EXIT,
@@ -723,6 +725,39 @@ static NTSTATUS sync_host_keyboard( HWND root, UINT64 host_epoch, UINT64 root_id
         req->root_generation = root_generation;
         req->event_id = event_id;
         status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS set_host_focus( HWND root, UINT64 host_epoch, UINT64 root_identity,
+                               UINT64 root_generation, UINT64 event_id, BOOL focused )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( set_wayland_host_focus )
+    {
+        req->root = wine_server_user_handle( root );
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->event_id = event_id;
+        req->focused = focused;
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS get_host_focus( HWND root, BOOL *focused )
+{
+    NTSTATUS status;
+
+    *focused = FALSE;
+    SERVER_START_REQ( get_wayland_host_focus )
+    {
+        req->root = wine_server_user_handle( root );
+        if (!(status = p_wine_server_call( req ))) *focused = reply->focused;
     }
     SERVER_END_REQ;
     return status;
@@ -1829,6 +1864,18 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->host_epoch, state->root_identity, state->root_generation,
                     state->input_event_id, state->input_flags );
             break;
+        case HOST_CHILD_COMMAND_SET_FOCUS:
+            state->command_status = set_host_focus( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->root_identity, state->root_generation,
+                    state->input_event_id, state->input_flags );
+            break;
+        case HOST_CHILD_COMMAND_GET_FOCUS:
+        {
+            BOOL focused;
+            state->command_status = get_host_focus( (HWND)(UINT_PTR)state->root, &focused );
+            state->input_flags = focused;
+            break;
+        }
         case HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE:
             state->command_status = manage_direct_surface( (HWND)(UINT_PTR)state->root,
                     state->direct_surface_active, &state->direct_surface_count );
@@ -2119,7 +2166,7 @@ static void test_host_registration( const char *program, const char *test_name )
     POINT input_point, cursor_point;
     HRESULT hr;
     NTSTATUS status;
-    BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
+    BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE, focused;
     unsigned int i;
     DWORD registered_slots, imported_slots, failed_slots, initial_caps;
     UINT keyboard_layout_count, keyboard_group;
@@ -4969,9 +5016,94 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
 
+    status = set_host_focus( root, old_epoch, root_identity, root_generation, 13, TRUE );
+    ok( status == STATUS_ACCESS_DENIED, "Non-host focus returned %#lx.\n", status );
+    state->input_event_id = 13;
+    state->input_flags = 2;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out sending invalid focus state.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER,
+        "Invalid focus returned %#lx.\n", state->command_status );
+    state->input_flags = TRUE;
+    state->root_identity ^= 1;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out sending mismatched focus.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Mismatched focus returned %#lx.\n", state->command_status );
+    state->root_identity ^= 1;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out entering hosted focus.\n" );
+    ok( !state->command_status, "Focus enter returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_GET_FOCUS ),
+        "Timed out querying focus as a foreign owner.\n" );
+    ok( state->command_status == STATUS_ACCESS_DENIED,
+        "Foreign focus query returned %#lx.\n", state->command_status );
+    status = get_host_focus( root, &focused );
+    ok( !status && focused, "Owner focus query returned %#lx, focused %d.\n", status, focused );
+    status = get_host_focus( root, &focused );
+    ok( status == STATUS_NOT_FOUND && !focused,
+        "Consumed focus notification returned %#lx, focused %d.\n", status, focused );
+    state->input_flags = TRUE;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out replaying focus enter.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH,
+        "Replayed focus enter returned %#lx.\n", state->command_status );
+
+    for (i = 14; i <= 15; ++i)
+    {
+        state->input_event_id = i;
+        state->input_flags = i & 1;
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+            "Timed out changing queued focus %u.\n", i );
+        ok( !state->command_status, "Queued focus %u returned %#lx.\n", i, state->command_status );
+    }
+    status = get_host_focus( root, &focused );
+    ok( !status && focused, "Coalesced leave/enter returned %#lx, focused %d.\n", status, focused );
+
+    if (GetModuleHandleW( L"winewayland.drv" ))
+    {
+        SetFocus( NULL );
+        SetActiveWindow( NULL );
+        state->input_event_id = 16;
+        state->input_flags = TRUE;
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+            "Timed out requesting owner-thread activation.\n" );
+        ok( !state->command_status, "Activation request returned %#lx.\n", state->command_status );
+        while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+        ok( GetForegroundWindow() == root && GetActiveWindow() == root,
+            "Hosted activation left foreground %p, active %p instead of %p.\n",
+            GetForegroundWindow(), GetActiveWindow(), root );
+        state->input_event_id = 17;
+        state->input_flags = FALSE;
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+            "Timed out requesting owner-thread deactivation.\n" );
+        ok( !state->command_status, "Deactivation request returned %#lx.\n", state->command_status );
+        while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+        ok( GetForegroundWindow() != root, "Hosted leave retained foreground %p.\n", root );
+    }
+    state->input_event_id = 18;
+    state->input_flags = TRUE;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out entering pre-hide focus.\n" );
+    ok( !state->command_status, "Pre-hide focus returned %#lx.\n", state->command_status );
+    ShowWindow( root, SW_HIDE );
+    status = get_host_focus( root, &focused );
+    ok( !focused && (!status || status == STATUS_NOT_FOUND),
+        "Hidden focus returned %#lx, focused %d.\n", status, focused );
+    ++state->input_event_id;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out trying hidden focus.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
+        "Hidden focus enter returned %#lx.\n", state->command_status );
+    ShowWindow( root, SW_SHOW );
+    state->input_event_id = 20;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+        "Timed out requesting pre-exit focus.\n" );
+    ok( !state->command_status, "Pre-exit focus returned %#lx.\n", state->command_status );
+
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
-    state->input_event_id = 13;
+    state->input_event_id = 21;
     state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
             (initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0);
     ok( send_host_child_command( state, command_event, result_event,
@@ -4980,7 +5112,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetKeyState( VK_SHIFT ) & 0x8000),
         "Host-exit modifier state returned %#lx, Shift %#x.\n",
         state->command_status, GetKeyState( VK_SHIFT ) );
-    state->input_event_id = 14;
+    state->input_event_id = 22;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4990,7 +5122,7 @@ static void test_host_registration( const char *program, const char *test_name )
         PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Host-exit key down returned %#lx without pressed state or message.\n",
         state->command_status );
-    state->input_event_id = 15;
+    state->input_event_id = 23;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,
@@ -5000,6 +5132,9 @@ static void test_host_registration( const char *program, const char *test_name )
         "Host-exit pointer down returned %#lx without pressed state.\n",
         state->command_status );
     stop_host_child( state, command_event, result_event, &process );
+    status = get_host_focus( root, &focused );
+    ok( !focused && (!status || status == STATUS_NOT_FOUND),
+        "Exited host retained focus: status %#lx, focused %d.\n", status, focused );
     ok( !(GetAsyncKeyState( 'A' ) & 0x8000),
         "Host exit left the key pressed.\n" );
     ok( !(GetAsyncKeyState( VK_SHIFT ) & 0x8000),

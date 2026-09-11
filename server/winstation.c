@@ -463,6 +463,7 @@ static bool desktop_init( struct object *obj, const void *init_data )
             sizeof(desktop->wayland_startup_device_uuid) );
     desktop->wayland_host_ready = 0;
     desktop->wayland_host_input_state = NULL;
+    desktop->wayland_host_focus = 0;
     memset( &desktop->key_repeat, 0, sizeof(desktop->key_repeat) );
     list_init( &desktop->threads );
     list_init( &desktop->hotkeys );

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Synchronize keyboard focus with Windows activation in the experimental Wayland host.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

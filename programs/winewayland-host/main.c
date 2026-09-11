@@ -1188,6 +1188,26 @@ static NTSTATUS sync_host_keyboard_state(struct host_renderer_root *root,
     return status;
 }
 
+static NTSTATUS set_host_focus(struct host_renderer_root *root, uint64_t host_epoch,
+        BOOL focused)
+{
+    NTSTATUS status;
+
+    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(set_wayland_host_focus)
+    {
+        req->root = root->root;
+        req->focused = focused;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->event_id = root->input_event_id;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS reset_host_input(struct host_renderer_root *root, uint64_t host_epoch,
         uint32_t flags)
 {
@@ -1323,6 +1343,11 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
         return sync_host_keyboard_state(root, host_epoch, event->flags, event->code);
     case WINEWAYLAND_HOST_INPUT_RESET:
         return reset_host_input(root, host_epoch, event->flags);
+    case WINEWAYLAND_HOST_INPUT_FOCUS:
+        if (event->state > 1 || event->flags || event->code || event->time ||
+            event->x || event->y || event->value120)
+            return STATUS_INVALID_PARAMETER;
+        return set_host_focus(root, host_epoch, event->state);
     default:
         return STATUS_INVALID_PARAMETER;
     }
@@ -2498,7 +2523,7 @@ static NTSTATUS process_host_input(uint64_t host_epoch,
 {
     struct winewayland_host_input_event event;
     struct host_renderer_root *root;
-    NTSTATUS status;
+    NTSTATUS status, first_error = STATUS_SUCCESS;
     unsigned int i;
 
     for (;;)
@@ -2507,7 +2532,7 @@ static NTSTATUS process_host_input(uint64_t host_epoch,
         event.version = WINEWAYLAND_HOST_RENDERER_VERSION;
         event.size = sizeof(event);
         status = WINE_UNIX_CALL(unix_renderer_get_input, &event);
-        if (status == STATUS_NO_MORE_ENTRIES) return STATUS_SUCCESS;
+        if (status == STATUS_NO_MORE_ENTRIES) return first_error;
         if (status) return status;
         if (startup) InterlockedIncrement((LONG *)&startup->test_input_event_count);
 
@@ -2530,7 +2555,7 @@ static NTSTATUS process_host_input(uint64_t host_epoch,
         if (status == STATUS_NOT_FOUND || status == STATUS_REVISION_MISMATCH ||
             status == STATUS_INVALID_DEVICE_STATE || status == STATUS_NOT_SUPPORTED)
             continue;
-        if (status) return status;
+        if (status && !first_error) first_error = status;
     }
 }
 
@@ -2563,7 +2588,7 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
     HANDLE shutdown_event = NULL, work_event = NULL;
     HANDLE wait_handles[3];
     uint64_t host_epoch = 0;
-    NTSTATUS status, work_status, last_work_status = STATUS_SUCCESS;
+    NTSTATUS status, dispatch_status, input_status, work_status, last_work_status = STATUS_SUCCESS;
     ULONGLONG activity_deadline = 0, next_server_scan = 0, reconciliation_deadline = 0;
     char test_input[2];
     BOOL test_input_pending;
@@ -2617,7 +2642,7 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
         {
             if (probe.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT)
             {
-                work_status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL);
+                dispatch_status = work_status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL);
                 if (!work_status && GetTickCount64() >= next_server_scan &&
                     (server_work_pending ||
                     GetTickCount64() < activity_deadline ||
@@ -2630,17 +2655,22 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
                     next_server_scan = GetTickCount64() + 20;
                     reconciliation_deadline = GetTickCount64() + 1000;
                 }
-                if (!work_status && test_input_pending)
+                if (!dispatch_status && test_input_pending)
                 {
-                    work_status = queue_host_test_input();
+                    input_status = queue_host_test_input();
                     InterlockedExchange((LONG *)&startup->test_input_queue_status,
-                            work_status);
-                    if (!work_status) test_input_pending = FALSE;
-                    else if (work_status == STATUS_DEVICE_NOT_READY)
-                        work_status = STATUS_SUCCESS;
+                            input_status);
+                    if (!input_status) test_input_pending = FALSE;
+                    else if (input_status != STATUS_DEVICE_NOT_READY && !work_status)
+                        work_status = input_status;
                 }
-                if (!work_status) work_status = process_host_input(host_epoch,
-                        test_input_pending ? NULL : startup);
+                /* A root's allocation/retirement failure must not suppress
+                 * hardware input for every other root on this connection. */
+                if (!dispatch_status)
+                {
+                    input_status = process_host_input(host_epoch, test_input_pending ? NULL : startup);
+                    if (!work_status) work_status = input_status;
+                }
                 if (work_status && work_status != last_work_status)
                     fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
                 last_work_status = work_status;

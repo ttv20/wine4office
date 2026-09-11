@@ -5112,3 +5112,19 @@ enum inproc_sync_type
     unsigned __int64 root_generation;
     unsigned __int64 event_id;
 @END
+
+/* Publish native keyboard focus; the owner pulls current state on notification. */
+@REQ(set_wayland_host_focus)
+    user_handle_t    root;
+    int              focused;
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+@END
+
+@REQ(get_wayland_host_focus)
+    user_handle_t    root;
+@REPLY
+    int              focused;
+@END

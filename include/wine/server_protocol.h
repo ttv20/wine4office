@@ -7339,6 +7339,35 @@ struct sync_wayland_host_keyboard_reply
 };
 
 
+struct set_wayland_host_focus_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    int              focused;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+};
+struct set_wayland_host_focus_reply
+{
+    struct reply_header __header;
+};
+
+struct get_wayland_host_focus_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+};
+struct get_wayland_host_focus_reply
+{
+    struct reply_header __header;
+    int              focused;
+    char __pad_12[4];
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -7703,6 +7732,8 @@ enum request
     REQ_get_wayland_frame_snapshot,
     REQ_manage_wayland_window_direct_surface,
     REQ_sync_wayland_host_keyboard,
+    REQ_set_wayland_host_focus,
+    REQ_get_wayland_host_focus,
     REQ_NB_REQUESTS
 };
 
@@ -8072,6 +8103,8 @@ union generic_request
     struct get_wayland_frame_snapshot_request get_wayland_frame_snapshot_request;
     struct manage_wayland_window_direct_surface_request manage_wayland_window_direct_surface_request;
     struct sync_wayland_host_keyboard_request sync_wayland_host_keyboard_request;
+    struct set_wayland_host_focus_request set_wayland_host_focus_request;
+    struct get_wayland_host_focus_request get_wayland_host_focus_request;
 };
 union generic_reply
 {
@@ -8439,8 +8472,10 @@ union generic_reply
     struct get_wayland_frame_snapshot_reply get_wayland_frame_snapshot_reply;
     struct manage_wayland_window_direct_surface_reply manage_wayland_window_direct_surface_reply;
     struct sync_wayland_host_keyboard_reply sync_wayland_host_keyboard_reply;
+    struct set_wayland_host_focus_reply set_wayland_host_focus_reply;
+    struct get_wayland_host_focus_reply get_wayland_host_focus_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 1000
+#define SERVER_PROTOCOL_VERSION 1001
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

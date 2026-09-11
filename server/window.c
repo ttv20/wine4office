@@ -194,6 +194,7 @@ struct window
     unsigned __int64 wayland_close_request_id;
     unsigned __int64 wayland_input_host_epoch;
     unsigned __int64 wayland_input_event_id;
+    int              wayland_focus_message_posted;
     unsigned int     wayland_direct_surface_count;
     unsigned __int64 wayland_configure_host_epoch;
     unsigned __int64 wayland_configure_request_id;
@@ -902,6 +903,7 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_message_posted = 0;
     win->wayland_input_host_epoch = 0;
     win->wayland_input_event_id = 0;
+    win->wayland_focus_message_posted = 0;
     win->wayland_direct_surface_count = 0;
     win->wayland_native_lease_host_epoch = 0;
     win->wayland_native_lease_scene_generation = 0;
@@ -2408,6 +2410,8 @@ void free_window_handle( struct window *win )
 
     assert( win->handle );
 
+    clear_wayland_host_focus( win->desktop, win->handle );
+
     /* hide the window */
     if (is_visible(win))
     {
@@ -3811,6 +3815,91 @@ struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
     }
     root->wayland_input_event_id = event_id;
     return (struct desktop *)grab_object( root->desktop );
+}
+
+static void post_wayland_host_focus( struct window *root )
+{
+    if (root->wayland_focus_message_posted) return;
+    post_message( root->handle, WM_WINE_WAYLAND_HOST_FOCUS, 0, 0 );
+    if (!get_error()) root->wayland_focus_message_posted = 1;
+}
+
+void clear_wayland_host_focus( struct desktop *desktop, user_handle_t root_handle )
+{
+    struct window *root;
+    unsigned int error = get_error();
+
+    if (!desktop->wayland_host_focus ||
+        (root_handle && desktop->wayland_host_focus != get_user_full_handle( root_handle ))) return;
+    clear_error();
+    root = get_user_object( desktop->wayland_host_focus, NTUSER_OBJ_WINDOW );
+    desktop->wayland_host_focus = 0;
+    if (root) post_wayland_host_focus( root );
+    if (error) set_error( error );
+    else clear_error();
+}
+
+DECL_HANDLER(set_wayland_host_focus)
+{
+    struct desktop *desktop;
+    struct window *root;
+
+    if ((req->focused != 0 && req->focused != 1) || !req->event_id ||
+        req->event_id == ~(unsigned __int64)0)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(desktop = get_wayland_host_input_desktop( req->root, req->host_epoch,
+            req->root_identity, req->root_generation, req->event_id ))) return;
+    if (!set_input_desktop( desktop->winstation, desktop ))
+    {
+        release_object( desktop );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    root = get_window( req->root );
+    if (req->focused)
+    {
+        post_wayland_host_focus( root );
+        if (!get_error() && desktop->wayland_host_focus != root->handle)
+        {
+            clear_wayland_host_focus( desktop, 0 );
+            desktop->wayland_host_focus = root->handle;
+        }
+    }
+    else if (desktop->wayland_host_focus == root->handle)
+    {
+        post_wayland_host_focus( root );
+        if (!get_error()) desktop->wayland_host_focus = 0;
+    }
+    release_object( desktop );
+}
+
+DECL_HANDLER(get_wayland_host_focus)
+{
+    struct window *root;
+
+    reply->focused = 0;
+    if (!(root = get_window( req->root ))) return;
+    if (root->thread != current)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (!root->wayland_focus_message_posted)
+    {
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    root->wayland_focus_message_posted = 0;
+    /* Notifications carry no authority. Revalidate the lease and current
+     * focus here, including after hide, host exit or a queued focus switch. */
+    reply->focused = root->desktop->wayland_host_focus == root->handle &&
+            root->desktop->wayland_host_ready && (root->style & WS_VISIBLE) &&
+            root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+            root->wayland_native_lease_host_epoch == root->desktop->wayland_host_epoch &&
+            root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT;
 }
 
 static int wayland_scene_uses_contributor( const struct window *root,
