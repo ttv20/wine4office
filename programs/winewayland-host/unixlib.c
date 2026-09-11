@@ -52,7 +52,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 392);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_snapshot) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 80);
@@ -241,7 +241,7 @@ struct renderer_root
     struct xdg_toplevel *xdg_toplevel;
     struct wl_callback *unmap_callback;
     struct renderer_device_queue device_queue;
-    char title[96];
+    char title[256];
     VkSurfaceKHR vulkan_surface;
     VkSwapchainKHR swapchain;
     VkImage swapchain_images[8];
@@ -266,6 +266,7 @@ struct renderer_root
     uint32_t pending_configure_state;
     uint32_t pending_configure_scale_120;
     uint32_t configure_serial;
+    BOOL configure_serial_valid;
     uint64_t configure_request_id;
     uint64_t configure_applied_id;
     uint64_t configure_applied_revision;
@@ -283,7 +284,7 @@ struct renderer_root
     BOOL configure_pending;
     BOOL unmapped;
     BOOL remap_pending;
-    BOOL closed;
+    uint64_t close_event_count;
     BOOL present_job_done;
     BOOL present_fence_submitted;
     BOOL present_complete;
@@ -1658,9 +1659,8 @@ static NTSTATUS enqueue_renderer_queue_job(struct renderer_device_queue *queue,
     return enqueue_renderer_queue_job_internal(queue, job, FALSE);
 }
 
-static void queue_renderer_root_configure(struct renderer_root *root, uint32_t serial)
+static void queue_renderer_root_configure(struct renderer_root *root)
 {
-    if (serial) root->configure_serial = serial;
     root->pending_configure_scale_120 = root->preferred_scale_120;
     if (!++renderer.next_configure_request_id) ++renderer.next_configure_request_id;
     root->configure_request_id = renderer.next_configure_request_id;
@@ -1686,7 +1686,7 @@ static void renderer_root_preferred_scale(void *data,
         root->pending_configure_state = root->configure_applied_state;
     }
     if (root->configured || root->configure_pending)
-        queue_renderer_root_configure(root, 0);
+        queue_renderer_root_configure(root);
 }
 
 static const struct wp_fractional_scale_v1_listener renderer_root_scale_listener =
@@ -1703,7 +1703,9 @@ static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *
     root->pending_configure_width = root->toplevel_width;
     root->pending_configure_height = root->toplevel_height;
     root->pending_configure_state = root->toplevel_state;
-    queue_renderer_root_configure(root, serial);
+    root->configure_serial = serial;
+    root->configure_serial_valid = TRUE;
+    queue_renderer_root_configure(root);
 }
 
 static const struct xdg_surface_listener renderer_root_xdg_surface_listener =
@@ -1752,7 +1754,7 @@ static void renderer_root_toplevel_close(void *data, struct xdg_toplevel *toplev
     struct renderer_root *root = data;
 
     (void)toplevel;
-    root->closed = TRUE;
+    if (root->close_event_count != UINT64_MAX) ++root->close_event_count;
 }
 
 static const struct xdg_toplevel_listener renderer_root_toplevel_listener =
@@ -1774,6 +1776,7 @@ static void renderer_root_unmap_done(void *data, struct wl_callback *callback,
         root->remap_pending = FALSE;
         root->configured = FALSE;
         root->configure_serial = 0;
+        root->configure_serial_valid = FALSE;
         root->configure_applied_id = 0;
         root->configure_applied_revision = 0;
         root->configure_applied_width = 0;
@@ -3348,7 +3351,7 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
      * update and acknowledgement immediately before the first presentation. */
     if (root->unmap_callback) return STATUS_PENDING;
     if (!root->configured &&
-        (!root->configure_serial ||
+        (!root->configure_serial_valid ||
          root->configure_applied_id != root->configure_request_id ||
          !root->configure_applied_revision ||
          root->configure_applied_state != root->pending_configure_state))
@@ -3487,6 +3490,7 @@ static NTSTATUS sync_renderer_root(void *args)
             WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT);
     BOOL test_fail_next_frame_copy = !!(params->flags &
             WINEWAYLAND_HOST_ROOT_TEST_FAIL_NEXT_FRAME_COPY);
+    BOOL test_close = !!(params->flags & WINEWAYLAND_HOST_ROOT_TEST_CLOSE);
     BOOL input_auth_valid = !!(params->flags &
             WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID);
     BOOL input_authorized = !!(params->flags &
@@ -3505,6 +3509,7 @@ static NTSTATUS sync_renderer_root(void *args)
     params->configure_height = 0;
     params->configure_state = 0;
     params->configure_scale_120 = 0;
+    params->close_event_count = 0;
     params->present_result = VK_NOT_READY;
     params->present_status = STATUS_PENDING;
     if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
@@ -3588,6 +3593,7 @@ done:
     if (input_auth_valid) set_renderer_input_authorized(root, input_authorized);
     if (test_block_next_present) root->test_block_next_present = TRUE;
     if (test_fail_next_frame_copy) root->test_fail_next_frame_copy = TRUE;
+    if (test_close) renderer_root_toplevel_close(root, root->xdg_toplevel);
     if (configure_applied_id)
     {
         if (configure_applied_id > root->configure_request_id)
@@ -3634,7 +3640,8 @@ done:
                     requested_height);
     }
     if (root->configured) params->flags |= WINEWAYLAND_HOST_ROOT_CONFIGURED;
-    if (root->closed) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
+    if (root->close_event_count) params->flags |= WINEWAYLAND_HOST_ROOT_CLOSED;
+    params->close_event_count = root->close_event_count;
     if (root->swapchain) params->flags |= WINEWAYLAND_HOST_ROOT_WSI_READY;
     if (root->present_complete)
     {
@@ -3691,12 +3698,13 @@ static NTSTATUS authorize_renderer_root_present(struct renderer_root *root,
      * Both double-buffered requests belong to the next WSI buffer commit. */
     if (root->viewport) wp_viewport_set_destination(root->viewport, width, height);
     xdg_surface_set_window_geometry(root->xdg_surface, 0, 0, width, height);
-    if (root->configure_serial)
+    if (root->configure_serial_valid)
     {
         xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
         ++root->configure_count;
     }
     root->configure_serial = 0;
+    root->configure_serial_valid = FALSE;
     root->configure_pending = FALSE;
     root->configured = TRUE;
     root->width = width;

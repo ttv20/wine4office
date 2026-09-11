@@ -33,7 +33,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame_release) == 24);
-C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 384);
+C_ASSERT(sizeof(struct winewayland_host_renderer_root) == 392);
 C_ASSERT(sizeof(struct winewayland_host_renderer_root_retire) == 24);
 C_ASSERT(sizeof(struct winewayland_host_renderer_snapshot) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 80);
@@ -279,6 +279,26 @@ static int test_roots(void)
     }
     configure_count = root.configure_count;
 
+    /* An application may cancel WM_CLOSE. Each later native close still
+     * needs a distinct request, while a plain sync must not create one. */
+    for (i = 1; i <= 2; ++i)
+    {
+        root.flags = WINEWAYLAND_HOST_ROOT_TEST_CLOSE;
+        if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+        if (root.close_event_count != i)
+        {
+            status = STATUS_UNSUCCESSFUL;
+            goto failed;
+        }
+        root.flags = 0;
+        if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, &root))) goto failed;
+        if (root.close_event_count != i)
+        {
+            status = STATUS_UNSUCCESSFUL;
+            goto failed;
+        }
+    }
+
     root.root_generation = 2;
     root.configure_applied_id = 0;
     root.configure_applied_revision = 0;
@@ -288,6 +308,11 @@ static int test_roots(void)
     root.flags = 0;
     status = sync_test_renderer_root(&root);
     if (status || !(root.flags & WINEWAYLAND_HOST_ROOT_CREATED)) goto failed;
+    if (root.close_event_count)
+    {
+        status = STATUS_UNSUCCESSFUL;
+        goto failed;
+    }
 
     memset(&retire, 0, sizeof(retire));
     retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -308,7 +333,7 @@ static int test_roots(void)
     status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
     if (status) goto failed;
     destroy_renderer();
-    printf("root_self_test=passed configure_count=%u\n", configure_count);
+    printf("root_self_test=passed configure_count=%u close_events=2\n", configure_count);
     return 0;
 
 failed:
@@ -372,6 +397,8 @@ static int test_wsi(void)
     root.size = sizeof(root);
     root.root_identity = 2;
     root.root_generation = 1;
+    root.window_state_revision = 1;
+    memset(root.title, 't', sizeof(root.title) - 1);
     if ((status = sync_test_renderer_root(&root))) goto failed;
     for (i = 0; i < 100 && !root.configure_applied_id; ++i)
     {
@@ -714,6 +741,7 @@ struct host_renderer_root
     uint32_t native_lease_state;
     uint32_t native_lease_action;
     uint64_t close_request_id;
+    uint64_t close_event_count;
     uint64_t configure_request_id;
     uint32_t configure_width;
     uint32_t configure_height;
@@ -736,8 +764,6 @@ struct host_renderer_root
     BOOL source_released;
     BOOL frame_snapshot_required;
     BOOL window_hidden;
-    BOOL native_closed;
-    BOOL close_posted;
     BOOL seen;
 };
 
@@ -805,7 +831,6 @@ struct host_renderer_pool
 static struct host_renderer_pool renderer_pools[HOST_RENDERER_MAX_POOLS];
 static struct host_renderer_root renderer_roots[HOST_RENDERER_MAX_ROOTS];
 static uint64_t next_renderer_pool_generation;
-static uint64_t next_host_close_request_id;
 
 static NTSTATUS get_registered_host(struct registered_host_info *info)
 {
@@ -860,8 +885,10 @@ static NTSTATUS get_host_window_state(user_handle_t root, uint64_t host_epoch,
         struct host_window_state *state)
 {
     WCHAR title[256];
+    char utf8_title[ARRAY_SIZE(title) * 3];
     NTSTATUS status;
     unsigned int length;
+    int converted;
 
     memset(state, 0, sizeof(*state));
     memset(title, 0, sizeof(title));
@@ -880,9 +907,16 @@ static NTSTATUS get_host_window_state(user_handle_t root, uint64_t host_epoch,
             state->client = reply->client;
             length = wine_server_reply_size(reply) / sizeof(title[0]);
             title[min(length, ARRAY_SIZE(title) - 1)] = 0;
-            if (!WideCharToMultiByte(CP_UTF8, 0, title, -1, state->title,
-                    sizeof(state->title), NULL, NULL))
-                state->title[0] = 0;
+            converted = WideCharToMultiByte(CP_UTF8, 0, title, -1, utf8_title,
+                    sizeof(utf8_title), NULL, NULL);
+            if (converted)
+            {
+                length = min(converted - 1, sizeof(state->title) - 1);
+                /* Clip at a codepoint boundary, not inside a UTF-8 sequence. */
+                while (length && (utf8_title[length] & 0xc0) == 0x80) --length;
+                memcpy(state->title, utf8_title, length);
+                state->title[length] = 0;
+            }
         }
     }
     SERVER_END_REQ;
@@ -1095,22 +1129,18 @@ static NTSTATUS post_host_window_close(struct host_renderer_root *root, uint64_t
 {
     NTSTATUS status;
 
-    if (!root->close_request_id)
-    {
-        if (!++next_host_close_request_id) ++next_host_close_request_id;
-        root->close_request_id = next_host_close_request_id;
-    }
+    if (root->close_request_id == root->close_event_count) return STATUS_SUCCESS;
     SERVER_START_REQ(post_wayland_window_close)
     {
         req->root = root->root;
         req->host_epoch = host_epoch;
         req->root_identity = root->root_identity;
         req->root_generation = root->root_generation;
-        req->request_id = root->close_request_id;
+        req->request_id = root->close_request_id + 1;
         status = wine_server_call(req);
     }
     SERVER_END_REQ;
-    if (!status) root->close_posted = TRUE;
+    if (!status) ++root->close_request_id;
     return status;
 }
 
@@ -2054,7 +2084,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
                     state->client.top != state->window.top ||
                     state->client.right != state->window.right ||
                     state->client.bottom != state->window.bottom;
-            entry->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
+            entry->close_event_count = sync.close_event_count;
             update_renderer_root_configure(entry, &sync);
             entry->seen = TRUE;
             *result = entry;
@@ -2077,7 +2107,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
             state->client.top != state->window.top ||
             state->client.right != state->window.right ||
             state->client.bottom != state->window.bottom;
-    free_root->native_closed = !!(sync.flags & WINEWAYLAND_HOST_ROOT_CLOSED);
+    free_root->close_event_count = sync.close_event_count;
     update_renderer_root_configure(free_root, &sync);
     free_root->seen = TRUE;
     *result = free_root;
@@ -2385,9 +2415,10 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
         renderer_root->configure_request_id != configure.applied_id &&
         (status = post_host_window_configure(renderer_root, host_epoch)))
         return status;
-    if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
-        renderer_root->native_closed && !renderer_root->close_posted &&
-        (status = post_host_window_close(renderer_root, host_epoch)))
+    if (renderer_root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+        !(window_state.style & WS_VISIBLE))
+        renderer_root->close_request_id = renderer_root->close_event_count;
+    else if ((status = post_host_window_close(renderer_root, host_epoch)))
         return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
     if ((status = process_root_frame_snapshot(renderer_root, host_epoch, &window_state)))

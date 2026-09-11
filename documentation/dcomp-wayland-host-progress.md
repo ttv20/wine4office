@@ -239,6 +239,11 @@ or transport fixture is not Outlook support.
   normal Windows message queue. Replaying the same ID is idempotent and an
   older ID or recycled-root tuple is rejected, so a host retry cannot deliver
   two close requests or close a new window that reused the HWND value.
+  Native close events now advance a per-root counter instead of setting a
+  permanent boolean. The host dispatches one distinct request per scan, so an
+  application that cancels `WM_CLOSE` can receive the next close action, while
+  retries retain their idempotent server request ID. Events observed outside a
+  visible hosted lease are consumed without replaying them after remap.
 - Xdg configure events now cross a bounded request/apply/ack path instead of
   being acknowledged immediately by the host. The Unix renderer retains the
   raw Wayland serial locally and exposes only a host-monotonic request ID,
@@ -1113,6 +1118,22 @@ Unsupported combinations return the complete root to the legacy local path.
   WSL build agent. No task-prefix Wine processes remained on either laptop;
   Intel retained 56 GiB free and WSL retained 304 GiB. Physical pointer routing,
   per-monitor DPI notifications and mixed-monitor transitions remain open gates.
+- Root lifecycle review replaced the native close latch with an event counter,
+  preserved the full bounded 256-byte title cache across unmap, and made title
+  conversion truncate at a UTF-8 boundary instead of erasing long non-ASCII
+  titles. Xdg configure serial validity is now explicit; a wrapped zero serial
+  is distinct from a scale-only request that needs no xdg acknowledgement.
+  Renderer ABI 13 carries the close count in the checked 392-byte root record.
+  The canonical x86-64/i386 host build passed. Intel's root fixture delivered
+  two close callbacks, checked stable polling and a fresh lifetime count; the
+  i386 WSI fixture passed and its Wayland trace contains the identical complete
+  255-byte title both before and after hide/remap. Evidence is
+  `artifacts/astra-root-controls-x64.log`,
+  `artifacts/astra-root-title-remap-i386.log` and
+  `artifacts/astra-root-controls-SHA256SUMS` in the personal Intel task directory.
+  This tests native event accounting and remap metadata; an externally issued
+  compositor close followed by application cancellation remains a separate
+  interaction gate.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
