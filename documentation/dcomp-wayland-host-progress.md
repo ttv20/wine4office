@@ -235,7 +235,7 @@ or transport fixture is not Outlook support.
 - An xdg-toplevel close event now crosses an authenticated server operation
   before it reaches the application. The request carries the host epoch, shared
   root identity, USER handle generation and a monotonic request ID. Wineserver
-  validates all four, then posts `WM_CLOSE` to the existing owner thread's
+  validates all four and the visible Hosted lease, then posts `WM_CLOSE` to the existing owner thread's
   normal Windows message queue. Replaying the same ID is idempotent and an
   older ID or recycled-root tuple is rejected, so a host retry cannot deliver
   two close requests or close a new window that reused the HWND value.
@@ -1228,6 +1228,19 @@ Unsupported combinations return the complete root to the legacy local path.
   `artifacts/astra-empty-input-{authority,pipeline}-x64.log` and
   `artifacts/astra-empty-input-SHA256SUMS` in the personal Intel task directory.
   No task Wine remained; 56 GiB remained free.
+- Native close now revalidates the visible Hosted lease as well as host/root
+  identity. Authority tests were corrected to deliver closes after ownership
+  transfer, not before it. Local, hidden and returning-local requests are
+  rejected without posting; Empty remains closable. Repeated accepted IDs
+  remain idempotent, stale IDs fail, and a later close succeeds after the prior
+  message is consumed without destroying the window. The host drops queued
+  closes for Hidden scenes instead of repeatedly blocking their retirement on
+  the new server denial. The server and x86-64/i386 host/test builds passed;
+  Intel's authority fixture passed 959 checks with zero failures. Evidence is
+  `artifacts/astra-close-lease-authority-x64.log` and
+  `artifacts/astra-close-lease-SHA256SUMS` in the personal Intel task directory.
+  No task Wine remained. This still does not claim an externally injected
+  compositor-close interaction fixture.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

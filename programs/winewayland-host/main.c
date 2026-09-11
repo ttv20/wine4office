@@ -2444,7 +2444,9 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
         (status = post_host_window_configure(renderer_root, host_epoch)))
         return status;
     if (renderer_root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
-        !(window_state.style & WS_VISIBLE))
+        !(window_state.style & WS_VISIBLE) ||
+        (renderer_root->scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+         renderer_root->scene_disposition != WINE_WAYLAND_SCENE_EMPTY))
         renderer_root->close_request_id = renderer_root->close_event_count;
     else if ((status = post_host_window_close(renderer_root, host_epoch)))
         return status;

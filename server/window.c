@@ -5641,6 +5641,11 @@ DECL_HANDLER(post_wayland_window_close)
         set_error( STATUS_REVISION_MISMATCH );
         return;
     }
+    if (!wayland_root_accepts_host_input( root ))
+    {
+        set_error( STATUS_INVALID_DEVICE_STATE );
+        return;
+    }
     if (root->wayland_close_host_epoch != req->host_epoch)
     {
         root->wayland_close_host_epoch = req->host_epoch;

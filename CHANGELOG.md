@@ -6,6 +6,7 @@
 - Keep other DirectComposition operations responsive while the Wayland host starts.
 - Fix invalid-handle errors when closing hosted Wayland windows with pending frames.
 - Keep hosted windows interactive when their composition content is removed.
+- Reject host close requests after a window is hidden or native ownership changes.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

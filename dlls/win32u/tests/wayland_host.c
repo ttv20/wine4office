@@ -2881,25 +2881,10 @@ static void test_host_registration( const char *program, const char *test_name )
     state->close_request_id = 2;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_POST_CLOSE ),
-        "Timed out posting native close.\n" );
-    ok( !state->command_status && state->window_state_revision &&
-        PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
-        "Native close returned %#lx, revision %s, without WM_CLOSE.\n",
-        state->command_status, wine_dbgstr_longlong( state->window_state_revision ) );
-    ok( send_host_child_command( state, command_event, result_event,
-                                HOST_CHILD_COMMAND_POST_CLOSE ),
-        "Timed out replaying native close.\n" );
-    ok( !state->command_status &&
+        "Timed out posting native close before ownership transfer.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE && !state->window_state_revision &&
         !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
-        "Idempotent native close returned %#lx or posted a duplicate.\n",
-        state->command_status );
-    state->close_request_id = 1;
-    ok( send_host_child_command( state, command_event, result_event,
-                                HOST_CHILD_COMMAND_POST_CLOSE ),
-        "Timed out posting stale native close.\n" );
-    ok( state->command_status == STATUS_REVISION_MISMATCH &&
-        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
-        "Stale native close returned %#lx or posted WM_CLOSE.\n",
+        "Unowned native close returned %#lx or posted WM_CLOSE.\n",
         state->command_status );
 
     status = post_window_configure( root, old_epoch, root_identity, root_generation,
@@ -3586,6 +3571,28 @@ static void test_host_registration( const char *program, const char *test_name )
 
     SetWindowPos( root, HWND_TOP, 100, 100, 64, 64,
                   SWP_SHOWWINDOW | SWP_NOACTIVATE );
+    state->close_request_id = 2;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting owned native close.\n" );
+    ok( !state->command_status && state->window_state_revision &&
+        PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Owned native close returned %#lx without WM_CLOSE.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out replaying owned native close.\n" );
+    ok( !state->command_status && !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Idempotent native close returned %#lx or posted a duplicate.\n", state->command_status );
+    state->close_request_id = 1;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting stale native close.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Stale native close returned %#lx or posted WM_CLOSE.\n", state->command_status );
+    state->close_request_id = 3;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting a second native close after cancellation.\n" );
+    ok( !state->command_status && IsWindow( root ) &&
+        PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Second native close returned %#lx without WM_CLOSE.\n", state->command_status );
     input_a = CreateWindowExW( 0, L"static", L"input A", WS_CHILD,
                                0, 0, 16, 16, root, NULL, NULL, NULL );
     input_b = CreateWindowExW( 0, L"static", L"input B", WS_CHILD,
@@ -3781,6 +3788,12 @@ static void test_host_registration( const char *program, const char *test_name )
         !(GetAsyncKeyState( VK_SHIFT ) & 0x8000) &&
         !!(GetKeyState( VK_CAPITAL ) & 1) == !!initial_caps,
         "Hiding the native root did not release key/modifier state or changed Caps.\n" );
+    state->close_request_id = 4;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting a close after hide.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Hidden-root close returned %#lx or posted WM_CLOSE.\n", state->command_status );
     ok( PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
         "Hiding the native root did not queue key-up.\n" );
     ok( send_host_child_command( state, command_event, result_event,
@@ -3844,6 +3857,11 @@ static void test_host_registration( const char *program, const char *test_name )
     scene_generation = state->revocation_scene_generation;
     ok( GetAsyncKeyState( 'A' ) & 0x8000,
         "Removing producer content released a key while the native window remained hosted.\n" );
+    state->close_request_id = 4;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting an empty-window close.\n" );
+    ok( !state->command_status && PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Empty-window close returned %#lx without WM_CLOSE.\n", state->command_status );
     state->input_event_id = 14;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = KEYEVENTF_KEYUP;
@@ -4463,6 +4481,12 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, state->native_lease_state, state->native_lease_action,
         wine_dbgstr_longlong( state->native_lease_host_epoch ),
         wine_dbgstr_longlong( state->native_lease_scene_generation ) );
+    state->close_request_id = 5;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CLOSE ),
+        "Timed out posting a close after ownership revocation.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE &&
+        !PeekMessageW( &msg, root, WM_CLOSE, WM_CLOSE, PM_REMOVE ),
+        "Returning-local close returned %#lx or posted WM_CLOSE.\n", state->command_status );
     state->native_lease_scene_generation++;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SET_HOST_RETIRED ),
