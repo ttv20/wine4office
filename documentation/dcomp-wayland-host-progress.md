@@ -1194,6 +1194,23 @@ Unsupported combinations return the complete root to the legacy local path.
   `artifacts/astra-startup-lock-i386-diagnostic.log` and
   `artifacts/astra-startup-frame-x64-final.log` in the personal Intel task
   directory. No multi-desktop runtime claim is made by this fixture.
+- WineD3D now retains its frame-latency semaphore until adapter cleanup has
+  joined the asynchronous presentation-completion worker. Previously the
+  final public release closed that handle before the worker returned the last
+  credits. The destructor keeps only the handle value across adapter object
+  destruction and closes it afterward; initialization failure cleanup is
+  unchanged. The canonical x86-64/i386 WineD3D build passed. The same automatic
+  framed fixture previously logged two invalid-handle credit releases and now
+  logs none. Its filtered trace verifies a presented backend result and a
+  discarded result; seven public Presents do not imply seven displayed frames.
+  The final startup-lock fixture also passed again. Evidence is
+  `artifacts/astra-present-credit-before-SHA256SUMS`,
+  `artifacts/astra-present-credit-after-x64.log`,
+  `artifacts/astra-startup-lock-final-x64.log` and
+  `artifacts/astra-startup-credit-final-SHA256SUMS` in the personal Intel task
+  directory. Prefix startup/shutdown still logs an RpcSs environment error;
+  it is not counted as a graphics result. No task Wine remained and 56 GiB
+  remained free. WSL and the running Radeon Office environment were untouched.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

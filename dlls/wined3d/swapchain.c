@@ -193,6 +193,7 @@ ULONG CDECL wined3d_swapchain_decref(struct wined3d_swapchain *swapchain)
     if (!refcount)
     {
         struct wined3d_device *device;
+        HANDLE frame_latency_semaphore;
 
         wined3d_mutex_lock();
 
@@ -204,10 +205,12 @@ ULONG CDECL wined3d_swapchain_decref(struct wined3d_swapchain *swapchain)
         if (swapchain->dc)
             wined3d_release_dc(swapchain->win_handle, swapchain->dc);
 
-        CloseHandle(swapchain->frame_latency_semaphore);
-
+        frame_latency_semaphore = swapchain->frame_latency_semaphore;
         swapchain->parent_ops->wined3d_object_destroyed(swapchain->parent);
         swapchain->device->adapter->adapter_ops->adapter_destroy_swapchain(swapchain);
+        /* Adapter cleanup joins asynchronous Present completion workers.
+         * They may return their last credits even after the parent is gone. */
+        CloseHandle(frame_latency_semaphore);
 
         wined3d_mutex_unlock();
     }
