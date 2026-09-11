@@ -1809,10 +1809,9 @@ static user_handle_t find_hardware_message_window( struct desktop *desktop, stru
     case QS_KEY:
         if (msg->direct_hardware_target)
         {
-            win = msg->win;
-            if (input && input_shm->focus &&
-                (input_shm->focus == win || is_child_window( win, input_shm->focus )))
-                win = input_shm->focus;
+            /* The native root authenticates the source, not the recipient.
+             * Windows focus can move to another toplevel between key edges. */
+            win = input && input_shm->focus ? input_shm->focus : msg->win;
         }
         else if (input && !(win = input_shm->focus))
         {

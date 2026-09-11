@@ -2160,7 +2160,7 @@ static void test_host_registration( const char *program, const char *test_name )
     HWND root = NULL, dcomp_root = NULL, pre_ready_root = NULL, hosted_root = NULL;
     HWND hosted_child = NULL, hosted_popup = NULL;
     HWND second_root = NULL;
-    HWND input_a = NULL, input_b = NULL;
+    HWND input_a = NULL, input_b = NULL, input_peer = NULL;
     HWND previous_focus = NULL;
     RECT pool_client_rect, framed_transfer_rect = {0, 0, 80, 72};
     POINT input_point, cursor_point;
@@ -3865,12 +3865,23 @@ static void test_host_registration( const char *program, const char *test_name )
     state->input_event_id = 14;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = KEYEVENTF_KEYUP;
+    input_peer = CreateWindowExW( 0, L"static", L"input peer", WS_POPUP,
+                                  0, 0, 32, 32, NULL, NULL, NULL, NULL );
+    ok( !!input_peer, "Failed to create an independent input root, error %lu.\n", GetLastError() );
+    SetFocus( input_peer );
+    ok( GetFocus() == input_peer && input_peer,
+        "Cross-root focus is %p instead of %p.\n", GetFocus(), input_peer );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
         "Timed out releasing a key on the empty hosted window.\n" );
     ok( !state->command_status && !(GetAsyncKeyState( 'A' ) & 0x8000) &&
-        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
-        "Empty-window key up returned %#lx without the expected release.\n", state->command_status );
+        PeekMessageW( &msg, input_peer, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Cross-root key up returned %#lx without the expected release.\n", state->command_status );
+    ok( !PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ),
+        "Key up was pinned to its native origin instead of following Windows focus.\n" );
+    SetFocus( previous_focus );
+    DestroyWindow( input_peer );
+    input_peer = NULL;
     for (i = 15; i <= 16; ++i)
     {
         state->input_event_id = i;
@@ -5449,6 +5460,7 @@ done:
     if (hosted_root) DestroyWindow( hosted_root );
     if (dcomp_root) DestroyWindow( dcomp_root );
     if (second_root) DestroyWindow( second_root );
+    if (input_peer) DestroyWindow( input_peer );
     if (root) DestroyWindow( root );
 }
 

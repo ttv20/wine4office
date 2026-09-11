@@ -1241,6 +1241,18 @@ Unsupported combinations return the complete root to the legacy local path.
   `artifacts/astra-close-lease-SHA256SUMS` in the personal Intel task directory.
   No task Wine remained. This still does not claim an externally injected
   compositor-close interaction fixture.
+- Hosted keyboard routing no longer restricts the current input-queue focus
+  to descendants of the native origin root. The native root authenticates the
+  event; it does not pin the Windows recipient. The held-key removal fixture
+  now moves focus to a separate top-level window before key-up. The previous
+  server sent the release to the old root and failed two assertions; the fixed
+  server passed all 962 checks. Existing same-root child routing, no-focus
+  fallback and native ownership checks still pass. The x86-64/i386 authority
+  executables and server rebuilt through the canonical focused path. Evidence
+  is `artifacts/astra-cross-root-input-{before,after}-x64.log` and their
+  `astra-cross-root-input-*-SHA256SUMS` manifests in the personal Intel task
+  directory. This covers Windows focus within one input queue, not new
+  cross-process raw-input or attached-thread claims. No task Wine remained.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
