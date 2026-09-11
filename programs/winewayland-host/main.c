@@ -173,6 +173,16 @@ static int test_renderer(void)
         import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
         import.memory_fd = import.ready_fd = import.reuse_fd = -1;
         status = WINE_UNIX_CALL(unix_renderer_import, &import);
+        if (status != STATUS_INVALID_PARAMETER)
+        {
+            fprintf(stderr, "renderer=failed allocation_validation_status=%#lx\n", status);
+            destroy_renderer();
+            return 5;
+        }
+        /* A BGRA pixel needs four bytes. Only valid metadata can reach the
+         * separate invalid-FD check. */
+        import.allocation_size = 4;
+        status = WINE_UNIX_CALL(unix_renderer_import, &import);
         if (status == STATUS_INVALID_HANDLE)
         {
             printf("renderer=ready device_uuid=%08x%08x%08x%08x self_test=passed import_validation=passed\n",

@@ -1366,6 +1366,37 @@ Unsupported combinations return the complete root to the legacy local path.
   focused canonical lifecycle. No additional GPU presentation run was needed
   for this conversion-only change; physical keypad/Num Lock interaction
   remains a separate input fixture gate.
+- Native pointer leave now queues a button-only root reset before dropping
+  pointer focus; seat loss uses the same helper. This prevents a compositor
+  grab from leaving the server's held-button record active when the compositor
+  consumes the release. Keyboard focus and held keys remain independent.
+  Queue overflow now records the state lost by the evicted event's root,
+  rather than replacing another root's newly arriving event with a blanket
+  reset. Lost keyboard edges trigger a current held-key snapshot; lost button
+  edges/resets retain a pending button reset. Revoked roots discard pending
+  pointer recovery, and root identity/generation checks protect replacements.
+  Pending keyboard snapshots wait for space for the whole bounded snapshot.
+  The previous eager partial-reset branch could repeatedly fill freed slots
+  for two roots and prevent either complete snapshot from fitting.
+- The renderer fixture now checks pointer cancellation without keyboard
+  cancellation, recovery of an evicted button reset, recovery of another
+  root's evicted key release, and progress of two pending snapshots under a
+  full queue. The input injection fixture uses the real key-release callback
+  so its held-key list agrees with the events it queues. Intel i386 passed
+  the native input reconciliation, transport-copy/pixel and import-validation
+  fixtures. The x86-64 input pipeline then passed all 11 events, nine imports,
+  six backend presentations and fallback/rehost with the new queue handling
+  and shared key mapper together. Evidence is
+  `artifacts/astra-pointer-overflow-final-i386.log`,
+  `artifacts/astra-pointer-overflow-pipeline-x64.log` and
+  `artifacts/astra-pointer-overflow-final-SHA256SUMS` in the personal Intel
+  task directory. An initial renderer run passed the new input checks but
+  exposed an obsolete import-test expectation: one byte cannot hold its
+  declared BGRA pixel. The fixture now asserts that metadata rejection first,
+  then supplies four bytes to reach its separate invalid-FD check. Production
+  import validation was not weakened. Final PE/Unix targets rebuilt through
+  the focused canonical lifecycle. No task Wine remained; 56 GiB remained
+  free. Physical compositor drag/capture testing remains open.
 
 ## Developer activation and reproduction
 
