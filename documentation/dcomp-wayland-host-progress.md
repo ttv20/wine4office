@@ -250,8 +250,12 @@ or transport fixture is not Outlook support.
   extent. The host acknowledges only the matching retained serial after that
   applied ID returns. Stale applies are harmless, conflicting replays fail,
   and a replacement host can restart its request numbering without accepting
-  an old epoch's response. The current host reports scale 120 because its
-  minimal shell adapter does not yet bind fractional-scale output state.
+  an old epoch's response. The host binds `fractional-scale-v1` and `viewporter`
+  when both are available. Each root carries its preferred scale through the
+  same configure/apply path, including scale-only events without an xdg serial.
+  Viewport destination and xdg geometry use logical units; WSI, frame snapshots
+  and producer pools retain their actual pixel extents. Without those protocols
+  the existing scale-120 path is retained.
 - Wineserver now completes an initial xdg configure that has no extent and no
   Win32 state change without posting work to the owner thread. This removes a
   startup deadlock in which three accepted frames exhausted the producer's
@@ -1078,6 +1082,37 @@ Unsupported combinations return the complete root to the legacy local path.
   build agent. This proves host-to-Windows layout activation for published
   groups; a physical compositor shortcut and typed Hebrew character fixture is
   still required before claiming complete interactive switching.
+- Fractional scaling now keeps staged xdg state, the pending owner configure
+  and the applied surface dimensions separate. Application-initiated buffer
+  resizing also updates the viewport when no new xdg serial arrives. A scale
+  change alone preserves the current logical size and requests the matching
+  pixel size from the owner. `winewayland.drv` now honors a nonzero extent
+  even when the configure contains no shell-state bits. Pointer motion is
+  converted using the root's pixel/logical mapping and the outer window origin,
+  so the frame is no longer clamped into client coordinates.
+  Review corrected a fractional-rounding defect in the initial uncommitted
+  implementation: 64 pixels at 150% maps to 43 logical units, but scaling 43
+  back gives 65. The host now validates the owner's reply in logical units
+  using the same rounding direction, preserving its authoritative pixel size.
+  A frame awaiting owner configure application is discarded before WSI rather
+  than reported as a GPU failure, returning its latency credit.
+  The canonical build compiled the host and tests for x86-64 and i386 and
+  linked the changed driver Unix library. Intel's original i386 WSI fixture
+  passed at 150%, including the full transported-pixel, reuse, WSI pin/release,
+  resize and hide/remap checks. Its protocol trace records 64x64 pixels mapped
+  to 43x43 logical units and 96x80 mapped to 64x53. The new `--dcomp-scale-test`
+  waits for a real host completion before publishing its ready marker; changing
+  isolated KWin from 100% to 125% then resized the client from 64x64 to 80x80
+  and completed 31 host presentations with zero failed frames. It requires
+  completions after resize beyond the maximum old in-flight credit count.
+  The WSLg authority test passed 908 checks, including a state-zero configure
+  at 150%. WSLg still withholds transport for its missing Vulkan extension.
+  Evidence is `artifacts/astra-scale-{wsi-i386,dcomp-x64-final}.log` and
+  `artifacts/astra-scale-SHA256SUMS` in the personal Intel task directory, and
+  `artifacts/astra-scale-authority-wslg-x64.log` with its manifest under the
+  WSL build agent. No task-prefix Wine processes remained on either laptop;
+  Intel retained 56 GiB free and WSL retained 304 GiB. Physical pointer routing,
+  per-monitor DPI notifications and mixed-monitor transitions remain open gates.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

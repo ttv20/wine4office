@@ -34,6 +34,8 @@
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-names.h>
 
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #include "ntstatus.h"
@@ -70,6 +72,8 @@ struct registry_probe
     struct registry_seat seats[16];
     unsigned int seat_count;
     struct wl_compositor *compositor;
+    struct wp_viewporter *viewporter;
+    struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
     struct xdg_wm_base *xdg_wm_base;
 };
 
@@ -103,6 +107,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
         if (probe->xdg_wm_base)
             xdg_wm_base_add_listener(probe->xdg_wm_base, &xdg_wm_base_listener, NULL);
     }
+    else if (!strcmp(interface, wp_viewporter_interface.name) && !probe->viewporter)
+        probe->viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
+    else if (!strcmp(interface, wp_fractional_scale_manager_v1_interface.name) &&
+             !probe->fractional_scale_manager)
+        probe->fractional_scale_manager = wl_registry_bind(registry, name,
+                &wp_fractional_scale_manager_v1_interface, 1);
     else if (!strcmp(interface, wl_shm_interface.name))
         probe->capabilities |= WINEWAYLAND_HOST_CAP_SHM;
     else if (!strcmp(interface, wl_seat_interface.name))
@@ -140,9 +150,14 @@ static const struct wl_registry_listener registry_listener =
 
 static void destroy_registry_probe(struct registry_probe *probe)
 {
+    if (probe->fractional_scale_manager)
+        wp_fractional_scale_manager_v1_destroy(probe->fractional_scale_manager);
+    if (probe->viewporter) wp_viewporter_destroy(probe->viewporter);
     if (probe->xdg_wm_base) xdg_wm_base_destroy(probe->xdg_wm_base);
     if (probe->compositor) wl_compositor_destroy(probe->compositor);
     probe->xdg_wm_base = NULL;
+    probe->fractional_scale_manager = NULL;
+    probe->viewporter = NULL;
     probe->compositor = NULL;
 }
 
@@ -220,6 +235,8 @@ struct renderer_root
     uint64_t root_identity;
     uint64_t root_generation;
     struct wl_surface *surface;
+    struct wp_viewport *viewport;
+    struct wp_fractional_scale_v1 *fractional_scale;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
     struct wl_callback *unmap_callback;
@@ -241,9 +258,13 @@ struct renderer_root
     uint32_t swapchain_height;
     BOOL swapchain_image_initialized[8];
     uint32_t configure_count;
+    uint32_t toplevel_width;
+    uint32_t toplevel_height;
+    uint32_t toplevel_state;
     uint32_t pending_configure_width;
     uint32_t pending_configure_height;
     uint32_t pending_configure_state;
+    uint32_t pending_configure_scale_120;
     uint32_t configure_serial;
     uint64_t configure_request_id;
     uint64_t configure_applied_id;
@@ -252,9 +273,14 @@ struct renderer_root
     uint32_t configure_applied_width;
     uint32_t configure_applied_height;
     uint32_t configure_applied_state;
+    uint32_t preferred_scale_120;
+    uint32_t surface_scale_120;
+    uint32_t surface_buffer_width;
+    uint32_t surface_buffer_height;
     int32_t width;
     int32_t height;
     BOOL configured;
+    BOOL configure_pending;
     BOOL unmapped;
     BOOL remap_pending;
     BOOL closed;
@@ -346,6 +372,8 @@ struct vulkan_renderer
     void *vulkan_handle;
     struct wl_display *display;
     struct wl_compositor *compositor;
+    struct wp_viewporter *viewporter;
+    struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
     struct xdg_wm_base *xdg_wm_base;
     struct wl_seat *seat;
     struct wl_keyboard *keyboard;
@@ -745,6 +773,29 @@ static void queue_pending_renderer_keyboard_snapshots(void)
 
 static NTSTATUS get_renderer_input(void *args);
 
+static int32_t renderer_pointer_to_buffer(wl_fixed_t coordinate, uint32_t pixels,
+        uint32_t logical)
+{
+    int64_t value;
+
+    if (!logical) return coordinate;
+    value = (int64_t)coordinate * pixels / logical;
+    return max(INT32_MIN, min(INT32_MAX, value));
+}
+
+static void queue_renderer_pointer_motion(struct winewayland_host_input_event *event,
+        wl_fixed_t x, wl_fixed_t y)
+{
+    struct renderer_root *root = renderer.pointer_root;
+
+    if (!root) return;
+    /* Capture the mapping when the event arrives, before a later configure
+     * can replace it. Coordinates cover the whole root, including its frame. */
+    event->x = renderer_pointer_to_buffer(x, root->surface_buffer_width, root->width);
+    event->y = renderer_pointer_to_buffer(y, root->surface_buffer_height, root->height);
+    queue_renderer_input(root, event, TRUE);
+}
+
 static void renderer_pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
         struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
 {
@@ -757,9 +808,7 @@ static void renderer_pointer_enter(void *data, struct wl_pointer *pointer, uint3
     if (!renderer.pointer_root) return;
     event.type = WINEWAYLAND_HOST_INPUT_POINTER_MOTION;
     event.serial = serial;
-    event.x = x;
-    event.y = y;
-    queue_renderer_input(renderer.pointer_root, &event, TRUE);
+    queue_renderer_pointer_motion(&event, x, y);
 }
 
 static void renderer_pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
@@ -787,9 +836,7 @@ static void renderer_pointer_motion(void *data, struct wl_pointer *pointer, uint
     event.type = WINEWAYLAND_HOST_INPUT_POINTER_MOTION;
     event.serial = renderer.pointer_serial;
     event.time = time;
-    event.x = x;
-    event.y = y;
-    queue_renderer_input(renderer.pointer_root, &event, TRUE);
+    queue_renderer_pointer_motion(&event, x, y);
 }
 
 static void renderer_pointer_button(void *data, struct wl_pointer *pointer, uint32_t serial,
@@ -1611,17 +1658,52 @@ static NTSTATUS enqueue_renderer_queue_job(struct renderer_device_queue *queue,
     return enqueue_renderer_queue_job_internal(queue, job, FALSE);
 }
 
+static void queue_renderer_root_configure(struct renderer_root *root, uint32_t serial)
+{
+    if (serial) root->configure_serial = serial;
+    root->pending_configure_scale_120 = root->preferred_scale_120;
+    if (!++renderer.next_configure_request_id) ++renderer.next_configure_request_id;
+    root->configure_request_id = renderer.next_configure_request_id;
+    root->configure_pending = TRUE;
+}
+
+static void renderer_root_preferred_scale(void *data,
+        struct wp_fractional_scale_v1 *fractional_scale, uint32_t scale_120)
+{
+    struct renderer_root *root = data;
+
+    (void)fractional_scale;
+    if (!scale_120 || scale_120 > 960) return;
+    if (root->preferred_scale_120 == scale_120) return;
+    root->preferred_scale_120 = scale_120;
+    /* A scale event need not be followed by an xdg configure. Preserve the
+     * current logical size in that case, and let the owner resize its buffers.
+     * Do not alter the viewport while a previous presentation owns the token. */
+    if (root->configured && !root->configure_pending)
+    {
+        root->pending_configure_width = root->width;
+        root->pending_configure_height = root->height;
+        root->pending_configure_state = root->configure_applied_state;
+    }
+    if (root->configured || root->configure_pending)
+        queue_renderer_root_configure(root, 0);
+}
+
+static const struct wp_fractional_scale_v1_listener renderer_root_scale_listener =
+{
+    renderer_root_preferred_scale,
+};
+
 static void renderer_root_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface,
         uint32_t serial)
 {
     struct renderer_root *root = data;
 
     (void)xdg_surface;
-    root->configure_serial = serial;
-    if (!++renderer.next_configure_request_id) ++renderer.next_configure_request_id;
-    root->configure_request_id = renderer.next_configure_request_id;
-    root->width = root->pending_configure_width;
-    root->height = root->pending_configure_height;
+    root->pending_configure_width = root->toplevel_width;
+    root->pending_configure_height = root->toplevel_height;
+    root->pending_configure_state = root->toplevel_state;
+    queue_renderer_root_configure(root, serial);
 }
 
 static const struct xdg_surface_listener renderer_root_xdg_surface_listener =
@@ -1636,30 +1718,30 @@ static void renderer_root_toplevel_configure(void *data, struct xdg_toplevel *to
     uint32_t *state;
 
     (void)toplevel;
-    root->pending_configure_width = max(width, 0);
-    root->pending_configure_height = max(height, 0);
-    root->pending_configure_state = 0;
+    root->toplevel_width = max(width, 0);
+    root->toplevel_height = max(height, 0);
+    root->toplevel_state = 0;
     wl_array_for_each(state, states)
     {
         switch (*state)
         {
         case XDG_TOPLEVEL_STATE_MAXIMIZED:
-            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED;
+            root->toplevel_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED;
             break;
         case XDG_TOPLEVEL_STATE_RESIZING:
-            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_RESIZING;
+            root->toplevel_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_RESIZING;
             break;
         case XDG_TOPLEVEL_STATE_TILED_LEFT:
         case XDG_TOPLEVEL_STATE_TILED_RIGHT:
         case XDG_TOPLEVEL_STATE_TILED_TOP:
         case XDG_TOPLEVEL_STATE_TILED_BOTTOM:
-            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_TILED;
+            root->toplevel_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_TILED;
             break;
         case XDG_TOPLEVEL_STATE_FULLSCREEN:
-            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN;
+            root->toplevel_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN;
             break;
         case XDG_TOPLEVEL_STATE_ACTIVATED:
-            root->pending_configure_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_ACTIVATED;
+            root->toplevel_state |= WINEWAYLAND_HOST_CONFIGURE_STATE_ACTIVATED;
             break;
         }
     }
@@ -1697,6 +1779,7 @@ static void renderer_root_unmap_done(void *data, struct wl_callback *callback,
         root->configure_applied_width = 0;
         root->configure_applied_height = 0;
         root->configure_applied_state = 0;
+        root->configure_pending = FALSE;
     }
     wl_callback_destroy(callback);
 }
@@ -1784,6 +1867,9 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
         renderer.p_vkDestroySurfaceKHR(renderer.instance, root->vulkan_surface, NULL);
     if (root->xdg_toplevel) xdg_toplevel_destroy(root->xdg_toplevel);
     if (root->xdg_surface) xdg_surface_destroy(root->xdg_surface);
+    if (root->fractional_scale)
+        wp_fractional_scale_v1_destroy(root->fractional_scale);
+    if (root->viewport) wp_viewport_destroy(root->viewport);
     if (root->surface) wl_surface_destroy(root->surface);
     if (renderer.pointer_root == root) renderer.pointer_root = NULL;
     if (renderer.keyboard_root == root) renderer.keyboard_root = NULL;
@@ -1997,6 +2083,9 @@ static NTSTATUS destroy_renderer(void)
         renderer.p_vkDestroyDevice(renderer.device, NULL);
     if (renderer.instance && renderer.p_vkDestroyInstance)
         renderer.p_vkDestroyInstance(renderer.instance, NULL);
+    if (renderer.fractional_scale_manager)
+        wp_fractional_scale_manager_v1_destroy(renderer.fractional_scale_manager);
+    if (renderer.viewporter) wp_viewporter_destroy(renderer.viewporter);
     if (renderer.xdg_wm_base) xdg_wm_base_destroy(renderer.xdg_wm_base);
     if (renderer.compositor) wl_compositor_destroy(renderer.compositor);
     if (renderer.display) wl_display_disconnect(renderer.display);
@@ -2647,8 +2736,12 @@ static NTSTATUS create_renderer(void *args)
     wl_surface_destroy(surface);
     surface = NULL;
     renderer.compositor = registry_probe.compositor;
+    renderer.viewporter = registry_probe.viewporter;
+    renderer.fractional_scale_manager = registry_probe.fractional_scale_manager;
     renderer.xdg_wm_base = registry_probe.xdg_wm_base;
     registry_probe.compositor = NULL;
+    registry_probe.viewporter = NULL;
+    registry_probe.fractional_scale_manager = NULL;
     registry_probe.xdg_wm_base = NULL;
     destroy_registry_probe(&registry_probe);
     wl_registry_destroy(registry);
@@ -3434,8 +3527,27 @@ static NTSTATUS sync_renderer_root(void *args)
     root = free_root;
     root->root_identity = params->root_identity;
     root->root_generation = params->root_generation;
-    if (!(root->surface = wl_compositor_create_surface(renderer.compositor)) ||
-        !(root->xdg_surface = xdg_wm_base_get_xdg_surface(renderer.xdg_wm_base,
+    root->preferred_scale_120 = 120;
+    root->surface_scale_120 = 120;
+    if (!(root->surface = wl_compositor_create_surface(renderer.compositor)))
+    {
+        destroy_renderer_root(root);
+        return STATUS_NOT_SUPPORTED;
+    }
+    /* Keep the default buffer scale of one; the viewport handles fractions. */
+    if (renderer.viewporter && renderer.fractional_scale_manager &&
+        (!(root->viewport = wp_viewporter_get_viewport(renderer.viewporter,
+                root->surface)) ||
+         !(root->fractional_scale =
+                wp_fractional_scale_manager_v1_get_fractional_scale(
+                renderer.fractional_scale_manager, root->surface)) ||
+         wp_fractional_scale_v1_add_listener(root->fractional_scale,
+                &renderer_root_scale_listener, root) == -1))
+    {
+        destroy_renderer_root(root);
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!(root->xdg_surface = xdg_wm_base_get_xdg_surface(renderer.xdg_wm_base,
                 root->surface)) ||
         xdg_surface_add_listener(root->xdg_surface,
                 &renderer_root_xdg_surface_listener, root) == -1 ||
@@ -3480,7 +3592,7 @@ done:
     {
         if (configure_applied_id > root->configure_request_id)
             return STATUS_REVISION_MISMATCH;
-        if (configure_applied_id == root->configure_request_id && root->configure_serial)
+        if (configure_applied_id == root->configure_request_id && root->configure_pending)
         {
             if (configure_applied_state != root->pending_configure_state)
                 return STATUS_REVISION_MISMATCH;
@@ -3533,13 +3645,13 @@ done:
     params->width = root->swapchain ? root->swapchain_width : root->width;
     params->height = root->swapchain ? root->swapchain_height : root->height;
     params->configure_count = root->configure_count;
-    if (root->configure_serial)
+    if (root->configure_pending)
     {
         params->configure_request_id = root->configure_request_id;
         params->configure_width = root->pending_configure_width;
         params->configure_height = root->pending_configure_height;
         params->configure_state = root->pending_configure_state;
-        params->configure_scale_120 = 120;
+        params->configure_scale_120 = root->pending_configure_scale_120;
     }
     return wsi_status;
 }
@@ -3547,35 +3659,51 @@ done:
 static NTSTATUS authorize_renderer_root_present(struct renderer_root *root,
         uint64_t geometry_revision)
 {
-    uint32_t width, height;
+    uint32_t width, height, scale_120;
 
     if (!geometry_revision || geometry_revision != root->geometry_revision)
         return STATUS_REVISION_MISMATCH;
     if (root->geometry_token_revision) return STATUS_DEVICE_BUSY;
-    if (!root->configure_serial)
+    if (!root->configure_pending)
     {
         if (!root->configured) return STATUS_DEVICE_NOT_READY;
-        root->geometry_token_revision = geometry_revision;
-        return STATUS_SUCCESS;
     }
-    if (root->configure_applied_id != root->configure_request_id ||
+    else if (root->configure_applied_id != root->configure_request_id ||
         !root->configure_applied_revision ||
         root->configure_applied_revision > geometry_revision ||
         root->configure_applied_state != root->pending_configure_state)
-        return STATUS_DEVICE_NOT_READY;
+        /* Nothing from this job has reached WSI. Discard it so its latency
+         * credit cannot keep the owner thread from processing the configure. */
+        return STATUS_RETRY;
 
-    width = root->configure_applied_width ? root->configure_applied_width :
-            root->swapchain_width;
-    height = root->configure_applied_height ? root->configure_applied_height :
-            root->swapchain_height;
-    if (!width || !height || width != root->swapchain_width ||
-        height != root->swapchain_height)
+    scale_120 = root->configure_pending ? root->pending_configure_scale_120 :
+            root->surface_scale_120;
+    /* The owner's pixel extent is authoritative, including minimum-size
+     * constraints. Use the same pixels-to-logical rounding as its configure
+     * reply. A round trip through fractional scaling is not an identity. */
+    width = max(1, ((uint64_t)root->swapchain_width * 120 + scale_120 / 2) / scale_120);
+    height = max(1, ((uint64_t)root->swapchain_height * 120 + scale_120 / 2) / scale_120);
+    if (root->configure_pending &&
+        ((root->configure_applied_width && root->configure_applied_width != width) ||
+         (root->configure_applied_height && root->configure_applied_height != height)))
         return STATUS_REVISION_MISMATCH;
+    /* Update application-initiated resizes too, even without an xdg serial.
+     * Both double-buffered requests belong to the next WSI buffer commit. */
+    if (root->viewport) wp_viewport_set_destination(root->viewport, width, height);
     xdg_surface_set_window_geometry(root->xdg_surface, 0, 0, width, height);
-    xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
+    if (root->configure_serial)
+    {
+        xdg_surface_ack_configure(root->xdg_surface, root->configure_serial);
+        ++root->configure_count;
+    }
     root->configure_serial = 0;
+    root->configure_pending = FALSE;
     root->configured = TRUE;
-    ++root->configure_count;
+    root->width = width;
+    root->height = height;
+    root->surface_scale_120 = scale_120;
+    root->surface_buffer_width = root->swapchain_width;
+    root->surface_buffer_height = root->swapchain_height;
     root->geometry_token_revision = geometry_revision;
     if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
     {

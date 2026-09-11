@@ -77,7 +77,7 @@ struct winewayland_host_startup
     volatile uint32_t test_input_success_count;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 11
+#define WINEWAYLAND_HOST_RENDERER_VERSION 12
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -145,6 +145,7 @@ struct winewayland_host_input_event
     uint32_t time;
     uint32_t code;
     uint32_t state;
+    /* Pointer coordinates in 24.8 root-buffer pixels, including the frame. */
     int32_t x;
     int32_t y;
     int32_t value120;

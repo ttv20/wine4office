@@ -1262,7 +1262,7 @@ static void wayland_configure_hosted_window(HWND hwnd)
          !(style & WS_MAXIMIZE)))
         NtUserSetWindowLong(hwnd, GWL_STYLE, style ^ WS_MAXIMIZE, FALSE);
 
-    if (!configure.state || !configure.width || !configure.height ||
+    if (!configure.width || !configure.height ||
         !scale_wayland_host_dimension(configure.width, configure.scale_120, &width) ||
         !scale_wayland_host_dimension(configure.height, configure.scale_120, &height) ||
         (right = (INT64)rect.left + width) > INT_MAX || right < INT_MIN ||

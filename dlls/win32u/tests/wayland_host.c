@@ -3020,8 +3020,9 @@ static void test_host_registration( const char *program, const char *test_name )
         state->configure_request_id = 5;
         state->configure_width = 104;
         state->configure_height = 84;
-        state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_TILED;
-        state->configure_scale_120 = 120;
+        /* A fractional-scale resize also applies without a shell state bit. */
+        state->configure_state = 0;
+        state->configure_scale_120 = 180;
         ok( send_host_child_command( state, command_event, result_event,
                                     HOST_CHILD_COMMAND_POST_CONFIGURE ),
             "Timed out posting owner-thread configure.\n" );
@@ -3040,14 +3041,14 @@ static void test_host_registration( const char *program, const char *test_name )
         ok( !state->command_status && state->configure_request_id == 5 &&
             state->configure_applied_id == 5 && state->configure_width == 104 &&
             state->configure_height == 84 &&
-            state->configure_state == WINE_WAYLAND_CONFIGURE_STATE_TILED,
+            !state->configure_state,
             "Owner-thread configure result returned %#lx, request %s, applied %s, %lux%lu, state %#lx.\n",
             state->command_status, wine_dbgstr_longlong( state->configure_request_id ),
             wine_dbgstr_longlong( state->configure_applied_id ),
             state->configure_width, state->configure_height, state->configure_state );
         ok( GetWindowRect( root, &applied_rect ) &&
-            applied_rect.right - applied_rect.left == 104 &&
-            applied_rect.bottom - applied_rect.top == 84,
+            applied_rect.right - applied_rect.left == 156 &&
+            applied_rect.bottom - applied_rect.top == 126,
             "Owner-thread configure applied rect %ld,%ld %ldx%ld.\n", applied_rect.left,
             applied_rect.top, applied_rect.right - applied_rect.left,
             applied_rect.bottom - applied_rect.top );

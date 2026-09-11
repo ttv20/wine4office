@@ -7,6 +7,8 @@ UNIX_LIBS = $(WAYLAND_CLIENT_LIBS) $(XKBCOMMON_LIBS) $(PTHREAD_LIBS)
 EXTRADLLFLAGS = -mconsole -municode
 
 SOURCES = \
+	fractional-scale-v1.xml \
 	main.c \
 	unixlib.c \
+	viewporter.xml \
 	xdg-shell.xml

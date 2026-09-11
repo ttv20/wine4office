@@ -719,6 +719,7 @@ struct host_renderer_root
     uint32_t configure_height;
     uint32_t configure_state;
     uint32_t configure_scale_120;
+    struct rectangle window;
     struct rectangle client;
     uint32_t snapshot_width;
     uint32_t snapshot_height;
@@ -1227,16 +1228,12 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
     switch (event->type)
     {
     case WINEWAYLAND_HOST_INPUT_POINTER_MOTION:
-        if (root->client.right <= root->client.left ||
-            root->client.bottom <= root->client.top)
+        if (root->window.right <= root->window.left ||
+            root->window.bottom <= root->window.top)
             return STATUS_INVALID_DEVICE_STATE;
         input.mouse.type = INPUT_MOUSE;
-        input.mouse.x = root->client.left + event->x / 256;
-        input.mouse.y = root->client.top + event->y / 256;
-        if (input.mouse.x < root->client.left) input.mouse.x = root->client.left;
-        if (input.mouse.y < root->client.top) input.mouse.y = root->client.top;
-        if (input.mouse.x >= root->client.right) input.mouse.x = root->client.right - 1;
-        if (input.mouse.y >= root->client.bottom) input.mouse.y = root->client.bottom - 1;
+        input.mouse.x = max(INT32_MIN, min(INT32_MAX, (int64_t)root->window.left + event->x / 256));
+        input.mouse.y = max(INT32_MIN, min(INT32_MAX, (int64_t)root->window.top + event->y / 256));
         input.mouse.flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
         input.mouse.time = event->time;
         break;
@@ -2051,6 +2048,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
             entry->root = root->root;
             entry->scene_generation = root->scene_generation;
             entry->geometry_revision = state->geometry_revision;
+            entry->window = state->window;
             entry->client = state->client;
             entry->frame_snapshot_required = state->client.left != state->window.left ||
                     state->client.top != state->window.top ||
@@ -2073,6 +2071,7 @@ static NTSTATUS ensure_renderer_root(const struct host_root_info *root,
     free_root->root_generation = root->root_generation;
     free_root->scene_generation = root->scene_generation;
     free_root->geometry_revision = state->geometry_revision;
+    free_root->window = state->window;
     free_root->client = state->client;
     free_root->frame_snapshot_required = state->client.left != state->window.left ||
             state->client.top != state->window.top ||
@@ -2928,7 +2927,7 @@ static void pump_dcomp_test_messages(HWND window, BOOL input_test,
 }
 
 static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
-        BOOL multi_root, BOOL failure_test)
+        BOOL multi_root, BOOL failure_test, BOOL scale_test)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -2970,8 +2969,10 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     NTSTATUS status;
     HRESULT hr = E_FAIL;
     DWORD wait;
-    unsigned int i, present_count = 0;
-    BOOL key_down = FALSE, key_up = FALSE;
+    unsigned int i, present_count = 0, automatic_present_count = scale_test ? 40 : 6;
+    UINT initial_client_width, initial_client_height;
+    uint32_t scale_presented_before_resize = 0;
+    BOOL key_down = FALSE, key_up = FALSE, resized = FALSE, scale_ready = FALSE;
     uint32_t expected_imports = multi_root ? 2 * WINE_WAYLAND_BUFFER_POOL_SLOTS :
             WINE_WAYLAND_BUFFER_POOL_SLOTS;
     int ret = 7;
@@ -3071,6 +3072,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.Scaling = DXGI_SCALING_STRETCH;
     desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    initial_client_width = desc.Width;
+    initial_client_height = desc.Height;
     if (FAILED(hr = IDXGIFactory2_CreateSwapChainForComposition(factory,
             (IUnknown *)d3d_device, &desc, NULL, &swapchain)) ||
             FAILED(hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, window,
@@ -3119,7 +3122,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             goto done;
     }
 
-    if (automatic_host)
+    if (automatic_host || scale_test)
     {
         if ((status = get_registered_host(&host_info)) || !host_info.ready ||
                 !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
@@ -3128,7 +3131,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
                     status, host_info.ready, host_info.capabilities);
             goto done;
         }
-        for (i = 0; i < 6; ++i)
+        for (i = 0; i < automatic_present_count; ++i)
         {
             static const float colors[][4] =
             {
@@ -3139,6 +3142,25 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             ID3D11RenderTargetView *view = NULL;
             ID3D11Texture2D *texture = NULL;
 
+            pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
+            if (scale_test && GetClientRect(window, &client_rect) &&
+                client_rect.right > 0 && client_rect.bottom > 0 &&
+                ((UINT)client_rect.right != desc.Width ||
+                 (UINT)client_rect.bottom != desc.Height))
+            {
+                fprintf(stderr, "DComp scale fixture resizing buffers from %ux%u to %lux%lu.\n",
+                        desc.Width, desc.Height, client_rect.right, client_rect.bottom);
+                hr = IDXGISwapChain1_ResizeBuffers(swapchain, 0, client_rect.right,
+                        client_rect.bottom, DXGI_FORMAT_UNKNOWN, 0);
+                if (FAILED(hr)) break;
+                desc.Width = client_rect.right;
+                desc.Height = client_rect.bottom;
+                if (FAILED(hr = IDCompositionDevice_Commit(dcomp_device))) break;
+                fprintf(stderr, "DComp scale fixture recommitted %ux%u content.\n",
+                        desc.Width, desc.Height);
+                scale_presented_before_resize = startup->presented_frames;
+                resized = TRUE;
+            }
             if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
                     (void **)&texture))) break;
             hr = ID3D11Device_CreateRenderTargetView(d3d_device, (ID3D11Resource *)texture,
@@ -3153,12 +3175,27 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             ID3D11Texture2D_Release(texture);
             if (FAILED(hr)) break;
             pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
+            if (scale_test && !scale_ready && startup->presented_frames)
+            {
+                printf("dcomp_fractional_scale=ready\n");
+                fflush(stdout);
+                scale_ready = TRUE;
+            }
             Sleep(50);
         }
         if (FAILED(hr) || (status = get_registered_host(&final_host_info)) ||
-                !final_host_info.ready || final_host_info.host_epoch != host_info.host_epoch)
+                !final_host_info.ready || final_host_info.host_epoch != host_info.host_epoch ||
+                (scale_test && (!scale_ready || !resized || desc.Width == initial_client_width ||
+                 desc.Height == initial_client_height || startup->failed_frames ||
+                 startup->presented_frames <= scale_presented_before_resize +
+                        WINE_WAYLAND_BUFFER_POOL_SLOTS)))
         {
-            fprintf(stderr, "dcomp_auto_host=failed hr=%#lx host_status=%#lx\n", hr, status);
+            fprintf(stderr, "dcomp_auto_host=failed hr=%#lx host_status=%#lx resized=%u client=%ux%u initial=%ux%u\n",
+                    hr, status, resized, desc.Width, desc.Height,
+                    initial_client_width, initial_client_height);
+            if (scale_test)
+                fprintf(stderr, "dcomp_fractional_scale=failed presented=%u discarded=%u failed=%u\n",
+                        startup->presented_frames, startup->discarded_frames, startup->failed_frames);
             goto done;
         }
         present_count = i + 1;
@@ -3186,8 +3223,13 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             }
             printf("dcomp_input=passed key_down=1 key_up=1\n");
         }
-        printf("dcomp_auto_host=passed host_pid=%u host_epoch=%I64u presents=%u\n",
+        if (automatic_host)
+            printf("dcomp_auto_host=passed host_pid=%u host_epoch=%I64u presents=%u\n",
                 host_info.process_id, host_info.host_epoch, present_count);
+        if (scale_test)
+            printf("dcomp_fractional_scale=passed client=%ux%u initial=%ux%u presented=%u failed=%u\n",
+                    desc.Width, desc.Height, initial_client_width, initial_client_height,
+                    startup->presented_frames, startup->failed_frames);
         ret = 0;
         goto done;
     }
@@ -3858,19 +3900,21 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-input-test"))
-        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-scale-test"))
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
