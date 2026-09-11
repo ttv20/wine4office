@@ -76,6 +76,7 @@ enum wayland_window_message
     WM_WAYLAND_SET_KEYBOARD_LAYOUT,
     WM_WAYLAND_HOST_CONFIGURE = WM_WINE_WAYLAND_HOST_CONFIGURE,
     WM_WAYLAND_NATIVE_LEASE = WM_WINE_WAYLAND_NATIVE_LEASE,
+    WM_WAYLAND_HOST_KEYBOARD_GROUP = WM_WINE_WAYLAND_HOST_KEYBOARD_GROUP,
 };
 
 enum wayland_surface_config_state
@@ -468,6 +469,7 @@ UINT WAYLAND_GetKeyboardLayoutList(INT size, HKL *layouts);
 const KBDTABLES *WAYLAND_KbdLayerDescriptor(HKL hkl);
 void WAYLAND_ReleaseKbdTables(const KBDTABLES *);
 void activate_keyboard_hkl(HWND hwnd, BOOL ime);
+void wayland_keyboard_activate_host_group(HWND hwnd, UINT xkb_group);
 
 /**********************************************************************
  *          Wayland pointer

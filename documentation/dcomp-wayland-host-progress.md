@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 998.
+Generated server protocol version: 1000.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -308,8 +308,8 @@ or transport fixture is not Outlook support.
   also preserves the original Win32 foreground/focus queue when its local
   surface is intentionally retired for native hosting, so authenticated host
   input reaches the logical application instead of the resident host process.
-  Physical locked/latched modifier reconciliation, IME/text input and a
-  compositor-originated pointer-recipient fixture remain pending.
+  IME/text input and a compositor-originated pointer-recipient fixture remain
+  pending.
 - Each native root now owns a separate Vulkan logical device, presentation
   queue, command pool and bounded worker. Imported pool slots and immutable
   host copies are bound to that root's device, and root retirement waits until
@@ -1057,10 +1057,27 @@ Unsupported combinations return the complete root to the legacy local path.
   under the WSL build agent, and
   `artifacts/keyboard-modifiers-{final-wsi-x64,final-wsi-i386,auto-host-input-hide-release-x64}.log`
   in the personal Intel task directory. The Intel fixtures use synthetic input;
-  physical compositor injection, Windows layout activation, Hebrew/English
-  switching and IME text sessions remain separate work. No task Wine process
-  remained on either laptop; Intel retained 57 GiB free and WSL retained
-  304 GiB free.
+  physical compositor injection, Hebrew/English shortcut switching and IME
+  text sessions remain separate work. No task Wine process remained on either
+  laptop; Intel retained 57 GiB free and WSL retained 304 GiB free.
+- An authenticated host keyboard snapshot now forwards its XKB layout-group
+  index to the logical window's owner thread through an internal driver
+  message. `winewayland.drv` resolves that index against the application's own
+  compositor keymap and activates the corresponding Windows HKL on that thread,
+  rather than changing the resident host process's layout. Intel's isolated
+  KWin advertised English as group 0 and Hebrew as group 1; the authority test
+  selected group 1, activated HKL `0x040d040d`, loaded the Hebrew keyboard
+  tables and passed 908 checks. The automatic hosted DComp fixture separately
+  activated group 0 as HKL `0x04090409`, delivered A down/up and completed seven
+  presentations. WSLg advertised Hebrew as group 0, activated the same Hebrew
+  HKL and passed 908 checks. Evidence is retained as
+  `artifacts/host-layout-{authority-intel-x64-final,auto-input-intel-x64}.log`
+  in the personal Intel task directory,
+  `/workspace/artifacts/host-layout-authority-x64-final.log` in the Radeon task
+  environment and `artifacts/host-layout-authority-wslg-x64.log` under the WSL
+  build agent. This proves host-to-Windows layout activation for published
+  groups; a physical compositor shortcut and typed Hebrew character fixture is
+  still required before claiming complete interactive switching.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

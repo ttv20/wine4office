@@ -1489,6 +1489,9 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_SET_KEYBOARD_LAYOUT:
         NtUserActivateKeyboardLayout((HKL)lp, wp ? KLF_WINE_NOTIFY : 0);
         return 0;
+    case WM_WAYLAND_HOST_KEYBOARD_GROUP:
+        wayland_keyboard_activate_host_group(hwnd, wp);
+        return 0;
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);
         return 0;

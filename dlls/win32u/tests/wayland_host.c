@@ -2122,6 +2122,8 @@ static void test_host_registration( const char *program, const char *test_name )
     BOOL created, saw_root = FALSE, saw_pre_ready_root = FALSE;
     unsigned int i;
     DWORD registered_slots, imported_slots, failed_slots, initial_caps;
+    UINT keyboard_layout_count, keyboard_group;
+    HKL keyboard_layouts[8];
     MSG msg;
     DWORD *snapshot_bits;
 
@@ -3612,6 +3614,9 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status );
 
     initial_caps = GetKeyState( VK_CAPITAL ) & 1;
+    keyboard_layout_count = GetKeyboardLayoutList( ARRAY_SIZE(keyboard_layouts),
+                                                   keyboard_layouts );
+    keyboard_group = keyboard_layout_count > 1 && keyboard_layout_count != ~0u ? 1 : 0;
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     state->input_event_id = 5;
     state->input_flags = 0x00008000;
@@ -3622,7 +3627,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Invalid native keyboard state returned %#lx.\n", state->command_status );
     state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
             (initial_caps ? 0 : WINE_WAYLAND_KEYBOARD_LOCK_CAPS) |
-            (1u << WINE_WAYLAND_KEYBOARD_GROUP_SHIFT);
+            (keyboard_group << WINE_WAYLAND_KEYBOARD_GROUP_SHIFT);
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
         "Timed out reconciling native keyboard state.\n" );
@@ -3632,6 +3637,17 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, GetKeyState( VK_SHIFT ), GetKeyState( VK_CAPITAL ) );
     ok( !PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ),
         "Native keyboard reconciliation manufactured message %#x.\n", msg.message );
+    while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+    {
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+    }
+    if (keyboard_layout_count && keyboard_layout_count != ~0u)
+        ok( GetKeyboardLayout( 0 ) == keyboard_layouts[keyboard_group],
+            "Hosted keyboard group %u activated layout %p, expected %p.\n",
+            keyboard_group, GetKeyboardLayout( 0 ), keyboard_layouts[keyboard_group] );
+    else
+        skip( "The Wayland driver did not publish a keyboard layout list.\n" );
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SYNC_KEYBOARD ),
         "Timed out replaying native keyboard state.\n" );

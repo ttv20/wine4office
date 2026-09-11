@@ -3626,6 +3626,10 @@ DECL_HANDLER(sync_wayland_host_keyboard)
     }
     if (!update_wayland_host_keyboard_state( desktop, req->root, req->modifiers ))
         set_error( STATUS_NO_MEMORY );
+    else
+        post_message( req->root, WM_WINE_WAYLAND_HOST_KEYBOARD_GROUP,
+                (req->modifiers & WINE_WAYLAND_KEYBOARD_GROUP_MASK) >>
+                WINE_WAYLAND_KEYBOARD_GROUP_SHIFT, 0 );
 
 done:
     release_object( desktop );

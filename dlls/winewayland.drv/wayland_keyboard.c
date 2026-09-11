@@ -664,6 +664,32 @@ static void set_current_xkb_group(xkb_layout_index_t xkb_group)
     activate_keyboard_hkl(keyboard->focused_hwnd, ime);
 }
 
+void wayland_keyboard_activate_host_group(HWND hwnd, UINT xkb_group)
+{
+    struct layout *layout;
+    HKL hkl = NULL;
+
+    pthread_mutex_lock(&xkb_layouts_mutex);
+    LIST_FOR_EACH_ENTRY(layout, &xkb_layouts, struct layout, entry)
+        if (layout->xkb_group == xkb_group) break;
+    if (&layout->entry != &xkb_layouts)
+    {
+        hkl = get_layout_hkl(layout);
+        keyboard_hkl = hkl;
+        keyboard_lang = layout->lang;
+    }
+    pthread_mutex_unlock(&xkb_layouts_mutex);
+
+    if (!hkl)
+    {
+        WARN("Failed to activate hosted XKB group %u\n", xkb_group);
+        return;
+    }
+    TRACE("Activating hosted XKB group %u as layout %p for hwnd %p\n",
+            xkb_group, hkl, hwnd);
+    NtUserActivateKeyboardLayout(hkl, KLF_WINE_NOTIFY);
+}
+
 static BOOL find_xkb_layout_variant(const char *name, const char **layout, const char **variant)
 {
     struct rxkb_layout *iter;
