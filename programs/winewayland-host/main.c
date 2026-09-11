@@ -24,6 +24,8 @@
 #define WIN32_NO_STATUS
 #include "wine/server.h"
 #include "wine/unixlib.h"
+#include "ntuser.h"
+#include "kbd.h"
 
 #include "unixlib.h"
 
@@ -1361,12 +1363,11 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
         input.kbd.type = INPUT_KEYBOARD;
         input.kbd.time = event->time;
         scan = event->code;
-        input.kbd.scan = scan & 0xff;
-        if (scan & ~0xff) input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
         if (!event->state) input.kbd.flags |= KEYEVENTF_KEYUP;
         if (scan & 0x300) scan += 0xdf00;
-        input.kbd.vkey = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX,
-                GetKeyboardLayout(0));
+        input.kbd.vkey = NtUserMapScanToKbdVkey(scan, GetKeyboardLayout(0), &scan);
+        input.kbd.scan = scan & 0xff;
+        if (scan & ~0xff) input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
         break;
     case WINEWAYLAND_HOST_INPUT_MODIFIERS:
         if (event->time || event->state || event->x || event->y || event->value120)
@@ -4175,8 +4176,24 @@ done:
     return ret;
 }
 
+static int test_keyboard_mapping(void)
+{
+    HKL layout = GetKeyboardLayout(0);
+    UINT keypad_scan, cursor_scan;
+    USHORT keypad = NtUserMapScanToKbdVkey(0x4f, layout, &keypad_scan);
+    USHORT cursor = NtUserMapScanToKbdVkey(0xe04f, layout, &cursor_scan);
+    BOOL passed = (keypad & 0xff) == VK_END && (keypad & KBDNUMPAD) &&
+            keypad_scan == 0x4f && (cursor & 0xff) == VK_END &&
+            !(cursor & KBDNUMPAD) && cursor_scan == 0x14f;
+
+    printf("keyboard_map=%s keypad=%#x/%#x cursor=%#x/%#x\n",
+            passed ? "passed" : "failed", keypad, keypad_scan, cursor, cursor_scan);
+    return passed ? 0 : 5;
+}
+
 int wmain(int argc, WCHAR **argv)
 {
+    if (argc == 2 && !wcscmp(argv[1], L"--keyboard-map-self-test")) return test_keyboard_mapping();
     if (argc == 2 && !wcscmp(argv[1], L"--probe")) return probe_backend();
     if (argc == 2 && !wcscmp(argv[1], L"--renderer-test")) return test_renderer();
     if (argc == 2 && !wcscmp(argv[1], L"--transport-self-test"))
@@ -4220,7 +4237,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }

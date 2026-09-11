@@ -1814,6 +1814,9 @@ NTSTATUS WINAPI wow64_NtUserCallTwoParam( UINT *args )
 
     switch (code)
     {
+    case NtUserCallTwoParam_MapScanToKbdVkey:
+        return NtUserCallTwoParam( arg1, (ULONG_PTR)UlongToHandle(arg2), code );
+
     case NtUserCallTwoParam_GetMenuInfo:
         {
             MENUINFO32 *info32 = UlongToPtr( arg2 );

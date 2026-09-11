@@ -1339,6 +1339,33 @@ Unsupported combinations return the complete root to the legacy local path.
   sync cannot be advertised as proof that a native move finished. Modal
   attempt retirement and actual compositor completion must remain distinct;
   do not introduce concurrent local fallback based on a guessed timeout.
+- Hosted keyboard conversion now calls win32u's existing
+  `map_scan_to_kbd_vkey` through a pointer-free private NtUser adapter instead
+  of the public MapVirtualKey API. The public API strips `KBDNUMPAD`, which
+  made the server receive keypad navigation keys without the information
+  needed for Num Lock translation. The shared mapper also preserves Wine's
+  existing right-Shift, Num Lock and Pause scan remapping. The normal hardware
+  path and public MapVirtualKey behavior are unchanged. A WoW64 adapter
+  preserves the keyboard-layout handle's sign extension, and the host links
+  the existing win32u import library. Layout selection still uses the host
+  thread's layout; this change does not claim to solve differing per-thread
+  layouts or IME.
+- The focused x86-64 `win32u keyboard_map` fixture passed all 16 checks for
+  keypad versus extended navigation, special scan remapping and invalid
+  inputs. The i386 built-in host self-test passed through the WoW64 adapter,
+  returning keypad `0xc23/0x4f` versus navigation `0x123/0x14f`. The full
+  arbitrary i386 test executable still fails before test entry with missing
+  `kernel32.dll`; it is not counted as a passing test. The initial x86-64 test
+  expected Windows-style e0 scan prefixes, then was corrected to assert the
+  canonical 0x100 representation actually returned by the shared Wine helper.
+  The general test skips X11/macOS drivers with their separate mapping path.
+  Evidence is `artifacts/astra-keymap-final-x64.log`,
+  `artifacts/astra-keymap-host-i386.log` and
+  `artifacts/astra-keymap-final-SHA256SUMS` in the personal Intel task directory.
+  Win32u, WoW64, both PE hosts and both test executables rebuilt through the
+  focused canonical lifecycle. No additional GPU presentation run was needed
+  for this conversion-only change; physical keypad/Num Lock interaction
+  remains a separate input fixture gate.
 
 ## Developer activation and reproduction
 

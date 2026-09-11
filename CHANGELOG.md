@@ -11,6 +11,7 @@
 - Require per-application developer opt-in for the experimental DirectComposition Wayland host.
 - Keep hosted input resets from releasing keys pressed outside the affected window.
 - Forward maximize and restore requests to the experimental native Wayland host.
+- Preserve numeric-keypad and special-key information in hosted Wayland input.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

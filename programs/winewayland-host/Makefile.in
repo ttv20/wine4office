@@ -1,6 +1,6 @@
 MODULE = winewayland-host.exe
 UNIXLIB = winewayland-host.so
-IMPORTS = user32 ntdll
+IMPORTS = user32 win32u ntdll
 UNIX_CFLAGS = $(WAYLAND_CLIENT_CFLAGS) $(XKBCOMMON_CFLAGS)
 UNIX_LIBS = $(WAYLAND_CLIENT_LIBS) $(XKBCOMMON_LIBS) $(PTHREAD_LIBS)
 

@@ -7665,6 +7665,16 @@ ULONG_PTR WINAPI NtUserCallTwoParam( ULONG_PTR arg1, ULONG_PTR arg2, ULONG code 
         *(RECT *)arg1 = get_virtual_screen_rect( no_dpi, arg2 );
         return 1;
 
+    case NtUserCallTwoParam_MapScanToKbdVkey:
+    {
+        UINT mapped;
+        USHORT vkey;
+
+        if (arg1 > 0xffff) return 0;
+        vkey = map_scan_to_kbd_vkey( arg1, (HKL)arg2, &mapped );
+        return (mapped << 16) | vkey;
+    }
+
     /* temporary exports */
     case NtUserAllocWinProc:
         return (UINT_PTR)alloc_winproc( (WNDPROC)arg1, arg2 );

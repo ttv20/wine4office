@@ -1228,7 +1228,17 @@ enum
     NtUserCallTwoParam_GetVirtualScreenRect,
     /* temporary exports */
     NtUserAllocWinProc,
+    NtUserCallTwoParam_MapScanToKbdVkey,
 };
+
+/* Keep the keyboard flags and the native scan remapping which the public
+ * MapVirtualKey API deliberately omits. The packed result is pointer-free. */
+static inline USHORT NtUserMapScanToKbdVkey( USHORT scan, HKL layout, UINT *mapped )
+{
+    UINT result = NtUserCallTwoParam( scan, (ULONG_PTR)layout, NtUserCallTwoParam_MapScanToKbdVkey );
+    *mapped = HIWORD(result);
+    return LOWORD(result);
+}
 
 static inline DLGPROC NtUserGetDialogProc( DLGPROC proc, BOOL ansi )
 {

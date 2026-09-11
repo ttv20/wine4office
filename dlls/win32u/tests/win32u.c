@@ -23,6 +23,7 @@
 
 #include "winbase.h"
 #include "ntuser.h"
+#include "kbd.h"
 
 #define MAX_ATOM_LEN  255
 
@@ -3053,6 +3054,54 @@ void test_NtUserGetPointerDeviceRects( const char *arg )
         wine_dbgstr_rect( &display ), wine_dbgstr_rect( &screen ) );
 }
 
+static void test_NtUserMapScanToKbdVkey(void)
+{
+    static const struct
+    {
+        USHORT scan, vkey, mapped;
+        BOOL numpad;
+    }
+    tests[] =
+    {
+        {0x004f, VK_END, 0x004f, TRUE},
+        {0xe04f, VK_END, 0x014f, FALSE},
+        {0x0053, VK_DELETE, 0x0053, TRUE},
+        {0xe053, VK_DELETE, 0x0153, FALSE},
+        {0x0036, VK_RSHIFT, 0x0136, FALSE},
+        {0x0045, VK_NUMLOCK, 0x0145, FALSE},
+        {0xe11d, VK_PAUSE, 0x0045, FALSE},
+    };
+    HKL layout = GetKeyboardLayout( 0 );
+    UINT mapped, i;
+    USHORT vkey;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        win_skip( "NtUserMapScanToKbdVkey is Wine-specific.\n" );
+        return;
+    }
+    if (GetModuleHandleW( L"winex11.drv" ) || GetModuleHandleW( L"winemac.drv" ))
+    {
+        skip( "This fixture covers the keyboard-table path used by the Wayland host.\n" );
+        return;
+    }
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context( "scan %#x", tests[i].scan );
+        mapped = 0xdeadbeef;
+        vkey = NtUserMapScanToKbdVkey( tests[i].scan, layout, &mapped );
+        ok( (vkey & 0xff) == tests[i].vkey && !!(vkey & KBDNUMPAD) == tests[i].numpad,
+            "Got vkey %#x, expected %#x, numpad %d.\n", vkey, tests[i].vkey, tests[i].numpad );
+        ok( mapped == tests[i].mapped, "Got mapped scan %#x, expected %#x.\n", mapped, tests[i].mapped );
+        winetest_pop_context();
+    }
+    mapped = 0xdeadbeef;
+    vkey = NtUserMapScanToKbdVkey( 0xffff, layout, &mapped );
+    ok( !vkey && mapped == 0x20ff, "Invalid scan returned vkey %#x, mapped %#x.\n", vkey, mapped );
+    ok( !NtUserCallTwoParam( 0x10000, (ULONG_PTR)layout, NtUserCallTwoParam_MapScanToKbdVkey ),
+        "Oversized scan was truncated.\n" );
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3062,6 +3111,11 @@ START_TEST(win32u)
     GetDesktopWindow();
 
     argc = winetest_get_mainargs( &argv );
+    if (argc == 3 && !strcmp( argv[2], "keyboard_map" ))
+    {
+        test_NtUserMapScanToKbdVkey();
+        return;
+    }
     if (argc > 3 && !strcmp( argv[2], "ipcmsg" ))
     {
         test_inter_process_child( LongToHandle( strtol( argv[3], NULL, 16 )));
@@ -3090,6 +3144,7 @@ START_TEST(win32u)
         return;
     }
 
+    test_NtUserMapScanToKbdVkey();
     test_NtUserEnumDisplayDevices();
     test_window_props();
     test_class();
