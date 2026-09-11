@@ -310,9 +310,10 @@ or transport fixture is not Outlook support.
   of risking a permanently pressed key. `wl_keyboard.enter` now retains a
   bounded, deduplicated snapshot of up to 64 depressed keys while the native
   lease is not yet Hosted. The PE side explicitly authorizes a renderer root
-  only for current `HostedContent`; that transition queues one reset plus the
-  latest snapshot, while revocation discards stale queued edges and keeps only
-  current physical state for a later lease. Snapshot replay waits for queue
+  for visible `HostedContent` or `Empty` under a Hosted lease; that transition
+  queues one reset plus the latest snapshot, while lease revocation discards
+  stale queued edges and keeps current physical state for a later lease.
+  Snapshot replay waits for queue
   capacity rather than partially applying the set. The guest Wayland driver
   also preserves the original Win32 foreground/focus queue when its local
   surface is intentionally retired for native hosting, so authenticated host
@@ -400,6 +401,12 @@ or transport fixture is not Outlook support.
   device transaction. After startup it enumerates current committed scenes
   again and redraws hosted frames outside the lock. No target or content
   pointer survives the wait, and a failed refresh cannot recursively relaunch.
+
+- Input authorization follows the native window lease rather than the presence
+  of producer content. `Empty` keeps the hosted frame/background interactive
+  and preserves held keys until their normal release. Hidden and local-fallback
+  windows still reject host input. Window destruction explicitly releases
+  root-owned input before detaching the owner thread.
 
 ## Contributor interception inventory
 
@@ -1211,6 +1218,16 @@ Unsupported combinations return the complete root to the legacy local path.
   directory. Prefix startup/shutdown still logs an RpcSs environment error;
   it is not counted as a graphics result. No task Wine remained and 56 GiB
   remained free. WSL and the running Radeon Office environment were untouched.
+- The empty-window input authority fixture passed 949 checks on Intel. It
+  holds a key across contributor revocation, releases it on the remaining
+  hosted window and changes native focus while the scene is Empty. The revoked
+  producer remains denied, and hidden-root input/focus rejection still passes.
+  The canonical server, x86-64/i386 host and authority-test builds passed.
+  The x86-64 pipeline also completed all 11 host input events, six presented
+  frames and its fallback/rehost sequence. Evidence is
+  `artifacts/astra-empty-input-{authority,pipeline}-x64.log` and
+  `artifacts/astra-empty-input-SHA256SUMS` in the personal Intel task directory.
+  No task Wine remained; 56 GiB remained free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

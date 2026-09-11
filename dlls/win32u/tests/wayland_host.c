@@ -3820,6 +3820,16 @@ static void test_host_registration( const char *program, const char *test_name )
         state->scene_disposition );
     SetFocus( previous_focus );
 
+    SetFocus( root );
+    state->input_event_id = 13;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out pressing a key before content removal.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( 'A' ) & 0x8000) &&
+        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ),
+        "Pre-removal key down returned %#lx without a pressed key.\n", state->command_status );
+
     state->binding_generation++;
     status = revoke_contributor( root, state );
     ok( status == STATUS_REVISION_MISMATCH,
@@ -3832,14 +3842,29 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( state->registry_generation ),
         wine_dbgstr_longlong( state->revocation_scene_generation ) );
     scene_generation = state->revocation_scene_generation;
-    state->input_event_id = 13;
+    ok( GetAsyncKeyState( 'A' ) & 0x8000,
+        "Removing producer content released a key while the native window remained hosted.\n" );
+    state->input_event_id = 14;
     state->input_type = INPUT_KEYBOARD;
-    state->input_flags = 0;
+    state->input_flags = KEYEVENTF_KEYUP;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
-        "Timed out sending input after scene revocation.\n" );
-    ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
-        "Input after scene revocation returned %#lx.\n", state->command_status );
+        "Timed out releasing a key on the empty hosted window.\n" );
+    ok( !state->command_status && !(GetAsyncKeyState( 'A' ) & 0x8000) &&
+        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Empty-window key up returned %#lx without the expected release.\n", state->command_status );
+    for (i = 15; i <= 16; ++i)
+    {
+        state->input_event_id = i;
+        state->input_flags = i & 1;
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
+            "Timed out changing empty-window focus.\n" );
+        ok( !state->command_status, "Empty-window focus returned %#lx.\n", state->command_status );
+        status = get_host_focus( root, &focused );
+        ok( !status && focused == (i & 1), "Empty-window focus query returned %#lx, state %d.\n",
+            status, focused );
+    }
+    SetFocus( previous_focus );
     ok( send_producer_child_command( state, producer_command_event, producer_result_event,
                                     PRODUCER_CHILD_COMMAND_CHECK ),
         "Timed out checking revoked producer stream.\n" );
@@ -5016,9 +5041,9 @@ static void test_host_registration( const char *program, const char *test_name )
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         wine_dbgstr_longlong( state->owner_revision ), state->scene_disposition );
 
-    status = set_host_focus( root, old_epoch, root_identity, root_generation, 13, TRUE );
+    status = set_host_focus( root, old_epoch, root_identity, root_generation, 17, TRUE );
     ok( status == STATUS_ACCESS_DENIED, "Non-host focus returned %#lx.\n", status );
-    state->input_event_id = 13;
+    state->input_event_id = 17;
     state->input_flags = 2;
     ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
         "Timed out sending invalid focus state.\n" );
@@ -5049,7 +5074,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->command_status == STATUS_REVISION_MISMATCH,
         "Replayed focus enter returned %#lx.\n", state->command_status );
 
-    for (i = 14; i <= 15; ++i)
+    for (i = 18; i <= 19; ++i)
     {
         state->input_event_id = i;
         state->input_flags = i & 1;
@@ -5064,7 +5089,7 @@ static void test_host_registration( const char *program, const char *test_name )
     {
         SetFocus( NULL );
         SetActiveWindow( NULL );
-        state->input_event_id = 16;
+        state->input_event_id = 20;
         state->input_flags = TRUE;
         ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
             "Timed out requesting owner-thread activation.\n" );
@@ -5073,7 +5098,7 @@ static void test_host_registration( const char *program, const char *test_name )
         ok( GetForegroundWindow() == root && GetActiveWindow() == root,
             "Hosted activation left foreground %p, active %p instead of %p.\n",
             GetForegroundWindow(), GetActiveWindow(), root );
-        state->input_event_id = 17;
+        state->input_event_id = 21;
         state->input_flags = FALSE;
         ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
             "Timed out requesting owner-thread deactivation.\n" );
@@ -5081,7 +5106,7 @@ static void test_host_registration( const char *program, const char *test_name )
         while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
         ok( GetForegroundWindow() != root, "Hosted leave retained foreground %p.\n", root );
     }
-    state->input_event_id = 18;
+    state->input_event_id = 22;
     state->input_flags = TRUE;
     ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
         "Timed out entering pre-hide focus.\n" );
@@ -5096,14 +5121,14 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
         "Hidden focus enter returned %#lx.\n", state->command_status );
     ShowWindow( root, SW_SHOW );
-    state->input_event_id = 20;
+    state->input_event_id = 24;
     ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SET_FOCUS ),
         "Timed out requesting pre-exit focus.\n" );
     ok( !state->command_status, "Pre-exit focus returned %#lx.\n", state->command_status );
 
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
-    state->input_event_id = 21;
+    state->input_event_id = 25;
     state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
             (initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0);
     ok( send_host_child_command( state, command_event, result_event,
@@ -5112,7 +5137,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetKeyState( VK_SHIFT ) & 0x8000),
         "Host-exit modifier state returned %#lx, Shift %#x.\n",
         state->command_status, GetKeyState( VK_SHIFT ) );
-    state->input_event_id = 22;
+    state->input_event_id = 26;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -5122,7 +5147,7 @@ static void test_host_registration( const char *program, const char *test_name )
         PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Host-exit key down returned %#lx without pressed state or message.\n",
         state->command_status );
-    state->input_event_id = 23;
+    state->input_event_id = 27;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,

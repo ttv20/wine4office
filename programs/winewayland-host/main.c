@@ -2151,7 +2151,7 @@ static NTSTATUS set_renderer_root_test_flags(const struct host_root_info *root,
     return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
 }
 
-static NTSTATUS set_renderer_root_input_authorized(struct host_renderer_root *root)
+static NTSTATUS set_renderer_root_input_authorized(struct host_renderer_root *root, BOOL visible)
 {
     struct winewayland_host_renderer_root sync;
 
@@ -2161,8 +2161,9 @@ static NTSTATUS set_renderer_root_input_authorized(struct host_renderer_root *ro
     sync.root_identity = root->root_identity;
     sync.root_generation = root->root_generation;
     sync.flags = WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID;
-    if (root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
-        root->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+    if (visible && root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        (root->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+         root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY))
         sync.flags |= WINEWAYLAND_HOST_ROOT_INPUT_AUTHORIZED;
     return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
 }
@@ -2435,7 +2436,8 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     renderer_root->scene_applied_generation = scene.applied_generation;
     renderer_root->scene_disposition = scene.disposition;
     if ((status = query_host_native_lease(renderer_root, host_epoch))) return status;
-    if ((status = set_renderer_root_input_authorized(renderer_root))) return status;
+    if ((status = set_renderer_root_input_authorized(renderer_root,
+            !!(window_state.style & WS_VISIBLE)))) return status;
     if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
         renderer_root->configure_request_id &&
         renderer_root->configure_request_id != configure.applied_id &&

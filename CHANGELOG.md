@@ -5,6 +5,7 @@
 - Synchronize keyboard focus with Windows activation in the experimental Wayland host.
 - Keep other DirectComposition operations responsive while the Wayland host starts.
 - Fix invalid-handle errors when closing hosted Wayland windows with pending frames.
+- Keep hosted windows interactive when their composition content is removed.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

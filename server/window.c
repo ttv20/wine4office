@@ -2410,7 +2410,7 @@ void free_window_handle( struct window *win )
 
     assert( win->handle );
 
-    clear_wayland_host_focus( win->desktop, win->handle );
+    release_wayland_host_inputs( win->desktop, win->handle );
 
     /* hide the window */
     if (is_visible(win))
@@ -3774,6 +3774,18 @@ static int is_current_wayland_host( struct desktop *desktop, unsigned __int64 ho
     return 0;
 }
 
+static int wayland_root_accepts_host_input( const struct window *root )
+{
+    unsigned __int64 host_epoch = root->desktop->wayland_host_epoch;
+
+    return (root->style & WS_VISIBLE) &&
+           (root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+            root->wayland_scene_disposition == WINE_WAYLAND_SCENE_EMPTY) &&
+           root->wayland_scene_host_epoch == host_epoch &&
+           root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+           root->wayland_native_lease_host_epoch == host_epoch;
+}
+
 struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
         unsigned __int64 host_epoch, unsigned __int64 root_identity,
         unsigned __int64 root_generation, unsigned __int64 event_id )
@@ -3794,11 +3806,7 @@ struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
         set_error( STATUS_REVISION_MISMATCH );
         return NULL;
     }
-    if (!(root->style & WS_VISIBLE) ||
-        root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
-        root->wayland_scene_host_epoch != host_epoch ||
-        root->wayland_native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
-        root->wayland_native_lease_host_epoch != host_epoch)
+    if (!wayland_root_accepts_host_input( root ))
     {
         set_error( STATUS_INVALID_DEVICE_STATE );
         return NULL;
@@ -3896,10 +3904,7 @@ DECL_HANDLER(get_wayland_host_focus)
     /* Notifications carry no authority. Revalidate the lease and current
      * focus here, including after hide, host exit or a queued focus switch. */
     reply->focused = root->desktop->wayland_host_focus == root->handle &&
-            root->desktop->wayland_host_ready && (root->style & WS_VISIBLE) &&
-            root->wayland_native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
-            root->wayland_native_lease_host_epoch == root->desktop->wayland_host_epoch &&
-            root->wayland_scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT;
+            root->desktop->wayland_host_ready && wayland_root_accepts_host_input( root );
 }
 
 static int wayland_scene_uses_contributor( const struct window *root,
@@ -3968,6 +3973,14 @@ static void update_wayland_native_lease_scene( struct window *root )
         return;
     }
 
+    /* Empty removes producer content, not the native window or its input
+     * owner. Keep held input while the host displays the frame/background. */
+    if (state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        root->wayland_scene_disposition == WINE_WAYLAND_SCENE_EMPTY)
+    {
+        root->wayland_native_lease_scene_generation = root->wayland_scene_generation;
+        return;
+    }
     release_wayland_host_inputs( root->desktop, root->handle );
 
     if (root->wayland_scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK)
