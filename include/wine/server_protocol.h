@@ -33,7 +33,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 8
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 9
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -7292,6 +7292,22 @@ struct get_wayland_frame_snapshot_reply
     unsigned __int64 geometry_revision;
 };
 
+/* Track direct WGL/Vulkan client surfaces which exclude hosted DComp output.
+ * Keep new requests appended so existing protocol operation numbers remain stable. */
+struct manage_wayland_window_direct_surface_request
+{
+    struct request_header __header;
+    user_handle_t    window;
+    int              active;
+    char __pad_20[4];
+};
+struct manage_wayland_window_direct_surface_reply
+{
+    struct reply_header __header;
+    unsigned int     active_count;
+    char __pad_12[4];
+};
+
 
 enum request
 {
@@ -7655,6 +7671,7 @@ enum request
     REQ_send_wayland_host_input,
     REQ_publish_wayland_frame_snapshot,
     REQ_get_wayland_frame_snapshot,
+    REQ_manage_wayland_window_direct_surface,
     REQ_NB_REQUESTS
 };
 
@@ -8022,6 +8039,7 @@ union generic_request
     struct send_wayland_host_input_request send_wayland_host_input_request;
     struct publish_wayland_frame_snapshot_request publish_wayland_frame_snapshot_request;
     struct get_wayland_frame_snapshot_request get_wayland_frame_snapshot_request;
+    struct manage_wayland_window_direct_surface_request manage_wayland_window_direct_surface_request;
 };
 union generic_reply
 {
@@ -8387,8 +8405,9 @@ union generic_reply
     struct send_wayland_host_input_reply send_wayland_host_input_reply;
     struct publish_wayland_frame_snapshot_reply publish_wayland_frame_snapshot_reply;
     struct get_wayland_frame_snapshot_reply get_wayland_frame_snapshot_reply;
+    struct manage_wayland_window_direct_surface_reply manage_wayland_window_direct_surface_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 996
+#define SERVER_PROTOCOL_VERSION 998
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

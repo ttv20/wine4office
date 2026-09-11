@@ -194,6 +194,7 @@ struct window
     unsigned __int64 wayland_close_request_id;
     unsigned __int64 wayland_input_host_epoch;
     unsigned __int64 wayland_input_event_id;
+    unsigned int     wayland_direct_surface_count;
     unsigned __int64 wayland_configure_host_epoch;
     unsigned __int64 wayland_configure_request_id;
     unsigned __int64 wayland_configure_applied_id;
@@ -901,6 +902,7 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_message_posted = 0;
     win->wayland_input_host_epoch = 0;
     win->wayland_input_event_id = 0;
+    win->wayland_direct_surface_count = 0;
     win->wayland_native_lease_host_epoch = 0;
     win->wayland_native_lease_scene_generation = 0;
     win->wayland_native_lease_request_id = 0;
@@ -3919,12 +3921,20 @@ static int is_wayland_dcomp_helper_window( struct window *win, struct window *ro
     static const WCHAR nameW[] = {'_','_','w','i','n','e','_','d','c','o','m','p','_',
                                   'd','e','t','a','c','h','e','d','_','w','i','n','d','o','w'};
     const struct unicode_str name = {nameW, sizeof(nameW)};
-    atom_t atom = find_atom( get_global_atom_table(), name );
+    unsigned int error = get_error();
+    atom_t atom;
+    int result;
 
-    return atom && get_property( win, atom ) == root->handle;
+    clear_error();
+    atom = find_atom( get_global_atom_table(), name );
+    result = atom && get_property( win, atom ) == root->handle;
+    if (error) set_error( error );
+    else clear_error();
+    return result;
 }
 
-static void invalidate_wayland_hosted_window_family( struct window *win )
+static void invalidate_wayland_hosted_window_family_internal( struct window *win,
+                                                               int direct_surface )
 {
     struct wayland_scene_contributor *contributor = NULL;
     struct window *root = win, *owner;
@@ -3940,9 +3950,10 @@ static void invalidate_wayland_hosted_window_family( struct window *win )
     }
     else if (root == win)
     {
-        if (!(win->ex_style & WS_EX_LAYERED)) return;
+        if (!direct_surface && !(win->ex_style & WS_EX_LAYERED)) return;
     }
-    if (!is_visible( win ) || root->parent != root->desktop->top_window ||
+    if ((!direct_surface && !is_visible( win )) ||
+        root->parent != root->desktop->top_window ||
         is_wayland_dcomp_helper_window( win, root ) ||
         root->wayland_scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
         return;
@@ -3978,6 +3989,76 @@ static void invalidate_wayland_hosted_window_family( struct window *win )
     if (contributor)
         contributor->revocation_scene_generation = root->wayland_scene_generation;
     signal_wayland_host_work( root->desktop );
+}
+
+static void invalidate_wayland_hosted_window_family( struct window *win )
+{
+    invalidate_wayland_hosted_window_family_internal( win, 0 );
+}
+
+static int wayland_window_tree_has_direct_surface( struct window *win, struct window *root )
+{
+    struct window *child;
+
+    if (win != root && is_wayland_dcomp_helper_window( win, root )) return 0;
+    if (win->wayland_direct_surface_count) return 1;
+    LIST_FOR_EACH_ENTRY( child, &win->children, struct window, entry )
+        if (wayland_window_tree_has_direct_surface( child, root )) return 1;
+    return 0;
+}
+
+static int wayland_window_family_has_direct_surface( struct window *root )
+{
+    struct window *window;
+
+    if (wayland_window_tree_has_direct_surface( root, root )) return 1;
+    LIST_FOR_EACH_ENTRY( window, &root->desktop->top_window->children,
+                         struct window, entry )
+        if (window != root && window->owner == root->handle &&
+            !is_wayland_dcomp_helper_window( window, root ) &&
+            wayland_window_tree_has_direct_surface( window, root ))
+            return 1;
+    return 0;
+}
+
+#define MAX_WAYLAND_WINDOW_DIRECT_SURFACES 64
+
+DECL_HANDLER(manage_wayland_window_direct_surface)
+{
+    struct window *win;
+
+    reply->active_count = 0;
+    if (req->active != 0 && req->active != 1)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(win = get_window( req->window ))) return;
+    reply->active_count = win->wayland_direct_surface_count;
+    if (!win->thread || win->thread->process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (req->active)
+    {
+        if (win->wayland_direct_surface_count >= MAX_WAYLAND_WINDOW_DIRECT_SURFACES)
+        {
+            set_error( STATUS_QUOTA_EXCEEDED );
+            return;
+        }
+        reply->active_count = ++win->wayland_direct_surface_count;
+        invalidate_wayland_hosted_window_family_internal( win, 1 );
+    }
+    else
+    {
+        if (!win->wayland_direct_surface_count)
+        {
+            set_error( STATUS_INVALID_DEVICE_STATE );
+            return;
+        }
+        reply->active_count = --win->wayland_direct_surface_count;
+    }
 }
 
 static void invalidate_wayland_contributor( struct window *root,
@@ -4043,6 +4124,9 @@ DECL_HANDLER(publish_wayland_scene)
     if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
         (!desktop->wayland_host_process || !desktop->wayland_host_ready))
         set_error( STATUS_DEVICE_NOT_READY );
+    else if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+             wayland_window_family_has_direct_surface( root ))
+        set_error( STATUS_NOT_SUPPORTED );
     else if (req->disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
              (!(contributor = find_wayland_contributor( root, req->contributor_id )) ||
               contributor->state != WINE_WAYLAND_CONTRIBUTOR_BOUND ||
@@ -4162,6 +4246,11 @@ DECL_HANDLER(create_wayland_contributor)
         goto done;
     }
     if (!(desktop->wayland_host_capabilities & WINE_WAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+    {
+        set_error( STATUS_NOT_SUPPORTED );
+        goto done;
+    }
+    if (wayland_window_family_has_direct_surface( root ))
     {
         set_error( STATUS_NOT_SUPPORTED );
         goto done;

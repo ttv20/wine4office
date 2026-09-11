@@ -4284,6 +4284,17 @@ static void dump_get_wayland_frame_snapshot_reply( const struct get_wayland_fram
     dump_uint64( ", geometry_revision=", &req->geometry_revision );
 }
 
+static void dump_manage_wayland_window_direct_surface_request( const struct manage_wayland_window_direct_surface_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+    fprintf( stderr, ", active=%d", req->active );
+}
+
+static void dump_manage_wayland_window_direct_surface_reply( const struct manage_wayland_window_direct_surface_reply *req )
+{
+    fprintf( stderr, " active_count=%08x", req->active_count );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4648,6 +4659,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_send_wayland_host_input_request,
     (dump_func)dump_publish_wayland_frame_snapshot_request,
     (dump_func)dump_get_wayland_frame_snapshot_request,
+    (dump_func)dump_manage_wayland_window_direct_surface_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -5012,6 +5024,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_publish_wayland_frame_snapshot_reply,
     (dump_func)dump_get_wayland_frame_snapshot_reply,
+    (dump_func)dump_manage_wayland_window_direct_surface_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5376,6 +5389,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "send_wayland_host_input",
     "publish_wayland_frame_snapshot",
     "get_wayland_frame_snapshot",
+    "manage_wayland_window_direct_surface",
 };
 
 static const struct
@@ -5511,6 +5525,7 @@ static const struct
     { "PROCESS_IN_JOB",              STATUS_PROCESS_IN_JOB },
     { "PROCESS_IS_TERMINATING",      STATUS_PROCESS_IS_TERMINATING },
     { "PROCESS_NOT_IN_JOB",          STATUS_PROCESS_NOT_IN_JOB },
+    { "QUOTA_EXCEEDED",              STATUS_QUOTA_EXCEEDED },
     { "RANGE_NOT_LOCKED",            STATUS_RANGE_NOT_LOCKED },
     { "REPARSE_POINT_NOT_RESOLVED",  STATUS_REPARSE_POINT_NOT_RESOLVED },
     { "REVISION_MISMATCH",           STATUS_REVISION_MISMATCH },

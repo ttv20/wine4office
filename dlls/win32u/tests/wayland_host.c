@@ -27,6 +27,7 @@
 #include "wingdi.h"
 #include "winuser.h"
 #include "wine/server.h"
+#include "wine/vulkan.h"
 
 #define TEST_ENDPOINT_DEVICE 0x1122334455667788ULL
 #define TEST_ENDPOINT_INODE  0x8877665544332211ULL
@@ -72,6 +73,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_SEND_INPUT,
+    HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE,
     HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT,
     HOST_CHILD_COMMAND_EXIT,
 };
@@ -196,6 +198,8 @@ struct wayland_host_test_state
     LONG input_x;
     LONG input_y;
     DWORD input_data;
+    DWORD direct_surface_active;
+    DWORD direct_surface_count;
     DWORD snapshot_width;
     DWORD snapshot_height;
     DWORD snapshot_stride;
@@ -517,6 +521,22 @@ static NTSTATUS get_host( struct wayland_host_info *info )
             info->device_uuid[2] = reply->device_uuid_2;
             info->device_uuid[3] = reply->device_uuid_3;
         }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS manage_direct_surface( HWND window, BOOL active, DWORD *active_count )
+{
+    NTSTATUS status;
+
+    *active_count = 0;
+    SERVER_START_REQ( manage_wayland_window_direct_surface )
+    {
+        req->window = wine_server_user_handle( window );
+        req->active = active;
+        status = p_wine_server_call( req );
+        *active_count = reply->active_count;
     }
     SERVER_END_REQ;
     return status;
@@ -909,6 +929,101 @@ static NTSTATUS create_contributor( HWND root, UINT source, UINT target_layer,
     }
     SERVER_END_REQ;
     return status;
+}
+
+static void test_direct_vulkan_surface_admission(void)
+{
+    static const char *const extensions[] =
+    {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+    };
+    VkWin32SurfaceCreateInfoKHR surface_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+    };
+    VkApplicationInfo app_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .apiVersion = VK_API_VERSION_1_0,
+    };
+    VkInstanceCreateInfo instance_info =
+    {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &app_info,
+        .enabledExtensionCount = ARRAY_SIZE(extensions),
+        .ppEnabledExtensionNames = extensions,
+    };
+    struct wayland_host_test_state contributor = {0};
+    PFN_vkCreateWin32SurfaceKHR p_vkCreateWin32SurfaceKHR = NULL;
+    PFN_vkDestroySurfaceKHR p_vkDestroySurfaceKHR = NULL;
+    PFN_vkGetInstanceProcAddr p_vkGetInstanceProcAddr;
+    PFN_vkDestroyInstance p_vkDestroyInstance = NULL;
+    PFN_vkCreateInstance p_vkCreateInstance;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkInstance instance = VK_NULL_HANDLE;
+    HMODULE vulkan;
+    VkResult vr;
+    NTSTATUS status;
+    HWND window;
+
+    if (!(vulkan = LoadLibraryW( L"vulkan-1.dll" )))
+    {
+        win_skip( "Vulkan loader is unavailable.\n" );
+        return;
+    }
+    p_vkCreateInstance = (void *)GetProcAddress( vulkan, "vkCreateInstance" );
+    p_vkGetInstanceProcAddr = (void *)GetProcAddress( vulkan, "vkGetInstanceProcAddr" );
+    if (!p_vkCreateInstance || !p_vkGetInstanceProcAddr)
+    {
+        win_skip( "Vulkan instance entry points are unavailable.\n" );
+        FreeLibrary( vulkan );
+        return;
+    }
+    window = CreateWindowExW( 0, L"static", L"Direct Vulkan admission root",
+                              WS_POPUP | WS_VISIBLE, 0, 0, 64, 64,
+                              NULL, NULL, NULL, NULL );
+    ok( !!window, "Failed to create direct Vulkan root, error %lu.\n", GetLastError() );
+    if (!window)
+    {
+        FreeLibrary( vulkan );
+        return;
+    }
+
+    vr = p_vkCreateInstance( &instance_info, NULL, &instance );
+    if (vr == VK_ERROR_EXTENSION_NOT_PRESENT)
+        win_skip( "Vulkan Win32 surface extensions are unavailable.\n" );
+    else
+        ok( vr == VK_SUCCESS, "Creating direct Vulkan instance returned %d.\n", vr );
+    if (vr != VK_SUCCESS) goto done;
+
+    p_vkCreateWin32SurfaceKHR = (void *)p_vkGetInstanceProcAddr( instance,
+                                                                 "vkCreateWin32SurfaceKHR" );
+    p_vkDestroySurfaceKHR = (void *)p_vkGetInstanceProcAddr( instance, "vkDestroySurfaceKHR" );
+    p_vkDestroyInstance = (void *)p_vkGetInstanceProcAddr( instance, "vkDestroyInstance" );
+    ok( !!p_vkCreateWin32SurfaceKHR && !!p_vkDestroySurfaceKHR && !!p_vkDestroyInstance,
+        "Vulkan surface entry points are incomplete.\n" );
+    if (!p_vkCreateWin32SurfaceKHR || !p_vkDestroySurfaceKHR || !p_vkDestroyInstance) goto done;
+
+    surface_info.hinstance = GetModuleHandleW( NULL );
+    surface_info.hwnd = window;
+    vr = p_vkCreateWin32SurfaceKHR( instance, &surface_info, NULL, &surface );
+    ok( vr == VK_SUCCESS, "Creating direct Vulkan surface returned %d.\n", vr );
+    if (vr == VK_SUCCESS)
+    {
+        status = create_contributor( window, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                                     WINE_WAYLAND_TARGET_BELOW, 1, &contributor );
+        ok( status == STATUS_NOT_SUPPORTED,
+            "Contributor admission with a Vulkan surface returned %#lx.\n", status );
+        p_vkDestroySurfaceKHR( instance, surface, NULL );
+        surface = VK_NULL_HANDLE;
+    }
+
+done:
+    if (surface && p_vkDestroySurfaceKHR) p_vkDestroySurfaceKHR( instance, surface, NULL );
+    if (instance && p_vkDestroyInstance) p_vkDestroyInstance( instance, NULL );
+    DestroyWindow( window );
+    FreeLibrary( vulkan );
 }
 
 static NTSTATUS bind_stream( HWND root, struct wayland_host_test_state *state )
@@ -1688,6 +1803,10 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->input_event_id, state->input_type, state->input_flags,
                     state->input_x, state->input_y, state->input_data );
             break;
+        case HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE:
+            state->command_status = manage_direct_surface( (HWND)(UINT_PTR)state->root,
+                    state->direct_surface_active, &state->direct_surface_count );
+            break;
         case HOST_CHILD_COMMAND_GET_FRAME_SNAPSHOT:
             state->command_status = get_frame_snapshot( (HWND)(UINT_PTR)state->root,
                     state->host_epoch, state->snapshot_revision, &snapshot );
@@ -2348,6 +2467,12 @@ static void test_host_registration( const char *program, const char *test_name )
         if (hosted_target && hosted_visual && hosted_swapchain)
         {
             RECT framed_rect = {0, 0, 64, 64}, actual_rect = {0}, actual_client = {0};
+            struct wayland_host_test_state direct_surface_state = {0};
+            PIXELFORMATDESCRIPTOR pfd = {sizeof(pfd), 1, PFD_DRAW_TO_WINDOW |
+                    PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 24};
+            HGLRC direct_gl = NULL;
+            HDC direct_dc = NULL;
+            int pixel_format;
 
             hr = IDCompositionVisual_SetContent( hosted_visual, (IUnknown *)hosted_swapchain );
             ok( hr == S_OK, "Setting hosted DComp content returned %#lx.\n", hr );
@@ -2468,6 +2593,98 @@ static void test_host_registration( const char *program, const char *test_name )
                 state->command_status, wine_dbgstr_longlong( state->scene_generation ),
                 state->scene_disposition );
 
+            state->direct_surface_active = TRUE;
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE ),
+                "Timed out registering a foreign direct surface.\n" );
+            ok( state->command_status == STATUS_ACCESS_DENIED && !state->direct_surface_count,
+                "Foreign direct surface returned %#lx, count %lu.\n",
+                state->command_status, state->direct_surface_count );
+            status = manage_direct_surface( hosted_root, 2, &state->direct_surface_count );
+            ok( status == STATUS_INVALID_PARAMETER && !state->direct_surface_count,
+                "Invalid direct surface registration returned %#lx, count %lu.\n",
+                status, state->direct_surface_count );
+            status = manage_direct_surface( hosted_root, TRUE, &state->direct_surface_count );
+            ok( !status && state->direct_surface_count == 1,
+                "Direct surface registration returned %#lx, count %lu.\n",
+                status, state->direct_surface_count );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying direct-surface fallback.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+                "Direct surface scene returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+            for (i = 1; i < 64; ++i)
+            {
+                status = manage_direct_surface( hosted_root, TRUE,
+                                                &state->direct_surface_count );
+                ok( !status && state->direct_surface_count == i + 1,
+                    "Direct surface registration %u returned %#lx, count %lu.\n",
+                    i + 1, status, state->direct_surface_count );
+            }
+            status = manage_direct_surface( hosted_root, TRUE, &state->direct_surface_count );
+            ok( status == STATUS_QUOTA_EXCEEDED && state->direct_surface_count == 64,
+                "Excess direct surface registration returned %#lx, count %lu.\n",
+                status, state->direct_surface_count );
+            status = create_contributor( hosted_root, WINE_WAYLAND_CONTRIBUTOR_DCOMP,
+                    WINE_WAYLAND_TARGET_BELOW, 1, &direct_surface_state );
+            ok( status == STATUS_NOT_SUPPORTED,
+                "Contributor admission with a direct surface returned %#lx.\n", status );
+            status = publish_scene( hosted_root, WINE_WAYLAND_SCENE_HOSTED_CONTENT,
+                    state->scene_generation, state->owner_revision + 1, 1, 1, 1,
+                    &next_generation, NULL );
+            ok( status == STATUS_NOT_SUPPORTED,
+                "Hosted publication with a direct surface returned %#lx.\n", status );
+
+            hr = IDCompositionVisual_SetOffsetX( hosted_visual, 1.0f );
+            ok( hr == S_OK, "Setting direct-surface fallback offset returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Committing direct-surface fallback returned %#lx.\n", hr );
+            for (i = 64; i; --i)
+            {
+                status = manage_direct_surface( hosted_root, FALSE,
+                                                &state->direct_surface_count );
+                ok( !status && state->direct_surface_count == i - 1,
+                    "Direct surface release %u returned %#lx, count %lu.\n",
+                    i, status, state->direct_surface_count );
+            }
+            status = manage_direct_surface( hosted_root, FALSE, &state->direct_surface_count );
+            ok( status == STATUS_INVALID_DEVICE_STATE && !state->direct_surface_count,
+                "Duplicate direct surface release returned %#lx, count %lu.\n",
+                status, state->direct_surface_count );
+            hr = IDCompositionVisual_SetOffsetX( hosted_visual, 0.0f );
+            ok( hr == S_OK, "Restoring direct-surface hosted offset returned %#lx.\n", hr );
+            hr = IDCompositionDevice_Commit( hosted_dcomp_device );
+            ok( hr == S_OK, "Rehosting after direct-surface fallback returned %#lx.\n", hr );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying the direct-surface rehost.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT,
+                "Direct-surface rehost returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+
+            direct_dc = GetDC( hosted_root );
+            pixel_format = direct_dc ? ChoosePixelFormat( direct_dc, &pfd ) : 0;
+            ok( direct_dc && pixel_format && SetPixelFormat( direct_dc, pixel_format, &pfd ),
+                "Failed to set a direct WGL pixel format, error %lu.\n", GetLastError() );
+            if (direct_dc && pixel_format) direct_gl = wglCreateContext( direct_dc );
+            ok( !!direct_gl, "Failed to create a direct WGL context, error %lu.\n",
+                GetLastError() );
+            ok( send_host_child_command( state, command_event, result_event,
+                                        HOST_CHILD_COMMAND_GET_SCENE ),
+                "Timed out querying WGL direct-surface fallback.\n" );
+            ok( !state->command_status &&
+                state->scene_disposition == WINE_WAYLAND_SCENE_LOCAL_FALLBACK,
+                "WGL direct surface scene returned %#lx, generation %s, disposition %#lx.\n",
+                state->command_status, wine_dbgstr_longlong( state->scene_generation ),
+                state->scene_disposition );
+            if (direct_gl) wglDeleteContext( direct_gl );
+            if (direct_dc) ReleaseDC( hosted_root, direct_dc );
+
             hosted_popup = CreateWindowExW( 0, L"static", L"Visible hosted popup",
                     WS_POPUP | WS_VISIBLE, 0, 0, 24, 24, hosted_root, NULL, NULL, NULL );
             ok( !!hosted_popup, "Failed to create visible hosted popup, error %lu.\n",
@@ -2519,6 +2736,8 @@ static void test_host_registration( const char *program, const char *test_name )
     hosted_d3d_device = NULL;
     if (hosted_root) DestroyWindow( hosted_root );
     hosted_root = NULL;
+
+    test_direct_vulkan_surface_admission();
 
     status = get_host_root( old_epoch, 0, &host_root );
     ok( status == STATUS_ACCESS_DENIED && !host_root.root && !host_root.root_identity &&

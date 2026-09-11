@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 996.
+Generated server protocol version: 998.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -343,6 +343,16 @@ or transport fixture is not Outlook support.
   one reconciliation scan per second to recover from a missed signal without
   continuously waking the server. Closing the registering process's handle
   cannot invalidate the server-held event object.
+- Protocol 998 tracks direct WGL and Vulkan client surfaces in wineserver.
+  Only the HWND owner may change the bounded 64-surface count. The first
+  surface on a hosted root, descendant or directly owned window immediately
+  revokes the hosted contributor and moves the complete root to
+  `LocalFallback`; a family with any retained direct surface cannot create a
+  new contributor or publish `HostedContent`. The identified internal DXGI
+  helper remains excluded. `winewayland.drv` registers the shared client
+  surface used by both OpenGL and Vulkan after its Wayland objects succeed,
+  retains that exclusion while an unused surface is cached, and unregisters
+  it on final detach or destruction using the original HWND identity.
 
 ## Contributor interception inventory
 
@@ -366,11 +376,10 @@ The initial source inspection found these visible-content publication points:
 - Direct OpenGL/EGL surface creation in `dlls/winewayland.drv/opengl.c`, with
   swaps crossing `win32u_wglSwapBuffers()` in `dlls/win32u/opengl.c`.
 
-This list is not yet the complete admission proof. Both DComp target layers
-and multiple DComp devices have deterministic authority coverage, while
-visible child and owned-popup creation now force whole-root fallback.
-Visibility transitions and direct WGL/Vulkan contributors still need complete
-fixtures before generic applications can be admitted.
+This admission inventory now has deterministic authority coverage for both
+DComp target layers, multiple DComp devices, visibility transitions, visible
+children and owned popups, and real direct WGL and Vulkan client surfaces.
+Unsupported combinations return the complete root to the legacy local path.
 
 ## Verification record
 
@@ -952,6 +961,27 @@ fixtures before generic applications can be admitted.
   environment, and `artifacts/per-root-device-20260911-030100-*.log` in the
   Intel task directory. Both systems ended with zero task-owned Wine processes;
   the personal Intel laptop retained 62 GiB free.
+- Protocol 998 direct-surface authority passed 875 checks with zero failures
+  and zero skips on Radeon, Intel Iris Xe and WSLg. The suite rejects a foreign
+  registrar and invalid state, exercises all 64 count slots plus overflow and
+  underflow, proves immediate fallback and rehosting, creates a real WGL
+  context on an already hosted root, and creates a real `VkWin32SurfaceKHR`
+  whose root is then rejected for contributor admission. Both PE
+  architectures and the coupled wineserver, ntdll, Wayland driver and host
+  binaries rebuilt in the canonical build and on `testing-laptop` WSL. The
+  Intel x86-64/i386 WSI fixtures and the decorated, fallback, multi-root and
+  asynchronous-copy-failure DComp fixtures also remained green. The standalone
+  i386 authority executable still cannot enter the test in the available
+  pure-win64 prefix because its `syswow64/kernel32.dll` is absent; its PE code
+  and shared WoW64 Unix-call path compile, and the i386 WSI run passes.
+  Evidence and hashes are retained as
+  `/workspace/artifacts/direct-surface-final-{authority-x64.log,SHA256SUMS}` on
+  the Radeon task environment, `artifacts/direct-surface-final-SHA256SUMS` in
+  the personal Intel task directory, and
+  `artifacts/direct-surface-final-SHA256SUMS` under the WSL build agent. WSL
+  required the 56 KiB `libxkbregistry0` runtime package before the Wayland
+  driver could create a window. Every task-prefix Wine process was stopped;
+  the personal laptop retained 62 GiB free and WSL retained 304 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

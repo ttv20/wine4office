@@ -28,6 +28,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+
 #include "waylanddrv.h"
 #include "wine/debug.h"
 #include "wine/server.h"
@@ -1476,11 +1479,36 @@ POINT map_point_from_surface(struct wayland_surface *surface, POINT point)
     return point;
 }
 
+static NTSTATUS manage_direct_surface(HWND hwnd, BOOL active)
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ(manage_wayland_window_direct_surface)
+    {
+        req->window = wine_server_user_handle(hwnd);
+        req->active = active;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static void wayland_client_surface_destroy(struct client_surface *client)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
+    NTSTATUS status;
 
     TRACE("%s\n", debugstr_client_surface(client));
+
+    if (surface->direct_surface_registered)
+    {
+        status = manage_direct_surface(surface->direct_surface_hwnd, FALSE);
+        if (status)
+            TRACE("Could not unregister direct surface for hwnd %p, status %#x.\n",
+                  surface->direct_surface_hwnd, status);
+        surface->direct_surface_registered = FALSE;
+        surface->direct_surface_hwnd = NULL;
+    }
 
     if (surface->wp_viewport)
         wp_viewport_destroy(surface->wp_viewport);
@@ -1495,6 +1523,17 @@ static void wayland_client_surface_detach(struct client_surface *client)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     struct wayland_win_data *data;
+    NTSTATUS status;
+
+    if (surface->direct_surface_registered)
+    {
+        status = manage_direct_surface(surface->direct_surface_hwnd, FALSE);
+        if (status)
+            TRACE("Could not unregister detached direct surface for hwnd %p, status %#x.\n",
+                  surface->direct_surface_hwnd, status);
+        surface->direct_surface_registered = FALSE;
+        surface->direct_surface_hwnd = NULL;
+    }
 
     if ((data = wayland_win_data_get(client->hwnd)))
     {
@@ -1608,6 +1647,7 @@ struct client_surface *WAYLAND_CreateClientSurface(HWND hwnd, int pixel_format)
 {
     struct wayland_client_surface *client;
     struct wl_region *empty_region;
+    NTSTATUS status;
 
     if (!(client = client_surface_create(sizeof(*client), &wayland_client_surface_funcs, hwnd, pixel_format))) return NULL;
 
@@ -1638,6 +1678,21 @@ struct client_surface *WAYLAND_CreateClientSurface(HWND hwnd, int pixel_format)
         ERR("Failed to create client wp_viewport\n");
         goto err;
     }
+
+    status = manage_direct_surface(hwnd, TRUE);
+    if (status && status != STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        WARN("Failed to register direct surface for hwnd %p, status %#x.\n", hwnd, status);
+        goto err;
+    }
+    if (!status)
+    {
+        client->direct_surface_registered = TRUE;
+        client->direct_surface_hwnd = hwnd;
+    }
+    else
+        TRACE("Ignoring unregistered internal surface for stale hwnd %p, status %#x.\n",
+              hwnd, status);
 
     return &client->client;
 

@@ -367,6 +367,7 @@ DECL_HANDLER(manage_wayland_window_native_lease);
 DECL_HANDLER(send_wayland_host_input);
 DECL_HANDLER(publish_wayland_frame_snapshot);
 DECL_HANDLER(get_wayland_frame_snapshot);
+DECL_HANDLER(manage_wayland_window_direct_surface);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -731,6 +732,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_send_wayland_host_input,
     (req_handler)req_publish_wayland_frame_snapshot,
     (req_handler)req_get_wayland_frame_snapshot,
+    (req_handler)req_manage_wayland_window_direct_surface,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2948,3 +2950,8 @@ C_ASSERT( offsetof(struct get_wayland_frame_snapshot_reply, flags) == 28 );
 C_ASSERT( offsetof(struct get_wayland_frame_snapshot_reply, snapshot_revision) == 32 );
 C_ASSERT( offsetof(struct get_wayland_frame_snapshot_reply, geometry_revision) == 40 );
 C_ASSERT( sizeof(struct get_wayland_frame_snapshot_reply) == 48 );
+C_ASSERT( offsetof(struct manage_wayland_window_direct_surface_request, window) == 12 );
+C_ASSERT( offsetof(struct manage_wayland_window_direct_surface_request, active) == 16 );
+C_ASSERT( sizeof(struct manage_wayland_window_direct_surface_request) == 24 );
+C_ASSERT( offsetof(struct manage_wayland_window_direct_surface_reply, active_count) == 8 );
+C_ASSERT( sizeof(struct manage_wayland_window_direct_surface_reply) == 16 );

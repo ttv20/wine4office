@@ -49,7 +49,7 @@ typedef unsigned __int64 affinity_t;
 typedef unsigned __int64 object_id_t;
 typedef client_ptr_t mod_handle_t;
 
-#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 8
+#define WINE_WAYLAND_HOST_PROTOCOL_VERSION 9
 
 #define WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET   0x00000001
 #define WINE_WAYLAND_HOST_CAP_COMPOSITOR     0x00000002
@@ -5079,4 +5079,13 @@ enum inproc_sync_type
     unsigned int     flags;
     unsigned __int64 snapshot_revision;
     unsigned __int64 geometry_revision;
+@END
+
+/* Track direct WGL/Vulkan client surfaces which exclude hosted DComp output.
+ * Keep new requests appended so existing protocol operation numbers remain stable. */
+@REQ(manage_wayland_window_direct_surface)
+    user_handle_t    window;
+    int              active;
+@REPLY
+    unsigned int     active_count;
 @END

@@ -278,6 +278,8 @@ struct wayland_client_surface
     size_t offscreen_bits_size;
     int offscreen_width;
     int offscreen_height;
+    BOOL direct_surface_registered;
+    HWND direct_surface_hwnd;
 };
 
 extern struct wayland_client_surface *impl_from_client_surface(struct client_surface *client);
