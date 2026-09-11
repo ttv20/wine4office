@@ -90,6 +90,7 @@ struct message
     void                  *data;      /* message data for sent messages */
     unsigned int           data_size; /* size of message data */
     unsigned int           unique_id; /* unique id for nested hw message waits */
+    int                    direct_hardware_target; /* bypass native foreground routing */
     struct message_result *result;    /* result in sender queue */
 };
 
@@ -1806,7 +1807,14 @@ static user_handle_t find_hardware_message_window( struct desktop *desktop, stru
         if (!(win = msg->win) && input) win = input_shm->focus;
         break;
     case QS_KEY:
-        if (input && !(win = input_shm->focus))
+        if (msg->direct_hardware_target)
+        {
+            win = msg->win;
+            if (input && input_shm->focus &&
+                (input_shm->focus == win || is_child_window( win, input_shm->focus )))
+                win = input_shm->focus;
+        }
+        else if (input && !(win = input_shm->focus))
         {
             win = input_shm->active;
             if (*msg_code < WM_SYSKEYDOWN) *msg_code += WM_SYSKEYDOWN - WM_KEYDOWN;
@@ -2334,14 +2342,16 @@ static int queue_mouse_message( struct desktop *desktop, user_handle_t win, cons
 }
 
 static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
-                                   unsigned int origin, struct msg_queue *sender, int repeat );
+                                   unsigned int origin, struct msg_queue *sender, int repeat,
+                                   int direct_target );
 
 static void key_repeat_timeout( void *private )
 {
     struct desktop *desktop = private;
 
     desktop->key_repeat.timeout = NULL;
-    queue_keyboard_message( desktop, desktop->key_repeat.win, &desktop->key_repeat.input, IMO_HARDWARE, NULL, 1 );
+    queue_keyboard_message( desktop, desktop->key_repeat.win, &desktop->key_repeat.input,
+                            IMO_HARDWARE, NULL, 1, desktop->key_repeat.direct_target );
 }
 
 static void stop_key_repeat( struct desktop *desktop )
@@ -2349,6 +2359,7 @@ static void stop_key_repeat( struct desktop *desktop )
     if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
     desktop->key_repeat.timeout = NULL;
     desktop->key_repeat.win = 0;
+    desktop->key_repeat.direct_target = 0;
     memset( &desktop->key_repeat.input, 0, sizeof(desktop->key_repeat.input) );
 }
 
@@ -2460,7 +2471,8 @@ static void update_wayland_host_input_state( struct desktop *desktop, user_handl
 
 /* queue a hardware message for a keyboard event */
 static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, const union hw_input *input,
-                                   unsigned int origin, struct msg_queue *sender, int repeat )
+                                   unsigned int origin, struct msg_queue *sender, int repeat,
+                                   int direct_target )
 {
     desktop_shm_t *desktop_shm = desktop->shared;
     struct hw_msg_source source = { IMDT_KEYBOARD, origin };
@@ -2578,12 +2590,14 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
             desktop->key_repeat.input = *input;
             desktop->key_repeat.input.kbd.time = 0;
             desktop->key_repeat.win = win;
+            desktop->key_repeat.direct_target = direct_target;
             if (desktop->key_repeat.timeout) remove_timeout_user( desktop->key_repeat.timeout );
             desktop->key_repeat.timeout = add_timeout_user( timeout, key_repeat_timeout, desktop );
         }
     }
 
-    if (!unicode && (foreground = get_foreground_thread( desktop, win )))
+    if (!unicode && (foreground = direct_target ? get_window_thread( win ) :
+            get_foreground_thread( desktop, win )))
     {
         struct rawinput_message raw_msg = {0};
         raw_msg.foreground = foreground;
@@ -2603,6 +2617,7 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
 
     msg->win       = get_user_full_handle( win );
     msg->msg       = message_code;
+    msg->direct_hardware_target = direct_target;
     if (origin == IMO_INJECTED) msg_data->flags = LLKHF_INJECTED;
 
     if (!unicode || input->kbd.vkey)
@@ -2640,7 +2655,8 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
         if (!state->key_roots[i] || (root && state->key_roots[i] != root)) continue;
         input = state->keys[i];
         input.kbd.flags |= KEYEVENTF_KEYUP;
-        queue_keyboard_message( desktop, 0, &input, IMO_HARDWARE, NULL, 0 );
+        queue_keyboard_message( desktop, state->key_roots[i], &input, IMO_HARDWARE,
+                                NULL, 0, 1 );
         memset( &state->keys[i], 0, sizeof(state->keys[i]) );
         state->key_roots[i] = 0;
         --state->active_count;
@@ -3426,7 +3442,7 @@ DECL_HANDLER(send_hardware_message)
                 get_req_data(), get_req_data_size() / sizeof(POINT) );
         break;
     case INPUT_KEYBOARD:
-        wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, 0 );
+        wait = queue_keyboard_message( desktop, req->win, &req->input, origin, sender, 0, 0 );
         break;
     case INPUT_HARDWARE:
         queue_custom_hardware_message( desktop, req->win, origin, &req->input );
@@ -3474,7 +3490,7 @@ DECL_HANDLER(send_wayland_host_input)
         queue_mouse_message( desktop, req->root, &input, IMO_HARDWARE, NULL,
                 !!(req->flags & SEND_HWMSG_RAWINPUT), NULL, 0 );
     else
-        queue_keyboard_message( desktop, req->root, &input, IMO_HARDWARE, NULL, 0 );
+        queue_keyboard_message( desktop, req->root, &input, IMO_HARDWARE, NULL, 0, 1 );
     if (!get_error())
         update_wayland_host_input_state( desktop, req->root, &input );
     else if (desktop->wayland_host_input_state &&

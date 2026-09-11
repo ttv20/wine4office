@@ -928,6 +928,20 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
      * and for any key repetition to stop. */
     release_all_keys(hwnd);
 
+    if (clear_foreground)
+    {
+        struct wayland_win_data *win_data = wayland_win_data_get(hwnd);
+
+        /* Native hosting replaces only the compositor-side surface.  Keep the
+         * original Win32 foreground/focus queue while input moves to the host;
+         * otherwise authenticated host input is routed to the host process. */
+        if (win_data)
+        {
+            if (win_data->native_host_suppressed) clear_foreground = FALSE;
+            wayland_win_data_release(win_data);
+        }
+    }
+
     if (clear_foreground && (sync = malloc(sizeof(*sync))))
     {
         sync->hwnd = hwnd;

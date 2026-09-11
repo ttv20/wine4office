@@ -290,9 +290,18 @@ or transport fixture is not Outlook support.
   loss and focused-root retirement now queue an authenticated reset that
   releases Wine's depressed keys or pointer buttons. If a pure-edge burst
   fills the queue, the host replaces one edge with a full input reset instead
-  of risking a permanently pressed key. Physical modifier reconciliation,
-  IME/text input and a compositor-originated pointer-recipient fixture remain
-  pending.
+  of risking a permanently pressed key. `wl_keyboard.enter` now retains a
+  bounded, deduplicated snapshot of up to 64 depressed keys while the native
+  lease is not yet Hosted. The PE side explicitly authorizes a renderer root
+  only for current `HostedContent`; that transition queues one reset plus the
+  latest snapshot, while revocation discards stale queued edges and keeps only
+  current physical state for a later lease. Snapshot replay waits for queue
+  capacity rather than partially applying the set. The guest Wayland driver
+  also preserves the original Win32 foreground/focus queue when its local
+  surface is intentionally retired for native hosting, so authenticated host
+  input reaches the logical application instead of the resident host process.
+  Physical locked/latched modifier reconciliation, IME/text input and a
+  compositor-originated pointer-recipient fixture remain pending.
 - Each native root now owns a separate Vulkan logical device, presentation
   queue, command pool and bounded worker. Imported pool slots and immutable
   host copies are bound to that root's device, and root retirement waits until
@@ -982,6 +991,34 @@ Unsupported combinations return the complete root to the legacy local path.
   required the 56 KiB `libxkbregistry0` runtime package before the Wayland
   driver could create a window. Every task-prefix Wine process was stopped;
   the personal laptop retained 62 GiB free and WSL retained 304 GiB free.
+- Renderer ABI 10 and startup fixture ABI 9 add delayed
+  `wl_keyboard.enter` reconciliation. The renderer self-test verifies the
+  reset-plus-snapshot order, evdev-to-scan conversion, duplicate suppression,
+  malformed-array reset, authorization-delayed replay, atomic retry under a
+  full input queue and root-specific event removal on deauthorization in both
+  x86-64 and i386 Unix-call paths. The Intel x86-64 manual fixture delivered A
+  down/up to
+  the original application HWND after the native surface handoff, processed
+  four renderer events with four successful server results, and completed the
+  full fallback/rehost sequence with nine imports and six presented frames.
+  The server authority fixture also clears both logical focus and active state
+  before host key down/up, then proves that the authenticated direct route
+  still reaches the original root; the complete suite passed 880 checks with
+  zero failures. The decorated frame, multi-root fairness and asynchronous
+  frame-copy-failure fixtures remained green, as did x86-64 and i386 WSI.
+  Evidence is retained as
+  `artifacts/keyboard-routing-final2-manual-x64.log`,
+  `artifacts/keyboard-queue-final-{wsi-x64,wsi-i386}.log` and
+  `artifacts/keyboard-enter-final-{frame-x64,multi-root-x64,frame-failure-x64}.log`
+  in the Intel task directory, and
+  `/workspace/artifacts/keyboard-direct-routing-authority-x64-final.log` in the
+  Radeon task environment. The same authority executable passed 880 checks
+  with zero failures on `testing-laptop` WSLg; its evidence is
+  `artifacts/keyboard-routing-authority-wslg-x64-final.log` under the WSL build
+  agent. Every test used the task prefix's exact
+  wineserver shutdown path; no task Wine process remained and the laptop
+  retained 62 GiB free. WSL retained 304 GiB free and correctly reported its
+  missing Vulkan transport extension rather than claiming a WSI result.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

@@ -153,6 +153,7 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define MAX_RENDERER_FRAMES (MAX_RENDERER_ROOTS * MAX_RENDERER_FRAMES_PER_ROOT)
 #define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES_PER_ROOT + 2)
 #define MAX_RENDERER_INPUT_EVENTS 256
+#define MAX_RENDERER_ENTER_KEYS 64
 
 struct renderer_frame;
 struct renderer_root;
@@ -260,6 +261,11 @@ struct renderer_root
     BOOL recreate_swapchain;
     BOOL test_block_next_present;
     BOOL test_fail_next_frame_copy;
+    BOOL input_authorized;
+    BOOL keyboard_snapshot_pending;
+    uint32_t keyboard_serial;
+    uint32_t keyboard_key_count;
+    uint32_t keyboard_keys[MAX_RENDERER_ENTER_KEYS];
     NTSTATUS present_job_status;
     VkResult present_result;
     uint64_t next_present_id;
@@ -498,22 +504,44 @@ static void queue_renderer_input(struct renderer_root *root,
 static void queue_renderer_input_reset(struct renderer_root *root, uint32_t flags)
 {
     struct winewayland_host_input_event event = {0};
-    unsigned int index, offset;
+    unsigned int index;
 
     if (!root || !flags) return;
-    for (offset = 0; offset < renderer.input_count; ++offset)
+    if (renderer.input_count)
     {
-        index = (renderer.input_head + offset) % ARRAY_SIZE(renderer.input_events);
-        if (renderer.input_events[index].type != WINEWAYLAND_HOST_INPUT_RESET ||
-            renderer.input_events[index].root_identity != root->root_identity ||
-            renderer.input_events[index].root_generation != root->root_generation)
-            continue;
-        renderer.input_events[index].flags |= flags;
-        return;
+        index = (renderer.input_head + renderer.input_count - 1) %
+                ARRAY_SIZE(renderer.input_events);
+        if (renderer.input_events[index].type == WINEWAYLAND_HOST_INPUT_RESET &&
+            renderer.input_events[index].root_identity == root->root_identity &&
+            renderer.input_events[index].root_generation == root->root_generation)
+        {
+            renderer.input_events[index].flags |= flags;
+            return;
+        }
     }
     event.type = WINEWAYLAND_HOST_INPUT_RESET;
     event.flags = flags;
     queue_renderer_input(root, &event, FALSE);
+}
+
+static void discard_renderer_input(struct renderer_root *root)
+{
+    struct winewayland_host_input_event events[MAX_RENDERER_INPUT_EVENTS];
+    unsigned int count = 0, offset, index;
+
+    if (!root) return;
+    for (offset = 0; offset < renderer.input_count; ++offset)
+    {
+        index = (renderer.input_head + offset) % ARRAY_SIZE(renderer.input_events);
+        if (renderer.input_events[index].root_identity == root->root_identity &&
+            renderer.input_events[index].root_generation == root->root_generation)
+            continue;
+        events[count++] = renderer.input_events[index];
+    }
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    if (count) memcpy(renderer.input_events, events, count * sizeof(events[0]));
+    renderer.input_head = 0;
+    renderer.input_count = count;
 }
 
 static uint32_t renderer_key_to_scan(uint32_t key)
@@ -581,6 +609,99 @@ static uint32_t renderer_key_to_scan(uint32_t key)
     default: return 0x0200 | (key & 0x7f);
     }
 }
+
+static void queue_renderer_keyboard_snapshot(struct renderer_root *root)
+{
+    struct winewayland_host_input_event event = {0};
+    unsigned int i;
+
+    if (!root || !root->input_authorized || !root->keyboard_snapshot_pending) return;
+    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) -
+            root->keyboard_key_count - 1)
+    {
+        queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+        return;
+    }
+    queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+    for (i = 0; i < root->keyboard_key_count; ++i)
+    {
+        event.type = WINEWAYLAND_HOST_INPUT_KEY;
+        event.serial = root->keyboard_serial;
+        event.code = renderer_key_to_scan(root->keyboard_keys[i]);
+        event.state = WL_KEYBOARD_KEY_STATE_PRESSED;
+        queue_renderer_input(root, &event, FALSE);
+    }
+    root->keyboard_snapshot_pending = FALSE;
+}
+
+static NTSTATUS store_renderer_keyboard_enter(struct renderer_root *root, uint32_t serial,
+        const struct wl_array *keys)
+{
+    const uint32_t *key_data;
+    size_t count, i, j;
+
+    if (!root || !keys) return STATUS_INVALID_PARAMETER;
+    if (keys->size % sizeof(*key_data) || (keys->size && !keys->data))
+    {
+        root->keyboard_key_count = 0;
+        root->keyboard_snapshot_pending = TRUE;
+        queue_renderer_keyboard_snapshot(root);
+        return STATUS_INVALID_PARAMETER;
+    }
+    count = keys->size / sizeof(*key_data);
+    key_data = keys->data;
+    if (count > MAX_RENDERER_ENTER_KEYS)
+    {
+        root->keyboard_key_count = 0;
+        root->keyboard_snapshot_pending = TRUE;
+        queue_renderer_keyboard_snapshot(root);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    for (i = 0; i < count; ++i)
+        if (key_data[i] > KEY_MAX)
+        {
+            root->keyboard_key_count = 0;
+            root->keyboard_snapshot_pending = TRUE;
+            queue_renderer_keyboard_snapshot(root);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+    root->keyboard_serial = serial;
+    root->keyboard_key_count = 0;
+    for (i = 0; i < count; ++i)
+    {
+        for (j = 0; j < i; ++j)
+            if (key_data[j] == key_data[i]) break;
+        if (j != i) continue;
+        root->keyboard_keys[root->keyboard_key_count++] = key_data[i];
+    }
+    root->keyboard_snapshot_pending = TRUE;
+    queue_renderer_keyboard_snapshot(root);
+    return STATUS_SUCCESS;
+}
+
+static void set_renderer_input_authorized(struct renderer_root *root, BOOL authorized)
+{
+    if (!root || root->input_authorized == authorized) return;
+    root->input_authorized = authorized;
+    if (!authorized)
+    {
+        discard_renderer_input(root);
+        root->keyboard_snapshot_pending = renderer.keyboard_root == root;
+        return;
+    }
+    queue_renderer_keyboard_snapshot(root);
+}
+
+static void queue_pending_renderer_keyboard_snapshots(void)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        queue_renderer_keyboard_snapshot(&renderer.roots[i]);
+}
+
+static NTSTATUS get_renderer_input(void *args);
 
 static void renderer_pointer_enter(void *data, struct wl_pointer *pointer, uint32_t serial,
         struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
@@ -777,11 +898,21 @@ static void renderer_keyboard_keymap(void *data, struct wl_keyboard *keyboard,
 static void renderer_keyboard_enter(void *data, struct wl_keyboard *keyboard,
         uint32_t serial, struct wl_surface *surface, struct wl_array *keys)
 {
+    struct renderer_root *root = surface ? wl_surface_get_user_data(surface) : NULL;
+
     (void)data;
     (void)keyboard;
-    (void)serial;
-    (void)keys;
-    renderer.keyboard_root = surface ? wl_surface_get_user_data(surface) : NULL;
+    if (renderer.keyboard_root && renderer.keyboard_root != root)
+    {
+        if (renderer.keyboard_root->input_authorized)
+            queue_renderer_input_reset(renderer.keyboard_root,
+                    WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+        renderer.keyboard_root->keyboard_key_count = 0;
+        renderer.keyboard_root->keyboard_snapshot_pending = FALSE;
+    }
+    renderer.keyboard_root = root;
+    if (renderer.keyboard_root)
+        store_renderer_keyboard_enter(renderer.keyboard_root, serial, keys);
 }
 
 static void renderer_keyboard_leave(void *data, struct wl_keyboard *keyboard,
@@ -794,22 +925,56 @@ static void renderer_keyboard_leave(void *data, struct wl_keyboard *keyboard,
     (void)serial;
     (void)surface;
     renderer.keyboard_root = NULL;
-    queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+    if (root)
+    {
+        root->keyboard_key_count = 0;
+        root->keyboard_snapshot_pending = FALSE;
+        if (root->input_authorized)
+            queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+    }
 }
 
 static void renderer_keyboard_key(void *data, struct wl_keyboard *keyboard, uint32_t serial,
         uint32_t time, uint32_t key, uint32_t state)
 {
     struct winewayland_host_input_event event = {0};
+    struct renderer_root *root = renderer.keyboard_root;
+    unsigned int i;
 
     (void)data;
     (void)keyboard;
+    if (!root || key > KEY_MAX) return;
+    for (i = 0; i < root->keyboard_key_count; ++i)
+        if (root->keyboard_keys[i] == key) break;
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED && i == root->keyboard_key_count)
+    {
+        if (root->keyboard_key_count == ARRAY_SIZE(root->keyboard_keys))
+        {
+            root->keyboard_key_count = 0;
+            root->keyboard_snapshot_pending = TRUE;
+            queue_renderer_keyboard_snapshot(root);
+            return;
+        }
+        root->keyboard_keys[root->keyboard_key_count++] = key;
+    }
+    else if (state == WL_KEYBOARD_KEY_STATE_RELEASED && i < root->keyboard_key_count)
+    {
+        memmove(&root->keyboard_keys[i], &root->keyboard_keys[i + 1],
+                (root->keyboard_key_count - i - 1) * sizeof(root->keyboard_keys[0]));
+        --root->keyboard_key_count;
+    }
+    if (!root->input_authorized)
+    {
+        root->keyboard_serial = serial;
+        root->keyboard_snapshot_pending = TRUE;
+        return;
+    }
     event.type = WINEWAYLAND_HOST_INPUT_KEY;
     event.serial = serial;
     event.time = time;
     event.code = renderer_key_to_scan(key);
     event.state = state;
-    queue_renderer_input(renderer.keyboard_root, &event, FALSE);
+    queue_renderer_input(root, &event, FALSE);
 }
 
 static void renderer_keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
@@ -844,6 +1009,174 @@ static const struct wl_keyboard_listener renderer_keyboard_listener =
     renderer_keyboard_repeat_info,
 };
 
+static NTSTATUS renderer_keyboard_enter_self_test(void)
+{
+    static const uint32_t expected_codes[] = {KEY_LEFTSHIFT, KEY_A, 0x011d};
+    uint32_t key_data[] = {KEY_LEFTSHIFT, KEY_A, KEY_RIGHTCTRL, KEY_A};
+    struct winewayland_host_input_event queued = {0}, dequeued;
+    struct winewayland_host_input_event *saved_events, *event;
+    struct renderer_root root = {0}, other_root = {0}, *pending_root = NULL;
+    struct wl_array keys = {0};
+    unsigned int saved_head, saved_count, i;
+    BOOL saved_overflow;
+    NTSTATUS status;
+
+    if (!(saved_events = malloc(sizeof(renderer.input_events)))) return STATUS_NO_MEMORY;
+    memcpy(saved_events, renderer.input_events, sizeof(renderer.input_events));
+    saved_head = renderer.input_head;
+    saved_count = renderer.input_count;
+    saved_overflow = renderer.input_overflow;
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+
+    root.root_identity = 0x1122334455667788ull;
+    root.root_generation = 7;
+    root.input_authorized = TRUE;
+    keys.size = keys.alloc = sizeof(key_data);
+    keys.data = key_data;
+    status = store_renderer_keyboard_enter(&root, 17, &keys);
+    if (status || renderer.input_count != ARRAY_SIZE(expected_codes) + 1)
+        status = STATUS_DATA_ERROR;
+    if (!status)
+    {
+        event = &renderer.input_events[renderer.input_head];
+        if (event->type != WINEWAYLAND_HOST_INPUT_RESET ||
+            event->flags != WINEWAYLAND_HOST_INPUT_RESET_KEYS ||
+            event->root_identity != root.root_identity ||
+            event->root_generation != root.root_generation)
+            status = STATUS_DATA_ERROR;
+    }
+    for (i = 0; !status && i < ARRAY_SIZE(expected_codes); ++i)
+    {
+        event = &renderer.input_events[(renderer.input_head + i + 1) %
+                ARRAY_SIZE(renderer.input_events)];
+        if (event->type != WINEWAYLAND_HOST_INPUT_KEY || event->flags ||
+            event->serial != 17 || event->code != expected_codes[i] ||
+            event->state != WL_KEYBOARD_KEY_STATE_PRESSED ||
+            event->root_identity != root.root_identity ||
+            event->root_generation != root.root_generation)
+            status = STATUS_DATA_ERROR;
+    }
+    queue_renderer_input_reset(&root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+    event = &renderer.input_events[(renderer.input_head + renderer.input_count - 1) %
+            ARRAY_SIZE(renderer.input_events)];
+    if (renderer.input_count != ARRAY_SIZE(expected_codes) + 2 ||
+        event->type != WINEWAYLAND_HOST_INPUT_RESET ||
+        event->flags != WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+        status = STATUS_DATA_ERROR;
+    queue_renderer_input_reset(&root, WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
+    if (renderer.input_count != ARRAY_SIZE(expected_codes) + 2 ||
+        event->flags != (WINEWAYLAND_HOST_INPUT_RESET_KEYS |
+                         WINEWAYLAND_HOST_INPUT_RESET_BUTTONS))
+        status = STATUS_DATA_ERROR;
+
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+    keys.size--;
+    if (store_renderer_keyboard_enter(&root, 19, &keys) != STATUS_INVALID_PARAMETER ||
+        renderer.input_count != 1 ||
+        renderer.input_events[renderer.input_head].type != WINEWAYLAND_HOST_INPUT_RESET ||
+        renderer.input_events[renderer.input_head].flags != WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+        status = STATUS_DATA_ERROR;
+
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+    root.input_authorized = FALSE;
+    keys.size = keys.alloc = sizeof(key_data);
+    if (store_renderer_keyboard_enter(&root, 23, &keys) || renderer.input_count)
+        status = STATUS_DATA_ERROR;
+    set_renderer_input_authorized(&root, TRUE);
+    if (renderer.input_count != ARRAY_SIZE(expected_codes) + 1 ||
+        root.keyboard_snapshot_pending)
+        status = STATUS_DATA_ERROR;
+
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if (!renderer.roots[i].root_identity)
+        {
+            pending_root = &renderer.roots[i];
+            break;
+        }
+    if (!pending_root)
+        status = STATUS_QUOTA_EXCEEDED;
+    else
+    {
+        pending_root->root_identity = 0x8877665544332211ull;
+        pending_root->root_generation = 9;
+        pending_root->input_authorized = TRUE;
+        other_root.root_identity = 0x1020304050607080ull;
+        other_root.root_generation = 11;
+        queued.type = WINEWAYLAND_HOST_INPUT_KEY;
+        queued.code = KEY_B;
+        queued.state = WL_KEYBOARD_KEY_STATE_PRESSED;
+        for (i = 0; i < ARRAY_SIZE(renderer.input_events) - 3; ++i)
+            queue_renderer_input(&other_root, &queued, FALSE);
+        if (store_renderer_keyboard_enter(pending_root, 29, &keys) ||
+            renderer.input_count != ARRAY_SIZE(renderer.input_events) - 2 ||
+            !pending_root->keyboard_snapshot_pending)
+            status = STATUS_DATA_ERROR;
+        memset(&dequeued, 0, sizeof(dequeued));
+        dequeued.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        dequeued.size = sizeof(dequeued);
+        if (get_renderer_input(&dequeued) || !pending_root->keyboard_snapshot_pending)
+            status = STATUS_DATA_ERROR;
+        memset(&dequeued, 0, sizeof(dequeued));
+        dequeued.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        dequeued.size = sizeof(dequeued);
+        if (get_renderer_input(&dequeued) || pending_root->keyboard_snapshot_pending ||
+            renderer.input_count != ARRAY_SIZE(renderer.input_events) - 1)
+            status = STATUS_DATA_ERROR;
+        for (i = 0; !status && i < ARRAY_SIZE(expected_codes) + 1; ++i)
+        {
+            event = &renderer.input_events[(renderer.input_head + renderer.input_count -
+                    ARRAY_SIZE(expected_codes) - 1 + i) %
+                    ARRAY_SIZE(renderer.input_events)];
+            if (!i)
+            {
+                if (event->type != WINEWAYLAND_HOST_INPUT_RESET ||
+                    event->flags != WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+                    status = STATUS_DATA_ERROR;
+            }
+            else if (event->type != WINEWAYLAND_HOST_INPUT_KEY ||
+                     event->code != expected_codes[i - 1] ||
+                     event->state != WL_KEYBOARD_KEY_STATE_PRESSED)
+                status = STATUS_DATA_ERROR;
+            if (event->root_identity != pending_root->root_identity ||
+                event->root_generation != pending_root->root_generation)
+                status = STATUS_DATA_ERROR;
+        }
+        memset(pending_root, 0, sizeof(*pending_root));
+    }
+
+    memset(renderer.input_events, 0, sizeof(renderer.input_events));
+    renderer.input_head = renderer.input_count = 0;
+    renderer.input_overflow = FALSE;
+    root.input_authorized = TRUE;
+    queued.type = WINEWAYLAND_HOST_INPUT_KEY;
+    queue_renderer_input(&root, &queued, FALSE);
+    queue_renderer_input(&other_root, &queued, FALSE);
+    queue_renderer_input_reset(&root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+    set_renderer_input_authorized(&root, FALSE);
+    if (renderer.input_count != 1 ||
+        renderer.input_events[renderer.input_head].root_identity != other_root.root_identity ||
+        renderer.input_events[renderer.input_head].root_generation != other_root.root_generation)
+        status = STATUS_DATA_ERROR;
+
+    memcpy(renderer.input_events, saved_events, sizeof(renderer.input_events));
+    renderer.input_head = saved_head;
+    renderer.input_count = saved_count;
+    renderer.input_overflow = saved_overflow;
+    free(saved_events);
+    if (!status)
+        fprintf(stderr, "Vulkan transport self-test: keyboard enter reconciliation passed.\n");
+    return status;
+}
+
 static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
         uint32_t capabilities)
 {
@@ -874,8 +1207,14 @@ static void renderer_seat_capabilities(void *data, struct wl_seat *seat,
     }
     else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && renderer.keyboard)
     {
-        queue_renderer_input_reset(renderer.keyboard_root,
-                WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+        if (renderer.keyboard_root)
+        {
+            renderer.keyboard_root->keyboard_key_count = 0;
+            renderer.keyboard_root->keyboard_snapshot_pending = FALSE;
+            if (renderer.keyboard_root->input_authorized)
+                queue_renderer_input_reset(renderer.keyboard_root,
+                        WINEWAYLAND_HOST_INPUT_RESET_KEYS);
+        }
         if (wl_proxy_get_version((struct wl_proxy *)renderer.keyboard) >=
                 WL_KEYBOARD_RELEASE_SINCE_VERSION)
             wl_keyboard_release(renderer.keyboard);
@@ -1278,9 +1617,9 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
         if (renderer.slots[i].pool_generation && renderer.slots[i].root == root)
             return STATUS_PENDING;
-    if (renderer.pointer_root == root)
+    if (renderer.pointer_root == root && root->input_authorized)
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
-    if (renderer.keyboard_root == root)
+    if (renderer.keyboard_root == root && root->input_authorized)
         queue_renderer_input_reset(root, WINEWAYLAND_HOST_INPUT_RESET_KEYS);
     destroy_renderer_root_swapchain(root);
     if (root->snapshot_buffer)
@@ -2693,6 +3032,7 @@ static NTSTATUS get_renderer_input(void *args)
         renderer.input_head = (renderer.input_head + 1) %
                 ARRAY_SIZE(renderer.input_events);
         --renderer.input_count;
+        queue_pending_renderer_keyboard_snapshots();
         return STATUS_SUCCESS;
     }
     if (renderer.input_overflow)
@@ -2707,22 +3047,24 @@ static NTSTATUS test_renderer_input(void *args)
 {
     struct winewayland_host_input_test *params = args;
     struct winewayland_host_input_event event = {0};
+    uint32_t key_data = KEY_A;
+    struct wl_array keys = {0};
     struct renderer_root *root;
+    NTSTATUS status;
 
     if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
         params->size != sizeof(*params))
         return STATUS_REVISION_MISMATCH;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
-    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) - 2)
+    if (renderer.input_count > ARRAY_SIZE(renderer.input_events) - 3)
         return STATUS_INSUFFICIENT_RESOURCES;
+    keys.size = keys.alloc = sizeof(key_data);
+    keys.data = &key_data;
+    if ((status = store_renderer_keyboard_enter(root, 0, &keys))) return status;
     event.type = WINEWAYLAND_HOST_INPUT_KEY;
-    event.code = 0x1e;
-    event.state = 1;
-    queue_renderer_input(root, &event, FALSE);
-    memset(&event, 0, sizeof(event));
-    event.type = WINEWAYLAND_HOST_INPUT_RESET;
-    event.flags = WINEWAYLAND_HOST_INPUT_RESET_KEYS;
+    event.code = renderer_key_to_scan(KEY_A);
+    event.state = WL_KEYBOARD_KEY_STATE_RELEASED;
     queue_renderer_input(root, &event, FALSE);
     return STATUS_SUCCESS;
 }
@@ -2890,6 +3232,10 @@ static NTSTATUS sync_renderer_root(void *args)
             WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT);
     BOOL test_fail_next_frame_copy = !!(params->flags &
             WINEWAYLAND_HOST_ROOT_TEST_FAIL_NEXT_FRAME_COPY);
+    BOOL input_auth_valid = !!(params->flags &
+            WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID);
+    BOOL input_authorized = !!(params->flags &
+            WINEWAYLAND_HOST_ROOT_INPUT_AUTHORIZED);
     NTSTATUS status, wsi_status = STATUS_SUCCESS;
     unsigned int i;
 
@@ -2965,6 +3311,7 @@ static NTSTATUS sync_renderer_root(void *args)
     params->flags |= WINEWAYLAND_HOST_ROOT_CREATED;
 
 done:
+    if (input_auth_valid) set_renderer_input_authorized(root, input_authorized);
     if (test_block_next_present) root->test_block_next_present = TRUE;
     if (test_fail_next_frame_copy) root->test_fail_next_frame_copy = TRUE;
     if (configure_applied_id)
@@ -3641,6 +3988,7 @@ static NTSTATUS renderer_self_test(void *args)
         test_params->flags = 0;
         test_params->present_image_count = 0;
     }
+    if ((status = renderer_keyboard_enter_self_test())) return status;
     fprintf(stderr, "Vulkan transport self-test: begin.\n");
     if (!renderer.device) return STATUS_DEVICE_NOT_READY;
     if (renderer.deferred.image || renderer.deferred.memory || renderer.deferred.buffer ||

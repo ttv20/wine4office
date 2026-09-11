@@ -59,6 +59,7 @@ struct key_repeat
     timeout_t            period;           /* auto-repeat period */
     union hw_input       input;            /* the input to repeat */
     user_handle_t        win;              /* target window for input event */
+    int                  direct_target;    /* bypass native foreground routing */
     struct timeout_user *timeout;          /* timeout for repeat */
 };
 

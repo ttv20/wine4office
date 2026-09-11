@@ -3546,12 +3546,37 @@ static void test_host_registration( const char *program, const char *test_name )
         "Native key up after focus change returned %#lx without the expected message.\n",
         state->command_status );
 
+    SetFocus( NULL );
+    SetActiveWindow( NULL );
+    ok( !GetFocus() && !GetActiveWindow(),
+        "Hosted direct-input test retained focus %p or active window %p.\n",
+        GetFocus(), GetActiveWindow() );
+    state->input_event_id = 3;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native key down without logical focus.\n" );
+    ok( !state->command_status &&
+        PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
+        "Direct native key down returned %#lx without the expected root message.\n",
+        state->command_status );
+    state->input_event_id = 4;
+    state->input_flags = KEYEVENTF_KEYUP;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending native key up without logical focus.\n" );
+    ok( !state->command_status &&
+        PeekMessageW( &msg, root, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A',
+        "Direct native key up returned %#lx without the expected root message.\n",
+        state->command_status );
+
+    SetActiveWindow( root );
     SetFocus( root );
     input_point.x = 8;
     input_point.y = 9;
     ClientToScreen( root, &input_point );
     while (PeekMessageW( &msg, root, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
-    state->input_event_id = 3;
+    state->input_event_id = 5;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     state->input_x = input_point.x;
@@ -3566,7 +3591,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Native pointer motion returned %#lx at %ld,%ld instead of %ld,%ld.\n",
         state->command_status, cursor_point.x, cursor_point.y,
         input_point.x, input_point.y );
-    state->input_event_id = 4;
+    state->input_event_id = 6;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
@@ -3574,7 +3599,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
         "Native pointer down returned %#lx without pressed button state.\n",
         state->command_status );
-    state->input_event_id = 5;
+    state->input_event_id = 7;
     state->input_flags = MOUSEEVENTF_LEFTUP;
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_SEND_INPUT ),
@@ -3593,7 +3618,7 @@ static void test_host_registration( const char *program, const char *test_name )
         "Hidden window scene returned %#lx, generation %s, disposition %#lx.\n",
         state->command_status, wine_dbgstr_longlong( state->scene_generation ),
         state->scene_disposition );
-    state->input_event_id = 6;
+    state->input_event_id = 8;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -3625,7 +3650,7 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( state->registry_generation ),
         wine_dbgstr_longlong( state->revocation_scene_generation ) );
     scene_generation = state->revocation_scene_generation;
-    state->input_event_id = 6;
+    state->input_event_id = 9;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4811,7 +4836,7 @@ static void test_host_registration( const char *program, const char *test_name )
 
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
-    state->input_event_id = 6;
+    state->input_event_id = 10;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -4821,7 +4846,7 @@ static void test_host_registration( const char *program, const char *test_name )
         PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Host-exit key down returned %#lx without pressed state or message.\n",
         state->command_status );
-    state->input_event_id = 7;
+    state->input_event_id = 11;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,

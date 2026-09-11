@@ -41,7 +41,7 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
-#define WINEWAYLAND_HOST_STARTUP_VERSION 8
+#define WINEWAYLAND_HOST_STARTUP_VERSION 9
 
 struct winewayland_host_startup
 {
@@ -71,15 +71,21 @@ struct winewayland_host_startup
     volatile uint32_t fail_frame_copy_armed;
     volatile uint32_t server_work_scans;
     volatile uint32_t server_work_wakeups;
+    volatile uint32_t test_input_queue_status;
+    volatile uint32_t test_input_event_count;
+    volatile uint32_t test_input_last_status;
+    volatile uint32_t test_input_success_count;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 9
+#define WINEWAYLAND_HOST_RENDERER_VERSION 10
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
 #define WINEWAYLAND_HOST_ROOT_CLOSED     0x00000004
 #define WINEWAYLAND_HOST_ROOT_WSI_READY  0x00000008
 #define WINEWAYLAND_HOST_ROOT_PRESENT_COMPLETE 0x00000010
+#define WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID 0x10000000
+#define WINEWAYLAND_HOST_ROOT_INPUT_AUTHORIZED 0x20000000
 #define WINEWAYLAND_HOST_ROOT_TEST_BLOCK_NEXT_PRESENT 0x80000000
 #define WINEWAYLAND_HOST_ROOT_TEST_FAIL_NEXT_FRAME_COPY 0x40000000
 

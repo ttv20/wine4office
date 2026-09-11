@@ -26,7 +26,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 120);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 136);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -1943,7 +1943,8 @@ static NTSTATUS process_root_contributors(struct host_renderer_root *root,
     return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
 }
 
-static NTSTATUS process_host_input(uint64_t host_epoch);
+static NTSTATUS process_host_input(uint64_t host_epoch,
+        struct winewayland_host_startup *startup);
 
 static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t host_epoch)
 {
@@ -1958,7 +1959,7 @@ static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t h
     retire.root_identity = root->root_identity;
     retire.root_generation = root->root_generation;
     status = WINE_UNIX_CALL(unix_renderer_root_retire, &retire);
-    if (!status) status = process_host_input(host_epoch);
+    if (!status) status = process_host_input(host_epoch, NULL);
     if (!status) memset(root, 0, sizeof(*root));
     return status;
 }
@@ -2057,6 +2058,22 @@ static NTSTATUS set_renderer_root_test_flags(const struct host_root_info *root,
 
     prepare_renderer_root_sync(&sync, root, state, configure);
     sync.flags = flags;
+    return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
+}
+
+static NTSTATUS set_renderer_root_input_authorized(struct host_renderer_root *root)
+{
+    struct winewayland_host_renderer_root sync;
+
+    memset(&sync, 0, sizeof(sync));
+    sync.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    sync.size = sizeof(sync);
+    sync.root_identity = root->root_identity;
+    sync.root_generation = root->root_generation;
+    sync.flags = WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID;
+    if (root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
+        root->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+        sync.flags |= WINEWAYLAND_HOST_ROOT_INPUT_AUTHORIZED;
     return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
 }
 
@@ -2328,6 +2345,7 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     renderer_root->scene_applied_generation = scene.applied_generation;
     renderer_root->scene_disposition = scene.disposition;
     if ((status = query_host_native_lease(renderer_root, host_epoch))) return status;
+    if ((status = set_renderer_root_input_authorized(renderer_root))) return status;
     if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
         renderer_root->configure_request_id &&
         renderer_root->configure_request_id != configure.applied_id &&
@@ -2410,7 +2428,8 @@ static NTSTATUS process_host_work(uint64_t host_epoch)
     return first_error;
 }
 
-static NTSTATUS process_host_input(uint64_t host_epoch)
+static NTSTATUS process_host_input(uint64_t host_epoch,
+        struct winewayland_host_startup *startup)
 {
     struct winewayland_host_input_event event;
     struct host_renderer_root *root;
@@ -2425,6 +2444,7 @@ static NTSTATUS process_host_input(uint64_t host_epoch)
         status = WINE_UNIX_CALL(unix_renderer_get_input, &event);
         if (status == STATUS_NO_MORE_ENTRIES) return STATUS_SUCCESS;
         if (status) return status;
+        if (startup) InterlockedIncrement((LONG *)&startup->test_input_event_count);
 
         root = NULL;
         for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
@@ -2436,6 +2456,12 @@ static NTSTATUS process_host_input(uint64_t host_epoch)
             }
         if (!root) continue;
         status = send_host_input(root, host_epoch, &event);
+        if (startup)
+        {
+            InterlockedExchange((LONG *)&startup->test_input_last_status, status);
+            if (!status)
+                InterlockedIncrement((LONG *)&startup->test_input_success_count);
+        }
         if (status == STATUS_NOT_FOUND || status == STATUS_REVISION_MISMATCH ||
             status == STATUS_INVALID_DEVICE_STATE || status == STATUS_NOT_SUPPORTED)
             continue;
@@ -2450,7 +2476,10 @@ static NTSTATUS queue_host_test_input(void)
 
     for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
     {
-        if (!renderer_roots[i].root_identity || !renderer_roots[i].native_owned) continue;
+        if (!renderer_roots[i].root_identity) continue;
+        if (renderer_roots[i].native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+            renderer_roots[i].scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+            continue;
         memset(&test, 0, sizeof(test));
         test.version = WINEWAYLAND_HOST_RENDERER_VERSION;
         test.size = sizeof(test);
@@ -2482,9 +2511,13 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
         SetEvent(ready_event);
         return 5;
     }
-    test_input_pending = system_process &&
-            GetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", test_input,
+    test_input_pending = GetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", test_input,
             sizeof(test_input)) == 1 && test_input[0] == '1';
+    if (test_input_pending)
+    {
+        InterlockedExchange((LONG *)&startup->test_input_queue_status, STATUS_PENDING);
+        InterlockedExchange((LONG *)&startup->test_input_last_status, STATUS_PENDING);
+    }
     if (startup->version != WINEWAYLAND_HOST_STARTUP_VERSION ||
             startup->size != sizeof(*startup))
         status = STATUS_REVISION_MISMATCH;
@@ -2535,11 +2568,14 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
                 if (!work_status && test_input_pending)
                 {
                     work_status = queue_host_test_input();
+                    InterlockedExchange((LONG *)&startup->test_input_queue_status,
+                            work_status);
                     if (!work_status) test_input_pending = FALSE;
                     else if (work_status == STATUS_DEVICE_NOT_READY)
                         work_status = STATUS_SUCCESS;
                 }
-                if (!work_status) work_status = process_host_input(host_epoch);
+                if (!work_status) work_status = process_host_input(host_epoch,
+                        test_input_pending ? NULL : startup);
                 if (work_status && work_status != last_work_status)
                     fprintf(stderr, "Wayland host work scan returned %#lx.\n", work_status);
                 last_work_status = work_status;
@@ -2832,6 +2868,30 @@ static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *devi
     return hr;
 }
 
+static void pump_dcomp_test_messages(HWND window, BOOL input_test,
+        BOOL *key_down, BOOL *key_up)
+{
+    MSG message;
+
+    while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+    {
+        if (input_test && message.wParam == 'A' &&
+            (message.message == WM_KEYDOWN || message.message == WM_KEYUP))
+        {
+            if (message.hwnd == window || IsChild(window, message.hwnd))
+            {
+                if (message.message == WM_KEYDOWN) *key_down = TRUE;
+                if (message.message == WM_KEYUP) *key_up = TRUE;
+            }
+            else
+                fprintf(stderr, "dcomp_input=unexpected_target message=%#x hwnd=%p root=%p\n",
+                        message.message, message.hwnd, window);
+        }
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+}
+
 static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
         BOOL multi_root, BOOL failure_test)
 {
@@ -2876,6 +2936,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     HRESULT hr = E_FAIL;
     DWORD wait;
     unsigned int i, present_count = 0;
+    BOOL key_down = FALSE, key_up = FALSE;
     uint32_t expected_imports = multi_root ? 2 * WINE_WAYLAND_BUFFER_POOL_SLOTS :
             WINE_WAYLAND_BUFFER_POOL_SLOTS;
     int ret = 7;
@@ -2890,12 +2951,15 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         printf("dcomp_pipeline=unsupported capabilities=%#x\n", probe.capabilities);
         return 0;
     }
+    if (input_test)
+        SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
     if (!automatic_host)
     {
         if ((status = request_host_startup(&probe, &token_low, &token_high)))
         {
             fprintf(stderr, "dcomp_pipeline=unavailable startup_status=%#lx\n", status);
-            return 5;
+            ret = 5;
+            goto done;
         }
 
         mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
@@ -2950,7 +3014,6 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     if (frame_test) UpdateWindow(window);
     if (input_test)
     {
-        SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
         SetActiveWindow(window);
         SetFocus(window);
     }
@@ -3023,8 +3086,6 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
 
     if (automatic_host)
     {
-        BOOL key_down = FALSE, key_up = FALSE;
-
         if ((status = get_registered_host(&host_info)) || !host_info.ready ||
                 !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
         {
@@ -3042,7 +3103,6 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             };
             ID3D11RenderTargetView *view = NULL;
             ID3D11Texture2D *texture = NULL;
-            MSG message;
 
             if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D,
                     (void **)&texture))) break;
@@ -3057,16 +3117,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             if (view) ID3D11RenderTargetView_Release(view);
             ID3D11Texture2D_Release(texture);
             if (FAILED(hr)) break;
-            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-            {
-                if (input_test && message.hwnd == window && message.wParam == 'A')
-                {
-                    if (message.message == WM_KEYDOWN) key_down = TRUE;
-                    if (message.message == WM_KEYUP) key_up = TRUE;
-                }
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
             Sleep(50);
         }
         if (FAILED(hr) || (status = get_registered_host(&final_host_info)) ||
@@ -3083,24 +3134,19 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             fflush(stdout);
             for (i = 0; i < 1000 && (!key_down || !key_up); ++i)
             {
-                MSG message;
-
-                while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-                {
-                    if (message.hwnd == window && message.wParam == 'A')
-                    {
-                        if (message.message == WM_KEYDOWN) key_down = TRUE;
-                        if (message.message == WM_KEYUP) key_up = TRUE;
-                    }
-                    TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
+                pump_dcomp_test_messages(window, TRUE, &key_down, &key_up);
                 Sleep(10);
             }
             if (!key_down || !key_up)
             {
-                fprintf(stderr, "dcomp_input=failed key_down=%u key_up=%u\n",
-                        key_down, key_up);
+                if (startup)
+                    fprintf(stderr, "dcomp_input=failed key_down=%u key_up=%u queue=%#x "
+                            "events=%u last=%#x successes=%u\n", key_down, key_up,
+                            startup->test_input_queue_status, startup->test_input_event_count,
+                            startup->test_input_last_status, startup->test_input_success_count);
+                else
+                    fprintf(stderr, "dcomp_input=failed key_down=%u key_up=%u\n",
+                            key_down, key_up);
                 goto done;
             }
             printf("dcomp_input=passed key_down=1 key_up=1\n");
@@ -3114,13 +3160,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     for (i = 0; i < 500 && InterlockedCompareExchange(
             (LONG *)&startup->imported_slots, 0, 0) != expected_imports; ++i)
     {
-        MSG message;
-
-        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-        {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
+        pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
         Sleep(10);
     }
     if (InterlockedCompareExchange((LONG *)&startup->imported_slots, 0, 0) !=
@@ -3291,13 +3331,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             goto done;
         for (wait_count = 0; wait_count < 500; ++wait_count)
         {
-            MSG message;
-
-            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
             completed_after = InterlockedCompareExchange(
                     (LONG *)&startup->presented_frames, 0, 0) +
                     InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
@@ -3425,13 +3459,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         if (FAILED(hr)) break;
         for (wait_count = 0; wait_count < 500; ++wait_count)
         {
-            MSG message;
-
-            while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
-            {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
+            pump_dcomp_test_messages(window, input_test, &key_down, &key_up);
             completed_after = InterlockedCompareExchange(
                     (LONG *)&startup->presented_frames, 0, 0) +
                     InterlockedCompareExchange((LONG *)&startup->discarded_frames, 0, 0) +
@@ -3460,6 +3488,25 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     {
         fprintf(stderr, "dcomp_pipeline=failed local retirement was not acknowledged\n");
         goto done;
+    }
+    if (input_test)
+    {
+        for (i = 0; i < 500 && (!key_down || !key_up); ++i)
+        {
+            pump_dcomp_test_messages(window, TRUE, &key_down, &key_up);
+            Sleep(10);
+        }
+        if (!key_down || !key_up)
+        {
+            fprintf(stderr, "dcomp_input=failed key_down=%u key_up=%u queue=%#x "
+                    "events=%u last=%#x successes=%u focus=%p active=%p foreground=%p root=%p\n",
+                    key_down, key_up,
+                    startup->test_input_queue_status, startup->test_input_event_count,
+                    startup->test_input_last_status, startup->test_input_success_count,
+                    GetFocus(), GetActiveWindow(), GetForegroundWindow(), window);
+            goto done;
+        }
+        printf("dcomp_input=passed key_down=1 key_up=1\n");
     }
 
     if (frame_test)
@@ -3687,9 +3734,15 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     ret = 0;
 
 done:
+    if (input_test)
+        SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", NULL);
     if (!ret && startup)
         printf("host_work=event_driven wakeups=%u scans=%u\n",
                 startup->server_work_wakeups, startup->server_work_scans);
+    if (input_test && startup)
+        printf("dcomp_input_host=queue=%#x events=%u last=%#x successes=%u\n",
+                startup->test_input_queue_status, startup->test_input_event_count,
+                startup->test_input_last_status, startup->test_input_success_count);
     if (second_target)
     {
         IDCompositionTarget_SetRoot(second_target, NULL);
@@ -3755,7 +3808,6 @@ done:
     if (dcomp_module) FreeLibrary(dcomp_module);
     if (dxgi_module) FreeLibrary(dxgi_module);
     if (d3d11_module) FreeLibrary(d3d11_module);
-    if (input_test) SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", NULL);
     return ret;
 }
 
@@ -3772,6 +3824,8 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
         return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-input-test"))
+        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
         return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
@@ -3791,7 +3845,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
             argv[0]);
     return 2;
 }
