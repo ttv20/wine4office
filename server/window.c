@@ -5625,6 +5625,24 @@ DECL_HANDLER(post_wayland_window_configure)
         root->wayland_configure_state = req->state;
         root->wayland_configure_scale_120 = req->scale_120;
     }
+    /* The initial xdg-shell configure commonly carries no extent or Win32
+     * state transition.  Completing that no-op in the server avoids making
+     * WSI startup depend on the window thread returning from a credit-limited
+     * Present.  State changes that need window messages still use the owner
+     * thread below. */
+    if (root->wayland_configure_applied_id != root->wayland_configure_request_id &&
+        !root->wayland_configure_width && !root->wayland_configure_height &&
+        !(root->wayland_configure_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
+        !(root->wayland_configure_applied_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
+        !root->wayland_configure_message_posted)
+    {
+        root->wayland_configure_applied_id = root->wayland_configure_request_id;
+        root->wayland_configure_applied_revision = root->wayland_geometry_revision;
+        root->wayland_configure_applied_width = 0;
+        root->wayland_configure_applied_height = 0;
+        root->wayland_configure_applied_state = root->wayland_configure_state;
+        signal_wayland_host_work( root->desktop );
+    }
     reply->state_revision = root->wayland_window_state_revision;
     reply->applied_id = root->wayland_configure_applied_id;
     reply->applied_revision = root->wayland_configure_applied_revision;

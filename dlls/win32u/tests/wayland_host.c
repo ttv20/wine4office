@@ -2970,11 +2970,26 @@ static void test_host_registration( const char *program, const char *test_name )
         status, wine_dbgstr_longlong( configure_applied_id ),
         wine_dbgstr_longlong( configure_applied_revision ) );
 
+    state->configure_request_id = 4;
+    state->configure_width = state->configure_height = 0;
+    state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED;
+    ok( send_host_child_command( state, command_event, result_event,
+                                HOST_CHILD_COMMAND_POST_CONFIGURE ),
+        "Timed out posting no-op configure.\n" );
+    ok( !state->command_status && state->configure_applied_id == 4 &&
+        state->configure_applied_revision == configure_applied_revision,
+        "No-op configure returned %#lx, applied %s, revision %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->configure_applied_id ),
+        wine_dbgstr_longlong( state->configure_applied_revision ) );
+    status = get_window_configure( root, &configure );
+    ok( status == STATUS_NOT_FOUND,
+        "Auto-applied no-op configure pull returned %#lx.\n", status );
+
     if (GetModuleHandleW( L"winewayland.drv" ))
     {
         RECT applied_rect = {0};
 
-        state->configure_request_id = 4;
+        state->configure_request_id = 5;
         state->configure_width = 104;
         state->configure_height = 84;
         state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_TILED;
@@ -2984,7 +2999,7 @@ static void test_host_registration( const char *program, const char *test_name )
             "Timed out posting owner-thread configure.\n" );
         ok( !state->command_status, "Owner-thread configure returned %#lx.\n",
             state->command_status );
-        for (i = 0; i < 100 && state->configure_applied_id != 4; ++i)
+        for (i = 0; i < 100 && state->configure_applied_id != 5; ++i)
         {
             while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE ))
                 DispatchMessageW( &msg );
@@ -2992,10 +3007,10 @@ static void test_host_registration( const char *program, const char *test_name )
             ok( send_host_child_command( state, command_event, result_event,
                                         HOST_CHILD_COMMAND_GET_CONFIGURE_RESULT ),
                 "Timed out polling owner-thread configure.\n" );
-            if (state->configure_applied_id != 4) Sleep(10);
+            if (state->configure_applied_id != 5) Sleep(10);
         }
-        ok( !state->command_status && state->configure_request_id == 4 &&
-            state->configure_applied_id == 4 && state->configure_width == 104 &&
+        ok( !state->command_status && state->configure_request_id == 5 &&
+            state->configure_applied_id == 5 && state->configure_width == 104 &&
             state->configure_height == 84 &&
             state->configure_state == WINE_WAYLAND_CONFIGURE_STATE_TILED,
             "Owner-thread configure result returned %#lx, request %s, applied %s, %lux%lu, state %#lx.\n",

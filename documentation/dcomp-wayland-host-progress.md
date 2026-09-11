@@ -252,6 +252,14 @@ or transport fixture is not Outlook support.
   and a replacement host can restart its request numbering without accepting
   an old epoch's response. The current host reports scale 120 because its
   minimal shell adapter does not yet bind fractional-scale output state.
+- Wineserver now completes an initial xdg configure that has no extent and no
+  Win32 state change without posting work to the owner thread. This removes a
+  startup deadlock in which three accepted frames exhausted the producer's
+  bounded credits while the host waited for that thread to acknowledge a
+  no-op configure. Activated-only zero-extent updates use the same path, but a
+  resize, maximize, fullscreen or resizing transition still runs on the owner
+  thread and reports its applied geometry before the host acknowledges the
+  Wayland serial.
 - Window metadata and transport geometry now use separate revisions. Title,
   style and other semantic changes still advance the window-state revision,
   while only a client-extent change advances the geometry revision that binds
@@ -997,10 +1005,10 @@ Unsupported combinations return the complete root to the legacy local path.
   malformed-array reset, authorization-delayed replay, atomic retry under a
   full input queue and root-specific event removal on deauthorization in both
   x86-64 and i386 Unix-call paths. The Intel x86-64 manual fixture delivered A
-  down/up to
-  the original application HWND after the native surface handoff, processed
-  four renderer events with four successful server results, and completed the
-  full fallback/rehost sequence with nine imports and six presented frames.
+  down/up to the original application HWND after the native surface handoff,
+  processed four renderer events with four successful server results, and
+  completed the full fallback/rehost sequence with nine imports and six
+  presented frames.
   The server authority fixture also clears both logical focus and active state
   before host key down/up, then proves that the authenticated direct route
   still reaches the original root; the complete suite passed 880 checks with
@@ -1019,6 +1027,17 @@ Unsupported combinations return the complete root to the legacy local path.
   wineserver shutdown path; no task Wine process remained and the laptop
   retained 62 GiB free. WSL retained 304 GiB free and correctly reported its
   missing Vulkan transport extension rather than claiming a WSI result.
+- The no-op configure authority regression passed 883 checks with zero
+  failures on Radeon and WSLg. On Intel Iris Xe, the previously stalled
+  automatic system-host fixture completed seven presentations, and its input
+  variant also delivered A down/up before completing the same seven-frame
+  sequence. Evidence is retained as
+  `/workspace/artifacts/configure-noop-authority-x64.log` on Radeon,
+  `artifacts/configure-noop-authority-wslg-x64.log` under the WSL build agent,
+  and `artifacts/configure-noop-auto-host-{x64,input-x64}.log` in the Intel
+  task directory. The focused wineserver and x86-64/i386 authority binaries
+  rebuilt without warnings. No task Wine process remained on either laptop;
+  the personal laptop retained 57 GiB free and WSL retained 304 GiB free.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline
