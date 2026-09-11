@@ -3111,8 +3111,19 @@ done:
     return hr;
 }
 
-static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
-        BOOL multi_root, BOOL failure_test, BOOL scale_test, BOOL startup_test)
+enum dcomp_pipeline_flags
+{
+    DCOMP_TEST_AUTOMATIC_HOST = 0x01,
+    DCOMP_TEST_INPUT = 0x02,
+    DCOMP_TEST_FRAME = 0x04,
+    DCOMP_TEST_MULTI_ROOT = 0x08,
+    DCOMP_TEST_FAILURE = 0x10,
+    DCOMP_TEST_SCALE = 0x20,
+    DCOMP_TEST_STARTUP = 0x40,
+    DCOMP_TEST_LOCAL = 0x80,
+};
+
+static int test_dcomp_pipeline(unsigned int flags)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -3121,6 +3132,11 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     typedef HRESULT (WINAPI *dcomposition_create_device_t)(IDXGIDevice *, REFIID, void **);
     static const GUID dcomp_device_iid =
             {0xc37ea93a, 0xe7aa, 0x450d, {0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3}};
+    BOOL automatic_host = flags & DCOMP_TEST_AUTOMATIC_HOST;
+    BOOL input_test = flags & DCOMP_TEST_INPUT, frame_test = flags & DCOMP_TEST_FRAME;
+    BOOL multi_root = flags & DCOMP_TEST_MULTI_ROOT, failure_test = flags & DCOMP_TEST_FAILURE;
+    BOOL scale_test = flags & DCOMP_TEST_SCALE, startup_test = flags & DCOMP_TEST_STARTUP;
+    BOOL local_test = flags & DCOMP_TEST_LOCAL;
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     struct winewayland_host_startup *startup = NULL;
     struct winewayland_host_probe probe;
@@ -3174,6 +3190,11 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     }
     if (input_test)
         SetEnvironmentVariableA("WINEWAYLAND_HOST_TEST_INPUT", "1");
+    if (local_test && automatic_host && get_registered_host(&host_info) != STATUS_NOT_FOUND)
+    {
+        fprintf(stderr, "dcomp_local=unavailable host already registered\n");
+        goto done;
+    }
     if (!automatic_host)
     {
         if ((status = request_host_startup(&probe, &token_low, &token_high)))
@@ -3311,6 +3332,22 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
                 (multi_root && FAILED(hr = present_test_color(second_swapchain,
                 d3d_device, context, color))))
             goto done;
+    }
+
+    if (local_test)
+    {
+        status = get_registered_host(&host_info);
+        if (GetPropW(window, L"__wine_dcomp_hosted_frame") ||
+                (automatic_host ? status != STATUS_NOT_FOUND : status || !host_info.ready))
+        {
+            fprintf(stderr, "dcomp_local=failed host_status=%#lx ready=%u hosted=%u\n",
+                    status, host_info.ready, !!GetPropW(window, L"__wine_dcomp_hosted_frame"));
+            goto done;
+        }
+        printf("dcomp_local=passed commit=0 present=%#lx host_ready=%u hosted=0\n",
+                hr, host_info.ready);
+        ret = 0;
+        goto done;
     }
 
     if (automatic_host || scale_test)
@@ -4029,7 +4066,7 @@ done:
 
         IDCompositionTarget_SetRoot(target, NULL);
         IDCompositionDevice_Commit(dcomp_device);
-        for (i = 0; !automatic_host && i < 500 && !InterlockedCompareExchange(
+        for (i = 0; !automatic_host && !local_test && startup && i < 500 && !InterlockedCompareExchange(
                 (LONG *)&startup->empty_scenes_applied, 0, 0); ++i)
         {
             MSG message;
@@ -4041,7 +4078,7 @@ done:
             }
             Sleep(10);
         }
-        if (!automatic_host && !startup->empty_scenes_applied)
+        if (!automatic_host && !local_test && startup && !startup->empty_scenes_applied)
         {
             fprintf(stderr, "dcomp_pipeline=failed empty scene was not applied\n");
             ret = 5;
@@ -4093,25 +4130,29 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(0);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-input-test"))
-        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_INPUT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_FRAME);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_MULTI_ROOT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_FAILURE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_AUTOMATIC_HOST);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_AUTOMATIC_HOST | DCOMP_TEST_INPUT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-scale-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_SCALE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-startup-lock-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE);
+        return test_dcomp_pipeline(DCOMP_TEST_AUTOMATIC_HOST | DCOMP_TEST_STARTUP);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-frame-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(DCOMP_TEST_AUTOMATIC_HOST | DCOMP_TEST_FRAME);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-local-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_AUTOMATIC_HOST | DCOMP_TEST_LOCAL);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-local-ready-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_LOCAL);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -4121,7 +4162,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }

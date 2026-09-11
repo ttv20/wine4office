@@ -14,9 +14,11 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <math.h>
+#include <wchar.h>
 
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "initguid.h"
 #include "objidl.h"
 #include "dxgi.h"
@@ -129,6 +131,7 @@ static INIT_ONCE dcomp_global_once = INIT_ONCE_STATIC_INIT;
 static CRITICAL_SECTION dcomp_global_lock;
 static struct dcomp_device *dcomp_devices;
 static UINT64 dcomp_owner_revision;
+static BOOL dcomp_wayland_host_enabled;
 
 struct dcomp_host_startup
 {
@@ -156,7 +159,31 @@ static UINT64 dcomp_get_desktop_id(DWORD thread_id)
 
 static BOOL CALLBACK dcomp_global_init(INIT_ONCE *once, void *param, void **context)
 {
+    const WCHAR *appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer, *p;
+    DWORD enabled = 0, size = sizeof(enabled);
+    HKEY defaults, appkey;
+
     InitializeCriticalSection(&dcomp_global_lock);
+    if ((p = wcsrchr(appname, '/'))) appname = p + 1;
+    if ((p = wcsrchr(appname, '\\'))) appname = p + 1;
+
+    /* Opt in per application while native ownership/input coverage is still
+     * incomplete. A host started by another application is not an opt-in.
+     * Read once, so changing the setting cannot split a live transaction. */
+    /* @@ Wine registry key: HKCU\Software\Wine\AppDefaults\app.exe\DirectComposition */
+    if (!RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Wine\\AppDefaults", 0, KEY_READ, &defaults))
+    {
+        if (!RegOpenKeyExW(defaults, appname, 0, KEY_READ, &appkey))
+        {
+            if (!RegGetValueW(appkey, L"DirectComposition", L"EnableWaylandHost",
+                    RRF_RT_REG_DWORD, NULL, &enabled, &size))
+                dcomp_wayland_host_enabled = enabled == 1;
+            RegCloseKey(appkey);
+        }
+        RegCloseKey(defaults);
+    }
+    TRACE("Experimental Wayland host %s for %s.\n",
+            dcomp_wayland_host_enabled ? "enabled" : "disabled", debugstr_w(appname));
     return TRUE;
 }
 
@@ -437,7 +464,8 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
     UINT disposition;
     NTSTATUS status;
 
-    if (!allow_no_target && !dcomp_scene_has_current_target(scene)) return;
+    if (!dcomp_wayland_host_enabled ||
+            (!allow_no_target && !dcomp_scene_has_current_target(scene))) return;
     candidate = dcomp_scene_get_hosted_candidate(scene, &target_layer);
     disposition = dcomp_scene_has_applied_root(scene) ? WINE_WAYLAND_SCENE_LOCAL_FALLBACK :
             WINE_WAYLAND_SCENE_EMPTY;

@@ -16,7 +16,8 @@ or transport fixture is not Outlook support.
   connection, and records compositor, shared-memory and seat globals.
 - The executable consumes a startup permit through inherited handles,
   independently re-probes the Wayland endpoint, registers with wineserver and
-  publishes Ready. DComp launches it on demand for the first eligible commit.
+  publishes Ready. DComp launches it on demand for the first eligible commit
+  in an application explicitly opted in through the developer setting below.
   Concurrent launchers converge on one detached Wine system process, which
   remains resident until the matching wineserver shuts down. The host binds
   the version-1 `xdg_wm_base` subset, creates retained native roots after an
@@ -1258,23 +1259,62 @@ Unsupported combinations return the complete root to the legacy local path.
   transform/opacity/composite pixel failures, while the unchanged baseline
   runner reported five in the same areas. The task-specific authority and
   public contract fixtures are unaffected.
+- Experimental DComp admission now requires per-executable developer opt-in,
+  read once through Wine's AppDefaults registry layout. Missing, zero or
+  malformed settings keep the existing backend even if a Ready host is
+  already registered. The new Ready-host negative fixture fails on the prior
+  DComp DLL, which sets the hosted-frame property without opt-in. With the fix,
+  both no-host and Ready-host cases pass public Commit/Present locally. With
+  explicit opt-in, the existing input pipeline passes all 11 input events,
+  nine imports, six backend presentations and fallback/rehost. Canonical
+  x86-64/i386 DComp and host builds passed in 11 focused compile/link commands.
+  The fixture switches now use named flags instead of seven positional
+  booleans. Evidence is `artifacts/astra-developer-optin-before-x64.log`,
+  `artifacts/astra-developer-optin-{local,local-ready,enabled}-x64.log` and
+  `artifacts/astra-developer-optin-{before,after}-SHA256SUMS` in the personal
+  Intel task directory. The setting was returned to zero, no task Wine
+  remained, and 56 GiB remained free. No new i386 guest-window runtime claim
+  is made. The reproduction instructions below replace the obsolete partial
+  runner deployment instructions.
 - Outlook topology and timing baselines are pending.
 
-## Reproduce the current probe
+## Developer activation and reproduction
 
-The environment uses runner
-`runner-wine4office-0-0-0-main-347abf611ff6`. After placing the two PE files
-and Unix library recorded in `winewayland-host-build.sha256` into that
-task-owned runner, run:
+Hosted DirectComposition is disabled by default, including when another
+application already started a Ready host on the same desktop. In a disposable
+test prefix, set the `REG_DWORD` value `EnableWaylandHost` to exactly `1` under
+`HKCU\Software\Wine\AppDefaults\<executable name>\DirectComposition`.
+For the built-in pipeline fixtures the executable name is
+`winewayland-host.exe`. Other values, wrong types and missing values keep the
+existing backend. There is no prefix-wide or environment-variable opt-in.
+The setting is read once per process; restart the application after changing
+it. This controls experimental admission, not server authority or capability
+checks, which remain mandatory after opt-in.
 
-```sh
-tools/office-test-env/office-exec.sh dcomp-host-probe-20260909 -- \
-  /usr/bin/env HOME=/workspace/home USER=tester LOGNAME=tester \
-  XDG_RUNTIME_DIR=/tmp/runtime-wine365 WAYLAND_DISPLAY=wayland-0 \
-  WINEPREFIX=/workspace/home/.wine4office WINEDEBUG=-all \
-  /workspace/runner-wine4office-0-0-0-main-347abf611ff6/bin/wine \
-  winewayland-host.exe --probe
-```
+The current Intel test runner is
+`elkana:/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/runner-root-identity`.
+Use only its mature task prefixes and private compositor. The current x86-64
+guest-window fixtures use `prefix-auto-host-lifecycle-x64`, with
+`XDG_RUNTIME_DIR` set to the task's `runtime` directory,
+`WAYLAND_DISPLAY=wayland-dcomp-import`,
+`WINEDLLOVERRIDES=winewayland.drv=b;winex11.drv=d`, and `DISPLAY` unset.
+Every test must have a bounded timeout and an exit trap that invokes this
+runner's `wineserver -k` and bounded `wineserver -w` with that exact
+`WINEPREFIX`. Preserve at least 20 GiB free and verify no task Wine remains.
+Do not touch the user's normal Wine prefixes or desktop.
 
-Pass the explicit i386 PE path in place of `winewayland-host.exe` to exercise
-the WoW64 Unix-call table.
+With the setting absent or zero, `--dcomp-local-test` checks successful public
+Commit/Present without launching a host. `--dcomp-local-ready-test` checks that
+an explicitly started Ready host cannot bypass the opt-in. With the setting
+enabled, `--dcomp-pipeline-input-test` exercises hosted presentation and
+fallback/rehost; `--dcomp-auto-frame-test` exercises automatic startup with a
+standard Wine frame. Neither fixture writes the setting itself. Restore the
+test setting after use. Backend Present results are not scanout measurements.
+
+Keep the runner coherent: protocol 1001 requires matching wineserver and
+ntdll, plus the task's win32u, winewayland driver, DComp, DXGI, WineD3D and host
+PE/Unix binaries. The old instruction to patch only the host's two PE files
+and Unix library into an untouched main runner is obsolete. Record the
+deployed binary hashes with each result. Native i386 host self-tests can use
+the explicit `i386-windows/winewayland-host.exe` path; the separate i386
+guest-window prefix initialization limitation above still applies.
