@@ -1311,6 +1311,34 @@ Unsupported combinations return the complete root to the legacy local path.
   without new warnings. i386 guest-window runtime coverage remains blocked
   by the previously recorded prefix initialization issue. No new prefixes,
   runners or Office sessions were created for these changes.
+- Renderer ABI 15 forwards the guest's requested maximized state alongside
+  the versioned window snapshot. State changes issue native
+  `xdg_toplevel.set_maximized` / `unset_maximized`; unchanged snapshots do not
+  repeatedly request another configure. The requested state survives unmap
+  and is restored before the bufferless remapping commit. Configure receipt,
+  owner application and WSI geometry authorization remain separate; issuing
+  the request does not claim that the compositor accepted it. The minimal
+  xdg-shell XML includes the preceding requests to preserve their official
+  wire opcodes. Its move/resize requests are not yet used by production.
+  The canonical x86-64/i386 PE and Unix builds passed in nine commands. The
+  Intel i386 `--maximize-self-test` observed and presented the compositor's
+  1024x768 maximized configure, retained maximization across hide/remap, and
+  presented the restored 96x80 output after a zero-size unmaximized configure.
+  Transport copy, pixel verification and WSI retention checks also passed.
+  Evidence is `artifacts/astra-maximize-wsi-i386.log` and
+  `artifacts/astra-maximize-wsi-SHA256SUMS` in the personal Intel task directory.
+  This is native renderer/WSI evidence, not a physical caption-click fixture.
+  No task Wine remained and 56 GiB remained free.
+- Interactive move/resize delegation remains open. The old guest
+  `WAYLAND_SysCommand` uses its suppressed native surface and a serial from
+  the wrong connection in hosted mode. The host must retain the originating
+  button serial, bind each owner-authorized action to that press's server
+  event ID, and prevent reuse after release, lease loss or root replacement.
+  Read-only design analysis confirmed that xdg-shell supplies resizing
+  configure edges but no move-completion event. Pointer leave and a display
+  sync cannot be advertised as proof that a native move finished. Modal
+  attempt retirement and actual compositor completion must remain distinct;
+  do not introduce concurrent local fallback based on a guessed timeout.
 
 ## Developer activation and reproduction
 
@@ -1354,3 +1382,5 @@ and Unix library into an untouched main runner is obsolete. Record the
 deployed binary hashes with each result. Native i386 host self-tests can use
 the explicit `i386-windows/winewayland-host.exe` path; the separate i386
 guest-window prefix initialization limitation above still applies.
+The current host PE/Unix pair uses renderer ABI 15, with the root record still
+392 bytes and startup fixture ABI 9 still 136 bytes.

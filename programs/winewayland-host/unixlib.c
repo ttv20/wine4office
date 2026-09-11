@@ -306,6 +306,7 @@ struct renderer_root
     VkResult present_result;
     uint64_t next_present_id;
     uint64_t window_state_revision;
+    BOOL maximized;
     uint64_t geometry_revision;
     uint64_t snapshot_revision;
     uint64_t snapshot_geometry_revision;
@@ -3580,6 +3581,7 @@ static NTSTATUS sync_renderer_root(void *args)
             WINEWAYLAND_HOST_ROOT_INPUT_AUTH_VALID);
     BOOL input_authorized = !!(params->flags &
             WINEWAYLAND_HOST_ROOT_INPUT_AUTHORIZED);
+    BOOL maximized = !!(params->flags & WINEWAYLAND_HOST_ROOT_MAXIMIZED);
     NTSTATUS status, wsi_status = STATUS_SUCCESS;
     unsigned int i;
 
@@ -3699,6 +3701,12 @@ done:
     {
         xdg_toplevel_set_title(root->xdg_toplevel, params->title);
         memcpy(root->title, params->title, sizeof(root->title));
+        if (root->maximized != maximized)
+        {
+            if (maximized) xdg_toplevel_set_maximized(root->xdg_toplevel);
+            else xdg_toplevel_unset_maximized(root->xdg_toplevel);
+            root->maximized = maximized;
+        }
         root->window_state_revision = params->window_state_revision;
     }
     if (params->geometry_revision)
@@ -3714,6 +3722,7 @@ done:
             if (root->window_state_revision)
                 xdg_toplevel_set_title(root->xdg_toplevel, root->title);
             xdg_toplevel_set_app_id(root->xdg_toplevel, "winewayland-host");
+            if (root->maximized) xdg_toplevel_set_maximized(root->xdg_toplevel);
             wl_surface_commit(root->surface);
             root->remap_pending = TRUE;
             if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)

@@ -227,9 +227,9 @@ static NTSTATUS sync_test_renderer_root(struct winewayland_host_renderer_root *r
         return status;
     if (!root->configure_request_id) return status;
     root->configure_applied_id = root->configure_request_id;
-    root->configure_applied_revision = 1;
-    root->window_state_revision = 1;
-    root->geometry_revision = 1;
+    if (!root->window_state_revision) root->window_state_revision = 1;
+    if (!root->geometry_revision) root->geometry_revision = 1;
+    root->configure_applied_revision = root->window_state_revision;
     root->configure_applied_width = root->configure_width;
     root->configure_applied_height = root->configure_height;
     root->configure_applied_state = root->configure_state;
@@ -369,7 +369,56 @@ static NTSTATUS wait_for_test_present(struct winewayland_host_renderer_root *roo
     return STATUS_IO_TIMEOUT;
 }
 
-static int test_wsi(void)
+static NTSTATUS set_test_root_maximized(struct winewayland_host_renderer_root *root,
+        struct winewayland_host_renderer_present *present, BOOL maximized)
+{
+    uint64_t previous_configure = root->configure_applied_id, width, height;
+    uint32_t fallback_width = root->requested_width, fallback_height = root->requested_height;
+    NTSTATUS status;
+    unsigned int i;
+
+    ++root->window_state_revision;
+    root->flags = maximized ? WINEWAYLAND_HOST_ROOT_MAXIMIZED : 0;
+    root->requested_width = root->requested_height = 0;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, root))) return status;
+    for (i = 0; i < 200; ++i)
+    {
+        if ((status = WINE_UNIX_CALL(unix_renderer_dispatch, NULL))) return status;
+        root->flags = 0;
+        if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, root))) return status;
+        if (root->configure_request_id > previous_configure &&
+            !!(root->configure_state & WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED) == maximized)
+            break;
+        Sleep(10);
+    }
+    if (i == 200) return STATUS_IO_TIMEOUT;
+    width = root->configure_width ?
+            ((uint64_t)root->configure_width * root->configure_scale_120 + 60) / 120 : fallback_width;
+    height = root->configure_height ?
+            ((uint64_t)root->configure_height * root->configure_scale_120 + 60) / 120 : fallback_height;
+    if (!width || !height || width > 16384 || height > 16384) return STATUS_INVALID_PARAMETER;
+    root->requested_width = width;
+    root->requested_height = height;
+    ++root->geometry_revision;
+    root->configure_applied_id = root->configure_request_id;
+    root->configure_applied_revision = root->window_state_revision;
+    root->configure_applied_width = root->configure_width;
+    root->configure_applied_height = root->configure_height;
+    root->configure_applied_state = root->configure_state;
+    root->flags = 0;
+    if ((status = WINE_UNIX_CALL(unix_renderer_root_sync, root))) return status;
+    present->geometry_revision = root->geometry_revision;
+    present->snapshot_revision = 0;
+    present->image_index = UINT32_MAX;
+    status = wait_for_test_present(root, present);
+    if (!status)
+        printf("wsi_maximize=%u configured=%ux%u pixels=%ux%u\n", maximized,
+                root->configure_applied_width, root->configure_applied_height,
+                root->width, root->height);
+    return status;
+}
+
+static int test_wsi(BOOL maximize_test)
 {
     struct winewayland_host_renderer_root_retire retire;
     struct winewayland_host_renderer_root_retire hide;
@@ -507,6 +556,8 @@ static int test_wsi(void)
     present.image_index = UINT32_MAX;
     if ((status = wait_for_test_present(&root, &present))) goto failed;
 
+    if (maximize_test && (status = set_test_root_maximized(&root, &present, TRUE))) goto failed;
+
     memset(&hide, 0, sizeof(hide));
     hide.version = WINEWAYLAND_HOST_RENDERER_VERSION;
     hide.size = sizeof(hide);
@@ -538,6 +589,19 @@ static int test_wsi(void)
     }
     present.image_index = UINT32_MAX;
     if ((status = wait_for_test_present(&root, &present))) goto failed;
+
+    if (maximize_test)
+    {
+        if (!(root.configure_applied_state & WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED))
+        {
+            status = STATUS_UNSUCCESSFUL;
+            goto failed;
+        }
+        root.requested_width = 96;
+        root.requested_height = 80;
+        if ((status = set_test_root_maximized(&root, &present, FALSE))) goto failed;
+        printf("wsi_maximize_restore=passed remap=passed\n");
+    }
 
     memset(&retire, 0, sizeof(retire));
     retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -2028,6 +2092,7 @@ static void prepare_renderer_root_sync(struct winewayland_host_renderer_root *sy
     sync->root_identity = root->root_identity;
     sync->root_generation = root->root_generation;
     sync->window_state_revision = state->state_revision;
+    if (state->style & WS_MAXIMIZE) sync->flags |= WINEWAYLAND_HOST_ROOT_MAXIMIZED;
     sync->geometry_revision = state->geometry_revision;
     sync->configure_applied_id = configure->applied_id;
     sync->configure_applied_revision = configure->applied_revision;
@@ -2113,7 +2178,7 @@ static NTSTATUS set_renderer_root_test_flags(const struct host_root_info *root,
     struct winewayland_host_renderer_root sync;
 
     prepare_renderer_root_sync(&sync, root, state, configure);
-    sync.flags = flags;
+    sync.flags |= flags;
     return WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
 }
 
@@ -4118,7 +4183,8 @@ int wmain(int argc, WCHAR **argv)
         return test_headless_transport();
     if (argc == 2 && !wcscmp(argv[1], L"--shell-self-test")) return test_shell();
     if (argc == 2 && !wcscmp(argv[1], L"--root-self-test")) return test_roots();
-    if (argc == 2 && !wcscmp(argv[1], L"--wsi-self-test")) return test_wsi();
+    if (argc == 2 && !wcscmp(argv[1], L"--wsi-self-test")) return test_wsi(FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--maximize-self-test")) return test_wsi(TRUE);
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
@@ -4154,7 +4220,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }

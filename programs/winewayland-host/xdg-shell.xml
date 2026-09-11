@@ -67,6 +67,31 @@
     <request name="set_app_id">
       <arg name="app_id" type="string"/>
     </request>
+    <request name="show_window_menu">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="move">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="resize">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="serial" type="uint"/>
+      <arg name="edges" type="uint"/>
+    </request>
+    <request name="set_max_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="set_min_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="set_maximized"/>
+    <request name="unset_maximized"/>
     <event name="configure">
       <arg name="width" type="int"/>
       <arg name="height" type="int"/>
