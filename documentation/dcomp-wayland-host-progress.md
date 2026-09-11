@@ -394,6 +394,13 @@ or transport fixture is not Outlook support.
   publishes the desktop repeat settings and the server already schedules
   hardware repeats, including the authenticated host route.
 
+- DComp startup no longer waits for its launcher while holding the global
+  composition lock. The outermost unlock admits one in-process startup per
+  server desktop identity; recursive releases cannot launch under an outer
+  device transaction. After startup it enumerates current committed scenes
+  again and redraws hosted frames outside the lock. No target or content
+  pointer survives the wait, and a failed refresh cannot recursively relaunch.
+
 ## Contributor interception inventory
 
 The initial source inspection found these visible-content publication points:
@@ -1169,6 +1176,24 @@ Unsupported combinations return the complete root to the legacy local path.
   The root-work error isolation is source-reviewed; a dedicated failing-root
   input fairness run and physical mixed hosted/local focus switching remain
   open. This does not complete IME, clipboard or desktop interaction coverage.
+- The startup-lock fixture holds an actual wineserver startup permit and waits
+  until its launcher child exists, then removes the target root and commits
+  from another thread before releasing the permit. The previous DComp binary
+  failed this boundary (`removed_before_ready=0`); the fixed x86-64 binary
+  passed, with the host Ready and no stale hosted-frame state afterward.
+  The canonical DComp and host builds passed for x86-64 and i386. The i386
+  runtime attempt failed before fixture entry because its existing prefix
+  could not start Explorer/load a window driver; this is not a passing runtime
+  result. The x86-64 automatic startup fixture with a standard frame also
+  completed seven public Presents. Its filtered D3D trace confirms transport
+  submissions, successful backend results and a configure-related discard.
+  It additionally exposed late credit-release errors during swapchain cleanup,
+  which are tracked separately from the startup fix. Evidence is retained as
+  `artifacts/astra-startup-lock-before-x64.log`,
+  `artifacts/astra-startup-lock-after-x64.log`,
+  `artifacts/astra-startup-lock-i386-diagnostic.log` and
+  `artifacts/astra-startup-frame-x64-final.log` in the personal Intel task
+  directory. No multi-desktop runtime claim is made by this fixture.
 - The broader x86-64 DComp device pixel test remains unsuitable as a clean
   gate in this KDE/R600 environment: the task runner reported three existing
   transform/opacity/composite pixel failures, while the unchanged baseline

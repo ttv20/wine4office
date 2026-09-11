@@ -45,6 +45,7 @@ struct dcomp_device
 struct dcomp_scene
 {
     HWND hwnd;
+    UINT64 desktop_id;
     unsigned int refcount;
     UINT64 scene_generation;
     UINT64 contribution_revision;
@@ -129,6 +130,30 @@ static CRITICAL_SECTION dcomp_global_lock;
 static struct dcomp_device *dcomp_devices;
 static UINT64 dcomp_owner_revision;
 
+struct dcomp_host_startup
+{
+    struct dcomp_host_startup *next;
+    UINT64 desktop_id;
+};
+
+static struct dcomp_host_startup *dcomp_host_startups;
+static BOOL dcomp_host_start_requested;
+
+static void dcomp_finish_host_startup(struct dcomp_host_startup *startup);
+
+static UINT64 dcomp_get_desktop_id(DWORD thread_id)
+{
+    UINT64 id = 0;
+
+    SERVER_START_REQ(get_thread_desktop)
+    {
+        req->tid = thread_id;
+        if (!wine_server_call(req)) id = reply->locator.id;
+    }
+    SERVER_END_REQ;
+    return id;
+}
+
 static BOOL CALLBACK dcomp_global_init(INIT_ONCE *once, void *param, void **context)
 {
     InitializeCriticalSection(&dcomp_global_lock);
@@ -143,7 +168,30 @@ static void dcomp_global_enter(void)
 
 static void dcomp_global_leave(void)
 {
+    struct dcomp_host_startup startup, *other;
+    BOOL start = FALSE;
+
+    /* Release can re-enter while Commit still holds a device lock. Only the
+     * outermost unlock may launch, after all of that caller's locks are gone.
+     * The stack record prevents another thread on this desktop from waiting
+     * for the same launch; different desktops remain independent. */
+    if (dcomp_global_lock.RecursionCount == 1 && dcomp_host_start_requested)
+    {
+        dcomp_host_start_requested = FALSE;
+        if ((startup.desktop_id = dcomp_get_desktop_id(GetCurrentThreadId())))
+        {
+            for (other = dcomp_host_startups; other; other = other->next)
+                if (other->desktop_id == startup.desktop_id) break;
+            if (!other)
+            {
+                startup.next = dcomp_host_startups;
+                dcomp_host_startups = &startup;
+                start = TRUE;
+            }
+        }
+    }
     LeaveCriticalSection(&dcomp_global_lock);
+    if (start) dcomp_finish_host_startup(&startup);
 }
 
 static BOOL dcomp_target_is_current(const struct dcomp_target *target)
@@ -172,6 +220,7 @@ static struct dcomp_scene *dcomp_scene_acquire(HWND hwnd)
 
     if (!(scene = calloc(1, sizeof(*scene)))) return NULL;
     scene->hwnd = hwnd;
+    scene->desktop_id = dcomp_get_desktop_id(GetWindowThreadProcessId(hwnd, NULL));
     scene->refcount = 1;
     return scene;
 }
@@ -396,8 +445,7 @@ static void dcomp_scene_publish_committed_state(struct dcomp_scene *scene, BOOL 
     {
         if (scene->hosted_swapchain) dcomp_scene_revoke_hosted_binding(scene);
         status = dcomp_scene_create_hosted_binding(scene, candidate, target_layer);
-        if (status == STATUS_DEVICE_NOT_READY && !dcomp_start_wayland_host())
-            status = dcomp_scene_create_hosted_binding(scene, candidate, target_layer);
+        if (status == STATUS_DEVICE_NOT_READY) dcomp_host_start_requested = TRUE;
         if (status && status != STATUS_DEVICE_NOT_READY)
             TRACE("Could not bind hosted candidate for %p, status %#lx.\n", scene->hwnd, status);
     }
@@ -470,6 +518,52 @@ static void dcomp_device_publish_committed_scenes(struct dcomp_device *device)
         dcomp_scene_publish_committed_state(target->scene, FALSE);
     }
 }
+
+static void dcomp_finish_host_startup(struct dcomp_host_startup *startup)
+{
+    struct dcomp_host_startup **link;
+    struct dcomp_device *device;
+    struct dcomp_target *target;
+    HWND *windows = NULL;
+    unsigned int count = 0, index = 0;
+    NTSTATUS status;
+
+    status = dcomp_start_wayland_host();
+    dcomp_global_enter();
+    if (!status)
+    {
+        /* Retain no target, visual or candidate across the launch wait. Other
+         * threads may have committed, removed content or destroyed a device.
+         * Re-evaluate live committed scenes on this desktop, including scenes
+         * whose concurrent Commit selected local rendering during startup. */
+        for (device = dcomp_devices; device; device = device->next_global)
+            for (target = device->targets; target; target = target->next)
+                if (target->scene->desktop_id == startup->desktop_id)
+                    dcomp_scene_publish_committed_state(target->scene, FALSE);
+        for (device = dcomp_devices; device; device = device->next_global)
+            for (target = device->targets; target; target = target->next)
+                if (target->scene->desktop_id == startup->desktop_id &&
+                    target->scene->committed && target->scene->committed_disposition ==
+                            WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+                    ++count;
+        if (count && (windows = calloc(count, sizeof(*windows))))
+            for (device = dcomp_devices; device; device = device->next_global)
+                for (target = device->targets; target; target = target->next)
+                    if (target->scene->desktop_id == startup->desktop_id &&
+                        target->scene->committed && target->scene->committed_disposition ==
+                                WINE_WAYLAND_SCENE_HOSTED_CONTENT)
+                        windows[index++] = target->hwnd;
+    }
+    /* A failed launch or a still-unready scene must not recursively launch
+     * again from this refresh. A later application change may retry. */
+    dcomp_host_start_requested = FALSE;
+    for (link = &dcomp_host_startups; *link != startup; link = &(*link)->next);
+    *link = startup->next;
+    LeaveCriticalSection(&dcomp_global_lock);
+    while (index) RedrawWindow(windows[--index], NULL, NULL, RDW_INVALIDATE | RDW_FRAME);
+    free(windows);
+}
+
 static HRESULT dcomp_validate_offset(float value)
 {
     if (!isfinite(value) || (double)value < (double)INT_MIN || (double)value > (double)INT_MAX)

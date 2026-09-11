@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
+#include "tlhelp32.h"
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -2987,8 +2988,127 @@ static void pump_dcomp_test_messages(HWND window, BOOL input_test,
     }
 }
 
+struct dcomp_startup_test
+{
+    IDCompositionDevice *device;
+    IDCompositionTarget *target;
+    HRESULT result;
+};
+
+static DWORD WINAPI dcomp_startup_commit_thread(void *arg)
+{
+    struct dcomp_startup_test *test = arg;
+
+    test->result = IDCompositionDevice_Commit(test->device);
+    return 0;
+}
+
+static DWORD WINAPI dcomp_startup_remove_thread(void *arg)
+{
+    struct dcomp_startup_test *test = arg;
+
+    if (SUCCEEDED(test->result = IDCompositionTarget_SetRoot(test->target, NULL)))
+        test->result = IDCompositionDevice_Commit(test->device);
+    return 0;
+}
+
+static BOOL dcomp_startup_launcher_exists(void)
+{
+    PROCESSENTRY32W entry = {sizeof(entry)};
+    HANDLE snapshot;
+    BOOL found = FALSE;
+
+    if ((snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)) == INVALID_HANDLE_VALUE)
+        return FALSE;
+    if (Process32FirstW(snapshot, &entry))
+        do
+        {
+            if (entry.th32ParentProcessID == GetCurrentProcessId() &&
+                !wcsicmp(entry.szExeFile, L"winewayland-host.exe"))
+            {
+                found = TRUE;
+                break;
+            }
+        }
+        while (Process32NextW(snapshot, &entry));
+    CloseHandle(snapshot);
+    return found;
+}
+
+static DWORD dcomp_startup_wait_thread(HANDLE thread, HWND window, DWORD timeout)
+{
+    ULONGLONG deadline = GetTickCount64() + timeout;
+    DWORD wait;
+
+    while ((wait = WaitForSingleObject(thread, 0)) == WAIT_TIMEOUT &&
+           GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        Sleep(10);
+    }
+    return wait;
+}
+
+static HRESULT test_dcomp_startup_lock(IDCompositionDevice *device, IDCompositionTarget *target,
+        HWND window, const struct winewayland_host_probe *probe)
+{
+    struct dcomp_startup_test commit = {device, target, E_PENDING};
+    struct dcomp_startup_test remove = {device, target, E_PENDING};
+    struct registered_host_info host = {0};
+    HANDLE commit_thread = NULL, remove_thread = NULL;
+    uint64_t token_low = 0, token_high = 0;
+    BOOL launcher = FALSE, removed_before_ready = FALSE;
+    ULONGLONG deadline;
+    NTSTATUS status, host_status;
+    HRESULT hr = E_FAIL;
+
+    /* Hold the real desktop startup permit. Observing our launcher child
+     * proves Commit reached startup; a sleep alone would not prove that. */
+    if ((status = request_host_startup(probe, &token_low, &token_high)))
+    {
+        fprintf(stderr, "dcomp_startup_lock=unavailable permit_status=%#lx\n", status);
+        return E_FAIL;
+    }
+    if (!(commit_thread = CreateThread(NULL, 0, dcomp_startup_commit_thread, &commit, 0, NULL)))
+        goto done;
+    deadline = GetTickCount64() + 5000;
+    while (!(launcher = dcomp_startup_launcher_exists()) && GetTickCount64() < deadline &&
+           WaitForSingleObject(commit_thread, 0) == WAIT_TIMEOUT)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        Sleep(25);
+    }
+    if (launcher && WaitForSingleObject(commit_thread, 0) == WAIT_TIMEOUT &&
+        (remove_thread = CreateThread(NULL, 0, dcomp_startup_remove_thread, &remove, 0, NULL)))
+        removed_before_ready = dcomp_startup_wait_thread(remove_thread, window, 2000) == WAIT_OBJECT_0 &&
+                SUCCEEDED(remove.result) && WaitForSingleObject(commit_thread, 0) == WAIT_TIMEOUT;
+
+done:
+    status = cancel_host_startup(token_low, token_high);
+    /* Join before releasing COM objects or this stack state, including on a
+     * failed old implementation. Only this disposable fixture may exit here. */
+    if ((commit_thread && dcomp_startup_wait_thread(commit_thread, window, 10000) != WAIT_OBJECT_0) ||
+        (remove_thread && dcomp_startup_wait_thread(remove_thread, window, 5000) != WAIT_OBJECT_0))
+    {
+        fprintf(stderr, "dcomp_startup_lock=failed thread_join_timeout\n");
+        TerminateProcess(GetCurrentProcess(), 7);
+    }
+    host_status = get_registered_host(&host);
+    if (!status && !host_status && registered_host_matches(&host, probe) &&
+        launcher && removed_before_ready && SUCCEEDED(commit.result) &&
+        SUCCEEDED(remove.result) && !GetPropW(window, L"__wine_dcomp_hosted_frame"))
+        hr = S_OK;
+    printf("dcomp_startup_lock=%s launcher=%u removed_before_ready=%u commit=%#lx remove=%#lx stale_hosted=%u ready=%u\n",
+            SUCCEEDED(hr) ? "passed" : "failed", launcher, removed_before_ready,
+            commit.result, remove.result, !!GetPropW(window, L"__wine_dcomp_hosted_frame"),
+            !host_status && registered_host_matches(&host, probe));
+    if (commit_thread) CloseHandle(commit_thread);
+    if (remove_thread) CloseHandle(remove_thread);
+    return hr;
+}
+
 static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_test,
-        BOOL multi_root, BOOL failure_test, BOOL scale_test)
+        BOOL multi_root, BOOL failure_test, BOOL scale_test, BOOL startup_test)
 {
     typedef HRESULT (WINAPI *d3d11_create_device_t)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
             UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
@@ -3141,8 +3261,14 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
             FALSE, &target)) || FAILED(hr = IDCompositionDevice_CreateVisual(dcomp_device,
             &visual)) || FAILED(hr = IDCompositionVisual_SetContent(visual,
             (IUnknown *)swapchain)) || FAILED(hr = IDCompositionTarget_SetRoot(target, visual)) ||
-            FAILED(hr = IDCompositionDevice_Commit(dcomp_device)))
+            FAILED(hr = startup_test ? test_dcomp_startup_lock(dcomp_device, target, window, &probe) :
+                    IDCompositionDevice_Commit(dcomp_device)))
         goto done;
+    if (startup_test)
+    {
+        ret = 0;
+        goto done;
+    }
 
     if (multi_root)
     {
@@ -3186,7 +3312,8 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
     if (automatic_host || scale_test)
     {
         if ((status = get_registered_host(&host_info)) || !host_info.ready ||
-                !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT))
+                !(host_info.capabilities & WINEWAYLAND_HOST_CAP_VULKAN_TRANSPORT) ||
+                !GetPropW(window, L"__wine_dcomp_hosted_frame"))
         {
             fprintf(stderr, "dcomp_auto_host=failed host_status=%#lx ready=%u capabilities=%#x\n",
                     status, host_info.ready, host_info.capabilities);
@@ -3246,6 +3373,7 @@ static int test_dcomp_pipeline(BOOL automatic_host, BOOL input_test, BOOL frame_
         }
         if (FAILED(hr) || (status = get_registered_host(&final_host_info)) ||
                 !final_host_info.ready || final_host_info.host_epoch != host_info.host_epoch ||
+                !GetPropW(window, L"__wine_dcomp_hosted_frame") ||
                 (scale_test && (!scale_ready || !resized || desc.Width == initial_client_width ||
                  desc.Height == initial_client_height || startup->failed_frames ||
                  startup->presented_frames <= scale_presented_before_resize +
@@ -3961,21 +4089,25 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-input-test"))
-        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-test"))
-        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-host-input-test"))
-        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE, FALSE);
+        return test_dcomp_pipeline(TRUE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-scale-test"))
-        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE);
+        return test_dcomp_pipeline(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-startup-lock-test"))
+        return test_dcomp_pipeline(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-auto-frame-test"))
+        return test_dcomp_pipeline(TRUE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE);
     if (argc == 5 && !wcscmp(argv[1], L"--host-fixture"))
         return run_registered_host((HANDLE)(UINT_PTR)_wcstoui64(argv[2], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
@@ -3985,7 +4117,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test\n",
             argv[0]);
     return 2;
 }
