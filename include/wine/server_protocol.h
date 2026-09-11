@@ -83,6 +83,9 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_KEYBOARD_GROUP_MASK      0xff000000
 #define WINE_WAYLAND_KEYBOARD_STATE_MASK      0x0000070f
 
+#define WINE_WAYLAND_INPUT_RESET_KEYS        0x00000001
+#define WINE_WAYLAND_INPUT_RESET_BUTTONS     0x00000002
+
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
 #define WINE_WAYLAND_MAX_FRAME_CREDITS 16
@@ -7367,6 +7370,24 @@ struct get_wayland_host_focus_reply
     char __pad_12[4];
 };
 
+/* Reconcile only depressed input tracked for this native root. Do not infer
+ * its held input from the desktop-wide async state or change logical focus. */
+struct reset_wayland_host_input_request
+{
+    struct request_header __header;
+    user_handle_t    root;
+    unsigned int     flags;
+    char __pad_20[4];
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 event_id;
+};
+struct reset_wayland_host_input_reply
+{
+    struct reply_header __header;
+};
+
 
 enum request
 {
@@ -7734,6 +7755,7 @@ enum request
     REQ_sync_wayland_host_keyboard,
     REQ_set_wayland_host_focus,
     REQ_get_wayland_host_focus,
+    REQ_reset_wayland_host_input,
     REQ_NB_REQUESTS
 };
 
@@ -8105,6 +8127,7 @@ union generic_request
     struct sync_wayland_host_keyboard_request sync_wayland_host_keyboard_request;
     struct set_wayland_host_focus_request set_wayland_host_focus_request;
     struct get_wayland_host_focus_request get_wayland_host_focus_request;
+    struct reset_wayland_host_input_request reset_wayland_host_input_request;
 };
 union generic_reply
 {
@@ -8474,8 +8497,9 @@ union generic_reply
     struct sync_wayland_host_keyboard_reply sync_wayland_host_keyboard_reply;
     struct set_wayland_host_focus_reply set_wayland_host_focus_reply;
     struct get_wayland_host_focus_reply get_wayland_host_focus_reply;
+    struct reset_wayland_host_input_reply reset_wayland_host_input_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 1001
+#define SERVER_PROTOCOL_VERSION 1002
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

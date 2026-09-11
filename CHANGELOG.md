@@ -9,6 +9,7 @@
 - Reject host close requests after a window is hidden or native ownership changes.
 - Send hosted key releases to the current Windows focus, including another top-level window.
 - Require per-application developer opt-in for the experimental DirectComposition Wayland host.
+- Keep hosted input resets from releasing keys pressed outside the affected window.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

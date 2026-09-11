@@ -2733,18 +2733,18 @@ static int queue_keyboard_message( struct desktop *desktop, user_handle_t win, c
     return wait;
 }
 
-void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
+static void reset_wayland_host_inputs( struct desktop *desktop, user_handle_t root,
+                                       unsigned int flags )
 {
     struct wayland_host_input_state *state = desktop->wayland_host_input_state;
     union hw_input input;
     unsigned int error, i;
 
-    clear_wayland_host_focus( desktop, root );
     if (!state) return;
     error = get_error();
     clear_error();
     if (root) root = get_user_full_handle( root );
-    for (i = 0; i < ARRAY_SIZE(state->keys); ++i)
+    for (i = 0; (flags & WINE_WAYLAND_INPUT_RESET_KEYS) && i < ARRAY_SIZE(state->keys); ++i)
     {
         if (!state->key_roots[i] || (root && state->key_roots[i] != root)) continue;
         input = state->keys[i];
@@ -2755,7 +2755,7 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
         state->key_roots[i] = 0;
         --state->active_count;
     }
-    for (i = 0; i < ARRAY_SIZE(state->buttons); ++i)
+    for (i = 0; (flags & WINE_WAYLAND_INPUT_RESET_BUTTONS) && i < ARRAY_SIZE(state->buttons); ++i)
     {
         if (!state->button_roots[i] || (root && state->button_roots[i] != root)) continue;
         input = state->buttons[i];
@@ -2765,7 +2765,8 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
         state->button_roots[i] = 0;
         --state->active_count;
     }
-    if (state->modifier_root && (!root || state->modifier_root == root))
+    if ((flags & WINE_WAYLAND_INPUT_RESET_KEYS) && state->modifier_root &&
+        (!root || state->modifier_root == root))
     {
         apply_wayland_host_keyboard_state( desktop, 0, 0 );
         state->modifier_root = 0;
@@ -2779,6 +2780,13 @@ void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
     }
     if (error) set_error( error );
     else clear_error();
+}
+
+void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
+{
+    clear_wayland_host_focus( desktop, root );
+    reset_wayland_host_inputs( desktop, root,
+            WINE_WAYLAND_INPUT_RESET_KEYS | WINE_WAYLAND_INPUT_RESET_BUTTONS );
 }
 
 struct pointer
@@ -3632,6 +3640,26 @@ DECL_HANDLER(sync_wayland_host_keyboard)
                 WINE_WAYLAND_KEYBOARD_GROUP_SHIFT, 0 );
 
 done:
+    release_object( desktop );
+}
+
+DECL_HANDLER(reset_wayland_host_input)
+{
+    struct desktop *desktop;
+
+    if (!req->event_id || req->event_id == ~(unsigned __int64)0 || !req->flags ||
+        (req->flags & ~(WINE_WAYLAND_INPUT_RESET_KEYS | WINE_WAYLAND_INPUT_RESET_BUTTONS)))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(desktop = get_wayland_host_input_desktop( req->root, req->host_epoch,
+            req->root_identity, req->root_generation, req->event_id )))
+        return;
+    if (!set_input_desktop( desktop->winstation, desktop ))
+        set_error( STATUS_ACCESS_DENIED );
+    else
+        reset_wayland_host_inputs( desktop, req->root, req->flags );
     release_object( desktop );
 }
 

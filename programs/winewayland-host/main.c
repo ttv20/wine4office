@@ -63,6 +63,8 @@ C_ASSERT(WINEWAYLAND_HOST_LOCK_CAPS == WINE_WAYLAND_KEYBOARD_LOCK_CAPS);
 C_ASSERT(WINEWAYLAND_HOST_LOCK_NUM == WINE_WAYLAND_KEYBOARD_LOCK_NUM);
 C_ASSERT(WINEWAYLAND_HOST_LOCK_SCROLL == WINE_WAYLAND_KEYBOARD_LOCK_SCROLL);
 C_ASSERT(WINEWAYLAND_HOST_MODIFIER_MASK == WINE_WAYLAND_KEYBOARD_STATE_MASK);
+C_ASSERT(WINEWAYLAND_HOST_INPUT_RESET_KEYS == WINE_WAYLAND_INPUT_RESET_KEYS);
+C_ASSERT(WINEWAYLAND_HOST_INPUT_RESET_BUTTONS == WINE_WAYLAND_INPUT_RESET_BUTTONS);
 
 #define HOST_BTN_LEFT    0x110
 #define HOST_BTN_RIGHT   0x111
@@ -1212,60 +1214,24 @@ static NTSTATUS set_host_focus(struct host_renderer_root *root, uint64_t host_ep
 static NTSTATUS reset_host_input(struct host_renderer_root *root, uint64_t host_epoch,
         uint32_t flags)
 {
-    static const struct
-    {
-        int vkey;
-        uint32_t flags;
-        uint32_t data;
-    }
-    buttons[] =
-    {
-        {VK_LBUTTON, MOUSEEVENTF_LEFTUP, 0},
-        {VK_RBUTTON, MOUSEEVENTF_RIGHTUP, 0},
-        {VK_MBUTTON, MOUSEEVENTF_MIDDLEUP, 0},
-        {VK_XBUTTON1, MOUSEEVENTF_XUP, XBUTTON1},
-        {VK_XBUTTON2, MOUSEEVENTF_XUP, XBUTTON2},
-    };
-    union hw_input input;
-    uint32_t scan;
     NTSTATUS status;
-    unsigned int i;
-    int vkey;
 
     if (!flags || (flags & ~(WINEWAYLAND_HOST_INPUT_RESET_KEYS |
             WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)))
         return STATUS_INVALID_PARAMETER;
-    if (flags & WINEWAYLAND_HOST_INPUT_RESET_KEYS)
+    if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
+    SERVER_START_REQ(reset_wayland_host_input)
     {
-        for (vkey = 1; vkey < 256; ++vkey)
-        {
-            if (vkey < 7 && vkey != VK_CANCEL) continue;
-            if (vkey == VK_SHIFT || vkey == VK_CONTROL || vkey == VK_MENU) continue;
-            if (!(GetAsyncKeyState(vkey) & 0x8000)) continue;
-            memset(&input, 0, sizeof(input));
-            input.kbd.type = INPUT_KEYBOARD;
-            input.kbd.vkey = vkey;
-            scan = MapVirtualKeyExW(vkey, MAPVK_VK_TO_VSC_EX, GetKeyboardLayout(0));
-            input.kbd.scan = scan & 0xff;
-            input.kbd.flags = KEYEVENTF_KEYUP;
-            if (scan & ~0xff) input.kbd.flags |= KEYEVENTF_EXTENDEDKEY;
-            if ((status = submit_host_input(root, host_epoch, &input, 0))) return status;
-        }
+        req->root = root->root;
+        req->flags = flags;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->event_id = root->input_event_id;
+        status = wine_server_call(req);
     }
-    if (flags & WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)
-    {
-        for (i = 0; i < ARRAY_SIZE(buttons); ++i)
-        {
-            if (!(GetAsyncKeyState(buttons[i].vkey) & 0x8000)) continue;
-            memset(&input, 0, sizeof(input));
-            input.mouse.type = INPUT_MOUSE;
-            input.mouse.flags = buttons[i].flags;
-            input.mouse.data = buttons[i].data;
-            if ((status = submit_host_input(root, host_epoch, &input,
-                    SEND_HWMSG_RAWINPUT))) return status;
-        }
-    }
-    return STATUS_SUCCESS;
+    SERVER_END_REQ;
+    return status;
 }
 
 static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_epoch,
@@ -2564,9 +2530,32 @@ static NTSTATUS process_host_input(uint64_t host_epoch,
     }
 }
 
-static NTSTATUS queue_host_test_input(void)
+static NTSTATUS test_host_input_reset(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    INPUT input = {0};
+    NTSTATUS status;
+    BOOL pressed, retained;
+
+    /* This key did not come from the host's native root. A snapshot reset
+     * must leave it alone, regardless of the desktop-wide async key state. */
+    if (GetAsyncKeyState('F') & 0x8000) return STATUS_DEVICE_BUSY;
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = 'F';
+    input.ki.wScan = 0x21;
+    if (SendInput(1, &input, sizeof(input)) != 1) return STATUS_UNSUCCESSFUL;
+    pressed = !!(GetAsyncKeyState('F') & 0x8000);
+    status = pressed ? reset_host_input(root, host_epoch, WINEWAYLAND_HOST_INPUT_RESET_KEYS) :
+            STATUS_UNSUCCESSFUL;
+    retained = !!(GetAsyncKeyState('F') & 0x8000);
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (SendInput(1, &input, sizeof(input)) != 1) return STATUS_UNSUCCESSFUL;
+    return status ? status : retained ? STATUS_SUCCESS : STATUS_DATA_ERROR;
+}
+
+static NTSTATUS queue_host_test_input(uint64_t host_epoch)
 {
     struct winewayland_host_input_test test;
+    NTSTATUS status;
     unsigned int i;
 
     for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
@@ -2575,6 +2564,7 @@ static NTSTATUS queue_host_test_input(void)
         if (renderer_roots[i].native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
             renderer_roots[i].scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT)
             continue;
+        if ((status = test_host_input_reset(&renderer_roots[i], host_epoch))) return status;
         memset(&test, 0, sizeof(test));
         test.version = WINEWAYLAND_HOST_RENDERER_VERSION;
         test.size = sizeof(test);
@@ -2662,12 +2652,14 @@ static int run_registered_host(HANDLE mapping, HANDLE ready_event, HANDLE stop_e
                 }
                 if (!dispatch_status && test_input_pending)
                 {
-                    input_status = queue_host_test_input();
+                    input_status = queue_host_test_input(host_epoch);
                     InterlockedExchange((LONG *)&startup->test_input_queue_status,
                             input_status);
-                    if (!input_status) test_input_pending = FALSE;
-                    else if (input_status != STATUS_DEVICE_NOT_READY && !work_status)
-                        work_status = input_status;
+                    if (input_status != STATUS_DEVICE_NOT_READY)
+                    {
+                        test_input_pending = FALSE;
+                        if (input_status && !work_status) work_status = input_status;
+                    }
                 }
                 /* A root's allocation/retirement failure must not suppress
                  * hardware input for every other root on this connection. */

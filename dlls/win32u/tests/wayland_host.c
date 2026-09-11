@@ -74,6 +74,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_SET_HOST_RETIRED,
     HOST_CHILD_COMMAND_SEND_INPUT,
     HOST_CHILD_COMMAND_SYNC_KEYBOARD,
+    HOST_CHILD_COMMAND_RESET_INPUT,
     HOST_CHILD_COMMAND_SET_FOCUS,
     HOST_CHILD_COMMAND_GET_FOCUS,
     HOST_CHILD_COMMAND_MANAGE_DIRECT_SURFACE,
@@ -704,6 +705,25 @@ static NTSTATUS send_host_input( HWND root, UINT64 host_epoch, UINT64 root_ident
         req->root_generation = root_generation;
         req->event_id = event_id;
         wine_server_add_data( req, &input, sizeof(input) );
+        status = p_wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+static NTSTATUS reset_host_input( HWND root, UINT64 host_epoch, UINT64 root_identity,
+                                  UINT64 root_generation, UINT64 event_id, DWORD flags )
+{
+    NTSTATUS status;
+
+    SERVER_START_REQ( reset_wayland_host_input )
+    {
+        req->root = wine_server_user_handle( root );
+        req->flags = flags;
+        req->host_epoch = host_epoch;
+        req->root_identity = root_identity;
+        req->root_generation = root_generation;
+        req->event_id = event_id;
         status = p_wine_server_call( req );
     }
     SERVER_END_REQ;
@@ -1864,6 +1884,11 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
                     state->host_epoch, state->root_identity, state->root_generation,
                     state->input_event_id, state->input_flags );
             break;
+        case HOST_CHILD_COMMAND_RESET_INPUT:
+            state->command_status = reset_host_input( (HWND)(UINT_PTR)state->root,
+                    state->host_epoch, state->root_identity, state->root_generation,
+                    state->input_event_id, state->input_flags );
+            break;
         case HOST_CHILD_COMMAND_SET_FOCUS:
             state->command_status = set_host_focus( (HWND)(UINT_PTR)state->root,
                     state->host_epoch, state->root_identity, state->root_generation,
@@ -2110,6 +2135,87 @@ static void reset_child_state( struct wayland_host_test_state *state, HANDLE rea
     ResetEvent( ready_event );
     ResetEvent( command_event );
     ResetEvent( result_event );
+}
+
+static void test_host_input_reset( struct wayland_host_test_state *state,
+                                   HANDLE command_event, HANDLE result_event )
+{
+    HWND root = (HWND)(UINT_PTR)state->root;
+    NTSTATUS status;
+    BOOL focused;
+    MSG msg;
+
+    status = get_host_focus( root, &focused );
+    ok( !status && focused, "Pre-reset focus returned %#lx, focused %d.\n", status, focused );
+    status = reset_host_input( root, state->host_epoch, state->root_identity,
+            state->root_generation, state->input_event_id + 1, WINE_WAYLAND_INPUT_RESET_KEYS );
+    ok( status == STATUS_ACCESS_DENIED, "Non-host reset returned %#lx.\n", status );
+    ++state->input_event_id;
+    state->input_type = INPUT_KEYBOARD;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out pressing the reset key.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( 'A' ) & 0x8000),
+        "Reset key-down returned %#lx without pressed state.\n", state->command_status );
+    ++state->input_event_id;
+    state->input_type = INPUT_MOUSE;
+    state->input_flags = MOUSEEVENTF_LEFTDOWN;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out pressing the reset button.\n" );
+    ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Reset button-down returned %#lx without pressed state.\n", state->command_status );
+    ++state->input_event_id;
+    state->input_flags = 0;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out rejecting empty reset flags.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER && (GetAsyncKeyState( 'A' ) & 0x8000),
+        "Empty reset returned %#lx or released the key.\n", state->command_status );
+    state->input_flags = 0x80000000;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out rejecting invalid reset flags.\n" );
+    ok( state->command_status == STATUS_INVALID_PARAMETER, "Invalid reset returned %#lx.\n",
+        state->command_status );
+    state->input_flags = WINE_WAYLAND_INPUT_RESET_KEYS;
+    state->root_generation++;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out rejecting stale-root reset.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH && (GetAsyncKeyState( 'A' ) & 0x8000),
+        "Stale-root reset returned %#lx or released the key.\n", state->command_status );
+    state->root_generation--;
+    while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out resetting only the keyboard.\n" );
+    ok( !state->command_status && !(GetAsyncKeyState( 'A' ) & 0x8000) &&
+        (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Keyboard reset returned %#lx, key %#x, button %#x.\n", state->command_status,
+        GetAsyncKeyState( 'A' ), GetAsyncKeyState( VK_LBUTTON ) );
+    status = get_host_focus( root, &focused );
+    ok( status == STATUS_NOT_FOUND, "Keyboard reset generated a focus transition: %#lx, %d.\n",
+        status, focused );
+    ok( PeekMessageW( &msg, NULL, WM_KEYUP, WM_KEYUP, PM_REMOVE ) && msg.wParam == 'A' &&
+        ((msg.lParam >> 16) & 0xff) == 0x1e,
+        "Reset did not preserve the original key/scan in key-up.\n" );
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out replaying a reset event.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH, "Repeated reset returned %#lx.\n",
+        state->command_status );
+    ++state->input_event_id;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out resetting an already clear keyboard.\n" );
+    ok( !state->command_status && !PeekMessageW( &msg, NULL, WM_KEYUP, WM_KEYUP, PM_REMOVE ),
+        "Clear keyboard reset returned %#lx or generated another release.\n", state->command_status );
+    ++state->input_event_id;
+    state->input_flags = WINE_WAYLAND_INPUT_RESET_BUTTONS;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out resetting only pointer buttons.\n" );
+    ok( !state->command_status && !(GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
+        "Button reset returned %#lx with pressed button state.\n", state->command_status );
+    status = get_host_focus( root, &focused );
+    ok( status == STATUS_NOT_FOUND, "Button reset generated a focus transition: %#lx, %d.\n",
+        status, focused );
+    /* Finish this fixture's pointer edges before later GetKeyState checks;
+     * queued hardware input intentionally holds the thread's key snapshot. */
+    while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
 }
 
 static void test_host_registration( const char *program, const char *test_name )
@@ -5161,9 +5267,11 @@ static void test_host_registration( const char *program, const char *test_name )
         "Timed out requesting pre-exit focus.\n" );
     ok( !state->command_status, "Pre-exit focus returned %#lx.\n", state->command_status );
 
+    test_host_input_reset( state, command_event, result_event );
+
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
-    state->input_event_id = 25;
+    ++state->input_event_id;
     state->input_flags = WINE_WAYLAND_KEYBOARD_MOD_SHIFT |
             (initial_caps ? WINE_WAYLAND_KEYBOARD_LOCK_CAPS : 0);
     ok( send_host_child_command( state, command_event, result_event,
@@ -5172,7 +5280,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetKeyState( VK_SHIFT ) & 0x8000),
         "Host-exit modifier state returned %#lx, Shift %#x.\n",
         state->command_status, GetKeyState( VK_SHIFT ) );
-    state->input_event_id = 26;
+    ++state->input_event_id;
     state->input_type = INPUT_KEYBOARD;
     state->input_flags = 0;
     ok( send_host_child_command( state, command_event, result_event,
@@ -5182,7 +5290,7 @@ static void test_host_registration( const char *program, const char *test_name )
         PeekMessageW( &msg, root, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE ) && msg.wParam == 'A',
         "Host-exit key down returned %#lx without pressed state or message.\n",
         state->command_status );
-    state->input_event_id = 27;
+    ++state->input_event_id;
     state->input_type = INPUT_MOUSE;
     state->input_flags = MOUSEEVENTF_LEFTDOWN;
     ok( send_host_child_command( state, command_event, result_event,

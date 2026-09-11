@@ -2,7 +2,7 @@
 
 Implementation branch: `feat/dcomp-wayland-host-20260909`.
 Baseline: `origin/main` at `347abf611ff61dcdaada20e0c1faed08303b8d21`.
-Generated server protocol version: 1001.
+Generated server protocol version: 1002.
 
 This file records completed evidence and open gates for the implementation
 contract in `plans-to-impl/dcomp-wayland-host-20260909*.md`. A successful probe
@@ -1278,6 +1278,40 @@ Unsupported combinations return the complete root to the legacy local path.
   runner deployment instructions.
 - Outlook topology and timing baselines are pending.
 
+- Protocol 1002 replaces the host's desktop-wide `GetAsyncKeyState` reset
+  loop with one authenticated root-scoped request. The server reuses its
+  existing held-input records, preserving original key/scan data and normal
+  release routing. Keyboard and pointer resets are independent, preserve
+  native focus and leave untracked input alone. Invalid flags, non-host
+  callers, old roots and replayed event IDs are rejected. The input pipeline
+  now holds an unrelated injected F key across the real host reset before
+  queuing its native-enter fixture, then releases that fixture key itself.
+  A terminal fixture setup failure is no longer retried every host-loop tick.
+  This use of SendInput is test-only; production input remains hardware input.
+- The reset authority fixture passed 985 checks with zero failures. The
+  pipeline passed the unrelated-key retention assertion, all 11 input events,
+  nine imports, six backend presentations and fallback/rehost. Evidence is
+  `artifacts/astra-input-reset-authority-final-x64.log`,
+  `artifacts/astra-input-reset-correct-optin-x64.log` and
+  `artifacts/astra-input-reset-final-SHA256SUMS` in the personal Intel task
+  directory. The earlier host reset fixture failed on the prior implementation;
+  its child had no inherited stdout, so that result records only the failed
+  fixture status, not a standalone retained-key diagnostic. Initial follow-up
+  runs had an incorrectly quoted AppDefaults setup key and are not product
+  results. The authority test also needed to drain its new pointer edges
+  before the existing GetKeyState check, which correctly retains a thread's
+  snapshot while hardware messages are queued. The corrected runs are the
+  final evidence. Settings were returned to zero, no task Wine remained and
+  56 GiB remained free.
+- Protocol-coupled server, ntdll, win32u, Wayland driver, DComp, DXGI, WineD3D,
+  host and authority-test targets rebuilt through the canonical focused
+  lifecycle, including both PE architectures. Source hashes matched the
+  canonical build source. Existing warnings in `server/registry.c` and
+  `dlls/ntdll/unix/sync.c` are unrelated to this change; changed objects built
+  without new warnings. i386 guest-window runtime coverage remains blocked
+  by the previously recorded prefix initialization issue. No new prefixes,
+  runners or Office sessions were created for these changes.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
@@ -1285,7 +1319,9 @@ application already started a Ready host on the same desktop. In a disposable
 test prefix, set the `REG_DWORD` value `EnableWaylandHost` to exactly `1` under
 `HKCU\Software\Wine\AppDefaults\<executable name>\DirectComposition`.
 For the built-in pipeline fixtures the executable name is
-`winewayland-host.exe`. Other values, wrong types and missing values keep the
+`winewayland-host.exe`. The `win32u` authority fixture's DComp scene assertions
+also need opt-in under the actual test executable's basename. Other values,
+wrong types and missing values keep the
 existing backend. There is no prefix-wide or environment-variable opt-in.
 The setting is read once per process; restart the application after changing
 it. This controls experimental admission, not server authority or capability
@@ -1311,7 +1347,7 @@ fallback/rehost; `--dcomp-auto-frame-test` exercises automatic startup with a
 standard Wine frame. Neither fixture writes the setting itself. Restore the
 test setting after use. Backend Present results are not scanout measurements.
 
-Keep the runner coherent: protocol 1001 requires matching wineserver and
+Keep the runner coherent: protocol 1002 requires matching wineserver and
 ntdll, plus the task's win32u, winewayland driver, DComp, DXGI, WineD3D and host
 PE/Unix binaries. The old instruction to patch only the host's two PE files
 and Unix library into an untouched main runner is obsolete. Record the
