@@ -5216,7 +5216,21 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
     else if (type & MEM_RESET)
     {
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
-        else madvise( base, size, MADV_DONTNEED );
+        else
+        {
+            char *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
+            char *host_end = ROUND_ADDR( (char *)base + size, host_page_mask );
+
+            /* madvise() operates on host pages. Clamp inward so a Windows-page
+             * MEM_RESET range cannot discard neighbouring data on larger-page hosts. */
+            if (host_start < host_end)
+            {
+#ifdef MADV_FREE
+                if (madvise( host_start, host_end - host_start, MADV_FREE ))
+#endif
+                    madvise( host_start, host_end - host_start, MADV_DONTNEED );
+            }
+        }
     }
     else  /* commit the pages */
     {
