@@ -204,6 +204,8 @@ extern struct desktop *get_wayland_host_input_desktop( user_handle_t root,
         unsigned __int64 host_epoch, unsigned __int64 root_identity,
         unsigned __int64 root_generation, unsigned __int64 event_id );
 extern void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root );
+extern void cancel_wayland_host_resizes( struct desktop *desktop, user_handle_t root );
+extern unsigned __int64 get_wayland_host_left_button_event( struct desktop *desktop, user_handle_t root );
 extern void clear_wayland_host_focus( struct desktop *desktop, user_handle_t root );
 extern int is_child_window( user_handle_t parent, user_handle_t child );
 extern struct thread *make_window_foreground( struct desktop *desktop, user_handle_t window,

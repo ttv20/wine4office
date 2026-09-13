@@ -2371,6 +2371,7 @@ struct wayland_host_input_state
     user_handle_t key_roots[WAYLAND_HOST_KEY_SLOTS];
     union hw_input buttons[WAYLAND_HOST_BUTTON_SLOTS];
     user_handle_t button_roots[WAYLAND_HOST_BUTTON_SLOTS];
+    unsigned __int64 button_events[WAYLAND_HOST_BUTTON_SLOTS];
     user_handle_t modifier_root;
     unsigned int modifiers;
     unsigned int active_count;
@@ -2508,7 +2509,7 @@ static int prepare_wayland_host_input_state( struct desktop *desktop,
 }
 
 static void update_wayland_host_input_state( struct desktop *desktop, user_handle_t root,
-                                             const union hw_input *input )
+                                             const union hw_input *input, unsigned __int64 event_id )
 {
     struct wayland_host_input_state *state = desktop->wayland_host_input_state;
     unsigned int key_slot;
@@ -2545,6 +2546,7 @@ static void update_wayland_host_input_state( struct desktop *desktop, user_handl
             {
                 memset( &state->buttons[slot], 0, sizeof(state->buttons[slot]) );
                 state->button_roots[slot] = 0;
+                state->button_events[slot] = 0;
                 --state->active_count;
             }
         }
@@ -2553,6 +2555,7 @@ static void update_wayland_host_input_state( struct desktop *desktop, user_handl
             if (!state->button_roots[slot]) ++state->active_count;
             state->buttons[slot] = *input;
             state->button_roots[slot] = get_user_full_handle( root );
+            state->button_events[slot] = event_id;
         }
     }
     if (!state->active_count)
@@ -2560,6 +2563,14 @@ static void update_wayland_host_input_state( struct desktop *desktop, user_handl
         free( state );
         desktop->wayland_host_input_state = NULL;
     }
+}
+
+unsigned __int64 get_wayland_host_left_button_event( struct desktop *desktop, user_handle_t root )
+{
+    struct wayland_host_input_state *state = desktop->wayland_host_input_state;
+
+    if (!state || state->button_roots[0] != get_user_full_handle( root )) return 0;
+    return state->button_events[0];
 }
 
 /* queue a hardware message for a keyboard event */
@@ -2763,6 +2774,7 @@ static void reset_wayland_host_inputs( struct desktop *desktop, user_handle_t ro
         queue_mouse_message( desktop, 0, &input, IMO_HARDWARE, NULL, TRUE, NULL, 0 );
         memset( &state->buttons[i], 0, sizeof(state->buttons[i]) );
         state->button_roots[i] = 0;
+        state->button_events[i] = 0;
         --state->active_count;
     }
     if ((flags & WINE_WAYLAND_INPUT_RESET_KEYS) && state->modifier_root &&
@@ -2785,6 +2797,7 @@ static void reset_wayland_host_inputs( struct desktop *desktop, user_handle_t ro
 void release_wayland_host_inputs( struct desktop *desktop, user_handle_t root )
 {
     clear_wayland_host_focus( desktop, root );
+    cancel_wayland_host_resizes( desktop, root );
     reset_wayland_host_inputs( desktop, root,
             WINE_WAYLAND_INPUT_RESET_KEYS | WINE_WAYLAND_INPUT_RESET_BUTTONS );
 }
@@ -3601,7 +3614,7 @@ DECL_HANDLER(send_wayland_host_input)
     else
         queue_keyboard_message( desktop, req->root, &input, IMO_HARDWARE, NULL, 0, 1 );
     if (!get_error())
-        update_wayland_host_input_state( desktop, req->root, &input );
+        update_wayland_host_input_state( desktop, req->root, &input, req->event_id );
     else if (desktop->wayland_host_input_state &&
             !desktop->wayland_host_input_state->active_count)
     {

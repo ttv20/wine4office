@@ -43,6 +43,9 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 C_ASSERT(sizeof(struct winewayland_host_input_event) == 64);
 C_ASSERT(sizeof(struct winewayland_host_input_test) == 24);
+C_ASSERT(sizeof(struct winewayland_host_renderer_action) == 48);
+C_ASSERT(WINEWAYLAND_HOST_ACTION_MOVE == WINE_WAYLAND_WINDOW_ACTION_MOVE);
+C_ASSERT(WINEWAYLAND_HOST_ACTION_RESIZE == WINE_WAYLAND_WINDOW_ACTION_RESIZE);
 C_ASSERT(WINEWAYLAND_HOST_CAP_LOCAL_SOCKET == WINE_WAYLAND_HOST_CAP_LOCAL_SOCKET);
 C_ASSERT(WINEWAYLAND_HOST_CAP_COMPOSITOR == WINE_WAYLAND_HOST_CAP_COMPOSITOR);
 C_ASSERT(WINEWAYLAND_HOST_CAP_SHM == WINE_WAYLAND_HOST_CAP_SHM);
@@ -141,6 +144,7 @@ static int probe_backend(void)
 static int test_renderer(void)
 {
     struct winewayland_host_renderer_import import;
+    struct winewayland_host_renderer_action action = {0};
     struct winewayland_host_probe probe;
     NTSTATUS status;
 
@@ -161,6 +165,27 @@ static int test_renderer(void)
         if (status)
         {
             fprintf(stderr, "renderer=failed self_test_status=%#lx\n", status);
+            destroy_renderer();
+            return 5;
+        }
+        action.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+        action.size = sizeof(action);
+        action.root_identity = action.root_generation = UINT64_MAX;
+        action.request_id = 1;
+        action.command = WINEWAYLAND_HOST_ACTION_MOVE;
+        status = WINE_UNIX_CALL(unix_renderer_root_action, &action);
+        if (status != STATUS_NOT_FOUND)
+        {
+            fprintf(stderr, "renderer=failed action_identity_status=%#lx\n", status);
+            destroy_renderer();
+            return 5;
+        }
+        action.command = WINEWAYLAND_HOST_ACTION_RESIZE;
+        action.edge = 9;
+        status = WINE_UNIX_CALL(unix_renderer_root_action, &action);
+        if (status != STATUS_INVALID_PARAMETER)
+        {
+            fprintf(stderr, "renderer=failed action_edge_status=%#lx\n", status);
             destroy_renderer();
             return 5;
         }
@@ -185,7 +210,7 @@ static int test_renderer(void)
         status = WINE_UNIX_CALL(unix_renderer_import, &import);
         if (status == STATUS_INVALID_HANDLE)
         {
-            printf("renderer=ready device_uuid=%08x%08x%08x%08x self_test=passed import_validation=passed\n",
+            printf("renderer=ready device_uuid=%08x%08x%08x%08x self_test=passed import_validation=passed action_validation=passed\n",
                     probe.device_uuid[0], probe.device_uuid[1], probe.device_uuid[2],
                     probe.device_uuid[3]);
             status = STATUS_SUCCESS;
@@ -813,6 +838,10 @@ struct host_renderer_root
     uint64_t native_lease_scene_generation;
     uint64_t native_lease_request_id;
     uint64_t input_event_id;
+    uint64_t left_button_event_id;
+    uint32_t left_button_serial;
+    uint64_t action_request_id;
+    NTSTATUS action_status;
     uint64_t snapshot_cursor;
     uint64_t snapshot_revision;
     uint64_t snapshot_geometry_revision;
@@ -1127,6 +1156,9 @@ static NTSTATUS manage_host_native_lease(const struct host_renderer_root *root,
 static void update_host_native_lease(struct host_renderer_root *root,
                                      const struct host_native_lease_info *lease)
 {
+    if (root->native_lease_host_epoch != lease->host_epoch ||
+        lease->state != WINE_WAYLAND_NATIVE_LEASE_HOSTED)
+        root->left_button_event_id = 0;
     root->native_lease_host_epoch = lease->host_epoch;
     root->native_lease_scene_generation = lease->scene_generation;
     root->native_lease_request_id = lease->request_id;
@@ -1223,6 +1255,64 @@ static NTSTATUS post_host_window_close(struct host_renderer_root *root, uint64_t
     return status;
 }
 
+static NTSTATUS process_host_window_action(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    struct winewayland_host_renderer_action action = {0};
+    uint64_t input_event_id = 0;
+    NTSTATUS status;
+
+    SERVER_START_REQ(manage_wayland_window_action)
+    {
+        req->root = root->root;
+        req->operation = WINE_WAYLAND_WINDOW_ACTION_CLAIM;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        if (!(status = wine_server_call(req)))
+        {
+            action.request_id = reply->request_id;
+            action.command = reply->command;
+            action.edge = reply->edge;
+            input_event_id = reply->input_event_id;
+        }
+    }
+    SERVER_END_REQ;
+    if (status == STATUS_NOT_FOUND) return STATUS_SUCCESS;
+    if (status) return status;
+
+    if (root->action_request_id != action.request_id)
+    {
+        status = STATUS_INVALID_DEVICE_STATE;
+        if (input_event_id && input_event_id == root->left_button_event_id)
+        {
+            action.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+            action.size = sizeof(action);
+            action.root_identity = root->root_identity;
+            action.root_generation = root->root_generation;
+            action.serial = root->left_button_serial;
+            status = WINE_UNIX_CALL(unix_renderer_root_action, &action);
+        }
+        /* Retrying the result must not issue the operation again or infer
+         * failure from pointer leave after an already-issued request. */
+        root->action_request_id = action.request_id;
+        root->action_status = status;
+    }
+    SERVER_START_REQ(manage_wayland_window_action)
+    {
+        req->root = root->root;
+        req->operation = WINE_WAYLAND_WINDOW_ACTION_RESULT;
+        req->host_epoch = host_epoch;
+        req->root_identity = root->root_identity;
+        req->root_generation = root->root_generation;
+        req->request_id = root->action_request_id;
+        req->result = root->action_status ? WINE_WAYLAND_WINDOW_ACTION_REJECTED : WINE_WAYLAND_WINDOW_ACTION_ISSUED;
+        req->backend_status = root->action_status;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS submit_host_input(struct host_renderer_root *root, uint64_t host_epoch,
         const union hw_input *input, uint32_t flags)
 {
@@ -1295,6 +1385,7 @@ static NTSTATUS reset_host_input(struct host_renderer_root *root, uint64_t host_
     if (!flags || (flags & ~(WINEWAYLAND_HOST_INPUT_RESET_KEYS |
             WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)))
         return STATUS_INVALID_PARAMETER;
+    if (flags & WINEWAYLAND_HOST_INPUT_RESET_BUTTONS) root->left_button_event_id = 0;
     if (!++root->input_event_id) return STATUS_INTEGER_OVERFLOW;
     SERVER_START_REQ(reset_wayland_host_input)
     {
@@ -1315,6 +1406,7 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
 {
     union hw_input input;
     uint32_t scan;
+    NTSTATUS status;
 
     if (event->reserved) return STATUS_INVALID_PARAMETER;
     memset(&input, 0, sizeof(input));
@@ -1331,6 +1423,7 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
         input.mouse.time = event->time;
         break;
     case WINEWAYLAND_HOST_INPUT_POINTER_BUTTON:
+        if (event->state > 1) return STATUS_INVALID_PARAMETER;
         input.mouse.type = INPUT_MOUSE;
         input.mouse.time = event->time;
         switch (event->code)
@@ -1395,8 +1488,14 @@ static NTSTATUS send_host_input(struct host_renderer_root *root, uint64_t host_e
     }
 
     if (event->flags) return STATUS_INVALID_PARAMETER;
-    return submit_host_input(root, host_epoch, &input,
+    status = submit_host_input(root, host_epoch, &input,
             event->type == WINEWAYLAND_HOST_INPUT_KEY ? 0 : SEND_HWMSG_RAWINPUT);
+    if (event->type == WINEWAYLAND_HOST_INPUT_POINTER_BUTTON && event->code == HOST_BTN_LEFT)
+    {
+        root->left_button_event_id = !status && event->state ? root->input_event_id : 0;
+        root->left_button_serial = event->serial;
+    }
+    return status;
 }
 
 static NTSTATUS get_next_contributor(user_handle_t root, uint64_t host_epoch,
@@ -2480,6 +2579,7 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     if ((status = query_host_native_lease(renderer_root, host_epoch))) return status;
     if ((status = set_renderer_root_input_authorized(renderer_root,
             !!(window_state.style & WS_VISIBLE)))) return status;
+    if ((status = process_host_window_action(renderer_root, host_epoch))) return status;
     if (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED &&
         renderer_root->configure_request_id &&
         renderer_root->configure_request_id != configure.applied_id &&

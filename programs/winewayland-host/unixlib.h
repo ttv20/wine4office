@@ -77,7 +77,23 @@ struct winewayland_host_startup
     volatile uint32_t test_input_success_count;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 15
+#define WINEWAYLAND_HOST_RENDERER_VERSION 16
+
+#define WINEWAYLAND_HOST_ACTION_MOVE   1
+#define WINEWAYLAND_HOST_ACTION_RESIZE 2
+
+struct winewayland_host_renderer_action
+{
+    uint32_t version;
+    uint32_t size;
+    uint64_t root_identity;
+    uint64_t root_generation;
+    uint64_t request_id;
+    uint32_t serial;
+    uint32_t command;
+    uint32_t edge;
+    uint32_t reserved;
+};
 
 #define WINEWAYLAND_HOST_ROOT_CREATED    0x00000001
 #define WINEWAYLAND_HOST_ROOT_CONFIGURED 0x00000002
@@ -311,6 +327,7 @@ enum winewayland_host_unix_func
     unix_renderer_get_input,
     unix_renderer_test_input,
     unix_renderer_root_snapshot,
+    unix_renderer_root_action,
     winewayland_host_unix_func_count,
 };
 

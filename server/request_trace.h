@@ -4167,6 +4167,7 @@ static void dump_get_wayland_window_configure_reply( const struct get_wayland_wi
     fprintf( stderr, ", state=%08x", req->state );
     fprintf( stderr, ", scale_120=%08x", req->scale_120 );
     fprintf( stderr, ", previous_state=%08x", req->previous_state );
+    fprintf( stderr, ", cancelled=%d", req->cancelled );
 }
 
 static void dump_set_wayland_window_configure_applied_request( const struct set_wayland_window_configure_applied_request *req )
@@ -4333,6 +4334,31 @@ static void dump_reset_wayland_host_input_request( const struct reset_wayland_ho
     dump_uint64( ", root_identity=", &req->root_identity );
     dump_uint64( ", root_generation=", &req->root_generation );
     dump_uint64( ", event_id=", &req->event_id );
+}
+
+static void dump_manage_wayland_window_action_request( const struct manage_wayland_window_action_request *req )
+{
+    fprintf( stderr, " root=%08x", req->root );
+    fprintf( stderr, ", operation=%08x", req->operation );
+    fprintf( stderr, ", command=%08x", req->command );
+    fprintf( stderr, ", edge=%08x", req->edge );
+    fprintf( stderr, ", result=%08x", req->result );
+    fprintf( stderr, ", backend_status=%08x", req->backend_status );
+    dump_uint64( ", host_epoch=", &req->host_epoch );
+    dump_uint64( ", root_identity=", &req->root_identity );
+    dump_uint64( ", root_generation=", &req->root_generation );
+    dump_uint64( ", request_id=", &req->request_id );
+}
+
+static void dump_manage_wayland_window_action_reply( const struct manage_wayland_window_action_reply *req )
+{
+    dump_uint64( " host_epoch=", &req->host_epoch );
+    dump_uint64( ", request_id=", &req->request_id );
+    dump_uint64( ", input_event_id=", &req->input_event_id );
+    fprintf( stderr, ", command=%08x", req->command );
+    fprintf( stderr, ", edge=%08x", req->edge );
+    fprintf( stderr, ", result=%08x", req->result );
+    fprintf( stderr, ", backend_status=%08x", req->backend_status );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -4704,6 +4730,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_wayland_host_focus_request,
     (dump_func)dump_get_wayland_host_focus_request,
     (dump_func)dump_reset_wayland_host_input_request,
+    (dump_func)dump_manage_wayland_window_action_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -5073,6 +5100,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_get_wayland_host_focus_reply,
     NULL,
+    (dump_func)dump_manage_wayland_window_action_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -5442,6 +5470,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_wayland_host_focus",
     "get_wayland_host_focus",
     "reset_wayland_host_input",
+    "manage_wayland_window_action",
 };
 
 static const struct

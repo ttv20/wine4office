@@ -372,6 +372,7 @@ DECL_HANDLER(sync_wayland_host_keyboard);
 DECL_HANDLER(set_wayland_host_focus);
 DECL_HANDLER(get_wayland_host_focus);
 DECL_HANDLER(reset_wayland_host_input);
+DECL_HANDLER(manage_wayland_window_action);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -741,6 +742,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_wayland_host_focus,
     (req_handler)req_get_wayland_host_focus,
     (req_handler)req_reset_wayland_host_input,
+    (req_handler)req_manage_wayland_window_action,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2882,6 +2884,7 @@ C_ASSERT( offsetof(struct get_wayland_window_configure_reply, height) == 28 );
 C_ASSERT( offsetof(struct get_wayland_window_configure_reply, state) == 32 );
 C_ASSERT( offsetof(struct get_wayland_window_configure_reply, scale_120) == 36 );
 C_ASSERT( offsetof(struct get_wayland_window_configure_reply, previous_state) == 40 );
+C_ASSERT( offsetof(struct get_wayland_window_configure_reply, cancelled) == 44 );
 C_ASSERT( sizeof(struct get_wayland_window_configure_reply) == 48 );
 C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, root) == 12 );
 C_ASSERT( offsetof(struct set_wayland_window_configure_applied_request, width) == 16 );
@@ -2988,3 +2991,22 @@ C_ASSERT( offsetof(struct reset_wayland_host_input_request, root_identity) == 32
 C_ASSERT( offsetof(struct reset_wayland_host_input_request, root_generation) == 40 );
 C_ASSERT( offsetof(struct reset_wayland_host_input_request, event_id) == 48 );
 C_ASSERT( sizeof(struct reset_wayland_host_input_request) == 56 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, root) == 12 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, operation) == 16 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, command) == 20 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, edge) == 24 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, result) == 28 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, backend_status) == 32 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, host_epoch) == 40 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, root_identity) == 48 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, root_generation) == 56 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_request, request_id) == 64 );
+C_ASSERT( sizeof(struct manage_wayland_window_action_request) == 72 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, host_epoch) == 8 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, request_id) == 16 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, input_event_id) == 24 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, command) == 32 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, edge) == 36 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, result) == 40 );
+C_ASSERT( offsetof(struct manage_wayland_window_action_reply, backend_status) == 44 );
+C_ASSERT( sizeof(struct manage_wayland_window_action_reply) == 48 );

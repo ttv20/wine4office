@@ -142,6 +142,17 @@ struct wayland_scene_registry
 };
 
 
+struct wayland_window_action
+{
+    unsigned __int64 host_epoch;
+    unsigned __int64 request_id;
+    unsigned __int64 input_event_id;
+    unsigned int command;
+    unsigned int edge;
+    unsigned int result;
+    unsigned int backend_status;
+};
+
 struct window
 {
     struct object    obj;             /* object header */
@@ -204,6 +215,9 @@ struct window
     unsigned __int64 wayland_configure_delivered_id;
     unsigned int     wayland_configure_delivered_state;
     unsigned int     wayland_configure_owner_state;
+    unsigned __int64 wayland_configure_cancelled_id;
+    int              wayland_configure_cancel_pending;
+    struct wayland_window_action wayland_action;
     unsigned __int64 wayland_native_lease_host_epoch;
     unsigned __int64 wayland_native_lease_scene_generation;
     unsigned __int64 wayland_native_lease_request_id;
@@ -901,6 +915,9 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_delivered_id = 0;
     win->wayland_configure_delivered_state = 0;
     win->wayland_configure_owner_state = 0;
+    win->wayland_configure_cancelled_id = 0;
+    win->wayland_configure_cancel_pending = 0;
+    memset( &win->wayland_action, 0, sizeof(win->wayland_action) );
     win->wayland_configure_width = 0;
     win->wayland_configure_height = 0;
     win->wayland_configure_state = 0;
@@ -3794,6 +3811,191 @@ static int wayland_root_accepts_host_input( const struct window *root )
            root->wayland_native_lease_host_epoch == host_epoch;
 }
 
+static int wayland_root_accepts_action( const struct window *root, unsigned int command )
+{
+    return root->desktop->wayland_host_ready && wayland_root_accepts_host_input( root ) &&
+           !(root->style & (WS_DISABLED | WS_MINIMIZE | WS_MAXIMIZE)) &&
+           (command != WINE_WAYLAND_WINDOW_ACTION_RESIZE || (root->style & WS_THICKFRAME));
+}
+
+static void expire_wayland_window_action( struct window *root )
+{
+    struct wayland_window_action *action = &root->wayland_action;
+
+    if (action->result != WINE_WAYLAND_WINDOW_ACTION_PENDING &&
+        action->result != WINE_WAYLAND_WINDOW_ACTION_CLAIMED) return;
+    if (!root->desktop->wayland_host_ready || action->host_epoch != root->desktop->wayland_host_epoch)
+    {
+        action->result = WINE_WAYLAND_WINDOW_ACTION_REJECTED;
+        action->backend_status = STATUS_REVISION_MISMATCH;
+    }
+    else if (action->result == WINE_WAYLAND_WINDOW_ACTION_PENDING &&
+             (!wayland_root_accepts_action( root, action->command ) ||
+              action->input_event_id != get_wayland_host_left_button_event( root->desktop, root->handle )))
+    {
+        action->result = WINE_WAYLAND_WINDOW_ACTION_REJECTED;
+        action->backend_status = STATUS_INVALID_DEVICE_STATE;
+    }
+}
+
+DECL_HANDLER(manage_wayland_window_action)
+{
+    struct wayland_window_action *action;
+    struct obj_locator locator;
+    unsigned __int64 input_event_id;
+    struct window *root;
+
+    reply->host_epoch = reply->request_id = reply->input_event_id = 0;
+    reply->command = reply->edge = reply->result = reply->backend_status = 0;
+    if (req->operation < WINE_WAYLAND_WINDOW_ACTION_REQUEST ||
+        req->operation > WINE_WAYLAND_WINDOW_ACTION_RESULT || get_req_data_size())
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(root = get_window( req->root ))) return;
+    if (root->parent != root->desktop->top_window)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    action = &root->wayland_action;
+    if (req->operation == WINE_WAYLAND_WINDOW_ACTION_REQUEST ||
+        req->operation == WINE_WAYLAND_WINDOW_ACTION_QUERY)
+    {
+        if (root->thread != current)
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+        if (req->host_epoch || req->root_identity || req->root_generation ||
+            req->result || req->backend_status)
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            return;
+        }
+    }
+    else
+    {
+        if (!is_current_wayland_host( root->desktop, req->host_epoch )) return;
+        locator = get_shared_object_locator( root->shared );
+        if (locator.id != req->root_identity || (root->handle >> 16) != req->root_generation)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+    }
+
+    if (req->operation == WINE_WAYLAND_WINDOW_ACTION_REQUEST)
+    {
+        if (req->request_id ||
+            (req->command != WINE_WAYLAND_WINDOW_ACTION_MOVE &&
+             req->command != WINE_WAYLAND_WINDOW_ACTION_RESIZE) ||
+            (req->command == WINE_WAYLAND_WINDOW_ACTION_MOVE ? req->edge != 0 :
+             req->edge < WMSZ_LEFT || req->edge > WMSZ_BOTTOMRIGHT))
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            return;
+        }
+        if (!wayland_root_accepts_action( root, req->command ) ||
+            !(input_event_id = get_wayland_host_left_button_event( root->desktop, root->handle )))
+        {
+            set_error( STATUS_INVALID_DEVICE_STATE );
+            return;
+        }
+        expire_wayland_window_action( root );
+        if (action->host_epoch == root->desktop->wayland_host_epoch &&
+            action->input_event_id == input_event_id)
+        {
+            /* One native operation per press, including after a result. */
+            if (action->command != req->command || action->edge != req->edge)
+            {
+                set_error( STATUS_INVALID_DEVICE_STATE );
+                return;
+            }
+        }
+        else
+        {
+            if (action->result == WINE_WAYLAND_WINDOW_ACTION_CLAIMED)
+            {
+                set_error( STATUS_DEVICE_BUSY );
+                return;
+            }
+            if (action->request_id == ~(unsigned __int64)0)
+            {
+                set_error( STATUS_INTEGER_OVERFLOW );
+                return;
+            }
+            ++action->request_id;
+            action->host_epoch = root->desktop->wayland_host_epoch;
+            action->input_event_id = input_event_id;
+            action->command = req->command;
+            action->edge = req->edge;
+            action->result = WINE_WAYLAND_WINDOW_ACTION_PENDING;
+            action->backend_status = STATUS_PENDING;
+            signal_wayland_host_work( root->desktop );
+        }
+    }
+    else
+    {
+        if (req->command || req->edge ||
+            (req->operation != WINE_WAYLAND_WINDOW_ACTION_RESULT && (req->result || req->backend_status)) ||
+            (req->operation == WINE_WAYLAND_WINDOW_ACTION_CLAIM && req->request_id))
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            return;
+        }
+        expire_wayland_window_action( root );
+        if (!action->request_id ||
+            (req->operation != WINE_WAYLAND_WINDOW_ACTION_QUERY && action->host_epoch != req->host_epoch) ||
+            (req->request_id && req->request_id != action->request_id))
+        {
+            set_error( STATUS_NOT_FOUND );
+            return;
+        }
+        if (req->operation == WINE_WAYLAND_WINDOW_ACTION_CLAIM)
+        {
+            if (action->result != WINE_WAYLAND_WINDOW_ACTION_PENDING &&
+                action->result != WINE_WAYLAND_WINDOW_ACTION_CLAIMED)
+            {
+                set_error( STATUS_NOT_FOUND );
+                return;
+            }
+            action->result = WINE_WAYLAND_WINDOW_ACTION_CLAIMED;
+        }
+        else if (req->operation == WINE_WAYLAND_WINDOW_ACTION_RESULT)
+        {
+            if (!req->request_id ||
+                (req->result == WINE_WAYLAND_WINDOW_ACTION_ISSUED ? req->backend_status != STATUS_SUCCESS :
+                 req->result != WINE_WAYLAND_WINDOW_ACTION_REJECTED || !(req->backend_status & 0x80000000)))
+            {
+                set_error( STATUS_INVALID_PARAMETER );
+                return;
+            }
+            if (action->result != WINE_WAYLAND_WINDOW_ACTION_CLAIMED)
+            {
+                if (action->result != req->result || action->backend_status != req->backend_status)
+                {
+                    set_error( STATUS_INVALID_DEVICE_STATE );
+                    return;
+                }
+            }
+            else
+            {
+                action->result = req->result;
+                action->backend_status = req->backend_status;
+            }
+        }
+    }
+    reply->host_epoch = action->host_epoch;
+    reply->request_id = action->request_id;
+    reply->input_event_id = action->input_event_id;
+    reply->command = action->command;
+    reply->edge = action->edge;
+    reply->result = action->result;
+    reply->backend_status = action->backend_status;
+}
+
 struct desktop *get_wayland_host_input_desktop( user_handle_t root_handle,
         unsigned __int64 host_epoch, unsigned __int64 root_identity,
         unsigned __int64 root_generation, unsigned __int64 event_id )
@@ -5677,6 +5879,7 @@ static void reset_wayland_window_configure( struct window *root,
      * the last owner-applied state until it returns, even across epochs. */
     root->wayland_configure_host_epoch = host_epoch;
     root->wayland_configure_request_id = 0;
+    root->wayland_configure_cancelled_id = 0;
     root->wayland_configure_applied_id = 0;
     root->wayland_configure_applied_revision = 0;
     root->wayland_configure_width = 0;
@@ -5691,14 +5894,45 @@ static void reset_wayland_window_configure( struct window *root,
 
 static void post_wayland_window_configure_message( struct window *root )
 {
-    if (!root->wayland_configure_request_id || root->wayland_configure_delivered_id ||
-        root->wayland_configure_applied_id == root->wayland_configure_request_id ||
-        root->wayland_configure_message_posted || !root->desktop->wayland_host_ready ||
-        root->wayland_configure_host_epoch != root->desktop->wayland_host_epoch)
+    if (root->wayland_configure_delivered_id || root->wayland_configure_message_posted) return;
+    if (!root->wayland_configure_cancel_pending &&
+        (!root->wayland_configure_request_id ||
+         root->wayland_configure_request_id <= root->wayland_configure_cancelled_id ||
+         root->wayland_configure_applied_id == root->wayland_configure_request_id ||
+         !root->desktop->wayland_host_ready ||
+         root->wayland_configure_host_epoch != root->desktop->wayland_host_epoch))
         return;
 
     post_message( root->handle, WM_WINE_WAYLAND_HOST_CONFIGURE, 0, 0 );
     if (!get_error()) root->wayland_configure_message_posted = 1;
+}
+
+static void cancel_wayland_root_resize( struct window *root )
+{
+    /* Pending native state must not start a new resize after ownership loss. */
+    root->wayland_configure_cancelled_id = root->wayland_configure_request_id;
+    if (!((root->wayland_configure_owner_state | root->wayland_configure_delivered_state) &
+          WINE_WAYLAND_CONFIGURE_STATE_RESIZING)) return;
+    root->wayland_configure_cancel_pending = 1;
+    clear_error();
+    post_wayland_window_configure_message( root );
+}
+
+void cancel_wayland_host_resizes( struct desktop *desktop, user_handle_t root_handle )
+{
+    struct window *root;
+    user_handle_t handle = 0;
+    unsigned int error = get_error();
+
+    if (root_handle)
+    {
+        root = get_user_object( root_handle, NTUSER_OBJ_WINDOW );
+        if (root && root->desktop == desktop) cancel_wayland_root_resize( root );
+    }
+    else while ((root = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
+        if (root->desktop == desktop) cancel_wayland_root_resize( root );
+    if (error) set_error( error );
+    else clear_error();
 }
 
 DECL_HANDLER(post_wayland_window_configure)
@@ -5766,6 +6000,8 @@ DECL_HANDLER(post_wayland_window_configure)
         !(root->wayland_configure_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
         !(root->wayland_configure_owner_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
         !root->wayland_configure_delivered_id &&
+        !root->wayland_configure_cancel_pending &&
+        root->wayland_configure_request_id > root->wayland_configure_cancelled_id &&
         !root->wayland_configure_message_posted)
     {
         root->wayland_configure_applied_id = root->wayland_configure_request_id;
@@ -5793,6 +6029,7 @@ DECL_HANDLER(get_wayland_window_configure)
     reply->state = 0;
     reply->scale_120 = 0;
     reply->previous_state = 0;
+    reply->cancelled = 0;
     if (!(root = get_window( req->root ))) return;
     if (!root->thread || root->thread != current)
     {
@@ -5804,6 +6041,22 @@ DECL_HANDLER(get_wayland_window_configure)
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
+    if (root->wayland_configure_delivered_id)
+    {
+        set_error( STATUS_PENDING );
+        return;
+    }
+    if (root->wayland_configure_cancel_pending)
+    {
+        reply->cancelled = 1;
+        reply->previous_state = root->wayland_configure_owner_state;
+        root->wayland_configure_owner_state &= ~WINE_WAYLAND_CONFIGURE_STATE_RESIZING;
+        reply->state = root->wayland_configure_owner_state;
+        root->wayland_configure_cancel_pending = 0;
+        root->wayland_configure_message_posted = 0;
+        post_wayland_window_configure_message( root );
+        return;
+    }
     if (!root->desktop->wayland_host_process || !root->desktop->wayland_host_ready ||
         root->wayland_configure_host_epoch != root->desktop->wayland_host_epoch)
     {
@@ -5811,14 +6064,11 @@ DECL_HANDLER(get_wayland_window_configure)
         return;
     }
     if (!root->wayland_configure_request_id ||
+        root->wayland_configure_request_id <= root->wayland_configure_cancelled_id ||
         root->wayland_configure_applied_id == root->wayland_configure_request_id)
     {
+        root->wayland_configure_message_posted = 0;
         set_error( STATUS_NOT_FOUND );
-        return;
-    }
-    if (root->wayland_configure_delivered_id)
-    {
-        set_error( STATUS_PENDING );
         return;
     }
     reply->host_epoch = root->wayland_configure_host_epoch;

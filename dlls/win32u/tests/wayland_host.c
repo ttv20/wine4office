@@ -68,6 +68,7 @@ enum host_child_command
     HOST_CHILD_COMMAND_POST_CONFIGURE,
     HOST_CHILD_COMMAND_GET_CONFIGURE,
     HOST_CHILD_COMMAND_GET_CONFIGURE_RESULT,
+    HOST_CHILD_COMMAND_WINDOW_ACTION,
     HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE,
     HOST_CHILD_COMMAND_BEGIN_NATIVE_TRANSFER,
     HOST_CHILD_COMMAND_GET_NATIVE_LEASE_ACTION,
@@ -103,6 +104,12 @@ enum slot_registration_variant
     SLOT_REGISTRATION_VALID,
     SLOT_REGISTRATION_WRONG_MEMORY_TYPE,
     SLOT_REGISTRATION_SHARED_SYNC,
+};
+
+struct wayland_window_action_info
+{
+    UINT64 host_epoch, request_id, input_event_id;
+    DWORD command, edge, result, backend_status;
 };
 
 struct wayland_host_test_state
@@ -151,6 +158,8 @@ struct wayland_host_test_state
     UINT64 native_lease_scene_generation;
     UINT64 native_lease_request_id;
     UINT64 input_event_id;
+    struct wayland_window_action_info action;
+    DWORD action_operation;
     UINT64 snapshot_revision;
     UINT64 snapshot_geometry_revision;
     DWORD capabilities;
@@ -291,6 +300,7 @@ struct wayland_configure_info
     DWORD state;
     DWORD scale_120;
     DWORD previous_state;
+    BOOL cancelled;
 };
 
 struct wayland_configure_result_info
@@ -711,6 +721,50 @@ static NTSTATUS send_host_input( HWND root, UINT64 host_epoch, UINT64 root_ident
     return status;
 }
 
+static NTSTATUS manage_window_action( HWND root, DWORD operation, UINT64 host_epoch,
+                                      UINT64 root_identity, UINT64 root_generation,
+                                      struct wayland_window_action_info *info )
+{
+    struct wayland_window_action_info requested = *info;
+    NTSTATUS status;
+
+    memset( info, 0, sizeof(*info) );
+    SERVER_START_REQ( manage_wayland_window_action )
+    {
+        req->root = wine_server_user_handle( root );
+        req->operation = operation;
+        if (operation == WINE_WAYLAND_WINDOW_ACTION_REQUEST)
+        {
+            req->command = requested.command;
+            req->edge = requested.edge;
+        }
+        if (operation == WINE_WAYLAND_WINDOW_ACTION_CLAIM || operation == WINE_WAYLAND_WINDOW_ACTION_RESULT)
+        {
+            req->host_epoch = host_epoch;
+            req->root_identity = root_identity;
+            req->root_generation = root_generation;
+        }
+        if (operation == WINE_WAYLAND_WINDOW_ACTION_RESULT)
+        {
+            req->request_id = requested.request_id;
+            req->result = requested.result;
+            req->backend_status = requested.backend_status;
+        }
+        if (!(status = p_wine_server_call( req )))
+        {
+            info->host_epoch = reply->host_epoch;
+            info->request_id = reply->request_id;
+            info->input_event_id = reply->input_event_id;
+            info->command = reply->command;
+            info->edge = reply->edge;
+            info->result = reply->result;
+            info->backend_status = reply->backend_status;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
 static NTSTATUS reset_host_input( HWND root, UINT64 host_epoch, UINT64 root_identity,
                                   UINT64 root_generation, UINT64 event_id, DWORD flags )
 {
@@ -832,6 +886,7 @@ static NTSTATUS get_window_configure( HWND root, struct wayland_configure_info *
             info->state = reply->state;
             info->scale_120 = reply->scale_120;
             info->previous_state = reply->previous_state;
+            info->cancelled = reply->cancelled;
         }
     }
     SERVER_END_REQ;
@@ -1835,6 +1890,11 @@ static void run_host_child( HANDLE mapping, HANDLE ready_event, HANDLE command_e
             state->configure_height = configure_result.height;
             state->configure_state = configure_result.state;
             break;
+        case HOST_CHILD_COMMAND_WINDOW_ACTION:
+            state->command_status = manage_window_action( (HWND)(UINT_PTR)state->root,
+                    state->action_operation, state->host_epoch, state->root_identity,
+                    state->root_generation, &state->action );
+            break;
         case HOST_CHILD_COMMAND_QUERY_NATIVE_LEASE:
             state->command_status = manage_native_lease( (HWND)(UINT_PTR)state->root,
                     WINE_WAYLAND_NATIVE_LEASE_QUERY_HOST, state->host_epoch,
@@ -2218,12 +2278,123 @@ static void test_host_input_reset( struct wayland_host_test_state *state,
     while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
 }
 
+static void send_action_button( struct wayland_host_test_state *state,
+                                HANDLE command_event, HANDLE result_event, BOOL down )
+{
+    ++state->input_event_id;
+    state->input_type = INPUT_MOUSE;
+    state->input_flags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+    state->input_data = 0;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_SEND_INPUT ),
+        "Timed out sending action button.\n" );
+    ok( !state->command_status, "Action button returned %#lx.\n", state->command_status );
+}
+
+static void test_window_actions( struct wayland_host_test_state *state,
+                                 HANDLE command_event, HANDLE result_event )
+{
+    HWND root = (HWND)(UINT_PTR)state->root;
+    struct wayland_window_action_info action = {0};
+    UINT64 request_id;
+    NTSTATUS status;
+    MSG msg;
+
+    action.command = WINE_WAYLAND_WINDOW_ACTION_MOVE;
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_REQUEST, 0, 0, 0, &action );
+    ok( status == STATUS_INVALID_DEVICE_STATE && !action.request_id,
+        "Action without native press returned %#lx, id %s.\n", status, wine_dbgstr_longlong( action.request_id ) );
+    send_action_button( state, command_event, result_event, TRUE );
+    state->action.command = WINE_WAYLAND_WINDOW_ACTION_MOVE;
+    state->action_operation = WINE_WAYLAND_WINDOW_ACTION_REQUEST;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out requesting foreign action.\n" );
+    ok( state->command_status == STATUS_ACCESS_DENIED, "Foreign action returned %#lx.\n", state->command_status );
+    action.command = WINE_WAYLAND_WINDOW_ACTION_MOVE;
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_REQUEST, 0, 0, 0, &action );
+    ok( !status && action.request_id && action.input_event_id == state->input_event_id &&
+        action.host_epoch == state->host_epoch && action.result == WINE_WAYLAND_WINDOW_ACTION_PENDING,
+        "Action returned %#lx, id %s, event %s, result %lu.\n", status,
+        wine_dbgstr_longlong( action.request_id ), wine_dbgstr_longlong( action.input_event_id ), action.result );
+    request_id = action.request_id;
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_REQUEST, 0, 0, 0, &action );
+    ok( !status && action.request_id == request_id, "Repeated request returned %#lx or changed ID.\n", status );
+    state->action = action;
+    state->action.result = WINE_WAYLAND_WINDOW_ACTION_ISSUED;
+    state->action.backend_status = 0;
+    state->action_operation = WINE_WAYLAND_WINDOW_ACTION_RESULT;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out reporting unclaimed action.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE,
+        "Unclaimed result returned %#lx.\n", state->command_status );
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_CLAIM, state->host_epoch,
+            state->root_identity, state->root_generation, &action );
+    ok( status == STATUS_ACCESS_DENIED && !action.request_id, "Non-host claim returned %#lx.\n", status );
+    state->action_operation = WINE_WAYLAND_WINDOW_ACTION_CLAIM;
+    state->root_generation ^= 1;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out claiming stale root action.\n" );
+    ok( state->command_status == STATUS_REVISION_MISMATCH, "Stale root claim returned %#lx.\n", state->command_status );
+    state->root_generation ^= 1;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out claiming action.\n" );
+    ok( !state->command_status && state->action.request_id == request_id &&
+        state->action.input_event_id == state->input_event_id && state->action.result == WINE_WAYLAND_WINDOW_ACTION_CLAIMED,
+        "Action claim returned %#lx, id %s, result %lu.\n", state->command_status,
+        wine_dbgstr_longlong( state->action.request_id ), state->action.result );
+    send_action_button( state, command_event, result_event, FALSE );
+    /* The host may have issued a request before observing release. Its
+     * delayed result describes that request, never compositor completion. */
+    state->action_operation = WINE_WAYLAND_WINDOW_ACTION_RESULT;
+    state->action.result = WINE_WAYLAND_WINDOW_ACTION_ISSUED;
+    state->action.backend_status = 0;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out reporting issued action.\n" );
+    ok( !state->command_status && state->action.result == WINE_WAYLAND_WINDOW_ACTION_ISSUED,
+        "Issued result returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out replaying issued action.\n" );
+    ok( !state->command_status, "Result replay returned %#lx.\n", state->command_status );
+    state->action.result = WINE_WAYLAND_WINDOW_ACTION_REJECTED;
+    state->action.backend_status = STATUS_INVALID_DEVICE_STATE;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out changing terminal action.\n" );
+    ok( state->command_status == STATUS_INVALID_DEVICE_STATE, "Changed result returned %#lx.\n", state->command_status );
+
+    send_action_button( state, command_event, result_event, TRUE );
+    action.command = WINE_WAYLAND_WINDOW_ACTION_MOVE;
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_REQUEST, 0, 0, 0, &action );
+    ok( !status && action.request_id > request_id, "Second press request returned %#lx.\n", status );
+    send_action_button( state, command_event, result_event, FALSE );
+    state->action_operation = WINE_WAYLAND_WINDOW_ACTION_CLAIM;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out claiming released press.\n" );
+    ok( state->command_status == STATUS_NOT_FOUND, "Released press claim returned %#lx.\n", state->command_status );
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_QUERY, 0, 0, 0, &action );
+    ok( !status && action.result == WINE_WAYLAND_WINDOW_ACTION_REJECTED &&
+        action.backend_status == STATUS_INVALID_DEVICE_STATE, "Released press result returned %#lx/%lu.\n", status, action.result );
+
+    send_action_button( state, command_event, result_event, TRUE );
+    action.command = WINE_WAYLAND_WINDOW_ACTION_MOVE;
+    status = manage_window_action( root, WINE_WAYLAND_WINDOW_ACTION_REQUEST, 0, 0, 0, &action );
+    ok( !status, "Reset press request returned %#lx.\n", status );
+    ++state->input_event_id;
+    state->input_flags = WINE_WAYLAND_INPUT_RESET_BUTTONS;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_RESET_INPUT ),
+        "Timed out resetting action press.\n" );
+    ok( !state->command_status, "Action press reset returned %#lx.\n", state->command_status );
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_WINDOW_ACTION ),
+        "Timed out claiming reset press.\n" );
+    ok( state->command_status == STATUS_NOT_FOUND, "Reset press claim returned %#lx.\n", state->command_status );
+    while (PeekMessageW( &msg, root, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
+}
+
 static struct
 {
     struct wayland_host_test_state *state;
     HANDLE command_event, result_event;
     WNDPROC previous_proc;
     unsigned int entered, exited;
+    BOOL cancel_on_enter;
 } configure_reentry;
 
 static LRESULT CALLBACK configure_reentry_proc( HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam )
@@ -2233,6 +2404,12 @@ static LRESULT CALLBACK configure_reentry_proc( HWND hwnd, UINT message, WPARAM 
 
     if (message == WM_ENTERSIZEMOVE && !configure_reentry.entered++)
     {
+        if (configure_reentry.cancel_on_enter)
+        {
+            ShowWindow( hwnd, SW_HIDE );
+            while (PeekMessageW( &msg, hwnd, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+            return CallWindowProcW( configure_reentry.previous_proc, hwnd, message, wparam, lparam );
+        }
         /* A real application callback can pump messages while the host posts
          * the final resize. The older handler must finish before that update. */
         state->configure_request_id = 7;
@@ -2329,6 +2506,38 @@ static void test_configure_reentry( struct wayland_host_test_state *state,
     status = set_window_configure_applied( root, state->host_epoch, 9, 0, 0,
             WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED, &applied_id, &applied_revision );
     ok( !status && applied_id == 9, "Deferred configure apply returned %#lx.\n", status );
+}
+
+static void test_configure_hide( struct wayland_host_test_state *state,
+                                 HANDLE command_event, HANDLE result_event )
+{
+    HWND root = (HWND)(UINT_PTR)state->root;
+    struct wayland_configure_info configure;
+    NTSTATUS status;
+    MSG msg;
+
+    if (!GetModuleHandleW( L"winewayland.drv" )) return;
+    memset( &configure_reentry, 0, sizeof(configure_reentry) );
+    configure_reentry.state = state;
+    configure_reentry.cancel_on_enter = TRUE;
+    configure_reentry.previous_proc = (WNDPROC)SetWindowLongPtrW( root, GWLP_WNDPROC,
+            (LONG_PTR)configure_reentry_proc );
+    state->configure_request_id = 10;
+    state->configure_width = 120;
+    state->configure_height = 100;
+    state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_RESIZING;
+    state->configure_scale_120 = 120;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+        "Timed out posting hidden resize.\n" );
+    ok( !state->command_status, "Hidden resize post returned %#lx.\n", state->command_status );
+    while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+    SetWindowLongPtrW( root, GWLP_WNDPROC, (LONG_PTR)configure_reentry.previous_proc );
+    ok( configure_reentry.entered == 1 && configure_reentry.exited == 1 && !IsWindowVisible( root ),
+        "Hidden resize sent %u enters and %u exits, visible %d.\n",
+        configure_reentry.entered, configure_reentry.exited, IsWindowVisible( root ) );
+    status = get_window_configure( root, &configure );
+    ok( status == STATUS_NOT_FOUND, "Cancelled resize was delivered again, status %#lx.\n", status );
+    ShowWindow( root, SW_SHOW );
 }
 
 static void test_host_registration( const char *program, const char *test_name )
@@ -5383,6 +5592,8 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status, "Pre-exit focus returned %#lx.\n", state->command_status );
 
     test_host_input_reset( state, command_event, result_event );
+    test_window_actions( state, command_event, result_event );
+    test_configure_hide( state, command_event, result_event );
 
     while (PeekMessageW( &msg, NULL, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE ));
     SetFocus( root );
@@ -5414,7 +5625,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
         "Host-exit pointer down returned %#lx without pressed state.\n",
         state->command_status );
-    state->configure_request_id = 10;
+    state->configure_request_id = 20;
     state->configure_width = 100;
     state->configure_height = 82;
     state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_RESIZING;
@@ -5422,7 +5633,7 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
         "Timed out posting configure before host replacement.\n" );
     status = get_window_configure( root, &configure );
-    ok( !status && configure.request_id == 10, "Pre-replacement configure pull returned %#lx.\n", status );
+    ok( !status && configure.request_id == 20, "Pre-replacement configure pull returned %#lx.\n", status );
     stop_host_child( state, command_event, result_event, &process );
     status = get_host_focus( root, &focused );
     ok( !focused && (!status || status == STATUS_NOT_FOUND),
@@ -5527,17 +5738,22 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( status == STATUS_PENDING && !configure.request_id,
         "Replacement overtook owner callback, status %#lx, id %s.\n",
         status, wine_dbgstr_longlong( configure.request_id ) );
-    status = set_window_configure_applied( root, old_epoch, 10, 100, 82,
+    status = set_window_configure_applied( root, old_epoch, 20, 100, 82,
             WINE_WAYLAND_CONFIGURE_STATE_RESIZING, &configure_applied_id,
             &configure_applied_revision );
     ok( status == STATUS_REVISION_MISMATCH && !configure_applied_id,
         "Old delivery acknowledged replacement, status %#lx, id %s.\n",
         status, wine_dbgstr_longlong( configure_applied_id ) );
     status = get_window_configure( root, &configure );
+    ok( !status && configure.cancelled && !configure.host_epoch && !configure.request_id &&
+        configure.previous_state == WINE_WAYLAND_CONFIGURE_STATE_RESIZING,
+        "Old host resize cancellation returned %#lx, cancelled %d, previous %#lx.\n",
+        status, configure.cancelled, configure.previous_state );
+    status = get_window_configure( root, &configure );
     ok( !status && configure.host_epoch == state->host_epoch &&
         configure.request_id == 1 && configure.width == 100 && configure.height == 82 &&
         configure.state == WINE_WAYLAND_CONFIGURE_STATE_TILED &&
-        configure.previous_state == WINE_WAYLAND_CONFIGURE_STATE_RESIZING,
+        !configure.previous_state,
         "Replacement-epoch configure returned %#lx, epoch %s, id %s, %lux%lu, state %#lx, previous %#lx.\n",
         status, wine_dbgstr_longlong( configure.host_epoch ),
         wine_dbgstr_longlong( configure.request_id ), configure.width,

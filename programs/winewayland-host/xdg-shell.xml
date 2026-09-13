@@ -77,10 +77,21 @@
       <arg name="seat" type="object" interface="wl_seat"/>
       <arg name="serial" type="uint"/>
     </request>
+    <enum name="resize_edge">
+      <entry name="none" value="0"/>
+      <entry name="top" value="1"/>
+      <entry name="bottom" value="2"/>
+      <entry name="left" value="4"/>
+      <entry name="top_left" value="5"/>
+      <entry name="bottom_left" value="6"/>
+      <entry name="right" value="8"/>
+      <entry name="top_right" value="9"/>
+      <entry name="bottom_right" value="10"/>
+    </enum>
     <request name="resize">
       <arg name="seat" type="object" interface="wl_seat"/>
       <arg name="serial" type="uint"/>
-      <arg name="edges" type="uint"/>
+      <arg name="edges" type="uint" enum="resize_edge"/>
     </request>
     <request name="set_max_size">
       <arg name="width" type="int"/>

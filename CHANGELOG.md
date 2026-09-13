@@ -14,6 +14,8 @@
 - Preserve numeric-keypad and special-key information in hosted Wayland input.
 - Release hosted pointer buttons on native focus loss and recover input correctly when event queues fill.
 - Keep reentrant window callbacks from applying hosted resize updates out of order.
+- Route experimental hosted move and resize requests through the native pointer connection.
+- Cancel Windows resize state when a hosted window is hidden or loses native ownership.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

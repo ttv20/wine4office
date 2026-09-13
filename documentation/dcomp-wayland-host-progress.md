@@ -1440,6 +1440,80 @@ topology and timing tests. Classic Microsoft 365 Outlook is not the target
 for those gates. This choice does not turn the existing synthetic fixtures
 into evidence of new Outlook support.
 
+## Native move/resize requests, 2026-09-13
+
+The hosted `SC_MOVE`/`SC_SIZE` path could not reach the native shell: the
+guest connection has neither the hosted toplevel nor its originating button
+serial. The owner-thread adapter now requests an action through wineserver
+instead of attempting that guest-local operation.
+
+One bounded record per root distinguishes pending, claimed, issued and
+rejected. Admission requires the owning Windows thread, a current visible
+HostedContent/Empty lease, compatible window style and a held native left
+button for that root. The server retains its input event ID, never the
+Wayland serial. One press can authorize at most one action. Release/reset
+invalidates unclaimed work. A host claims the action before issuing it;
+terminal result replays are idempotent and cannot change the result.
+
+The host matches the server event ID with its successfully submitted press
+and retains the serial only on its own connection. Immediately before the
+native request, the renderer checks current pointer focus, held state,
+serial, mapping/configure state, maximize/fullscreen state and input
+authorization. Leave, hide/remap and authorization loss invalidate the
+press. Both PE and Unix code retain issued results so a delayed result
+acknowledgement cannot issue the request twice or reinterpret a later leave
+as failure. The private action record is pointer-free and 48 bytes on both
+architectures. Renderer ABI is now 16; server protocol is 1004. The host
+protocol remains 10.
+
+Analysis-only review agreed with using the held, same-root native press,
+without widening every Windows hardware-message payload to guess the
+origin of an application-posted system command. The implementation uses the
+host epoch and root lifetime with the per-root event ID; those IDs are not
+claimed to be globally monotonic. The review also identified resize
+cancellation as a prerequisite, implemented here.
+
+Hide, ownership loss and host exit now cancel a delivered Windows resize
+session on the owner thread. Cancellation waits for an in-flight configure
+callback to return, discards pre-cancellation pending native updates, and
+cannot acknowledge a replacement host's configure. It closes Windows
+resize bookkeeping, not a claimed native drag-completion event. The
+single-root cleanup path does not enumerate other windows.
+
+Verification: x64 authority passed 1049 checks with zero failures. These
+include action ownership, stale identity, press release/reset, idempotent
+results, hiding from a real `WM_ENTERSIZEMOVE` callback and cancellation
+across host replacement. Intel i386 passed held-pointer validation and the
+new Unix-call entry's identity/edge checks, together with the existing GPU
+copy, pixel and import fixtures. The x64 input/presentation pipeline passed
+all 11 input events, nine imports, six backend presentations and
+fallback/rehost. Source hashes matched the canonical task source. No
+physical compositor drag was exercised by these fixtures.
+
+The first combined dry run proposed 81 compile/link commands and was
+refused by the 80-command gate. The reviewed protocol-dependent rebuild was
+split by module: wineserver, ntdll, win32u, winewayland, DComp, DXGI,
+WineD3D, host and tests. Both PE architectures rebuilt. A first host compile
+caught missing resize-edge declarations in its minimal xdg-shell XML; the
+declarative enum was added and the generated Wayland bindings rebuilt.
+The final focused host build passed. Only the previously recorded server
+registry and ntdll C90 warnings appeared in coupled targets.
+
+Evidence in the personal Intel task directory:
+`artifacts/astra-actions-authority-x64.log`,
+`artifacts/astra-actions-renderer-i386.log`,
+`artifacts/astra-actions-pipeline-x64.log`, and
+`artifacts/astra-actions-final-SHA256SUMS`. Test opt-ins were restored to
+zero and task Wine was stopped between architectures and after the final
+fixture. No new runner, prefix or desktop was created.
+
+Still not complete Windows move/resize semantics: issuance is not
+compositor acceptance; `SC_MOVE` returns asynchronously, there is no
+fabricated move enter/exit pair or final global origin, keyboard-initiated
+move without a held pointer is unsupported, and native min/max constraints
+and `WM_MOVING`/`WM_SIZING` arbitration remain open. Actual compositor input
+and the new Outlook topology are still required for application readiness.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
@@ -1475,12 +1549,12 @@ fallback/rehost; `--dcomp-auto-frame-test` exercises automatic startup with a
 standard Wine frame. Neither fixture writes the setting itself. Restore the
 test setting after use. Backend Present results are not scanout measurements.
 
-Keep the runner coherent: protocol 1002 requires matching wineserver and
+Keep the runner coherent: protocol 1004 requires matching wineserver and
 ntdll, plus the task's win32u, winewayland driver, DComp, DXGI, WineD3D and host
 PE/Unix binaries. The old instruction to patch only the host's two PE files
 and Unix library into an untouched main runner is obsolete. Record the
 deployed binary hashes with each result. Native i386 host self-tests can use
 the explicit `i386-windows/winewayland-host.exe` path; the separate i386
 guest-window prefix initialization limitation above still applies.
-The current host PE/Unix pair uses renderer ABI 15, with the root record still
+The current host PE/Unix pair uses renderer ABI 16, with the root record still
 392 bytes and startup fixture ABI 9 still 136 bytes.

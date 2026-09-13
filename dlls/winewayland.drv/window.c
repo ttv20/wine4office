@@ -990,6 +990,7 @@ struct wayland_host_configure
     UINT state;
     UINT scale_120;
     UINT previous_state;
+    BOOL cancelled;
 };
 
 struct wayland_native_lease
@@ -1203,6 +1204,7 @@ static NTSTATUS get_wayland_host_configure(HWND hwnd, struct wayland_host_config
             configure->state = reply->state;
             configure->scale_120 = reply->scale_120;
             configure->previous_state = reply->previous_state;
+            configure->cancelled = reply->cancelled;
         }
     }
     SERVER_END_REQ;
@@ -1253,6 +1255,14 @@ static void wayland_configure_hosted_window(HWND hwnd)
     if ((status = get_wayland_host_configure(hwnd, &configure)))
     {
         TRACE("No hosted configure for hwnd %p, status %#x.\n", hwnd, status);
+        return;
+    }
+    if (configure.cancelled)
+    {
+        /* This closes the Windows resize session after hide or ownership
+         * loss. It makes no claim about compositor grab completion. */
+        if (configure.previous_state & WINE_WAYLAND_CONFIGURE_STATE_RESIZING)
+            send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
         return;
     }
     if (!configure.host_epoch || !configure.request_id || !configure.scale_120)
@@ -1702,6 +1712,33 @@ static void wayland_move_resize_loop(HWND hwnd)
     }
 }
 
+static BOOL request_hosted_move_resize(HWND hwnd, WPARAM command, UINT edge)
+{
+    struct wayland_win_data *data;
+    BOOL hosted;
+    NTSTATUS status;
+
+    if (!(data = wayland_win_data_get(hwnd))) return FALSE;
+    hosted = data->native_host_suppressed;
+    wayland_win_data_release(data);
+    if (!hosted) return FALSE;
+
+    SERVER_START_REQ(manage_wayland_window_action)
+    {
+        req->root = wine_server_user_handle(hwnd);
+        req->operation = WINE_WAYLAND_WINDOW_ACTION_REQUEST;
+        req->command = command == SC_MOVE ? WINE_WAYLAND_WINDOW_ACTION_MOVE : WINE_WAYLAND_WINDOW_ACTION_RESIZE;
+        req->edge = command == SC_MOVE ? 0 : edge;
+        status = wine_server_call(req);
+    }
+    SERVER_END_REQ;
+    TRACE("Hosted move/resize request for hwnd %p returned %#x.\n", hwnd, status);
+    /* The host owns the originating pointer serial. Do not fall back to the
+     * guest connection or block the owner thread waiting for a shell grab.
+     * Resize notifications come only from compositor configure states. */
+    return TRUE;
+}
+
 /***********************************************************************
  *          WAYLAND_SysCommand
  */
@@ -1715,6 +1752,9 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
 
     TRACE("cmd=%lx hwnd=%p, %lx, %lx\n",
           (long)command, hwnd, (long)wparam, lparam);
+
+    if ((command == SC_MOVE || command == SC_SIZE) &&
+        request_hosted_move_resize(hwnd, command, wparam & 0x0f)) return 0;
 
     pthread_mutex_lock(&process_wayland.pointer.mutex);
     button_hwnd = process_wayland.pointer.button_hwnd;

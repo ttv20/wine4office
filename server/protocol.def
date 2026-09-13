@@ -102,6 +102,17 @@ typedef client_ptr_t mod_handle_t;
 #define WINE_WAYLAND_INPUT_RESET_KEYS        0x00000001
 #define WINE_WAYLAND_INPUT_RESET_BUTTONS     0x00000002
 
+#define WINE_WAYLAND_WINDOW_ACTION_REQUEST  1
+#define WINE_WAYLAND_WINDOW_ACTION_QUERY    2
+#define WINE_WAYLAND_WINDOW_ACTION_CLAIM    3
+#define WINE_WAYLAND_WINDOW_ACTION_RESULT   4
+#define WINE_WAYLAND_WINDOW_ACTION_MOVE     1
+#define WINE_WAYLAND_WINDOW_ACTION_RESIZE   2
+#define WINE_WAYLAND_WINDOW_ACTION_PENDING  1
+#define WINE_WAYLAND_WINDOW_ACTION_CLAIMED  2
+#define WINE_WAYLAND_WINDOW_ACTION_ISSUED   3
+#define WINE_WAYLAND_WINDOW_ACTION_REJECTED 4
+
 #define WINE_WAYLAND_BUFFER_FORMAT_BGRA8_UNORM 0x00000001
 #define WINE_WAYLAND_BUFFER_POOL_SLOTS 3
 #define WINE_WAYLAND_MAX_FRAME_CREDITS 16
@@ -4992,6 +5003,7 @@ enum inproc_sync_type
     unsigned int     state;
     unsigned int     scale_120;
     unsigned int     previous_state;
+    int              cancelled; /* owner-side resize cancellation, no native acknowledgement */
 @END
 
 /* Publish the logical state reached after applying a hosted configure. */
@@ -5141,4 +5153,28 @@ enum inproc_sync_type
     unsigned __int64 root_identity;
     unsigned __int64 root_generation;
     unsigned __int64 event_id;
+@END
+
+/* Admit an owner-thread move/resize against a held native button. A host
+ * claims it before issuing the connection-local request. ISSUED is not a
+ * compositor acceptance or completion notification. Edges use WMSZ_* values. */
+@REQ(manage_wayland_window_action)
+    user_handle_t    root;
+    unsigned int     operation;
+    unsigned int     command;
+    unsigned int     edge;
+    unsigned int     result;
+    unsigned int     backend_status;
+    unsigned __int64 host_epoch;
+    unsigned __int64 root_identity;
+    unsigned __int64 root_generation;
+    unsigned __int64 request_id;
+@REPLY
+    unsigned __int64 host_epoch;
+    unsigned __int64 request_id;
+    unsigned __int64 input_event_id;
+    unsigned int     command;
+    unsigned int     edge;
+    unsigned int     result;
+    unsigned int     backend_status;
 @END

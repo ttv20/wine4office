@@ -59,6 +59,7 @@ C_ASSERT(sizeof(struct winewayland_host_renderer_present) == 80);
 C_ASSERT(sizeof(struct winewayland_host_renderer_test) == 16);
 C_ASSERT(sizeof(struct winewayland_host_input_event) == 64);
 C_ASSERT(sizeof(struct winewayland_host_input_test) == 24);
+C_ASSERT(sizeof(struct winewayland_host_renderer_action) == 48);
 
 struct registry_seat
 {
@@ -292,6 +293,11 @@ struct renderer_root
     BOOL test_block_next_present;
     BOOL test_fail_next_frame_copy;
     BOOL input_authorized;
+    uint64_t action_request_id;
+    uint32_t action_serial;
+    uint32_t action_command;
+    uint32_t action_edge;
+    NTSTATUS action_status;
     BOOL pointer_reset_pending;
     BOOL keyboard_snapshot_pending;
     BOOL keyboard_focused;
@@ -389,6 +395,8 @@ struct vulkan_renderer
     struct xkb_keymap *xkb_keymap;
     struct xkb_state *xkb_state;
     uint32_t pointer_serial;
+    uint32_t pointer_left_serial;
+    BOOL pointer_left_pressed;
     int64_t pointer_axis_fixed[2];
     int32_t pointer_axis_remainder[2];
     uint32_t pointer_axis_time[2];
@@ -800,6 +808,7 @@ static void set_renderer_input_authorized(struct renderer_root *root, BOOL autho
     root->input_authorized = authorized;
     if (!authorized)
     {
+        if (renderer.pointer_root == root) renderer.pointer_left_pressed = FALSE;
         discard_renderer_input(root);
         root->pointer_reset_pending = FALSE;
         root->keyboard_focus_pending = root->keyboard_focused;
@@ -834,6 +843,8 @@ static void queue_pending_renderer_input(void)
 }
 
 static NTSTATUS get_renderer_input(void *args);
+static NTSTATUS validate_renderer_root_action(struct renderer_root *root,
+        const struct winewayland_host_renderer_action *params);
 
 static int32_t renderer_pointer_to_buffer(wl_fixed_t coordinate, uint32_t pixels,
         uint32_t logical)
@@ -866,6 +877,7 @@ static void renderer_pointer_enter(void *data, struct wl_pointer *pointer, uint3
     (void)data;
     (void)pointer;
     renderer.pointer_root = surface ? wl_surface_get_user_data(surface) : NULL;
+    renderer.pointer_left_pressed = FALSE;
     renderer.pointer_serial = serial;
     if (!renderer.pointer_root) return;
     event.type = WINEWAYLAND_HOST_INPUT_POINTER_MOTION;
@@ -880,6 +892,7 @@ static void leave_renderer_pointer_root(void)
     if (renderer.pointer_root && renderer.pointer_root->input_authorized)
         queue_renderer_input_reset(renderer.pointer_root, WINEWAYLAND_HOST_INPUT_RESET_BUTTONS);
     renderer.pointer_root = NULL;
+    renderer.pointer_left_pressed = FALSE;
 }
 
 static void renderer_pointer_leave(void *data, struct wl_pointer *pointer, uint32_t serial,
@@ -918,6 +931,11 @@ static void renderer_pointer_button(void *data, struct wl_pointer *pointer, uint
     (void)data;
     (void)pointer;
     renderer.pointer_serial = serial;
+    if (button == BTN_LEFT)
+    {
+        renderer.pointer_left_serial = serial;
+        renderer.pointer_left_pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
+    }
     event.type = WINEWAYLAND_HOST_INPUT_POINTER_BUTTON;
     event.serial = serial;
     event.time = time;
@@ -1255,6 +1273,7 @@ static NTSTATUS renderer_keyboard_enter_self_test(void)
     static const uint32_t expected_codes[] = {KEY_LEFTSHIFT, KEY_A, 0x011d};
     uint32_t key_data[] = {KEY_LEFTSHIFT, KEY_A, KEY_RIGHTCTRL, KEY_A};
     struct winewayland_host_input_event queued = {0}, dequeued;
+    struct winewayland_host_renderer_action action = {0};
     struct winewayland_host_input_event *saved_events, *event;
     struct renderer_root root = {0}, other_root = {0}, *pending_root = NULL, *pending_other = NULL;
     struct renderer_root *saved_pointer_root;
@@ -1263,6 +1282,8 @@ static NTSTATUS renderer_keyboard_enter_self_test(void)
     struct wl_array keys = {0};
     unsigned int saved_head, saved_count, i;
     BOOL saved_overflow;
+    BOOL saved_left_pressed;
+    uint32_t saved_left_serial;
     NTSTATUS status;
 
     if (!(saved_events = malloc(sizeof(renderer.input_events)))) return STATUS_NO_MEMORY;
@@ -1408,14 +1429,35 @@ static NTSTATUS renderer_keyboard_enter_self_test(void)
         renderer.input_head = renderer.input_count = 0;
         pending_root->keyboard_focused = TRUE;
         saved_pointer_root = renderer.pointer_root;
+        saved_left_pressed = renderer.pointer_left_pressed;
+        saved_left_serial = renderer.pointer_left_serial;
         renderer.pointer_root = pending_root;
+        pending_root->configured = TRUE;
+        renderer.pointer_left_pressed = TRUE;
+        renderer.pointer_left_serial = action.serial = 41;
+        if (validate_renderer_root_action(pending_root, &action)) status = STATUS_DATA_ERROR;
+        action.serial = 40;
+        if (validate_renderer_root_action(pending_root, &action) != STATUS_INVALID_DEVICE_STATE)
+            status = STATUS_DATA_ERROR;
+        action.serial = 41;
+        pending_root->maximized = TRUE;
+        if (validate_renderer_root_action(pending_root, &action) != STATUS_INVALID_DEVICE_STATE)
+            status = STATUS_DATA_ERROR;
+        pending_root->maximized = FALSE;
+        pending_root->remap_pending = TRUE;
+        if (validate_renderer_root_action(pending_root, &action) != STATUS_INVALID_DEVICE_STATE)
+            status = STATUS_DATA_ERROR;
+        pending_root->remap_pending = FALSE;
         leave_renderer_pointer_root();
-        if (renderer.pointer_root || !pending_root->keyboard_focused ||
+        if (renderer.pointer_root || renderer.pointer_left_pressed || !pending_root->keyboard_focused ||
+            validate_renderer_root_action(pending_root, &action) != STATUS_INVALID_DEVICE_STATE ||
             renderer.input_count != 1 ||
             renderer.input_events[0].type != WINEWAYLAND_HOST_INPUT_RESET ||
             renderer.input_events[0].flags != WINEWAYLAND_HOST_INPUT_RESET_BUTTONS)
             status = STATUS_DATA_ERROR;
         renderer.pointer_root = saved_pointer_root;
+        renderer.pointer_left_pressed = saved_left_pressed;
+        renderer.pointer_left_serial = saved_left_serial;
         for (i = 1; i < ARRAY_SIZE(renderer.input_events); ++i)
             queue_renderer_input(&other_root, &queued, FALSE);
         queue_renderer_input(&other_root, &queued, FALSE);
@@ -4280,6 +4322,67 @@ done:
     return status;
 }
 
+static NTSTATUS validate_renderer_root_action(struct renderer_root *root,
+        const struct winewayland_host_renderer_action *params)
+{
+    if (!root->input_authorized || renderer.pointer_root != root ||
+        !renderer.pointer_left_pressed || params->serial != renderer.pointer_left_serial ||
+        !root->configured || root->unmapped || root->unmap_callback || root->remap_pending ||
+        root->maximized || (root->toplevel_state &
+        (WINEWAYLAND_HOST_CONFIGURE_STATE_MAXIMIZED | WINEWAYLAND_HOST_CONFIGURE_STATE_FULLSCREEN)))
+        return STATUS_INVALID_DEVICE_STATE;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS perform_renderer_root_action(void *args)
+{
+    static const uint32_t edges[] =
+    {
+        XDG_TOPLEVEL_RESIZE_EDGE_NONE,
+        XDG_TOPLEVEL_RESIZE_EDGE_LEFT, XDG_TOPLEVEL_RESIZE_EDGE_RIGHT,
+        XDG_TOPLEVEL_RESIZE_EDGE_TOP, XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT,
+        XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT, XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM,
+        XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT, XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT,
+    };
+    struct winewayland_host_renderer_action *params = args;
+    struct renderer_root *root;
+    NTSTATUS status;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION || params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->root_identity || !params->root_generation || !params->request_id || params->reserved ||
+        (params->command != WINEWAYLAND_HOST_ACTION_MOVE && params->command != WINEWAYLAND_HOST_ACTION_RESIZE) ||
+        (params->command == WINEWAYLAND_HOST_ACTION_MOVE ? params->edge != 0 :
+         !params->edge || params->edge >= ARRAY_SIZE(edges)))
+        return STATUS_INVALID_PARAMETER;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation))) return STATUS_NOT_FOUND;
+    if (params->request_id < root->action_request_id) return STATUS_REVISION_MISMATCH;
+    if (params->request_id == root->action_request_id)
+    {
+        if (params->serial != root->action_serial || params->command != root->action_command ||
+            params->edge != root->action_edge) return STATUS_REVISION_MISMATCH;
+        return root->action_status;
+    }
+    status = validate_renderer_root_action(root, params);
+    if (!status && (!renderer.seat || !root->xdg_toplevel)) status = STATUS_DEVICE_NOT_READY;
+    if (!status)
+    {
+        /* Do not yield between the held-press check and the request on this
+         * connection. Success means issued, not accepted or completed. */
+        if (params->command == WINEWAYLAND_HOST_ACTION_MOVE)
+            xdg_toplevel_move(root->xdg_toplevel, renderer.seat, params->serial);
+        else
+            xdg_toplevel_resize(root->xdg_toplevel, renderer.seat, params->serial, edges[params->edge]);
+        if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN) status = STATUS_PORT_DISCONNECTED;
+    }
+    root->action_request_id = params->request_id;
+    root->action_serial = params->serial;
+    root->action_command = params->command;
+    root->action_edge = params->edge;
+    root->action_status = status;
+    return status;
+}
+
 static NTSTATUS hide_renderer_root(void *args)
 {
     struct winewayland_host_renderer_root_retire *params = args;
@@ -4293,6 +4396,7 @@ static NTSTATUS hide_renderer_root(void *args)
         return STATUS_INVALID_PARAMETER;
     if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
         return STATUS_NOT_FOUND;
+    if (renderer.pointer_root == root) renderer.pointer_left_pressed = FALSE;
     if ((status = poll_renderer_root_present(root))) return status;
     if (root->unmap_callback) return STATUS_PENDING;
     if (root->unmapped) return STATUS_SUCCESS;
@@ -5066,6 +5170,12 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     return STATUS_NOT_SUPPORTED;
 }
 
+static NTSTATUS perform_renderer_root_action(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS shell_self_test(void *args)
 {
     (void)args;
@@ -5190,6 +5300,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     get_renderer_input,
     test_renderer_input,
     update_renderer_root_snapshot,
+    perform_renderer_root_action,
 };
 
 #ifdef _WIN64
@@ -5213,6 +5324,7 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     get_renderer_input,
     test_renderer_input,
     update_renderer_root_snapshot,
+    perform_renderer_root_action,
 };
 #endif
 
