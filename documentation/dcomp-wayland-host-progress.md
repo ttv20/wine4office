@@ -1398,6 +1398,48 @@ Unsupported combinations return the complete root to the legacy local path.
   the focused canonical lifecycle. No task Wine remained; 56 GiB remained
   free. Physical compositor drag/capture testing remains open.
 
+## Configure callback ordering, 2026-09-13
+
+Confirmed through the owner thread's real `WM_ENTERSIZEMOVE` callback:
+while that callback pumped messages, a newer configure ran recursively and
+was acknowledged before the older handler resumed. The older handler then
+restored the wrong dimensions. The baseline emitted one enter and no exit,
+left the window at 110x90 instead of 118x98, and also allowed an automatic
+no-op acknowledgement to overtake a configure being applied.
+
+The server now retains one delivered configure separately from the latest
+pending configure. Nested pulls return pending without claiming another
+delivery. Completion records the state the owner actually applied, then
+rings the doorbell for the pending update. Undelivered requests cannot be
+acknowledged, and a changed delivered state is rejected. This adds bounded
+per-window state, not a growing configure queue or a callback on the host
+thread. No wire layout or protocol version changed.
+
+A delivered callback can outlive host replacement. Its completion releases
+only its own delivery and preserves the owner state needed by the next
+configure. It returns revision mismatch and cannot acknowledge a request in
+the new host epoch. The existing replacement fixture exercises this ordering.
+
+Verification: the baseline failed six targeted assertions. The final x64
+authority executable passed 1007 checks with zero failures, including the
+public callback, final rectangle, balanced resize notifications, no-op race,
+invalid acknowledgements and host replacement. The canonical build rebuilt
+wineserver and both PE test architectures; changed objects introduced no
+new warning. The existing server registry type-limits warning remains.
+The arbitrary i386 executable startup limitation is unchanged; no extra GPU
+or stress run was needed for this server-only fix. Source hashes matched the
+canonical task source. Personal Intel evidence is
+`artifacts/astra-configure-before-x64.log`,
+`artifacts/astra-configure-after-x64.log` and the matching
+`astra-configure-{before,after}-SHA256SUMS`. Opt-in was restored to zero, no
+task Wine remained, and 57 GiB was free. Interactive compositor move/resize
+is still a separate unfinished integration.
+
+The user selected **new Outlook** on 2026-09-13 for application-level
+topology and timing tests. Classic Microsoft 365 Outlook is not the target
+for those gates. This choice does not turn the existing synthetic fixtures
+into evidence of new Outlook support.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another

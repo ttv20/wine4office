@@ -2218,6 +2218,119 @@ static void test_host_input_reset( struct wayland_host_test_state *state,
     while (PeekMessageW( &msg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE ));
 }
 
+static struct
+{
+    struct wayland_host_test_state *state;
+    HANDLE command_event, result_event;
+    WNDPROC previous_proc;
+    unsigned int entered, exited;
+} configure_reentry;
+
+static LRESULT CALLBACK configure_reentry_proc( HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam )
+{
+    struct wayland_host_test_state *state = configure_reentry.state;
+    MSG msg;
+
+    if (message == WM_ENTERSIZEMOVE && !configure_reentry.entered++)
+    {
+        /* A real application callback can pump messages while the host posts
+         * the final resize. The older handler must finish before that update. */
+        state->configure_request_id = 7;
+        state->configure_width = 118;
+        state->configure_height = 98;
+        state->configure_state = 0;
+        ok( send_host_child_command( state, configure_reentry.command_event,
+                                    configure_reentry.result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+            "Timed out posting configure during WM_ENTERSIZEMOVE.\n" );
+        ok( !state->command_status, "Reentrant configure post returned %#lx.\n", state->command_status );
+        while (PeekMessageW( &msg, hwnd, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+    }
+    if (message == WM_EXITSIZEMOVE) ++configure_reentry.exited;
+    return CallWindowProcW( configure_reentry.previous_proc, hwnd, message, wparam, lparam );
+}
+
+static void test_configure_reentry( struct wayland_host_test_state *state,
+                                    HANDLE command_event, HANDLE result_event )
+{
+    HWND root = (HWND)(UINT_PTR)state->root;
+    struct wayland_configure_info configure;
+    UINT64 applied_id, applied_revision;
+    NTSTATUS status;
+    RECT rect;
+    MSG msg;
+
+    if (GetModuleHandleW( L"winewayland.drv" ))
+    {
+        memset( &configure_reentry, 0, sizeof(configure_reentry) );
+        configure_reentry.state = state;
+        configure_reentry.command_event = command_event;
+        configure_reentry.result_event = result_event;
+        configure_reentry.previous_proc = (WNDPROC)SetWindowLongPtrW( root, GWLP_WNDPROC,
+                (LONG_PTR)configure_reentry_proc );
+        state->configure_request_id = 6;
+        state->configure_width = 110;
+        state->configure_height = 90;
+        state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_RESIZING;
+        state->configure_scale_120 = 120;
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+            "Timed out posting first reentrant configure.\n" );
+        ok( !state->command_status, "First reentrant configure returned %#lx.\n", state->command_status );
+        while (PeekMessageW( &msg, root, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+        SetWindowLongPtrW( root, GWLP_WNDPROC, (LONG_PTR)configure_reentry.previous_proc );
+        ok( configure_reentry.entered == 1 && configure_reentry.exited == 1,
+            "Reentrant resize sent %u enters and %u exits.\n", configure_reentry.entered, configure_reentry.exited );
+        ok( GetWindowRect( root, &rect ) && rect.right - rect.left == 118 && rect.bottom - rect.top == 98,
+            "Reentrant resize left rectangle %ld,%ld-%ld,%ld.\n", rect.left, rect.top, rect.right, rect.bottom );
+        ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_GET_CONFIGURE_RESULT ),
+            "Timed out reading reentrant configure result.\n" );
+        ok( !state->command_status && state->configure_applied_id == 7 &&
+            state->configure_width == 118 && state->configure_height == 98 && !state->configure_state,
+            "Reentrant result returned %#lx, applied %s, %lux%lu, state %#lx.\n",
+            state->command_status, wine_dbgstr_longlong( state->configure_applied_id ),
+            state->configure_width, state->configure_height, state->configure_state );
+    }
+
+    state->configure_request_id = 8;
+    state->configure_width = 120;
+    state->configure_height = 100;
+    state->configure_state = 0;
+    state->configure_scale_120 = 120;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+        "Timed out posting in-flight configure.\n" );
+    status = get_window_configure( root, &configure );
+    ok( !status && configure.request_id == 8, "In-flight configure pull returned %#lx.\n", status );
+    state->configure_request_id = 9;
+    state->configure_width = state->configure_height = 0;
+    state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+        "Timed out posting no-op behind in-flight configure.\n" );
+    ok( !state->command_status && state->configure_applied_id < 8,
+        "In-flight configure was overtaken, status %#lx, applied %s.\n",
+        state->command_status, wine_dbgstr_longlong( state->configure_applied_id ) );
+    status = get_window_configure( root, &configure );
+    ok( status == STATUS_PENDING && !configure.request_id,
+        "Nested configure pull returned %#lx, id %s.\n", status, wine_dbgstr_longlong( configure.request_id ) );
+    status = set_window_configure_applied( root, state->host_epoch, 9, 0, 0,
+            WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED, &applied_id, &applied_revision );
+    ok( status == STATUS_INVALID_DEVICE_STATE && applied_id < 8,
+        "Undelivered configure apply returned %#lx, id %s.\n", status, wine_dbgstr_longlong( applied_id ) );
+    status = set_window_configure_applied( root, state->host_epoch, 8, 120, 100,
+            WINE_WAYLAND_CONFIGURE_STATE_RESIZING, &applied_id, &applied_revision );
+    ok( status == STATUS_REVISION_MISMATCH && applied_id < 8,
+        "Changed delivered state returned %#lx, id %s.\n", status, wine_dbgstr_longlong( applied_id ) );
+    status = set_window_configure_applied( root, state->host_epoch, 8, 120, 100, 0,
+            &applied_id, &applied_revision );
+    ok( !status && applied_id == 8, "In-flight configure apply returned %#lx, id %s.\n",
+        status, wine_dbgstr_longlong( applied_id ) );
+    status = get_window_configure( root, &configure );
+    ok( !status && configure.request_id == 9 && !configure.previous_state,
+        "Deferred configure pull returned %#lx, id %s, previous %#lx.\n",
+        status, wine_dbgstr_longlong( configure.request_id ), configure.previous_state );
+    status = set_window_configure_applied( root, state->host_epoch, 9, 0, 0,
+            WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED, &applied_id, &applied_revision );
+    ok( !status && applied_id == 9, "Deferred configure apply returned %#lx.\n", status );
+}
+
 static void test_host_registration( const char *program, const char *test_name )
 {
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
@@ -3192,6 +3305,8 @@ static void test_host_registration( const char *program, const char *test_name )
             applied_rect.bottom - applied_rect.top );
     }
     else win_skip( "winewayland.drv is not active; skipping owner-thread configure dispatch.\n" );
+
+    test_configure_reentry( state, command_event, result_event );
 
     ok( send_host_child_command( state, command_event, result_event,
                                 HOST_CHILD_COMMAND_GET_SCENE ),
@@ -5299,6 +5414,15 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( !state->command_status && (GetAsyncKeyState( VK_LBUTTON ) & 0x8000),
         "Host-exit pointer down returned %#lx without pressed state.\n",
         state->command_status );
+    state->configure_request_id = 10;
+    state->configure_width = 100;
+    state->configure_height = 82;
+    state->configure_state = WINE_WAYLAND_CONFIGURE_STATE_RESIZING;
+    state->configure_scale_120 = 120;
+    ok( send_host_child_command( state, command_event, result_event, HOST_CHILD_COMMAND_POST_CONFIGURE ),
+        "Timed out posting configure before host replacement.\n" );
+    status = get_window_configure( root, &configure );
+    ok( !status && configure.request_id == 10, "Pre-replacement configure pull returned %#lx.\n", status );
     stop_host_child( state, command_event, result_event, &process );
     status = get_host_focus( root, &focused );
     ok( !focused && (!status || status == STATUS_NOT_FOUND),
@@ -5400,13 +5524,24 @@ static void test_host_registration( const char *program, const char *test_name )
     ok( status == STATUS_REVISION_MISMATCH,
         "Old-epoch configure apply returned %#lx.\n", status );
     status = get_window_configure( root, &configure );
+    ok( status == STATUS_PENDING && !configure.request_id,
+        "Replacement overtook owner callback, status %#lx, id %s.\n",
+        status, wine_dbgstr_longlong( configure.request_id ) );
+    status = set_window_configure_applied( root, old_epoch, 10, 100, 82,
+            WINE_WAYLAND_CONFIGURE_STATE_RESIZING, &configure_applied_id,
+            &configure_applied_revision );
+    ok( status == STATUS_REVISION_MISMATCH && !configure_applied_id,
+        "Old delivery acknowledged replacement, status %#lx, id %s.\n",
+        status, wine_dbgstr_longlong( configure_applied_id ) );
+    status = get_window_configure( root, &configure );
     ok( !status && configure.host_epoch == state->host_epoch &&
         configure.request_id == 1 && configure.width == 100 && configure.height == 82 &&
-        configure.state == WINE_WAYLAND_CONFIGURE_STATE_TILED,
-        "Replacement-epoch configure returned %#lx, epoch %s, id %s, %lux%lu, state %#lx.\n",
+        configure.state == WINE_WAYLAND_CONFIGURE_STATE_TILED &&
+        configure.previous_state == WINE_WAYLAND_CONFIGURE_STATE_RESIZING,
+        "Replacement-epoch configure returned %#lx, epoch %s, id %s, %lux%lu, state %#lx, previous %#lx.\n",
         status, wine_dbgstr_longlong( configure.host_epoch ),
         wine_dbgstr_longlong( configure.request_id ), configure.width,
-        configure.height, configure.state );
+        configure.height, configure.state, configure.previous_state );
     status = set_window_configure_applied( root, state->host_epoch, 1, 100, 82,
             WINE_WAYLAND_CONFIGURE_STATE_TILED, &configure_applied_id,
             &configure_applied_revision );

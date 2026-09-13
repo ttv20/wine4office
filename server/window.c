@@ -200,6 +200,10 @@ struct window
     unsigned __int64 wayland_configure_request_id;
     unsigned __int64 wayland_configure_applied_id;
     unsigned __int64 wayland_configure_applied_revision;
+    unsigned __int64 wayland_configure_delivered_epoch;
+    unsigned __int64 wayland_configure_delivered_id;
+    unsigned int     wayland_configure_delivered_state;
+    unsigned int     wayland_configure_owner_state;
     unsigned __int64 wayland_native_lease_host_epoch;
     unsigned __int64 wayland_native_lease_scene_generation;
     unsigned __int64 wayland_native_lease_request_id;
@@ -893,6 +897,10 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->wayland_configure_request_id = 0;
     win->wayland_configure_applied_id = 0;
     win->wayland_configure_applied_revision = 0;
+    win->wayland_configure_delivered_epoch = 0;
+    win->wayland_configure_delivered_id = 0;
+    win->wayland_configure_delivered_state = 0;
+    win->wayland_configure_owner_state = 0;
     win->wayland_configure_width = 0;
     win->wayland_configure_height = 0;
     win->wayland_configure_state = 0;
@@ -5665,6 +5673,8 @@ DECL_HANDLER(post_wayland_window_close)
 static void reset_wayland_window_configure( struct window *root,
                                             unsigned __int64 host_epoch )
 {
+    /* An owner callback can outlive the native host. Keep its delivery and
+     * the last owner-applied state until it returns, even across epochs. */
     root->wayland_configure_host_epoch = host_epoch;
     root->wayland_configure_request_id = 0;
     root->wayland_configure_applied_id = 0;
@@ -5677,6 +5687,18 @@ static void reset_wayland_window_configure( struct window *root,
     root->wayland_configure_applied_height = 0;
     root->wayland_configure_applied_state = 0;
     root->wayland_configure_message_posted = 0;
+}
+
+static void post_wayland_window_configure_message( struct window *root )
+{
+    if (!root->wayland_configure_request_id || root->wayland_configure_delivered_id ||
+        root->wayland_configure_applied_id == root->wayland_configure_request_id ||
+        root->wayland_configure_message_posted || !root->desktop->wayland_host_ready ||
+        root->wayland_configure_host_epoch != root->desktop->wayland_host_epoch)
+        return;
+
+    post_message( root->handle, WM_WINE_WAYLAND_HOST_CONFIGURE, 0, 0 );
+    if (!get_error()) root->wayland_configure_message_posted = 1;
 }
 
 DECL_HANDLER(post_wayland_window_configure)
@@ -5742,7 +5764,8 @@ DECL_HANDLER(post_wayland_window_configure)
     if (root->wayland_configure_applied_id != root->wayland_configure_request_id &&
         !root->wayland_configure_width && !root->wayland_configure_height &&
         !(root->wayland_configure_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
-        !(root->wayland_configure_applied_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
+        !(root->wayland_configure_owner_state & ~WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED) &&
+        !root->wayland_configure_delivered_id &&
         !root->wayland_configure_message_posted)
     {
         root->wayland_configure_applied_id = root->wayland_configure_request_id;
@@ -5750,17 +5773,13 @@ DECL_HANDLER(post_wayland_window_configure)
         root->wayland_configure_applied_width = 0;
         root->wayland_configure_applied_height = 0;
         root->wayland_configure_applied_state = root->wayland_configure_state;
+        root->wayland_configure_owner_state = root->wayland_configure_state;
         signal_wayland_host_work( root->desktop );
     }
     reply->state_revision = root->wayland_window_state_revision;
     reply->applied_id = root->wayland_configure_applied_id;
     reply->applied_revision = root->wayland_configure_applied_revision;
-    if (root->wayland_configure_applied_id != root->wayland_configure_request_id &&
-        !root->wayland_configure_message_posted)
-    {
-        post_message( root->handle, WM_WINE_WAYLAND_HOST_CONFIGURE, 0, 0 );
-        if (!get_error()) root->wayland_configure_message_posted = 1;
-    }
+    post_wayland_window_configure_message( root );
 }
 
 DECL_HANDLER(get_wayland_window_configure)
@@ -5797,13 +5816,21 @@ DECL_HANDLER(get_wayland_window_configure)
         set_error( STATUS_NOT_FOUND );
         return;
     }
+    if (root->wayland_configure_delivered_id)
+    {
+        set_error( STATUS_PENDING );
+        return;
+    }
     reply->host_epoch = root->wayland_configure_host_epoch;
     reply->request_id = root->wayland_configure_request_id;
     reply->width = root->wayland_configure_width;
     reply->height = root->wayland_configure_height;
     reply->state = root->wayland_configure_state;
     reply->scale_120 = root->wayland_configure_scale_120;
-    reply->previous_state = root->wayland_configure_applied_state;
+    reply->previous_state = root->wayland_configure_owner_state;
+    root->wayland_configure_delivered_epoch = root->wayland_configure_host_epoch;
+    root->wayland_configure_delivered_id = root->wayland_configure_request_id;
+    root->wayland_configure_delivered_state = root->wayland_configure_state;
     root->wayland_configure_message_posted = 0;
 }
 
@@ -5813,6 +5840,7 @@ DECL_HANDLER(set_wayland_window_configure_applied)
             WINE_WAYLAND_CONFIGURE_STATE_RESIZING | WINE_WAYLAND_CONFIGURE_STATE_TILED |
             WINE_WAYLAND_CONFIGURE_STATE_FULLSCREEN | WINE_WAYLAND_CONFIGURE_STATE_ACTIVATED;
     struct window *root;
+    int delivered;
 
     reply->applied_id = 0;
     reply->state_revision = 0;
@@ -5834,10 +5862,27 @@ DECL_HANDLER(set_wayland_window_configure_applied)
     }
     reply->applied_id = root->wayland_configure_applied_id;
     reply->state_revision = root->wayland_window_state_revision;
+    delivered = req->request_id && req->request_id == root->wayland_configure_delivered_id &&
+                req->host_epoch == root->wayland_configure_delivered_epoch;
+    if (delivered)
+    {
+        if (req->state != root->wayland_configure_delivered_state)
+        {
+            set_error( STATUS_REVISION_MISMATCH );
+            return;
+        }
+        root->wayland_configure_owner_state = req->state;
+        root->wayland_configure_delivered_id = 0;
+        root->wayland_configure_delivered_epoch = 0;
+        root->wayland_configure_delivered_state = 0;
+    }
     if (!root->desktop->wayland_host_process || !root->desktop->wayland_host_ready ||
         req->host_epoch != root->desktop->wayland_host_epoch ||
         req->host_epoch != root->wayland_configure_host_epoch)
     {
+        /* The old callback completed, but cannot acknowledge a replacement
+         * host's request. Wake its deferred configure using the owner state. */
+        if (delivered) post_wayland_window_configure_message( root );
         set_error( STATUS_REVISION_MISMATCH );
         return;
     }
@@ -5846,7 +5891,6 @@ DECL_HANDLER(set_wayland_window_configure_applied)
         set_error( STATUS_REVISION_MISMATCH );
         return;
     }
-    if (req->request_id < root->wayland_configure_request_id) return;
     if (root->wayland_configure_applied_id == req->request_id)
     {
         reply->state_revision = root->wayland_configure_applied_revision;
@@ -5854,6 +5898,14 @@ DECL_HANDLER(set_wayland_window_configure_applied)
             req->height != root->wayland_configure_applied_height ||
             req->state != root->wayland_configure_applied_state)
             set_error( STATUS_REVISION_MISMATCH );
+        else
+            post_wayland_window_configure_message( root );
+        return;
+    }
+    if (!delivered)
+    {
+        if (req->request_id == root->wayland_configure_request_id)
+            set_error( STATUS_INVALID_DEVICE_STATE );
         return;
     }
     root->wayland_configure_applied_id = req->request_id;
@@ -5864,6 +5916,7 @@ DECL_HANDLER(set_wayland_window_configure_applied)
     reply->applied_id = root->wayland_configure_applied_id;
     reply->state_revision = root->wayland_configure_applied_revision;
     signal_wayland_host_work( root->desktop );
+    post_wayland_window_configure_message( root );
 }
 
 DECL_HANDLER(get_wayland_window_configure_result)
