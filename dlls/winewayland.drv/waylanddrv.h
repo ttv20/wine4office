@@ -456,7 +456,7 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
 void wayland_reapply_cursor_clipping(HWND hwnd);
 void wayland_restack_after_surface_flush(HWND owner);
-void wayland_window_surface_presented(HWND hwnd);
+BOOL wayland_window_surface_presented(HWND hwnd);
 void wayland_window_init(void);
 
 /**********************************************************************

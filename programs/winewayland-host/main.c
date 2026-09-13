@@ -29,7 +29,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 136);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 160);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -830,6 +830,12 @@ struct host_renderer_root
     uint64_t scene_generation;
     uint64_t scene_applied_generation;
     uint64_t present_scene_generation;
+    uint64_t present_geometry_revision;
+    uint64_t present_snapshot_revision;
+    uint64_t present_configure_id;
+    uint64_t empty_geometry_revision;
+    uint64_t empty_snapshot_revision;
+    uint64_t empty_configure_id;
     uint64_t geometry_revision;
     uint64_t present_contributor_id;
     uint64_t present_frame_id;
@@ -1857,6 +1863,9 @@ static void clear_root_present(struct host_renderer_root *root)
 {
     root->present_active = FALSE;
     root->present_scene_generation = 0;
+    root->present_geometry_revision = 0;
+    root->present_snapshot_revision = 0;
+    root->present_configure_id = 0;
     root->present_contributor_id = 0;
     root->present_frame_id = 0;
     root->present_renderer_pool_generation = 0;
@@ -1878,6 +1887,10 @@ static void set_root_present(struct host_renderer_root *root, uint64_t contribut
 {
     root->present_active = TRUE;
     root->present_scene_generation = root->scene_generation;
+    root->present_geometry_revision = root->geometry_revision;
+    root->present_snapshot_revision = root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_revision : 0;
+    root->present_configure_id = root->configure_request_id;
     root->present_contributor_id = contributor_id;
     root->present_frame_id = frame_id;
     root->present_renderer_pool_generation = renderer_pool_generation;
@@ -1934,6 +1947,22 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
         root->scene_applied_generation = root->scene_generation;
         if (root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY && active_fixture_startup)
             InterlockedIncrement((LONG *)&active_fixture_startup->empty_scenes_applied);
+    }
+    if (result == WINE_WAYLAND_FRAME_RESULT_PRESENTED &&
+        root->present_scene_generation == root->scene_generation &&
+        root->scene_disposition == WINE_WAYLAND_SCENE_EMPTY && !root->present_frame_id)
+    {
+        /* Only this immutable submission is applied. A newer snapshot or
+         * geometry received during the job must still schedule another one. */
+        root->empty_geometry_revision = root->present_geometry_revision;
+        root->empty_snapshot_revision = root->present_snapshot_revision;
+        root->empty_configure_id = root->present_configure_id;
+        if (active_fixture_startup)
+        {
+            active_fixture_startup->empty_frame_width = root->present_width;
+            active_fixture_startup->empty_frame_height = root->present_height;
+            InterlockedIncrement((LONG *)&active_fixture_startup->empty_frames_presented);
+        }
     }
     if (root->restore_present && result == WINE_WAYLAND_FRAME_RESULT_PRESENTED)
     {
@@ -2329,12 +2358,16 @@ static NTSTATUS process_root_frame_snapshot(struct host_renderer_root *root,
     if (status == STATUS_NOT_FOUND || status == STATUS_NO_MORE_ENTRIES)
         return STATUS_SUCCESS;
     if (status) return status;
+    mapping = wine_server_ptr_handle(snapshot.mapping);
     if (snapshot.geometry_revision != state->geometry_revision)
     {
-        root->snapshot_cursor = snapshot.revision;
-        return STATUS_SUCCESS;
+        /* A newer snapshot can race our earlier geometry query. Leave it
+         * available for the next scan; only older geometry is obsolete.
+         * Both cases still own the handle returned by the server. */
+        if (snapshot.geometry_revision < state->geometry_revision)
+            root->snapshot_cursor = snapshot.revision;
+        goto done;
     }
-    mapping = wine_server_ptr_handle(snapshot.mapping);
     if (!(bits = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0)))
     {
         status = STATUS_UNSUCCESSFUL;
@@ -2381,16 +2414,61 @@ done:
     return status;
 }
 
+static NTSTATUS test_host_frame_snapshot_race(struct host_renderer_root *root, uint64_t host_epoch,
+        const struct host_window_state *state)
+{
+    struct host_renderer_root newer = *root, older = *root;
+    struct host_window_state observed = *state;
+    struct host_frame_snapshot_info snapshot;
+    OBJECT_BASIC_INFORMATION before, after;
+    HANDLE mapping;
+    NTSTATUS status;
+
+    if (!state->geometry_revision || state->geometry_revision == UINT64_MAX)
+        return STATUS_INVALID_PARAMETER;
+    newer.snapshot_cursor = older.snapshot_cursor = 0;
+    newer.present_active = older.present_active = FALSE;
+    if ((status = get_host_frame_snapshot(root->root, host_epoch, 0, &snapshot))) return status;
+    mapping = wine_server_ptr_handle(snapshot.mapping);
+    /* ProcessHandleCount is a Wine stub. Query this real section's handle
+     * count while pinning it, rather than accepting that stub's zero. */
+    if ((status = NtQueryObject(mapping, ObjectBasicInformation, &before, sizeof(before), NULL))) goto done;
+
+    /* A real server snapshot can be newer than an earlier state query, or
+     * older than a geometry update whose paint has not been published yet.
+     * Exercise both observations without changing the live renderer root. */
+    observed.geometry_revision = state->geometry_revision - 1;
+    if ((status = process_root_frame_snapshot(&newer, host_epoch, &observed))) goto done;
+    observed.geometry_revision = state->geometry_revision + 1;
+    if ((status = process_root_frame_snapshot(&older, host_epoch, &observed))) goto done;
+    if ((status = NtQueryObject(mapping, ObjectBasicInformation, &after, sizeof(after), NULL))) goto done;
+    active_fixture_startup->frame_snapshot_handles_before = before.HandleCount;
+    active_fixture_startup->frame_snapshot_handles_after = after.HandleCount;
+    status = before.HandleCount == after.HandleCount && !newer.snapshot_cursor &&
+            older.snapshot_cursor == root->snapshot_cursor ?
+            STATUS_SUCCESS : STATUS_DATA_ERROR;
+done:
+    CloseHandle(mapping);
+    return status;
+}
+
 static NTSTATUS process_empty_scene(struct host_renderer_root *root, uint64_t host_epoch,
         const struct host_root_info *root_info, const struct host_window_state *state,
         const struct host_configure_result *configure)
 {
     struct winewayland_host_renderer_present present;
     struct winewayland_host_renderer_root sync;
+    uint64_t snapshot_revision = root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_revision : 0;
     uint32_t width, height;
     NTSTATUS status;
 
-    if (root->scene_applied_generation == root->scene_generation || root->present_active)
+    if (root->present_active || (root->frame_snapshot_required && !snapshot_revision))
+        return STATUS_SUCCESS;
+    if (root->scene_applied_generation == root->scene_generation &&
+        root->empty_geometry_revision == root->geometry_revision &&
+        root->empty_snapshot_revision == snapshot_revision &&
+        (!root->configure_request_id || root->empty_configure_id == root->configure_request_id))
         return STATUS_SUCCESS;
     width = root->snapshot_revision &&
             root->snapshot_geometry_revision == root->geometry_revision ?
@@ -2595,6 +2673,10 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
     if ((status = process_root_frame_snapshot(renderer_root, host_epoch, &window_state)))
         return status;
+    if (active_fixture_startup && active_fixture_startup->frame_snapshot_test_status == STATUS_PENDING &&
+        renderer_root->snapshot_revision && renderer_root->snapshot_geometry_revision == window_state.geometry_revision)
+        InterlockedExchange((LONG *)&active_fixture_startup->frame_snapshot_test_status,
+                test_host_frame_snapshot_race(renderer_root, host_epoch, &window_state));
     if ((renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
          (renderer_root->native_lease_state == WINE_WAYLAND_NATIVE_LEASE_RETURNING_LOCAL &&
           renderer_root->native_lease_action == WINE_WAYLAND_NATIVE_LEASE_ACTION_RETIRE_HOST)) &&
@@ -3285,6 +3367,86 @@ done:
     return hr;
 }
 
+static BOOL wait_dcomp_empty_frame(HWND window, struct winewayland_host_startup *startup,
+        uint32_t previous_count, UINT width, UINT height, DWORD timeout)
+{
+    ULONGLONG deadline = GetTickCount64() + timeout;
+
+    while (GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        if (InterlockedCompareExchange((LONG *)&startup->empty_frames_presented, 0, 0) > previous_count &&
+            (!width || (startup->empty_frame_width == width && startup->empty_frame_height == height)))
+            return TRUE;
+        Sleep(20);
+    }
+    return FALSE;
+}
+
+static BOOL test_dcomp_empty_frame(HWND window, IDCompositionDevice *device, IDCompositionTarget *target,
+        struct winewayland_host_startup *startup)
+{
+    uint32_t previous_frames, previous_snapshots, content_frames;
+    ULONGLONG deadline;
+    RECT bounds;
+
+    InterlockedExchange((LONG *)&startup->frame_snapshot_test_status, STATUS_PENDING);
+    deadline = GetTickCount64() + 3000;
+    while (InterlockedCompareExchange((LONG *)&startup->frame_snapshot_test_status, 0, 0) == STATUS_PENDING &&
+           GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        Sleep(20);
+    }
+    printf("frame_snapshot_race=%s status=%#x handles_before=%u handles_after=%u\n",
+            startup->frame_snapshot_test_status ? "failed" : "passed", startup->frame_snapshot_test_status,
+            startup->frame_snapshot_handles_before, startup->frame_snapshot_handles_after);
+    if (startup->frame_snapshot_test_status) return FALSE;
+    if (FAILED(IDCompositionTarget_SetRoot(target, NULL)) || FAILED(IDCompositionDevice_Commit(device)) ||
+        !wait_dcomp_empty_frame(window, startup, 0, 0, 0, 3000))
+        return FALSE;
+    content_frames = InterlockedCompareExchange((LONG *)&startup->presented_frames, 0, 0);
+    previous_frames = InterlockedCompareExchange((LONG *)&startup->empty_frames_presented, 0, 0);
+    previous_snapshots = InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0);
+    SetWindowTextW(window, L"DComp host empty repaint");
+    RedrawWindow(window, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+    if (!wait_dcomp_empty_frame(window, startup, previous_frames, 0, 0, 3000) ||
+        InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0) <= previous_snapshots)
+    {
+        printf("dcomp_empty_frame=failed repaint outputs=%u snapshots=%u previous_outputs=%u previous_snapshots=%u\n",
+                startup->empty_frames_presented, startup->frame_snapshots, previous_frames, previous_snapshots);
+        return FALSE;
+    }
+    previous_frames = InterlockedCompareExchange((LONG *)&startup->empty_frames_presented, 0, 0);
+    if (!GetWindowRect(window, &bounds) ||
+        !SetWindowPos(window, NULL, 0, 0, bounds.right - bounds.left + 32, bounds.bottom - bounds.top + 16,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER) ||
+        !wait_dcomp_empty_frame(window, startup, previous_frames, bounds.right - bounds.left + 32,
+                bounds.bottom - bounds.top + 16, 3000) ||
+        !GetWindowRect(window, &bounds) || startup->empty_frame_width != bounds.right - bounds.left ||
+        startup->empty_frame_height != bounds.bottom - bounds.top)
+    {
+        printf("dcomp_empty_frame=failed resize outputs=%u width=%u height=%u\n",
+                startup->empty_frames_presented, startup->empty_frame_width, startup->empty_frame_height);
+        return FALSE;
+    }
+    previous_frames = InterlockedCompareExchange((LONG *)&startup->empty_frames_presented, 0, 0);
+    previous_snapshots = InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0);
+    deadline = GetTickCount64() + 1000;
+    while (GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        Sleep(20);
+    }
+    if (startup->empty_frames_presented - previous_frames > 1 ||
+        startup->frame_snapshots - previous_snapshots > 1 || startup->presented_frames != content_frames)
+        return FALSE;
+    printf("dcomp_empty_frame=passed outputs=%u width=%u height=%u idle_outputs=%u idle_snapshots=%u no_producer_present=passed\n",
+            startup->empty_frames_presented, startup->empty_frame_width, startup->empty_frame_height,
+            startup->empty_frames_presented - previous_frames, startup->frame_snapshots - previous_snapshots);
+    return TRUE;
+}
+
 struct dcomp_interactive_state
 {
     unsigned int enters, exits;
@@ -3325,6 +3487,7 @@ enum dcomp_pipeline_flags
     DCOMP_TEST_LOCAL = 0x80,
     DCOMP_TEST_INTERACTIVE = 0x100,
     DCOMP_TEST_INTERACTIVE_RESIZE = 0x200,
+    DCOMP_TEST_EMPTY_FRAME = 0x400,
 };
 
 static int test_dcomp_pipeline(unsigned int flags)
@@ -4036,6 +4199,12 @@ static int test_dcomp_pipeline(unsigned int flags)
         printf("dcomp_input=passed key_down=1 key_up=1\n");
     }
 
+    if (flags & DCOMP_TEST_EMPTY_FRAME)
+    {
+        ret = test_dcomp_empty_frame(window, dcomp_device, target, startup) ? 0 : 7;
+        goto done;
+    }
+
     if (interactive_test)
     {
         ULONGLONG deadline = GetTickCount64() + 10000;
@@ -4462,6 +4631,8 @@ int wmain(int argc, WCHAR **argv)
         return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_INTERACTIVE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-interactive-resize-test"))
         return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_INTERACTIVE | DCOMP_TEST_INTERACTIVE_RESIZE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-empty-frame-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_EMPTY_FRAME);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
         return test_dcomp_pipeline(DCOMP_TEST_MULTI_ROOT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
@@ -4489,7 +4660,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-empty-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }

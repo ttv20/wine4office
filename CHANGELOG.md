@@ -17,6 +17,8 @@
 - Route experimental hosted move and resize requests through the native pointer connection.
 - Cancel Windows resize state when a hosted window is hidden or loses native ownership.
 - Stop repeatedly uploading unchanged window frames in the experimental Wayland host.
+- Repaint and resize hosted window frames after DirectComposition content is removed.
+- Keep newer hosted frame snapshots available during resize races and release skipped snapshot handles.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

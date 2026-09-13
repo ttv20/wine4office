@@ -43,6 +43,12 @@ new backend presentation. Both fixtures check that software frame snapshots
 stop growing during the last idle second. A native shell request by itself
 does not prove acceptance, final Windows position or scanout.
 
+`--dcomp-empty-frame-test` needs no input helper. It removes the DComp root,
+repaints the title/frame and resizes the window without another producer
+Present. It also checks section-handle cleanup and snapshot availability
+when frame and geometry observations race. Use the same isolated prefix,
+opt-in and bounded outer timeout.
+
 Restore the test opt-in and stop only the explicitly disposable test prefix's
 Wine processes in the caller's exit trap, using that runner's `wineserver -k`
 and a bounded `wineserver -w`. Retain logs and binary hashes. Do not stop the

@@ -1573,11 +1573,69 @@ Earlier failing fixture logs remain alongside them. The helper and usage
 notes are in `tools/wayland-host-test/`.
 The hide/restore result is `artifacts/astra-flush-frame-regression-x64.log`.
 
-Frame-only changes without a producer Present, especially after an Empty
-scene, still need their own submission path. The current Empty handler
-short-circuits once the scene generation is applied, and the guest's DComp
-property is removed when content is cleared. This is separate from fixing
-the repeated successful HostedContent publication above.
+The following change addresses frame-only Empty updates. Repainting a frame
+while retaining HostedContent without a producer Present remains separate
+from fixing repeated successful snapshot publication.
+
+## Empty frame updates and snapshot races, 2026-09-13
+
+Confirmed two reasons Empty windows did not repaint after `SetRoot(NULL)`:
+the guest stopped publishing snapshots when the DComp property disappeared,
+and the host stopped scheduling output once that scene generation had been
+applied. The new fixture failed on that implementation with one uploaded
+snapshot and one Empty output, unchanged after a title repaint.
+
+The driver now also uses its acknowledged native-suppression state to keep
+publishing frame snapshots. The private property remains useful during
+preparation but is not the lifetime of the hosted window. Failed publication
+keeps dirty bounds even when a preparing local window could commit locally.
+The host records the geometry, snapshot and configure IDs of each submitted
+Empty output. Only its successful completion advances those applied IDs.
+A newer frame or configure schedules another bounded job; unchanged state
+does not. Required frame pixels must match current geometry before that job
+can replace the old output.
+
+Review also found that a snapshot/state-query race leaked the section handle
+returned by wineserver. Worse, a snapshot newer than the earlier window-state
+query advanced the snapshot cursor, preventing the next scan from reading it
+after catching up to that geometry. Both mismatch paths now close the acquired
+handle; only an older snapshot advances the cursor. Newer snapshots remain
+available for the next scan.
+
+The regression uses the real snapshot request and both stale-state directions
+against a pinned section, without modifying the live renderer root. The old
+code failed with the section's handle count increasing from one to three;
+the fix passed with one before and one after and the expected snapshot cursors.
+The test uses `NtQueryObject`, not Wine's stubbed `ProcessHandleCount`. Initial
+process-counter instrumentation and its missing i386 declaration were rejected
+before making a resource claim.
+
+The final x64 fixture passed initial clear, title/frame repaint and resize to
+360x235 with three Empty outputs and no additional producer Present. Its idle
+second produced zero snapshots and zero additional outputs. The existing
+input/fallback/rehost fixture also passed six presentations and all nine input
+events, with three host activations and two local activations. The final i386
+registration fixture passed the updated shared startup record. Both PE
+architectures, the host Unix library and affected driver rebuilt; final source
+hashes matched the canonical task source. Server protocol remains 1004 and
+renderer ABI remains 16. Startup fixture ABI is now 10, 160 bytes.
+
+Evidence under the personal Intel task directory:
+`artifacts/astra-empty-repaint-before-x64.log`,
+`artifacts/astra-empty-repaint-{empty-frame,pipeline-input}-after-x64.log`,
+`artifacts/astra-snapshot-section-race-{before,after}-x64.log`,
+`artifacts/astra-empty-final-registration-i386.log` and
+`artifacts/astra-empty-final-SHA256SUMS`.
+The final prefix audit found zero task Wine processes and 57 GiB free.
+Existing runners, prefixes, compositor and evidence were retained.
+
+Read-only Outlook inventory also located the new Outlook executable in the
+assigned Radeon Office environment at
+`/workspace/home/.wine4office/drive_c/Program Files/WindowsApps/Microsoft.OutlookForWindows_1.2026.728.100_x64__8wekyb3d8bbwe/olk.exe`.
+It was not launched. The environment's selected main runner is based on
+`347abf611ff6`, but an existing older task wineserver uses
+`/home/tester/.wine4office`; resolve whether that names the same prefix before
+attempting another runner there. Preserve that existing environment.
 
 ## Developer activation and reproduction
 
@@ -1622,4 +1680,4 @@ deployed binary hashes with each result. Native i386 host self-tests can use
 the explicit `i386-windows/winewayland-host.exe` path; the separate i386
 guest-window prefix initialization limitation above still applies.
 The current host PE/Unix pair uses renderer ABI 16, with the root record still
-392 bytes and startup fixture ABI 9 still 136 bytes.
+392 bytes and startup fixture ABI 10 now 160 bytes.

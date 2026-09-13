@@ -503,7 +503,9 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
                  !NtUserGetProp(window_surface->hwnd, dcomp_background_prop) &&
                  !NtUserGetProp(window_surface->hwnd, dcomp_caption_overlay_prop);
     dcomp_hosted = !!NtUserGetProp(window_surface->hwnd, dcomp_hosted_frame_prop);
-    wayland_window_surface_presented(window_surface->hwnd);
+    /* Empty scenes remove the DComp property but retain the hosted window.
+     * Its frame still belongs to the host, including after SetRoot(NULL). */
+    dcomp_hosted |= wayland_window_surface_presented(window_surface->hwnd);
     window_surface_lock(window_surface);
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
                                                rect->left + dirty->right, rect->top + dirty->bottom);
@@ -598,6 +600,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
 
     flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region,
                                           frame_published, &reapply_clip, &popup_restack_owner);
+    if (dcomp_hosted && !frame_published) flushed = FALSE;
     if (reapply_clip) InterlockedExchange(&wws->reapply_clip, TRUE);
     if (popup_restack_owner)
         InterlockedExchangePointer(&wws->popup_restack_owner, popup_restack_owner);
