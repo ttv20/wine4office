@@ -16,6 +16,7 @@
 - Keep reentrant window callbacks from applying hosted resize updates out of order.
 - Route experimental hosted move and resize requests through the native pointer connection.
 - Cancel Windows resize state when a hosted window is hidden or loses native ownership.
+- Stop repeatedly uploading unchanged window frames in the experimental Wayland host.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.

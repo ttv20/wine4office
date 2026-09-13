@@ -381,7 +381,7 @@ static void wayland_shm_buffer_copy_shape(struct wayland_shm_buffer *buffer, con
     }
 }
 
-static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *source)
+static BOOL publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *source)
 {
     RECT window_rect, client_rect;
     POINT client_origin = {0};
@@ -400,7 +400,7 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
         window_rect.right <= window_rect.left || window_rect.bottom <= window_rect.top)
     {
         TRACE("Could not query frame snapshot geometry for %p.\n", hwnd);
-        return;
+        return FALSE;
     }
     width = window_rect.right - window_rect.left;
     height = window_rect.bottom - window_rect.top;
@@ -410,7 +410,7 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
             client_rect.bottom - client_rect.top, source->width, source->height);
     if (width > source->width || height > source->height || width > 16384 || height > 16384 ||
         (UINT64)width * height * sizeof(*bits) > 64ull * 1024 * 1024)
-        return;
+        return FALSE;
 
     section_size.QuadPart = (UINT64)width * height * sizeof(*bits);
     status = NtCreateSection(&mapping, SECTION_MAP_READ | SECTION_MAP_WRITE, NULL,
@@ -418,7 +418,7 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
     if (status)
     {
         TRACE("Creating frame snapshot section for %p returned %#x.\n", hwnd, status);
-        return;
+        return FALSE;
     }
     status = NtMapViewOfSection(mapping, GetCurrentProcess(), (void **)&bits, 0, 0, NULL,
             &view_size, ViewUnmap, 0, PAGE_READWRITE);
@@ -470,6 +470,7 @@ static void publish_frame_snapshot(HWND hwnd, const struct wayland_shm_buffer *s
 
 done:
     NtClose(mapping);
+    return !status;
 }
 
 /***********************************************************************
@@ -482,7 +483,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     RECT surface_rect = {.right = color_info->bmiHeader.biWidth, .bottom = abs(color_info->bmiHeader.biHeight)};
     struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
     struct wayland_shm_buffer *shm_buffer = NULL, *latest_buffer;
-    BOOL flushed = FALSE;
+    BOOL flushed = FALSE, frame_published;
     BOOL update_full_shape = shape_changed;
     BOOL dcomp_host, dcomp_hosted;
     BOOL reapply_clip;
@@ -580,7 +581,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     if (shape_bits)
         wayland_shm_buffer_copy_shape(shm_buffer, update_full_shape ? &surface_rect : rect,
                                       shape_info, shape_bits);
-    if (dcomp_hosted) publish_frame_snapshot(window_surface->hwnd, shm_buffer);
+    frame_published = dcomp_hosted && publish_frame_snapshot(window_surface->hwnd, shm_buffer);
     if (dcomp_host)
     {
         UINT32 *pixel = shm_buffer->map_data;
@@ -596,7 +597,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
     flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region,
-                                          &reapply_clip, &popup_restack_owner);
+                                          frame_published, &reapply_clip, &popup_restack_owner);
     if (reapply_clip) InterlockedExchange(&wws->reapply_clip, TRUE);
     if (popup_restack_owner)
         InterlockedExchangePointer(&wws->popup_restack_owner, popup_restack_owner);

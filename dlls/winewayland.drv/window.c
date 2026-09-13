@@ -1852,7 +1852,7 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
 }
 
 BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
-                                 BOOL *reapply_clip, HWND *popup_restack_owner)
+                                 BOOL frame_published, BOOL *reapply_clip, HWND *popup_restack_owner)
 {
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
@@ -1890,6 +1890,12 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
     if (data->window_contents)
         wayland_shm_buffer_unref(data->window_contents);
     wayland_shm_buffer_ref((data->window_contents = shm_buffer));
+
+    /* Hosted roots have no local buffer commit. A server-accepted snapshot
+     * completes their software flush; otherwise win32u retains the dirty
+     * bounds and republishes the same frame on every idle flush. Keep retrying
+     * failed publication, and still require a native commit for local roots. */
+    if (data->native_host_suppressed && frame_published) committed = TRUE;
 
     wayland_win_data_release(data);
 

@@ -1514,6 +1514,71 @@ move without a held pointer is unsupported, and native min/max constraints
 and `WM_MOVING`/`WM_SIZING` arbitration remain open. Actual compositor input
 and the new Outlook topology are still required for application readiness.
 
+## Compositor input and hosted flush completion, 2026-09-13
+
+Added bounded KWin EIS input tooling and ordinary Windows-frame fixtures for
+native move and resize. The helper requires an explicit private virtual KWin
+PID, bus and task-contained Wayland socket; D-Bus, Wayland and EIS peer
+credentials must agree. It never selects the default desktop. A matching
+caption alone is insufficient: the helper checks the hosted class, unique
+window and scale-one native/Windows extents before sending input.
+
+Two initial fixture assumptions were rejected without production changes.
+KWin's `noBorder` reports decoration policy, not necessarily a painted native
+frame. Also, Wine's `static` control returns `HTTRANSPARENT` and consumes
+nonclient button messages. The interactive fixture now uses its own class
+with `DefWindowProcW`. No xdg-decoration change was justified.
+
+Both compositor-delivered drags passed on the private Intel KWin instance.
+Move changed the same native window's position by 60 by 40 pixels and the
+owner observed an issued action. Resize changed its native extent by 60 by
+40, produced exactly one `WM_ENTERSIZEMOVE`/`WM_EXITSIZEMOVE` pair, changed the
+client from 320x192 to 380x232 and presented new content without replacing the
+native window. EIS input is emulated input delivered by the compositor, not a
+physical-hardware test. Issuance is still not a final Windows move position
+or a scanout timestamp.
+
+The resize fixture animates through bounded nonblocking Presents after
+resizing its buffers. An earlier one-Present-per-resize run delivered all
+Windows geometry callbacks but did not converge to a new native buffer.
+That result is retained; one-shot/static-content resize convergence remains
+an open case, not a passing consequence of the animated fixture.
+
+The longer interactive fixture exposed a confirmed production defect:
+`publish_frame_snapshot()` discarded its success status, and the surface
+flush only reported a local Wayland buffer commit. A hosted root has no such
+local commit, so win32u kept the dirty bounds and repeatedly copied/published
+the same frame. Publication now returns its actual status. A suppressed
+local root completes the flush only after server acceptance; a failed
+publication still retains the dirty bounds. Local roots still require their
+normal commit. No protocol or renderer ABI change was needed.
+
+The initial animated resize run uploaded 289 frame snapshots. With the fix,
+the final run uploaded five; the final move run uploaded two. Both final
+fixtures observed zero new snapshots and one server scan during their last
+idle second. These are work counters, not matched CPU or latency benchmarks.
+The final resize run reported 21 presented frames, one discard and zero
+failed frames. Existing authority matrices were not rerun for this private
+driver flush change. The existing frame/hide/restore fixture also passed:
+two snapshots, seven presentations and one successful restore. The affected driver and both host PE architectures
+rebuilt without new warnings; the existing i386 guest-prefix initialization
+limitation still prevents claiming i386 compositor-drag coverage.
+
+Evidence under the personal Intel task directory:
+`artifacts/astra-native-move-defproc-{window-x64.log,input.log,SHA256SUMS}`,
+`artifacts/astra-native-resize-rendered-{window-x64.log,input.log,trace.log,SHA256SUMS}`,
+and the final
+`artifacts/astra-native-{move,resize}-fixed-{window-x64.log,input.log,SHA256SUMS}`.
+Earlier failing fixture logs remain alongside them. The helper and usage
+notes are in `tools/wayland-host-test/`.
+The hide/restore result is `artifacts/astra-flush-frame-regression-x64.log`.
+
+Frame-only changes without a producer Present, especially after an Empty
+scene, still need their own submission path. The current Empty handler
+short-circuits once the scene generation is applied, and the guest's DComp
+property is removed when content is cleared. This is separate from fixing
+the repeated successful HostedContent publication above.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another

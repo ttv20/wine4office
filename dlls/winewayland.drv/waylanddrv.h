@@ -452,7 +452,7 @@ void wayland_win_data_release(struct wayland_win_data *data);
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);
 BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region,
-                                 BOOL *reapply_clip, HWND *popup_restack_owner);
+                                 BOOL frame_published, BOOL *reapply_clip, HWND *popup_restack_owner);
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
 void wayland_reapply_cursor_clipping(HWND hwnd);
 void wayland_restack_after_surface_flush(HWND owner);

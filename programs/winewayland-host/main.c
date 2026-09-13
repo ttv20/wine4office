@@ -3115,8 +3115,8 @@ done:
     return ret;
 }
 
-static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *device,
-        ID3D11DeviceContext *context, const float color[4])
+static HRESULT present_test_color_flags(IDXGISwapChain1 *swapchain, ID3D11Device *device,
+        ID3D11DeviceContext *context, const float color[4], UINT flags)
 {
     ID3D11RenderTargetView *view = NULL;
     ID3D11Texture2D *texture = NULL;
@@ -3129,11 +3129,17 @@ static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *devi
     {
         ID3D11DeviceContext_ClearRenderTargetView(context, view, color);
         ID3D11DeviceContext_Flush(context);
-        hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+        hr = IDXGISwapChain1_Present(swapchain, 0, flags);
     }
     if (view) ID3D11RenderTargetView_Release(view);
     ID3D11Texture2D_Release(texture);
     return hr;
+}
+
+static HRESULT present_test_color(IDXGISwapChain1 *swapchain, ID3D11Device *device,
+        ID3D11DeviceContext *context, const float color[4])
+{
+    return present_test_color_flags(swapchain, device, context, color, 0);
 }
 
 static void pump_dcomp_test_messages(HWND window, BOOL input_test,
@@ -3279,6 +3285,34 @@ done:
     return hr;
 }
 
+struct dcomp_interactive_state
+{
+    unsigned int enters, exits;
+    BOOL resizing;
+};
+
+static LRESULT CALLBACK dcomp_interactive_window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    struct dcomp_interactive_state *state = (void *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    if (message == WM_NCCREATE)
+    {
+        state = ((CREATESTRUCTW *)lparam)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+    }
+    if (state && message == WM_ENTERSIZEMOVE)
+    {
+        ++state->enters;
+        state->resizing = TRUE;
+    }
+    if (state && message == WM_EXITSIZEMOVE)
+    {
+        ++state->exits;
+        state->resizing = FALSE;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 enum dcomp_pipeline_flags
 {
     DCOMP_TEST_AUTOMATIC_HOST = 0x01,
@@ -3289,6 +3323,8 @@ enum dcomp_pipeline_flags
     DCOMP_TEST_SCALE = 0x20,
     DCOMP_TEST_STARTUP = 0x40,
     DCOMP_TEST_LOCAL = 0x80,
+    DCOMP_TEST_INTERACTIVE = 0x100,
+    DCOMP_TEST_INTERACTIVE_RESIZE = 0x200,
 };
 
 static int test_dcomp_pipeline(unsigned int flags)
@@ -3305,6 +3341,9 @@ static int test_dcomp_pipeline(unsigned int flags)
     BOOL multi_root = flags & DCOMP_TEST_MULTI_ROOT, failure_test = flags & DCOMP_TEST_FAILURE;
     BOOL scale_test = flags & DCOMP_TEST_SCALE, startup_test = flags & DCOMP_TEST_STARTUP;
     BOOL local_test = flags & DCOMP_TEST_LOCAL;
+    BOOL interactive_test = flags & DCOMP_TEST_INTERACTIVE;
+    BOOL interactive_resize = flags & DCOMP_TEST_INTERACTIVE_RESIZE;
+    struct dcomp_interactive_state interactive_state = {0};
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     struct winewayland_host_startup *startup = NULL;
     struct winewayland_host_probe probe;
@@ -3333,6 +3372,8 @@ static int test_dcomp_pipeline(unsigned int flags)
     D3D_FEATURE_LEVEL feature_level;
     RECT client_rect = {0}, window_rect = {0, 0, 64, 64};
     DWORD window_style = frame_test ? WS_OVERLAPPEDWINDOW : WS_POPUP;
+    WNDCLASSW interactive_class = {0};
+    ATOM interactive_atom = 0;
     HWND window = NULL;
     HWND second_window = NULL;
     NTSTATUS status;
@@ -3413,10 +3454,21 @@ static int test_dcomp_pipeline(unsigned int flags)
         window_rect.bottom = 192;
         if (!AdjustWindowRectEx(&window_rect, window_style, FALSE, 0)) goto done;
     }
-    if (!(window = CreateWindowExW(0, L"static", multi_root ? L"DComp host blocked root" :
+    if (interactive_test)
+    {
+        /* Static controls return HTTRANSPARENT and consume nonclient clicks.
+         * Exercise the ordinary Windows frame through DefWindowProc instead. */
+        interactive_class.lpfnWndProc = dcomp_interactive_window_proc;
+        interactive_class.hInstance = GetModuleHandleW(NULL);
+        interactive_class.lpszClassName = L"DComp host interactive test";
+        if (!(interactive_atom = RegisterClassW(&interactive_class))) goto done;
+    }
+    if (!(window = CreateWindowExW(0, interactive_test ? interactive_class.lpszClassName : L"static",
+            multi_root ? L"DComp host blocked root" :
             failure_test ? L"DComp host failed root" : L"DComp host pipeline", window_style,
             0, 0, window_rect.right - window_rect.left,
-            window_rect.bottom - window_rect.top, NULL, NULL, NULL, NULL)) ||
+            window_rect.bottom - window_rect.top, NULL, NULL, NULL,
+            interactive_test ? &interactive_state : NULL)) ||
             !GetClientRect(window, &client_rect) || client_rect.right <= 0 ||
             client_rect.bottom <= 0)
         goto done;
@@ -3984,6 +4036,91 @@ static int test_dcomp_pipeline(unsigned int flags)
         printf("dcomp_input=passed key_down=1 key_up=1\n");
     }
 
+    if (interactive_test)
+    {
+        ULONGLONG deadline = GetTickCount64() + 10000;
+        ULONGLONG next_present = 0;
+        uint64_t issued_id = 0;
+        uint32_t action_result = 0;
+        uint32_t presented_before_resize = 0;
+        uint32_t idle_snapshots = UINT32_MAX, idle_scans = 0;
+        unsigned int resize_count = 0;
+        unsigned int resized_presents = 0;
+        static const float color[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+        BOOL passed;
+        RECT bounds;
+
+        SetWindowTextW(window, L"DComp host interactive");
+        if (!GetWindowRect(window, &bounds)) goto done;
+        printf("dcomp_interactive=ready root=%p width=%ld height=%ld\n", window,
+                bounds.right - bounds.left, bounds.bottom - bounds.top);
+        fflush(stdout);
+        while (GetTickCount64() < deadline && IsWindow(window))
+        {
+            pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+            SERVER_START_REQ(manage_wayland_window_action)
+            {
+                req->root = wine_server_user_handle(window);
+                req->operation = WINE_WAYLAND_WINDOW_ACTION_QUERY;
+                if (!wine_server_call(req))
+                {
+                    action_result = reply->result;
+                    if (reply->command == (interactive_resize ? WINE_WAYLAND_WINDOW_ACTION_RESIZE :
+                            WINE_WAYLAND_WINDOW_ACTION_MOVE) &&
+                        reply->result == WINE_WAYLAND_WINDOW_ACTION_ISSUED)
+                        issued_id = reply->request_id;
+                }
+            }
+            SERVER_END_REQ;
+            if (interactive_resize && GetClientRect(window, &client_rect) &&
+                client_rect.right > 0 && client_rect.bottom > 0 &&
+                ((UINT)client_rect.right != desc.Width || (UINT)client_rect.bottom != desc.Height))
+            {
+                if (++resize_count > 16) goto done;
+                if (FAILED(hr = IDXGISwapChain1_ResizeBuffers(swapchain, 0, client_rect.right,
+                        client_rect.bottom, DXGI_FORMAT_UNKNOWN, 0))) goto done;
+                desc.Width = client_rect.right;
+                desc.Height = client_rect.bottom;
+                if (FAILED(hr = IDCompositionDevice_Commit(dcomp_device))) goto done;
+                presented_before_resize = InterlockedCompareExchange((LONG *)&startup->presented_frames, 0, 0);
+                next_present = 0;
+            }
+            /* Keep rendering during the drag, as an animated application does.
+             * Nonblocking Present keeps configure delivery alive while the
+             * previous pool or geometry is still retiring. */
+            if (resize_count && resized_presents < 20 && GetTickCount64() >= next_present)
+            {
+                hr = present_test_color_flags(swapchain, d3d_device, context, color, DXGI_PRESENT_DO_NOT_WAIT);
+                if (FAILED(hr) && hr != DXGI_ERROR_WAS_STILL_DRAWING) goto done;
+                if (SUCCEEDED(hr)) ++resized_presents;
+                next_present = GetTickCount64() + 100;
+            }
+            if (idle_snapshots == UINT32_MAX && GetTickCount64() + 1000 >= deadline)
+            {
+                idle_snapshots = InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0);
+                idle_scans = InterlockedCompareExchange((LONG *)&startup->server_work_scans, 0, 0);
+            }
+            Sleep(20);
+        }
+        passed = issued_id && IsWindow(window) && idle_snapshots != UINT32_MAX &&
+                InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0) - idle_snapshots <= 1;
+        if (interactive_resize)
+            passed = passed && resize_count && interactive_state.enters == 1 &&
+                    interactive_state.exits == 1 && !interactive_state.resizing &&
+                    desc.Width > initial_client_width && desc.Height > initial_client_height &&
+                    InterlockedCompareExchange((LONG *)&startup->presented_frames, 0, 0) > presented_before_resize;
+        printf("dcomp_interactive=%s issued_id=%I64u last_result=%u resizes=%u enters=%u exits=%u client=%ux%u\n",
+                passed ? "passed" : "failed", issued_id, action_result, resize_count,
+                interactive_state.enters, interactive_state.exits, desc.Width, desc.Height);
+        printf("dcomp_interactive_frames=submitted=%u presented=%u discarded=%u failed=%u snapshots=%u host_activations=%u\n",
+                resized_presents, startup->presented_frames, startup->discarded_frames,
+                startup->failed_frames, startup->frame_snapshots, startup->native_host_activations);
+        printf("dcomp_interactive_idle=snapshots=%u scans=%u interval_ms=1000\n",
+                startup->frame_snapshots - idle_snapshots, startup->server_work_scans - idle_scans);
+        ret = passed ? 0 : 7;
+        goto done;
+    }
+
     if (frame_test)
     {
         uint32_t completed_before, completed_after, hidden_before, presented_before;
@@ -4267,6 +4404,7 @@ done:
     if (d3d_device) ID3D11Device_Release(d3d_device);
     if (window) DestroyWindow(window);
     if (second_window) DestroyWindow(second_window);
+    if (interactive_atom) UnregisterClassW(interactive_class.lpszClassName, interactive_class.hInstance);
     if (stop_event) SetEvent(stop_event);
     if (process.hProcess)
     {
@@ -4320,6 +4458,10 @@ int wmain(int argc, WCHAR **argv)
         return test_dcomp_pipeline(DCOMP_TEST_INPUT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-test"))
         return test_dcomp_pipeline(DCOMP_TEST_FRAME);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-interactive-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_INTERACTIVE);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-interactive-resize-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_INTERACTIVE | DCOMP_TEST_INTERACTIVE_RESIZE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
         return test_dcomp_pipeline(DCOMP_TEST_MULTI_ROOT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
@@ -4347,7 +4489,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }
