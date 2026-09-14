@@ -1951,7 +1951,7 @@ static BOOL normalize_product_key(const WCHAR *key, WCHAR normalized[30])
 {
     unsigned int i;
 
-    if (!key || lstrlenW(key) != 29) return FALSE;
+    if (!key) return FALSE;
     for (i = 0; i < 29; ++i)
     {
         if (i == 5 || i == 11 || i == 17 || i == 23)
@@ -1967,6 +1967,7 @@ static BOOL normalize_product_key(const WCHAR *key, WCHAR normalized[30])
             normalized[i] = ch;
         }
     }
+    if (key[29]) return FALSE;
     normalized[29] = 0;
     return TRUE;
 }

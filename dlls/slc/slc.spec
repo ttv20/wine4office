@@ -29,12 +29,13 @@
 @ stdcall SLGetWindowsInformation(wstr ptr ptr ptr)
 @ stdcall SLGetWindowsInformationDWORD(wstr ptr)
 @ stdcall SLInstallLicense(ptr long ptr ptr) sppc.SLInstallLicense
-@ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr) sppc.SLInstallProofOfPurchase
+@ stdcall SLInstallProofOfPurchase(ptr wstr ptr long ptr ptr) sppc.SLInstallProofOfPurchase
 @ stub SLInstallSAMLicense
 @ stdcall SLOpen(ptr) sppc.SLOpen
 @ stub SLReArmWindows
 @ stub SLRegisterEvent
 @ stub SLRegisterWindowsEvent
+@ stdcall SLSetCurrentProductKey(ptr ptr ptr) sppc.SLSetCurrentProductKey
 @ stub SLUninstallLicense
 @ stdcall SLUninstallProofOfPurchase(ptr ptr) sppc.SLUninstallProofOfPurchase
 @ stub SLUninstallSAMLicense

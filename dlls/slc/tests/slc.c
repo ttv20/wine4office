@@ -132,6 +132,22 @@ static void test_SLGetInstalledProductKeyIds(void)
     ok(res == S_OK, "expected S_OK, got %08lx\n", res);
 }
 
+static void test_SLSetCurrentProductKey(void)
+{
+    HSLC handle = NULL;
+    HRESULT res;
+
+    res = SLOpen(&handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+    if (FAILED(res)) return;
+
+    res = SLSetCurrentProductKey(handle, NULL, NULL);
+    ok(res == E_INVALIDARG, "expected E_INVALIDARG, got %08lx\n", res);
+
+    res = SLClose(handle);
+    ok(res == S_OK, "expected S_OK, got %08lx\n", res);
+}
+
 
 START_TEST(slc)
 {
@@ -139,4 +155,5 @@ START_TEST(slc)
     test_SLInstallLicense();
     test_SLGetLicenseInformation();
     test_SLGetInstalledProductKeyIds();
+    test_SLSetCurrentProductKey();
 }

@@ -19,7 +19,7 @@
 @ stub SLpVLActivateProduct
 @ cdecl __wine_sppc_set_auth_session_key(ptr long)
 @ cdecl __wine_sppc_set_expected_hmac(ptr long)
-@ stdcall __wine_sppc_install_product_key(ptr wstr ptr)
+@ stdcall __wine_sppc_install_product_key(ptr ptr ptr)
 @ stdcall SLClose(ptr)
 @ stdcall SLConsumeRight(ptr ptr ptr wstr ptr)
 @ stub SLDepositMigrationBlob
@@ -50,7 +50,7 @@
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
 @ stdcall SLGetServiceInformation(ptr wstr ptr ptr ptr)
 @ stdcall SLInstallLicense(ptr long ptr ptr)
-@ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr)
+@ stdcall SLInstallProofOfPurchase(ptr wstr ptr long ptr ptr)
 @ stub SLInstallProofOfPurchaseEx
 @ stub SLIsGenuineLocalEx
 @ stdcall SLLoadApplicationPolicies(ptr ptr long ptr)
