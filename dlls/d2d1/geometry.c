@@ -2754,6 +2754,9 @@ static BOOL d2d_geometry_intersect_self(struct d2d_geometry *geometry)
     for (idx_p.figure_idx = 0; idx_p.figure_idx < geometry->u.path.figure_count; ++idx_p.figure_idx)
     {
         figure_p = &geometry->u.path.figures[idx_p.figure_idx];
+        if (figure_p->flags & D2D_FIGURE_FLAG_HOLLOW)
+            continue;
+
         idx_p.control_idx = 0;
         for (idx_p.vertex_idx = 0; idx_p.vertex_idx < figure_p->vertex_count; ++idx_p.vertex_idx)
         {
@@ -2763,6 +2766,9 @@ static BOOL d2d_geometry_intersect_self(struct d2d_geometry *geometry)
             for (idx_q.figure_idx = 0; idx_q.figure_idx <= idx_p.figure_idx; ++idx_q.figure_idx)
             {
                 figure_q = &geometry->u.path.figures[idx_q.figure_idx];
+                if (figure_q->flags & D2D_FIGURE_FLAG_HOLLOW)
+                    continue;
+
                 if (idx_q.figure_idx != idx_p.figure_idx)
                 {
                     if (!d2d_rect_check_overlap(&figure_p->bounds, &figure_q->bounds))

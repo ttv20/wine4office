@@ -72,9 +72,9 @@ export WINE4OFFICE_MANAGER_ROOT="$ROOT"
 if [ -x "$ROOT/lib/wine4office-manager-qt" ]; then
     exec "$ROOT/lib/wine4office-manager-qt" "$@"
 fi
-if ! python3 -c 'import PySide6, pefile, zstandard' >/dev/null 2>&1; then
-    echo "wine4office-manager: PySide6, pefile, and zstandard are required for the native interface and updates." >&2
-    echo "Install them with: python3 -m pip install --user PySide6 pefile zstandard" >&2
+if ! python3 -c 'import PySide6, pefile, signify, zstandard' >/dev/null 2>&1; then
+    echo "wine4office-manager: PySide6, pefile, signify, and zstandard are required for the native interface and updates." >&2
+    echo "Install them with: python3 -m pip install --user PySide6 pefile signify zstandard" >&2
     exit 1
 fi
 exec python3 "$ROOT/lib/wine4office_manager.py" "$@"

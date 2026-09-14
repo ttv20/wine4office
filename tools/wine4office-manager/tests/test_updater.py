@@ -401,6 +401,7 @@ class UpdaterTests(unittest.TestCase):
         finish.assert_called_once_with(transition, new_wine)
         restore.assert_not_called()
         self.assertEqual(state.snapshot()["config"]["wine"], new_wine)
+        self.assertTrue(state.snapshot()["task"]["wine_update_completed"])
         self.assertIn(
             "Updated the background services",
             state.snapshot()["task"]["log"],
@@ -442,6 +443,7 @@ class UpdaterTests(unittest.TestCase):
 
         restore.assert_called_once_with(transition)
         self.assertEqual(state.snapshot()["task"]["status"], "failed")
+        self.assertFalse(state.snapshot()["task"]["wine_update_completed"])
 
     def test_wine_update_aborts_when_shutdown_is_not_confirmed(self):
         config = {

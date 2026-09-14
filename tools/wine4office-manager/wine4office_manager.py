@@ -212,9 +212,12 @@ class ManagerState:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.config = backend.load_config()
+        self._task_generation = 0
         self.task = {
             "running": False, "kind": "", "status": "idle", "log": "",
+            "generation": self._task_generation,
             "restart_required": False, "progress_label": "", "progress_value": None,
+            "wine_update_completed": False,
             "foreground_pending": False, "foreground_ready": False,
         }
         self.cancel_event = threading.Event()
@@ -811,6 +814,7 @@ class ManagerState:
                         backend.save_config(candidate)
                         self.config = candidate
                         config.update(candidate)
+                        self.task["wine_update_completed"] = True
             finally:
                 if preload_update is not None:
                     try:
@@ -1131,10 +1135,13 @@ class ManagerState:
         with self.lock:
             if self.task["running"]:
                 raise RuntimeError("Another operation is already running.")
+            self._task_generation += 1
             self.task = {
                 "running": True, "kind": kind, "status": "running", "log": "",
+                "generation": self._task_generation,
                 "restart_required": False,
                 "progress_label": "Preparing operation", "progress_value": None,
+                "wine_update_completed": False,
                 "foreground_pending": False, "foreground_ready": False,
             }
             self.cancel_event.clear()
@@ -1250,6 +1257,16 @@ class ManagerState:
                 daemon=True,
             ).start()
         return True
+
+
+def _validate_smoke_test_authenticode() -> None:
+    """Load packaged signing data and optionally verify a real ODT fixture."""
+    backend._microsoft_authenticode_store.cache_clear()
+    if not backend._microsoft_authenticode_store():
+        raise RuntimeError("Microsoft Authenticode trust store is empty.")
+    odt_fixture = os.environ.get("WINE4OFFICE_SMOKE_TEST_ODT", "").strip()
+    if odt_fixture:
+        backend._verify_microsoft_signed_pe(Path(odt_fixture))
 
 
 
@@ -1466,6 +1483,16 @@ def main() -> int:
         )
         print(path)
         return 0
+
+    if args.smoke_test:
+        try:
+            _validate_smoke_test_authenticode()
+        except (OSError, RuntimeError, ValueError) as error:
+            print(
+                f"wine4office smoke test: Authenticode verification unavailable: {error}",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         post_install.run_post_install(

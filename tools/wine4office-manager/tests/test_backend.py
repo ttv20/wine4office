@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import hashlib
+import http.client
 import io
 import os
 import shlex
@@ -9,6 +10,7 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -1167,6 +1169,82 @@ exit 0
         self.assertFalse(launcher.exists())
         self.assertFalse(installed_helper.exists())
 
+    def test_office_installation_detection_requires_an_office_application(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        client = (
+            prefix / "drive_c/Program Files/Common Files/Microsoft Shared"
+            / "ClickToRun/OfficeClickToRun.exe"
+        )
+        client.parent.mkdir(parents=True)
+        client.write_bytes(b"client")
+
+        self.assertEqual(
+            backend.find_office_click_to_run(str(prefix)), client
+        )
+        self.assertFalse(backend.office_installation_exists(str(prefix)))
+        word = prefix / "drive_c/Program Files/Microsoft Office/root/Office16/WINWORD.EXE"
+        word.parent.mkdir(parents=True)
+        word.write_bytes(b"word")
+        self.assertTrue(backend.office_installation_exists(str(prefix)))
+
+    def test_office_repair_uses_installed_platform_and_culture(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        client = (
+            prefix / "drive_c/Program Files/Common Files/Microsoft Shared"
+            / "ClickToRun/OfficeClickToRun.exe"
+        )
+        client.parent.mkdir(parents=True)
+        client.write_bytes(b"client")
+        environment = {"WINEPREFIX": str(prefix)}
+        registry_results = [
+            mock.Mock(
+                returncode=0,
+                stdout="    Platform    REG_SZ    x64\n",
+                stderr="",
+            ),
+            mock.Mock(
+                returncode=0,
+                stdout="    ClientCulture    REG_SZ    he-il\n",
+                stderr="",
+            ),
+        ]
+
+        for requested, click_to_run_value in (
+                ("quick", "QuickRepair"), ("online", "FullRepair")):
+            with self.subTest(requested=requested), mock.patch.object(
+                backend, "wine_environment", return_value=environment
+            ), mock.patch.object(
+                backend.subprocess, "run", side_effect=list(registry_results)
+            ) as run, mock.patch.object(
+                backend, "_stream_command"
+            ) as stream:
+                result = backend.repair_office(
+                    str(prefix), str(self.wine), requested, lambda _line: None
+                )
+
+            self.assertIn("completed successfully", result)
+            self.assertEqual(run.call_count, 2)
+            command = stream.call_args.args[0]
+            self.assertEqual(command[:2], [str(self.wine.resolve()), str(client)])
+            self.assertIn("scenario=Repair", command)
+            self.assertIn("platform=x64", command)
+            self.assertIn("culture=he-il", command)
+            self.assertIn(f"RepairType={click_to_run_value}", command)
+            self.assertIn("forceappshutdown=False", command)
+            self.assertIn("DisplayLevel=True", command)
+            self.assertEqual(stream.call_args.kwargs["cwd"], client.parent)
+
+    def test_office_repair_rejects_missing_client_and_unknown_type(self):
+        prefix = self._make_prefix(self.home / ".wine4office")
+        with self.assertRaisesRegex(ValueError, "Unknown Office repair type"):
+            backend.repair_office(
+                str(prefix), str(self.wine), "factory", lambda _line: None
+            )
+        with self.assertRaisesRegex(FileNotFoundError, "Click-to-Run is not installed"):
+            backend.repair_office(
+                str(prefix), str(self.wine), "online", lambda _line: None
+            )
+
     def test_teams_detection_prefers_newest_windowsapps_package_and_creates_shortcut(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix)
@@ -2311,6 +2389,253 @@ exit 0
             backend.install_teams_with_bootstrapper(
                 str(prefix), str(self.wine), lambda line: None
             )
+
+    def test_odt_download_retries_then_succeeds(self):
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", return_value="url"
+        ) as resolve, mock.patch.object(
+            backend, "_download_odt",
+            side_effect=[OSError("offline"), Path("odt.exe")],
+        ) as download, mock.patch.object(backend.time, "sleep") as sleep:
+            self.assertEqual(backend._acquire_odt(mock.Mock()), Path("odt.exe"))
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(download.call_count, 2)
+        sleep.assert_called_once_with(backend.ODT_RETRY_DELAY_SECONDS)
+
+    def test_odt_download_retries_http_protocol_errors(self):
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", return_value="url"
+        ), mock.patch.object(
+            backend, "_download_odt",
+            side_effect=[http.client.IncompleteRead(b"partial"), Path("odt.exe")],
+        ), mock.patch.object(backend.time, "sleep"):
+            self.assertEqual(backend._acquire_odt(mock.Mock()), Path("odt.exe"))
+
+    def test_odt_resolution_failure_stops_after_two_attempts(self):
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url",
+            side_effect=ValueError("missing link"),
+        ) as resolve, mock.patch.object(backend.time, "sleep"):
+            with self.assertRaises(backend.OdtDownloadError) as caught:
+                backend._acquire_odt(mock.Mock())
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(caught.exception.download_url, backend._ODT_DOWNLOAD_PAGE)
+
+    def test_odt_download_failure_preserves_direct_url_for_manual_download(self):
+        url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", return_value=url
+        ), mock.patch.object(
+            backend, "_download_odt", side_effect=OSError("offline")
+        ), mock.patch.object(backend.time, "sleep"):
+            with self.assertRaises(backend.OdtDownloadError) as caught:
+                backend._acquire_odt(mock.Mock())
+        self.assertEqual(caught.exception.download_url, url)
+
+    def test_odt_download_verifies_signature_before_publishing(self):
+        payload = b"MZ" + bytes(2048)
+        url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return url
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        verified = []
+
+        def verify(path):
+            path = Path(path)
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.read_bytes(), payload)
+            verified.append(path)
+
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ), mock.patch.object(
+            backend, "_verify_microsoft_signed_pe", side_effect=verify
+        ):
+            result = backend._download_odt(url, mock.Mock())
+
+        self.assertEqual(result.read_bytes(), payload)
+        self.assertEqual(len(verified), 1)
+        self.assertNotEqual(verified[0], result)
+        self.assertFalse(verified[0].exists())
+
+    def test_odt_download_does_not_publish_an_invalid_signature(self):
+        payload = b"MZ" + bytes(2048)
+        url = "https://download.microsoft.com/officedeploymenttool_12345-12345.exe"
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+            def geturl(self):
+                return url
+
+        opener = mock.Mock()
+        opener.open.return_value = Response(payload)
+        with mock.patch.object(
+            backend, "_microsoft_opener", return_value=opener
+        ), mock.patch.object(
+            backend, "_verify_microsoft_signed_pe",
+            side_effect=ValueError("invalid signature"),
+        ), self.assertRaisesRegex(ValueError, "invalid signature"):
+            backend._download_odt(url, mock.Mock())
+
+        download_dir = self.home / ".cache/wine4office/odt"
+        self.assertFalse(list(download_dir.iterdir()))
+
+    def test_odt_cancel_does_not_retry_or_offer_manual_download(self):
+        cancel = threading.Event()
+
+        def fail(event):
+            event.set()
+            raise OSError("cancelled request")
+
+        with mock.patch.object(
+            backend, "_resolve_latest_odt_url", side_effect=fail
+        ) as resolve:
+            with self.assertRaisesRegex(RuntimeError, "Operation cancelled"):
+                backend._acquire_odt(mock.Mock(), cancel)
+        self.assertEqual(resolve.call_count, 1)
+
+    def test_manual_odt_install_skips_network_and_preserves_source(self):
+        prefix = self.home / ".wine4office"
+        self._make_prefix(prefix)
+        source = self.root / "downloaded odt.exe"
+        payload = b"MZ" + bytes(2048)
+        source.write_bytes(payload)
+
+        def command(args, *unused, **kwargs):
+            if "/quiet" in args:
+                self.assertNotEqual(Path(args[1]), source)
+                self.assertEqual(Path(args[1]).read_bytes(), payload)
+
+        with mock.patch.object(backend, "_acquire_odt") as download, mock.patch.object(
+            backend, "_verify_microsoft_signed_pe"
+        ) as verify_signature, mock.patch.object(
+            backend, "wine_environment", return_value={}
+        ), mock.patch.object(
+            backend, "_windows_document_path", side_effect=lambda path, *args: path
+        ), mock.patch.object(
+            backend, "_require_extracted_setup", return_value=self.root / "setup.exe"
+        ), mock.patch.object(backend, "_stream_command", side_effect=command) as stream:
+            backend.install_office_with_odt(
+                prefix, self.wine, None, mock.Mock(),
+                configuration_payload=b"<Configuration><Add /></Configuration>",
+                local_odt=source,
+            )
+        download.assert_not_called()
+        verify_signature.assert_called_once()
+        self.assertEqual(stream.call_count, 2)
+        self.assertEqual(source.read_bytes(), payload)
+
+    def test_manual_odt_rejects_html_download(self):
+        source = self.root / "download.exe"
+        source.write_bytes(b"<html>" + bytes(2048))
+        with self.assertRaisesRegex(ValueError, "not a valid Windows executable"):
+            backend._snapshot_local_odt(source, self.root / "snapshot.exe")
+
+    def test_manual_odt_requires_a_trusted_microsoft_publisher(self):
+        class Signer:
+            issuer = "Microsoft issuing CA"
+            serial_number = 42
+
+        class SignedData:
+            signer_info = Signer()
+
+        class Subject:
+            def __init__(self, organization):
+                self.organization = organization
+
+            def get_components(self, component):
+                return iter((self.organization,)) if component == "O" else iter(())
+
+        class Certificate:
+            def __init__(self, organization, issuer="Other CA", serial_number=1):
+                self.subject = Subject(organization)
+                self.issuer = issuer
+                self.serial_number = serial_number
+
+        path = self.root / "odt.exe"
+        microsoft_signer = Certificate(
+            "Microsoft Corporation", issuer="Microsoft issuing CA", serial_number=42
+        )
+        microsoft_chain = [[microsoft_signer, Certificate("Trusted Root")]]
+        other_signer = Certificate(
+            "Other Publisher", issuer="Microsoft issuing CA", serial_number=42
+        )
+        other_chain = [[Certificate("Trusted Root"), other_signer]]
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            return_value=[(SignedData(), None, microsoft_chain)],
+        ):
+            backend._verify_microsoft_signed_pe(path)
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            return_value=[(SignedData(), None, other_chain)],
+        ), self.assertRaisesRegex(ValueError, "not signed by Microsoft"):
+            backend._verify_microsoft_signed_pe(path)
+
+    def test_manual_odt_rejects_an_invalid_authenticode_signature(self):
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            side_effect=backend.OdtSignatureError("bad digest"),
+        ), self.assertRaisesRegex(ValueError, "valid trusted signature"):
+            backend._verify_microsoft_signed_pe(self.root / "odt.exe")
+
+    def test_authenticode_results_are_read_before_executable_closes(self):
+        path = self.root / "odt.exe"
+        path.write_bytes(b"MZ")
+
+        with mock.patch(
+            "signify.authenticode.signed_file.SignedPEFile"
+        ) as signed_file, mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=object()
+        ):
+            def lazy_results():
+                self.assertFalse(signed_file.call_args.args[0].closed)
+                yield ("signed data", "indirect data", "chains")
+
+            signed_file.return_value.verify.return_value = lazy_results()
+            results = backend._authenticode_verification_results(path)
+
+        self.assertEqual(
+            results, [("signed data", "indirect data", "chains")]
+        )
+        self.assertTrue(signed_file.call_args.args[0].closed)
+
+    def test_lazy_authenticode_failure_is_reported_as_signature_error(self):
+        from signify.exceptions import SignifyError
+
+        path = self.root / "odt.exe"
+        path.write_bytes(b"MZ")
+
+        def lazy_failure():
+            raise SignifyError("invalid signature")
+            yield
+
+        with mock.patch(
+            "signify.authenticode.signed_file.SignedPEFile"
+        ) as signed_file, mock.patch.object(
+            backend, "_microsoft_authenticode_store", return_value=object()
+        ):
+            signed_file.return_value.verify.return_value = lazy_failure()
+            with self.assertRaises(backend.OdtSignatureError):
+                backend._authenticode_verification_results(path)
+
+    def test_manual_odt_reports_authenticode_verifier_failures_separately(self):
+        with mock.patch.object(
+            backend, "_authenticode_verification_results",
+            side_effect=RuntimeError("verifier unavailable"),
+        ), self.assertRaisesRegex(RuntimeError, "verifier unavailable"):
+            backend._verify_microsoft_signed_pe(self.root / "odt.exe")
+
+    def test_microsoft_authenticode_store_builds(self):
+        backend._microsoft_authenticode_store.cache_clear()
+        self.assertGreater(len(backend._microsoft_authenticode_store()), 100)
 
     def test_odt_install_extracts_before_configure_and_keeps_configuration(self):
         prefix = self.home / ".wine4office"
