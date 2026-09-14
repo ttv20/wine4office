@@ -19,6 +19,7 @@
 #define COBJMACROS
 
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -1215,6 +1216,20 @@ static HRESULT WINAPI object_GetIDsOfNames(
 
 static VARTYPE to_vartype( CIMTYPE type );
 
+struct method_parameter
+{
+    BSTR name;
+    CIMTYPE type;
+    LONG id;
+};
+
+static int __cdecl compare_method_parameters( const void *left, const void *right )
+{
+    const struct method_parameter *a = left, *b = right;
+
+    return (a->id > b->id) - (a->id < b->id);
+}
+
 static BSTR get_member_name( struct object *object, DISPID dispid, CIMTYPE *type, BOOL *is_method )
 {
     UINT i;
@@ -1235,11 +1250,13 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
 {
     IWbemClassObject *in_signature = NULL, *out_signature = NULL;
     IWbemClassObject *in_params = NULL, *out_params = NULL;
+    struct method_parameter *method_params = NULL;
+    IWbemQualifierSet *qualifiers = NULL;
     VARIANT path, value;
     CIMTYPE type;
     BSTR param_name = NULL;
     HRESULT hr;
-    UINT i;
+    UINT i, param_count = 0;
 
     VariantInit( &path );
     if (result) VariantInit( result );
@@ -1277,42 +1294,67 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
     if (in_signature)
     {
         if (FAILED(hr = IWbemClassObject_SpawnInstance( in_signature, 0, &in_params ))) goto done;
+        if (params->cArgs && !(method_params = calloc( params->cArgs, sizeof(*method_params) )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
         if (FAILED(hr = IWbemClassObject_BeginEnumeration( in_signature,
                 WBEM_FLAG_NONSYSTEM_ONLY ))) goto done;
-        for (i = 0; i < params->cArgs; ++i)
+        while ((hr = IWbemClassObject_Next( in_signature, 0, &param_name,
+                NULL, &type, NULL )) == S_OK)
         {
-            hr = IWbemClassObject_Next( in_signature, 0, &param_name, NULL, &type, NULL );
-            if (hr != S_OK)
-            {
-                if (arg_err) *arg_err = params->cArgs - i - 1;
-                hr = DISP_E_BADPARAMCOUNT;
-                break;
-            }
-            VariantInit( &value );
-            hr = VariantChangeType( &value, &params->rgvarg[params->cArgs - i - 1], 0,
-                    to_vartype( type ) );
-            if (SUCCEEDED(hr)) hr = IWbemClassObject_Put( in_params, param_name, 0, &value, type );
-            VariantClear( &value );
-            SysFreeString( param_name );
-            param_name = NULL;
-            if (FAILED(hr))
-            {
-                if (arg_err) *arg_err = params->cArgs - i - 1;
-                break;
-            }
-        }
-        if (SUCCEEDED(hr))
-        {
-            hr = IWbemClassObject_Next( in_signature, 0, &param_name, NULL, NULL, NULL );
-            if (hr == S_OK)
+            if (param_count == params->cArgs)
             {
                 SysFreeString( param_name );
                 param_name = NULL;
                 hr = DISP_E_BADPARAMCOUNT;
+                break;
             }
-            else if (hr == WBEM_S_NO_MORE_DATA) hr = S_OK;
+            if (FAILED(hr = IWbemClassObject_GetPropertyQualifierSet( in_signature,
+                    param_name, &qualifiers ))) break;
+            VariantInit( &value );
+            hr = IWbemQualifierSet_Get( qualifiers, L"ID", 0, &value, NULL );
+            IWbemQualifierSet_Release( qualifiers );
+            qualifiers = NULL;
+            if (hr == WBEM_E_NOT_FOUND)
+            {
+                V_VT(&value) = VT_I4;
+                V_I4(&value) = param_count;
+                hr = S_OK;
+            }
+            if (SUCCEEDED(hr) && V_VT(&value) != VT_I4) hr = E_UNEXPECTED;
+            if (SUCCEEDED(hr))
+            {
+                method_params[param_count].name = param_name;
+                method_params[param_count].type = type;
+                method_params[param_count++].id = V_I4(&value);
+                param_name = NULL;
+            }
+            VariantClear( &value );
+            if (FAILED(hr)) break;
         }
         IWbemClassObject_EndEnumeration( in_signature );
+        if (hr == WBEM_S_NO_MORE_DATA) hr = S_OK;
+        if (SUCCEEDED(hr) && param_count != params->cArgs) hr = DISP_E_BADPARAMCOUNT;
+        if (FAILED(hr)) goto done;
+
+        if (param_count > 1)
+            qsort( method_params, param_count, sizeof(*method_params), compare_method_parameters );
+        for (i = 0; i < param_count; ++i)
+        {
+            VariantInit( &value );
+            hr = VariantChangeType( &value, &params->rgvarg[param_count - i - 1], 0,
+                    to_vartype( method_params[i].type ) );
+            if (SUCCEEDED(hr)) hr = IWbemClassObject_Put( in_params, method_params[i].name,
+                    0, &value, method_params[i].type );
+            VariantClear( &value );
+            if (FAILED(hr))
+            {
+                if (arg_err) *arg_err = param_count - i - 1;
+                break;
+            }
+        }
         if (FAILED(hr)) goto done;
     }
     else if (params->cArgs)
@@ -1327,6 +1369,12 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
         hr = IWbemClassObject_Get( out_params, L"ReturnValue", 0, result, NULL, NULL );
 
 done:
+    if (qualifiers) IWbemQualifierSet_Release( qualifiers );
+    if (method_params)
+    {
+        for (i = 0; i < param_count; ++i) SysFreeString( method_params[i].name );
+        free( method_params );
+    }
     SysFreeString( param_name );
     if (out_params) IWbemClassObject_Release( out_params );
     if (in_params) IWbemClassObject_Release( in_params );

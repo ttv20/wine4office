@@ -1775,6 +1775,7 @@ static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_produc
     HKEY key;
     SLID current_id;
     DWORD index = 0, name_size, size = sizeof(current_id), type;
+    LONG error;
 
     guid_to_string(sku_id, name);
     if (!RegGetValueW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, name,
@@ -1789,7 +1790,10 @@ static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_produc
     {
         name_size = ARRAY_SIZE(name);
         size = sizeof(*record);
-        if (RegEnumValueW(key, index++, name, &name_size, NULL, &type, (BYTE *)record, &size)) break;
+        error = RegEnumValueW(key, index++, name, &name_size, NULL, &type,
+                (BYTE *)record, &size);
+        if (error == ERROR_MORE_DATA) continue;
+        if (error) break;
         if (type == REG_BINARY && size == sizeof(*record) && product_key_record_valid(record) &&
                 IsEqualGUID(sku_id, &record->sku_id))
         {
