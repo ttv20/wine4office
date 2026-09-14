@@ -2635,6 +2635,19 @@ static void test_MSFT_PhysicalDisk( IWbemLocator *locator )
     SysFreeString( query );
 }
 
+static void test_SecurityCenter2( IWbemLocator *locator )
+{
+    BSTR path = SysAllocString( L"ROOT\\SecurityCenter2" );
+    IWbemServices *services;
+    HRESULT hr;
+
+    hr = IWbemLocator_ConnectServer( locator, path, NULL, NULL, NULL, 0, NULL, NULL, &services );
+    ok( hr == S_OK, "failed to get IWbemServices interface %#lx\n", hr );
+
+    IWbemServices_Release( services );
+    SysFreeString( path );
+}
+
 START_TEST(query)
 {
     BSTR path = SysAllocString( L"ROOT\\CIMV2" );
@@ -2724,6 +2737,7 @@ START_TEST(query)
     test_empty_namespace( locator );
     test_MSSMBios_RawSMBiosTables( locator );
     test_MSFT_PhysicalDisk( locator );
+    test_SecurityCenter2( locator );
 
     SysFreeString( path );
     IWbemServices_Release( services );

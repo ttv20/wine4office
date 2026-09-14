@@ -1996,6 +1996,7 @@ HRESULT message_insert_http_headers( WS_MESSAGE *handle, HINTERNET req )
     {
     case WS_ENVELOPE_VERSION_SOAP_1_1:
     {
+        if (!msg->action) break;
         if (!(len = MultiByteToWideChar( CP_UTF8, 0, (char *)msg->action->bytes, msg->action->length, NULL, 0 )))
             break;
 
@@ -2017,6 +2018,7 @@ HRESULT message_insert_http_headers( WS_MESSAGE *handle, HINTERNET req )
     {
         ULONG len_action = ARRAY_SIZE( L"action=\"" ) - 1;
 
+        if (!msg->action) break;
         if (!(len = MultiByteToWideChar( CP_UTF8, 0, (char *)msg->action->bytes, msg->action->length, NULL, 0 )))
             break;
 

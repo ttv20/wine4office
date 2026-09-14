@@ -6,7 +6,6 @@ UNIX_LIBS    = \
 	-lwin32u \
 	-framework AppKit \
 	-framework Carbon \
-	-framework CoreVideo \
 	-framework Foundation \
 	-framework IOKit \
 	-framework Metal \

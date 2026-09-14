@@ -908,7 +908,7 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
 /***********************************************************************
  *              GetDeviceGammaRamp (MACDRV.@)
  */
-BOOL macdrv_GetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp)
+UINT macdrv_GetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp)
 {
     BOOL ret = FALSE;
     DDGAMMARAMP *r = ramp;
@@ -984,7 +984,7 @@ done:
 /***********************************************************************
  *              SetDeviceGammaRamp (MACDRV.@)
  */
-BOOL macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp)
+UINT macdrv_SetDeviceGammaRamp(PHYSDEV dev, LPVOID ramp)
 {
     DDGAMMARAMP *r = ramp;
     int win_entries = ARRAY_SIZE(r->red);

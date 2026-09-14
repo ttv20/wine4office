@@ -747,6 +747,7 @@ static HRESULT WINAPI command_CreateParameter( _Command *iface, BSTR name, DataT
     parameter->datatype = type;
     parameter->direction = direction;
     parameter->size = size;
+    VariantInit(&parameter->value);
     VariantCopy(&parameter->value, &value);
 
     *obj = &parameter->Parameter_iface;

@@ -434,7 +434,7 @@ static HRESULT dup_message_mapping( const WS_HTTP_MESSAGE_MAPPING *src, WS_HTTP_
     size = src->responseHeaderMappingCount * sizeof(*dst->responseHeaderMappings);
     if (!(dst->responseHeaderMappings = malloc( size )))
     {
-        free( dst->responseHeaderMappings );
+        free_header_mappings( dst->requestHeaderMappings, src->requestHeaderMappingCount );
         return E_OUTOFMEMORY;
     }
 
@@ -2203,7 +2203,7 @@ static HRESULT build_dict( const BYTE *buf, ULONG buflen, struct dictionary *dic
 
     buflen -= strings_offset;
     ptr = buf + strings_offset;
-    while (ptr < buf + strings_size)
+    while (ptr < buf + strings_offset + strings_size)
     {
         if ((hr = read_size( &ptr, buflen, &size )) != S_OK)
         {
@@ -2883,7 +2883,7 @@ static void write_message_end_proc( struct task *task )
 
 static HRESULT queue_write_message_end( struct channel *channel, WS_MESSAGE *msg, const WS_ASYNC_CONTEXT *ctx )
 {
-    struct write_message_start *w;
+    struct write_message_end *w;
 
     if (!(w = malloc( sizeof(*w) ))) return E_OUTOFMEMORY;
     w->task.proc = write_message_end_proc;

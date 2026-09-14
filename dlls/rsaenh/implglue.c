@@ -355,18 +355,18 @@ static BOOL rsa_decrypt( const SYMCRYPT_RSAKEY *key, const BYTE *in, SYMCRYPT_NU
 
     if (!(scratch = malloc( scratch_size ))) return FALSE;
 
-    ciphertext = SymCryptIntCreate( scratch, scratch_size, key->nDigitsOfModulus );
+    ciphertext = SymCryptIntCreate( scratch, int_size, key->nDigitsOfModulus );
     offset += int_size;
 
-    plaintext = SymCryptIntCreate( scratch + offset, scratch_size - offset, key->nDigitsOfModulus );
+    plaintext = SymCryptIntCreate( scratch + offset, int_size, key->nDigitsOfModulus );
     offset += int_size;
 
-    tmp = SymCryptIntCreate( scratch + offset, scratch_size - offset, key->nMaxDigitsOfPrimes );
+    tmp = SymCryptIntCreate( scratch + offset, tmp_size, key->nMaxDigitsOfPrimes );
     offset += tmp_size;
 
     for (i = 0; i < key->nPrimes; i++)
     {
-        crt_elements[i] = SymCryptModElementCreate( scratch + offset, scratch_size - offset, key->pmPrimes[i] );
+        crt_elements[i] = SymCryptModElementCreate( scratch + offset, crt_elements_size[i], key->pmPrimes[i] );
         offset += crt_elements_size[i];
     }
 

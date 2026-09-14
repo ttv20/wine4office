@@ -71,27 +71,17 @@ struct hmac_md5_ctx
     char outer_padding[64];
 };
 
-struct ntlm_ctx
+struct ntlm_auth_ctx
 {
-    enum mode    mode;
-    int          pid;
-    unsigned int req_attrs;
-    int          pipe_in;
-    int          pipe_out;
-    char         session_key[16];
-    unsigned int flags;
+    int pid;
+    int pipe_in;
+    int pipe_out;
     com_buf_ptr  com_buf;
-    BYTE         server_challenge[8];
-    size_t       negotiate_len;
-    char        *negotiate;
-    HANDLE       token; /* local authentication token */
-    struct hmac_md5_ctx mic; /* local authentication MIC */
 };
-
 
 struct chat_params
 {
-    struct ntlm_ctx *ctx;
+    struct ntlm_auth_ctx *ctx;
     char *buf;
     unsigned int buflen;
     unsigned int *retlen;
@@ -99,7 +89,7 @@ struct chat_params
 
 struct fork_params
 {
-    struct ntlm_ctx *ctx;
+    struct ntlm_auth_ctx *ctx;
     char **argv;
 };
 

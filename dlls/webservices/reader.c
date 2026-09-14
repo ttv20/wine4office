@@ -2939,7 +2939,7 @@ static HRESULT read_comment_bin( struct reader *reader )
     if ((hr = read_bytes( reader, comment->value.bytes, len )) != S_OK)
     {
         free_node( node );
-        return E_OUTOFMEMORY;
+        return hr;
     }
     comment->value.length = len;
 
@@ -3637,7 +3637,7 @@ HRESULT WINAPI WsReadStartAttribute( WS_XML_READER *handle, ULONG index, WS_ERRO
 
     LeaveCriticalSection( &reader->cs );
     TRACE( "returning %#lx\n", hr );
-    return S_OK;
+    return hr;
 }
 
 /**************************************************************************
@@ -4010,12 +4010,12 @@ static HRESULT str_to_qname( struct reader *reader, const unsigned char *str, UL
     if (prefix_ret && (hr = copy_xml_string( heap, &prefix, prefix_ret )) != S_OK) return hr;
     if ((hr = copy_xml_string( heap, &localname, localname_ret )) != S_OK)
     {
-        ws_free( heap, prefix_ret->bytes, prefix_ret->length );
+        if (prefix_ret) ws_free( heap, prefix_ret->bytes, prefix_ret->length );
         return hr;
     }
     if ((hr = copy_xml_string( heap, ns, ns_ret )) != S_OK)
     {
-        ws_free( heap, prefix_ret->bytes, prefix_ret->length );
+        if (prefix_ret) ws_free( heap, prefix_ret->bytes, prefix_ret->length );
         ws_free( heap, localname_ret->bytes, localname_ret->length );
         return hr;
     }

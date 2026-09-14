@@ -363,13 +363,19 @@ static RECT get_client_surface_rects( HWND toplevel, HWND hwnd, RECT *monitor_re
 
 static void client_surface_update_locked( struct client_surface *surface )
 {
+    RECT virtual_rect = surface->virtual_rect, monitor_rect = surface->monitor_rect;
+    HWND toplevel = surface->toplevel;
+
     surface->toplevel = NtUserGetAncestor( surface->hwnd, GA_ROOT );
     surface->virtual_rect = get_client_surface_rects( surface->toplevel, surface->hwnd, &surface->monitor_rect );
 
     TRACE( "updating %s, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ), surface->toplevel,
            wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
     surface->funcs->update( surface );
-    InterlockedExchange( &surface->updated, 1 );
+
+    surface->updated = surface->updated || surface->toplevel != toplevel ||
+                       !EqualRect( &surface->virtual_rect, &virtual_rect ) ||
+                       !EqualRect( &surface->monitor_rect, &monitor_rect );
 }
 
 void update_client_surfaces( HWND hwnd )
@@ -392,7 +398,7 @@ void update_client_surfaces( HWND hwnd )
     pthread_mutex_unlock( &surfaces_lock );
 }
 
-void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd, int format )
+void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd, int format, BOOL raw )
 {
     HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
     struct client_surface *surface;
@@ -402,12 +408,13 @@ void *client_surface_create( UINT size, const struct client_surface_funcs *funcs
     surface->ref = 1;
     surface->hwnd = hwnd;
     surface->format = format;
+    surface->raw = raw;
     surface->toplevel = toplevel;
     surface->virtual_rect = get_client_surface_rects( toplevel, hwnd, &surface->monitor_rect );
     list_init( &surface->entry );
 
-    TRACE( "created %s, format %d, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ),
-           format, toplevel, wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
+    TRACE( "created %s, format %d, raw %u, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ),
+           format, raw, toplevel, wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
     return surface;
 }
 
@@ -489,7 +496,7 @@ void use_window_client_surface( struct client_surface *surface, BOOL use )
     pthread_mutex_unlock( &surfaces_lock );
 }
 
-struct client_surface *get_unused_client_surface( HWND hwnd, int format )
+struct client_surface *get_unused_client_surface( HWND hwnd, int format, BOOL raw )
 {
     struct client_surface *surface;
 
@@ -497,7 +504,7 @@ struct client_surface *get_unused_client_surface( HWND hwnd, int format )
 
     LIST_FOR_EACH_ENTRY( surface, &unused_surfaces, struct client_surface, entry )
     {
-        if (surface->hwnd != hwnd || surface->format != format) continue;
+        if (surface->hwnd != hwnd || surface->format != format || surface->raw != raw) continue;
         client_surface_update_locked( surface ); /* refresh it before creating GL/VK drawable */
         list_remove( &surface->entry ); /* take over its reference */
         list_init( &surface->entry );
@@ -508,7 +515,7 @@ struct client_surface *get_unused_client_surface( HWND hwnd, int format )
     pthread_mutex_unlock( &surfaces_lock );
 
     if (surface) TRACE( "Reusing surface %s\n", debugstr_client_surface( surface ) );
-    return surface ? surface : user_driver->pCreateClientSurface( hwnd, format );
+    return surface ? surface : user_driver->pCreateClientSurface( hwnd, format, raw );
 }
 
 BOOL is_client_surface_window( struct client_surface *surface, HWND hwnd )
@@ -1568,6 +1575,11 @@ static LONG_PTR set_window_long_internal( HWND hwnd, INT offset, UINT size,
     }
     if (win == WND_OTHER_PROCESS)
     {
+        if (offset == GWLP_WNDPROC)
+        {
+            RtlSetLastWin32Error( ERROR_ACCESS_DENIED );
+            return 0;
+        }
         if (offset > 32767 || offset < -32767)
         {
             RtlSetLastWin32Error( ERROR_INVALID_INDEX );

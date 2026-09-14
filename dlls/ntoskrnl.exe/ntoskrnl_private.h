@@ -56,7 +56,9 @@ struct _EPROCESS
 {
     DISPATCHER_HEADER header;
     PROCESS_BASIC_INFORMATION info;
+    KERNEL_USER_TIMES times;
     BOOL wow64;
+    ULONG session_id;
 };
 
 struct _KTHREAD

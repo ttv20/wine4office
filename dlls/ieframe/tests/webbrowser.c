@@ -196,29 +196,6 @@ static DWORD dwl_flags;
 
 static IAdviseSink test_sink;
 
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
-
 static BOOL iface_cmp(IUnknown *iface1, IUnknown *iface2)
 {
     IUnknown *unk1, *unk2;
@@ -2519,10 +2496,7 @@ static void test_ie_funcs(IWebBrowser2 *wb)
     /* Name */
     hres = IWebBrowser2_get_Name(wb, &sName);
     ok(hres == S_OK, "getName failed: %08lx, expected S_OK\n", hres);
-    if (is_lang_english())
-        ok(!lstrcmpW(sName, L"Microsoft Web Browser Control"), "got '%s', expected 'Microsoft Web Browser Control'\n", wine_dbgstr_w(sName));
-    else /* Non-English cannot be blank. */
-        ok(sName!=NULL, "get_Name return a NULL string.\n");
+    ok(!lstrcmpW(sName, L"Microsoft Web Browser Control"), "got '%s', expected 'Microsoft Web Browser Control'\n", wine_dbgstr_w(sName));
     SysFreeString(sName);
 
     /* RegisterAsDropTarget */
@@ -3856,6 +3830,9 @@ static void test_WebBrowser(DWORD flags, BOOL do_close)
     IOleObject *oleobj;
     HRESULT hres;
     ULONG ref, connection;
+
+    /* some tests need an English locale */
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
 
     webbrowser = create_webbrowser();
     if(!webbrowser)

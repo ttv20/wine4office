@@ -22,6 +22,7 @@
 @ stdcall PowerUnregisterSuspendResumeNotification(ptr)
 @ stdcall PowerSettingRegisterNotification(ptr long ptr ptr)
 @ stdcall PowerSettingUnregisterNotification(ptr)
+@ stdcall PowerReadACValueIndex(ptr ptr ptr ptr ptr)
 @ stdcall PowerWriteACValueIndex(ptr ptr ptr ptr long)
 @ stdcall ReadGlobalPwrPolicy (ptr)
 @ stdcall ReadProcessorPwrScheme (long ptr)

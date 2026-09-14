@@ -54,7 +54,11 @@ static struct domain *add_domain( struct session *session, WCHAR *name )
     list_init( &domain->entry );
     list_init( &domain->cookies );
 
-    domain->name = wcsdup( name );
+    if (!(domain->name = wcsdup( name )))
+    {
+        free( domain );
+        return NULL;
+    }
     list_add_tail( &session->cookie_cache, &domain->entry );
 
     TRACE("%s\n", debugstr_w(domain->name));

@@ -1407,7 +1407,7 @@ static BOOL request_set_option( struct object_header *hdr, DWORD option, void *b
         }
         WARN( "currently has no effect\n" );
         request->websocket_receive_buffer_size = *(DWORD *)buffer;
-        TRACE( "websocket_receive_buffer_size %u\n", request->websocket_set_send_buffer_size);
+        TRACE( "websocket_receive_buffer_size %u\n", request->websocket_receive_buffer_size);
         return TRUE;
     }
     case WINHTTP_OPTION_WEB_SOCKET_SEND_BUFFER_SIZE:
@@ -2375,9 +2375,9 @@ static BOOL run_script( char *script, DWORD size, const WCHAR *url, WINHTTP_PROX
     uc.dwSchemeLength = -1;
     uc.dwHostNameLength = -1;
 
-    if (!WinHttpCrackUrl( url, 0, 0, &uc ))
-        return FALSE;
+    if (!WinHttpCrackUrl( url, 0, 0, &uc )) return FALSE;
 
+    if (uc.dwSchemeLength > MAX_SCHEME_LENGTH) return FALSE;
     memcpy( scheme, uc.lpszScheme, uc.dwSchemeLength * sizeof(WCHAR) );
     scheme[uc.dwSchemeLength] = 0;
     wcslwr( scheme );
@@ -2385,6 +2385,7 @@ static BOOL run_script( char *script, DWORD size, const WCHAR *url, WINHTTP_PROX
 
     if (flags & WINHTTP_AUTOPROXY_HOST_LOWERCASE && !(flags & WINHTTP_AUTOPROXY_HOST_KEEPCASE))
     {
+        if (uc.dwHostNameLength > MAX_HOST_NAME_LENGTH) return FALSE;
         memcpy( buf, uc.lpszHostName, uc.dwHostNameLength * sizeof(WCHAR) );
         buf[uc.dwHostNameLength] = 0;
         wcslwr( buf );
@@ -2404,8 +2405,8 @@ static BOOL run_script( char *script, DWORD size, const WCHAR *url, WINHTTP_PROX
     urlA[len_scheme++] = '/';
     WideCharToMultiByte( CP_ACP, 0, hostname, uc.dwHostNameLength, urlA + len_scheme, len_hostname, NULL, NULL );
     hostnameA = urlA + len_scheme;
-    WideCharToMultiByte( CP_ACP, 0, uc.lpszHostName + uc.dwHostNameLength, -1,
-            urlA + len_scheme + len_hostname, len, NULL, NULL );
+    WideCharToMultiByte( CP_ACP, 0, uc.lpszHostName + uc.dwHostNameLength, -1, urlA + len_scheme + len_hostname,
+                         len, NULL, NULL );
 
     buffer.dwStructSize = sizeof(buffer);
     buffer.lpszScriptBuffer = script;
@@ -2808,7 +2809,7 @@ BOOL WINAPI WinHttpTimeFromSystemTime( const SYSTEMTIME *time, LPWSTR string )
 {
     TRACE("%p, %p\n", time, string);
 
-    if (!time || !string)
+    if (!time || !string || time->wDayOfWeek > 6 || time->wMonth < 1 || time->wMonth > 12)
     {
         SetLastError( ERROR_INVALID_PARAMETER );
         return FALSE;
