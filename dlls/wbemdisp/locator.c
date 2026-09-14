@@ -1252,14 +1252,24 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
     IWbemClassObject *in_params = NULL, *out_params = NULL;
     struct method_parameter *method_params = NULL;
     IWbemQualifierSet *qualifiers = NULL;
-    VARIANT path, value;
+    VARIANT class_name, path, value;
     CIMTYPE type;
     BSTR param_name = NULL;
     HRESULT hr;
     UINT i, param_count = 0;
 
+    VariantInit( &class_name );
     VariantInit( &path );
     if (result) VariantInit( result );
+    if (FAILED(hr = IWbemClassObject_Get( object->object, L"__CLASS", 0,
+            &class_name, NULL, NULL ))) return hr;
+    if (V_VT(&class_name) != VT_BSTR || !V_BSTR(&class_name) || wcsicmp(V_BSTR(&class_name),
+            L"SoftwareLicensingService") || wcsicmp(name, L"InstallProductKey"))
+    {
+        VariantClear( &class_name );
+        return E_NOTIMPL;
+    }
+    VariantClear( &class_name );
     if (FAILED(hr = IWbemClassObject_Get( object->object, L"__PATH", 0, &path, NULL, NULL )))
         return hr;
     if (V_VT( &path ) != VT_BSTR)

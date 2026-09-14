@@ -2165,12 +2165,20 @@ HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, LPCWSTR algorithm, LPCWSTR 
     if (wcsicmp(algorithm, pkey_algorithm)) return SL_E_NOT_SUPPORTED;
     if (!normalize_product_key(product_key, material.key)) return SL_E_INVALID_PKEY;
     if (!find_office_pidgen_files(dll_path, config_path))
+    {
+        SecureZeroMemory(material.key, sizeof(material.key));
         return GetLastError() == ERROR_BAD_EXE_FORMAT ? HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT) :
                 SL_E_PRODUCT_SKU_NOT_INSTALLED;
-    if (!(module = LoadLibraryW(dll_path))) return HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (!(module = LoadLibraryW(dll_path)))
+    {
+        SecureZeroMemory(material.key, sizeof(material.key));
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
     if (!(pidgenx = (pidgenx_fn)GetProcAddress(module, "PidGenX")))
     {
         FreeLibrary(module);
+        SecureZeroMemory(material.key, sizeof(material.key));
         return E_NOINTERFACE;
     }
     hr = pidgenx(material.key, config_path, mpc, NULL, product_id, &digital_pid, &digital_pid4);
