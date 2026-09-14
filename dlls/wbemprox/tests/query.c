@@ -2156,7 +2156,7 @@ static void test_SoftwareLicensingProduct( IWbemServices *services )
 {
     BSTR wql = SysAllocString( L"wql" ), query = SysAllocString( L"SELECT * FROM SoftwareLicensingProduct" );
     IEnumWbemClassObject *result;
-    IWbemClassObject *obj;
+    IWbemClassObject *obj, *in_signature = NULL, *out_signature = NULL;
     HRESULT hr;
     DWORD count;
 
@@ -2171,6 +2171,27 @@ static void test_SoftwareLicensingProduct( IWbemServices *services )
         check_property( obj, L"LicenseIsAddon", VT_BOOL, CIM_BOOLEAN );
         check_property( obj, L"LicenseStatus", VT_I4, CIM_UINT32 );
         check_property_nullable( obj, L"PartialProductKey", VT_BSTR, CIM_STRING );
+        hr = IWbemClassObject_GetMethod( obj, L"Activate", 0, &in_signature, &out_signature );
+        ok( hr == S_OK, "Activate method missing, got %#lx\n", hr );
+        ok( !in_signature, "Activate unexpectedly has input parameters.\n" );
+        if (out_signature) check_property( out_signature, L"ReturnValue", VT_I4, CIM_UINT32 );
+        if (out_signature) IWbemClassObject_Release( out_signature );
+        out_signature = NULL;
+        hr = IWbemClassObject_GetMethod( obj, L"SetKeyManagementServiceMachine", 0,
+                &in_signature, &out_signature );
+        ok( hr == S_OK, "SetKeyManagementServiceMachine method missing, got %#lx\n", hr );
+        if (in_signature) check_property_nullable( in_signature, L"MachineName", VT_NULL, CIM_STRING );
+        if (out_signature) check_property( out_signature, L"ReturnValue", VT_I4, CIM_UINT32 );
+        if (in_signature) IWbemClassObject_Release( in_signature );
+        if (out_signature) IWbemClassObject_Release( out_signature );
+        in_signature = out_signature = NULL;
+        hr = IWbemClassObject_GetMethod( obj, L"SetKeyManagementServicePort", 0,
+                &in_signature, &out_signature );
+        ok( hr == S_OK, "SetKeyManagementServicePort method missing, got %#lx\n", hr );
+        if (in_signature) check_property( in_signature, L"PortNumber", VT_I4, CIM_UINT32 );
+        if (out_signature) check_property( out_signature, L"ReturnValue", VT_I4, CIM_UINT32 );
+        if (in_signature) IWbemClassObject_Release( in_signature );
+        if (out_signature) IWbemClassObject_Release( out_signature );
         IWbemClassObject_Release( obj );
     }
 

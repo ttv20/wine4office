@@ -1325,19 +1325,27 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
     IWbemClassObject *in_params = NULL, *out_params = NULL;
     struct method_parameter *method_params = NULL;
     IWbemQualifierSet *qualifiers = NULL;
-    VARIANT class_name, path, value;
+    VARIANT class_name, path, value, id;
     CIMTYPE type;
     BSTR param_name = NULL;
     HRESULT hr;
     UINT i, param_count = 0;
+    BOOL licensing_product;
 
     VariantInit( &class_name );
     VariantInit( &path );
     if (result) VariantInit( result );
     if (FAILED(hr = IWbemClassObject_Get( object->object, L"__CLASS", 0,
             &class_name, NULL, NULL ))) return hr;
-    if (V_VT(&class_name) != VT_BSTR || !V_BSTR(&class_name) || wcsicmp(V_BSTR(&class_name),
-            L"SoftwareLicensingService") || wcsicmp(name, L"InstallProductKey"))
+    licensing_product = V_VT(&class_name) == VT_BSTR && V_BSTR(&class_name) &&
+            !wcsicmp(V_BSTR(&class_name), L"SoftwareLicensingProduct");
+    if (V_VT(&class_name) != VT_BSTR || !V_BSTR(&class_name) ||
+            ((wcsicmp(V_BSTR(&class_name), L"SoftwareLicensingService") ||
+              wcsicmp(name, L"InstallProductKey")) &&
+             (wcsicmp(V_BSTR(&class_name), L"SoftwareLicensingProduct") ||
+              (wcsicmp(name, L"Activate") &&
+               wcsicmp(name, L"SetKeyManagementServiceMachine") &&
+               wcsicmp(name, L"SetKeyManagementServicePort")))))
     {
         VariantClear( &class_name );
         return E_NOTIMPL;
@@ -1345,6 +1353,29 @@ static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAM
     VariantClear( &class_name );
     if (FAILED(hr = IWbemClassObject_Get( object->object, L"__PATH", 0, &path, NULL, NULL )))
         return hr;
+    if (V_VT( &path ) != VT_BSTR && licensing_product)
+    {
+        WCHAR object_path[128];
+
+        VariantInit( &id );
+        hr = IWbemClassObject_Get( object->object, L"ID", 0, &id, NULL, NULL );
+        if (SUCCEEDED(hr) && V_VT(&id) == VT_BSTR && V_BSTR(&id) &&
+                swprintf(object_path, ARRAY_SIZE(object_path),
+                L"SoftwareLicensingProduct.ID=\"%s\"", V_BSTR(&id)) > 0)
+        {
+            VariantClear( &path );
+            V_VT(&path) = VT_BSTR;
+            V_BSTR(&path) = SysAllocString(object_path);
+            if (!V_BSTR(&path)) hr = E_OUTOFMEMORY;
+        }
+        else if (SUCCEEDED(hr)) hr = E_UNEXPECTED;
+        VariantClear( &id );
+        if (FAILED(hr))
+        {
+            VariantClear( &path );
+            return hr;
+        }
+    }
     if (V_VT( &path ) != VT_BSTR)
     {
         VariantClear( &path );

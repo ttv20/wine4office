@@ -999,6 +999,272 @@ done:
     SLClose(handle);
 }
 
+struct kms_response
+{
+    WCHAR epid[128];
+    DWORD current_client_count;
+    DWORD activation_interval;
+    DWORD renewal_interval;
+};
+
+struct test_product_key
+{
+    DWORD version;
+    DWORD size;
+    SLID pkey_id;
+    SLID sku_id;
+    WCHAR partial[6];
+    WCHAR channel[64];
+    WCHAR advanced_pid[64];
+    WCHAR product_id[64];
+    WCHAR edition_type[260];
+};
+
+struct test_kms_state
+{
+    DWORD version;
+    DWORD size;
+    SLID sku_id;
+    SLID pkey_id;
+    SLID cmid;
+    WCHAR host[256];
+    DWORD port;
+    DWORD reserved_before_time;
+    ULONGLONG valid_until;
+    DWORD current_client_count;
+    DWORD activation_interval;
+    DWORD renewal_interval;
+    WCHAR epid[128];
+    DWORD reserved_end;
+};
+
+C_ASSERT(sizeof(struct test_product_key) == 956);
+C_ASSERT(sizeof(struct test_kms_state) == 856);
+
+typedef HRESULT (WINAPI *validate_kms_response_fn)(BYTE *, DWORD, const GUID *, ULONGLONG,
+        const BYTE *, struct kms_response *);
+typedef HRESULT (WINAPI *kms_activate_fn)(const WCHAR *, USHORT, const GUID *, const GUID *,
+        const GUID *, struct kms_response *);
+
+static unsigned int hex_value(char ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    return 0;
+}
+
+static void decode_hex(const char *hex, BYTE *data, DWORD size)
+{
+    DWORD i;
+    for (i = 0; i < size; ++i) data[i] = (hex_value(hex[i * 2]) << 4) | hex_value(hex[i * 2 + 1]);
+}
+
+static void test_kms_response_validation(void)
+{
+    static const char response_hex[] =
+        "e400000000000200e400000000000500000102030405060708090a0b0c0d0e0f"
+        "c006242cd7dcad6d834e770cebb1500e3a462d4042e66d500ee583794be0b31a"
+        "2a0a3cea4f344ba882d60f959bca4ea2e056825fd808a5ceede4683fe252d3a5"
+        "7104ac46233a33b7113af64700c567f9f11f3135f5967138187eafffbcc3bf6f"
+        "5bff2b1c208a317ac626fec3d3f86d775f1a85335757eb3e919683147b393c746"
+        "e93f3437738b43d6d6bb4ce057442496c838ef77f1745a1d525e699e5cd156fa"
+        "b47a132a83a01ae1dbd9a2db13e6d0932e04cf5ddff06631c89c7bf07ef68af1"
+        "f4013b236cac2fc55250d1a11cca29a00000000";
+    static const BYTE decrypted_salt[16] =
+        {0x86,0xbe,0x22,0x78,0x6d,0x75,0xe9,0x44,0x8b,0x07,0x92,0x84,0xfd,0xeb,0xfd,0x26};
+    static const GUID cmid =
+        {0x11111111,0x2222,0x4333,{0x84,0x44,0x55,0x55,0x55,0x55,0x55,0x55}};
+    static const GUID sku =
+        {0x8d368fc1,0x9470,0x4be2,{0x8d,0x66,0x90,0xe8,0x36,0xcb,0xb0,0x51}};
+    static const GUID kms_id =
+        {0x1b4db7eb,0x4057,0x5ddf,{0x91,0xe0,0x36,0xde,0xc7,0x20,0x71,0xf5}};
+    validate_kms_response_fn validate;
+    kms_activate_fn activate;
+    struct kms_response response;
+    BYTE wire[(sizeof(response_hex) - 1) / 2];
+    HMODULE module = GetModuleHandleW(L"sppc.dll");
+    HRESULT hr;
+
+    validate = (void *)GetProcAddress(module, "__wine_sppc_validate_kms_response");
+    activate = (void *)GetProcAddress(module, "__wine_sppc_kms_activate");
+    if (!validate || !activate)
+    {
+        win_skip("Wine KMS test entry points are unavailable.\n");
+        return;
+    }
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    memset(&response, 0, sizeof(response));
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == S_OK, "Valid KMS response was rejected, hr %#lx.\n", hr);
+    ok(response.current_client_count == 10, "Unexpected client count %lu.\n",
+            response.current_client_count);
+    ok(response.activation_interval == 120 && response.renewal_interval == 10080,
+            "Unexpected activation intervals %lu/%lu.\n", response.activation_interval,
+            response.renewal_interval);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    wire[4] = 1;
+    wire[5] = wire[6] = wire[7] = 0;
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == S_OK, "Alternate non-null NDR referent was rejected, hr %#lx.\n", hr);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    hr = validate(wire, sizeof(wire) - sizeof(DWORD), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "KMS response without RPC status returned %#lx.\n", hr);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    wire[sizeof(wire) - sizeof(DWORD)] = ERROR_ACCESS_DENIED;
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED),
+            "Failed KMS RPC status returned %#lx.\n", hr);
+
+    hr = activate(L"127.0.0.1", 65534, &sku, &kms_id, &cmid, &response);
+    ok(FAILED(hr), "Unreachable KMS server unexpectedly succeeded.\n");
+}
+
+static void test_persisted_kms_license(void)
+{
+    static const WCHAR product_store[] = L"Software\\Wine\\SPPC\\ProductKeys";
+    static const WCHAR current_store[] = L"Software\\Wine\\SPPC\\CurrentProductKeys";
+    struct test_product_key product = {0};
+    struct test_kms_state state = {0};
+    SL_LICENSING_STATUS *status = NULL;
+    WCHAR sku_name[39], pkey_name[39], state_name[44];
+    SLDATATYPE type = SL_DATA_NONE;
+    BYTE *value = NULL;
+    FILETIME now_filetime;
+    ULONGLONG now;
+    HSLP policies = NULL;
+    HSLC handle = NULL;
+    HKEY products = NULL, current = NULL;
+    UINT count = 0, size = 0;
+    HRESULT hr;
+
+    if (!GetProcAddress(GetModuleHandleW(L"sppc.dll"), "__wine_sppc_get_kms_state"))
+    {
+        win_skip("Wine KMS persistence support is unavailable.\n");
+        return;
+    }
+
+    product.version = 1;
+    product.size = sizeof(product);
+    product.sku_id.Data1 = 0xa1000000 ^ GetCurrentProcessId();
+    product.sku_id.Data2 = 0x1111;
+    product.sku_id.Data3 = 0x4111;
+    product.sku_id.Data4[0] = 0x81;
+    product.pkey_id.Data1 = 0xb2000000 ^ GetCurrentProcessId();
+    product.pkey_id.Data2 = 0x2222;
+    product.pkey_id.Data3 = 0x4222;
+    product.pkey_id.Data4[0] = 0x82;
+    lstrcpyW(product.partial, L"ABCDE");
+    lstrcpyW(product.channel, L"Volume:GVLK");
+    lstrcpyW(product.edition_type, L"KmsTestVolume");
+
+    state.version = 1;
+    state.size = sizeof(state);
+    state.sku_id = product.sku_id;
+    state.pkey_id = product.pkey_id;
+    state.cmid.Data1 = 0xc3000000 ^ GetCurrentProcessId();
+    lstrcpyW(state.host, L"127.0.0.1");
+    state.port = 1688;
+    state.current_client_count = 10;
+    state.activation_interval = 120;
+    state.renewal_interval = 10080;
+    lstrcpyW(state.epid, L"03612-00206-000-000000-03-1033-17763.0000-0012024");
+    GetSystemTimeAsFileTime(&now_filetime);
+    memcpy(&now, &now_filetime, sizeof(now));
+    state.valid_until = now + 24ULL * 60 * 600000000;
+
+    StringFromGUID2(&product.sku_id, sku_name, ARRAY_SIZE(sku_name));
+    StringFromGUID2(&product.pkey_id, pkey_name, ARRAY_SIZE(pkey_name));
+    swprintf(state_name, ARRAY_SIZE(state_name), L"KMS-%s", sku_name);
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, product_store, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &products, NULL))
+    {
+        win_skip("Cannot create temporary SPPC registry state.\n");
+        return;
+    }
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, current_store, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &current, NULL))
+    {
+        RegCloseKey(products);
+        win_skip("Cannot create temporary SPPC current-key state.\n");
+        return;
+    }
+    RegSetValueExW(products, pkey_name, 0, REG_BINARY, (BYTE *)&product, sizeof(product));
+    RegSetValueExW(current, sku_name, 0, REG_BINARY, (BYTE *)&product.pkey_id, sizeof(product.pkey_id));
+    RegSetValueExW(current, state_name, 0, REG_BINARY, (BYTE *)&state, sizeof(state));
+
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
+    hr = SLGetLicensingStatusInformation(handle, &office_app_id, &product.sku_id, NULL,
+            &count, &status);
+    ok(hr == S_OK && count == 1 && status && status[0].eStatus == SL_LICENSING_STATUS_LICENSED,
+            "Persisted KMS state did not produce LICENSED, hr %#lx/count %u/status %p.\n",
+            hr, count, status);
+    LocalFree(status);
+    status = NULL;
+    hr = SLConsumeRight(handle, &office_app_id, &product.sku_id, NULL, NULL);
+    ok(hr == S_OK, "SLConsumeRight failed, hr %#lx.\n", hr);
+    hr = SLGetPolicyInformation(handle, L"*", &type, &size, &value);
+    ok(hr == S_OK && type == SL_DATA_DWORD && size == sizeof(DWORD) && value && *(DWORD *)value == 1,
+            "KMS license did not grant aggregate policy, hr %#lx/type %u/size %u.\n", hr, type, size);
+    LocalFree(value);
+    value = NULL;
+    hr = SLLoadApplicationPolicies(&office_app_id, &product.sku_id, 0, &policies);
+    ok(hr == S_OK, "SLLoadApplicationPolicies failed, hr %#lx.\n", hr);
+    hr = SLGetApplicationPolicy(policies, L"*", &type, &size, &value);
+    ok(hr == S_OK && value && *(DWORD *)value == 1,
+            "KMS license did not grant application policy, hr %#lx.\n", hr);
+    LocalFree(value);
+    value = NULL;
+    SLUnloadApplicationPolicies(policies);
+    SLClose(handle);
+
+    handle = NULL;
+    count = 0;
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "Second SLOpen failed, hr %#lx.\n", hr);
+    hr = SLGetLicensingStatusInformation(handle, &office_app_id, &product.sku_id, NULL,
+            &count, &status);
+    ok(hr == S_OK && status && status[0].eStatus == SL_LICENSING_STATUS_LICENSED,
+            "KMS state did not survive reopening, hr %#lx/status %p.\n", hr, status);
+    LocalFree(status);
+    status = NULL;
+    SLClose(handle);
+
+    state.valid_until = now - 1;
+    RegSetValueExW(current, state_name, 0, REG_BINARY, (BYTE *)&state, sizeof(state));
+    hr = SLOpen(&handle);
+    count = 0;
+    hr = SLGetLicensingStatusInformation(handle, &office_app_id, &product.sku_id, NULL,
+            &count, &status);
+    ok(hr == S_OK && status && status[0].eStatus == SL_LICENSING_STATUS_UNLICENSED,
+            "Expired KMS state remained licensed, hr %#lx/status %p.\n", hr, status);
+    LocalFree(status);
+    hr = SLConsumeRight(handle, &office_app_id, &product.sku_id, NULL, NULL);
+    ok(hr == S_OK, "SLConsumeRight for expired KMS state failed, hr %#lx.\n", hr);
+    type = SL_DATA_NONE;
+    size = 0;
+    value = NULL;
+    hr = SLGetPolicyInformation(handle, L"*", &type, &size, &value);
+    ok(hr == SL_E_RIGHT_NOT_GRANTED && !value,
+            "Expired KMS state granted aggregate policy, hr %#lx/value %p.\n", hr, value);
+    SLClose(handle);
+
+    RegDeleteValueW(current, state_name);
+    RegDeleteValueW(current, sku_name);
+    RegDeleteValueW(products, pkey_name);
+    RegCloseKey(current);
+    RegCloseKey(products);
+}
+
 START_TEST(sppc)
 {
     test_SLInstallProofOfPurchase();
@@ -1012,4 +1278,6 @@ START_TEST(sppc)
     test_service_information();
     test_dynamic_grace_pkey();
     test_product_key_transactions();
+    test_kms_response_validation();
+    test_persisted_kms_license();
 }

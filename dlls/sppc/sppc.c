@@ -34,6 +34,7 @@
 
 #include "slpublic.h"
 #include "slerror.h"
+#include "kms.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(slc);
 
@@ -99,6 +100,7 @@ static const struct o365_product_sku o365_product_skus[] =
 #define AUTH_MAX_KEY_LEN  64
 #define GRACE_PERIOD_DAYS 5
 #define FILETIME_TICKS_PER_MINUTE 600000000ULL
+#define KMS_ACTIVATION_MINUTES (180 * 24 * 60)
 
 struct slc_context
 {
@@ -128,6 +130,25 @@ struct installed_product_key
     WCHAR edition_type[260];
 };
 C_ASSERT(sizeof(struct installed_product_key) == 956);
+
+struct kms_activation_state
+{
+    DWORD version;
+    DWORD size;
+    SLID sku_id;
+    SLID pkey_id;
+    SLID cmid;
+    WCHAR host[256];
+    DWORD port;
+    DWORD reserved_before_time;
+    ULONGLONG valid_until;
+    DWORD current_client_count;
+    DWORD activation_interval;
+    DWORD renewal_interval;
+    WCHAR epid[128];
+    DWORD reserved_end;
+};
+C_ASSERT(sizeof(struct kms_activation_state) == 856);
 
 /* Most recent AES session key exported by rsaenh while wrapping an SPP challenge.
  * Office generates the key in-process immediately before SLSetAuthenticationData. */
@@ -193,6 +214,10 @@ static BOOL find_product_key_for_sku_locked(const SLID *sku_id,
 static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record);
 static HRESULT get_installed_product_skus(UINT *count, SLID **ids);
 static HRESULT get_product_keys_for_sku(const SLID *sku_id, UINT *count, SLID **ids);
+static BOOL kms_activation_valid(const SLID *sku_id, const struct installed_product_key *key,
+        DWORD *remaining, struct kms_activation_state *state);
+static BOOL kms_license_present(const SLID *product);
+static BOOL office_policy_license_present(void);
 
 static const struct o365_product_sku *find_o365_product_sku(const SLID *id)
 {
@@ -381,10 +406,12 @@ HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *product,
     /* Office FullValidation calls ConsumeRight(app, product=Grace, right=NULL).
      * After this, aggregate policy "*" must not report RIGHT_NOT_GRANTED or
      * validation ends in 0xC004F013 even when Licenses/status look correct. */
-    if (IsEqualGUID(app, &office_app_id) &&
-        (!product || IsEqualGUID(product, selected_grace_id())) &&
-        start_grace_period())
-        context->rights_consumed = TRUE;
+    if (IsEqualGUID(app, &office_app_id))
+    {
+        if (kms_license_present(product) ||
+                ((!product || IsEqualGUID(product, selected_grace_id())) && start_grace_period()))
+            context->rights_consumed = TRUE;
+    }
 
     return S_OK;
 }
@@ -464,12 +491,24 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
         entry_count = base_count;
         for (i = 0; i < installed_count; ++i)
         {
+            DWORD kms_minutes;
+
             for (j = 0; j < entry_count; ++j)
                 if (IsEqualGUID(&entries[j].SkuId, &installed_skus[i])) break;
             if (j == entry_count) entries[entry_count++].SkuId = installed_skus[i];
-            entries[j].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-            entries[j].dwGraceTime = 0;
-            entries[j].dwTotalGraceDays = 0;
+            if (find_product_key_for_sku(&installed_skus[i], &product_key) &&
+                    kms_activation_valid(&installed_skus[i], &product_key, &kms_minutes, NULL))
+            {
+                entries[j].eStatus = SL_LICENSING_STATUS_LICENSED;
+                entries[j].dwGraceTime = kms_minutes;
+                entries[j].dwTotalGraceDays = 180;
+            }
+            else
+            {
+                entries[j].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+                entries[j].dwGraceTime = 0;
+                entries[j].dwTotalGraceDays = 0;
+            }
             entries[j].hrReason = S_OK;
         }
         LocalFree(installed_skus);
@@ -484,8 +523,16 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
     entry_count = 1;
     if (product && find_product_key_for_sku(product, &product_key))
     {
+        DWORD kms_minutes;
+
         entries[0].SkuId = *product;
-        entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+        if (kms_activation_valid(product, &product_key, &kms_minutes, NULL))
+        {
+            entries[0].eStatus = SL_LICENSING_STATUS_LICENSED;
+            entries[0].dwGraceTime = kms_minutes;
+            entries[0].dwTotalGraceDays = 180;
+        }
+        else entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
         entries[0].hrReason = S_OK;
     }
     else if ((o365_sku = find_o365_product_sku(product)) && o365_proplus_configured())
@@ -1302,7 +1349,7 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
      * we keep returning F013 here even though Licenses/status are populated. */
     if (!wcscmp(name, L"*"))
     {
-        if (context && context->rights_consumed && grace_license_present())
+        if (context && context->rights_consumed && office_policy_license_present())
         {
             DWORD *policy;
             if (!(policy = LocalAlloc(LMEM_FIXED, sizeof(*policy))))
@@ -1330,7 +1377,7 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
     grace_id = selected_grace_id();
     known_profile = IsEqualGUID(grace_id, &o365_proplus_grace_id) ||
             IsEqualGUID(grace_id, &word2024_grace_id);
-    if (!known_profile && grace_license_present() && installed_profile_get_policy(name, TRUE,
+    if (!known_profile && office_policy_license_present() && installed_profile_get_policy(name, TRUE,
             type ? type : &profile_type, size, value))
     {
         if (context) remember_policy(context, name, type ? *type : profile_type, *value, *size);
@@ -1339,7 +1386,7 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, LPCWSTR name, SLDATATYPE *typ
 
     /* Preserve the native-captured policy surface for the two known profiles.
      * For other profiles, installed PPD metadata remains authoritative. */
-    if (known_profile && grace_license_present())
+    if (known_profile && office_policy_license_present())
     {
         dword_policies = selected_dword_policies(&dword_count);
         string_policies = selected_string_policies(&string_count);
@@ -1678,7 +1725,9 @@ done:
 
 #define PRODUCT_KEY_STORE L"Software\\Wine\\SPPC\\ProductKeys"
 #define CURRENT_KEY_STORE L"Software\\Wine\\SPPC\\CurrentProductKeys"
+#define KMS_STATE_STORE CURRENT_KEY_STORE
 #define PRODUCT_KEY_RECORD_VERSION 1
+#define KMS_STATE_VERSION 1
 static const WCHAR product_key_store_mutex[] = L"Local\\WineSPPCProductKeyStore";
 
 struct digital_product_id
@@ -1831,6 +1880,236 @@ static BOOL find_product_key_for_sku(const SLID *sku_id,
     found = find_product_key_for_sku_locked(sku_id, record);
     unlock_product_key_store(mutex);
     return found;
+}
+
+static BOOL kms_state_record_valid(const struct kms_activation_state *state)
+{
+    return state->version == KMS_STATE_VERSION && state->size == sizeof(*state) &&
+            state->host[ARRAY_SIZE(state->host) - 1] == 0 &&
+            state->epid[ARRAY_SIZE(state->epid) - 1] == 0 && state->port <= 0xffff &&
+            !state->reserved_before_time && !state->reserved_end;
+}
+
+static BOOL load_kms_state(const SLID *sku_id, struct kms_activation_state *state)
+{
+    WCHAR guid[39], name[44];
+    DWORD size = sizeof(*state), type;
+
+    guid_to_string(sku_id, guid);
+    swprintf(name, ARRAY_SIZE(name), L"KMS-%s", guid);
+    return !RegGetValueW(HKEY_LOCAL_MACHINE, KMS_STATE_STORE, name,
+            RRF_RT_REG_BINARY | RRF_SUBKEY_WOW6464KEY, &type, state, &size) &&
+            type == REG_BINARY && size == sizeof(*state) && kms_state_record_valid(state) &&
+            IsEqualGUID(sku_id, &state->sku_id);
+}
+
+static LONG save_kms_state(const struct kms_activation_state *state)
+{
+    WCHAR guid[39], name[44];
+    HKEY key;
+    LONG error;
+
+    if ((error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, KMS_STATE_STORE, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL)))
+    {
+        TRACE("Failed to open KMS state store, error %ld.\n", error);
+        return error;
+    }
+    guid_to_string(&state->sku_id, guid);
+    swprintf(name, ARRAY_SIZE(name), L"KMS-%s", guid);
+    error = RegSetValueExW(key, name, 0, REG_BINARY, (const BYTE *)state, sizeof(*state));
+    if (error) TRACE("Failed to save KMS state, error %ld.\n", error);
+    RegCloseKey(key);
+    return error;
+}
+
+static BOOL generate_cmid(SLID *cmid)
+{
+    HCRYPTPROV provider;
+    BOOL ret;
+
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+        return FALSE;
+    ret = CryptGenRandom(provider, sizeof(*cmid), (BYTE *)cmid);
+    CryptReleaseContext(provider, 0);
+    if (ret)
+    {
+        cmid->Data3 = (cmid->Data3 & 0x0fff) | 0x4000;
+        cmid->Data4[0] = (cmid->Data4[0] & 0x3f) | 0x80;
+    }
+    return ret;
+}
+
+static BOOL kms_activation_valid(const SLID *sku_id, const struct installed_product_key *key,
+        DWORD *remaining, struct kms_activation_state *result)
+{
+    struct kms_activation_state state;
+    FILETIME now_filetime;
+    ULONGLONG now, minutes;
+
+    if (!load_kms_state(sku_id, &state) || !state.valid_until ||
+            !IsEqualGUID(&state.pkey_id, &key->pkey_id)) return FALSE;
+    GetSystemTimeAsFileTime(&now_filetime);
+    memcpy(&now, &now_filetime, sizeof(now));
+    if (state.valid_until <= now) return FALSE;
+    minutes = (state.valid_until - now) / FILETIME_TICKS_PER_MINUTE;
+    if (remaining) *remaining = min(minutes, MAXDWORD);
+    if (result) *result = state;
+    return TRUE;
+}
+
+static BOOL kms_license_present(const SLID *product)
+{
+    struct installed_product_key key;
+    SLID *skus = NULL;
+    UINT count = 0, i;
+    BOOL found = FALSE;
+
+    if (product && !IsEqualGUID(product, selected_grace_id()))
+        return find_product_key_for_sku(product, &key) &&
+                kms_activation_valid(product, &key, NULL, NULL);
+    if (FAILED(get_installed_product_skus(&count, &skus))) return FALSE;
+    for (i = 0; i < count; ++i)
+    {
+        if (find_product_key_for_sku(&skus[i], &key) &&
+                kms_activation_valid(&skus[i], &key, NULL, NULL))
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    LocalFree(skus);
+    return found;
+}
+
+static BOOL office_policy_license_present(void)
+{
+    return grace_license_present() || kms_license_present(NULL);
+}
+
+HRESULT WINAPI __wine_sppc_set_kms_host(const SLID *sku_id, LPCWSTR host)
+{
+    struct kms_activation_state state;
+    HANDLE mutex;
+    LONG error;
+
+    if (!sku_id || !host || !*host || wcslen(host) >= ARRAY_SIZE(state.host)) return E_INVALIDARG;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!load_kms_state(sku_id, &state))
+    {
+        memset(&state, 0, sizeof(state));
+        state.version = KMS_STATE_VERSION;
+        state.size = sizeof(state);
+        state.sku_id = *sku_id;
+        state.port = 1688;
+        if (!generate_cmid(&state.cmid))
+        {
+            unlock_product_key_store(mutex);
+            return E_FAIL;
+        }
+    }
+    lstrcpyW(state.host, host);
+    error = save_kms_state(&state);
+    TRACE("Set KMS host %s for %s, result %ld.\n", debugstr_w(host),
+            wine_dbgstr_guid(sku_id), error);
+    unlock_product_key_store(mutex);
+    return error ? HRESULT_FROM_WIN32(error) : S_OK;
+}
+
+HRESULT WINAPI __wine_sppc_set_kms_port(const SLID *sku_id, DWORD port)
+{
+    struct kms_activation_state state;
+    HANDLE mutex;
+    LONG error;
+
+    if (!sku_id || !port || port > 0xffff) return E_INVALIDARG;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!load_kms_state(sku_id, &state))
+    {
+        memset(&state, 0, sizeof(state));
+        state.version = KMS_STATE_VERSION;
+        state.size = sizeof(state);
+        state.sku_id = *sku_id;
+        if (!generate_cmid(&state.cmid))
+        {
+            unlock_product_key_store(mutex);
+            return E_FAIL;
+        }
+    }
+    state.port = port;
+    error = save_kms_state(&state);
+    unlock_product_key_store(mutex);
+    return error ? HRESULT_FROM_WIN32(error) : S_OK;
+}
+
+HRESULT WINAPI __wine_sppc_get_kms_state(const SLID *sku_id, WCHAR *host, DWORD host_count,
+        DWORD *port, DWORD *activation_interval, DWORD *renewal_interval)
+{
+    struct kms_activation_state state;
+
+    if (!sku_id) return E_INVALIDARG;
+    if (!load_kms_state(sku_id, &state)) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    if (host)
+    {
+        if (!host_count || lstrlenW(state.host) >= host_count) return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
+        lstrcpyW(host, state.host);
+    }
+    if (port) *port = state.port;
+    if (activation_interval) *activation_interval = state.activation_interval;
+    if (renewal_interval) *renewal_interval = state.renewal_interval;
+    return S_OK;
+}
+
+HRESULT WINAPI __wine_sppc_activate_product(const SLID *sku_id)
+{
+    static const SLID office_2024_proplus_sku =
+        {0x8d368fc1,0x9470,0x4be2,{0x8d,0x66,0x90,0xe8,0x36,0xcb,0xb0,0x51}};
+    static const SLID office_2024_kms_id =
+        {0x1b4db7eb,0x4057,0x5ddf,{0x91,0xe0,0x36,0xde,0xc7,0x20,0x71,0xf5}};
+    struct installed_product_key product_key, current_key;
+    struct kms_activation_state state, current_state;
+    struct kms_response response;
+    FILETIME now_filetime;
+    ULONGLONG now;
+    HANDLE mutex;
+    LONG error;
+    HRESULT hr;
+
+    if (!sku_id) return E_INVALIDARG;
+    if (!IsEqualGUID(sku_id, &office_2024_proplus_sku))
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!find_product_key_for_sku(sku_id, &product_key)) hr = SL_E_PKEY_NOT_INSTALLED;
+    else if (!wcsstr(product_key.channel, L"GVLK")) hr = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    else if (!load_kms_state(sku_id, &state) || !state.host[0] || !state.port)
+        hr = HRESULT_FROM_WIN32(ERROR_BAD_CONFIGURATION);
+    else hr = S_OK;
+    unlock_product_key_store(mutex);
+    if (FAILED(hr)) return hr;
+
+    if (FAILED(hr = __wine_sppc_kms_activate(state.host, state.port, sku_id, &office_2024_kms_id,
+            &state.cmid, &response))) return hr;
+
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!find_product_key_for_sku(sku_id, &current_key) ||
+            !IsEqualGUID(&current_key.pkey_id, &product_key.pkey_id) ||
+            !load_kms_state(sku_id, &current_state) || wcscmp(current_state.host, state.host) ||
+            current_state.port != state.port || !IsEqualGUID(&current_state.cmid, &state.cmid))
+    {
+        unlock_product_key_store(mutex);
+        return HRESULT_FROM_WIN32(ERROR_RETRY);
+    }
+    current_state.pkey_id = product_key.pkey_id;
+    current_state.current_client_count = response.current_client_count;
+    current_state.activation_interval = response.activation_interval;
+    current_state.renewal_interval = response.renewal_interval;
+    lstrcpynW(current_state.epid, response.epid, ARRAY_SIZE(current_state.epid));
+    GetSystemTimeAsFileTime(&now_filetime);
+    memcpy(&now, &now_filetime, sizeof(now));
+    current_state.valid_until = now + (ULONGLONG)KMS_ACTIVATION_MINUTES * FILETIME_TICKS_PER_MINUTE;
+    error = save_kms_state(&current_state);
+    unlock_product_key_store(mutex);
+    return error ? HRESULT_FROM_WIN32(error) : S_OK;
 }
 
 static HRESULT enumerate_product_keys(const SLID *sku_id, UINT *count,
@@ -3891,7 +4170,7 @@ HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *ty
         return E_INVALIDARG;
 
     /* Office FullValidation also queries aggregate "*" via application policies. */
-    if (!wcscmp(name, L"*") && grace_license_present())
+    if (!wcscmp(name, L"*") && office_policy_license_present())
     {
         if (!(installed = LocalAlloc(LMEM_FIXED, sizeof(*installed))))
             return E_OUTOFMEMORY;
@@ -3928,10 +4207,10 @@ HRESULT WINAPI SLGetApplicationPolicy(HSLP context, LPCWSTR name, SLDATATYPE *ty
     grace_id = selected_grace_id();
     known_profile = IsEqualGUID(grace_id, &o365_proplus_grace_id) ||
             IsEqualGUID(grace_id, &word2024_grace_id);
-    if (!known_profile && grace_license_present() && !wcsnicmp(name, L"office-", 7) &&
+    if (!known_profile && office_policy_license_present() && !wcsnicmp(name, L"office-", 7) &&
         installed_profile_get_policy(name, FALSE, type, size, value)) return S_OK;
 
-    if (grace_license_present())
+    if (office_policy_license_present())
     {
         if (known_profile)
         {

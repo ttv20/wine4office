@@ -259,6 +259,12 @@ HRESULT process_get_owner(IWbemClassObject *obj, IWbemContext *context, IWbemCla
 HRESULT process_create(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT licensing_install_product_key(IWbemClassObject *obj, IWbemContext *context,
         IWbemClassObject *in, IWbemClassObject **out);
+HRESULT licensing_activate_product(IWbemClassObject *obj, IWbemContext *context,
+        IWbemClassObject *in, IWbemClassObject **out);
+HRESULT licensing_set_kms_machine(IWbemClassObject *obj, IWbemContext *context,
+        IWbemClassObject *in, IWbemClassObject **out);
+HRESULT licensing_set_kms_port(IWbemClassObject *obj, IWbemContext *context,
+        IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_create_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_enum_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_enum_values(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
