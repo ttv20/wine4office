@@ -1001,6 +1001,23 @@ while not pathlib.Path(sys.argv[2]).exists():
 time.sleep(60)
 """
         processes = []
+        published_child_pids = []
+
+        def record_process(process):
+            processes.append(process)
+            if process is None:
+                return
+            readiness_deadline = time.monotonic() + 2
+            while time.monotonic() < readiness_deadline:
+                try:
+                    child_pid = child_pid_file.read_text().strip()
+                except FileNotFoundError:
+                    child_pid = ""
+                if child_pid.isdecimal() and child_ready_file.is_file():
+                    published_child_pids.append(int(child_pid))
+                    return
+                time.sleep(0.01)
+
         with mock.patch.object(
             backend, "PROCESS_TERMINATION_GRACE_SECONDS", 0.05
         ), self.assertRaises(subprocess.TimeoutExpired):
@@ -1010,10 +1027,11 @@ time.sleep(60)
                     str(child_pid_file), str(child_ready_file),
                 ],
                 os.environ.copy(), lambda _line: None,
-                process_callback=processes.append, timeout=0.3,
+                process_callback=record_process, timeout=0.3,
             )
 
-        child_pid = int(child_pid_file.read_text())
+        self.assertEqual(len(published_child_pids), 1)
+        child_pid = published_child_pids[0]
         child_stat = Path(f"/proc/{child_pid}/stat")
 
         def child_is_running() -> bool:
