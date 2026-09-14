@@ -249,9 +249,6 @@
 /* Define to 1 if you have the <mntent.h> header file. */
 #undef HAVE_MNTENT_H
 
-/* Define if MTLDevice protocol has registryID property. */
-#undef HAVE_MTLDEVICE_REGISTRYID
-
 /* Define to 1 if you have the <netdb.h> header file. */
 #undef HAVE_NETDB_H
 
@@ -695,6 +692,9 @@
 
 /* Define to 1 if you have the <X11/extensions/XInput2.h> header file. */
 #undef HAVE_X11_EXTENSIONS_XINPUT2_H
+
+/* Define to 1 if you have the <X11/extensions/XInput.h> header file. */
+#undef HAVE_X11_EXTENSIONS_XINPUT_H
 
 /* Define to 1 if you have the <X11/extensions/Xrandr.h> header file. */
 #undef HAVE_X11_EXTENSIONS_XRANDR_H

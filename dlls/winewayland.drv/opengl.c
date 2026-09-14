@@ -168,6 +168,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     EGLint attribs[4], *attrib = attribs;
     struct wayland_gl_drawable *gl;
     HWND hwnd = client->hwnd;
+    SIZE size;
 
     TRACE("client=%s format=%d\n", debugstr_client_surface(client), format);
 
@@ -184,6 +185,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     *attrib++ = EGL_NONE;
 
     if (!(gl = opengl_drawable_create(sizeof(*gl), &wayland_drawable_funcs, format, client))) return FALSE;
+    size = client->raw ? gl->base.monitor_size : gl->base.virtual_size;
 
     opengl_drawable_map_buffer(&gl->base, GL_FRONT_LEFT, GL_BACK_LEFT);
     opengl_drawable_map_buffer(&gl->base, GL_FRONT, GL_BACK);
@@ -191,7 +193,7 @@ static BOOL wayland_opengl_surface_create(struct client_surface *client, int for
     if (gl->base.stereo) opengl_drawable_map_buffer(&gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT);
 
     if (!(gl->frame_queue = wl_display_create_queue(process_wayland.wl_display))) goto err;
-    if (!(gl->wl_egl_window = wl_egl_window_create(surface->wl_surface, gl->base.virtual_size.cx, gl->base.virtual_size.cy))) goto err;
+    if (!(gl->wl_egl_window = wl_egl_window_create(surface->wl_surface, size.cx, size.cy))) goto err;
     if (!(gl->base.surface = funcs->p_eglCreateWindowSurface(egl->display, config, gl->wl_egl_window, attribs))) goto err;
     set_client_surface(hwnd, surface);
 
@@ -216,6 +218,7 @@ static void wayland_init_egl_platform(struct egl_platform *platform)
 static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
 {
     struct wayland_gl_drawable *gl = impl_from_opengl_drawable(base);
+    SIZE size = gl->base.client && gl->base.client->raw ? gl->base.monitor_size : gl->base.virtual_size;
 
     TRACE("drawable %s, flags %#x\n", debugstr_opengl_drawable(base), flags);
 
@@ -231,7 +234,7 @@ static void wayland_drawable_flush(struct opengl_drawable *base, UINT flags)
 
     /* Since context_flush is called from operations that may latch the native size,
      * perform any pending resizes before calling them. */
-    if (flags & GL_FLUSH_UPDATED) wl_egl_window_resize(gl->wl_egl_window, gl->base.virtual_size.cx, gl->base.virtual_size.cy, 0, 0);
+    if (flags & GL_FLUSH_UPDATED) wl_egl_window_resize(gl->wl_egl_window, size.cx, size.cy, 0, 0);
 }
 
 static BOOL wayland_drawable_swap(struct opengl_drawable *base)

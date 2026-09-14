@@ -112,7 +112,7 @@ typedef struct _SERVICE_INFOW
         DWORD               dwDisplayHint;
         DWORD               dwVersion;
         DWORD               dwTime;
-        LPSTR               lpMachineName;
+        LPWSTR              lpMachineName;
         LPSERVICE_ADDRESSES lpServiceAddress;
         BLOB                ServiceSpecificInfo; /* May point to SERVICE_TYPE_INFO_ABS */
 } SERVICE_INFOW, *PSERVICE_INFOW, *LPSERVICE_INFOW;

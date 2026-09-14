@@ -4760,7 +4760,6 @@ static VkCommandPool create_command_pool(struct wined3d_device_vk *device_vk,
 HRESULT wined3d_context_vk_init(struct wined3d_context_vk *context_vk, struct wined3d_swapchain *swapchain)
 {
     const struct wined3d_vk_info *vk_info;
-    struct wined3d_adapter_vk *adapter_vk;
     struct wined3d_device_vk *device_vk;
 
     TRACE("context_vk %p, swapchain %p.\n", context_vk, swapchain);
@@ -4768,8 +4767,7 @@ HRESULT wined3d_context_vk_init(struct wined3d_context_vk *context_vk, struct wi
     memset(context_vk, 0, sizeof(*context_vk));
     wined3d_context_init(&context_vk->c, swapchain);
     device_vk = wined3d_device_vk(swapchain->device);
-    adapter_vk = wined3d_adapter_vk(device_vk->d.adapter);
-    context_vk->vk_info = vk_info = &adapter_vk->vk_info;
+    context_vk->vk_info = vk_info = &device_vk->vk_info;
 
     if (!(context_vk->vk_command_pool = create_command_pool(device_vk,
             vk_info, device_vk->graphics_queue.vk_queue_family_index)))

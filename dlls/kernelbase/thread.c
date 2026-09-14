@@ -382,19 +382,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetThreadTimes( HANDLE thread, LPFILETIME creation
 
 
 /***********************************************************************
- *	     GetThreadUILanguage   (kernelbase.@)
- */
-LANGID WINAPI DECLSPEC_HOTPATCH GetThreadUILanguage(void)
-{
-    LANGID lang;
-
-    FIXME(": stub, returning default language.\n");
-    NtQueryDefaultUILanguage( &lang );
-    return lang;
-}
-
-
-/***********************************************************************
  *	     OpenThread   (kernelbase.@)
  */
 HANDLE WINAPI DECLSPEC_HOTPATCH OpenThread( DWORD access, BOOL inherit, DWORD id )
@@ -649,18 +636,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadStackGuarantee( ULONG *size )
     }
     if (new_size > prev_size) NtCurrentTeb()->GuaranteedStackBytes = (new_size + 4095) & ~4095;
     return TRUE;
-}
-
-
-/**********************************************************************
- *	SetThreadUILanguage   (kernelbase.@)
- */
-LANGID WINAPI DECLSPEC_HOTPATCH SetThreadUILanguage( LANGID langid )
-{
-    TRACE( "(0x%04x) stub - returning success\n", langid );
-
-    if (!langid) langid = GetThreadUILanguage();
-    return langid;
 }
 
 
@@ -1434,14 +1409,4 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolStackInformation( PTP_POOL pool, PTP_
 BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadpoolStackInformation( PTP_POOL pool, PTP_POOL_STACK_INFORMATION stack_info )
 {
     return set_ntstatus( TpQueryPoolStackInformation( pool, stack_info ));
-}
-
-/***********************************************************************
- *           SetThreadpoolTimerEx   (kernelbase.@)
- */
-BOOL WINAPI DECLSPEC_HOTPATCH SetThreadpoolTimerEx( PTP_TIMER timer, FILETIME *timeout,
-                                                    DWORD period, DWORD window_length )
-{
-    TpSetTimer( timer, (LARGE_INTEGER *)timeout, period, window_length );
-    return TRUE;
 }

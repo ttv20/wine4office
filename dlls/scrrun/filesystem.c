@@ -489,10 +489,7 @@ static HRESULT read_more_data(struct textstream *stream)
     if (stream->eof) return S_OK;
 
     if (!ReadFile(stream->file, buf, sizeof(buf), &read, NULL))
-    {
-        ITextStream_Release(&stream->ITextStream_iface);
         return create_error(GetLastError());
-    }
 
     stream->eof = read != sizeof(buf);
     return append_read_data(stream, buf, read);

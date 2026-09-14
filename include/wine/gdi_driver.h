@@ -156,7 +156,7 @@ struct gdi_dc_funcs
     BOOL     (*pGetCharWidth)(PHYSDEV,UINT,UINT,const WCHAR*,LPINT);
     BOOL     (*pGetCharWidthInfo)(PHYSDEV,void*);
     INT      (*pGetDeviceCaps)(PHYSDEV,INT);
-    BOOL     (*pGetDeviceGammaRamp)(PHYSDEV,LPVOID);
+    UINT     (*pGetDeviceGammaRamp)(PHYSDEV,LPVOID);
     DWORD    (*pGetFontData)(PHYSDEV,DWORD,DWORD,LPVOID,DWORD);
     BOOL     (*pGetFontRealizationInfo)(PHYSDEV,void*);
     DWORD    (*pGetFontUnicodeRanges)(PHYSDEV,LPGLYPHSET);
@@ -202,7 +202,7 @@ struct gdi_dc_funcs
     COLORREF (*pSetDCPenColor)(PHYSDEV, COLORREF);
     INT      (*pSetDIBitsToDevice)(PHYSDEV,INT,INT,DWORD,DWORD,INT,INT,UINT,UINT,LPCVOID,BITMAPINFO*,UINT);
     VOID     (*pSetDeviceClipping)(PHYSDEV,HRGN);
-    BOOL     (*pSetDeviceGammaRamp)(PHYSDEV,LPVOID);
+    UINT     (*pSetDeviceGammaRamp)(PHYSDEV,LPVOID);
     COLORREF (*pSetPixel)(PHYSDEV,INT,INT,COLORREF);
     COLORREF (*pSetTextColor)(PHYSDEV,COLORREF);
     INT      (*pStartDoc)(PHYSDEV,const DOCINFOW*);
@@ -270,9 +270,10 @@ struct client_surface
     LONG                               offscreen;      /* client window is offscreen */
     RECT                               virtual_rect;   /* virtual size and position in the toplevel ancestor, relative to its visible rect */
     RECT                               monitor_rect;   /* raw physical size and position in the toplevel ancestor, relative to its visible rect */
+    BOOL                               raw;            /* use the raw physical position and size for the host client surface */
 };
 
-W32KAPI void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd, int format );
+W32KAPI void *client_surface_create( UINT size, const struct client_surface_funcs *funcs, HWND hwnd, int format, BOOL raw );
 W32KAPI void client_surface_add_ref( struct client_surface *surface );
 W32KAPI void client_surface_release( struct client_surface *surface );
 W32KAPI void client_surface_present( struct client_surface *surface );
@@ -427,7 +428,7 @@ struct user_driver_funcs
     BOOL    (*pWindowPosChanging)(HWND,UINT,BOOL,const struct window_rects *);
     BOOL    (*pGetWindowStyleMasks)(HWND,UINT,UINT,UINT*,UINT*);
     BOOL    (*pGetWindowStateUpdates)(HWND,UINT*,UINT*,RECT*,HWND*);
-    struct client_surface *(*pCreateClientSurface)(HWND,int);
+    struct client_surface *(*pCreateClientSurface)(HWND,int,BOOL);
     BOOL    (*pCreateWindowSurface)(HWND,BOOL,const RECT *,struct window_surface**);
     void    (*pMoveWindowBits)(HWND,const struct window_rects *,const struct window_rects *,const RECT *);
     void    (*pWindowPosChanged)(HWND,HWND,HWND,UINT,const struct window_rects*,struct window_surface*);

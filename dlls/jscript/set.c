@@ -375,10 +375,10 @@ static HRESULT Map_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op, js
     }
 
     LIST_FOR_EACH_ENTRY(entry, &map->entries, struct jsval_map_entry, list_entry) {
-        hres = gc_process_linked_val(gc_ctx, op, dispex, &entry->key);
+        hres = gc_process_linked_val(gc_ctx, op, &entry->key);
         if(FAILED(hres))
             return hres;
-        hres = gc_process_linked_val(gc_ctx, op, dispex, &entry->value);
+        hres = gc_process_linked_val(gc_ctx, op, &entry->value);
         if(FAILED(hres))
             return hres;
     }
@@ -825,7 +825,7 @@ static HRESULT WeakMap_gc_traverse(struct gc_ctx *gc_ctx, enum gc_traverse_op op
         if(op == GC_TRAVERSE && entry->key->gc_marked)
             continue;
 
-        hres = gc_process_linked_val(gc_ctx, op, dispex, &entry->value);
+        hres = gc_process_linked_val(gc_ctx, op, &entry->value);
         if(FAILED(hres))
             return hres;
     }

@@ -3252,7 +3252,10 @@ static BOOL CDecodeSignedMsg_GetParam(CDecodeMsg *msg, DWORD dwParamType,
             if (dwIndex >= msg->u.signed_data.info->cSignerInfo)
                 SetLastError(CRYPT_E_INVALID_INDEX);
             else if (!msg->u.signed_data.info->rgSignerInfo[dwIndex].AuthAttrs.cAttr)
+            {
+                *pcbData = 0;
                 SetLastError(CRYPT_E_ATTRIBUTES_MISSING);
+            }
             else
                 ret = CRYPT_CopyAttr(pvData, pcbData,
                  &msg->u.signed_data.info->rgSignerInfo[dwIndex].AuthAttrs);
@@ -3266,7 +3269,10 @@ static BOOL CDecodeSignedMsg_GetParam(CDecodeMsg *msg, DWORD dwParamType,
             if (dwIndex >= msg->u.signed_data.info->cSignerInfo)
                 SetLastError(CRYPT_E_INVALID_INDEX);
             else if (!msg->u.signed_data.info->rgSignerInfo[dwIndex].UnauthAttrs.cAttr)
+            {
+                *pcbData = 0;
                 SetLastError(CRYPT_E_ATTRIBUTES_MISSING);
+            }
             else
                 ret = CRYPT_CopyAttr(pvData, pcbData,
                  &msg->u.signed_data.info->rgSignerInfo[dwIndex].UnauthAttrs);

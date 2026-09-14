@@ -1386,7 +1386,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileExW( LPCWSTR filename, FINDEX_INFO_
 
     InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = NtOpenFile( &info->handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attr, &io,
-                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT );
     if (status != STATUS_SUCCESS)
     {

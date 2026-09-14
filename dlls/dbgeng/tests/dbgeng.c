@@ -317,8 +317,8 @@ static void test_attach(void)
 static void test_module_information(void)
 {
     static const char *event_name = "dbgeng_test_event";
+    DEBUG_MODULE_PARAMETERS params[2], params2[3];
     ULONG loaded, unloaded, index, length;
-    DEBUG_MODULE_PARAMETERS params[2];
     IDebugDataSpaces *dataspaces;
     PROCESS_INFORMATION info;
     IDebugSymbols2 *symbols;
@@ -426,6 +426,34 @@ static void test_module_information(void)
 
     hr = symbols->lpVtbl->GetModuleParameters(symbols, 1, NULL, loaded, params);
     ok(FAILED(hr), "Unexpected hr %#lx.\n", hr);
+
+    /* Getting parameters with start offset. */
+    memset(&params, 0, sizeof(params));
+    memset(&params2, 0, sizeof(params2));
+    hr = symbols->lpVtbl->GetModuleParameters(symbols, 2, NULL, 0, params);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(!!params[0].Base && params[0].Base != DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    ok(!!params[1].Base && params[1].Base != DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    hr = symbols->lpVtbl->GetModuleParameters(symbols, 2, NULL, 1, params2);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(params2[0].Base == params[1].Base, "Unexpected module base.\n");
+    memset(&params2, 0, sizeof(params2));
+    hr = symbols->lpVtbl->GetModuleParameters(symbols, 3, NULL, loaded - 1, params2);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(!!params2[0].Base && params2[0].Base != DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    ok(params2[1].Base == DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    ok(params2[2].Base == DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+
+    memset(&params2, 0, sizeof(params2));
+    hr = symbols->lpVtbl->GetModuleParameters(symbols, 3, NULL, loaded, params2);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    ok(params2[0].Base == DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    ok(params2[1].Base == DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+    ok(params2[2].Base == DEBUG_INVALID_OFFSET, "Unexpected module base.\n");
+
+    memset(&params, 0, sizeof(params));
+    hr = symbols->lpVtbl->GetModuleParameters(symbols, 0, NULL, 1, params);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     /* Image name. */
     hr = symbols->lpVtbl->GetModuleNameString(symbols, DEBUG_MODNAME_IMAGE, 0, 0, buffer, sizeof(buffer), &length);

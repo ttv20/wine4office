@@ -267,7 +267,7 @@ static HRESULT get_bookmark_data( VARIANT *bookmark, const BYTE **data, DBBKMARK
         *data = NULL;
         *len = 0;
     }
-    else if (V_VT(bookmark) & (VT_ARRAY | VT_UI1))
+    else if (V_VT(bookmark) == (VT_ARRAY | VT_UI1))
     {
         HRESULT hr = SafeArrayLock(V_ARRAY(bookmark));
         if (FAILED(hr)) return hr;
@@ -1201,6 +1201,7 @@ static HRESULT WINAPI field_props_get_Item(Properties *iface, VARIANT index, Pro
         {
             prop = malloc (sizeof(struct field_property));
             prop->Property_iface.lpVtbl = &field_property_vtbl;
+            prop->refs = 1;
             prop->value = &field->optimize;
 
             *object = &prop->Property_iface;
@@ -4123,11 +4124,13 @@ static void init_bookmark( struct recordset *recordset )
             binding.bScale = colinfo[i].bScale;
             hr = IAccessor_CreateAccessor( recordset->accessor, DBACCESSOR_ROWDATA,
                     1, &binding, 0, &recordset->bookmark_hacc, NULL );
-            if (FAILED(hr)) return;
+            if (SUCCEEDED(hr))
+            {
+                V_VT(&recordset->bookmark) = VT_R8;
+                V_R8(&recordset->bookmark) = -INFINITY;
+            }
 
-            V_VT(&recordset->bookmark) = VT_R8;
-            V_R8(&recordset->bookmark) = -INFINITY;
-            return;
+            break;
         }
     }
 

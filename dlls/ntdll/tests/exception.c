@@ -4023,13 +4023,8 @@ static void test_debugger(DWORD cont_status, BOOL with_WaitForDebugEventEx)
             {
                 if (stage == STAGE_RTLRAISE_NOT_HANDLED)
                 {
-                    if (is_arm64ec) /* addr points to RtlRaiseException entry thunk */
-                        ok( ((ULONG *)ctx.Rip)[-1] == 0xd63f0120 /* blr x9 */,
-                            "Rip not in entry thunk %p (ntdll+%Ix)\n",
-                            (char *)ctx.Rip, (char *)ctx.Rip - (char *)hntdll );
-                    else
-                        ok((char *)ctx.Rip == (char *)code_mem_address + 0x0c, "Rip at %p instead of %p\n",
-                           (char *)ctx.Rip, (char *)code_mem_address + 0x0c);
+                    ok((char *)ctx.Rip == (char *)code_mem_address + 0x0c, "Rip at %p instead of %p\n",
+                       (char *)ctx.Rip, (char *)code_mem_address + 0x0c);
                     /* setting the context from debugger does not affect the context that the
                      * exception handler gets, except on w2008 */
                     ctx.Rip = (UINT_PTR)code_mem_address + 0x0e;
@@ -4042,14 +4037,8 @@ static void test_debugger(DWORD cont_status, BOOL with_WaitForDebugEventEx)
                 {
                     if (de.u.Exception.dwFirstChance)
                     {
-                        if (is_arm64ec)
-                            ok( ((ULONG *)ctx.Rip)[-1] == 0xd63f0120 /* blr x9 */,
-                                "Rip not in entry thunk %p (ntdll+%Ix)\n",
-                                (char *)ctx.Rip, (char *)ctx.Rip - (char *)hntdll );
-                        else
-                            ok((char *)ctx.Rip == (char *)code_mem_address + 0x0c,
-                               "Rip at %p instead of %p\n",
-                               (char *)ctx.Rip, (char *)code_mem_address + 0x0c);
+                        ok((char *)ctx.Rip == (char *)code_mem_address + 0x0c, "Rip at %p instead of %p\n",
+                           (char *)ctx.Rip, (char *)code_mem_address + 0x0c);
                         /* setting the context from debugger does not affect the context that the
                          * exception handler gets, except on w2008 */
                         ctx.Rip = (UINT_PTR)code_mem_address + 0x0e;
@@ -4061,11 +4050,7 @@ static void test_debugger(DWORD cont_status, BOOL with_WaitForDebugEventEx)
                     else
                     {
                         /* debugger gets context after exception handler has played with it */
-                        if (is_arm64ec)
-                            ok( ((ULONG *)ctx.Rip)[-1] == 0xd63f0120 /* blr x9 */,
-                                "Rip not in entry thunk %p (ntdll+%Ix)\n",
-                                (char *)ctx.Rip, (char *)ctx.Rip - (char *)hntdll );
-                        else if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)
+                        if (de.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT && !is_arm64ec)
                         {
                             ok((char *)ctx.Rip == (char *)code_mem_address + 0xb, "Rip at %p instead of %p\n",
                                (char *)ctx.Rip, (char *)code_mem_address + 0xb);
@@ -11541,7 +11526,7 @@ static void test_extended_context(void)
         ok(xs->Mask == bret ? 4 : 0xdeadbeef, "Got unexpected Mask %s.\n", wine_dbgstr_longlong(xs->Mask));
         mask = pRtlGetExtendedFeaturesMask(context_ex);
         ok(mask == (xs->Mask & ~(ULONG64)3), "Got unexpected mask %s.\n", wine_dbgstr_longlong(mask));
-        ok(xs->CompactionMask == bret ? expected_compaction : 0xdeadbeef, "Got unexpected CompactionMask %s.\n",
+        ok(xs->CompactionMask == 0xdeadbeef, "Got unexpected CompactionMask %s.\n",
                 wine_dbgstr_longlong(xs->CompactionMask));
 
         mask = 0xdeadbeef;
@@ -11583,7 +11568,8 @@ static void test_extended_context(void)
 
             length2 = 0xdeadbeef;
             p = pLocateXStateFeature(context, 2, &length2);
-            ok(!p && length2 == (flags & CONTEXT_NATIVE) ? sizeof(YMMCONTEXT) : 0xdeadbeef,
+            ok((!p && length2 == ((flags & CONTEXT_NATIVE) ? sizeof(YMMCONTEXT) : 0xdeadbeef))
+               || broken(p && length2 == sizeof(YMMCONTEXT)) /* some win10 versions */,
                     "Got unexpected p %p, length %#lx, flags %#lx.\n", p, length2, flags);
 
             context_flags = *(DWORD *)(context_buffer + context_arch[test].flags_offset);

@@ -204,8 +204,8 @@ static inline HRESULT VARIANT_Coerce(VARIANTARG* pd, LCID lcid, USHORT wFlags,
     case VT_I4:       return VarUI2FromI4(V_I4(ps), &V_UI2(pd));
     case VT_UI1:      return VarUI2FromUI1(V_UI1(ps), &V_UI2(pd));
     case VT_UI4:      return VarUI2FromUI4(V_UI4(ps), &V_UI2(pd));
-    case VT_I8:       return VarUI4FromI8(V_I8(ps), &V_UI4(pd));
-    case VT_UI8:      return VarUI4FromUI8(V_UI8(ps), &V_UI4(pd));
+    case VT_I8:       return VarUI2FromI8(V_I8(ps), &V_UI2(pd));
+    case VT_UI8:      return VarUI2FromUI8(V_UI8(ps), &V_UI2(pd));
     case VT_R4:       return VarUI2FromR4(V_R4(ps), &V_UI2(pd));
     case VT_R8:       return VarUI2FromR8(V_R8(ps), &V_UI2(pd));
     case VT_DATE:     return VarUI2FromDate(V_DATE(ps), &V_UI2(pd));
@@ -3992,7 +3992,7 @@ HRESULT WINAPI VarSub(LPVARIANT left, LPVARIANT right, LPVARIANT result)
     V_I2(result) = V_I2(&lv) - V_I2(&rv);
     break;
     case VT_UI1:
-    V_UI1(result) = V_UI2(&lv) - V_UI1(&rv);
+    V_UI1(result) = V_UI1(&lv) - V_UI1(&rv);
     break;
     case VT_R8:
     V_R8(result) = V_R8(&lv) - V_R8(&rv);

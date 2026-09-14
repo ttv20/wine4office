@@ -65,7 +65,7 @@ DEFINE_GUID( device_path_guid, 0x00000000, 0x0000, 0x0000, 0x8d, 0x4a, 0x23, 0x9
  */
 #define UUID_TIME_TO_SYSTEM_TIME_DAYS ((ULONG64)((365 * 18) + 5 + 17 + 30 + 31))
 #define UUID_TIME_TO_SYSTEM_TIME_NS_DIFFERENCE ((UUID_TIME_TO_SYSTEM_TIME_DAYS) * 24 * 60 * 60 * 10000000)
-DEFINE_GUID( dinput_joystick_uuid_init, 0x00000000, 0x0000, 0x1000, 0x80, 0x00, 0x00, 0x00, 'D', 'E', 'S', 'T' );
+DEFINE_GUID( dinput_joystick_uuid_init, 0x00000000, 0x0000, 0x1000, 0x80, 0x00, 'D', 'E', 'S', 'T', 0x00, 0x00 );
 
 static GUID create_instance_uuid(void)
 {
