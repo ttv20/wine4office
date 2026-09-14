@@ -515,6 +515,37 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "package name"):
             backend.package_installation()
 
+    def test_package_installation_prefers_its_owned_wine_runner(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "apt",
+            "package": "wine4office",
+            "components": ["manager", "wine"],
+        }))
+        packaged_wine = self.install_root / "runner/bin/wine"
+        packaged_wine.parent.mkdir(parents=True)
+        packaged_wine.write_text("#!/bin/sh\nexit 0\n")
+        packaged_wine.chmod(0o755)
+        manager_binary = self.install_root / "bin/Wine4OfficeManager"
+        manager_binary.parent.mkdir(parents=True)
+        manager_binary.write_text("manager")
+        manager_binary.chmod(0o755)
+        (self.install_root / "STANDALONE").write_text("Wine4OfficeManager\n")
+
+        with mock.patch.object(
+            backend.shutil, "which", return_value="/usr/bin/wine"
+        ), mock.patch.dict(
+            os.environ, {"WINE4OFFICE_MANAGER_ROOT": ""}
+        ), mock.patch.object(
+            backend.sys, "frozen", True, create=True
+        ), mock.patch.object(
+            backend.sys, "executable", str(manager_binary)
+        ):
+            self.assertEqual(
+                backend.default_config()["wine"], str(packaged_wine.resolve())
+            )
+
     def test_nix_package_wrapper_is_embedded_in_persistent_commands(self):
         package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
         package_file.write_text(__import__("json").dumps({
@@ -527,6 +558,14 @@ class UpdaterTests(unittest.TestCase):
         wrapper.parent.mkdir(parents=True)
         wrapper.write_text("#!/bin/sh\nexec \"$@\"\n")
         wrapper.chmod(0o755)
+        packaged_manager = self.install_root / "bin/Wine4OfficeManager"
+        packaged_wine = self.install_root / "runner/bin/wine"
+        packaged_winepath = self.install_root / "runner/bin/winepath"
+        for executable in (packaged_manager, packaged_wine):
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        packaged_winepath.symlink_to("wine")
         with mock.patch.dict(
             os.environ, {"WINE4OFFICE_PACKAGE_WRAPPER": str(wrapper)}
         ):
@@ -534,14 +573,22 @@ class UpdaterTests(unittest.TestCase):
                 backend.package_wrap_command(["/nix/store/raw-wine", "wineboot"]),
                 [str(wrapper), "--exec", "/nix/store/raw-wine", "wineboot"],
             )
+            self.assertEqual(
+                backend.package_wrap_command([packaged_manager, "--maintenance"]),
+                [str(wrapper), "--manager", "--maintenance"],
+            )
+            self.assertEqual(
+                backend.package_wrap_command([packaged_wine, "wineboot"]),
+                [str(wrapper), "--runner-tool", "wine", "wineboot"],
+            )
             launcher = backend._shortcut_launcher_text(
                 "excel", self.home / ".wine4office",
-                Path("/nix/store/raw-runner/bin/wine"),
+                packaged_wine,
                 self.home / "EXCEL.EXE", None,
             )
             with mock.patch.object(
                 backend, "_preload_manager_executable",
-                return_value=Path("/nix/store/raw-manager"),
+                return_value=packaged_manager,
             ), mock.patch.object(
                 backend, "_preload_worker_executable",
                 return_value=Path("/nix/store/raw-worker"),
@@ -551,9 +598,42 @@ class UpdaterTests(unittest.TestCase):
                     self.home / "binding.json", self.home / "status.json"
                 )
 
-        self.assertIn(f"wine_command=({wrapper} --exec ", launcher)
-        self.assertIn(f'ExecStart="{wrapper}" "--exec" ', update_unit)
+        self.assertIn(
+            f"wine_command=({wrapper} --runner-tool wine", launcher
+        )
+        self.assertIn(
+            f"winepath_command=({wrapper} --runner-tool winepath", launcher
+        )
+        self.assertIn(f'ExecStart="{wrapper}" "--manager" ', update_unit)
         self.assertIn(f'ExecStart="{wrapper}" "--exec" ', preload_unit)
+
+    def test_nix_profile_upgrade_replaces_saved_store_runner(self):
+        package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE
+        package_file.write_text(__import__("json").dumps({
+            "schema_version": 1,
+            "provider": "nix",
+            "package": "wine4office",
+            "components": ["manager", "wine"],
+        }))
+        packaged_wine = self.install_root / "runner/bin/wine"
+        packaged_wine.parent.mkdir(parents=True)
+        packaged_wine.write_text("#!/bin/sh\nexit 0\n")
+        packaged_wine.chmod(0o755)
+        config = backend.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(__import__("json").dumps({
+            "wine": "/nix/store/old-generation/opt/wine4office/runner/bin/wine",
+        }))
+
+        self.assertEqual(
+            backend.load_config()["wine"], str(packaged_wine.resolve())
+        )
+        config.write_text(__import__("json").dumps({
+            "wine": "/opt/custom-wine/bin/wine",
+        }))
+        self.assertEqual(
+            backend.load_config()["wine"], "/opt/custom-wine/bin/wine"
+        )
 
     def test_equal_or_downgrade_is_rejected_before_download(self):
         parsed = backend.parse_release_metadata(

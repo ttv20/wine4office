@@ -6,6 +6,7 @@
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Add AppImage, AUR, Nix, Ubuntu, and Fedora packages with durable user installs, package-manager updates, and startup checks.
+- Keep packaged Wine runners current across Nix profile upgrades and prevent AppImage or AUR prereleases from blocking stable upgrades.
 - Keep Authenticode verification working with multi-digit OpenSSL patch versions.
 - Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.

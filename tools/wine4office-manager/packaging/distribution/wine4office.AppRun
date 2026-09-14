@@ -72,14 +72,20 @@ PY
 
 INSTALL=true
 if [[ -x $MANAGER && -x $ROOT/runner/bin/wine && -r $ROOT/VERSION ]]; then
-    INSTALLED_VERSION=$(<"$ROOT/VERSION")
-    if ORDER=$(version_order "$INSTALLED_VERSION" "$BUNDLED_VERSION" 2>/dev/null); then
-        if ((ORDER >= 0)); then
+    INSTALLED_MANAGER_VERSION=$(<"$ROOT/VERSION")
+    INSTALLED_WINE_VERSION=$INSTALLED_MANAGER_VERSION
+    [[ ! -r $ROOT/WINE_VERSION ]] || INSTALLED_WINE_VERSION=$(<"$ROOT/WINE_VERSION")
+    if MANAGER_ORDER=$(version_order \
+            "$INSTALLED_MANAGER_VERSION" "$BUNDLED_VERSION" 2>/dev/null) && \
+            WINE_ORDER=$(version_order \
+                "$INSTALLED_WINE_VERSION" "$BUNDLED_VERSION" 2>/dev/null); then
+        if ((MANAGER_ORDER > 0 || WINE_ORDER > 0)); then
             INSTALL=false
-            if ((ORDER > 0)); then
-                printf 'Wine4Office %s is already installed; not downgrading to %s.\n' \
-                    "$INSTALLED_VERSION" "$BUNDLED_VERSION"
-            fi
+            printf 'Wine4Office Manager %s and Wine %s are installed; not downgrading either component to %s.\n' \
+                "$INSTALLED_MANAGER_VERSION" "$INSTALLED_WINE_VERSION" \
+                "$BUNDLED_VERSION"
+        elif ((MANAGER_ORDER == 0 && WINE_ORDER == 0)); then
+            INSTALL=false
         fi
     fi
 fi

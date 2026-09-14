@@ -73,7 +73,9 @@ def generate_aur(release: dict, output: Path, distribution: Path) -> None:
     shutil.copyfile(icon, output / "wine4office-manager.png")
     version = release["manager"]["version"]
     base_version = release["wine"].get("base_version", "unknown")
-    pkgver = version.replace("-", "_")
+    # Pacman sorts an underscore prerelease after the matching stable version.
+    # Removing the forbidden hyphen keeps 0.2.2rc1 below 0.2.2.
+    pkgver = version.replace("-", "")
     manager_url = release["manager"]["resolved_url"]
     wine_url = release["wine"]["resolved_url"]
     manager_source = shell_single_quote(f"Wine4OfficeManager::{manager_url}")
@@ -192,6 +194,10 @@ def generate_nix(release: dict, output: Path, distribution: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(distribution / "nix/flake.nix", output / "flake.nix")
     shutil.copyfile(distribution / "nix/package.nix", output / "package.nix")
+    shutil.copyfile(
+        distribution / "nix/wine4office-dispatch",
+        output / "wine4office-dispatch",
+    )
     data = {
         "version": release["manager"]["version"],
         "managerUrl": release["manager"]["resolved_url"],

@@ -214,6 +214,25 @@ EOF
             echo "Nix package redirects bundled Manager resource lookup" >&2
             exit 1
         fi
+        nix_payload=$tmp/nix-payload/opt/wine4office
+        mkdir -p "$nix_payload/bin" "$nix_payload/runner/bin" "$tmp/nix-external"
+        for executable in \
+                "$nix_payload/bin/Wine4OfficeManager:manager-current" \
+                "$nix_payload/runner/bin/wine:wine-current" \
+                "$tmp/nix-external/tool:external-current"; do
+            path=${executable%%:*}
+            result=${executable#*:}
+            printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "$result" > "$path"
+            chmod 0755 "$path"
+        done
+        nix_dispatch=$tmp/community/nix/wine4office-dispatch
+        [[ $(WINE4OFFICE_NIX_PAYLOAD="$nix_payload" \
+            sh "$nix_dispatch" --manager) == manager-current ]]
+        [[ $(WINE4OFFICE_NIX_PAYLOAD="$nix_payload" \
+            sh "$nix_dispatch" --runner-tool wine) == wine-current ]]
+        [[ $(WINE4OFFICE_NIX_PAYLOAD="$nix_payload" \
+            sh "$nix_dispatch" --exec "$tmp/nix-external/tool") == \
+            external-current ]]
         if command -v makepkg >/dev/null; then
             if [[ $EUID -eq 0 ]]; then
                 nobody_group=$(id -gn nobody)
@@ -226,6 +245,25 @@ EOF
                     > "$tmp/generated.SRCINFO"
             fi
             diff -u "$tmp/community/aur/.SRCINFO" "$tmp/generated.SRCINFO"
+        fi
+        python3 - "$release/release.json" "$tmp/prerelease.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    payload = json.load(source)
+payload["manager"]["version"] = "2.3.4-rc1"
+payload["wine"]["version"] = "2.3.4-rc1"
+with open(sys.argv[2], "w", encoding="utf-8") as target:
+    json.dump(payload, target)
+PY
+        "$distribution/generate-community-packages.py" \
+            "$tmp/prerelease.json" "$tmp/prerelease"
+        grep -F 'pkgver=2.3.4rc1' "$tmp/prerelease/aur/PKGBUILD" >/dev/null
+        grep -F $'\tpkgver = 2.3.4rc1' \
+            "$tmp/prerelease/aur/.SRCINFO" >/dev/null
+        if command -v vercmp >/dev/null; then
+            [[ $(vercmp 2.3.4rc1 2.3.4) -lt 0 ]]
         fi
         if command -v nix-instantiate >/dev/null; then
             nix-instantiate --parse "$tmp/community/nix/flake.nix" >/dev/null
@@ -336,7 +374,9 @@ EOF
             "$tmp/appdir/AppRun" --appimage-install-only >/dev/null
         [[ $(stat -c '%d:%i' "$appimage_root/runner/bin/wine") == "$runner_identity" ]]
 
-        printf '9.0.0\n' > "$appimage_root/VERSION"
+        printf '1.0.0\n' > "$appimage_root/VERSION"
+        printf '9.0.0\n' > "$appimage_root/WINE_VERSION"
+        runner_identity=$(stat -c '%d:%i' "$appimage_root/runner/bin/wine")
         APPDIR="$tmp/appdir" \
         HOME="$appimage_home" \
         XDG_DATA_HOME="$appimage_home/data" \
@@ -344,7 +384,9 @@ EOF
         WINE4OFFICE_BIN_HOME="$appimage_home/bin" \
             "$tmp/appdir/AppRun" --appimage-install-only \
             | grep -F 'not downgrading' >/dev/null
-        [[ $(cat "$appimage_root/VERSION") == 9.0.0 ]]
+        [[ $(cat "$appimage_root/VERSION") == 1.0.0 ]]
+        [[ $(cat "$appimage_root/WINE_VERSION") == 9.0.0 ]]
+        [[ $(stat -c '%d:%i' "$appimage_root/runner/bin/wine") == "$runner_identity" ]]
 
         mv "$tmp/appdir" "$tmp/AppDir.removed"
         "$appimage_root/bin/Wine4OfficeManager" --smoke-test

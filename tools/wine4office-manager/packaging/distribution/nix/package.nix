@@ -42,15 +42,8 @@ let
     '';
   };
   dispatcher = pkgs.writeShellScript "wine4office-dispatch" ''
-    if [ "''${1-}" = "--exec" ]; then
-      shift
-      if [ "$#" -eq 0 ]; then
-        echo "wine4office: --exec requires a command" >&2
-        exit 2
-      fi
-      exec "$@"
-    fi
-    exec ${payload}/opt/wine4office/bin/Wine4OfficeManager "$@"
+    export WINE4OFFICE_NIX_PAYLOAD=${payload}/opt/wine4office
+    exec ${pkgs.runtimeShell} ${./wine4office-dispatch} "$@"
   '';
   fhs = pkgs.buildFHSEnv {
     name = "wine4office-fhs";

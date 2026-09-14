@@ -426,6 +426,19 @@ def package_wrap_command(command: Iterable[str | Path]) -> list[str]:
         wrapper = Path.cwd() / wrapper
     if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
         raise RuntimeError(f"The Nix package runtime wrapper is unavailable: {wrapper}")
+    root = installed_root()
+    if root is not None and values:
+        try:
+            executable = Path(values[0]).expanduser()
+            executable = Path(os.path.abspath(executable))
+            relative = executable.relative_to(root.resolve())
+        except ValueError:
+            relative = None
+        if relative == Path("bin/Wine4OfficeManager"):
+            return [str(wrapper), "--manager", *values[1:]]
+        if (relative is not None and relative.parent == Path("runner/bin")
+                and relative.name not in ("", ".", "..")):
+            return [str(wrapper), "--runner-tool", relative.name, *values[1:]]
     return [str(wrapper), "--exec", *values]
 
 
@@ -650,6 +663,9 @@ def detect_wine() -> str:
     candidates: list[Path] = []
     if os.environ.get("WINE4OFFICE_WINE"):
         candidates.append(Path(os.environ["WINE4OFFICE_WINE"]).expanduser())
+    root = installed_root()
+    if root is not None:
+        candidates.append(root / "runner/bin/wine")
     candidates.append(data_home() / "wine4office/runner/bin/wine")
 
     bottles = data_home() / "bottles/bottles/Wine4Office/bottle.yml"
@@ -669,6 +685,7 @@ def detect_wine() -> str:
 
 def load_config() -> dict:
     result = default_config()
+    packaged_wine = result["wine"]
     path = config_path()
     if path.is_file():
         try:
@@ -681,6 +698,15 @@ def load_config() -> dict:
                         result[key] = saved[key]
         except (OSError, ValueError):
             pass
+    installation = package_installation()
+    configured_wine = Path(str(result.get("wine", ""))).expanduser()
+    if (installation is not None and installation["provider"] == "nix"
+            and "wine" in installation["components"] and configured_wine.is_absolute()
+            and configured_wine.parts[:3] == ("/", "nix", "store")
+            and configured_wine.parts[-5:] == (
+                "opt", "wine4office", "runner", "bin", "wine"
+            )):
+        result["wine"] = packaged_wine
     return result
 
 
