@@ -1773,20 +1773,27 @@ static LONG delete_product_key(const SLID *pkey_id)
 static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record)
 {
     WCHAR name[64];
-    HKEY key;
+    HKEY key = NULL;
     SLID current_id;
     DWORD index = 0, name_size, size = sizeof(current_id), type;
+    HANDLE mutex;
     LONG error;
+    BOOL found = FALSE;
+
+    if (!(mutex = lock_product_key_store())) return FALSE;
 
     guid_to_string(sku_id, name);
     if (!RegGetValueW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, name,
             RRF_RT_REG_BINARY | RRF_SUBKEY_WOW6464KEY, &type, &current_id, &size) &&
             type == REG_BINARY && size == sizeof(current_id) &&
             load_product_key(&current_id, record) && IsEqualGUID(sku_id, &record->sku_id))
-        return TRUE;
+    {
+        found = TRUE;
+        goto done;
+    }
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0,
-            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key)) return FALSE;
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key)) goto done;
     for (;;)
     {
         name_size = ARRAY_SIZE(name);
@@ -1798,12 +1805,15 @@ static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_produc
         if (type == REG_BINARY && size == sizeof(*record) && product_key_record_valid(record) &&
                 IsEqualGUID(sku_id, &record->sku_id))
         {
-            RegCloseKey(key);
-            return TRUE;
+            found = TRUE;
+            break;
         }
     }
-    RegCloseKey(key);
-    return FALSE;
+
+done:
+    if (key) RegCloseKey(key);
+    unlock_product_key_store(mutex);
+    return found;
 }
 
 static HRESULT enumerate_product_keys(const SLID *sku_id, UINT *count,
@@ -2266,7 +2276,7 @@ HRESULT WINAPI SLSetCurrentProductKey(HSLC handle, const SLID *sku_id, const SLI
     if (!IsEqualGUID(sku_id, &record.sku_id))
     {
         unlock_product_key_store(mutex);
-        return SL_E_INVALID_PKEY;
+        return SL_E_MISMATCHED_PRODUCT_SKU;
     }
     if ((error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, 0, NULL, 0,
             KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL)))
