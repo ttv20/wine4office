@@ -298,6 +298,7 @@ PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
 PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
 PACKAGE_UPDATE_HELPER = "wine4office-package-update-helper"
 PACKAGE_UPDATE_TIMEOUT_SECONDS = 30 * 60
+PACKAGE_UPDATE_RECOVERY_TIMEOUT_SECONDS = 2 * 60
 PACKAGE_PROVIDERS = {
     "apt": "APT",
     "dnf": "DNF",
@@ -1435,7 +1436,8 @@ def sibling_tool(wine: Path, name: str) -> Path | None:
 
 
 def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd: Path | None = None,
-                    cancel_event=None, process_callback=None) -> None:
+                    cancel_event=None, process_callback=None,
+                    timeout: float | None = None) -> None:
     """Stream command output without waiting on inherited descendant pipes."""
     output("$ " + " ".join(command))
     process = subprocess.Popen(
@@ -1456,6 +1458,21 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     os.set_blocking(stdout_fd, False)
     pending = bytearray()
     stdout_open = True
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def terminate_process() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
 
     def emit_lines(final: bool = False) -> None:
         while True:
@@ -1472,22 +1489,19 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait()
+                terminate_process()
                 raise RuntimeError("Operation cancelled.")
+            if deadline is not None and time.monotonic() >= deadline:
+                terminate_process()
+                raise subprocess.TimeoutExpired(command, timeout)
             if stdout_open:
+                select_timeout = 0.1
+                if deadline is not None:
+                    select_timeout = max(
+                        0.0, min(select_timeout, deadline - time.monotonic())
+                    )
                 readable, _writable, _exceptional = select.select(
-                    [stdout_fd], [], [], 0.1
+                    [stdout_fd], [], [], select_timeout
                 )
                 if readable:
                     try:
@@ -1682,7 +1696,8 @@ def finalize_new_prefix(prefix: Path, wine: Path, output: Output,
 
 
 def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
-                       output: Output, cancel_event=None, process_callback=None) -> str:
+                       output: Output, cancel_event=None, process_callback=None,
+                       timeout: float | None = None) -> str:
     """Update and start an existing prefix with a newly installed Wine runner."""
     prefix = validate_prefix(prefix_value)
     if not has_wine_prefix_layout(prefix):
@@ -1696,6 +1711,7 @@ def update_wine_prefix(prefix_value: str, wine_value: str, use_x11: bool,
         output,
         cancel_event=cancel_event,
         process_callback=process_callback,
+        timeout=timeout,
     )
     return f"Wine environment updated and restarted with {wine}"
 

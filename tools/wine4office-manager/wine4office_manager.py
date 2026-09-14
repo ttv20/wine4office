@@ -897,6 +897,7 @@ class ManagerState:
                         self.output(backend.update_wine_prefix(
                             config["prefix"], recovery_wine, active_use_x11,
                             self.output, process_callback=self.set_process,
+                            timeout=backend.PACKAGE_UPDATE_RECOVERY_TIMEOUT_SECONDS,
                         ))
                         wine_restarted = True
                     return result["message"]
@@ -937,6 +938,7 @@ class ManagerState:
                         self.output(backend.update_wine_prefix(
                             config["prefix"], recovery_wine, active_use_x11,
                             self.output, process_callback=self.set_process,
+                            timeout=backend.PACKAGE_UPDATE_RECOVERY_TIMEOUT_SECONDS,
                         ))
                     except Exception as error:
                         self.output(

@@ -962,6 +962,19 @@ exit 0
         self.assertTrue(callable(output))
         self.assertIn("updated and restarted", result)
 
+    def test_stream_command_timeout_terminates_and_reaps_process(self):
+        processes = []
+        with self.assertRaises(subprocess.TimeoutExpired):
+            backend._stream_command(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                os.environ.copy(), lambda _line: None,
+                process_callback=processes.append, timeout=0.05,
+            )
+
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")

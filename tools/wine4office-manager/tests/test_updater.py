@@ -570,6 +570,11 @@ raise SystemExit(int(sys.argv[1]))
 
         update_prefix.assert_called_once()
         self.assertEqual(update_prefix.call_args.args[1], state.config["wine"])
+        self.assertEqual(
+            update_prefix.call_args.kwargs["timeout"],
+            backend.PACKAGE_UPDATE_RECOVERY_TIMEOUT_SECONDS,
+        )
+        self.assertNotIn("cancel_event", update_prefix.call_args.kwargs)
         task = state.snapshot()["task"]
         self.assertEqual(task["status"], "failed")
         self.assertIn("APT failed", task["log"])
