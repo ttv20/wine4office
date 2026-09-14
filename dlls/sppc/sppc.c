@@ -123,10 +123,11 @@ struct installed_product_key
     SLID sku_id;
     WCHAR partial[6];
     WCHAR channel[64];
-    WCHAR digital_pid[64];
-    WCHAR digital_pid2[64];
+    WCHAR advanced_pid[64];
+    WCHAR product_id[64];
     WCHAR edition_type[260];
 };
+C_ASSERT(sizeof(struct installed_product_key) == 956);
 
 /* Most recent AES session key exported by rsaenh while wrapping an SPP challenge.
  * Office generates the key in-process immediately before SLSetAuthenticationData. */
@@ -1404,8 +1405,8 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
             *size = sizeof(record.sku_id);
             return S_OK;
         }
-        if (!wcsicmp(name, L"DigitalPID")) string = record.digital_pid;
-        else if (!wcsicmp(name, L"DigitalPID2")) string = record.digital_pid2;
+        if (!wcsicmp(name, L"DigitalPID")) string = record.advanced_pid;
+        else if (!wcsicmp(name, L"DigitalPID2")) string = record.product_id;
         else if (!wcsicmp(name, L"PartialProductKey")) string = record.partial;
         else if (!wcsicmp(name, L"Channel")) string = record.channel;
     }
@@ -1724,8 +1725,8 @@ static BOOL product_key_record_valid(const struct installed_product_key *record)
     return record->version == PRODUCT_KEY_RECORD_VERSION && record->size == sizeof(*record) &&
             record->partial[ARRAY_SIZE(record->partial) - 1] == 0 &&
             record->channel[ARRAY_SIZE(record->channel) - 1] == 0 &&
-            record->digital_pid[ARRAY_SIZE(record->digital_pid) - 1] == 0 &&
-            record->digital_pid2[ARRAY_SIZE(record->digital_pid2) - 1] == 0 &&
+            record->advanced_pid[ARRAY_SIZE(record->advanced_pid) - 1] == 0 &&
+            record->product_id[ARRAY_SIZE(record->product_id) - 1] == 0 &&
             record->edition_type[ARRAY_SIZE(record->edition_type) - 1] == 0;
 }
 
@@ -2229,9 +2230,11 @@ HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, LPCWSTR algorithm, LPCWSTR 
     record.version = PRODUCT_KEY_RECORD_VERSION;
     record.size = sizeof(record);
     lstrcpynW(record.channel, digital_pid4.key_type, ARRAY_SIZE(record.channel));
-    lstrcpynW(record.digital_pid, digital_pid4.advanced_pid, ARRAY_SIZE(record.digital_pid));
-    lstrcpynW(record.digital_pid2, product_id, ARRAY_SIZE(record.digital_pid2));
+    lstrcpynW(record.advanced_pid, digital_pid4.advanced_pid, ARRAY_SIZE(record.advanced_pid));
+    lstrcpynW(record.product_id, product_id, ARRAY_SIZE(record.product_id));
     lstrcpynW(record.edition_type, digital_pid4.edition_type, ARRAY_SIZE(record.edition_type));
+    /* PidGenX returns recoverable key material in these structures.  Only the
+     * non-secret text metadata copied above may reach the persistent record. */
     SecureZeroMemory(&digital_pid, sizeof(digital_pid));
     SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
     SecureZeroMemory(product_id, sizeof(product_id));
