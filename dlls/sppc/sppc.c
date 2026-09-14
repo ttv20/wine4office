@@ -2163,7 +2163,11 @@ HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, LPCWSTR algorithm, LPCWSTR 
     if (!get_slc_context(handle) || !algorithm || !product_key || !pkey_id ||
             (data_size && !data)) return E_INVALIDARG;
     if (wcsicmp(algorithm, pkey_algorithm)) return SL_E_NOT_SUPPORTED;
-    if (!normalize_product_key(product_key, material.key)) return SL_E_INVALID_PKEY;
+    if (!normalize_product_key(product_key, material.key))
+    {
+        SecureZeroMemory(material.key, sizeof(material.key));
+        return SL_E_INVALID_PKEY;
+    }
     if (!find_office_pidgen_files(dll_path, config_path))
     {
         SecureZeroMemory(material.key, sizeof(material.key));
