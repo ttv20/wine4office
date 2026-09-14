@@ -1,0 +1,81 @@
+#!/bin/bash
+set -euo pipefail
+
+[[ $EUID -eq 0 && $# -eq 4 ]] || {
+    echo "wine4office-package-update-helper: invalid invocation" >&2
+    exit 2
+}
+provider=$1
+package=$2
+cancel_dir=$3
+timeout=$4
+caller_uid=${PKEXEC_UID:-}
+
+[[ $provider =~ ^(apt|dnf)$ && \
+   $package =~ ^[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}$ && \
+   $caller_uid =~ ^[0-9]+$ && $timeout =~ ^[1-9][0-9]{0,4}$ && \
+   -d $cancel_dir && ! -L $cancel_dir && \
+   $(/usr/bin/stat -c %u -- "$cancel_dir") == "$caller_uid" && \
+   $(/usr/bin/stat -c %a -- "$cancel_dir") == 700 ]] || {
+    echo "wine4office-package-update-helper: invalid arguments" >&2
+    exit 2
+}
+
+terminate_child() {
+    local child=$1
+    kill -TERM -- "-$child" 2>/dev/null || true
+    for _attempt in {1..80}; do
+        kill -0 -- "-$child" 2>/dev/null || return 0
+        /usr/bin/sleep 0.1
+    done
+    kill -KILL -- "-$child" 2>/dev/null || true
+}
+
+run_command() {
+    local child deadline status
+    if [[ -e $cancel_dir/cancel ]]; then
+        echo "wine4office-package-update-helper: operation cancelled" >&2
+        return 130
+    fi
+    /usr/bin/setsid --wait "$@" &
+    child=$!
+    deadline=$((SECONDS + timeout))
+    while kill -0 "$child" 2>/dev/null; do
+        if [[ -e $cancel_dir/cancel ]]; then
+            terminate_child "$child"
+            wait "$child" 2>/dev/null || true
+            echo "wine4office-package-update-helper: operation cancelled" >&2
+            return 130
+        fi
+        if ((SECONDS >= deadline)); then
+            terminate_child "$child"
+            wait "$child" 2>/dev/null || true
+            echo "wine4office-package-update-helper: operation timed out" >&2
+            return 124
+        fi
+        /usr/bin/sleep 0.1
+    done
+    set +e
+    wait "$child"
+    status=$?
+    set -e
+    return "$status"
+}
+
+case $provider in
+    apt)
+        [[ -x /usr/bin/apt-get ]] || exit 127
+        run_command /usr/bin/apt-get update
+        run_command /usr/bin/apt-get install --only-upgrade -y "$package"
+        ;;
+    dnf)
+        if [[ -x /usr/bin/dnf5 ]]; then
+            dnf=/usr/bin/dnf5
+        elif [[ -x /usr/bin/dnf ]]; then
+            dnf=/usr/bin/dnf
+        else
+            exit 127
+        fi
+        run_command "$dnf" upgrade -y "$package"
+        ;;
+esac

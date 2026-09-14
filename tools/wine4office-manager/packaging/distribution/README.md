@@ -50,7 +50,9 @@ authority. The Manager hides the standalone metadata URL, prerelease selector,
 and background release-feed controls. APT and DNF updates run as one combined
 Manager-and-Wine transaction; the Manager compares the installed versions before
 and after the transaction and runs Wine migration only when both components
-actually advanced. AUR and Nix show copyable update instructions.
+actually advanced. A root-owned helper runs APT or DNF through `pkexec`, enforces
+a per-command timeout, and stops the privileged package process before reporting
+cancellation to the Manager. AUR and Nix show copyable update instructions.
 
 Suggested production paths:
 

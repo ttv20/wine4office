@@ -871,6 +871,7 @@ class ManagerState:
             preload_update = None
             wine_stopped = False
             wine_restarted = False
+            recovery_safe = True
             recovery_wine = config["wine"]
             try:
                 if "wine" in components:
@@ -888,9 +889,13 @@ class ManagerState:
                 self.set_progress(
                     f"Updating through {package['provider_name']}", None
                 )
-                result = backend.install_package_update(
-                    self.output, package, self.cancel_event, self.set_process
-                )
+                try:
+                    result = backend.install_package_update(
+                        self.output, package, self.cancel_event, self.set_process
+                    )
+                except backend.PackageUpdateStateUnknown:
+                    recovery_safe = False
+                    raise
                 if not result["changed"]:
                     if wine_stopped:
                         self.set_progress("Restarting the Wine environment", None)
@@ -929,7 +934,7 @@ class ManagerState:
                     self._run_updated_manager_post_install(config)
                 return result["message"]
             finally:
-                if wine_stopped and not wine_restarted:
+                if recovery_safe and wine_stopped and not wine_restarted:
                     try:
                         self.output(
                             "Restoring the selected Wine environment after the failed update."
@@ -943,7 +948,7 @@ class ManagerState:
                             "WARNING: Could not restore the selected Wine environment after "
                             f"the package update: {error}"
                         )
-                if preload_update is not None:
+                if recovery_safe and preload_update is not None:
                     try:
                         backend.restore_preload_after_runner_update(preload_update)
                     except RuntimeError as error:
@@ -1336,7 +1341,7 @@ class ManagerState:
             return
         try:
             os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (PermissionError, ProcessLookupError):
             return
         try:
             process.wait(timeout=8)

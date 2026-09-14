@@ -46,6 +46,8 @@ stage_package_payload() {
         "$destination/usr/share/icons/hicolor/256x256/apps"
     install -m 0755 "$manager_binary" \
         "$destination/opt/wine4office/bin/Wine4OfficeManager"
+    install -m 0755 "$distribution_dir/wine4office-package-update-helper" \
+        "$destination/opt/wine4office/bin/wine4office-package-update-helper"
     cp -a "$root/." "$destination/opt/wine4office/runner/"
     wine_base_version=unknown
     wine_build_id=$("$root/bin/wine" --version 2>/dev/null || true)

@@ -296,7 +296,9 @@ WINE_BASE_VERSION_PATTERN = re.compile(
 )
 PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
 PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
+PACKAGE_UPDATE_HELPER = "wine4office-package-update-helper"
 PACKAGE_UPDATE_TIMEOUT_SECONDS = 30 * 60
+PACKAGE_UPDATE_HELPER_GRACE_SECONDS = 10
 PACKAGE_PROVIDERS = {
     "apt": "APT",
     "dnf": "DNF",
@@ -401,16 +403,96 @@ def package_update_command(installation: dict | None = None) -> list[str] | None
         return None
     package = installation["package"]
     provider = installation["provider"]
-    pkexec = shutil.which("pkexec")
-    if provider == "apt" and pkexec:
-        apt_get = shutil.which("apt-get")
-        if apt_get:
-            return [pkexec, apt_get, "install", "--only-upgrade", "-y", package]
-    if provider == "dnf" and pkexec:
-        dnf = shutil.which("dnf5") or shutil.which("dnf")
-        if dnf:
-            return [pkexec, dnf, "upgrade", "-y", package]
+    pkexec = Path("/usr/bin/pkexec")
+    try:
+        pkexec_info = pkexec.stat(follow_symlinks=False)
+    except OSError:
+        pkexec = None
+    else:
+        if (not stat.S_ISREG(pkexec_info.st_mode) or pkexec_info.st_uid != 0
+                or pkexec_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not os.access(pkexec, os.X_OK)):
+            pkexec = None
+    helper = trusted_package_update_helper()
+    if provider in ("apt", "dnf") and pkexec and helper:
+        return [str(pkexec), str(helper), provider, package]
     return None
+
+
+def trusted_package_update_helper() -> Path | None:
+    root = installed_root()
+    helper = root / "bin" / PACKAGE_UPDATE_HELPER if root else None
+    if helper is None:
+        return None
+    for path, kind in (
+        (root, stat.S_ISDIR), (root / "bin", stat.S_ISDIR),
+        (helper, stat.S_ISREG),
+    ):
+        try:
+            info = path.stat(follow_symlinks=False)
+        except OSError:
+            return None
+        if (not kind(info.st_mode) or info.st_uid != 0
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            return None
+    if not os.access(helper, os.X_OK):
+        return None
+    return helper
+
+
+class PackageUpdateStateUnknown(RuntimeError):
+    """The privileged helper did not confirm that its package process stopped."""
+
+
+def _run_privileged_package_update(command: list[str], cancel_dir: Path,
+                                   cancel_event=None, process_callback=None,
+                                   timeout: float = PACKAGE_UPDATE_TIMEOUT_SECONDS,
+                                   command_count: int = 1) -> subprocess.CompletedProcess:
+    """Wait for the privileged helper, signalling it through a user-owned directory."""
+    process = subprocess.Popen(
+        [*command, str(cancel_dir), str(int(timeout))],
+        env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, errors="replace", start_new_session=True,
+    )
+    if process_callback:
+        process_callback(process)
+    deadline = time.monotonic() + timeout * command_count
+    timeout_requested = False
+    stop_deadline = None
+    try:
+        while True:
+            cancelled = cancel_event is not None and cancel_event.is_set()
+            now = time.monotonic()
+            if (cancelled or now >= deadline) and not timeout_requested:
+                try:
+                    (cancel_dir / "cancel").touch(exist_ok=True)
+                except OSError as error:
+                    raise PackageUpdateStateUnknown(
+                        "Could not signal the privileged package update helper; "
+                        "Wine recovery was left stopped."
+                    ) from error
+                timeout_requested = True
+                stop_deadline = now + PACKAGE_UPDATE_HELPER_GRACE_SECONDS
+            try:
+                stdout, _stderr = process.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                    raise PackageUpdateStateUnknown(
+                        "The privileged package update helper did not confirm that it "
+                        "stopped; Wine recovery was left stopped."
+                    )
+    finally:
+        if process_callback:
+            process_callback(None)
+    completed = subprocess.CompletedProcess(
+        process.args, process.returncode, stdout, None
+    )
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
+    if timeout_requested or completed.returncode == 124:
+        raise subprocess.TimeoutExpired(command, timeout * command_count)
+    return completed
 
 
 def package_wrap_command(command: Iterable[str | Path]) -> list[str]:
@@ -460,25 +542,23 @@ def install_package_update(output: Output,
         "wine": current_wine_version(),
     }
     output(f"Requesting a Wine4Office update through {installation['provider_name']}.")
-    commands = [command]
-    if installation["provider"] == "apt":
-        commands.insert(0, command[:2] + ["update"])
-    for package_command in commands:
+    command_count = 2 if installation["provider"] == "apt" else 1
+    with tempfile.TemporaryDirectory(prefix="wine4office-package-update-") as directory:
+        cancel_dir = Path(directory)
+        cancel_dir.chmod(0o700)
         try:
-            process = _run_cancellable_command(
-                package_command, os.environ.copy(), cancel_event=cancel_event,
-                process_callback=process_callback,
-                timeout=PACKAGE_UPDATE_TIMEOUT_SECONDS, check=False,
+            process = _run_privileged_package_update(
+                command, cancel_dir, cancel_event, process_callback,
+                PACKAGE_UPDATE_TIMEOUT_SECONDS, command_count,
             )
         except subprocess.TimeoutExpired as error:
             raise RuntimeError(
                 f"{installation['provider_name']} timed out after "
-                f"{PACKAGE_UPDATE_TIMEOUT_SECONDS // 60} minutes."
+                f"{PACKAGE_UPDATE_TIMEOUT_SECONDS // 60} minutes per command."
             ) from error
-        for stream in (process.stdout, process.stderr):
-            if isinstance(stream, str):
-                for line in stream.splitlines():
-                    output(line)
+        if process.stdout:
+            for line in process.stdout.splitlines():
+                output(line)
         if process.returncode:
             raise RuntimeError(
                 f"{installation['provider_name']} exited with status "

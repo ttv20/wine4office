@@ -5,6 +5,7 @@ import io
 import os
 import shutil
 import subprocess
+import stat
 import sys
 import tarfile
 import tempfile
@@ -307,15 +308,17 @@ class UpdaterTests(unittest.TestCase):
             "schema_version": 1, "provider": "apt", "provider_name": "APT",
             "package": "wine4office", "components": ("manager", "wine"),
         }
+        helper = self.install_root / "bin/wine4office-package-update-helper"
         with mock.patch.object(
-            backend.shutil, "which",
-            side_effect=lambda command: f"/usr/bin/{command}" if command in {
-                "pkexec", "apt-get"
-            } else None,
+            backend.Path, "stat",
+            return_value=mock.Mock(st_mode=stat.S_IFREG | 0o755, st_uid=0),
+        ), mock.patch.object(
+            backend.os, "access", return_value=True,
+        ), mock.patch.object(
+            backend, "trusted_package_update_helper", return_value=helper,
         ):
             self.assertEqual(backend.package_update_command(apt), [
-                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
-                "--only-upgrade", "-y", "wine4office",
+                "/usr/bin/pkexec", str(helper), "apt", "wine4office",
             ])
         self.assertEqual(
             backend.package_update_instructions(apt),
@@ -327,23 +330,21 @@ class UpdaterTests(unittest.TestCase):
             "schema_version": 1, "provider": "apt", "provider_name": "APT",
             "package": "wine4office", "components": ("manager", "wine"),
         }
-        completed = mock.Mock(returncode=0, stdout="")
+        completed = subprocess.CompletedProcess([], 0, "", None)
         with mock.patch.object(
             backend, "package_update_command", return_value=[
-                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
-                "--only-upgrade", "-y", "wine4office",
+                "/usr/bin/pkexec", "/opt/wine4office/bin/helper", "apt",
+                "wine4office",
             ]
         ), mock.patch.object(
             backend, "package_installation", return_value=apt
-        ), mock.patch.object(backend.subprocess, "run", return_value=completed) as run:
+        ), mock.patch.object(
+            backend, "_run_privileged_package_update", return_value=completed
+        ) as run:
             result = backend.install_package_update(lambda _line: None, apt)
-        self.assertEqual([call.args[0] for call in run.call_args_list], [
-            ["/usr/bin/pkexec", "/usr/bin/apt-get", "update"],
-            [
-                "/usr/bin/pkexec", "/usr/bin/apt-get", "install",
-                "--only-upgrade", "-y", "wine4office",
-            ],
-        ])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-2:], ["apt", "wine4office"])
+        self.assertEqual(run.call_args.args[-1], 2)
         self.assertFalse(result["changed"])
         self.assertIn("already current", result["message"])
 
@@ -358,11 +359,25 @@ class UpdaterTests(unittest.TestCase):
         def process_callback(process):
             processes.append(process)
             if process is not None:
+                state = manager.ManagerState()
+                with mock.patch.object(
+                    manager.os, "killpg", side_effect=PermissionError
+                ):
+                    state._terminate_process(process)
                 cancel.set()
 
+        helper = """
+import pathlib
+import sys
+import time
+cancel = pathlib.Path(sys.argv[2]) / "cancel"
+while not cancel.exists():
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[1]))
+"""
         with mock.patch.object(
             backend, "package_update_command", return_value=[
-                sys.executable, "-c", "import time; time.sleep(60)",
+                sys.executable, "-c", helper, "130",
             ]
         ), self.assertRaisesRegex(RuntimeError, "Operation cancelled"):
             backend.install_package_update(
@@ -379,9 +394,18 @@ class UpdaterTests(unittest.TestCase):
             "package": "wine4office", "components": ("manager", "wine"),
         }
         processes = []
+        helper = """
+import pathlib
+import sys
+import time
+cancel = pathlib.Path(sys.argv[2]) / "cancel"
+while not cancel.exists():
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[1]))
+"""
         with mock.patch.object(
             backend, "package_update_command", return_value=[
-                sys.executable, "-c", "import time; time.sleep(60)",
+                sys.executable, "-c", helper, "124",
             ]
         ), mock.patch.object(
             backend, "PACKAGE_UPDATE_TIMEOUT_SECONDS", 0.05
@@ -405,14 +429,16 @@ class UpdaterTests(unittest.TestCase):
         def update_package(*_args, **_kwargs):
             (self.install_root / "VERSION").write_text("2.0.0\n")
             (self.install_root / "WINE_VERSION").write_text("2.0.0\n")
-            return mock.Mock(returncode=0, stdout="updated\n")
+            return subprocess.CompletedProcess([], 0, "updated\n", None)
 
         with mock.patch.object(
             backend, "package_update_command",
             return_value=["/usr/bin/pkexec", "/usr/bin/apt-get", "install"],
         ), mock.patch.object(
             backend, "package_installation", return_value=apt
-        ), mock.patch.object(backend.subprocess, "run", side_effect=update_package):
+        ), mock.patch.object(
+            backend, "_run_privileged_package_update", side_effect=update_package
+        ):
             result = backend.install_package_update(lambda _line: None, apt)
 
         self.assertTrue(result["changed"])
@@ -429,14 +455,16 @@ class UpdaterTests(unittest.TestCase):
         def update_package(*_args, **_kwargs):
             (self.install_root / "VERSION").write_text("1.0.0+build.5\n")
             (self.install_root / "WINE_VERSION").write_text("1.0.0+build.5\n")
-            return mock.Mock(returncode=0, stdout="updated\n")
+            return subprocess.CompletedProcess([], 0, "updated\n", None)
 
         with mock.patch.object(
             backend, "package_update_command",
             return_value=["/usr/bin/pkexec", "/usr/bin/apt-get", "install"],
         ), mock.patch.object(
             backend, "package_installation", return_value=apt
-        ), mock.patch.object(backend.subprocess, "run", side_effect=update_package):
+        ), mock.patch.object(
+            backend, "_run_privileged_package_update", side_effect=update_package
+        ):
             result = backend.install_package_update(lambda _line: None, apt)
 
         self.assertTrue(result["changed"])
@@ -518,6 +546,38 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         self.assertIn("APT failed", task["log"])
         self.assertIn("Restoring the selected Wine environment", task["log"])
+
+    def test_unknown_package_update_state_does_not_start_wine_recovery(self):
+        package = {
+            "schema_version": 1, "provider": "apt", "provider_name": "APT",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        preload_update = object()
+        with mock.patch.object(
+            backend, "package_installation", return_value=package
+        ), mock.patch.object(
+            backend, "package_update_command", return_value=["pkexec", "helper"]
+        ), mock.patch.object(
+            backend, "prepare_preload_runner_update", return_value=preload_update
+        ), mock.patch.object(
+            manager, "stop_wine_confirmed"
+        ), mock.patch.object(
+            backend, "install_package_update",
+            side_effect=backend.PackageUpdateStateUnknown("helper still running"),
+        ), mock.patch.object(
+            backend, "update_wine_prefix"
+        ) as update_prefix, mock.patch.object(
+            backend, "restore_preload_after_runner_update"
+        ) as restore_preload:
+            state = manager.ManagerState()
+            state.start_package_update()
+            self._wait_for(lambda: not state.snapshot()["task"]["running"])
+
+        update_prefix.assert_not_called()
+        restore_preload.assert_not_called()
+        task = state.snapshot()["task"]
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("helper still running", task["log"])
 
     def test_failed_new_package_runner_recovers_with_previous_runner(self):
         package = {

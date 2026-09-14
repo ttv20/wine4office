@@ -61,6 +61,9 @@ verify_installation() {
     [[ $(/opt/wine4office/runner/bin/wine --version) == \
         'wine4office-2.3.4 (Wine 11.17-rc1)' ]]
     /opt/wine4office/bin/Wine4OfficeManager --smoke-test
+    [[ -x /opt/wine4office/bin/wine4office-package-update-helper ]]
+    [[ $(stat -c '%u:%a' \
+        /opt/wine4office/bin/wine4office-package-update-helper) == 0:755 ]]
     cmp "$manager" /opt/wine4office/bin/Wine4OfficeManager
     cmp "$runner/bin/wine" /opt/wine4office/runner/bin/wine
     [[ $(cat /opt/wine4office/WINE_BASE_VERSION) == 11.17-rc1 ]]
@@ -123,6 +126,45 @@ case $mode in
         apt-get install -y --no-install-recommends wine4office >/dev/null
         verify_installation
         [[ $(python3 -c 'import json; print(json.load(open("/opt/wine4office/PACKAGE-INSTALLATION.json"))["provider"])') == apt ]]
+        mv /usr/bin/apt-get /usr/bin/apt-get.real
+        cat > /usr/bin/apt-get <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+printf '%s\n' "$$" > "$WINE4OFFICE_TEST_HELPER_PID"
+while :; do sleep 1; done
+EOF
+        chmod 0755 /usr/bin/apt-get
+        pre_cancelled=$tmp/pre-cancelled
+        mkdir -m 0700 "$pre_cancelled"
+        touch "$pre_cancelled/cancel"
+        set +e
+        PKEXEC_UID=0 WINE4OFFICE_TEST_HELPER_PID="$tmp/pre-cancelled-child.pid" \
+            /opt/wine4office/bin/wine4office-package-update-helper \
+            apt wine4office "$pre_cancelled" 30 >/dev/null 2>&1
+        pre_cancelled_status=$?
+        set -e
+        [[ $pre_cancelled_status -eq 130 ]]
+        [[ ! -e $tmp/pre-cancelled-child.pid ]]
+        helper_cancel=$tmp/helper-cancel
+        mkdir -m 0700 "$helper_cancel"
+        set +e
+        PKEXEC_UID=0 WINE4OFFICE_TEST_HELPER_PID="$tmp/helper-child.pid" \
+            /opt/wine4office/bin/wine4office-package-update-helper \
+            apt wine4office "$helper_cancel" 30 &
+        helper_pid=$!
+        set -e
+        for _attempt in {1..100}; do
+            [[ -s $tmp/helper-child.pid ]] && break
+            sleep 0.05
+        done
+        [[ -s $tmp/helper-child.pid ]]
+        touch "$helper_cancel/cancel"
+        set +e
+        wait "$helper_pid"
+        helper_status=$?
+        set -e
+        [[ $helper_status -eq 130 ]]
+        ! kill -0 "$(cat "$tmp/helper-child.pid")" 2>/dev/null
         ;;
     rpm)
         "$distribution/build-rpm.sh" "$release/Wine4OfficeManager-${version}-x86_64" \
