@@ -931,6 +931,7 @@ HRESULT WINAPI AtlGetObjectSourceInterface(IUnknown *unk, GUID *libid, IID *iid,
             hres = get_default_source(typelib, &clsid, iid);
         IPersist_Release(persist);
     }
+    ITypeLib_Release(typelib);
 
     return hres;
 }

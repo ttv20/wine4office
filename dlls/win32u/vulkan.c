@@ -1553,7 +1553,7 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance client_instance, cons
         surface->hwnd = dummy;
     }
 
-    if (!(surface->client = get_unused_client_surface( surface->hwnd, 0 ))) res = VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (!(surface->client = get_unused_client_surface( surface->hwnd, 0, FALSE ))) res = VK_ERROR_OUT_OF_HOST_MEMORY;
     else
     {
         res = driver_funcs->p_vulkan_surface_create( surface->client, instance, &host_surface );

@@ -170,6 +170,20 @@ static WCHAR *concat_path(const WCHAR *root, const WCHAR *path)
     return sprintf_path(L"%s\\%s", root, path);
 }
 
+static BOOL guid_from_string_w(WCHAR *str, GUID *guid)
+{
+    RPC_STATUS ret;
+
+    if (wcslen(str) != 38 || (str[0] != '{') || (str[37] != '}'))
+        return FALSE;
+
+    str[37] = 0;
+    ret = UuidFromStringW(&str[1], guid);
+    str[37] = '}';
+
+    return ret == RPC_S_OK;
+}
+
 static struct DeviceInfoSet *get_device_set(HDEVINFO devinfo)
 {
     struct DeviceInfoSet *set = devinfo;
@@ -474,15 +488,6 @@ err:
     return NULL;
 }
 
-static BOOL SETUPDI_SetInterfaceSymbolicLink(struct device_iface *iface,
-    const WCHAR *symlink)
-{
-    free(iface->symlink);
-    if ((iface->symlink = wcsdup(symlink)))
-        return TRUE;
-    return FALSE;
-}
-
 static HKEY SETUPDI_CreateDevKey(struct device *device)
 {
     HKEY enumKey, key = INVALID_HANDLE_VALUE;
@@ -656,8 +661,10 @@ static void delete_device_iface(struct device_iface *iface)
  * enumerated in the set */
 static void remove_all_device_ifaces(struct device *device)
 {
+    DEVINSTID_W instance = (DEVINSTID_W)device->instanceId;
+    WCHAR *tmp, iface_instance[MAX_PATH];
     HKEY classes_key;
-    DWORD i, len;
+    GUID class_guid;
     LONG ret;
 
     if ((ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, DeviceClasses, 0, KEY_READ, &classes_key)))
@@ -666,62 +673,23 @@ static void remove_all_device_ifaces(struct device *device)
         return;
     }
 
-    for (i = 0; ; ++i)
+    swprintf(iface_instance, ARRAY_SIZE(iface_instance), L"##?#%s#", device->instanceId);
+    for (tmp = wcschr(iface_instance, '\\'); tmp; tmp = wcschr(tmp + 1, '\\')) *tmp = '#';
+    for (UINT i = 0; !CM_Enumerate_Classes(i, &class_guid, CM_ENUMERATE_CLASSES_INTERFACE); i++)
     {
-        WCHAR class_name[40];
-        HKEY class_key;
-        DWORD j;
+        UINT flags = CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES;
+        WCHAR buf[MAX_PATH], guid_str[MAX_GUID_STRING_LEN];
+        ULONG size;
 
-        len = ARRAY_SIZE(class_name);
-        if ((ret = RegEnumKeyExW(classes_key, i, class_name, &len, NULL, NULL, NULL, NULL)))
-        {
-            if (ret != ERROR_NO_MORE_ITEMS) ERR("Failed to enumerate classes, error %lu.\n", ret);
-            break;
-        }
+        /* No interfaces for this device instance, continue. */
+        if (CM_Get_Device_Interface_List_SizeW(&size, &class_guid, instance, flags) || size <= 1) continue;
 
-        if ((ret = RegOpenKeyExW(classes_key, class_name, 0, KEY_READ, &class_key)))
-        {
-            ERR("Failed to open class %s, error %lu.\n", debugstr_w(class_name), ret);
-            continue;
-        }
-
-        for (j = 0; ; ++j)
-        {
-            WCHAR iface_name[MAX_DEVICE_ID_LEN + 39], device_name[MAX_DEVICE_ID_LEN];
-            HKEY iface_key;
-
-            len = ARRAY_SIZE(iface_name);
-            if ((ret = RegEnumKeyExW(class_key, j, iface_name, &len, NULL, NULL, NULL, NULL)))
-            {
-                if (ret != ERROR_NO_MORE_ITEMS) ERR("Failed to enumerate interfaces, error %lu.\n", ret);
-                break;
-            }
-
-            if ((ret = RegOpenKeyExW(class_key, iface_name, 0, KEY_ALL_ACCESS, &iface_key)))
-            {
-                ERR("Failed to open interface %s, error %lu.\n", debugstr_w(iface_name), ret);
-                continue;
-            }
-
-            len = sizeof(device_name);
-            if ((ret = RegQueryValueExW(iface_key, L"DeviceInstance", NULL, NULL, (BYTE *)device_name, &len)))
-            {
-                ERR("Failed to query device instance, error %lu.\n", ret);
-                RegCloseKey(iface_key);
-                continue;
-            }
-
-            if (!wcsicmp(device_name, device->instanceId))
-            {
-                if ((ret = RegDeleteTreeW(iface_key, NULL)))
-                    ERR("Failed to delete interface %s subkeys, error %lu.\n", debugstr_w(iface_name), ret);
-                if ((ret = RegDeleteKeyW(iface_key, L"")))
-                    ERR("Failed to delete interface %s, error %lu.\n", debugstr_w(iface_name), ret);
-            }
-
-            RegCloseKey(iface_key);
-        }
-        RegCloseKey(class_key);
+        SETUPDI_GuidToString(&class_guid, guid_str);
+        swprintf(buf, ARRAY_SIZE(buf), L"%s\\%s%s", guid_str, iface_instance, guid_str);
+        if ((ret = RegDeleteTreeW(classes_key, buf)))
+            ERR("Failed to delete interface %s subkeys, error %lu.\n", debugstr_w(buf), ret);
+        if ((ret = RegDeleteKeyW(classes_key, buf)))
+            ERR("Failed to delete interface %s, error %lu.\n", debugstr_w(buf), ret);
     }
 
     RegCloseKey(classes_key);
@@ -1935,342 +1903,169 @@ end:
     return ret;
 }
 
-static void SETUPDI_AddDeviceInterfaces(struct device *device, HKEY key,
-    const GUID *guid, DWORD flags)
+static void SETUPDI_EnumerateMatchingInterfaces(struct DeviceInfoSet *set, const GUID *class, const WCHAR *enum_str,
+        DWORD flags)
 {
-    DWORD i, len;
-    WCHAR subKeyName[MAX_PATH];
-    LONG l = ERROR_SUCCESS;
+    WCHAR dev_class_guid[MAX_GUID_STRING_LEN];
+    GUID dev_iface_class_guid = *class;
+    ULONG size, cm_flags;
+    WCHAR *paths = NULL;
+    HKEY enum_key;
+    CONFIGRET cr;
 
-    for (i = 0; !l; i++)
+    TRACE("%p, %s, %s, %08lx.\n", set, debugstr_guid(class), debugstr_w(enum_str), flags);
+
+    cm_flags = (flags & DIGCF_PRESENT) ? 0 : CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES;
+    for (;;)
     {
-        len = ARRAY_SIZE(subKeyName);
-        l = RegEnumKeyExW(key, i, subKeyName, &len, NULL, NULL, NULL, NULL);
-        if (!l)
+        if (CM_Get_Device_Interface_List_SizeW(&size, &dev_iface_class_guid, (DEVINSTID_W)enum_str, cm_flags)) break;
+        if (!(paths = malloc(size * sizeof(*paths))))
         {
-            HKEY subKey;
-            struct device_iface *iface;
-
-            if (*subKeyName == '#')
-            {
-                /* The subkey name is the reference string, with a '#' prepended */
-                l = RegOpenKeyExW(key, subKeyName, 0, KEY_READ, &subKey);
-                if (!l)
-                {
-                    WCHAR symbolicLink[MAX_PATH];
-                    DWORD dataType;
-
-                    if (!(flags & DIGCF_PRESENT) || is_linked(subKey))
-                    {
-                        iface = SETUPDI_CreateDeviceInterface(device, guid, subKeyName + 1);
-
-                        len = sizeof(symbolicLink);
-                        l = RegQueryValueExW(subKey, L"SymbolicLink", NULL, &dataType,
-                                (BYTE *)symbolicLink, &len);
-                        if (!l && dataType == REG_SZ)
-                            SETUPDI_SetInterfaceSymbolicLink(iface, symbolicLink);
-                    }
-                    RegCloseKey(subKey);
-                }
-            }
-            /* Allow enumeration to continue */
-            l = ERROR_SUCCESS;
+           ERR("Failed to allocate memory for device ID list.\n");
+           break;
         }
+        if (!(cr = CM_Get_Device_Interface_ListW(&dev_iface_class_guid, (DEVINSTID_W)enum_str, paths, size, cm_flags))) break;
+        free(paths);
+        paths = NULL;
+        if (cr != CR_BUFFER_SMALL) break;
     }
-    /* FIXME: find and add all the device's interfaces to the device */
-}
+    if (!paths) return;
 
-static void SETUPDI_EnumerateMatchingInterfaces(HDEVINFO DeviceInfoSet,
-        HKEY key, const GUID *guid, const WCHAR *enumstr, DWORD flags)
-{
-    struct DeviceInfoSet *set = DeviceInfoSet;
-    DWORD i, len;
-    WCHAR subKeyName[MAX_PATH];
-    LONG l;
-    HKEY enumKey = INVALID_HANDLE_VALUE;
-
-    TRACE("%s\n", debugstr_w(enumstr));
-
-    l = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Enum, 0, NULL, 0, KEY_READ, NULL,
-            &enumKey, NULL);
-    for (i = 0; !l; i++)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Enum, 0, KEY_ENUMERATE_SUB_KEYS, &enum_key))
     {
-        len = ARRAY_SIZE(subKeyName);
-        l = RegEnumKeyExW(key, i, subKeyName, &len, NULL, NULL, NULL, NULL);
-        if (!l)
-        {
-            HKEY subKey;
-
-            l = RegOpenKeyExW(key, subKeyName, 0, KEY_READ, &subKey);
-            if (!l)
-            {
-                WCHAR deviceInst[MAX_PATH * 3];
-                DWORD dataType;
-
-                len = sizeof(deviceInst);
-                l = RegQueryValueExW(subKey, L"DeviceInstance", NULL, &dataType,
-                        (BYTE *)deviceInst, &len);
-                if (!l && dataType == REG_SZ)
-                {
-                    TRACE("found instance ID %s\n", debugstr_w(deviceInst));
-                    if (!enumstr || !lstrcmpiW(enumstr, deviceInst))
-                    {
-                        HKEY deviceKey;
-
-                        l = RegOpenKeyExW(enumKey, deviceInst, 0, KEY_READ,
-                                &deviceKey);
-                        if (!l)
-                        {
-                            WCHAR deviceClassStr[40];
-
-                            len = sizeof(deviceClassStr);
-                            l = RegQueryValueExW(deviceKey, L"ClassGUID", NULL,
-                                    &dataType, (BYTE *)deviceClassStr, &len);
-                            if (!l && dataType == REG_SZ &&
-                                    deviceClassStr[0] == '{' &&
-                                    deviceClassStr[37] == '}')
-                            {
-                                GUID deviceClass;
-                                struct device *device;
-
-                                deviceClassStr[37] = 0;
-                                UuidFromStringW(&deviceClassStr[1],
-                                        &deviceClass);
-                                if ((device = create_device(set, &deviceClass, deviceInst, FALSE)))
-                                    SETUPDI_AddDeviceInterfaces(device, subKey, guid, flags);
-                            }
-                            RegCloseKey(deviceKey);
-                        }
-                    }
-                }
-                RegCloseKey(subKey);
-            }
-            /* Allow enumeration to continue */
-            l = ERROR_SUCCESS;
-        }
+        free(paths);
+        return;
     }
-    if (enumKey != INVALID_HANDLE_VALUE)
-        RegCloseKey(enumKey);
-}
 
-static void SETUPDI_EnumerateInterfaces(HDEVINFO DeviceInfoSet,
-        const GUID *guid, LPCWSTR enumstr, DWORD flags)
-{
-    HKEY interfacesKey = SetupDiOpenClassRegKeyExW(guid, KEY_READ,
-            DIOCR_INTERFACE, NULL, NULL);
-
-    TRACE("%p, %s, %s, %08lx\n", DeviceInfoSet, debugstr_guid(guid),
-            debugstr_w(enumstr), flags);
-
-    if (interfacesKey != INVALID_HANDLE_VALUE)
+    for (WCHAR *path = paths; *path; path = path + wcslen(path) + 1)
     {
-        if (flags & DIGCF_ALLCLASSES)
-        {
-            DWORD i, len;
-            WCHAR interfaceGuidStr[40];
-            LONG l = ERROR_SUCCESS;
+        WCHAR buf[MAX_PATH] = { 0 };
+        struct device_iface *iface;
+        struct device *device;
+        WCHAR *tmp, *refstr;
+        GUID dev_class;
+        DWORD phantom;
 
-            for (i = 0; !l; i++)
-            {
-                len = ARRAY_SIZE(interfaceGuidStr);
-                l = RegEnumKeyExW(interfacesKey, i, interfaceGuidStr, &len,
-                        NULL, NULL, NULL, NULL);
-                if (!l)
-                {
-                    if (interfaceGuidStr[0] == '{' &&
-                            interfaceGuidStr[37] == '}')
-                    {
-                        HKEY interfaceKey;
-                        GUID interfaceGuid;
+        /* Copy path, starting after the "\\?\". */
+        wcscpy(buf, &path[4]);
+        /* Replace the last '#' with a NULL terminator. */
+        tmp = wcsrchr(buf, '#');
+        *tmp = 0;
 
-                        interfaceGuidStr[37] = 0;
-                        UuidFromStringW(&interfaceGuidStr[1], &interfaceGuid);
-                        interfaceGuidStr[37] = '}';
-                        interfaceGuidStr[38] = 0;
-                        l = RegOpenKeyExW(interfacesKey, interfaceGuidStr, 0,
-                                KEY_READ, &interfaceKey);
-                        if (!l)
-                        {
-                            SETUPDI_EnumerateMatchingInterfaces(DeviceInfoSet,
-                                    interfaceKey, &interfaceGuid, enumstr, flags);
-                            RegCloseKey(interfaceKey);
-                        }
-                    }
-                }
-            }
-        }
-        else
-        {
-            /* In this case, SetupDiOpenClassRegKeyExW opened the specific
-             * interface's key, so just pass that long
-             */
-            SETUPDI_EnumerateMatchingInterfaces(DeviceInfoSet,
-                    interfacesKey, guid, enumstr, flags);
-        }
-        RegCloseKey(interfacesKey);
+        /*
+         * Characters between the last '#' and the '{' from the GUID contain
+         * the refstr, if present.
+         */
+        refstr = tmp + 1;
+        tmp = wcschr(refstr, '{');
+        *tmp = 0;
+
+        /* Now replace '#' with '\' to reconstruct the instance ID. */
+        for (tmp = wcschr(buf, '#'); tmp; tmp = wcschr(tmp + 1, '#'))
+            *tmp = '\\';
+
+        if (enum_str && wcsicmp(enum_str, buf))
+            continue;
+
+        /* Query for "Phantom" value first. */
+        size = sizeof(phantom);
+        if (!RegGetValueW(enum_key, buf, L"Phantom", RRF_RT_REG_DWORD, NULL, &phantom, &size) && phantom)
+            continue;
+
+        dev_class_guid[0] = 0;
+        size = sizeof(dev_class_guid);
+        if (RegGetValueW(enum_key, buf, L"ClassGUID", RRF_RT_REG_SZ, NULL, dev_class_guid, &size)
+                || !guid_from_string_w(dev_class_guid, &dev_class))
+            continue;
+
+        if (!(device = create_device(set, &dev_class, buf, FALSE)))
+            continue;
+
+        if (!(iface = SETUPDI_CreateDeviceInterface(device, class, refstr)))
+            ERR("Failed to create device interface for %s.\n", debugstr_w(path));
     }
-}
-
-static void SETUPDI_EnumerateMatchingDeviceInstances(struct DeviceInfoSet *set,
-        LPCWSTR enumerator, LPCWSTR deviceName, HKEY deviceKey,
-        const GUID *class, DWORD flags)
-{
-    WCHAR id[MAX_DEVICE_ID_LEN];
-    DWORD i, len;
-    WCHAR deviceInstance[MAX_PATH];
-    LONG l = ERROR_SUCCESS;
-
-    TRACE("%s %s\n", debugstr_w(enumerator), debugstr_w(deviceName));
-
-    for (i = 0; !l; i++)
-    {
-        len = ARRAY_SIZE(deviceInstance);
-        l = RegEnumKeyExW(deviceKey, i, deviceInstance, &len, NULL, NULL, NULL,
-                NULL);
-        if (!l)
-        {
-            HKEY subKey;
-
-            l = RegOpenKeyExW(deviceKey, deviceInstance, 0, KEY_READ, &subKey);
-            if (!l)
-            {
-                WCHAR classGuid[40];
-                DWORD dataType;
-
-                len = sizeof(classGuid);
-                l = RegQueryValueExW(subKey, L"ClassGUID", NULL, &dataType,
-                        (BYTE *)classGuid, &len);
-                if (!l && dataType == REG_SZ)
-                {
-                    if (classGuid[0] == '{' && classGuid[37] == '}')
-                    {
-                        GUID deviceClass;
-
-                        classGuid[37] = 0;
-                        UuidFromStringW(&classGuid[1], &deviceClass);
-                        if ((flags & DIGCF_ALLCLASSES) ||
-                                IsEqualGUID(class, &deviceClass))
-                        {
-                            static const WCHAR fmt[] =
-                             {'%','s','\\','%','s','\\','%','s',0};
-
-                            if (swprintf(id, ARRAY_SIZE(id), fmt, enumerator,
-                                    deviceName, deviceInstance) != -1)
-                            {
-                                create_device(set, &deviceClass, id, FALSE);
-                            }
-                        }
-                    }
-                }
-                RegCloseKey(subKey);
-            }
-            /* Allow enumeration to continue */
-            l = ERROR_SUCCESS;
-        }
-    }
-}
-
-static void SETUPDI_EnumerateMatchingDevices(HDEVINFO DeviceInfoSet,
-        LPCWSTR parent, HKEY key, const GUID *class, DWORD flags)
-{
-    struct DeviceInfoSet *set = DeviceInfoSet;
-    DWORD i, len;
-    WCHAR subKeyName[MAX_PATH];
-    LONG l = ERROR_SUCCESS;
-
-    TRACE("%s\n", debugstr_w(parent));
-
-    for (i = 0; !l; i++)
-    {
-        len = ARRAY_SIZE(subKeyName);
-        l = RegEnumKeyExW(key, i, subKeyName, &len, NULL, NULL, NULL, NULL);
-        if (!l)
-        {
-            HKEY subKey;
-
-            l = RegOpenKeyExW(key, subKeyName, 0, KEY_READ, &subKey);
-            if (!l)
-            {
-                TRACE("%s\n", debugstr_w(subKeyName));
-                SETUPDI_EnumerateMatchingDeviceInstances(set, parent,
-                        subKeyName, subKey, class, flags);
-                RegCloseKey(subKey);
-            }
-            /* Allow enumeration to continue */
-            l = ERROR_SUCCESS;
-        }
-    }
+    RegCloseKey(enum_key);
+    free(paths);
 }
 
 static void SETUPDI_EnumerateDevices(HDEVINFO DeviceInfoSet, const GUID *class,
-        LPCWSTR enumstr, DWORD flags)
+        const WCHAR *enum_str, DWORD flags)
 {
-    HKEY enumKey;
-    LONG l;
+    WCHAR class_guid[MAX_GUID_STRING_LEN], enum_str2[MAX_DEVICE_ID_LEN];
+    ULONG size, enum_str_len, cm_flags;
+    WCHAR *filter, *ids;
+    HKEY enum_key;
+    CONFIGRET cr;
 
-    TRACE("%p, %s, %s, %08lx\n", DeviceInfoSet, debugstr_guid(class),
-            debugstr_w(enumstr), flags);
+    TRACE("%p, %s, %s, %08lx.\n", DeviceInfoSet, debugstr_guid(class), debugstr_w(enum_str), flags);
 
-    l = RegCreateKeyExW(HKEY_LOCAL_MACHINE, Enum, 0, NULL, 0, KEY_READ, NULL,
-            &enumKey, NULL);
-    if (enumKey != INVALID_HANDLE_VALUE)
+    filter = ids = NULL;
+    cm_flags = (flags & DIGCF_PRESENT) ? CM_GETIDLIST_FILTER_PRESENT : 0;
+    if (class)
     {
-        if (enumstr)
-        {
-            HKEY enumStrKey;
-
-            l = RegOpenKeyExW(enumKey, enumstr, 0, KEY_READ,
-                    &enumStrKey);
-            if (!l)
-            {
-                WCHAR *bus, *device;
-
-                if (!wcschr(enumstr, '\\'))
-                {
-                    SETUPDI_EnumerateMatchingDevices(DeviceInfoSet, enumstr, enumStrKey, class, flags);
-                }
-                else if ((bus = wcsdup(enumstr)))
-                {
-                    device = wcschr(bus, '\\');
-                    *device++ = 0;
-
-                    SETUPDI_EnumerateMatchingDeviceInstances(DeviceInfoSet, bus, device, enumStrKey, class, flags);
-                    free(bus);
-                }
-
-                RegCloseKey(enumStrKey);
-            }
-        }
-        else
-        {
-            DWORD i, len;
-            WCHAR subKeyName[MAX_PATH];
-
-            l = ERROR_SUCCESS;
-            for (i = 0; !l; i++)
-            {
-                len = ARRAY_SIZE(subKeyName);
-                l = RegEnumKeyExW(enumKey, i, subKeyName, &len, NULL,
-                        NULL, NULL, NULL);
-                if (!l)
-                {
-                    HKEY subKey;
-
-                    l = RegOpenKeyExW(enumKey, subKeyName, 0, KEY_READ,
-                            &subKey);
-                    if (!l)
-                    {
-                        SETUPDI_EnumerateMatchingDevices(DeviceInfoSet,
-                                subKeyName, subKey, class, flags);
-                        RegCloseKey(subKey);
-                    }
-                    /* Allow enumeration to continue */
-                    l = ERROR_SUCCESS;
-                }
-            }
-        }
-        RegCloseKey(enumKey);
+        SETUPDI_GuidToString(class, class_guid);
+        cm_flags |= CM_GETIDLIST_FILTER_CLASS;
+        filter = class_guid;
     }
+
+    for (;;)
+    {
+        if (CM_Get_Device_ID_List_SizeW(&size, filter, cm_flags)) break;
+        if (!(ids = malloc(size * sizeof(*ids))))
+        {
+           ERR("Failed to allocate memory for device ID list.\n");
+           break;
+        }
+        if (!(cr = CM_Get_Device_ID_ListW(filter, ids, size, cm_flags))) break;
+        free(ids);
+        ids = NULL;
+        if (cr != CR_BUFFER_SMALL) break;
+    }
+    if (!ids) return;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Enum, 0, KEY_ENUMERATE_SUB_KEYS, &enum_key))
+    {
+        free(ids);
+        return;
+    }
+
+    if (enum_str)
+    {
+        wcscpy(enum_str2, enum_str);
+        wcscat(enum_str2, L"\\");
+    }
+    enum_str_len = enum_str ? wcslen(enum_str2) : 0;
+    for (WCHAR *id = ids; *id; id = id + wcslen(id) + 1)
+    {
+        DWORD size, phantom;
+        GUID dev_class;
+
+        /* Check if enum_str matches this device instance ID. */
+        if (enum_str)
+        {
+            WCHAR tmp[MAX_DEVICE_ID_LEN] = { 0 };
+
+            if (wcslen(id) < enum_str_len) continue;
+            memcpy(tmp, id, enum_str_len * sizeof(WCHAR));
+            tmp[enum_str_len] = 0;
+            if (wcsicmp(enum_str2, tmp)) continue;
+        }
+
+        /* SetupDiGetClassDevs() doesn't return phantom devices. */
+        size = sizeof(phantom);
+        if (!RegGetValueW(enum_key, id, L"Phantom", RRF_RT_REG_DWORD, NULL, &phantom, &size) && phantom)
+            continue;
+
+        class_guid[0] = 0;
+        size = sizeof(class_guid);
+        if (RegGetValueW(enum_key, id, L"ClassGUID", RRF_RT_REG_SZ, NULL, class_guid, &size)
+                || !guid_from_string_w(class_guid, &dev_class))
+            continue;
+
+        create_device(DeviceInfoSet, &dev_class, id, FALSE);
+    }
+    RegCloseKey(enum_key);
+    free(ids);
 }
 
 /***********************************************************************
@@ -2280,6 +2075,24 @@ HDEVINFO WINAPI SetupDiGetClassDevsW(const GUID *class, LPCWSTR enumstr, HWND pa
 {
     return SetupDiGetClassDevsExW(class, enumstr, parent, flags, NULL, NULL,
             NULL);
+}
+
+static BOOL is_valid_enumerator(const WCHAR *enumerator)
+{
+    WCHAR *tmp;
+
+    if (!enumerator[0])
+        return FALSE;
+    if (!(tmp = wcschr(enumerator, '\\')))
+        return TRUE;
+    /* Cannot have more than one '\'. */
+    if (!!wcschr(tmp + 1, '\\'))
+        return FALSE;
+    /* Enumerator can't end with '\'. */
+    if (tmp[1] == '\0')
+        return FALSE;
+
+    return TRUE;
 }
 
 /***********************************************************************
@@ -2300,6 +2113,11 @@ HDEVINFO WINAPI SetupDiGetClassDevsExW(const GUID *class, PCWSTR enumstr, HWND p
         SetLastError(ERROR_INVALID_PARAMETER);
         return INVALID_HANDLE_VALUE;
     }
+    if (!(flags & DIGCF_DEVICEINTERFACE) && enumstr && !is_valid_enumerator(enumstr))
+    {
+        SetLastError(ERROR_INVALID_DATA);
+        return INVALID_HANDLE_VALUE;
+    }
     if (flags & DIGCF_ALLCLASSES)
         class = NULL;
 
@@ -2315,7 +2133,19 @@ HDEVINFO WINAPI SetupDiGetClassDevsExW(const GUID *class, PCWSTR enumstr, HWND p
             FIXME("%s: unimplemented for remote machines\n",
                     debugstr_w(machine));
         else if (flags & DIGCF_DEVICEINTERFACE)
-            SETUPDI_EnumerateInterfaces(set, class, enumstr, flags);
+        {
+            if ((flags & DIGCF_ALLCLASSES))
+            {
+                GUID class_guid;
+
+                for (UINT i = 0; !CM_Enumerate_Classes(i, &class_guid, CM_ENUMERATE_CLASSES_INTERFACE); i++)
+                    SETUPDI_EnumerateMatchingInterfaces(set, &class_guid, enumstr, flags);
+            }
+            else
+            {
+                SETUPDI_EnumerateMatchingInterfaces(set, class, enumstr, flags);
+            }
+        }
         else
             SETUPDI_EnumerateDevices(set, class, enumstr, flags);
     }

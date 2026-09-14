@@ -297,29 +297,6 @@ static const WCHAR wszTimesNewRoman[] =
 static const WCHAR wszArial[] =
     {'A','r','i','a','l',0};
 
-/* Returns true if the user interface is in English. Note that this does not
- * presume of the formatting of dates, numbers, etc.
- */
-static BOOL is_lang_english(void)
-{
-    static HMODULE hkernel32 = NULL;
-    static LANGID (WINAPI *pGetThreadUILanguage)(void) = NULL;
-    static LANGID (WINAPI *pGetUserDefaultUILanguage)(void) = NULL;
-
-    if (!hkernel32)
-    {
-        hkernel32 = GetModuleHandleA("kernel32.dll");
-        pGetThreadUILanguage = (void*)GetProcAddress(hkernel32, "GetThreadUILanguage");
-        pGetUserDefaultUILanguage = (void*)GetProcAddress(hkernel32, "GetUserDefaultUILanguage");
-    }
-    if (pGetThreadUILanguage)
-        return PRIMARYLANGID(pGetThreadUILanguage()) == LANG_ENGLISH;
-    if (pGetUserDefaultUILanguage)
-        return PRIMARYLANGID(pGetUserDefaultUILanguage()) == LANG_ENGLISH;
-
-    return PRIMARYLANGID(GetUserDefaultLangID()) == LANG_ENGLISH;
-}
-
 static BOOL iface_cmp(IUnknown *iface1, IUnknown *iface2)
 {
     IUnknown *unk1, *unk2;
@@ -2036,7 +2013,7 @@ static HRESULT WINAPI InPlaceUIWindow_SetActiveObject(IOleInPlaceFrame *iface,
 
     if(expect_InPlaceUIWindow_SetActiveObject_active) {
         ok(pActiveObject != NULL, "pActiveObject = NULL\n");
-        if(pActiveObject && is_lang_english())
+        if(pActiveObject)
             ok(!lstrcmpW(wszHTML_Document, pszObjName), "%s != \"HTML Document\"\n", wine_dbgstr_w(pszObjName));
     }
     else {
@@ -2056,7 +2033,7 @@ static HRESULT WINAPI InPlaceFrame_SetActiveObject(IOleInPlaceFrame *iface,
     if(pActiveObject) {
         CHECK_EXPECT2(SetActiveObject);
 
-        if(pActiveObject && is_lang_english())
+        if(pActiveObject)
             ok(!lstrcmpW(wszHTML_Document, pszObjName), "%s != \"HTML Document\"\n", wine_dbgstr_w(pszObjName));
     }else {
         CHECK_EXPECT(SetActiveObject_null);
@@ -2842,12 +2819,14 @@ static HRESULT WINAPI DocHostUIHandler_GetDropTarget(IDocHostUIHandler2 *iface,
     return E_NOTIMPL;
 }
 
+static HRESULT GetExternal_hres = S_FALSE;
+
 static HRESULT WINAPI DocHostUIHandler_GetExternal(IDocHostUIHandler2 *iface, IDispatch **ppDispatch)
 {
     CHECK_EXPECT(GetExternal);
     ok(iface == expect_uihandler_iface, "called on unexpected iface\n");
     *ppDispatch = &External;
-    return S_FALSE;
+    return GetExternal_hres;
 }
 
 static HRESULT WINAPI DocHostUIHandler_TranslateUrl(IDocHostUIHandler2 *iface, DWORD dwTranslate,
@@ -8004,6 +7983,40 @@ static void test_external(IHTMLDocument2 *doc, BOOL initialized)
     IHTMLWindow2_Release(htmlwin);
 }
 
+static void test_external_hres(IHTMLDocument2 *doc)
+{
+    static HRESULT fail_codes[] = { E_FAIL, E_OUTOFMEMORY, E_NOTIMPL };
+    HRESULT old_hres = GetExternal_hres;
+    IHTMLWindow2 *htmlwin;
+    IDispatch *external;
+    HRESULT hres;
+    unsigned i;
+
+    hres = IHTMLDocument2_get_parentWindow(doc, &htmlwin);
+    ok(hres == S_OK, "get_parentWindow failed: %08lx\n", hres);
+
+    GetExternal_hres = E_NOINTERFACE;
+    SET_EXPECT(GetExternal);
+    external = (void*)0xdeadbeef;
+    hres = IHTMLWindow2_get_external(htmlwin, &external);
+    ok(hres == S_OK, "get_external failed: %08lx\n", hres);
+    ok(external == NULL, "external = %p\n", external);
+    CHECK_CALLED(GetExternal);
+
+    for(i = 0; i < ARRAY_SIZE(fail_codes); i++) {
+        GetExternal_hres = fail_codes[i];
+        SET_EXPECT(GetExternal);
+        external = (void*)0xdeadbeef;
+        hres = IHTMLWindow2_get_external(htmlwin, &external);
+        ok(hres == fail_codes[i], "[%u] get_external returned: %08lx\n", i, hres);
+        ok(external == NULL, "external = %p\n", external);
+        CHECK_CALLED(GetExternal);
+    }
+
+    IHTMLWindow2_Release(htmlwin);
+    GetExternal_hres = old_hres;
+}
+
 static void test_enum_objects(IOleContainer *container)
 {
     IEnumUnknown *enum_unknown;
@@ -8491,6 +8504,7 @@ static void test_HTMLDocument(BOOL do_load, BOOL mime)
     test_Window(doc, TRUE);
 
     test_external(doc, TRUE);
+    test_external_hres(doc);
     set_custom_uihandler(doc, NULL);
     test_external(doc, FALSE);
 
@@ -9802,6 +9816,9 @@ static void test_com_aggregation(const CLSID *clsid)
 
 START_TEST(htmldoc)
 {
+    /* some tests need an English locale */
+    SetThreadPreferredUILanguages( MUI_LANGUAGE_NAME, L"en-US\0", NULL );
+
     CoInitialize(NULL);
 
     if(!check_ie()) {

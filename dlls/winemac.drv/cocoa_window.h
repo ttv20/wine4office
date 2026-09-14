@@ -45,9 +45,6 @@
     void* hwnd;
     WineEventQueue* queue;
 
-    CGDirectDisplayID _lastDisplayID;
-    NSTimeInterval _lastDisplayTime;
-
     NSRect wineFrame;
     NSRect roundedWineFrame;
 

@@ -722,6 +722,7 @@ static void test_PropVariantCompareEx(void)
     SAFEARRAY emptysafearray;
     unsigned char bytevector1[] = {1,2,3};
     unsigned char bytevector2[] = {4,5,6};
+    WCHAR buff[100];
 
     PropVariantInit(&empty);
     PropVariantInit(&null);
@@ -880,6 +881,12 @@ static void test_PropVariantCompareEx(void)
 
     res = PropVariantCompareEx(&clsid, &clsid_null, 0, PVCF_TREATEMPTYASGREATERTHAN);
     ok(res == -1, "res=%i\n", res);
+
+    var1.vt = VT_LPWSTR;
+    var1.pwszVal = buff;
+    wcscpy(buff, L"{deadbeef-dead-beef-dead-beefcafebabe}");
+    res = PropVariantCompareEx(&clsid, &var1, 0, 0);
+    ok(res == 0, "res=%i\n", res);
 
     /* VT_R4/VT_R8 */
     res = PropVariantCompareEx(&r4_0, &r8_0, 0, 0);

@@ -2545,25 +2545,23 @@ static UINT TransformView_add_column( struct table_view *tv, MSIRECORD *rec )
 {
     static const WCHAR query_pfx[] =
         L"INSERT INTO `_TransformView` (`new`, `Table`, `Current`, `Column`, `Data`) VALUES (1, '";
-
     WCHAR buf[256], *query = buf;
-    UINT i, p, r, qlen;
+    UINT i, p, r, query_len;
     DWORD len;
     MSIQUERY *q;
 
-    qlen = p = wcslen( query_pfx );
+    query_len = p = wcslen( query_pfx );
     for (i = 1; i <= 4; i++)
     {
         r = MSI_RecordGetStringW( rec, i, NULL, &len );
         if (r != ERROR_SUCCESS)
             return r;
-        qlen += len + 3; /* strlen( "','" ) */
+        query_len += len + 3; /* strlen( "','" ) */
     }
 
-    if (qlen > ARRAY_SIZE(buf))
+    if (query_len > ARRAY_SIZE(buf))
     {
-        query = malloc( len * sizeof(WCHAR) );
-        qlen = len;
+        query = malloc( query_len * sizeof(WCHAR) );
         if (!query)
             return ERROR_OUTOFMEMORY;
     }
@@ -2571,7 +2569,7 @@ static UINT TransformView_add_column( struct table_view *tv, MSIRECORD *rec )
     memcpy( query, query_pfx, p * sizeof(WCHAR) );
     for (i = 1; i <= 4; i++)
     {
-        len = qlen - p;
+        len = query_len - p;
         MSI_RecordGetStringW( rec, i, query + p, &len );
         p += len;
         query[p++] = '\'';
@@ -2726,7 +2724,6 @@ static UINT TransformView_delete_row( MSIVIEW *view, UINT row )
         query = malloc( len * sizeof(WCHAR) );
         if (!query)
         {
-            free( tv );
             free( key );
             return ERROR_OUTOFMEMORY;
         }

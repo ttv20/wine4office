@@ -1114,7 +1114,7 @@ static NTSTATUS gl_glGetString( void *args )
     struct glGetString_params *params = args;
     const struct opengl_funcs *funcs = params->teb->glTable;
     if (!funcs->p_glGetString) return STATUS_NOT_IMPLEMENTED;
-    params->ret = wrap_glGetString( params->teb, params->name, funcs->p_glGetString );
+    params->ret = funcs->p_glGetString( params->name );
     return STATUS_SUCCESS;
 }
 
@@ -32896,7 +32896,7 @@ static NTSTATUS wow64_gl_glGetString( void *args )
     const GLubyte *ret;
     const struct opengl_funcs *funcs = teb->glTable;
     if (!funcs->p_glGetString) return STATUS_NOT_IMPLEMENTED;
-    ret = wrap_glGetString( teb, params->name, funcs->p_glGetString );
+    ret = funcs->p_glGetString( params->name );
     return return_wow64_string( ret, &params->ret );
 }
 

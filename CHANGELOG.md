@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
+- Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Add AppImage, AUR, Nix, Ubuntu, and Fedora packages with durable user installs, package-manager updates, and startup checks.
 - Keep Authenticode verification working with multi-digit OpenSSL patch versions.
@@ -11,7 +13,6 @@
 - Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.
 - Link to Microsoft's work/school and personal account pages for managing computers and downloading the online Office installer.
 - Hide the Teams installer from the Manager while Teams support is unavailable.
-
 - Prevent Office licensing repair from crashing while querying installed product keys.
 - Add X11/Wayland and OpenGL/Vulkan controls to the Manager's environment page.
 - Restore Outlook account setup after Office repairs its Click-to-Run registry data.

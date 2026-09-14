@@ -362,13 +362,13 @@ static enum vkd3d_shader_sysval_semantic map_fragment_output_sysval(const char *
     return VKD3D_SHADER_SV_NONE;
 }
 
-static int shader_parse_signature(const struct vkd3d_shader_dxbc_section_desc *section,
-        struct vkd3d_shader_message_context *message_context, struct shader_signature *s)
+static int vsir_signature_parse(struct vsir_signature *s, const struct vkd3d_shader_dxbc_section_desc *section,
+        struct vkd3d_shader_message_context *message_context)
 {
     bool has_stream_index, has_min_precision;
     const char *data = section->data.code;
+    struct vsir_signature_element *e;
     uint32_t count, header_size;
-    struct signature_element *e;
     const char *ptr = data;
     bool fail = false;
     unsigned int i;
@@ -472,7 +472,7 @@ static int shader_parse_signature(const struct vkd3d_shader_dxbc_section_desc *s
 
     if (fail)
     {
-        shader_signature_cleanup(s);
+        vsir_signature_cleanup(s);
         return VKD3D_ERROR_INVALID_ARGUMENT;
     }
 
@@ -482,7 +482,7 @@ static int shader_parse_signature(const struct vkd3d_shader_dxbc_section_desc *s
 static int isgn_handler(const struct vkd3d_shader_dxbc_section_desc *section,
         struct vkd3d_shader_message_context *message_context, void *ctx)
 {
-    struct shader_signature *is = ctx;
+    struct vsir_signature *is = ctx;
 
     if (section->tag != TAG_ISGN && section->tag != TAG_ISG1)
         return VKD3D_OK;
@@ -490,13 +490,14 @@ static int isgn_handler(const struct vkd3d_shader_dxbc_section_desc *section,
     if (is->elements)
     {
         FIXME("Multiple input signatures.\n");
-        shader_signature_cleanup(is);
+        vsir_signature_cleanup(is);
     }
-    return shader_parse_signature(section, message_context, is);
+
+    return vsir_signature_parse(is, section, message_context);
 }
 
 int shader_parse_input_signature(const struct vkd3d_shader_code *dxbc,
-        struct vkd3d_shader_message_context *message_context, struct shader_signature *signature)
+        struct vkd3d_shader_message_context *message_context, struct vsir_signature *signature)
 {
     int ret;
 
@@ -545,7 +546,7 @@ static int shdr_handler(const struct vkd3d_shader_dxbc_section_desc *section,
                 FIXME("Multiple input signatures.\n");
                 break;
             }
-            if ((ret = shader_parse_signature(section, message_context, &desc->input_signature)) < 0)
+            if ((ret = vsir_signature_parse(&desc->input_signature, section, message_context)) < 0)
                 return ret;
             break;
 
@@ -559,7 +560,7 @@ static int shdr_handler(const struct vkd3d_shader_dxbc_section_desc *section,
                 FIXME("Multiple output signatures.\n");
                 break;
             }
-            if ((ret = shader_parse_signature(section, message_context, &desc->output_signature)) < 0)
+            if ((ret = vsir_signature_parse(&desc->output_signature, section, message_context)) < 0)
                 return ret;
             break;
 
@@ -572,7 +573,7 @@ static int shdr_handler(const struct vkd3d_shader_dxbc_section_desc *section,
                 FIXME("Multiple patch constant signatures.\n");
                 break;
             }
-            if ((ret = shader_parse_signature(section, message_context, &desc->patch_constant_signature)) < 0)
+            if ((ret = vsir_signature_parse(&desc->patch_constant_signature, section, message_context)) < 0)
                 return ret;
             break;
 
@@ -609,9 +610,9 @@ static int shdr_handler(const struct vkd3d_shader_dxbc_section_desc *section,
 
 void free_dxbc_shader_desc(struct dxbc_shader_desc *desc)
 {
-    shader_signature_cleanup(&desc->input_signature);
-    shader_signature_cleanup(&desc->output_signature);
-    shader_signature_cleanup(&desc->patch_constant_signature);
+    vsir_signature_cleanup(&desc->input_signature);
+    vsir_signature_cleanup(&desc->output_signature);
+    vsir_signature_cleanup(&desc->patch_constant_signature);
 }
 
 int shader_extract_from_dxbc(const struct vkd3d_shader_code *dxbc,

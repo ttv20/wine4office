@@ -1490,9 +1490,6 @@ static HRESULT WINAPI test_d3dinclude_open(ID3DInclude *iface, D3D_INCLUDE_TYPE 
         "def c0, LIGHT, 0, 0, 0\n";
     char *buffer;
 
-    trace("filename %s.\n", filename);
-    trace("parent_data %p: %s.\n", parent_data, parent_data ? (char *)parent_data : "(null)");
-
     if (!strcmp(filename, "include1.h"))
     {
         buffer = strdup(include1);

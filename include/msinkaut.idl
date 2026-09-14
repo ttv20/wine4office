@@ -150,18 +150,10 @@ library MSINKAUTLib
         IRCACM_Random = 2
     } InkRecognizerCharacterAutoCompletionMode;
 
-    typedef struct tagtagRECT
+    typedef struct _InkRecoGuide
     {
-        LONG left;
-        LONG top;
-        LONG right;
-        LONG bottom;
-    } tagRECT;
-
-    typedef struct tag_InkRecoGuide
-    {
-        tagRECT rectWritingBox;
-        tagRECT rectDrawnBox;
+        RECT rectWritingBox;
+        RECT rectDrawnBox;
         long cRows;
         long cColumns;
         long Midline;

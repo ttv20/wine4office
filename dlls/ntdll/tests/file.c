@@ -143,6 +143,7 @@ static void create_file_test(void)
     static const WCHAR pathInvalidNtW[] = {'\\','\\','?','\\',0};
     static const WCHAR pathInvalidNt2W[] = {'\\','?','?','\\',0};
     static const WCHAR pathInvalidDosW[] = {'\\','D','o','s','D','e','v','i','c','e','s','\\',0};
+    static const WCHAR nodirW[] = {'n','o','s','u','c','h','d','i','r','\\','f','i','l','e',0};
     static const char testdata[] = "Hello World";
     FILE_NETWORK_OPEN_INFORMATION info;
     NTSTATUS status;
@@ -253,9 +254,70 @@ static void create_file_test(void)
     dir = NULL;
     status = pNtCreateFile( &dir, FILE_APPEND_DATA, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
                             FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
-    todo_wine
     ok( status == STATUS_INVALID_PARAMETER,
         "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+
+    /* FILE_SYNCHRONOUS_IO_* requires SYNCHRONIZE in the access mask. Windows
+     * checks for the literal bit, before expanding generic rights and before
+     * resolving the name. */
+    GetTempPathW( MAX_PATH, path );
+    lstrcatW( path, nodirW );
+    pRtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, FILE_READ_DATA, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, SYNCHRONIZE, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_OBJECT_PATH_NOT_FOUND,
+        "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    pRtlFreeUnicodeString( &nameW );
+
+    GetTempPathW( MAX_PATH, path );
+    lstrcatW( path, fooW );
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0 );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile error %ld\n", GetLastError() );
+    CloseHandle( file );
+    pRtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL );
+    InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, GENERIC_READ, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, FILE_GENERIC_READ, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( !status, "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, GENERIC_READ, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_ALERT, NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    dir = NULL;
+    status = pNtCreateFile( &dir, MAXIMUM_ALLOWED, &attr, &io, NULL, FILE_ATTRIBUTE_NORMAL, 0,
+                            FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER,
+        "open %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status );
+    if (!status) CloseHandle( dir );
+
+    pRtlFreeUnicodeString( &nameW );
+    DeleteFileW( path );
 
     /* Invalid chars in file/dirnames */
     pRtlDosPathNameToNtPathName_U(questionmarkInvalidNameW, &nameW, NULL, NULL);
@@ -6741,6 +6803,7 @@ static void test_reparse_points(void)
 
     data_size = init_reparse_custom( &guid_data, 0x1000beef );
     status = NtFsControlFile( handle, NULL, NULL, NULL, &io, FSCTL_SET_REPARSE_POINT, guid_data, data_size, NULL, 0 );
+    todo_wine_if( status == STATUS_DIRECTORY_NOT_EMPTY )
     ok( !status || broken(status == STATUS_DIRECTORY_NOT_EMPTY), "got %#lx\n", status );
 
     if (!status)
@@ -6772,7 +6835,7 @@ static void test_reparse_points(void)
     }
 
     ret = DeleteFileW( path );
-    todo_wine ok( ret == TRUE, "got error %lu\n", GetLastError() );
+    ok( ret == TRUE, "got error %lu\n", GetLastError() );
     if (!ret)
     {
         guid_data->ReparseDataLength = 0;
@@ -7566,6 +7629,90 @@ static void test_appv_vfs_overlay(void)
     RemoveDirectoryA( base );
 }
 
+static void test_find_file(void)
+{
+    IO_STATUS_BLOCK io;
+    UNICODE_STRING nameW;
+    OBJECT_ATTRIBUTES attr;
+    WIN32_FIND_DATAW find_data;
+    WCHAR filter[MAX_PATH];
+    WCHAR path[MAX_PATH];
+    WCHAR file1[MAX_PATH];
+    WCHAR file2[MAX_PATH];
+    NTSTATUS status;
+    HANDLE handle;
+    BOOL deleted;
+    UINT ret;
+
+    GetTempPathW(MAX_PATH, path);
+    lstrcatW(path, L"findfiletest");
+    CreateDirectoryW(path, NULL);
+
+    ret = GetTempFileNameW(path, L"pfx", 0, file1);
+    ok(!!ret, "GetTempFileName() error %lu\n", GetLastError());
+
+    ret = GetTempFileNameW(path, L"pfx", 0, file2);
+    ok(!!ret, "GetTempFileName() error %lu\n", GetLastError());
+
+    swprintf(filter, ARRAY_SIZE(filter), L"%s\\*.*", path);
+    handle = FindFirstFileW(filter, &find_data);
+    ok(handle != INVALID_HANDLE_VALUE, "FindFirstFileW error %lu\n", GetLastError());
+
+    do
+    {
+        if (find_data.cFileName[0] == '.')
+            continue;
+        /* break while FindFirstFileW holding open handle */
+        break;
+    }
+    while (FindNextFileW(handle, &find_data));
+
+    /* simulate SHFileOperationW(FO_MOVE) on directory being searched */
+    DeleteFileW(file2);
+    DeleteFileW(file1);
+
+    deleted = RemoveDirectoryW(path);
+    ok(deleted, "RemoveDirectoryW failed with error %lu\n", GetLastError());
+
+    FindClose(handle);
+
+    deleted = GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES;
+    ok(deleted, "Should not exist %ls\n", path);
+
+    /* simulate with Nt calls */
+    CreateDirectoryW(path, NULL);
+
+    pRtlDosPathNameToNtPathName_U(path, &nameW, NULL, NULL );
+    InitializeObjectAttributes(&attr, &nameW, OBJ_CASE_INSENSITIVE, 0, NULL);
+
+    handle = NULL;
+    status = pNtOpenFile(&handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+    ok(!status, "NtOpenFile %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status);
+
+    SetLastError(0xdeadbeef);
+    deleted = RemoveDirectoryW(path);
+    ok(!deleted, "RemoveDirectoryW should have failed\n");
+    ok(GetLastError() == ERROR_SHARING_VIOLATION, "got %lu\n", GetLastError());
+
+    pNtClose(handle);
+
+    /* recreate with FILE_SHARE_DELETE */
+    handle = NULL;
+    status = pNtOpenFile(&handle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+    ok(!status, "NtOpenFile %s failed %lx\n", wine_dbgstr_w(nameW.Buffer), status);
+
+    SetLastError(0xdeadbeef);
+    deleted = RemoveDirectoryW(path);
+    ok(deleted, "RemoveDirectoryW failed with error %lu\n", GetLastError());
+
+    pRtlFreeUnicodeString( &nameW );
+    pNtClose(handle);
+}
+
 START_TEST(file)
 {
     HMODULE hkernel32 = GetModuleHandleA("kernel32.dll");
@@ -7649,4 +7796,5 @@ START_TEST(file)
     test_reparse_points();
     test_file_map_large_size();
     test_appv_vfs_overlay();
+    test_find_file();
 }

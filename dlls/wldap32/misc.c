@@ -148,7 +148,7 @@ static void escape_filter_element( char *src, ULONG srclen, char *dst )
         else
             d += sprintf( d, fmt, (unsigned char)src[i] );
     }
-    *++d = 0;
+    *d = 0;
 }
 
 /***********************************************************************

@@ -525,7 +525,7 @@ static BOOL get_unix_full_path( LPCWSTR name, LPWSTR buffer, ULONG size, ULONG *
     RtlInitUnicodeString( &str, nt_str );
     InitializeObjectAttributes( &attr, &str, 0, 0, NULL );
 
-    status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          FILE_SYNCHRONOUS_IO_NONALERT );
     if (status)
     {
@@ -537,7 +537,7 @@ static BOOL get_unix_full_path( LPCWSTR name, LPWSTR buffer, ULONG size, ULONG *
         if (i > 9)
         {
             str.Length = (i + 1) * sizeof(WCHAR);
-            status = NtOpenFile( &handle, GENERIC_READ, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            status = NtOpenFile( &handle, GENERIC_READ | SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                  FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
         }
     }

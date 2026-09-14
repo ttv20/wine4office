@@ -150,12 +150,10 @@ static HRESULT grow_strs_array( struct error *error )
     if (error->strs_count < error->strs_size)
         return S_OK;
 
-    new_size = error->strs_size > 0 ? 2 * error->strs_size : 1;
     if (error->strs_size > 0)
     {
         new_size = 2 * error->strs_size;
-        new_ptr = ws_realloc_zero( error->heap, error->strs,
-                                   error->strs_size * sizeof(WS_STRING),
+        new_ptr = ws_realloc_zero( error->heap, error->strs, error->strs_size * sizeof(WS_STRING),
                                    new_size * sizeof(WS_STRING) );
     }
     else
@@ -179,22 +177,22 @@ static WS_FAULT *dup_fault( WS_HEAP *heap, const WS_FAULT *src )
     ULONG i;
     BOOL success = FALSE;
 
-    if (!(new_fault = ws_alloc_zero( heap, sizeof(*new_fault) )))
-        return NULL;
+    if (!(new_fault = ws_alloc_zero( heap, sizeof(*new_fault) ))) return NULL;
 
     prev_code = NULL;
     code = src->code;
-    while ( code )
+    while (code)
     {
-        if (!(new_code = ws_alloc_zero( heap, sizeof(*new_code) )) ||
-            !copy_xml_string( heap, &code->value.localName, &new_code->value.localName ) ||
-            !copy_xml_string( heap, &code->value.ns, &new_code->value.ns ))
-            goto done;
+        if (!(new_code = ws_alloc_zero( heap, sizeof(*new_code) ))) goto done;
 
         if (prev_code)
             prev_code->subCode = new_code;
         else
             new_fault->code = new_code;
+
+        if (!copy_xml_string( heap, &code->value.localName, &new_code->value.localName ) ||
+            !copy_xml_string( heap, &code->value.ns, &new_code->value.ns )) goto done;
+
         prev_code = new_code;
         code = code->subCode;
     }

@@ -363,7 +363,7 @@ PDH_STATUS WINAPI PdhCloseQuery( PDH_HQUERY handle )
     TRACE("%p\n", handle);
 
     EnterCriticalSection( &pdh_handle_cs );
-    if (!query || query->magic != PDH_MAGIC_QUERY)
+    if (IsBadReadPtr( query, sizeof(*query) ) || query->magic != PDH_MAGIC_QUERY)
     {
         LeaveCriticalSection( &pdh_handle_cs );
         return PDH_INVALID_HANDLE;

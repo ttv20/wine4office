@@ -1325,8 +1325,7 @@ static HRESULT d3d9_texture_init(struct d3d9_texture *texture, struct d3d9_devic
 
         managed_desc.access = WINED3D_RESOURCE_ACCESS_GPU;
         managed_desc.bind_flags = desc->bind_flags;
-        managed_desc.usage &= ~WINED3DUSAGE_GENERATE_MIPMAPS;
-        if (FAILED(hr = wined3d_texture_create(device->wined3d_device, &managed_desc, layer_count, level_count, flags,
+        if (FAILED(hr = wined3d_texture_create(device->wined3d_device, &managed_desc, layer_count, level_count, 0,
                 NULL, texture, &d3d9_texture_wined3d_parent_ops, &texture->draw_texture)))
         {
             wined3d_texture_decref(texture->wined3d_texture);

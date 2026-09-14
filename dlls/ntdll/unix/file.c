@@ -4820,6 +4820,9 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
     *handle = 0;
     if (!attr || !attr->ObjectName) return STATUS_INVALID_PARAMETER;
 
+    if ((options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) && !(access & SYNCHRONIZE))
+        return STATUS_INVALID_PARAMETER;
+
     if (alloc_size) FIXME( "alloc_size not supported\n" );
 
     new_attr = *attr;
@@ -7848,14 +7851,72 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
 }
 
 
+static NTSTATUS set_volume_label( HANDLE handle, const FILE_FS_LABEL_INFORMATION *info )
+{
+    ULONGLONG data[64];
+    struct mountmgr_unix_drive *drive = (struct mountmgr_unix_drive *)data;
+    size_t len = info->VolumeLabelLength / sizeof(WCHAR);
+    const char *mount_point;
+    int fd, needs_close;
+    NTSTATUS status;
+    char *path, *labelA;
+
+    if ((status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL )))
+        return status;
+
+    if ((status = get_mountmgr_fs_info( handle, fd, drive, sizeof(data) )))
+    {
+        if (needs_close) close( fd );
+        return status;
+    }
+    mount_point = (const char *)data + drive->mount_point_offset;
+
+    if (needs_close) close( fd );
+
+    if (drive->fs_type != MOUNTMGR_FS_TYPE_NTFS)
+        return STATUS_ACCESS_DENIED;
+
+    if (mount_point[0] == '/')
+        asprintf( &path, "%s/.windows-label", mount_point );
+    else
+        asprintf( &path, "%s/dosdevices/%s/.windows-label", config_dir, mount_point );
+    fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0666 );
+    free( path );
+    if (fd < 0)
+        return errno_to_status( errno );
+    labelA = malloc( len * 3 + 1 );
+    len = ntdll_wcstoumbs( info->VolumeLabel, len, labelA, len * 3, FALSE );
+    write( fd, labelA, len );
+    free( labelA );
+    close( fd );
+    return STATUS_SUCCESS;
+}
+
+
 /******************************************************************************
  *              NtSetVolumeInformationFile   (NTDLL.@)
  */
 NTSTATUS WINAPI NtSetVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io, void *info,
                                             ULONG length, FS_INFORMATION_CLASS class )
 {
-    FIXME( "(%p,%p,%p,0x%08x,0x%08x) stub\n", handle, io, info, length, class );
-    return STATUS_SUCCESS;
+    NTSTATUS status;
+
+    TRACE( "handle %p length %u class %#x\n", handle, length, class );
+
+    switch (class)
+    {
+    case FileFsLabelInformation:
+        status = set_volume_label( handle, info );
+        break;
+
+    default:
+        FIXME("class %#x not handled\n", class);
+        status = STATUS_SUCCESS;
+        break;
+    }
+    io->Status = status;
+    if (!status) io->Information = 0;
+    return status;
 }
 
 

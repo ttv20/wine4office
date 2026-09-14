@@ -344,8 +344,8 @@ HRESULT bind_url(IMoniker *mon, HRESULT (*onDataAvailable)(void*,char*,DWORD),
         hr = IMoniker_BindToStorage(mon, pbc, NULL, &IID_IStream, (LPVOID*)&stream);
         if(stream)
             IStream_Release(stream);
-        IBindCtx_Release(pbc);
     }
+    IBindCtx_Release(pbc);
 
     if(FAILED(hr))
     {

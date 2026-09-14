@@ -2,11 +2,12 @@ MODULE    = secur32.dll
 IMPORTLIB = secur32
 UNIXLIB   = secur32.so
 IMPORTS   = advapi32
-DELAYIMPORTS = crypt32 ncrypt
+DELAYIMPORTS = crypt32 ncrypt rpcrt4
 UNIX_CFLAGS  = $(GNUTLS_CFLAGS)
 
 SOURCES = \
 	lsa.c \
+	lsass.idl \
 	negotiate.c \
 	schannel.c \
 	schannel_gnutls.c \

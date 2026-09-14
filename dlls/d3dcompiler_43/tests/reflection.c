@@ -918,7 +918,6 @@ static void test_reflection_desc_ps(void)
         expected = pdesc->SystemValueType;
 #else
         expected = D3D_NAME_UNDEFINED;
-        todo_wine
 #endif
         ok(desc.SystemValueType == expected, "(%u): got unexpected SystemValueType %#x, expected %#x.\n",
                 i, desc.SystemValueType, expected);

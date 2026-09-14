@@ -58,6 +58,7 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
         libudev-dev \
         libusb-1.0-0-dev \
         libv4l-dev \
+        libva-dev \
         libvulkan-dev \
         libwayland-dev \
         libx11-dev \
@@ -132,6 +133,7 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
             libudev-dev:i386 \
             libusb-1.0-0-dev:i386 \
             libv4l-dev:i386 \
+            libva-dev:i386 \
             libvulkan-dev:i386 \
             libwayland-dev:i386 \
             libx11-dev:i386 \
@@ -157,8 +159,8 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
         curl -L -o /usr/local/bin/sarif-converter https://gitlab.com/ignis-build/sarif-converter/-/releases/permalink/latest/downloads/bin/sarif-converter-linux-amd64 && \
         chmod +x /usr/local/bin/sarif-converter ;; \
     arm64) \
-        curl -s -L https://github.com/mstorsjo/llvm-mingw/releases/download/20260505/llvm-mingw-20260505-ucrt-ubuntu-22.04-aarch64.tar.xz | tar xJ && \
-        mv llvm-mingw-20260505-ucrt-ubuntu-22.04-aarch64 /usr/local/llvm-mingw ;; \
+        curl -s -L https://github.com/mstorsjo/llvm-mingw/releases/download/20260826/llvm-mingw-20260826-ucrt-ubuntu-22.04-aarch64.tar.xz | tar xJ && \
+        mv llvm-mingw-20260826-ucrt-ubuntu-22.04-aarch64 /usr/local/llvm-mingw ;; \
     esac && \
     mkdir -p /usr/lib/oss/include/sys && \
     curl -s -o /usr/lib/oss/include/sys/soundcard.h https://salsa.debian.org/debian/oss4/-/raw/debian/4.2-build2020-6/include/soundcard.h && \

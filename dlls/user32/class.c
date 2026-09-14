@@ -106,7 +106,8 @@ void init_class_name_ansi( UNICODE_STRING *str, const char *name )
     else
     {
         UINT len = MultiByteToWideChar( CP_ACP, 0, name, -1, str->Buffer, str->MaximumLength / sizeof(WCHAR) );
-        str->Length = (len - 1) * sizeof(WCHAR);
+        if (len && !str->Buffer[len - 1]) len--;
+        str->Length = len * sizeof(WCHAR);
     }
 }
 
@@ -120,7 +121,7 @@ void init_class_name( UNICODE_STRING *str, const WCHAR *name )
     else
     {
         str->Length = min( str->MaximumLength, wcslen( name ) * sizeof(WCHAR) );
-        memcpy( str->Buffer, name, str->Length + sizeof(WCHAR) );
+        memcpy( str->Buffer, name, min( str->MaximumLength, str->Length + sizeof(WCHAR) ) );
     }
 }
 

@@ -155,6 +155,7 @@ NTSTATUS WINAPI wow64_NtAllocateVirtualMemory( UINT *args )
 
     if (!addr && (type & MEM_COMMIT)) type |= MEM_RESERVE;
     if (*addr32 > highest_user_address) return STATUS_CONFLICTING_ADDRESSES;
+    if (*addr32 + size > highest_user_address + 1) return STATUS_CONFLICTING_ADDRESSES;
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualAlloc,
                                                       addr, size, 3, type, protect, 0 );
@@ -198,6 +199,7 @@ NTSTATUS WINAPI wow64_NtAllocateVirtualMemoryEx( UINT *args )
     if (!addr) type |= MEM_RESERVE;
 
     if (*addr32 > highest_user_address) return STATUS_CONFLICTING_ADDRESSES;
+    if (*addr32 + size > highest_user_address + 1) return STATUS_CONFLICTING_ADDRESSES;
     if ((status = mem_extended_parameters_32to64( &params64, params32, &count, set_limit ))) return status;
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualAlloc,
@@ -478,7 +480,11 @@ NTSTATUS WINAPI wow64_NtMapViewOfSection( UINT *args )
     NTSTATUS status;
     void *prev = NtCurrentTeb()->Tib.ArbitraryUserPointer;
 
-    if (addr32 && *addr32 > highest_user_address) return STATUS_INVALID_PARAMETER;
+    if (addr32)
+    {
+        if (*addr32 > highest_user_address) return STATUS_INVALID_PARAMETER;
+        if (size32 && *addr32 + (SIZE_T)*size32 > highest_user_address + 1) return STATUS_CONFLICTING_ADDRESSES;
+    }
     NtCurrentTeb()->Tib.ArbitraryUserPointer = ULongToPtr( NtCurrentTeb32()->Tib.ArbitraryUserPointer );
     status = NtMapViewOfSection( handle, process, addr_32to64( &addr, addr32 ), get_zero_bits( zero_bits ),
                                  commit, offset, size_32to64( &size, size32 ), inherit, alloc, protect );
@@ -516,7 +522,11 @@ NTSTATUS WINAPI wow64_NtMapViewOfSectionEx( UINT *args )
     BOOL set_limit = (!*addr32 && is_current);
     void *prev = NtCurrentTeb()->Tib.ArbitraryUserPointer;
 
-    if (addr32 && *addr32 > highest_user_address) return STATUS_INVALID_PARAMETER;
+    if (addr32)
+    {
+        if (*addr32 > highest_user_address) return STATUS_INVALID_PARAMETER;
+        if (size32 && *addr32 + (SIZE_T)*size32 > highest_user_address + 1) return STATUS_CONFLICTING_ADDRESSES;
+    }
     if ((status = mem_extended_parameters_32to64( &params64, params32, &count, set_limit ))) return status;
 
     NtCurrentTeb()->Tib.ArbitraryUserPointer = ULongToPtr( NtCurrentTeb32()->Tib.ArbitraryUserPointer );

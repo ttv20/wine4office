@@ -1759,11 +1759,10 @@ class Parameter(VkVariable):
 
 
 class Record(Type):
-    def __init__(self, members, name, returnedonly=False, structextends=None, category="struct", **kwargs):
+    def __init__(self, members, name, structextends=None, category="struct", **kwargs):
         Type.__init__(self, name, requires=[m.type_name for m in members])
         self.union = category == "union"
         self.members = members
-        self.returnedonly = returnedonly
         self.structextends = structextends.split(",") if structextends else []
         self._struct_extensions = None
         self.chain_type = None
@@ -1778,12 +1777,22 @@ class Record(Type):
 
     @staticmethod
     def from_xml(struct):
-        if struct.attrib["name"] == "VkPhysicalDeviceVulkan14Properties":
-            del struct.attrib["returnedonly"]
         returnedonly = "returnedonly" in struct.attrib
         members = filter(is_api_supported, struct.findall("member"))
         members = [VkMember.from_xml(member, returnedonly) for member in members]
+
+        # don't flag dynamic arrays with input/output lengths as returnedonly
+        for member in filter(lambda m: m.returnedonly, members):
+            for len in filter(lambda m: m.name == member.dyn_array_len, members):
+                len.returnedonly = False
+            if member.is_dynamic_array():
+                member.returnedonly = False
+
         return Record(members, **struct.attrib)
+
+    @property
+    def returnedonly(self):
+        return all(m.returnedonly for m in self.members)
 
     @property
     def struct_extensions(self):
@@ -1897,7 +1906,7 @@ class Record(Type):
             # for non-pointer members, check for returnedonly and const attributes
             if not m.is_pointer() or m.type_name == "void":
                 if direction == Direction.INPUT:
-                    if self.returnedonly:
+                    if m.returnedonly:
                         continue
                 else:
                     if is_const or m.is_const():
@@ -1983,7 +1992,7 @@ class StructConversionFunction(object):
         else:
             if m.is_type() or m.is_next():
                 return True
-            if struct.returnedonly and not m.needs_conversion(
+            if m.returnedonly and not m.needs_conversion(
                     self.conv, self.unwrap, Direction.INPUT, self.const):
                 return False
         return True

@@ -27,6 +27,8 @@
 #include "initguid.h"
 #include "wined3d_private.h"
 #include "wined3d_gl.h"
+#include <d3d10.h>
+#include <d3d10_1shader.h>
 #include "d3d12.h"
 #define VK_NO_PROTOTYPES
 #include "wine/vulkan.h"

@@ -6266,6 +6266,7 @@ static void test_encodePKCSAttributes(DWORD dwEncoding)
     attr[0].pszObjId = oid1;
     ret = CryptEncodeObjectEx(dwEncoding, PKCS_ATTRIBUTES, &attributes,
      CRYPT_ENCODE_ALLOC_FLAG, NULL, &buf, &size);
+    ok(ret, "CryptEncodeObjectEx failed: %lx\n", GetLastError());
     if (ret)
     {
         ok(size == sizeof(singlePKCSAttributes), "Unexpected size %ld\n", size);

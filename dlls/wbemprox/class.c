@@ -180,7 +180,7 @@ static HRESULT WINAPI enum_class_object_Skip(
 
     if (nCount > view->result_count - ec->index)
     {
-        ec->index = view->result_count - 1;
+        ec->index = view->result_count;
         return WBEM_S_FALSE;
     }
     ec->index += nCount;
@@ -718,6 +718,7 @@ static HRESULT WINAPI class_object_SpawnInstance(
         return hr;
     }
     hr = create_class_object( co->ns, co->name, iter, 0, record, ppNewInstance );
+    if (FAILED(hr)) destroy_record( record );
     IEnumWbemClassObject_Release( iter );
     return hr;
 }
@@ -783,7 +784,7 @@ static HRESULT create_signature_columns_and_data( IEnumWbemClassObject *iter, UI
 {
     struct column *columns;
     BYTE *row;
-    IWbemClassObject *param;
+    IWbemClassObject *param = NULL;
     VARIANT val;
     HRESULT hr = E_OUTOFMEMORY;
     UINT offset = 0;
@@ -791,7 +792,7 @@ static HRESULT create_signature_columns_and_data( IEnumWbemClassObject *iter, UI
     int i = 0;
 
     count = count_instances( iter );
-    if (!(columns = malloc( count * sizeof(struct column) ))) return E_OUTOFMEMORY;
+    if (!(columns = calloc( count, sizeof(struct column) ))) return E_OUTOFMEMORY;
     if (!(row = calloc( count, sizeof(LONGLONG) ))) goto error;
 
     for (;;)
@@ -822,6 +823,7 @@ static HRESULT create_signature_columns_and_data( IEnumWbemClassObject *iter, UI
     return S_OK;
 
 error:
+    if (param) IWbemClassObject_Release( param );
     for (; i >= 0; i--) free( (WCHAR *)columns[i].name );
     free( columns );
     free( row );
@@ -946,7 +948,7 @@ static HRESULT WINAPI class_object_GetMethod(
         if (ppOutSignature) *ppOutSignature = out;
         else if (out) IWbemClassObject_Release( out );
     }
-    else IWbemClassObject_Release( in );
+    else if (in) IWbemClassObject_Release( in );
     return hr;
 }
 

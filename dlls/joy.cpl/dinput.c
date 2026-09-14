@@ -503,9 +503,9 @@ void paint_povs_view( HWND hwnd, UINT32 count, UINT32 *povs )
     OffsetRect( &rect, rect.right - rect.left + 5, 0 );
     draw_pov_view( hdc, rect, povs[1] );
     OffsetRect( &rect, rect.left - rect.right - 5, rect.bottom - rect.top + 5 );
-    draw_pov_view( hdc, rect, povs[1] );
-    OffsetRect( &rect, rect.right - rect.left + 5, 0 );
     draw_pov_view( hdc, rect, povs[2] );
+    OffsetRect( &rect, rect.right - rect.left + 5, 0 );
+    draw_pov_view( hdc, rect, povs[3] );
 
     EndPaint( hwnd, &paint );
 }

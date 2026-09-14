@@ -284,23 +284,17 @@ static void test_ParseDisplayName(void)
                         hr = ISWbemObject_get_Methods_( object, &methods );
                         ok( hr == S_OK, "got %#lx\n", hr );
                         hr = ISWbemObject_get_Qualifiers_( object, &quals );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
                         ISWbemObject_Release( object );
 
                         hr = ISWbemPropertySet_get__NewEnum( props, (IUnknown **)&setenumvar );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
-                        if (hr == S_OK)
-                        {
                         V_VT( vars + ARRAY_SIZE(vars) - 1 ) = VT_ERROR;
                         hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
                         ok( hr == S_FALSE, "got %#lx\n", hr );
                         ok( !!fetched, "got %lu\n", fetched );
-                        todo_wine
                         ok ( V_VT( vars + ARRAY_SIZE(vars) - 1 ) == VT_EMPTY, "got %u\n", V_VT( vars + ARRAY_SIZE(vars) - 1 ) );
 
-                        dispname = NULL;
                         for (i = 0; i < fetched; ++i)
                         {
                             ok( V_VT( vars + i ) == VT_DISPATCH, "got %u\n", V_VT( vars + i ) );
@@ -308,7 +302,6 @@ static void test_ParseDisplayName(void)
                             ok( hr == S_OK, "got %#lx\n", hr );
                             VariantClear( vars + i );
                             hr = ISWbemProperty_get_Name( prop, &dispname );
-                            todo_wine
                             ok( hr == S_OK, "got %#lx\n", hr );
                             SysFreeString( dispname );
                             hr = ISWbemProperty_get_Value( prop, &res );
@@ -327,43 +320,30 @@ static void test_ParseDisplayName(void)
                         hr = IEnumVARIANT_Next( setenumvar, 1, vars + 1, &fetched );
                         ok( hr == S_OK, "got %#lx\n", hr );
                         hr = ISWbemProperty_get_Name( (ISWbemProperty *)V_DISPATCH(vars), &dispname );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
-                        dispname2 = NULL;
                         hr = ISWbemProperty_get_Name( (ISWbemProperty *)V_DISPATCH(vars + 1), &dispname2 );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
-                        if (dispname) ok( wcscmp( dispname, dispname2 ), "got equal names\n" );
+                        ok( wcscmp( dispname, dispname2 ), "got equal names\n" );
                         SysFreeString( dispname );
                         SysFreeString( dispname2 );
                         VariantClear( vars );
                         VariantClear( vars + 1 );
                         IEnumVARIANT_Release( setenumvar );
                         IEnumVARIANT_Release( propenumvar );
-                        }
 
                         ISWbemPropertySet_Release( props );
 
                         hr = ISWbemMethodSet_get__NewEnum( methods, (IUnknown **)&setenumvar );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
-                        if (hr == S_OK)
-                        {
                         hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
                         ok( hr == S_FALSE, "got %#lx\n", hr );
                         ok( !fetched, "got %lu\n", fetched );
                         IEnumVARIANT_Release( setenumvar );
-                        }
 
                         ISWbemMethodSet_Release( methods );
 
-                        if (quals)
-                        {
                         hr = ISWbemQualifierSet_get__NewEnum( quals, (IUnknown **)&setenumvar );
-                        todo_wine
                         ok( hr == S_OK, "got %#lx\n", hr );
-                        if (hr == S_OK)
-                        {
                         hr = IEnumVARIANT_Next( setenumvar, ARRAY_SIZE(vars), vars, &fetched );
                         ok( hr == S_FALSE, "got %#lx\n", hr );
                         todo_wine
@@ -371,10 +351,8 @@ static void test_ParseDisplayName(void)
                         for (i = 0; i < fetched; ++i)
                             VariantClear( vars + i );
                         IEnumVARIANT_Release( setenumvar );
-                        }
 
                         ISWbemQualifierSet_Release( quals );
-                        }
 
                         VariantClear( &var );
 
