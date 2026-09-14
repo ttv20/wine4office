@@ -41,6 +41,7 @@
 #include "ntddstor.h"
 #include "setupapi.h"
 #include "devguid.h"
+#include "slpublic.h"
 
 #include "wine/debug.h"
 #include "wbemprox_private.h"
@@ -493,11 +494,39 @@ static const struct column col_sid[] =
 };
 static const struct column col_softwarelicensingproduct[] =
 {
-    { L"ApplicationId",     CIM_STRING },
-    { L"LicenseIsAddon",    CIM_BOOLEAN },
-    { L"LicenseStatus",     CIM_UINT32 },
-    { L"PartialProductKey", CIM_STRING },
+    { L"ADActivationCsvlkPid",                       CIM_STRING },
+    { L"ADActivationCsvlkSkuId",                     CIM_STRING },
+    { L"ADActivationObjectDN",                       CIM_STRING },
+    { L"ADActivationObjectName",                     CIM_STRING },
+    { L"ApplicationId",                              CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Description",                                CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"DiscoveredKeyManagementServiceMachineName", CIM_STRING },
+    { L"DiscoveredKeyManagementServiceMachinePort", CIM_UINT32 },
+    { L"EvaluationEndDate",                          CIM_DATETIME },
+    { L"GracePeriodRemaining",                       CIM_UINT32 },
+    { L"ID",                                         CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"KeyManagementServiceLookupDomain",           CIM_STRING },
+    { L"KeyManagementServiceMachine",                CIM_STRING },
+    { L"KeyManagementServicePort",                   CIM_UINT32 },
+    { L"LicenseIsAddon",                             CIM_BOOLEAN },
+    { L"LicenseStatus",                              CIM_UINT32 },
+    { L"LicenseStatusReason",                        CIM_UINT32 },
+    { L"Name",                                       CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"OfflineInstallationId",                      CIM_STRING },
+    { L"PartialProductKey",                          CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ProductKeyID",                               CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"ProductKeyID2",                              CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"VLActivationInterval",                       CIM_UINT32 },
+    { L"VLActivationType",                           CIM_UINT32 },
+    { L"VLActivationTypeEnabled",                    CIM_UINT32 },
+    { L"VLRenewalInterval",                          CIM_UINT32 },
  };
+static const struct column col_softwarelicensingservice[] =
+{
+    { L"KeyManagementServiceHostCaching", CIM_BOOLEAN },
+    { L"Version",                         CIM_STRING },
+    { L"InstallProductKey",               CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+};
 static const struct column col_sounddevice[] =
 {
     { L"Caption",      CIM_STRING },
@@ -1076,10 +1105,38 @@ struct record_sid
 };
 struct record_softwarelicensingproduct
 {
+    const WCHAR *ad_activation_csvlk_pid;
+    const WCHAR *ad_activation_csvlk_sku_id;
+    const WCHAR *ad_activation_object_dn;
+    const WCHAR *ad_activation_object_name;
     const WCHAR *application_id;
+    const WCHAR *description;
+    const WCHAR *discovered_kms_name;
+    UINT32       discovered_kms_port;
+    const WCHAR *evaluation_end_date;
+    UINT32       grace_period_remaining;
+    const WCHAR *id;
+    const WCHAR *kms_lookup_domain;
+    const WCHAR *kms_machine;
+    UINT32       kms_port;
     int         license_is_addon;
     UINT32      license_status;
+    UINT32      license_status_reason;
+    const WCHAR *name;
+    const WCHAR *offline_installation_id;
     const WCHAR *partial_product_key;
+    const WCHAR *product_key_id;
+    const WCHAR *product_key_id2;
+    UINT32       vl_activation_interval;
+    UINT32       vl_activation_type;
+    UINT32       vl_activation_type_enabled;
+    UINT32       vl_renewal_interval;
+};
+struct record_softwarelicensingservice
+{
+    int key_management_service_host_caching;
+    const WCHAR *version;
+    class_method *install_product_key;
 };
 struct record_sounddevice
 {
@@ -1228,6 +1285,8 @@ static const struct record_param data_param[] =
     { L"__SystemSecurity", L"GetSD", -1, L"SD", CIM_UINT8|CIM_FLAG_ARRAY },
     { L"__SystemSecurity", L"SetSD", 1, L"SD", CIM_UINT8|CIM_FLAG_ARRAY },
     { L"__SystemSecurity", L"SetSD", -1, L"ReturnValue", CIM_UINT32 },
+    { L"SoftwareLicensingService", L"InstallProductKey", 1, L"ProductKey", CIM_STRING },
+    { L"SoftwareLicensingService", L"InstallProductKey", -1, L"ReturnValue", CIM_UINT32 },
     { L"StdRegProv", L"CreateKey", 1, L"hDefKey", CIM_SINT32, 0x80000002 },
     { L"StdRegProv", L"CreateKey", 1, L"sSubKeyName", CIM_STRING },
     { L"StdRegProv", L"CreateKey", -1, L"ReturnValue", CIM_UINT32 },
@@ -1300,9 +1359,9 @@ static const struct record_quickfixengineering data_quickfixengineering[] =
     { L"http://winehq.org", L"Update", L"KB3140245", L"", L"22/2/2022" },
 };
 
-static const struct record_softwarelicensingproduct data_softwarelicensingproduct[] =
+static const struct record_softwarelicensingservice data_softwarelicensingservice[] =
 {
-    { L"55c92734-d682-4d71-983e-d6ec3f16059f", 0, 1, L"BEEF0" },
+    { -1, L"10.0.19041.1266", licensing_install_product_key },
 };
 
 static const struct record_stdregprov data_stdregprov[] =
@@ -1382,6 +1441,110 @@ static BOOL resize_table( struct table *table, UINT row_count, UINT row_size )
         table->num_rows_allocated = count;
     }
     return TRUE;
+}
+
+static WCHAR *licensing_string(HSLC handle, const SLID *id, const WCHAR *name, BOOL pkey)
+{
+    SLDATATYPE type;
+    BYTE *value = NULL;
+    UINT size;
+    WCHAR *ret = NULL;
+    HRESULT hr;
+
+    hr = pkey ? SLGetPKeyInformation(handle, id, name, &type, &size, &value) :
+            SLGetProductSkuInformation(handle, id, name, &type, &size, &value);
+    if (SUCCEEDED(hr) && type == SL_DATA_SZ && value) ret = wcsdup((const WCHAR *)value);
+    LocalFree(value);
+    return ret;
+}
+
+static WCHAR *licensing_guid_string(const SLID *id)
+{
+    WCHAR *string = malloc(37 * sizeof(*string));
+
+    if (string && swprintf(string, 37, L"%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            id->Data1, id->Data2, id->Data3, id->Data4[0], id->Data4[1], id->Data4[2],
+            id->Data4[3], id->Data4[4], id->Data4[5], id->Data4[6], id->Data4[7]) < 0)
+    {
+        free(string);
+        string = NULL;
+    }
+    return string;
+}
+
+static enum fill_status fill_softwarelicensingproduct(struct table *table, const struct expr *cond)
+{
+    static const SLID office_app_id =
+        {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
+    struct record_softwarelicensingproduct *rec;
+    SLID *skus = NULL, *pkeys;
+    UINT sku_count = 0, pkey_count, status_count, row = 0, i;
+    enum fill_status status = FILL_STATUS_UNFILTERED;
+    HSLC handle = NULL;
+
+    if (!resize_table(table, 1, sizeof(*rec))) return FILL_STATUS_FAILED;
+    rec = (struct record_softwarelicensingproduct *)table->data;
+
+    rec[row].application_id = wcsdup(L"55c92734-d682-4d71-983e-d6ec3f16059f");
+    rec[row].id = wcsdup(L"00000000-0000-0000-0000-000000000000");
+    rec[row].license_status = 1;
+    rec[row].partial_product_key = wcsdup(L"BEEF0");
+    if (!match_row(table, row, cond, &status)) free_row_values(table, row);
+    else row++;
+
+    if (FAILED(SLOpen(&handle)) || FAILED(SLGetSLIDList(handle, 0, &office_app_id, 1,
+            &sku_count, &skus)) || !sku_count)
+        goto done;
+    for (i = 0; i < sku_count; ++i)
+    {
+        SL_LICENSING_STATUS *status_info = NULL;
+
+        pkeys = NULL;
+        pkey_count = 0;
+        if (FAILED(SLGetInstalledProductKeyIds(handle, &skus[i], &pkey_count, &pkeys)))
+            pkey_count = 0;
+        status_count = 0;
+        SLGetLicensingStatusInformation(handle, &office_app_id, &skus[i], NULL,
+                &status_count, &status_info);
+        if (!resize_table(table, row + 1, sizeof(*rec)))
+        {
+            LocalFree(status_info);
+            LocalFree(pkeys);
+            status = FILL_STATUS_FAILED;
+            goto done;
+        }
+        rec = (struct record_softwarelicensingproduct *)table->data + row;
+        memset(rec, 0, sizeof(*rec));
+        rec->application_id = licensing_guid_string(&office_app_id);
+        rec->id = licensing_guid_string(&skus[i]);
+        rec->description = licensing_string(handle, &skus[i], L"Description", FALSE);
+        rec->name = licensing_string(handle, &skus[i], L"Name", FALSE);
+        rec->vl_activation_interval = 120;
+        rec->vl_renewal_interval = 10080;
+        if (status_count)
+        {
+            rec->license_status = status_info[0].eStatus;
+            rec->license_status_reason = status_info[0].hrReason;
+            rec->grace_period_remaining = status_info[0].dwGraceTime;
+        }
+        if (pkey_count)
+        {
+            rec->partial_product_key = licensing_string(handle, &pkeys[0],
+                    L"PartialProductKey", TRUE);
+            rec->product_key_id = licensing_guid_string(&pkeys[0]);
+            rec->product_key_id2 = licensing_string(handle, &pkeys[0], L"DigitalPID2", TRUE);
+        }
+        if (!match_row(table, row, cond, &status)) free_row_values(table, row);
+        else row++;
+        LocalFree(status_info);
+        LocalFree(pkeys);
+    }
+
+done:
+    LocalFree(skus);
+    if (handle) SLClose(handle);
+    table->num_rows = row;
+    return status;
 }
 
 #pragma pack(push,1)
@@ -4961,7 +5124,8 @@ static struct table cimv2_builtin_classes[] =
     { L"CIM_DataFile", C(col_datafile), 0, 0, NULL, fill_datafile },
     { L"CIM_LogicalDisk", C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
     { L"CIM_Processor", C(col_processor), 0, 0, NULL, fill_processor },
-    { L"SoftwareLicensingProduct", C(col_softwarelicensingproduct), D(data_softwarelicensingproduct) },
+    { L"SoftwareLicensingProduct", C(col_softwarelicensingproduct), 0, 0, NULL, fill_softwarelicensingproduct },
+    { L"SoftwareLicensingService", C(col_softwarelicensingservice), D(data_softwarelicensingservice) },
     { L"StdRegProv", C(col_stdregprov), D(data_stdregprov) },
     { L"SystemRestore", C(col_sysrestore), D(data_sysrestore) },
     { L"Win32_BIOS", C(col_bios), 0, 0, NULL, fill_bios },

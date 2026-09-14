@@ -32,9 +32,6 @@
 
 #include "wine/test.h"
 
-HRESULT WINAPI SLClose(HSLC handle);
-HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
-        UINT return_type, UINT *count, SLID **ids);
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *license, SLID *file_id);
 
 enum
@@ -46,6 +43,34 @@ enum
 
 static const SLID office_app_id =
         {0x0ff1ce15, 0xa989, 0x479d, {0xaf, 0x46, 0xf2, 0x75, 0xc6, 0x37, 0x06, 0x63}};
+
+static void test_SLInstallProofOfPurchase(void)
+{
+    static const WCHAR algorithm[] = L"msft:rm/algorithm/pkey/2005";
+    static const WCHAR malformed_key[] = L"NOT-A-PRODUCT-KEY";
+    static const SLID null_id;
+    SLID pkey_id;
+    HSLC handle;
+    HRESULT hr;
+
+    hr = SLOpen(&handle);
+    ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
+    if (FAILED(hr)) return;
+
+    memset(&pkey_id, 0xcc, sizeof(pkey_id));
+    hr = SLInstallProofOfPurchase(handle, algorithm, malformed_key, 0, NULL, &pkey_id);
+    ok(hr == SL_E_INVALID_PKEY, "Expected SL_E_INVALID_PKEY, got %#lx.\n", hr);
+    ok(IsEqualGUID(&pkey_id, &null_id), "Expected a cleared PKEY ID.\n");
+
+    memset(&pkey_id, 0xcc, sizeof(pkey_id));
+    hr = SLInstallProofOfPurchase(NULL, algorithm, malformed_key, 0, NULL, &pkey_id);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    ok(IsEqualGUID(&pkey_id, &null_id), "Expected a cleared PKEY ID.\n");
+
+    hr = SLInstallProofOfPurchase(handle, algorithm, malformed_key, 1, NULL, &pkey_id);
+    ok(hr == E_INVALIDARG, "Expected E_INVALIDARG, got %#lx.\n", hr);
+    SLClose(handle);
+}
 
 static void test_SLGetSLIDList(void)
 {
@@ -516,6 +541,7 @@ done:
 
 START_TEST(sppc)
 {
+    test_SLInstallProofOfPurchase();
     test_SLGetInstalledProductKeyIds();
     test_SLGetSLIDList();
     test_SLGetLicensingStatusInformation();

@@ -1,9 +1,10 @@
 MODULE    = wbemprox.dll
-IMPORTS   = version iphlpapi setupapi oleaut32 ole32 advapi32 user32 gdi32 ws2_32
+IMPORTS   = version iphlpapi setupapi oleaut32 ole32 advapi32 user32 gdi32 ws2_32 sppc
 
 SOURCES = \
 	builtin.c \
 	class.c \
+	licensing.c \
 	main.c \
 	process.c \
 	qualifier.c \

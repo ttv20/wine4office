@@ -115,6 +115,19 @@ struct slc_context
     BOOL rights_consumed;
 };
 
+struct installed_product_key
+{
+    DWORD version;
+    DWORD size;
+    SLID pkey_id;
+    SLID sku_id;
+    WCHAR partial[6];
+    WCHAR channel[64];
+    WCHAR digital_pid[64];
+    WCHAR digital_pid2[64];
+    WCHAR edition_type[260];
+};
+
 /* Most recent AES session key exported by rsaenh while wrapping an SPP challenge.
  * Office generates the key in-process immediately before SLSetAuthenticationData. */
 static BYTE pending_session_key[AUTH_MAX_KEY_LEN];
@@ -171,6 +184,10 @@ static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
 static const WCHAR *installed_profile_product_info(const WCHAR *name);
 static void guid_to_string(const SLID *id, WCHAR string[39]);
+static BOOL load_product_key(const SLID *pkey_id, struct installed_product_key *record);
+static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record);
+static HRESULT get_installed_product_skus(UINT *count, SLID **ids);
+static HRESULT get_product_keys_for_sku(const SLID *sku_id, UINT *count, SLID **ids);
 
 static const struct o365_product_sku *find_o365_product_sku(const SLID *id)
 {
@@ -370,13 +387,17 @@ HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *product,
 HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, const SLID *product,
                                                LPCWSTR name, UINT *count, SL_LICENSING_STATUS **status)
 {
+    struct installed_product_key product_key;
     const SLID *grace_id = selected_grace_id();
     const struct o365_product_sku *o365_sku;
     struct slc_context *context;
     SL_LICENSING_STATUS *entries;
+    SLID *installed_skus = NULL;
     DWORD grace_minutes;
-    BOOL grace_active;
-    unsigned int i, entry_count = 1;
+    BOOL grace_active, aggregate;
+    UINT installed_count = 0, base_count = 0, entry_count = 0;
+    unsigned int i, j;
+    HRESULT hr;
 
     FIXME("(%p %p %p %s %p %p) semi-stub\n", handle, app, product,
             debugstr_w(name), count, status );
@@ -391,31 +412,76 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
     if (!app && !product && !context->rights_consumed)
         return SL_E_RIGHT_NOT_CONSUMED;
 
-    if (o365_proplus_configured() && grace_profile_present() && !product &&
-        ((app && IsEqualGUID(app, &office_app_id)) || (!app && context->rights_consumed)))
-        entry_count = ARRAY_SIZE(o365_product_skus);
-
-    if (!(entries = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, entry_count * sizeof(*entries))))
-        return E_OUTOFMEMORY;
-
-    if (entry_count > 1)
+    aggregate = !product && ((app && IsEqualGUID(app, &office_app_id)) ||
+            (!app && context->rights_consumed));
+    if (aggregate)
     {
-        for (i = 0; i < entry_count; ++i)
+        if (grace_profile_present())
+            base_count = o365_proplus_configured() ? ARRAY_SIZE(o365_product_skus) : 1;
+        if (FAILED(hr = get_installed_product_skus(&installed_count, &installed_skus))) return hr;
+        if (!(entries = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT,
+                max(1, base_count + installed_count) * sizeof(*entries))))
         {
-            entries[i].SkuId = o365_product_skus[i].id;
-            if (IsEqualGUID(&entries[i].SkuId, &o365_proplus_grace_id) && grace_active)
+            LocalFree(installed_skus);
+            return E_OUTOFMEMORY;
+        }
+        if (base_count > 1)
+        {
+            for (i = 0; i < base_count; ++i)
             {
-                entries[i].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
-                entries[i].dwGraceTime = grace_minutes;
-                entries[i].dwTotalGraceDays = GRACE_PERIOD_DAYS;
-                entries[i].hrReason = SL_I_OOB_GRACE_PERIOD;
-            }
-            else
-            {
-                entries[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-                entries[i].hrReason = 0xC004F014; /* SL_E_PKEY_NOT_INSTALLED */
+                entries[i].SkuId = o365_product_skus[i].id;
+                if (IsEqualGUID(&entries[i].SkuId, &o365_proplus_grace_id) && grace_active)
+                {
+                    entries[i].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
+                    entries[i].dwGraceTime = grace_minutes;
+                    entries[i].dwTotalGraceDays = GRACE_PERIOD_DAYS;
+                    entries[i].hrReason = SL_I_OOB_GRACE_PERIOD;
+                }
+                else
+                {
+                    entries[i].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+                    entries[i].hrReason = SL_E_PKEY_NOT_INSTALLED;
+                }
             }
         }
+        else if (base_count)
+        {
+            entries[0].SkuId = *grace_id;
+            if (grace_active)
+            {
+                entries[0].eStatus = SL_LICENSING_STATUS_IN_GRACE_PERIOD;
+                entries[0].dwGraceTime = grace_minutes;
+                entries[0].dwTotalGraceDays = GRACE_PERIOD_DAYS;
+                entries[0].hrReason = SL_I_OOB_GRACE_PERIOD;
+            }
+            else entries[0].hrReason = SL_E_PKEY_NOT_INSTALLED;
+        }
+        entry_count = base_count;
+        for (i = 0; i < installed_count; ++i)
+        {
+            for (j = 0; j < entry_count; ++j)
+                if (IsEqualGUID(&entries[j].SkuId, &installed_skus[i])) break;
+            if (j == entry_count) entries[entry_count++].SkuId = installed_skus[i];
+            entries[j].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+            entries[j].dwGraceTime = 0;
+            entries[j].dwTotalGraceDays = 0;
+            entries[j].hrReason = S_OK;
+        }
+        LocalFree(installed_skus);
+        if (!entry_count) entry_count = 1;
+        *count = entry_count;
+        *status = entries;
+        return S_OK;
+    }
+
+    if (!(entries = LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, sizeof(*entries))))
+        return E_OUTOFMEMORY;
+    entry_count = 1;
+    if (product && find_product_key_for_sku(product, &product_key))
+    {
+        entries[0].SkuId = *product;
+        entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
+        entries[0].hrReason = S_OK;
     }
     else if ((o365_sku = find_o365_product_sku(product)) && o365_proplus_configured())
     {
@@ -430,7 +496,10 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
         else
         {
             entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-            entries[0].hrReason = 0xC004F014; /* SL_E_PKEY_NOT_INSTALLED */
+            /* OSPP asks for every Office SKU and tries to resolve any nonzero
+             * status reason through Office's XML resources.  Subscription
+             * SKUs without a product key have no actionable key error. */
+            entries[0].hrReason = S_OK;
         }
     }
     else if ((!product || IsEqualGUID(product, grace_id)) && grace_active)
@@ -445,7 +514,7 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
     {
         if (product) entries[0].SkuId = *product;
         entries[0].eStatus = SL_LICENSING_STATUS_UNLICENSED;
-        entries[0].hrReason = 0xC004F014; /* SL_E_PKEY_NOT_INSTALLED */
+        entries[0].hrReason = SL_E_PKEY_NOT_INSTALLED;
     }
     *count = entry_count;
     *status = entries;
@@ -455,6 +524,7 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
 HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCWSTR name,
                                           SLDATATYPE *type, UINT *size, BYTE **value)
 {
+    struct installed_product_key product_key;
     static const WCHAR word_sku_name[] = L"Office 24, Office24Word2024R_Grace edition";
     static const WCHAR word_description[] = L"Office 24, RETAIL(Grace) channel";
     static const WCHAR author[] = L"Microsoft Corporation";
@@ -463,6 +533,7 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
     static const WCHAR ux_differentiator[] = L"RETAIL(Grace)";
     const struct o365_product_sku *o365_sku;
     const WCHAR *string = NULL;
+    WCHAR installed_name[360], installed_description[160];
     UINT bytes;
 
     FIXME("(%p, %s, %s, %p, %p, %p) semi-stub\n", handle,
@@ -472,7 +543,24 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *product, LPCW
         return E_INVALIDARG;
 
     o365_sku = find_o365_product_sku(product);
-    if (o365_sku && o365_proplus_configured() && grace_profile_present())
+    if (find_product_key_for_sku(product, &product_key))
+    {
+        if (!wcsicmp(name, L"Name"))
+        {
+            swprintf(installed_name, ARRAY_SIZE(installed_name), L"Office 16, %s edition",
+                    product_key.edition_type);
+            string = installed_name;
+        }
+        else if (!wcsicmp(name, L"Description"))
+        {
+            swprintf(installed_description, ARRAY_SIZE(installed_description),
+                    L"Office 16, %s channel", wcsstr(product_key.channel, L"GVLK") ?
+                    L"VOLUME_KMSCLIENT" : product_key.channel);
+            string = installed_description;
+        }
+        else if (!wcsicmp(name, L"Author")) string = author;
+    }
+    else if (o365_sku && o365_proplus_configured() && grace_profile_present())
     {
         if (!wcsicmp(name, L"Name")) string = o365_sku->name;
         else if (!wcsicmp(name, L"Description")) string = o365_sku->description;
@@ -1295,6 +1383,7 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
         SLDATATYPE *type, UINT *size, BYTE **value)
 {
     const struct installed_grace_profile *profile = get_installed_profile();
+    struct installed_product_key record;
     const WCHAR *string = NULL;
     UINT bytes;
 
@@ -1304,10 +1393,35 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (grace_license_present() && profile && profile->pkey_valid &&
+    if (load_product_key(pkey_id, &record))
+    {
+        if (!wcsicmp(name, L"ProductSkuId"))
+        {
+            if (!(*value = LocalAlloc(LMEM_FIXED, sizeof(record.sku_id))))
+                return E_OUTOFMEMORY;
+            memcpy(*value, &record.sku_id, sizeof(record.sku_id));
+            if (type) *type = SL_DATA_BINARY;
+            *size = sizeof(record.sku_id);
+            return S_OK;
+        }
+        if (!wcsicmp(name, L"DigitalPID")) string = record.digital_pid;
+        else if (!wcsicmp(name, L"DigitalPID2")) string = record.digital_pid2;
+        else if (!wcsicmp(name, L"PartialProductKey")) string = record.partial;
+        else if (!wcsicmp(name, L"Channel")) string = record.channel;
+    }
+    else if (grace_license_present() && profile && profile->pkey_valid &&
         IsEqualGUID(selected_grace_id(), &profile->sku_id) &&
         IsEqualGUID(pkey_id, &profile->pkey_id))
     {
+        if (!wcsicmp(name, L"ProductSkuId"))
+        {
+            if (!(*value = LocalAlloc(LMEM_FIXED, sizeof(profile->sku_id))))
+                return E_OUTOFMEMORY;
+            memcpy(*value, &profile->sku_id, sizeof(profile->sku_id));
+            if (type) *type = SL_DATA_BINARY;
+            *size = sizeof(profile->sku_id);
+            return S_OK;
+        }
         if (!wcsicmp(name, L"DigitalPID")) string = profile->digital_pid;
         else if (!wcsicmp(name, L"DigitalPID2")) string = profile->digital_pid2;
         else if (!wcsicmp(name, L"PartialProductKey")) string = profile->pkey_partial;
@@ -1319,7 +1433,7 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
         *size = 0;
         *value = NULL;
         /* Native returns SL_E_PKEY_NOT_INSTALLED (0xC004F014) for unknown pkeys. */
-        return 0xC004F014;
+        return SL_E_PKEY_NOT_INSTALLED;
     }
 
     if (!string)
@@ -1327,7 +1441,7 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
         if (type) *type = SL_DATA_NONE;
         *size = 0;
         *value = NULL;
-        return 0xC004F016; /* SL_E_DATATYPE_MISMATCHED / value not available */
+        return SL_E_NOT_SUPPORTED;
     }
 
     bytes = (wcslen(string) + 1) * sizeof(*string);
@@ -1343,12 +1457,24 @@ HRESULT WINAPI SLGetInstalledProductKeyIds(HSLC handle, const SLID *product_sku_
         UINT *count, SLID **ids)
 {
     const struct installed_grace_profile *profile;
+    UINT stored_count;
+    SLID *stored_ids;
     SLID *list;
+    HRESULT hr;
 
     TRACE("(%p, %s, %p, %p)\n", handle, wine_dbgstr_guid(product_sku_id), count, ids);
 
     if (!get_slc_context(handle) || !product_sku_id || !count || !ids)
         return E_INVALIDARG;
+
+    if (FAILED(hr = get_product_keys_for_sku(product_sku_id, &stored_count, &stored_ids)))
+        return hr;
+    if (stored_count)
+    {
+        *count = stored_count;
+        *ids = stored_ids;
+        return S_OK;
+    }
 
     profile = get_installed_profile();
     if (!profile || !profile->pkey_valid ||
@@ -1537,6 +1663,683 @@ done:
     if (handle) CryptDestroyHash(handle);
     CryptReleaseContext(provider, 0);
     return ret;
+}
+
+#define PRODUCT_KEY_STORE L"Software\\Wine\\SPPC\\ProductKeys"
+#define CURRENT_KEY_STORE L"Software\\Wine\\SPPC\\CurrentProductKeys"
+#define PRODUCT_KEY_RECORD_VERSION 1
+static const WCHAR product_key_store_mutex[] = L"Local\\WineSPPCProductKeyStore";
+
+struct digital_product_id
+{
+    UINT size;
+    BYTE data[160];
+};
+
+struct digital_product_id4
+{
+    UINT size;
+    USHORT major;
+    USHORT minor;
+    WCHAR advanced_pid[64];
+    WCHAR activation_id[64];
+    WCHAR oem_id[8];
+    WCHAR edition_type[260];
+    BYTE is_upgrade;
+    BYTE reserved[7];
+    BYTE cd_key[16];
+    BYTE cd_key_hash[32];
+    BYTE hash[32];
+    WCHAR edition_id[64];
+    WCHAR key_type[64];
+    WCHAR eula[64];
+};
+
+typedef HRESULT (WINAPI *pidgenx_fn)(WCHAR *, WCHAR *, WCHAR *, void *, WCHAR *,
+        struct digital_product_id *, struct digital_product_id4 *);
+
+static HANDLE lock_product_key_store(void)
+{
+    HANDLE mutex = CreateMutexW(NULL, FALSE, product_key_store_mutex);
+    DWORD wait;
+
+    if (!mutex) return NULL;
+    wait = WaitForSingleObject(mutex, INFINITE);
+    if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+    {
+        CloseHandle(mutex);
+        return NULL;
+    }
+    return mutex;
+}
+
+static void unlock_product_key_store(HANDLE mutex)
+{
+    ReleaseMutex(mutex);
+    CloseHandle(mutex);
+}
+
+static BOOL product_key_record_valid(const struct installed_product_key *record)
+{
+    return record->version == PRODUCT_KEY_RECORD_VERSION && record->size == sizeof(*record) &&
+            record->partial[ARRAY_SIZE(record->partial) - 1] == 0 &&
+            record->channel[ARRAY_SIZE(record->channel) - 1] == 0 &&
+            record->digital_pid[ARRAY_SIZE(record->digital_pid) - 1] == 0 &&
+            record->digital_pid2[ARRAY_SIZE(record->digital_pid2) - 1] == 0 &&
+            record->edition_type[ARRAY_SIZE(record->edition_type) - 1] == 0;
+}
+
+static BOOL load_product_key(const SLID *pkey_id, struct installed_product_key *record)
+{
+    WCHAR name[39];
+    DWORD size = sizeof(*record);
+
+    guid_to_string(pkey_id, name);
+    return !RegGetValueW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, name,
+            RRF_RT_REG_BINARY | RRF_SUBKEY_WOW6464KEY, NULL, record, &size) &&
+            size == sizeof(*record) && product_key_record_valid(record) &&
+            IsEqualGUID(pkey_id, &record->pkey_id);
+}
+
+static LONG save_product_key(const struct installed_product_key *record)
+{
+    WCHAR name[39];
+    HKEY key;
+    LONG error;
+
+    if ((error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL))) return error;
+    guid_to_string(&record->pkey_id, name);
+    error = RegSetValueExW(key, name, 0, REG_BINARY, (const BYTE *)record, sizeof(*record));
+    RegCloseKey(key);
+    return error;
+}
+
+static LONG delete_product_key(const SLID *pkey_id)
+{
+    WCHAR name[39];
+    HKEY key;
+    LONG error;
+
+    if ((error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, &key))) return error;
+    guid_to_string(pkey_id, name);
+    error = RegDeleteValueW(key, name);
+    RegCloseKey(key);
+    return error;
+}
+
+static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record)
+{
+    WCHAR name[64];
+    HKEY key;
+    SLID current_id;
+    DWORD index = 0, name_size, size = sizeof(current_id), type;
+
+    guid_to_string(sku_id, name);
+    if (!RegGetValueW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, name,
+            RRF_RT_REG_BINARY | RRF_SUBKEY_WOW6464KEY, &type, &current_id, &size) &&
+            type == REG_BINARY && size == sizeof(current_id) &&
+            load_product_key(&current_id, record) && IsEqualGUID(sku_id, &record->sku_id))
+        return TRUE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key)) return FALSE;
+    for (;;)
+    {
+        name_size = ARRAY_SIZE(name);
+        size = sizeof(*record);
+        if (RegEnumValueW(key, index++, name, &name_size, NULL, &type, (BYTE *)record, &size)) break;
+        if (type == REG_BINARY && size == sizeof(*record) && product_key_record_valid(record) &&
+                IsEqualGUID(sku_id, &record->sku_id))
+        {
+            RegCloseKey(key);
+            return TRUE;
+        }
+    }
+    RegCloseKey(key);
+    return FALSE;
+}
+
+static HRESULT enumerate_product_keys(const SLID *sku_id, UINT *count,
+        struct installed_product_key **records)
+{
+    struct installed_product_key *list = NULL, record;
+    WCHAR name[64];
+    DWORD index, name_size, size, type, value_count = 0;
+    UINT found = 0, i;
+    HKEY key;
+    LONG error;
+
+    *count = 0;
+    *records = NULL;
+    error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return S_OK;
+    if (error) return HRESULT_FROM_WIN32(error);
+    error = RegQueryInfoKeyW(key, NULL, NULL, NULL, NULL, NULL, NULL, &value_count,
+            NULL, NULL, NULL, NULL);
+    if (error)
+    {
+        RegCloseKey(key);
+        return HRESULT_FROM_WIN32(error);
+    }
+    if (!value_count) goto done;
+    if (value_count > ~0u / sizeof(*list))
+    {
+        RegCloseKey(key);
+        return E_OUTOFMEMORY;
+    }
+    if (!(list = LocalAlloc(LMEM_FIXED, value_count * sizeof(*list))))
+    {
+        RegCloseKey(key);
+        return E_OUTOFMEMORY;
+    }
+    for (index = 0; index < value_count; ++index)
+    {
+        LONG enum_error;
+
+        name_size = ARRAY_SIZE(name);
+        size = sizeof(record);
+        enum_error = RegEnumValueW(key, index, name, &name_size, NULL, &type,
+                (BYTE *)&record, &size);
+        if (enum_error)
+        {
+            if (enum_error == ERROR_MORE_DATA) continue;
+            LocalFree(list);
+            RegCloseKey(key);
+            return HRESULT_FROM_WIN32(enum_error);
+        }
+        if (type != REG_BINARY || size != sizeof(record) || !product_key_record_valid(&record) ||
+                (sku_id && !IsEqualGUID(sku_id, &record.sku_id)))
+        {
+            TRACE("Skipping invalid product key value %lu, type %lu, size %lu.\n",
+                    index, type, size);
+            continue;
+        }
+        for (i = 0; i < found; ++i)
+            if (IsEqualGUID(&list[i].pkey_id, &record.pkey_id)) break;
+        if (i == found) list[found++] = record;
+    }
+
+done:
+    RegCloseKey(key);
+    if (!found)
+    {
+        LocalFree(list);
+        return S_OK;
+    }
+    *count = found;
+    *records = list;
+    TRACE("Found %u installed product key records.\n", found);
+    return S_OK;
+}
+
+static HRESULT get_installed_product_skus(UINT *count, SLID **ids)
+{
+    struct installed_product_key *records;
+    UINT record_count, found = 0, i, j;
+    HANDLE mutex;
+    SLID *list;
+    HRESULT hr;
+
+    *count = 0;
+    *ids = NULL;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    hr = enumerate_product_keys(NULL, &record_count, &records);
+    unlock_product_key_store(mutex);
+    if (FAILED(hr) || !record_count)
+        return hr;
+    if (!(list = LocalAlloc(LMEM_FIXED, record_count * sizeof(*list))))
+    {
+        LocalFree(records);
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < record_count; ++i)
+    {
+        for (j = 0; j < found; ++j)
+            if (IsEqualGUID(&list[j], &records[i].sku_id)) break;
+        if (j == found) list[found++] = records[i].sku_id;
+    }
+    LocalFree(records);
+    *count = found;
+    *ids = list;
+    return S_OK;
+}
+
+static HRESULT get_product_keys_for_sku(const SLID *sku_id, UINT *count, SLID **ids)
+{
+    struct installed_product_key current;
+    struct installed_product_key *records;
+    UINT record_count, i, found = 0;
+    HANDLE mutex;
+    SLID *list;
+    HRESULT hr;
+
+    *count = 0;
+    *ids = NULL;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    hr = enumerate_product_keys(sku_id, &record_count, &records);
+    if (FAILED(hr) || !record_count)
+    {
+        unlock_product_key_store(mutex);
+        return hr;
+    }
+    if (!(list = LocalAlloc(LMEM_FIXED, record_count * sizeof(*list))))
+    {
+        LocalFree(records);
+        unlock_product_key_store(mutex);
+        return E_OUTOFMEMORY;
+    }
+    if (find_product_key_for_sku(sku_id, &current)) list[found++] = current.pkey_id;
+    for (i = 0; i < record_count; ++i)
+        if (!found || !IsEqualGUID(&list[0], &records[i].pkey_id))
+            list[found++] = records[i].pkey_id;
+    LocalFree(records);
+    unlock_product_key_store(mutex);
+    *count = found;
+    *ids = list;
+    return S_OK;
+}
+
+static BOOL normalize_product_key(const WCHAR *key, WCHAR normalized[30])
+{
+    unsigned int i;
+
+    if (!key || lstrlenW(key) != 29) return FALSE;
+    for (i = 0; i < 29; ++i)
+    {
+        if (i == 5 || i == 11 || i == 17 || i == 23)
+        {
+            if (key[i] != '-') return FALSE;
+            normalized[i] = '-';
+        }
+        else
+        {
+            WCHAR ch = key[i];
+            if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) return FALSE;
+            normalized[i] = ch;
+        }
+    }
+    normalized[29] = 0;
+    return TRUE;
+}
+
+static BOOL binary_matches_process(const WCHAR *path)
+{
+    IMAGE_DOS_HEADER dos;
+    IMAGE_FILE_HEADER file_header;
+    const IMAGE_NT_HEADERS *process_header;
+    LARGE_INTEGER offset;
+    DWORD signature, read;
+    HANDLE file;
+    BOOL ret = FALSE;
+
+    if ((file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+            NULL, OPEN_EXISTING, 0, NULL)) == INVALID_HANDLE_VALUE) return FALSE;
+    if (!ReadFile(file, &dos, sizeof(dos), &read, NULL) || read != sizeof(dos) ||
+            dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0) goto done;
+    offset.QuadPart = dos.e_lfanew;
+    if (!SetFilePointerEx(file, offset, NULL, FILE_BEGIN) ||
+            !ReadFile(file, &signature, sizeof(signature), &read, NULL) ||
+            read != sizeof(signature) || signature != IMAGE_NT_SIGNATURE ||
+            !ReadFile(file, &file_header, sizeof(file_header), &read, NULL) ||
+            read != sizeof(file_header) || !(file_header.Characteristics & IMAGE_FILE_DLL))
+        goto done;
+    if ((process_header = RtlImageNtHeader(GetModuleHandleW(NULL))))
+        ret = file_header.Machine == process_header->FileHeader.Machine;
+
+done:
+    CloseHandle(file);
+    return ret;
+}
+
+static BOOL find_office_pidgen_in_root(const WCHAR *root, WCHAR dll_path[MAX_PATH],
+        WCHAR config_path[MAX_PATH], BOOL *wrong_arch)
+{
+    static const WCHAR * const dll_suffixes[] =
+    {
+        L"\\root\\Office15\\pidgenx.dll", L"\\Office15\\pidgenx.dll", L"\\pidgenx.dll"
+    };
+    static const WCHAR * const config_suffixes[] =
+    {
+        L"\\root\\Office16\\pkeyconfig-office.xrm-ms",
+        L"\\root\\Licenses16\\pkeyconfig-office.xrm-ms",
+        L"\\Office16\\pkeyconfig-office.xrm-ms",
+        L"\\Licenses16\\pkeyconfig-office.xrm-ms",
+        L"\\pkeyconfig-office.xrm-ms"
+    };
+    WCHAR candidate[MAX_PATH];
+    unsigned int i;
+
+    dll_path[0] = config_path[0] = 0;
+    for (i = 0; i < ARRAY_SIZE(dll_suffixes); ++i)
+    {
+        lstrcpynW(candidate, root, ARRAY_SIZE(candidate));
+        if (!append_path(candidate, ARRAY_SIZE(candidate), dll_suffixes[i]) ||
+                GetFileAttributesW(candidate) == INVALID_FILE_ATTRIBUTES) continue;
+        if (binary_matches_process(candidate))
+        {
+            lstrcpynW(dll_path, candidate, MAX_PATH);
+            break;
+        }
+        *wrong_arch = TRUE;
+    }
+    if (!dll_path[0]) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(config_suffixes); ++i)
+    {
+        lstrcpynW(candidate, root, ARRAY_SIZE(candidate));
+        if (append_path(candidate, ARRAY_SIZE(candidate), config_suffixes[i]) &&
+                GetFileAttributesW(candidate) != INVALID_FILE_ATTRIBUTES)
+        {
+            lstrcpynW(config_path, candidate, MAX_PATH);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL find_office_pidgen_files(WCHAR dll_path[MAX_PATH], WCHAR config_path[MAX_PATH])
+{
+    static const WCHAR config_key[] = L"Software\\Microsoft\\Office\\ClickToRun\\Configuration";
+    static const WCHAR * const fallbacks[] =
+    {
+        L"C:\\Program Files\\Microsoft Office", L"C:\\Program Files (x86)\\Microsoft Office"
+    };
+    WCHAR installation[MAX_PATH];
+    DWORD size = sizeof(installation);
+    BOOL wrong_arch = FALSE;
+    unsigned int i;
+
+    if (!RegGetValueW(HKEY_LOCAL_MACHINE, config_key, L"InstallationPath",
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, installation, &size) &&
+            find_office_pidgen_in_root(installation, dll_path, config_path, &wrong_arch)) return TRUE;
+    for (i = 0; i < ARRAY_SIZE(fallbacks); ++i)
+        if (find_office_pidgen_in_root(fallbacks[i], dll_path, config_path, &wrong_arch)) return TRUE;
+    SetLastError(wrong_arch ? ERROR_BAD_EXE_FORMAT : ERROR_FILE_NOT_FOUND);
+    return FALSE;
+}
+
+static BOOL parse_wide_guid(const WCHAR *string, SLID *id)
+{
+    unsigned int data1, data2, data3, data4[8], consumed = 0;
+    const WCHAR *format;
+
+    if (!string) return FALSE;
+    format = string[0] == '{' ? L"{%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x}%n" :
+            L"%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x%n";
+    if (swscanf(string, format,
+            &data1, &data2, &data3, &data4[0], &data4[1], &data4[2], &data4[3],
+            &data4[4], &data4[5], &data4[6], &data4[7], &consumed) != 11 ||
+            string[consumed]) return FALSE;
+    id->Data1 = data1;
+    id->Data2 = data2;
+    id->Data3 = data3;
+    id->Data4[0] = data4[0];
+    id->Data4[1] = data4[1];
+    id->Data4[2] = data4[2];
+    id->Data4[3] = data4[3];
+    id->Data4[4] = data4[4];
+    id->Data4[5] = data4[5];
+    id->Data4[6] = data4[6];
+    id->Data4[7] = data4[7];
+    return TRUE;
+}
+
+static BOOL office_sku_license_present(const SLID *sku_id)
+{
+    WCHAR root[MAX_PATH], map_path[MAX_PATH], filename[MAX_PATH], path[MAX_PATH];
+    const char *license, *license_end, *file, *name, *name_end;
+    char *map_xml;
+    DWORD size;
+    SLID mapped_id;
+    BOOL found = FALSE;
+
+    if (!get_office_license_root(root, ARRAY_SIZE(root))) return FALSE;
+    lstrcpynW(map_path, root, ARRAY_SIZE(map_path));
+    if (!append_path(map_path, ARRAY_SIZE(map_path), L"c2rpridslicensefiles_auto.xml") ||
+            !(map_xml = read_ascii_xml(map_path, &size))) return FALSE;
+    license = map_xml;
+    while ((license = strstr(license, " Acid=\"")))
+    {
+        if (!(license_end = strstr(license, "</License>"))) break;
+        if (!parse_slid(license + strlen(" Acid=\""), &mapped_id) ||
+                !IsEqualGUID(&mapped_id, sku_id))
+        {
+            license = license_end + 1;
+            continue;
+        }
+        file = license;
+        while ((file = strstr(file, "<File name=\"")) && file < license_end)
+        {
+            name = file + strlen("<File name=\"");
+            if (!(name_end = strchr(name, '\"')) || name_end > license_end) break;
+            if (copy_ascii_span(name, name_end, filename, ARRAY_SIZE(filename)) &&
+                    (license_filename_safe(filename, L"-ul.xrm-ms") ||
+                    license_filename_safe(filename, L"-ul-oob.xrm-ms")))
+            {
+                lstrcpynW(path, root, ARRAY_SIZE(path));
+                if (append_path(path, ARRAY_SIZE(path), filename) &&
+                        GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+                {
+                    found = TRUE;
+                    break;
+                }
+            }
+            file = name_end + 1;
+        }
+        break;
+    }
+    LocalFree(map_xml);
+    return found;
+}
+
+HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, LPCWSTR algorithm, LPCWSTR product_key,
+        UINT data_size, BYTE *data, SLID *pkey_id)
+{
+    static const WCHAR pkey_algorithm[] = L"msft:rm/algorithm/pkey/2005";
+    WCHAR mpc[] = L"03612";
+    struct { WCHAR key[30]; SLID sku; } material = {0};
+    struct installed_product_key record = {0};
+    struct digital_product_id digital_pid = {sizeof(digital_pid)};
+    struct digital_product_id4 digital_pid4 = {sizeof(digital_pid4)};
+    WCHAR dll_path[MAX_PATH], config_path[MAX_PATH], product_id[64] = {0};
+    BYTE digest[32];
+    pidgenx_fn pidgenx;
+    HMODULE module;
+    HANDLE mutex;
+    HRESULT hr;
+    LONG error;
+
+    TRACE("(%p, %s, <key>, %u, %p, %p)\n", handle, debugstr_w(algorithm),
+            data_size, data, pkey_id);
+
+    if (pkey_id) memset(pkey_id, 0, sizeof(*pkey_id));
+    if (!get_slc_context(handle) || !algorithm || !product_key || !pkey_id ||
+            (data_size && !data)) return E_INVALIDARG;
+    if (wcsicmp(algorithm, pkey_algorithm)) return SL_E_NOT_SUPPORTED;
+    if (!normalize_product_key(product_key, material.key)) return SL_E_INVALID_PKEY;
+    if (!find_office_pidgen_files(dll_path, config_path))
+        return GetLastError() == ERROR_BAD_EXE_FORMAT ? HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT) :
+                SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    if (!(module = LoadLibraryW(dll_path))) return HRESULT_FROM_WIN32(GetLastError());
+    if (!(pidgenx = (pidgenx_fn)GetProcAddress(module, "PidGenX")))
+    {
+        FreeLibrary(module);
+        return E_NOINTERFACE;
+    }
+    hr = pidgenx(material.key, config_path, mpc, NULL, product_id, &digital_pid, &digital_pid4);
+    FreeLibrary(module);
+    if (SUCCEEDED(hr))
+    {
+        memcpy(record.partial, material.key + 24, 5 * sizeof(WCHAR));
+        record.partial[5] = 0;
+    }
+    SecureZeroMemory(material.key, sizeof(material.key));
+    if (FAILED(hr))
+    {
+        SecureZeroMemory(&digital_pid, sizeof(digital_pid));
+        SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
+        return hr;
+    }
+    if (!digital_pid4.activation_id[0] ||
+            !parse_wide_guid(digital_pid4.activation_id, &record.sku_id))
+    {
+        SecureZeroMemory(&digital_pid, sizeof(digital_pid));
+        SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
+        return E_FAIL;
+    }
+    if (!office_sku_license_present(&record.sku_id))
+    {
+        SecureZeroMemory(&digital_pid, sizeof(digital_pid));
+        SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
+        return SL_E_PRODUCT_SKU_NOT_INSTALLED;
+    }
+
+    memcpy(&material.sku, &record.sku_id, sizeof(material.sku));
+    if (!normalize_product_key(product_key, material.key) ||
+            !hash_bytes(CALG_SHA_256, (const BYTE *)&material, sizeof(material), digest, sizeof(digest)))
+    {
+        SecureZeroMemory(&material, sizeof(material));
+        SecureZeroMemory(&digital_pid, sizeof(digital_pid));
+        SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
+        return E_FAIL;
+    }
+    SecureZeroMemory(&material, sizeof(material));
+    memcpy(&record.pkey_id, digest, sizeof(record.pkey_id));
+    record.pkey_id.Data3 = (record.pkey_id.Data3 & 0x0fff) | 0x5000;
+    record.pkey_id.Data4[0] = (record.pkey_id.Data4[0] & 0x3f) | 0x80;
+    record.version = PRODUCT_KEY_RECORD_VERSION;
+    record.size = sizeof(record);
+    lstrcpynW(record.channel, digital_pid4.key_type, ARRAY_SIZE(record.channel));
+    lstrcpynW(record.digital_pid, digital_pid4.advanced_pid, ARRAY_SIZE(record.digital_pid));
+    lstrcpynW(record.digital_pid2, product_id, ARRAY_SIZE(record.digital_pid2));
+    lstrcpynW(record.edition_type, digital_pid4.edition_type, ARRAY_SIZE(record.edition_type));
+    SecureZeroMemory(&digital_pid, sizeof(digital_pid));
+    SecureZeroMemory(&digital_pid4, sizeof(digital_pid4));
+    SecureZeroMemory(product_id, sizeof(product_id));
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    error = save_product_key(&record);
+    unlock_product_key_store(mutex);
+    if (error) return HRESULT_FROM_WIN32(error);
+    *pkey_id = record.pkey_id;
+    return S_OK;
+}
+
+HRESULT WINAPI SLSetCurrentProductKey(HSLC handle, const SLID *sku_id, const SLID *pkey_id)
+{
+    struct installed_product_key record;
+    WCHAR name[39];
+    HKEY key;
+    HANDLE mutex;
+    LONG error;
+
+    TRACE("(%p, %s, %s)\n", handle, wine_dbgstr_guid(sku_id), wine_dbgstr_guid(pkey_id));
+    if (!get_slc_context(handle) || !sku_id || !pkey_id) return E_INVALIDARG;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!load_product_key(pkey_id, &record))
+    {
+        unlock_product_key_store(mutex);
+        return SL_E_PKEY_NOT_INSTALLED;
+    }
+    if (!IsEqualGUID(sku_id, &record.sku_id))
+    {
+        unlock_product_key_store(mutex);
+        return SL_E_INVALID_PKEY;
+    }
+    if ((error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, 0, NULL, 0,
+            KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL)))
+    {
+        unlock_product_key_store(mutex);
+        return HRESULT_FROM_WIN32(error);
+    }
+    guid_to_string(sku_id, name);
+    error = RegSetValueExW(key, name, 0, REG_BINARY, (const BYTE *)pkey_id, sizeof(*pkey_id));
+    RegCloseKey(key);
+    unlock_product_key_store(mutex);
+    return error ? HRESULT_FROM_WIN32(error) : S_OK;
+}
+
+HRESULT WINAPI SLUninstallProofOfPurchase(HSLC handle, const SLID *pkey_id)
+{
+    struct installed_product_key record;
+    WCHAR sku_name[39];
+    SLID current_id;
+    DWORD size = sizeof(current_id), type;
+    HKEY key;
+    HANDLE mutex;
+    LONG error;
+
+    TRACE("(%p, %s)\n", handle, wine_dbgstr_guid(pkey_id));
+    if (!get_slc_context(handle) || !pkey_id) return E_INVALIDARG;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (!load_product_key(pkey_id, &record))
+    {
+        unlock_product_key_store(mutex);
+        return SL_E_PKEY_NOT_INSTALLED;
+    }
+    if ((error = delete_product_key(pkey_id)))
+    {
+        unlock_product_key_store(mutex);
+        return HRESULT_FROM_WIN32(error);
+    }
+    guid_to_string(&record.sku_id, sku_name);
+    error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, 0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+    if (!error)
+    {
+        error = RegQueryValueExW(key, sku_name, NULL, &type, (BYTE *)&current_id, &size);
+        if (!error && type == REG_BINARY && size == sizeof(current_id) &&
+                IsEqualGUID(&current_id, pkey_id)) error = RegDeleteValueW(key, sku_name);
+        else if (error == ERROR_FILE_NOT_FOUND || (!error &&
+                (type != REG_BINARY || size != sizeof(current_id) ||
+                !IsEqualGUID(&current_id, pkey_id)))) error = ERROR_SUCCESS;
+        if (error) save_product_key(&record);
+        RegCloseKey(key);
+    }
+    else if (error == ERROR_FILE_NOT_FOUND) error = ERROR_SUCCESS;
+    else save_product_key(&record);
+    unlock_product_key_store(mutex);
+    return error ? HRESULT_FROM_WIN32(error) : S_OK;
+}
+
+HRESULT WINAPI __wine_sppc_install_product_key(HSLC handle, LPCWSTR product_key, SLID *pkey_id)
+{
+    static const WCHAR algorithm[] = L"msft:rm/algorithm/pkey/2005";
+    struct installed_product_key record;
+    struct installed_product_key *previous = NULL;
+    UINT previous_count = 0, i;
+    HANDLE mutex;
+    LONG rollback_error;
+    HRESULT hr;
+
+    if (pkey_id) memset(pkey_id, 0, sizeof(*pkey_id));
+    if (!get_slc_context(handle) || !product_key || !pkey_id) return E_INVALIDARG;
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    if (FAILED(hr = enumerate_product_keys(NULL, &previous_count, &previous))) goto done;
+    if (FAILED(hr = SLInstallProofOfPurchase(handle, algorithm, product_key, 0, NULL, pkey_id)))
+        goto done;
+    if (!load_product_key(pkey_id, &record))
+    {
+        hr = E_FAIL;
+        goto rollback;
+    }
+    if (SUCCEEDED(hr = SLSetCurrentProductKey(handle, &record.sku_id, pkey_id))) goto done;
+
+rollback:
+    for (i = 0; i < previous_count; ++i)
+        if (IsEqualGUID(&previous[i].pkey_id, pkey_id)) break;
+    rollback_error = i < previous_count ? save_product_key(&previous[i]) :
+            delete_product_key(pkey_id);
+    if (rollback_error && rollback_error != ERROR_FILE_NOT_FOUND)
+        ERR("Failed to roll back product key record, error %ld.\n", rollback_error);
+    memset(pkey_id, 0, sizeof(*pkey_id));
+
+done:
+    unlock_product_key_store(mutex);
+    LocalFree(previous);
+    return hr;
 }
 
 static xmlNodePtr xml_child(xmlNodePtr parent, const char *name, const xmlChar *namespace)
@@ -2863,8 +3666,10 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
     const SLID *binding_id, *ul_id;
     BOOL o365 = o365_proplus_configured();
     const SLID *pkey_id = NULL;
-    unsigned int i;
-    SLID *list;
+    UINT stored_count = 0, list_count = 0;
+    unsigned int i, j;
+    SLID *stored_ids = NULL, *list;
+    HRESULT hr;
 
     FIXME("(%p, %u, %s, %u, %p, %p) semi-stub\n", handle, query_type,
             wine_dbgstr_guid(query_id), return_type, count, ids);
@@ -2875,6 +3680,44 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
 
     if (return_type == SL_ID_LICENSE && query_type == SL_ID_LICENSE_FILE)
         return get_file_license_ids(query_id, count, ids);
+
+    if (return_type == SL_ID_PKEY && query_type == SL_ID_PRODUCT_SKU && query_id)
+    {
+        if (FAILED(hr = get_product_keys_for_sku(query_id, &stored_count, &stored_ids)))
+            return hr;
+        if (stored_count)
+        {
+            *count = stored_count;
+            *ids = stored_ids;
+            return S_OK;
+        }
+    }
+    if (return_type == SL_ID_PRODUCT_SKU && query_type == SL_ID_APPLICATION && query_id &&
+            IsEqualGUID(query_id, &office_app_id))
+    {
+        if (FAILED(hr = get_installed_product_skus(&stored_count, &stored_ids))) return hr;
+        list_count = grace_profile_present() ? (o365 ? ARRAY_SIZE(o365_product_skus) : 1) : 0;
+        if (!(list = LocalAlloc(LMEM_FIXED, (list_count + stored_count) * sizeof(*list))) &&
+                list_count + stored_count)
+        {
+            LocalFree(stored_ids);
+            return E_OUTOFMEMORY;
+        }
+        if (o365 && list_count)
+            for (i = 0; i < ARRAY_SIZE(o365_product_skus); ++i)
+                list[i] = o365_product_skus[i].id;
+        else if (list_count) list[0] = *grace_id;
+        for (i = 0; i < stored_count; ++i)
+        {
+            for (j = 0; j < list_count; ++j)
+                if (IsEqualGUID(&list[j], &stored_ids[i])) break;
+            if (j == list_count) list[list_count++] = stored_ids[i];
+        }
+        LocalFree(stored_ids);
+        *count = list_count;
+        *ids = list;
+        return S_OK;
+    }
     if (!grace_profile_present())
     {
         *count = 0;
@@ -2943,23 +3786,7 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, UINT query_type, const SLID *query_id,
         return 0xC004F016;
     }
 
-    /* Native O365 APP → PRODUCT_SKU returns the complete Office inventory,
-     * including unlicensed subscription and trial channels. */
-    if (o365 && return_type == SL_ID_PRODUCT_SKU && query_type == SL_ID_APPLICATION &&
-        query_id && IsEqualGUID(query_id, &office_app_id))
-    {
-        if (!(list = LocalAlloc(LMEM_FIXED, ARRAY_SIZE(o365_product_skus) * sizeof(*list))))
-            return E_OUTOFMEMORY;
-        for (i = 0; i < ARRAY_SIZE(o365_product_skus); ++i)
-            list[i] = o365_product_skus[i].id;
-        *count = ARRAY_SIZE(o365_product_skus);
-        *ids = list;
-        return S_OK;
-    }
-
-    if (return_type == SL_ID_PRODUCT_SKU &&
-        ((query_type == SL_ID_APPLICATION && query_id && IsEqualGUID(query_id, &office_app_id)) ||
-         query_type == SL_ID_PRODUCT_SKU))
+    if (return_type == SL_ID_PRODUCT_SKU && query_type == SL_ID_PRODUCT_SKU)
     {
         if (!(list = LocalAlloc(LMEM_FIXED, sizeof(*list))))
             return E_OUTOFMEMORY;

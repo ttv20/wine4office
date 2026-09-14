@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Let Office install and report KMS client product keys through OSPP and WMI.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.
