@@ -298,7 +298,6 @@ PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
 PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
 PACKAGE_UPDATE_HELPER = "wine4office-package-update-helper"
 PACKAGE_UPDATE_TIMEOUT_SECONDS = 30 * 60
-PACKAGE_UPDATE_HELPER_GRACE_SECONDS = 10
 PACKAGE_PROVIDERS = {
     "apt": "APT",
     "dnf": "DNF",
@@ -440,15 +439,13 @@ def trusted_package_update_helper() -> Path | None:
     return helper
 
 
-class PackageUpdateStateUnknown(RuntimeError):
-    """The privileged helper did not confirm that its package process stopped."""
-
-
 def _run_privileged_package_update(command: list[str], cancel_dir: Path,
                                    cancel_event=None, process_callback=None,
                                    timeout: float = PACKAGE_UPDATE_TIMEOUT_SECONDS,
                                    command_count: int = 1) -> subprocess.CompletedProcess:
     """Wait for the privileged helper, signalling it through a user-owned directory."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
     process = subprocess.Popen(
         [*command, str(cancel_dir), str(int(timeout))],
         env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -457,31 +454,27 @@ def _run_privileged_package_update(command: list[str], cancel_dir: Path,
     if process_callback:
         process_callback(process)
     deadline = time.monotonic() + timeout * command_count
-    timeout_requested = False
-    stop_deadline = None
+    stop_requested = False
+    cancellation_signalled = False
     try:
         while True:
             cancelled = cancel_event is not None and cancel_event.is_set()
             now = time.monotonic()
-            if (cancelled or now >= deadline) and not timeout_requested:
+            if (cancelled or now >= deadline) and not cancellation_signalled:
+                stop_requested = True
                 try:
                     (cancel_dir / "cancel").touch(exist_ok=True)
-                except OSError as error:
-                    raise PackageUpdateStateUnknown(
-                        "Could not signal the privileged package update helper; "
-                        "Wine recovery was left stopped."
-                    ) from error
-                timeout_requested = True
-                stop_deadline = now + PACKAGE_UPDATE_HELPER_GRACE_SECONDS
+                except OSError:
+                    # Keep supervising the helper. Its own deadline still stops the
+                    # package command even if this cancellation write keeps failing.
+                    pass
+                else:
+                    cancellation_signalled = True
             try:
                 stdout, _stderr = process.communicate(timeout=0.1)
                 break
             except subprocess.TimeoutExpired:
-                if stop_deadline is not None and time.monotonic() >= stop_deadline:
-                    raise PackageUpdateStateUnknown(
-                        "The privileged package update helper did not confirm that it "
-                        "stopped; Wine recovery was left stopped."
-                    )
+                continue
     finally:
         if process_callback:
             process_callback(None)
@@ -490,7 +483,7 @@ def _run_privileged_package_update(command: list[str], cancel_dir: Path,
     )
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("Operation cancelled.")
-    if timeout_requested or completed.returncode == 124:
+    if stop_requested or completed.returncode == 124:
         raise subprocess.TimeoutExpired(command, timeout * command_count)
     return completed
 

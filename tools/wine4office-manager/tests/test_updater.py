@@ -373,8 +373,12 @@ import time
 cancel = pathlib.Path(sys.argv[2]) / "cancel"
 while not cancel.exists():
     time.sleep(0.01)
+time.sleep(0.15)
+if not cancel.exists():
+    raise SystemExit(73)
 raise SystemExit(int(sys.argv[1]))
 """
+        started = time.monotonic()
         with mock.patch.object(
             backend, "package_update_command", return_value=[
                 sys.executable, "-c", helper, "130",
@@ -384,6 +388,7 @@ raise SystemExit(int(sys.argv[1]))
                 lambda _line: None, dnf, cancel, process_callback
             )
 
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
         self.assertEqual(len(processes), 2)
         self.assertIsNone(processes[-1])
         self.assertIsNotNone(processes[0].poll())
@@ -414,6 +419,29 @@ raise SystemExit(int(sys.argv[1]))
                 lambda _line: None, dnf, process_callback=processes.append
             )
 
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_failed_cancellation_signal_keeps_supervising_helper(self):
+        cancel = threading.Event()
+        processes = []
+
+        def process_callback(process):
+            processes.append(process)
+            if process is not None:
+                cancel.set()
+
+        started = time.monotonic()
+        with mock.patch.object(
+            backend.Path, "touch", side_effect=OSError("read-only filesystem")
+        ), self.assertRaisesRegex(RuntimeError, "Operation cancelled"):
+            backend._run_privileged_package_update(
+                [sys.executable, "-c", "import time; time.sleep(0.15)"],
+                self.root, cancel, process_callback, timeout=1,
+            )
+
+        self.assertGreaterEqual(time.monotonic() - started, 0.1)
         self.assertEqual(len(processes), 2)
         self.assertIsNone(processes[-1])
         self.assertIsNotNone(processes[0].poll())
@@ -546,38 +574,6 @@ raise SystemExit(int(sys.argv[1]))
         self.assertEqual(task["status"], "failed")
         self.assertIn("APT failed", task["log"])
         self.assertIn("Restoring the selected Wine environment", task["log"])
-
-    def test_unknown_package_update_state_does_not_start_wine_recovery(self):
-        package = {
-            "schema_version": 1, "provider": "apt", "provider_name": "APT",
-            "package": "wine4office", "components": ("manager", "wine"),
-        }
-        preload_update = object()
-        with mock.patch.object(
-            backend, "package_installation", return_value=package
-        ), mock.patch.object(
-            backend, "package_update_command", return_value=["pkexec", "helper"]
-        ), mock.patch.object(
-            backend, "prepare_preload_runner_update", return_value=preload_update
-        ), mock.patch.object(
-            manager, "stop_wine_confirmed"
-        ), mock.patch.object(
-            backend, "install_package_update",
-            side_effect=backend.PackageUpdateStateUnknown("helper still running"),
-        ), mock.patch.object(
-            backend, "update_wine_prefix"
-        ) as update_prefix, mock.patch.object(
-            backend, "restore_preload_after_runner_update"
-        ) as restore_preload:
-            state = manager.ManagerState()
-            state.start_package_update()
-            self._wait_for(lambda: not state.snapshot()["task"]["running"])
-
-        update_prefix.assert_not_called()
-        restore_preload.assert_not_called()
-        task = state.snapshot()["task"]
-        self.assertEqual(task["status"], "failed")
-        self.assertIn("helper still running", task["log"])
 
     def test_failed_new_package_runner_recovers_with_previous_runner(self):
         package = {

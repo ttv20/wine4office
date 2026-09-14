@@ -52,7 +52,9 @@ Manager-and-Wine transaction; the Manager compares the installed versions before
 and after the transaction and runs Wine migration only when both components
 actually advanced. A root-owned helper runs APT or DNF through `pkexec`, enforces
 a per-command timeout, and stops the privileged package process before reporting
-cancellation to the Manager. AUR and Nix show copyable update instructions.
+cancellation to the Manager. The Manager keeps the cancellation channel and the
+helper process registered until the helper exits. AUR and Nix show copyable update
+instructions.
 
 Suggested production paths:
 
