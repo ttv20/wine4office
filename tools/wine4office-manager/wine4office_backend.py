@@ -299,6 +299,7 @@ PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
 PACKAGE_UPDATE_HELPER = "wine4office-package-update-helper"
 PACKAGE_UPDATE_TIMEOUT_SECONDS = 30 * 60
 PACKAGE_UPDATE_RECOVERY_TIMEOUT_SECONDS = 2 * 60
+PROCESS_TERMINATION_GRACE_SECONDS = 8
 PACKAGE_PROVIDERS = {
     "apt": "APT",
     "dnf": "DNF",
@@ -1435,6 +1436,36 @@ def sibling_tool(wine: Path, name: str) -> Path | None:
     return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
 
 
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    """Terminate a complete process group and reap its registered leader."""
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+    deadline = time.monotonic() + PROCESS_TERMINATION_GRACE_SECONDS
+    while _process_group_exists(process_group) and time.monotonic() < deadline:
+        process.poll()
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    if _process_group_exists(process_group):
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
 def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd: Path | None = None,
                     cancel_event=None, process_callback=None,
                     timeout: float | None = None) -> None:
@@ -1460,20 +1491,6 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     stdout_open = True
     deadline = time.monotonic() + timeout if timeout is not None else None
 
-    def terminate_process() -> None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-
     def emit_lines(final: bool = False) -> None:
         while True:
             newline = pending.find(b"\n")
@@ -1489,10 +1506,10 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                terminate_process()
+                _terminate_process_group(process)
                 raise RuntimeError("Operation cancelled.")
             if deadline is not None and time.monotonic() >= deadline:
-                terminate_process()
+                _terminate_process_group(process)
                 raise subprocess.TimeoutExpired(command, timeout)
             if stdout_open:
                 select_timeout = 0.1
@@ -1553,16 +1570,8 @@ def _run_cancellable_command(command: list[str], env: dict[str, str], *,
 
     def terminate_process() -> None:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.communicate(timeout=8)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _terminate_process_group(process)
+        finally:
             process.communicate()
 
     try:

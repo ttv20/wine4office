@@ -975,6 +975,62 @@ exit 0
         self.assertIsNone(processes[-1])
         self.assertIsNotNone(processes[0].poll())
 
+    def test_stream_timeout_kills_descendant_after_group_leader_exits(self):
+        child_pid_file = self.home / "wineboot-child.pid"
+        child_ready_file = self.home / "wineboot-child.ready"
+        leader = """
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
+child_code = '''
+import pathlib
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready")
+time.sleep(60)
+'''
+child = subprocess.Popen([sys.executable, "-c", child_code, sys.argv[2]])
+pathlib.Path(sys.argv[1]).write_text(str(child.pid))
+while not pathlib.Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+time.sleep(60)
+"""
+        processes = []
+        with mock.patch.object(
+            backend, "PROCESS_TERMINATION_GRACE_SECONDS", 0.05
+        ), self.assertRaises(subprocess.TimeoutExpired):
+            backend._stream_command(
+                [
+                    sys.executable, "-c", leader,
+                    str(child_pid_file), str(child_ready_file),
+                ],
+                os.environ.copy(), lambda _line: None,
+                process_callback=processes.append, timeout=0.3,
+            )
+
+        child_pid = int(child_pid_file.read_text())
+        child_stat = Path(f"/proc/{child_pid}/stat")
+
+        def child_is_running() -> bool:
+            try:
+                return child_stat.read_text().split()[2] != "Z"
+            except FileNotFoundError:
+                return False
+
+        for _attempt in range(100):
+            if not child_is_running():
+                break
+            time.sleep(0.01)
+        self.assertFalse(child_is_running())
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")

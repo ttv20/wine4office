@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import signal
 import shutil
 import stat
 import subprocess
@@ -1337,17 +1336,9 @@ class ManagerState:
         if process.poll() is not None:
             return
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except (PermissionError, ProcessLookupError):
+            backend._terminate_process_group(process)
+        except PermissionError:
             return
-        try:
-            process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
 
     def cancel(self) -> None:
         with self.lock:
