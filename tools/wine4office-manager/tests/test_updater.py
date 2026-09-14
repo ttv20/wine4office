@@ -3,9 +3,12 @@
 import hashlib
 import io
 import os
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -344,6 +347,53 @@ class UpdaterTests(unittest.TestCase):
         self.assertFalse(result["changed"])
         self.assertIn("already current", result["message"])
 
+    def test_package_update_is_cancellable_and_reaps_process_group(self):
+        dnf = {
+            "schema_version": 1, "provider": "dnf", "provider_name": "DNF",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        cancel = threading.Event()
+        processes = []
+
+        def process_callback(process):
+            processes.append(process)
+            if process is not None:
+                cancel.set()
+
+        with mock.patch.object(
+            backend, "package_update_command", return_value=[
+                sys.executable, "-c", "import time; time.sleep(60)",
+            ]
+        ), self.assertRaisesRegex(RuntimeError, "Operation cancelled"):
+            backend.install_package_update(
+                lambda _line: None, dnf, cancel, process_callback
+            )
+
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_package_update_timeout_is_bounded_and_reaps_process_group(self):
+        dnf = {
+            "schema_version": 1, "provider": "dnf", "provider_name": "DNF",
+            "package": "wine4office", "components": ("manager", "wine"),
+        }
+        processes = []
+        with mock.patch.object(
+            backend, "package_update_command", return_value=[
+                sys.executable, "-c", "import time; time.sleep(60)",
+            ]
+        ), mock.patch.object(
+            backend, "PACKAGE_UPDATE_TIMEOUT_SECONDS", 0.05
+        ), self.assertRaisesRegex(RuntimeError, "timed out"):
+            backend.install_package_update(
+                lambda _line: None, dnf, process_callback=processes.append
+            )
+
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
     def test_package_update_verifies_every_owned_component_changed(self):
         apt = {
             "schema_version": 1, "provider": "apt", "provider_name": "APT",
@@ -426,13 +476,15 @@ class UpdaterTests(unittest.TestCase):
             backend, "install_package_update", return_value={
                 "changed": False, "components": (), "message": "already current",
             }
-        ), mock.patch.object(
+        ) as install_update, mock.patch.object(
             backend, "update_wine_prefix", return_value="Wine environment restarted"
         ) as update_prefix:
             state = manager.ManagerState()
             state.start_package_update()
             self._wait_for(lambda: not state.snapshot()["task"]["running"])
 
+        self.assertIs(install_update.call_args.args[2], state.cancel_event)
+        self.assertIs(install_update.call_args.args[3].__self__, state)
         update_prefix.assert_called_once()
         self.assertEqual(update_prefix.call_args.args[1], state.config["wine"])
         self.assertEqual(state.snapshot()["task"]["status"], "completed")
@@ -556,8 +608,6 @@ class UpdaterTests(unittest.TestCase):
         }))
         wrapper = self.root / "profile/bin/wine4office"
         wrapper.parent.mkdir(parents=True)
-        wrapper.write_text("#!/bin/sh\nexec \"$@\"\n")
-        wrapper.chmod(0o755)
         packaged_manager = self.install_root / "bin/Wine4OfficeManager"
         packaged_wine = self.install_root / "runner/bin/wine"
         packaged_winepath = self.install_root / "runner/bin/winepath"
@@ -566,6 +616,22 @@ class UpdaterTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o755)
         packaged_winepath.symlink_to("wine")
+        current_payload = self.root / "current/opt/wine4office"
+        current_wine = current_payload / "runner/bin/wine"
+        current_wine.parent.mkdir(parents=True)
+        current_wine.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$WINE4OFFICE_TEST_NIX_LOG\"\n"
+        )
+        current_wine.chmod(0o755)
+        dispatcher = Path(backend.__file__).resolve().parent / (
+            "packaging/distribution/nix/wine4office-dispatch"
+        )
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f"export WINE4OFFICE_NIX_PAYLOAD='{current_payload}'\n"
+            f"exec /bin/sh '{dispatcher}' \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
         with mock.patch.dict(
             os.environ, {"WINE4OFFICE_PACKAGE_WRAPPER": str(wrapper)}
         ):
@@ -606,6 +672,21 @@ class UpdaterTests(unittest.TestCase):
         )
         self.assertIn(f'ExecStart="{wrapper}" "--manager" ', update_unit)
         self.assertIn(f'ExecStart="{wrapper}" "--exec" ', preload_unit)
+        launcher_path = self.root / "shortcut"
+        launcher_path.write_text(launcher)
+        launcher_path.chmod(0o755)
+        office = self.home / "EXCEL.EXE"
+        office.write_text("office")
+        log = self.root / "nix-wine.log"
+        shutil.rmtree(self.install_root / "runner")
+        completed = subprocess.run(
+            [str(launcher_path)], env={
+                **os.environ, "WINE4OFFICE_TEST_NIX_LOG": str(log),
+            }, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=10, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(log.read_text().strip(), str(office))
 
     def test_nix_profile_upgrade_replaces_saved_store_runner(self):
         package_file = self.install_root / backend.PACKAGE_INSTALLATION_FILE

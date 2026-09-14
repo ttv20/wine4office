@@ -19,12 +19,18 @@ overlong_version=$(printf 'a%.0s' {1..129})
 for invalid_version in -rc1 "$overlong_version"; do
     invalid_dir=$tmp/configure-invalid-${invalid_version:0:8}
     mkdir "$invalid_dir"
+    if [[ $invalid_version == -rc1 ]]; then
+        expected_message='invalid Wine4Office release version'
+    else
+        expected_message='Wine4Office release version is longer than 128 characters'
+    fi
     if (cd "$invalid_dir" && \
             "$root/configure" "--with-wine4office-version=$invalid_version") \
             >"$invalid_dir.log" 2>&1; then
         echo "Configure accepted an invalid Wine4Office version" >&2
         exit 1
     fi
+    grep -F -- "$expected_message" "$invalid_dir.log" >/dev/null
 done
 
 assert_absent() {

@@ -296,6 +296,7 @@ WINE_BASE_VERSION_PATTERN = re.compile(
 )
 PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,127}")
 PACKAGE_INSTALLATION_FILE = "PACKAGE-INSTALLATION.json"
+PACKAGE_UPDATE_TIMEOUT_SECONDS = 30 * 60
 PACKAGE_PROVIDERS = {
     "apt": "APT",
     "dnf": "DNF",
@@ -443,7 +444,8 @@ def package_wrap_command(command: Iterable[str | Path]) -> list[str]:
 
 
 def install_package_update(output: Output,
-                           installation: dict | None = None) -> dict:
+                           installation: dict | None = None, cancel_event=None,
+                           process_callback=None) -> dict:
     installation = installation or package_installation()
     command = package_update_command(installation)
     if installation is None:
@@ -462,13 +464,21 @@ def install_package_update(output: Output,
     if installation["provider"] == "apt":
         commands.insert(0, command[:2] + ["update"])
     for package_command in commands:
-        process = subprocess.run(
-            package_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, errors="replace", check=False,
-        )
-        if process.stdout:
-            for line in process.stdout.splitlines():
-                output(line)
+        try:
+            process = _run_cancellable_command(
+                package_command, os.environ.copy(), cancel_event=cancel_event,
+                process_callback=process_callback,
+                timeout=PACKAGE_UPDATE_TIMEOUT_SECONDS, check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"{installation['provider_name']} timed out after "
+                f"{PACKAGE_UPDATE_TIMEOUT_SECONDS // 60} minutes."
+            ) from error
+        for stream in (process.stdout, process.stderr):
+            if isinstance(stream, str):
+                for line in stream.splitlines():
+                    output(line)
         if process.returncode:
             raise RuntimeError(
                 f"{installation['provider_name']} exited with status "
@@ -1389,11 +1399,17 @@ def _stream_command(command: list[str], env: dict[str, str], output: Output, cwd
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     process.wait(timeout=8)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     process.wait()
                 raise RuntimeError("Operation cancelled.")
             if stdout_open:
@@ -1433,36 +1449,43 @@ def _run_cancellable_command(command: list[str], env: dict[str, str], *,
                              cancel_event=None, process_callback=None,
                              timeout: float = 30, check: bool = True) -> subprocess.CompletedProcess:
     """Run a policy helper while exposing and reaping its process."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
     if cancel_event is None and process_callback is None:
         return subprocess.run(
             command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout, check=check,
+            text=True, errors="replace", timeout=timeout, check=check,
         )
     process = subprocess.Popen(
         command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        text=True, errors="replace", start_new_session=True,
     )
     if process_callback:
         process_callback(process)
     deadline = time.monotonic() + timeout
+
+    def terminate_process() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+                terminate_process()
                 raise RuntimeError("Operation cancelled.")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+                terminate_process()
                 raise subprocess.TimeoutExpired(command, timeout)
             try:
                 stdout, stderr = process.communicate(timeout=min(0.1, remaining))
@@ -2333,6 +2356,9 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
     helper_value = shlex.quote(str(font_helper)) if font_helper else "''"
     wine_command = package_wrap_command([wine])
     winepath_command = package_wrap_command([wine.parent / "winepath"])
+    package_runner = (
+        len(wine_command) >= 3 and wine_command[1:3] == ["--runner-tool", "wine"]
+    )
     wine_command_value = " ".join(shlex.quote(part) for part in wine_command)
     winepath_command_value = " ".join(shlex.quote(part) for part in winepath_command)
     winappsdk_runtime = office_winappsdk_runtime_environment(prefix)
@@ -2345,9 +2371,10 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         f"wine={wine_value}",
         f"wine_command=({wine_command_value})",
         f"winepath_command=({winepath_command_value})",
+        f"package_runner={'true' if package_runner else 'false'}",
         f"executable={executable_value}",
         f"font_helper={helper_value}",
-        'if [[ ! -x "$wine" ]]; then',
+        'if [[ $package_runner != true && ! -x "$wine" ]]; then',
         '    printf \'Wine4Office launcher: Wine is unavailable: %s\\n\' "$wine" >&2',
         "    exit 1",
         "fi",
@@ -2355,7 +2382,9 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         '    printf \'Wine4Office launcher: Office application is unavailable: %s\\n\' "$executable" >&2',
         "    exit 1",
         "fi",
-        'export PATH="${wine%/*}${PATH:+:$PATH}"',
+        'if [[ $package_runner != true ]]; then',
+        '    export PATH="${wine%/*}${PATH:+:$PATH}"',
+        "fi",
         'marker="$prefix/.wine4office-managed-prefix"',
         'prefix_info=$(stat -c "%F:%u" -- "$prefix" 2>/dev/null || true)',
         'marker_info=$(stat -c "%F:%u:%a" -- "$marker" 2>/dev/null || true)',
@@ -2543,7 +2572,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         "        fi",
         '        local_document=${downloaded[0]}',
         '    fi',
-        '    if [[ -x "$winepath" ]]; then',
+        '    if [[ $package_runner == true || -x "$winepath" ]]; then',
         '        windows_document=$("${winepath_command[@]}" -w "$local_document")',
         "    else",
         '        windows_document=$("${wine_command[@]}" winepath.exe -w "$local_document")',

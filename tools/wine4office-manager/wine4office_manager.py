@@ -888,7 +888,9 @@ class ManagerState:
                 self.set_progress(
                     f"Updating through {package['provider_name']}", None
                 )
-                result = backend.install_package_update(self.output, package)
+                result = backend.install_package_update(
+                    self.output, package, self.cancel_event, self.set_process
+                )
                 if not result["changed"]:
                     if wine_stopped:
                         self.set_progress("Restarting the Wine environment", None)
