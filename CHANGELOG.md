@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Let Office install and report KMS client product keys through OSPP and WMI while retaining only derived licensing metadata.
+- Let Office activate installed KMS client keys against a configured KMS server and retain validated activation state.
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.

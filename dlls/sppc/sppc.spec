@@ -20,6 +20,12 @@
 @ cdecl __wine_sppc_set_auth_session_key(ptr long)
 @ cdecl __wine_sppc_set_expected_hmac(ptr long)
 @ stdcall __wine_sppc_install_product_key(ptr ptr ptr)
+@ stdcall __wine_sppc_set_kms_host(ptr wstr)
+@ stdcall __wine_sppc_set_kms_port(ptr long)
+@ stdcall __wine_sppc_get_kms_state(ptr ptr long ptr ptr ptr)
+@ stdcall __wine_sppc_activate_product(ptr)
+@ stdcall __wine_sppc_kms_activate(wstr long ptr ptr ptr ptr)
+@ stdcall __wine_sppc_validate_kms_response(ptr long ptr int64 ptr ptr)
 @ stdcall SLClose(ptr)
 @ stdcall SLConsumeRight(ptr ptr ptr wstr ptr)
 @ stub SLDepositMigrationBlob

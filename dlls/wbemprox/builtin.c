@@ -520,6 +520,10 @@ static const struct column col_softwarelicensingproduct[] =
     { L"VLActivationType",                           CIM_UINT32 },
     { L"VLActivationTypeEnabled",                    CIM_UINT32 },
     { L"VLRenewalInterval",                          CIM_UINT32 },
+    /* methods */
+    { L"Activate",                                   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"SetKeyManagementServiceMachine",             CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"SetKeyManagementServicePort",                CIM_FLAG_ARRAY|COL_FLAG_METHOD },
  };
 static const struct column col_softwarelicensingservice[] =
 {
@@ -1131,6 +1135,10 @@ struct record_softwarelicensingproduct
     UINT32       vl_activation_type;
     UINT32       vl_activation_type_enabled;
     UINT32       vl_renewal_interval;
+    /* methods */
+    class_method *activate;
+    class_method *set_kms_machine;
+    class_method *set_kms_port;
 };
 struct record_softwarelicensingservice
 {
@@ -1287,6 +1295,11 @@ static const struct record_param data_param[] =
     { L"__SystemSecurity", L"SetSD", -1, L"ReturnValue", CIM_UINT32 },
     { L"SoftwareLicensingService", L"InstallProductKey", 1, L"ProductKey", CIM_STRING },
     { L"SoftwareLicensingService", L"InstallProductKey", -1, L"ReturnValue", CIM_UINT32 },
+    { L"SoftwareLicensingProduct", L"Activate", -1, L"ReturnValue", CIM_UINT32 },
+    { L"SoftwareLicensingProduct", L"SetKeyManagementServiceMachine", 1, L"MachineName", CIM_STRING },
+    { L"SoftwareLicensingProduct", L"SetKeyManagementServiceMachine", -1, L"ReturnValue", CIM_UINT32 },
+    { L"SoftwareLicensingProduct", L"SetKeyManagementServicePort", 1, L"PortNumber", CIM_UINT32 },
+    { L"SoftwareLicensingProduct", L"SetKeyManagementServicePort", -1, L"ReturnValue", CIM_UINT32 },
     { L"StdRegProv", L"CreateKey", 1, L"hDefKey", CIM_SINT32, 0x80000002 },
     { L"StdRegProv", L"CreateKey", 1, L"sSubKeyName", CIM_STRING },
     { L"StdRegProv", L"CreateKey", -1, L"ReturnValue", CIM_UINT32 },
@@ -1472,6 +1485,23 @@ static WCHAR *licensing_guid_string(const SLID *id)
     return string;
 }
 
+static void fill_kms_state(const SLID *sku_id, struct record_softwarelicensingproduct *record)
+{
+    typedef HRESULT (WINAPI *get_kms_state_fn)(const SLID *, WCHAR *, DWORD, DWORD *, DWORD *, DWORD *);
+    WCHAR host[256];
+    DWORD port = 0, activation = 0, renewal = 0;
+    get_kms_state_fn get_state;
+    HMODULE sppc;
+
+    sppc = GetModuleHandleW(L"sppc.dll");
+    if (!sppc || !(get_state = (void *)GetProcAddress(sppc, "__wine_sppc_get_kms_state")) ||
+            FAILED(get_state(sku_id, host, ARRAY_SIZE(host), &port, &activation, &renewal))) return;
+    if (host[0]) record->kms_machine = wcsdup(host);
+    record->kms_port = port;
+    if (activation) record->vl_activation_interval = activation;
+    if (renewal) record->vl_renewal_interval = renewal;
+}
+
 static enum fill_status fill_softwarelicensingproduct(struct table *table, const struct expr *cond)
 {
     static const SLID office_app_id =
@@ -1489,6 +1519,9 @@ static enum fill_status fill_softwarelicensingproduct(struct table *table, const
     rec[row].id = wcsdup(L"00000000-0000-0000-0000-000000000000");
     rec[row].license_status = 1;
     rec[row].partial_product_key = wcsdup(L"BEEF0");
+    rec[row].activate = licensing_activate_product;
+    rec[row].set_kms_machine = licensing_set_kms_machine;
+    rec[row].set_kms_port = licensing_set_kms_port;
     if (!match_row(table, row, cond, &status)) free_row_values(table, row);
     else row++;
 
@@ -1521,6 +1554,10 @@ static enum fill_status fill_softwarelicensingproduct(struct table *table, const
         rec->name = licensing_string(handle, &skus[i], L"Name", FALSE);
         rec->vl_activation_interval = 120;
         rec->vl_renewal_interval = 10080;
+        rec->activate = licensing_activate_product;
+        rec->set_kms_machine = licensing_set_kms_machine;
+        rec->set_kms_port = licensing_set_kms_port;
+        fill_kms_state(&skus[i], rec);
         if (status_count)
         {
             rec->license_status = status_info[0].eStatus;
