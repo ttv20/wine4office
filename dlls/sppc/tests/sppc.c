@@ -1148,19 +1148,42 @@ struct test_rpc_response_header
 struct rpc_test_server
 {
     SOCKET listener;
+    HANDLE cancel;
     BYTE flags;
     DWORD representation;
     WORD context_id;
     HRESULT method_status;
     DWORD error;
+    BOOL cancelled;
 };
 
-static BOOL test_socket_receive_all(SOCKET socket, BYTE *data, DWORD size)
+static BOOL wait_for_test_socket(SOCKET socket, BOOL writable, HANDLE cancel)
+{
+    struct timeval timeout;
+    fd_set sockets;
+    int ret;
+
+    for (;;)
+    {
+        if (WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) return FALSE;
+        FD_ZERO(&sockets);
+        FD_SET(socket, &sockets);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000;
+        ret = select(0, writable ? NULL : &sockets, writable ? &sockets : NULL,
+                NULL, &timeout);
+        if (ret > 0) return TRUE;
+        if (ret == SOCKET_ERROR) return FALSE;
+    }
+}
+
+static BOOL test_socket_receive_all(SOCKET socket, HANDLE cancel, BYTE *data, DWORD size)
 {
     int received;
 
     while (size)
     {
+        if (!wait_for_test_socket(socket, FALSE, cancel)) return FALSE;
         received = recv(socket, (char *)data, size, 0);
         if (received <= 0) return FALSE;
         data += received;
@@ -1169,12 +1192,13 @@ static BOOL test_socket_receive_all(SOCKET socket, BYTE *data, DWORD size)
     return TRUE;
 }
 
-static BOOL test_socket_send_all(SOCKET socket, const BYTE *data, DWORD size)
+static BOOL test_socket_send_all(SOCKET socket, HANDLE cancel, const BYTE *data, DWORD size)
 {
     int sent;
 
     while (size)
     {
+        if (!wait_for_test_socket(socket, TRUE, cancel)) return FALSE;
         sent = send(socket, (const char *)data, size, 0);
         if (sent <= 0) return FALSE;
         data += sent;
@@ -1183,15 +1207,16 @@ static BOOL test_socket_send_all(SOCKET socket, const BYTE *data, DWORD size)
     return TRUE;
 }
 
-static BOOL receive_test_rpc_request(SOCKET socket)
+static BOOL receive_test_rpc_request(SOCKET socket, HANDLE cancel)
 {
     struct test_rpc_header header;
     BYTE body[8192];
 
-    if (!test_socket_receive_all(socket, (BYTE *)&header, sizeof(header)) ||
+    if (!test_socket_receive_all(socket, cancel, (BYTE *)&header, sizeof(header)) ||
             header.fragment_length < sizeof(header) ||
             header.fragment_length - sizeof(header) > sizeof(body)) return FALSE;
-    return test_socket_receive_all(socket, body, header.fragment_length - sizeof(header));
+    return test_socket_receive_all(socket, cancel, body,
+            header.fragment_length - sizeof(header));
 }
 
 static DWORD WINAPI rpc_test_server_thread(void *arg)
@@ -1202,14 +1227,19 @@ static DWORD WINAPI rpc_test_server_thread(void *arg)
     BYTE bind_response[56] = {0}, activation_response[36] = {0};
     SOCKET client;
 
+    if (!wait_for_test_socket(server->listener, FALSE, server->cancel))
+    {
+        server->cancelled = WaitForSingleObject(server->cancel, 0) == WAIT_OBJECT_0;
+        if (!server->cancelled) server->error = WSAGetLastError();
+        return 0;
+    }
     client = accept(server->listener, NULL, NULL);
-    closesocket(server->listener);
     if (client == INVALID_SOCKET)
     {
         server->error = WSAGetLastError();
         return 0;
     }
-    if (!receive_test_rpc_request(client)) goto failed;
+    if (!receive_test_rpc_request(client, server->cancel)) goto failed;
     bind_header = (struct test_rpc_header *)bind_response;
     bind_header->major = 5;
     bind_header->type = 12;
@@ -1218,8 +1248,8 @@ static DWORD WINAPI rpc_test_server_thread(void *arg)
     bind_header->fragment_length = sizeof(bind_response);
     bind_header->call_id = 1;
     bind_response[28] = 1;
-    if (!test_socket_send_all(client, bind_response, sizeof(bind_response)) ||
-            !receive_test_rpc_request(client)) goto failed;
+    if (!test_socket_send_all(client, server->cancel, bind_response, sizeof(bind_response)) ||
+            !receive_test_rpc_request(client, server->cancel)) goto failed;
     response = (struct test_rpc_response_header *)activation_response;
     response->common.major = 5;
     response->common.type = 2;
@@ -1231,18 +1261,20 @@ static DWORD WINAPI rpc_test_server_thread(void *arg)
     response->context_id = server->context_id;
     memcpy(activation_response + sizeof(*response) + 8, &server->method_status,
             sizeof(server->method_status));
-    if (!test_socket_send_all(client, activation_response, sizeof(activation_response)))
+    if (!test_socket_send_all(client, server->cancel, activation_response,
+            sizeof(activation_response)))
         goto failed;
     closesocket(client);
     return 0;
 failed:
-    server->error = WSAGetLastError();
+    server->cancelled = WaitForSingleObject(server->cancel, 0) == WAIT_OBJECT_0;
+    if (!server->cancelled) server->error = WSAGetLastError();
     closesocket(client);
     return 0;
 }
 
-static HRESULT run_rpc_envelope_test(kms_activate_fn activate, BYTE flags,
-        DWORD representation, WORD context_id)
+static HRESULT run_rpc_envelope_test(kms_activate_fn activate, const WCHAR *host,
+        BYTE flags, DWORD representation, WORD context_id)
 {
     static const GUID sku =
         {0x8d368fc1,0x9470,0x4be2,{0x8d,0x66,0x90,0xe8,0x36,0xcb,0xb0,0x51}};
@@ -1281,18 +1313,30 @@ static HRESULT run_rpc_envelope_test(kms_activate_fn activate, BYTE flags,
     server.representation = representation;
     server.context_id = context_id;
     server.method_status = 0xc004f042;
-    thread = CreateThread(NULL, 0, rpc_test_server_thread, &server, 0, NULL);
-    if (!thread)
+    server.cancel = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!server.cancel)
     {
         closesocket(server.listener);
         WSACleanup();
         return E_FAIL;
     }
-    hr = activate(L"127.0.0.1", ntohs(address.sin_port), &sku, &kms_id, &cmid, &response);
-    wait = WaitForSingleObject(thread, 5000);
+    thread = CreateThread(NULL, 0, rpc_test_server_thread, &server, 0, NULL);
+    if (!thread)
+    {
+        CloseHandle(server.cancel);
+        closesocket(server.listener);
+        WSACleanup();
+        return E_FAIL;
+    }
+    hr = activate(host, ntohs(address.sin_port), &sku, &kms_id, &cmid, &response);
+    SetEvent(server.cancel);
+    wait = WaitForSingleObject(thread, INFINITE);
     ok(wait == WAIT_OBJECT_0, "RPC test server did not finish, wait %#lx.\n", wait);
     ok(!server.error, "RPC test server failed, error %lu.\n", server.error);
+    if (!host) ok(server.cancelled, "RPC test server did not take the cancellation path.\n");
     CloseHandle(thread);
+    CloseHandle(server.cancel);
+    closesocket(server.listener);
     WSACleanup();
     return hr;
 }
@@ -1402,20 +1446,22 @@ static void test_kms_response_validation(void)
     hr = activate(L"127.0.0.1", 65534, &sku, &kms_id, &cmid, &response);
     ok(FAILED(hr), "Unreachable KMS server unexpectedly succeeded.\n");
 
-    hr = run_rpc_envelope_test(activate, 3, 0x10, 0);
+    hr = run_rpc_envelope_test(activate, L"127.0.0.1", 3, 0x10, 0);
     ok(hr == 0xc004f042, "Valid RPC error envelope returned %#lx.\n", hr);
-    hr = run_rpc_envelope_test(activate, 1, 0x10, 0);
+    hr = run_rpc_envelope_test(activate, L"127.0.0.1", 1, 0x10, 0);
     ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
             "Non-final RPC response returned %#lx.\n", hr);
-    hr = run_rpc_envelope_test(activate, 0, 0x10, 0);
+    hr = run_rpc_envelope_test(activate, L"127.0.0.1", 0, 0x10, 0);
     ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
             "Fragmented RPC response returned %#lx.\n", hr);
-    hr = run_rpc_envelope_test(activate, 3, 0, 0);
+    hr = run_rpc_envelope_test(activate, L"127.0.0.1", 3, 0, 0);
     ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
             "Unsupported RPC representation returned %#lx.\n", hr);
-    hr = run_rpc_envelope_test(activate, 3, 0x10, 1);
+    hr = run_rpc_envelope_test(activate, L"127.0.0.1", 3, 0x10, 1);
     ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
             "Unexpected RPC context returned %#lx.\n", hr);
+    hr = run_rpc_envelope_test(activate, NULL, 3, 0x10, 0);
+    ok(hr == E_INVALIDARG, "Invalid activation arguments returned %#lx.\n", hr);
 }
 
 static void test_persisted_kms_license(void)
