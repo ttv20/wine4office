@@ -185,7 +185,11 @@ static BOOL o365_proplus_configured(void);
 static const SLID *selected_grace_id(void);
 static const WCHAR *installed_profile_product_info(const WCHAR *name);
 static void guid_to_string(const SLID *id, WCHAR string[39]);
-static BOOL load_product_key(const SLID *pkey_id, struct installed_product_key *record);
+static HANDLE lock_product_key_store(void);
+static void unlock_product_key_store(HANDLE mutex);
+static BOOL load_product_key_locked(const SLID *pkey_id, struct installed_product_key *record);
+static BOOL find_product_key_for_sku_locked(const SLID *sku_id,
+        struct installed_product_key *record);
 static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record);
 static HRESULT get_installed_product_skus(UINT *count, SLID **ids);
 static HRESULT get_product_keys_for_sku(const SLID *sku_id, UINT *count, SLID **ids);
@@ -1386,6 +1390,8 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     const struct installed_grace_profile *profile = get_installed_profile();
     struct installed_product_key record;
     const WCHAR *string = NULL;
+    HANDLE mutex;
+    BOOL stored;
     UINT bytes;
 
     FIXME("(%p, %s, %s, %p, %p, %p) semi-stub\n", handle, wine_dbgstr_guid(pkey_id),
@@ -1394,7 +1400,11 @@ HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey_id, LPCWSTR na
     if (!get_slc_context(handle) || !pkey_id || !name || !size || !value)
         return E_INVALIDARG;
 
-    if (load_product_key(pkey_id, &record))
+    if (!(mutex = lock_product_key_store())) return E_FAIL;
+    stored = load_product_key_locked(pkey_id, &record);
+    unlock_product_key_store(mutex);
+
+    if (stored)
     {
         if (!wcsicmp(name, L"ProductSkuId"))
         {
@@ -1730,7 +1740,9 @@ static BOOL product_key_record_valid(const struct installed_product_key *record)
             record->edition_type[ARRAY_SIZE(record->edition_type) - 1] == 0;
 }
 
-static BOOL load_product_key(const SLID *pkey_id, struct installed_product_key *record)
+/* The caller must hold product_key_store_mutex while accessing a record. */
+static BOOL load_product_key_locked(const SLID *pkey_id,
+        struct installed_product_key *record)
 {
     WCHAR name[39];
     DWORD size = sizeof(*record);
@@ -1770,30 +1782,26 @@ static LONG delete_product_key(const SLID *pkey_id)
     return error;
 }
 
-static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_product_key *record)
+/* The caller must hold product_key_store_mutex across the current-key lookup
+ * and fallback enumeration so neither can observe a transaction rollback. */
+static BOOL find_product_key_for_sku_locked(const SLID *sku_id,
+        struct installed_product_key *record)
 {
     WCHAR name[64];
     HKEY key = NULL;
     SLID current_id;
     DWORD index = 0, name_size, size = sizeof(current_id), type;
-    HANDLE mutex;
     LONG error;
-    BOOL found = FALSE;
-
-    if (!(mutex = lock_product_key_store())) return FALSE;
 
     guid_to_string(sku_id, name);
     if (!RegGetValueW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, name,
             RRF_RT_REG_BINARY | RRF_SUBKEY_WOW6464KEY, &type, &current_id, &size) &&
             type == REG_BINARY && size == sizeof(current_id) &&
-            load_product_key(&current_id, record) && IsEqualGUID(sku_id, &record->sku_id))
-    {
-        found = TRUE;
-        goto done;
-    }
+            load_product_key_locked(&current_id, record) &&
+            IsEqualGUID(sku_id, &record->sku_id)) return TRUE;
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, PRODUCT_KEY_STORE, 0,
-            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key)) goto done;
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key)) return FALSE;
     for (;;)
     {
         name_size = ARRAY_SIZE(name);
@@ -1805,13 +1813,22 @@ static BOOL find_product_key_for_sku(const SLID *sku_id, struct installed_produc
         if (type == REG_BINARY && size == sizeof(*record) && product_key_record_valid(record) &&
                 IsEqualGUID(sku_id, &record->sku_id))
         {
-            found = TRUE;
-            break;
+            RegCloseKey(key);
+            return TRUE;
         }
     }
+    RegCloseKey(key);
+    return FALSE;
+}
 
-done:
-    if (key) RegCloseKey(key);
+static BOOL find_product_key_for_sku(const SLID *sku_id,
+        struct installed_product_key *record)
+{
+    HANDLE mutex;
+    BOOL found;
+
+    if (!(mutex = lock_product_key_store())) return FALSE;
+    found = find_product_key_for_sku_locked(sku_id, record);
     unlock_product_key_store(mutex);
     return found;
 }
@@ -1946,7 +1963,7 @@ static HRESULT get_product_keys_for_sku(const SLID *sku_id, UINT *count, SLID **
         unlock_product_key_store(mutex);
         return E_OUTOFMEMORY;
     }
-    if (find_product_key_for_sku(sku_id, &current)) list[found++] = current.pkey_id;
+    if (find_product_key_for_sku_locked(sku_id, &current)) list[found++] = current.pkey_id;
     for (i = 0; i < record_count; ++i)
         if (!found || !IsEqualGUID(&list[0], &records[i].pkey_id))
             list[found++] = records[i].pkey_id;
@@ -2268,7 +2285,7 @@ HRESULT WINAPI SLSetCurrentProductKey(HSLC handle, const SLID *sku_id, const SLI
     TRACE("(%p, %s, %s)\n", handle, wine_dbgstr_guid(sku_id), wine_dbgstr_guid(pkey_id));
     if (!get_slc_context(handle) || !sku_id || !pkey_id) return E_INVALIDARG;
     if (!(mutex = lock_product_key_store())) return E_FAIL;
-    if (!load_product_key(pkey_id, &record))
+    if (!load_product_key_locked(pkey_id, &record))
     {
         unlock_product_key_store(mutex);
         return SL_E_PKEY_NOT_INSTALLED;
@@ -2304,7 +2321,7 @@ HRESULT WINAPI SLUninstallProofOfPurchase(HSLC handle, const SLID *pkey_id)
     TRACE("(%p, %s)\n", handle, wine_dbgstr_guid(pkey_id));
     if (!get_slc_context(handle) || !pkey_id) return E_INVALIDARG;
     if (!(mutex = lock_product_key_store())) return E_FAIL;
-    if (!load_product_key(pkey_id, &record))
+    if (!load_product_key_locked(pkey_id, &record))
     {
         unlock_product_key_store(mutex);
         return SL_E_PKEY_NOT_INSTALLED;
@@ -2350,7 +2367,7 @@ HRESULT WINAPI __wine_sppc_install_product_key(HSLC handle, LPCWSTR product_key,
     if (FAILED(hr = enumerate_product_keys(NULL, &previous_count, &previous))) goto done;
     if (FAILED(hr = SLInstallProofOfPurchase(handle, algorithm, product_key, 0, NULL, pkey_id)))
         goto done;
-    if (!load_product_key(pkey_id, &record))
+    if (!load_product_key_locked(pkey_id, &record))
     {
         hr = E_FAIL;
         goto rollback;
