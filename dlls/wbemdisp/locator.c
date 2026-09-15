@@ -19,6 +19,7 @@
 #define COBJMACROS
 
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -1208,6 +1209,7 @@ static HRESULT init_members( struct object *object )
             object->members[count].is_system = FALSE;
             object->members[count].is_method = TRUE;
             object->members[count].dispid    = 0;
+            object->members[count].type      = 0;
             count++;
             if (sig_in) IWbemClassObject_Release( sig_in );
             if (sig_out) IWbemClassObject_Release( sig_out );
@@ -1285,7 +1287,23 @@ static HRESULT WINAPI object_GetIDsOfNames(
     return S_OK;
 }
 
-static BSTR get_member_name( struct object *object, DISPID dispid, CIMTYPE *type )
+static VARTYPE to_vartype( CIMTYPE type );
+
+struct method_parameter
+{
+    BSTR name;
+    CIMTYPE type;
+    LONG id;
+};
+
+static int __cdecl compare_method_parameters( const void *left, const void *right )
+{
+    const struct method_parameter *a = left, *b = right;
+
+    return (a->id > b->id) - (a->id < b->id);
+}
+
+static BSTR get_member_name( struct object *object, DISPID dispid, CIMTYPE *type, BOOL *is_method )
 {
     UINT i;
     for (i = 0; i < object->nb_members; i++)
@@ -1293,10 +1311,160 @@ static BSTR get_member_name( struct object *object, DISPID dispid, CIMTYPE *type
         if (object->members[i].dispid == dispid)
         {
             *type = object->members[i].type;
+            *is_method = object->members[i].is_method;
             return object->members[i].name;
         }
     }
     return NULL;
+}
+
+static HRESULT invoke_object_method( struct object *object, BSTR name, DISPPARAMS *params,
+        VARIANT *result, UINT *arg_err )
+{
+    IWbemClassObject *in_signature = NULL, *out_signature = NULL;
+    IWbemClassObject *in_params = NULL, *out_params = NULL;
+    struct method_parameter *method_params = NULL;
+    IWbemQualifierSet *qualifiers = NULL;
+    VARIANT class_name, path, value;
+    CIMTYPE type;
+    BSTR param_name = NULL;
+    HRESULT hr;
+    UINT i, param_count = 0;
+
+    VariantInit( &class_name );
+    VariantInit( &path );
+    if (result) VariantInit( result );
+    if (FAILED(hr = IWbemClassObject_Get( object->object, L"__CLASS", 0,
+            &class_name, NULL, NULL ))) return hr;
+    if (V_VT(&class_name) != VT_BSTR || !V_BSTR(&class_name) || wcsicmp(V_BSTR(&class_name),
+            L"SoftwareLicensingService") || wcsicmp(name, L"InstallProductKey"))
+    {
+        VariantClear( &class_name );
+        return E_NOTIMPL;
+    }
+    VariantClear( &class_name );
+    if (FAILED(hr = IWbemClassObject_Get( object->object, L"__PATH", 0, &path, NULL, NULL )))
+        return hr;
+    if (V_VT( &path ) != VT_BSTR)
+    {
+        VariantClear( &path );
+        return E_UNEXPECTED;
+    }
+    if (FAILED(hr = IWbemClassObject_GetMethod( object->object, name, 0,
+            &in_signature, &out_signature ))) goto done;
+    if (out_signature)
+    {
+        if (FAILED(hr = IWbemClassObject_BeginEnumeration( out_signature,
+                WBEM_FLAG_NONSYSTEM_ONLY ))) goto done;
+        while ((hr = IWbemClassObject_Next( out_signature, 0, &param_name,
+                NULL, NULL, NULL )) == S_OK)
+        {
+            if (wcsicmp(param_name, L"ReturnValue"))
+            {
+                SysFreeString(param_name);
+                param_name = NULL;
+                IWbemClassObject_EndEnumeration(out_signature);
+                hr = E_NOTIMPL;
+                goto done;
+            }
+            SysFreeString(param_name);
+            param_name = NULL;
+        }
+        IWbemClassObject_EndEnumeration(out_signature);
+        if (hr != WBEM_S_NO_MORE_DATA) goto done;
+        hr = S_OK;
+    }
+    if (in_signature)
+    {
+        if (FAILED(hr = IWbemClassObject_SpawnInstance( in_signature, 0, &in_params ))) goto done;
+        if (params->cArgs && !(method_params = calloc( params->cArgs, sizeof(*method_params) )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        if (FAILED(hr = IWbemClassObject_BeginEnumeration( in_signature,
+                WBEM_FLAG_NONSYSTEM_ONLY ))) goto done;
+        while ((hr = IWbemClassObject_Next( in_signature, 0, &param_name,
+                NULL, &type, NULL )) == S_OK)
+        {
+            if (param_count == params->cArgs)
+            {
+                SysFreeString( param_name );
+                param_name = NULL;
+                hr = DISP_E_BADPARAMCOUNT;
+                break;
+            }
+            if (FAILED(hr = IWbemClassObject_GetPropertyQualifierSet( in_signature,
+                    param_name, &qualifiers ))) break;
+            VariantInit( &value );
+            hr = IWbemQualifierSet_Get( qualifiers, L"ID", 0, &value, NULL );
+            IWbemQualifierSet_Release( qualifiers );
+            qualifiers = NULL;
+            if (hr == WBEM_E_NOT_FOUND)
+            {
+                V_VT(&value) = VT_I4;
+                V_I4(&value) = param_count;
+                hr = S_OK;
+            }
+            if (SUCCEEDED(hr) && V_VT(&value) != VT_I4) hr = E_UNEXPECTED;
+            if (SUCCEEDED(hr))
+            {
+                method_params[param_count].name = param_name;
+                method_params[param_count].type = type;
+                method_params[param_count++].id = V_I4(&value);
+                param_name = NULL;
+            }
+            VariantClear( &value );
+            if (FAILED(hr)) break;
+        }
+        IWbemClassObject_EndEnumeration( in_signature );
+        if (hr == WBEM_S_NO_MORE_DATA) hr = S_OK;
+        if (SUCCEEDED(hr) && param_count != params->cArgs) hr = DISP_E_BADPARAMCOUNT;
+        if (FAILED(hr)) goto done;
+
+        if (param_count > 1)
+            qsort( method_params, param_count, sizeof(*method_params), compare_method_parameters );
+        for (i = 0; i < param_count; ++i)
+        {
+            VariantInit( &value );
+            hr = VariantChangeType( &value, &params->rgvarg[param_count - i - 1], 0,
+                    to_vartype( method_params[i].type ) );
+            if (SUCCEEDED(hr)) hr = IWbemClassObject_Put( in_params, method_params[i].name,
+                    0, &value, method_params[i].type );
+            VariantClear( &value );
+            if (FAILED(hr))
+            {
+                if (arg_err) *arg_err = param_count - i - 1;
+                break;
+            }
+        }
+        if (FAILED(hr)) goto done;
+    }
+    else if (params->cArgs)
+    {
+        hr = DISP_E_BADPARAMCOUNT;
+        goto done;
+    }
+
+    hr = IWbemServices_ExecMethod( object->services->services, V_BSTR( &path ), name, 0, NULL,
+            in_params, &out_params, NULL );
+    if (SUCCEEDED(hr) && result && out_params)
+        hr = IWbemClassObject_Get( out_params, L"ReturnValue", 0, result, NULL, NULL );
+
+done:
+    if (qualifiers) IWbemQualifierSet_Release( qualifiers );
+    if (method_params)
+    {
+        for (i = 0; i < param_count; ++i) SysFreeString( method_params[i].name );
+        free( method_params );
+    }
+    SysFreeString( param_name );
+    if (out_params) IWbemClassObject_Release( out_params );
+    if (in_params) IWbemClassObject_Release( in_params );
+    if (in_signature) IWbemClassObject_Release( in_signature );
+    if (out_signature) IWbemClassObject_Release( out_signature );
+    VariantClear( &path );
+    return hr;
 }
 
 static VARTYPE to_vartype( CIMTYPE type )
@@ -1347,6 +1515,7 @@ static HRESULT WINAPI object_Invoke(
     VARTYPE vartype;
     VARIANT value;
     CIMTYPE type;
+    BOOL is_method;
     HRESULT hr;
 
     TRACE( "%p, %ld, %s, %#lx, %#x, %p, %p, %p, %p\n", object, member, debugstr_guid(riid),
@@ -1364,8 +1533,11 @@ static HRESULT WINAPI object_Invoke(
         return hr;
     }
 
-    if (!(name = get_member_name( object, member, &type )))
+    if (!(name = get_member_name( object, member, &type, &is_method )))
         return DISP_E_MEMBERNOTFOUND;
+
+    if (is_method && (flags & DISPATCH_METHOD))
+        return invoke_object_method( object, name, params, result, arg_err );
 
     if (flags == (DISPATCH_METHOD|DISPATCH_PROPERTYGET) ||
         flags == DISPATCH_PROPERTYGET)

@@ -22,6 +22,7 @@
 #include "windows.h"
 #include "initguid.h"
 #include "objidl.h"
+#include "slerror.h"
 #include "wbemdisp.h"
 #include "wbemcli.h"
 #include "wine/test.h"
@@ -547,6 +548,80 @@ static void test_locator(void)
     ISWbemLocator_Release( locator );
 }
 
+static void test_dynamic_method_invoke(void)
+{
+    ISWbemLocator *locator;
+    ISWbemServices *services;
+    ISWbemObjectSet *object_set;
+    IEnumVARIANT *enumerator;
+    VARIANT object, result, argument;
+    DISPPARAMS params = {0};
+    BSTR host, root, class_name, method_name;
+    DISPID dispid;
+    HRESULT hr;
+
+    hr = CoCreateInstance( &CLSID_SWbemLocator, NULL, CLSCTX_INPROC_SERVER,
+            &IID_ISWbemLocator, (void **)&locator );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (FAILED(hr)) return;
+    host = SysAllocString( L"localhost" );
+    root = SysAllocString( L"root\\CIMV2" );
+    hr = ISWbemLocator_ConnectServer( locator, host, root, NULL, NULL, NULL, NULL,
+            0, NULL, &services );
+    SysFreeString( root );
+    SysFreeString( host );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (FAILED(hr)) goto done_locator;
+
+    class_name = SysAllocString( L"SoftwareLicensingService" );
+    hr = ISWbemServices_InstancesOf( services, class_name, 0, NULL, &object_set );
+    SysFreeString( class_name );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (FAILED(hr)) goto done_services;
+    hr = ISWbemObjectSet_get__NewEnum( object_set, (IUnknown **)&enumerator );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (FAILED(hr)) goto done_set;
+    VariantInit( &object );
+    hr = IEnumVARIANT_Next( enumerator, 1, &object, NULL );
+    if (hr != S_OK)
+    {
+        win_skip( "SoftwareLicensingService has no instances.\n" );
+        goto done_enum;
+    }
+
+    method_name = SysAllocString( L"InstallProductKey" );
+    hr = IDispatch_GetIDsOfNames( V_DISPATCH(&object), &IID_NULL, &method_name, 1,
+            english, &dispid );
+    SysFreeString( method_name );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        VariantInit( &argument );
+        V_VT( &argument ) = VT_BSTR;
+        V_BSTR( &argument ) = SysAllocString( L"NOT-A-PRODUCT-KEY" );
+        params.rgvarg = &argument;
+        params.cArgs = 1;
+        VariantInit( &result );
+        hr = IDispatch_Invoke( V_DISPATCH(&object), dispid, &IID_NULL, english,
+                DISPATCH_METHOD, &params, &result, NULL, NULL );
+        ok( hr == SL_E_INVALID_PKEY, "expected SL_E_INVALID_PKEY, got %#lx\n", hr );
+        VariantClear( &result );
+        hr = IDispatch_Invoke( V_DISPATCH(&object), dispid, &IID_NULL, english,
+                DISPATCH_METHOD, &params, NULL, NULL, NULL );
+        ok( hr == SL_E_INVALID_PKEY, "expected SL_E_INVALID_PKEY, got %#lx\n", hr );
+        VariantClear( &argument );
+    }
+    VariantClear( &object );
+done_enum:
+    IEnumVARIANT_Release( enumerator );
+done_set:
+    ISWbemObjectSet_Release( object_set );
+done_services:
+    ISWbemServices_Release( services );
+done_locator:
+    ISWbemLocator_Release( locator );
+}
+
 static void test_namedvalueset(void)
 {
     static const WCHAR nameW[] = {'n','a','m','e',0,'2'};
@@ -640,6 +715,7 @@ START_TEST(wbemdisp)
 
     test_ParseDisplayName();
     test_locator();
+    test_dynamic_method_invoke();
     test_namedvalueset();
 
     CoUninitialize();

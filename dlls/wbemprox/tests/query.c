@@ -2179,6 +2179,39 @@ static void test_SoftwareLicensingProduct( IWbemServices *services )
     SysFreeString( wql );
 }
 
+static void test_SoftwareLicensingService( IWbemServices *services )
+{
+    BSTR wql = SysAllocString( L"wql" );
+    BSTR query = SysAllocString( L"SELECT * FROM SoftwareLicensingService" );
+    IEnumWbemClassObject *result;
+    IWbemClassObject *obj, *in_signature = NULL, *out_signature = NULL;
+    HRESULT hr;
+    DWORD count;
+
+    hr = IWbemServices_ExecQuery( services, wql, query, 0, NULL, &result );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    if (hr != S_OK) goto done;
+    hr = IEnumWbemClassObject_Next( result, 10000, 1, &obj, &count );
+    ok( hr == S_OK && count == 1, "expected one service instance, got %#lx/%lu\n", hr, count );
+    if (hr == S_OK)
+    {
+        check_property( obj, L"KeyManagementServiceHostCaching", VT_BOOL, CIM_BOOLEAN );
+        check_property( obj, L"Version", VT_BSTR, CIM_STRING );
+        hr = IWbemClassObject_GetMethod( obj, L"InstallProductKey", 0,
+                &in_signature, &out_signature );
+        ok( hr == S_OK, "InstallProductKey method missing, got %#lx\n", hr );
+        if (in_signature) check_property_nullable( in_signature, L"ProductKey", VT_NULL, CIM_STRING );
+        if (out_signature) check_property( out_signature, L"ReturnValue", VT_I4, CIM_UINT32 );
+        IWbemClassObject_Release( obj );
+    }
+    if (in_signature) IWbemClassObject_Release( in_signature );
+    if (out_signature) IWbemClassObject_Release( out_signature );
+    IEnumWbemClassObject_Release( result );
+done:
+    SysFreeString( query );
+    SysFreeString( wql );
+}
+
 static void test_Win32_DesktopMonitor( IWbemServices *services )
 {
     BSTR wql = SysAllocString( L"wql" ), query = SysAllocString( L"SELECT * FROM Win32_DesktopMonitor" );
@@ -2668,6 +2701,7 @@ START_TEST(query)
 
     /* classes */
     test_SoftwareLicensingProduct( services );
+    test_SoftwareLicensingService( services );
     test_StdRegProv( services );
     test_SystemSecurity( services );
     test_Win32_Baseboard( services );
