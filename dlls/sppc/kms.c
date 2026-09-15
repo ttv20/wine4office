@@ -18,6 +18,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "wincrypt.h"
+#include "slerror.h"
 #include "wine/debug.h"
 
 #include "kms.h"
@@ -66,11 +67,21 @@ struct rpc_request_header
     WORD context_id;
     WORD operation;
 };
+
+struct rpc_response_header
+{
+    struct rpc_header common;
+    DWORD allocation_hint;
+    WORD context_id;
+    BYTE cancel_count;
+    BYTE reserved;
+};
 #pragma pack(pop)
 
 C_ASSERT(sizeof(struct kms_request) == KMS_REQUEST_SIZE);
 C_ASSERT(sizeof(struct rpc_header) == 16);
 C_ASSERT(sizeof(struct rpc_request_header) == 24);
+C_ASSERT(sizeof(struct rpc_response_header) == 24);
 
 static HRESULT win32_error(DWORD fallback)
 {
@@ -226,7 +237,8 @@ static HRESULT receive_fragment(SOCKET socket, BYTE *buffer, DWORD capacity, DWO
     if (capacity < sizeof(*header)) return E_INVALIDARG;
     if (FAILED(hr = socket_receive_all(socket, buffer, sizeof(*header)))) return hr;
     if (header->major != 5 || header->minor != 0 || header->fragment_length < sizeof(*header) ||
-            header->fragment_length > capacity || header->auth_length)
+            header->fragment_length > capacity || header->auth_length ||
+            header->representation != 0x10)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     if (FAILED(hr = socket_receive_all(socket, buffer + sizeof(*header),
             header->fragment_length - sizeof(*header)))) return hr;
@@ -339,7 +351,7 @@ static HRESULT rpc_activate(SOCKET socket, const BYTE *request, DWORD request_si
 {
     BYTE packet[sizeof(struct rpc_request_header) + 272];
     struct rpc_request_header *header = (struct rpc_request_header *)packet;
-    struct rpc_header *reply = (struct rpc_header *)response;
+    struct rpc_response_header *reply = (struct rpc_response_header *)response;
     HRESULT hr;
 
     if (request_size > sizeof(packet) - sizeof(*header)) return E_INVALIDARG;
@@ -354,10 +366,11 @@ static HRESULT rpc_activate(SOCKET socket, const BYTE *request, DWORD request_si
     memcpy(packet + sizeof(*header), request, request_size);
     if (FAILED(hr = socket_send_all(socket, packet, sizeof(*header) + request_size)) ||
             FAILED(hr = receive_fragment(socket, response, response_capacity, response_size))) return hr;
-    if (reply->type != 2 || reply->call_id != 2 || *response_size < 24)
+    if (*response_size < sizeof(*reply) || reply->common.type != 2 ||
+            (reply->common.flags & 3) != 3 || reply->common.call_id != 2 || reply->context_id)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-    memmove(response, response + 24, *response_size - 24);
-    *response_size -= 24;
+    memmove(response, response + sizeof(*reply), *response_size - sizeof(*reply));
+    *response_size -= sizeof(*reply);
     return S_OK;
 }
 
@@ -403,6 +416,7 @@ static HRESULT parse_response(BYTE *data, DWORD size, const GUID *cmid, ULONGLON
         const BYTE request_salt[16], struct kms_response *result)
 {
     DWORD body1, body2, encrypted_size, plaintext_size, epid_size, offset, padding, rpc_status;
+    DWORD current_client_count, activation_interval, renewal_interval, referent;
     BYTE *salt, *encrypted, derived_salt[16], digest[32];
     WORD minor, major;
     GUID response_cmid;
@@ -410,19 +424,28 @@ static HRESULT parse_response(BYTE *data, DWORD size, const GUID *cmid, ULONGLON
     unsigned int i;
     HRESULT hr;
 
-    if (size < 16)
+    if (size < 12)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     body1 = *(DWORD *)(data + 0);
+    referent = *(DWORD *)(data + 4);
+    if (!referent)
+    {
+        memcpy(&rpc_status, data + 8, sizeof(rpc_status));
+        if (size != 12 || body1 || !rpc_status) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        return rpc_status & 0x80000000 ? rpc_status : HRESULT_FROM_WIN32(rpc_status);
+    }
+    if (size < 16) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     body2 = *(DWORD *)(data + 8);
-    minor = *(WORD *)(data + 12);
-    major = *(WORD *)(data + 14);
     padding = 4 + ((-(LONG)body1) & 3);
-    if (body1 != body2 || !*(DWORD *)(data + 4) || body1 < 36 ||
-            body1 > KMS_MAX_FRAGMENT - 12 - padding || size != 12 + body1 + padding ||
-            major != KMS_PROTOCOL_MAJOR || minor)
+    if (body1 != body2 || body1 > KMS_MAX_FRAGMENT - 12 - padding ||
+            size != 12 + body1 + padding)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     memcpy(&rpc_status, data + size - sizeof(rpc_status), sizeof(rpc_status));
     if (rpc_status) return rpc_status & 0x80000000 ? rpc_status : HRESULT_FROM_WIN32(rpc_status);
+    if (body1 < 36) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    minor = *(WORD *)(data + 12);
+    major = *(WORD *)(data + 14);
+    if (major != KMS_PROTOCOL_MAJOR || minor) return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     encrypted_size = body1 - 20;
     if (!encrypted_size || encrypted_size % 16 || 32 + encrypted_size > size)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
@@ -448,20 +471,23 @@ static HRESULT parse_response(BYTE *data, DWORD size, const GUID *cmid, ULONGLON
     offset += sizeof(response_cmid);
     memcpy(&response_time, encrypted + offset, sizeof(response_time));
     offset += sizeof(response_time);
-    result->current_client_count = *(DWORD *)(encrypted + offset); offset += 4;
-    result->activation_interval = *(DWORD *)(encrypted + offset); offset += 4;
-    result->renewal_interval = *(DWORD *)(encrypted + offset); offset += 4;
+    current_client_count = *(DWORD *)(encrypted + offset); offset += 4;
+    activation_interval = *(DWORD *)(encrypted + offset); offset += 4;
+    renewal_interval = *(DWORD *)(encrypted + offset); offset += 4;
     if (!IsEqualGUID(cmid, &response_cmid) || response_time != request_time ||
-            result->current_client_count < KMS_REQUIRED_CLIENTS || result->current_client_count > 1000 ||
-            !result->activation_interval || result->activation_interval > 43200 ||
-            !result->renewal_interval || result->renewal_interval > 259200)
+            current_client_count > 1000 || !activation_interval || activation_interval > 43200 ||
+            !renewal_interval || renewal_interval > 259200)
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     for (i = 0; i < 16; ++i)
         derived_salt[i] = encrypted[offset + i] ^ request_salt[i] ^ salt[i];
     if (!sha256(derived_salt, sizeof(derived_salt), digest) ||
             memcmp(digest, encrypted + offset + 16, sizeof(digest)))
         return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    if (current_client_count < KMS_REQUIRED_CLIENTS) return SL_E_VL_NOT_ENOUGH_COUNT;
     memcpy(result->epid, encrypted + 8, epid_size);
+    result->current_client_count = current_client_count;
+    result->activation_interval = activation_interval;
+    result->renewal_interval = renewal_interval;
     return S_OK;
 }
 

@@ -21,8 +21,11 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "winsock2.h"
+#include "ws2tcpip.h"
 #include "windef.h"
 #include "winbase.h"
+#include "wincrypt.h"
 #include "winerror.h"
 #include "winreg.h"
 #include "aclapi.h"
@@ -1059,6 +1062,241 @@ static void decode_hex(const char *hex, BYTE *data, DWORD size)
     for (i = 0; i < size; ++i) data[i] = (hex_value(hex[i * 2]) << 4) | hex_value(hex[i * 2 + 1]);
 }
 
+static HCRYPTKEY import_test_kms_key(HCRYPTPROV provider, const BYTE iv[16])
+{
+    static const BYTE kms_key[16] =
+        {0xcd,0x7e,0x79,0x6f,0x2a,0xb2,0x5d,0xcb,0x55,0xff,0xc8,0xef,0x83,0x64,0xc4,0x70};
+    struct
+    {
+        BLOBHEADER header;
+        DWORD size;
+        BYTE key[16];
+    } blob;
+    DWORD mode = CRYPT_MODE_CBC;
+    HCRYPTKEY key = 0;
+
+    blob.header.bType = PLAINTEXTKEYBLOB;
+    blob.header.bVersion = CUR_BLOB_VERSION;
+    blob.header.reserved = 0;
+    blob.header.aiKeyAlg = CALG_AES_128;
+    blob.size = sizeof(blob.key);
+    memcpy(blob.key, kms_key, sizeof(blob.key));
+    if (!CryptImportKey(provider, (BYTE *)&blob, sizeof(blob), 0, 0, &key) ||
+            !CryptSetKeyParam(key, KP_MODE, (BYTE *)&mode, 0) ||
+            !CryptSetKeyParam(key, KP_IV, iv, 0))
+    {
+        if (key) CryptDestroyKey(key);
+        return 0;
+    }
+    return key;
+}
+
+static BOOL set_fixture_client_count(BYTE *wire, DWORD size, DWORD count, BOOL corrupt_hash)
+{
+    DWORD body_size, encrypted_size, plaintext_size, epid_size, offset;
+    HCRYPTPROV provider = 0;
+    HCRYPTKEY key = 0;
+    BYTE *salt, *encrypted;
+    BOOL ret = FALSE;
+
+    if (size < 48) return FALSE;
+    body_size = *(DWORD *)wire;
+    if (body_size < 36 || body_size > size - 12) return FALSE;
+    encrypted_size = body_size - 20;
+    salt = wire + 16;
+    encrypted = wire + 32;
+    plaintext_size = encrypted_size;
+    if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) ||
+            !(key = import_test_kms_key(provider, salt)) ||
+            !CryptDecrypt(key, 0, TRUE, 0, encrypted, &plaintext_size)) goto done;
+    epid_size = *(DWORD *)(encrypted + 4);
+    offset = 8 + epid_size + sizeof(GUID) + sizeof(ULONGLONG);
+    if (offset + 12 + 48 > plaintext_size) goto done;
+    *(DWORD *)(encrypted + offset) = count;
+    if (corrupt_hash) encrypted[offset + 12 + 16] ^= 0x80;
+    CryptDestroyKey(key);
+    key = import_test_kms_key(provider, salt);
+    if (!key || !CryptEncrypt(key, 0, TRUE, 0, encrypted, &plaintext_size, encrypted_size) ||
+            plaintext_size != encrypted_size) goto done;
+    ret = TRUE;
+done:
+    if (key) CryptDestroyKey(key);
+    if (provider) CryptReleaseContext(provider, 0);
+    return ret;
+}
+
+#pragma pack(push,1)
+struct test_rpc_header
+{
+    BYTE major, minor, type, flags;
+    DWORD representation;
+    WORD fragment_length;
+    WORD auth_length;
+    DWORD call_id;
+};
+
+struct test_rpc_response_header
+{
+    struct test_rpc_header common;
+    DWORD allocation_hint;
+    WORD context_id;
+    BYTE cancel_count;
+    BYTE reserved;
+};
+#pragma pack(pop)
+
+struct rpc_test_server
+{
+    SOCKET listener;
+    BYTE flags;
+    DWORD representation;
+    WORD context_id;
+    HRESULT method_status;
+    DWORD error;
+};
+
+static BOOL test_socket_receive_all(SOCKET socket, BYTE *data, DWORD size)
+{
+    int received;
+
+    while (size)
+    {
+        received = recv(socket, (char *)data, size, 0);
+        if (received <= 0) return FALSE;
+        data += received;
+        size -= received;
+    }
+    return TRUE;
+}
+
+static BOOL test_socket_send_all(SOCKET socket, const BYTE *data, DWORD size)
+{
+    int sent;
+
+    while (size)
+    {
+        sent = send(socket, (const char *)data, size, 0);
+        if (sent <= 0) return FALSE;
+        data += sent;
+        size -= sent;
+    }
+    return TRUE;
+}
+
+static BOOL receive_test_rpc_request(SOCKET socket)
+{
+    struct test_rpc_header header;
+    BYTE body[8192];
+
+    if (!test_socket_receive_all(socket, (BYTE *)&header, sizeof(header)) ||
+            header.fragment_length < sizeof(header) ||
+            header.fragment_length - sizeof(header) > sizeof(body)) return FALSE;
+    return test_socket_receive_all(socket, body, header.fragment_length - sizeof(header));
+}
+
+static DWORD WINAPI rpc_test_server_thread(void *arg)
+{
+    struct rpc_test_server *server = arg;
+    struct test_rpc_response_header *response;
+    struct test_rpc_header *bind_header;
+    BYTE bind_response[56] = {0}, activation_response[36] = {0};
+    SOCKET client;
+
+    client = accept(server->listener, NULL, NULL);
+    closesocket(server->listener);
+    if (client == INVALID_SOCKET)
+    {
+        server->error = WSAGetLastError();
+        return 0;
+    }
+    if (!receive_test_rpc_request(client)) goto failed;
+    bind_header = (struct test_rpc_header *)bind_response;
+    bind_header->major = 5;
+    bind_header->type = 12;
+    bind_header->flags = 3;
+    bind_header->representation = 0x10;
+    bind_header->fragment_length = sizeof(bind_response);
+    bind_header->call_id = 1;
+    bind_response[28] = 1;
+    if (!test_socket_send_all(client, bind_response, sizeof(bind_response)) ||
+            !receive_test_rpc_request(client)) goto failed;
+    response = (struct test_rpc_response_header *)activation_response;
+    response->common.major = 5;
+    response->common.type = 2;
+    response->common.flags = server->flags;
+    response->common.representation = server->representation;
+    response->common.fragment_length = sizeof(activation_response);
+    response->common.call_id = 2;
+    response->allocation_hint = 12;
+    response->context_id = server->context_id;
+    memcpy(activation_response + sizeof(*response) + 8, &server->method_status,
+            sizeof(server->method_status));
+    if (!test_socket_send_all(client, activation_response, sizeof(activation_response)))
+        goto failed;
+    closesocket(client);
+    return 0;
+failed:
+    server->error = WSAGetLastError();
+    closesocket(client);
+    return 0;
+}
+
+static HRESULT run_rpc_envelope_test(kms_activate_fn activate, BYTE flags,
+        DWORD representation, WORD context_id)
+{
+    static const GUID sku =
+        {0x8d368fc1,0x9470,0x4be2,{0x8d,0x66,0x90,0xe8,0x36,0xcb,0xb0,0x51}};
+    static const GUID kms_id =
+        {0x1b4db7eb,0x4057,0x5ddf,{0x91,0xe0,0x36,0xde,0xc7,0x20,0x71,0xf5}};
+    static const GUID cmid =
+        {0x11111111,0x2222,0x4333,{0x84,0x44,0x55,0x55,0x55,0x55,0x55,0x55}};
+    struct rpc_test_server server = {0};
+    struct kms_response response;
+    struct sockaddr_in address;
+    int address_size = sizeof(address);
+    WSADATA wsa;
+    HANDLE thread;
+    DWORD wait;
+    HRESULT hr;
+
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) return E_FAIL;
+    server.listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server.listener == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return E_FAIL;
+    }
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(server.listener, (struct sockaddr *)&address, sizeof(address)) ||
+            getsockname(server.listener, (struct sockaddr *)&address, &address_size) ||
+            listen(server.listener, 1))
+    {
+        closesocket(server.listener);
+        WSACleanup();
+        return E_FAIL;
+    }
+    server.flags = flags;
+    server.representation = representation;
+    server.context_id = context_id;
+    server.method_status = 0xc004f042;
+    thread = CreateThread(NULL, 0, rpc_test_server_thread, &server, 0, NULL);
+    if (!thread)
+    {
+        closesocket(server.listener);
+        WSACleanup();
+        return E_FAIL;
+    }
+    hr = activate(L"127.0.0.1", ntohs(address.sin_port), &sku, &kms_id, &cmid, &response);
+    wait = WaitForSingleObject(thread, 5000);
+    ok(wait == WAIT_OBJECT_0, "RPC test server did not finish, wait %#lx.\n", wait);
+    ok(!server.error, "RPC test server failed, error %lu.\n", server.error);
+    CloseHandle(thread);
+    WSACleanup();
+    return hr;
+}
+
 static void test_kms_response_validation(void)
 {
     static const char response_hex[] =
@@ -1082,6 +1320,7 @@ static void test_kms_response_validation(void)
     kms_activate_fn activate;
     struct kms_response response;
     BYTE wire[(sizeof(response_hex) - 1) / 2];
+    BYTE short_error[12] = {0,0,0,0, 0,0,0,0, 0x42,0xf0,0x04,0xc0};
     HMODULE module = GetModuleHandleW(L"sppc.dll");
     HRESULT hr;
 
@@ -1111,6 +1350,42 @@ static void test_kms_response_validation(void)
             decrypted_salt, &response);
     ok(hr == S_OK, "Alternate non-null NDR referent was rejected, hr %#lx.\n", hr);
 
+    hr = validate(short_error, sizeof(short_error), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == 0xc004f042, "Short KMS RPC error returned %#lx.\n", hr);
+    memset(short_error + 8, 0, sizeof(DWORD));
+    hr = validate(short_error, sizeof(short_error), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Empty successful KMS response returned %#lx.\n", hr);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    ok(set_fixture_client_count(wire, sizeof(wire), 4, FALSE),
+            "Could not create a low-count KMS fixture.\n");
+    memset(&response, 0, sizeof(response));
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == SL_E_VL_NOT_ENOUGH_COUNT, "Low KMS client count returned %#lx.\n", hr);
+    ok(!response.current_client_count, "Failed activation published client count %lu.\n",
+            response.current_client_count);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    ok(set_fixture_client_count(wire, sizeof(wire), 5, FALSE),
+            "Could not create a threshold-count KMS fixture.\n");
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == S_OK && response.current_client_count == 5,
+            "Threshold KMS client count returned %#lx/count %lu.\n",
+            hr, response.current_client_count);
+
+    decode_hex(response_hex, wire, sizeof(wire));
+    ok(set_fixture_client_count(wire, sizeof(wire), 4, TRUE),
+            "Could not create a corrupt low-count KMS fixture.\n");
+    hr = validate(wire, sizeof(wire), &cmid, 132537600000000000ULL,
+            decrypted_salt, &response);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Corrupt low-count KMS response returned %#lx.\n", hr);
+
     decode_hex(response_hex, wire, sizeof(wire));
     hr = validate(wire, sizeof(wire) - sizeof(DWORD), &cmid, 132537600000000000ULL,
             decrypted_salt, &response);
@@ -1126,6 +1401,21 @@ static void test_kms_response_validation(void)
 
     hr = activate(L"127.0.0.1", 65534, &sku, &kms_id, &cmid, &response);
     ok(FAILED(hr), "Unreachable KMS server unexpectedly succeeded.\n");
+
+    hr = run_rpc_envelope_test(activate, 3, 0x10, 0);
+    ok(hr == 0xc004f042, "Valid RPC error envelope returned %#lx.\n", hr);
+    hr = run_rpc_envelope_test(activate, 1, 0x10, 0);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Non-final RPC response returned %#lx.\n", hr);
+    hr = run_rpc_envelope_test(activate, 0, 0x10, 0);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Fragmented RPC response returned %#lx.\n", hr);
+    hr = run_rpc_envelope_test(activate, 3, 0, 0);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Unsupported RPC representation returned %#lx.\n", hr);
+    hr = run_rpc_envelope_test(activate, 3, 0x10, 1);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
+            "Unexpected RPC context returned %#lx.\n", hr);
 }
 
 static void test_persisted_kms_license(void)
