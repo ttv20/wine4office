@@ -655,10 +655,11 @@ static void test_product_key_transactions(void)
     DWORD saved_type = 0, saved_size = 0, wait;
     SLID id_a, id_b, returned_id, current_id;
     HMODULE module;
-    HANDLE mutex = NULL, thread = NULL;
+    HANDLE mutex_anchor = NULL, mutex = NULL, thread = NULL;
     HKEY config_key = NULL, current_key = NULL;
     HSLC handle = NULL;
-    BOOL saved_present = FALSE, record_a = FALSE, record_b = FALSE;
+    BOOL installation_path_changed = FALSE, saved_present = FALSE;
+    BOOL mutex_owned = FALSE, record_a = FALSE, record_b = FALSE;
     LONG error;
     HRESULT hr;
 
@@ -726,6 +727,7 @@ static void test_product_key_transactions(void)
     error = RegSetValueExW(config_key, L"InstallationPath", 0, REG_SZ,
             (const BYTE *)root, (lstrlenW(root) + 1) * sizeof(WCHAR));
     if (error) goto cleanup;
+    installation_path_changed = TRUE;
 
     hr = SLOpen(&handle);
     ok(hr == S_OK, "SLOpen failed, hr %#lx.\n", hr);
@@ -811,9 +813,17 @@ static void test_product_key_transactions(void)
     ok(!error && IsEqualGUID(&current_id, &id_b),
             "Removing a non-current key changed the selection, error %lu.\n", error);
 
-    mutex = CreateMutexW(NULL, TRUE, mutex_name);
-    ok(!!mutex, "Could not lock the product-key store, error %lu.\n", GetLastError());
+    mutex_anchor = CreateMutexW(NULL, FALSE, mutex_name);
+    ok(!!mutex_anchor, "Could not keep the product-key store mutex open, error %lu.\n",
+            GetLastError());
+    if (!mutex_anchor) goto cleanup;
+    mutex = CreateMutexW(NULL, FALSE, mutex_name);
+    ok(!!mutex, "Could not open the product-key store mutex, error %lu.\n", GetLastError());
     if (!mutex) goto cleanup;
+    wait = WaitForSingleObject(mutex, 5000);
+    mutex_owned = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    ok(wait == WAIT_OBJECT_0, "Could not lock the product-key store, wait %#lx.\n", wait);
+    if (wait != WAIT_OBJECT_0) goto cleanup;
     error = load_product_key_record(&id_b, &previous);
     ok(!error, "Could not save the concurrent-read record, error %lu.\n", error);
     if (error) goto release_mutex;
@@ -836,11 +846,12 @@ restore_record:
     ok(!error, "Could not restore the transiently deleted record, error %lu.\n", error);
 release_mutex:
     ReleaseMutex(mutex);
+    mutex_owned = FALSE;
     CloseHandle(mutex);
     mutex = NULL;
     if (thread)
     {
-        wait = WaitForSingleObject(thread, 5000);
+        wait = WaitForSingleObject(thread, INFINITE);
         ok(wait == WAIT_OBJECT_0, "Metadata reader did not finish, wait %#lx.\n", wait);
         ok(read_context.hr == S_OK, "Metadata read failed, hr %#lx.\n", read_context.hr);
         ok(read_context.type == SL_DATA_SZ && read_context.value &&
@@ -851,9 +862,10 @@ release_mutex:
 cleanup:
     if (mutex)
     {
-        ReleaseMutex(mutex);
+        if (mutex_owned) ReleaseMutex(mutex);
         CloseHandle(mutex);
     }
+    if (mutex_anchor) CloseHandle(mutex_anchor);
     if (saved_sd && current_key) restore_current_key_security(current_key, saved_sd);
     if (thread) CloseHandle(thread);
     if (read_context.started) CloseHandle(read_context.started);
@@ -865,15 +877,15 @@ cleanup:
         SLClose(handle);
     }
     if (current_key) RegCloseKey(current_key);
-    if (config_key)
+    if (config_key && installation_path_changed)
     {
         if (saved_present)
             RegSetValueExW(config_key, L"InstallationPath", 0, saved_type,
                     saved_installation, saved_size);
         else
             RegDeleteValueW(config_key, L"InstallationPath");
-        RegCloseKey(config_key);
     }
+    if (config_key) RegCloseKey(config_key);
     HeapFree(GetProcessHeap(), 0, saved_installation);
     guid_to_string(&sku_id, sku_name);
     RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, CURRENT_KEY_STORE, sku_name);
