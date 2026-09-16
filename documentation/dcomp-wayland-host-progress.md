@@ -2047,6 +2047,43 @@ hardware regression. The required reordered GPU reuse test still needs a
 backend with the transport capabilities; the server's Radeon cannot exercise
 that path. No redundant controlled host run was counted as producer coverage.
 
+## Resource-stage runner and evidence, September 16
+
+Eight code commits from `7be90c0a2f8` through `0d3822533b6` implement the
+resource/lifetime corrections above. They are pushed on
+`feat/dcomp-wayland-host-20260909`, based on merged `origin/main`
+`5e053caac7dca3536dd8e53ce6d7b6b6e1658351`. The canonical build remains
+`dcomp-host-20260916`; all four changed source files' SHA256 values match its
+remote source exactly. Only affected host/WineD3D targets were rebuilt.
+Builder image: `sha256:26f3ad82302303f2c3ecbaba4455a5c2f985c71221f3cc6d50851d5826e9a2b0`.
+
+The preserved Office environment is agent `dcomp-host-probe-20260909`, container
+`wine365-dcomp-host-probe-20260909`, at
+`keremreim-bardugonet:32768`, VNC password `wine365`. Its server workspace is
+`/home/ttv20/wine365vm-agents/dcomp-host-probe-20260909`.
+Runner `runner-cancel-20260916` contains the final binaries; the latest
+WineD3D x64/i386 hashes are respectively
+`fe0a14b4ed5bafaff46e2bd60248bdbd5f7f16786cc5d90b81df759512ed0ff1` and
+`2c80849c5f9c8473e26bc78b87df89dfcacf915e18d476c2ab1cae755f3b71a6`.
+The final host Unix hash is recorded in the preceding unknown-submit section.
+
+Artifacts are under that workspace's `artifacts/`, including all stage logs,
+reproduction scripts, and `resource-lifetimes-20260916-SHA256SUMS`. Reproduce
+the final controlled suite with `unknown-submit-20260916.sh` through
+`tools/office-test-env/office-exec.sh dcomp-host-probe-20260909 --script FILE`.
+The script selects the exact task runner and `/workspace/prefix-cancel-20260916`,
+uses the assigned Wayland environment, and bounds each architecture run to
+20 seconds. The final audit found zero processes using this prefix and
+182 GiB free on the server. Existing Office/VNC sessions, prefixes and
+artifacts were preserved; nothing was deleted or killed.
+
+The personal laptop was not accessed. Controlled callbacks establish the
+tested state/lifetime behavior, not real GPU/WSI correctness. Reordered
+producer-slot reuse, native failure/teardown observation and new Outlook
+integration still need a capable approved machine. Coding gaps also remain,
+including latency-derived credit negotiation, full contributor admission,
+cross-scene/resize retention and hosted OpenGL. This is not plan completion.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
