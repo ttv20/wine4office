@@ -3361,6 +3361,7 @@ static NTSTATUS process_renderer_frame(void *args)
             return STATUS_REVISION_MISMATCH;
         if ((status = poll_renderer_frame(candidate)))
         {
+            if (status == STATUS_PENDING) return status;
             if (!candidate->reuse_recovered)
                 candidate->reuse_recovered = signal_renderer_reuse(candidate->device_queue,
                         candidate->reuse_semaphore, candidate->reuse_value);
@@ -5213,6 +5214,7 @@ struct renderer_queue_test_state
     struct renderer_root *root;
     unsigned int submits, commands, presents, waits, fences, semaphores, buffers;
     unsigned int fail_submit_number;
+    unsigned int images, memories, signals;
     BOOL cancel_on_submit, fence_ready, invalid;
     NTSTATUS cancel_status;
 };
@@ -5274,12 +5276,30 @@ static void queue_test_free_commands(VkDevice device, VkCommandPool pool, uint32
     queue_test.buffers += count;
 }
 
+static void queue_test_destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks *allocator)
+{
+    ++queue_test.images;
+}
+
+static void queue_test_free_memory(VkDevice device, VkDeviceMemory memory,
+        const VkAllocationCallbacks *allocator)
+{
+    ++queue_test.memories;
+}
+
+static VkResult queue_test_signal(VkDevice device, const VkSemaphoreSignalInfo *info)
+{
+    ++queue_test.signals;
+    return VK_SUCCESS;
+}
+
 static NTSTATUS renderer_queue_self_test(void *args)
 {
     struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
             sizeof(cancel), 31, 47};
     struct winewayland_host_renderer_frame_release release = {WINEWAYLAND_HOST_RENDERER_VERSION,
             sizeof(release), 3, 7};
+    struct winewayland_host_renderer_frame process = {0};
     struct vulkan_renderer *saved;
     struct renderer_root *root = &renderer.roots[0];
     struct renderer_device_queue *queue = &root->device_queue;
@@ -5300,6 +5320,9 @@ static NTSTATUS renderer_queue_self_test(void *args)
     renderer.p_vkDestroyFence = queue_test_destroy_fence;
     renderer.p_vkDestroySemaphore = queue_test_destroy_semaphore;
     renderer.p_vkFreeCommandBuffers = queue_test_free_commands;
+    renderer.p_vkDestroyImage = queue_test_destroy_image;
+    renderer.p_vkFreeMemory = queue_test_free_memory;
+    renderer.p_vkSignalSemaphore = queue_test_signal;
 
 #define QUEUE_TEST_CHECK(condition) do { if (!(condition)) \
     { fprintf(stderr, "Renderer queue test failed at line %u, case %u.\n", __LINE__, mode); \
@@ -5385,6 +5408,45 @@ static NTSTATUS renderer_queue_self_test(void *args)
         pthread_mutex_destroy(&queue->mutex);
         mutex_initialized = FALSE;
     }
+
+    /* Poll the production copy entry while the executor still owns the record,
+     * then while the submitted GPU copy is unfinished. Neither is a failure. */
+    memset(root, 0, sizeof(*root));
+    memset(&queue_test, 0, sizeof(queue_test));
+    QUEUE_TEST_CHECK(!pthread_mutex_init(&queue->mutex, NULL));
+    mutex_initialized = TRUE;
+    renderer.device = (VkDevice)1;
+    process.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    process.size = sizeof(process);
+    process.pool_generation = release.pool_generation;
+    process.frame_id = release.frame_id;
+    process.ready_value = process.reuse_value = 1;
+    renderer.frames[0].device_queue = queue;
+    renderer.frames[0].pool_generation = process.pool_generation;
+    renderer.frames[0].frame_id = process.frame_id;
+    renderer.frames[0].ready_value = process.ready_value;
+    renderer.frames[0].reuse_value = process.reuse_value;
+    renderer.frames[0].fence = (VkFence)1;
+    renderer.frames[0].command_buffer = (VkCommandBuffer)2;
+    renderer.frames[0].image = (VkImage)3;
+    renderer.frames[0].memory = (VkDeviceMemory)4;
+    renderer.frames[0].reuse_semaphore = (VkSemaphore)5;
+    QUEUE_TEST_CHECK(process_renderer_frame(&process) == STATUS_PENDING && !process.reusable);
+    QUEUE_TEST_CHECK(renderer.frames[0].frame_id == process.frame_id);
+    QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
+            !queue_test.fences && !queue_test.buffers);
+    renderer.frames[0].submit_done = TRUE;
+    QUEUE_TEST_CHECK(process_renderer_frame(&process) == STATUS_PENDING && !process.reusable);
+    QUEUE_TEST_CHECK(renderer.frames[0].frame_id == process.frame_id);
+    QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
+            !queue_test.fences && !queue_test.buffers);
+    queue_test.fence_ready = TRUE;
+    QUEUE_TEST_CHECK(!process_renderer_frame(&process) && process.reusable);
+    QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
+            queue_test.fences == 1 && queue_test.buffers == 1);
+    QUEUE_TEST_CHECK(!release_renderer_frame(&release));
+    QUEUE_TEST_CHECK(queue_test.images == 1 && queue_test.memories == 1 && !queue_test.signals);
+    QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
 done:
     if (cond_initialized) pthread_cond_destroy(&queue->cond);
     if (mutex_initialized) pthread_mutex_destroy(&queue->mutex);

@@ -1789,6 +1789,30 @@ personal laptop remains off limits. Generic admission, hosted OpenGL,
 cross-generation retention, complete resource budgets and new Outlook
 validation remain open.
 
+## Pending transport-copy lifetime correction, September 16
+
+Resource-budget inspection found a reachable lifetime defect in
+`process_renderer_frame()`: `poll_renderer_frame()` returning `STATUS_PENDING`
+entered the terminal-error recovery branch. A repeat query before worker
+submission or GPU completion could signal producer reuse and destroy the
+still-owned image and memory. The entry now returns pending before recovery.
+No producer reuse or memory release occurs until copy completion.
+
+The existing controlled queue fixture now calls this production entry with
+both worker submission held and the GPU fence unsignaled. It checks the live
+record, zero reuse signals, and zero image/memory/command/fence destruction.
+After fence success, only submission objects retire; explicit final release
+destroys the image and memory once. The previous five presentation cases also
+still pass. x64 and i386 returned zero on the server using the task runner and
+prefix from the preceding section. The native host rebuilt without warnings;
+no ABI or server protocol changes were needed.
+
+Evidence under the existing server Office artifacts directory:
+`frame-pending-20260916-{x86_64,i386}.log`. The deployed Unix library SHA256 is
+`72bc08667c0f4c0962bf023a1e1da639174e480fdcc212b1883564fe5ee3bd8e`.
+This validates controlled lifetime behavior, not physical GPU execution.
+Memory-budget admission work continues separately. No personal-laptop access.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
