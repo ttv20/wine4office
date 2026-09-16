@@ -1995,6 +1995,26 @@ static HRESULT wined3d_swapchain_vk_create_wayland_pool(struct wined3d_swapchain
         goto failed;
     }
 
+    /* Reserve both generations against the server's root/desktop byte limits
+     * before allocating any exportable memory. Empty slots are not importable
+     * until register_wayland_buffer_slot publishes their handles below. */
+    if (!++swapchain_vk->wayland_pool_generation)
+        ++swapchain_vk->wayland_pool_generation;
+    swapchain_vk->wayland_allocation_size = first_requirements.size;
+    swapchain_vk->wayland_memory_type_index = memory_type;
+    swapchain_vk->wayland_width = width;
+    swapchain_vk->wayland_height = height;
+    swapchain_vk->wayland_pool_binding_generation = binding->binding_generation;
+    swapchain_vk->wayland_pool_contributor_id = binding->contributor_id;
+    swapchain_vk->wayland_pool_stream_id = binding->stream_id;
+    swapchain_vk->wayland_pool_root = binding->root;
+    if ((status = wined3d_wayland_create_pool_record(swapchain_vk, binding)))
+    {
+        WARN("Could not reserve Wayland transport pool, status %#lx.\n", status);
+        goto failed_status;
+    }
+    swapchain_vk->wayland_pool_registered = true;
+
     export_memory.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
     export_memory.pNext = &dedicated;
     allocate_info.pNext = &export_memory;
@@ -2019,23 +2039,6 @@ static HRESULT wined3d_swapchain_vk_create_wayland_pool(struct wined3d_swapchain
                 &swapchain_vk->wayland_slots[i].reuse)))
             goto failed;
     }
-
-    if (!++swapchain_vk->wayland_pool_generation)
-        ++swapchain_vk->wayland_pool_generation;
-    swapchain_vk->wayland_allocation_size = first_requirements.size;
-    swapchain_vk->wayland_memory_type_index = memory_type;
-    swapchain_vk->wayland_width = width;
-    swapchain_vk->wayland_height = height;
-    swapchain_vk->wayland_pool_binding_generation = binding->binding_generation;
-    swapchain_vk->wayland_pool_contributor_id = binding->contributor_id;
-    swapchain_vk->wayland_pool_stream_id = binding->stream_id;
-    swapchain_vk->wayland_pool_root = binding->root;
-    if ((status = wined3d_wayland_create_pool_record(swapchain_vk, binding)))
-    {
-        WARN("Could not reserve Wayland transport pool, status %#lx.\n", status);
-        goto failed_status;
-    }
-    swapchain_vk->wayland_pool_registered = true;
 
     for (i = 0; i < ARRAY_SIZE(swapchain_vk->wayland_slots); ++i)
     {

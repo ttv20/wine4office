@@ -17,6 +17,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <poll.h>
 #include <pthread.h>
@@ -173,6 +174,8 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define MAX_RENDERER_QUEUE_JOBS (MAX_RENDERER_FRAMES_PER_ROOT + 2)
 #define MAX_RENDERER_INPUT_EVENTS 256
 #define MAX_RENDERER_ENTER_KEYS 64
+#define MAX_RENDERER_ROOT_MEMORY_BYTES (512ull * 1024 * 1024)
+#define MAX_RENDERER_DESKTOP_MEMORY_BYTES (1024ull * 1024 * 1024)
 
 struct renderer_frame;
 struct renderer_root;
@@ -325,6 +328,7 @@ struct renderer_root
     uint64_t snapshot_geometry_revision;
     VkBuffer snapshot_buffer;
     VkDeviceMemory snapshot_memory;
+    uint64_t snapshot_allocation_size;
     uint32_t snapshot_width;
     uint32_t snapshot_height;
     int32_t snapshot_client_x;
@@ -357,6 +361,7 @@ struct renderer_frame
     uint64_t frame_id;
     uint64_t ready_value;
     uint64_t reuse_value;
+    uint64_t allocation_size;
     uint32_t slot;
     uint32_t width;
     uint32_t height;
@@ -493,6 +498,43 @@ struct vulkan_renderer
 };
 
 static struct vulkan_renderer renderer;
+
+static BOOL account_renderer_memory(uint64_t bytes, BOOL same_root,
+        uint64_t *root_available, uint64_t *desktop_available)
+{
+    if (bytes > *desktop_available || (same_root && bytes > *root_available)) return FALSE;
+    *desktop_available -= bytes;
+    if (same_root) *root_available -= bytes;
+    return TRUE;
+}
+
+/* The event loop owns allocation and retirement. Queue workers never mutate
+ * these sizes. Count live records, including old resize generations and pinned
+ * copies, rather than Present credits, which may already have been returned.
+ * Imported memory is charged once per import, conservatively including aliases.
+ * WSI-managed storage is not included in these explicit VkDeviceMemory bytes. */
+static BOOL renderer_memory_available(const struct renderer_device_queue *queue, uint64_t bytes)
+{
+    uint64_t root_available = MAX_RENDERER_ROOT_MEMORY_BYTES;
+    uint64_t desktop_available = MAX_RENDERER_DESKTOP_MEMORY_BYTES;
+    unsigned int i;
+
+    if (!bytes || !account_renderer_memory(bytes, TRUE, &root_available, &desktop_available))
+        return FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer.slots); ++i)
+        if (!account_renderer_memory(renderer.slots[i].allocation_size,
+                renderer.slots[i].device_queue == queue, &root_available, &desktop_available))
+            return FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (!account_renderer_memory(renderer.frames[i].allocation_size,
+                renderer.frames[i].device_queue == queue, &root_available, &desktop_available))
+            return FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if (!account_renderer_memory(renderer.roots[i].snapshot_allocation_size,
+                &renderer.roots[i].device_queue == queue, &root_available, &desktop_available))
+            return FALSE;
+    return TRUE;
+}
 
 static void mark_renderer_input_lost(struct renderer_root *root,
         const struct winewayland_host_input_event *event)
@@ -3103,6 +3145,9 @@ static NTSTATUS create_renderer(void *args)
         goto failed;
     }
     if ((status = start_renderer_queue(&renderer.default_device_queue))) goto failed;
+    fprintf(stderr, "Renderer explicit-memory limits: root=%llu desktop=%llu bytes.\n",
+            (unsigned long long)MAX_RENDERER_ROOT_MEMORY_BYTES,
+            (unsigned long long)MAX_RENDERER_DESKTOP_MEMORY_BYTES);
     return STATUS_SUCCESS;
 
 failed:
@@ -3228,6 +3273,11 @@ static NTSTATUS import_renderer_slot(void *args)
     if (!slot)
     {
         status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if (!renderer_memory_available(queue, params->allocation_size))
+    {
+        status = STATUS_NO_MEMORY;
         goto done;
     }
 
@@ -3423,6 +3473,11 @@ static NTSTATUS process_renderer_frame(void *args)
     if ((vr = renderer.p_vkCreateImage(queue->device, &image_info, NULL, &pending.image)))
         goto failed;
     renderer.p_vkGetImageMemoryRequirements(queue->device, pending.image, &requirements);
+    if (!renderer_memory_available(queue, requirements.size))
+    {
+        vr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        goto failed;
+    }
     for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
          ++memory_type)
         if ((requirements.memoryTypeBits & (1u << memory_type)) &&
@@ -3512,6 +3567,7 @@ static NTSTATUS process_renderer_frame(void *args)
     pending.frame_id = frame_id;
     pending.ready_value = ready_value;
     pending.reuse_value = reuse_value;
+    pending.allocation_size = requirements.size;
     pending.slot = slot_index;
     pending.width = slot->width;
     pending.height = slot->height;
@@ -4118,12 +4174,18 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     if ((status = poll_renderer_root_present(root))) return status;
 
     size = (uint64_t)params->stride * params->height;
+    if (!renderer_memory_available(queue, size)) return STATUS_NO_MEMORY;
     buffer_info.size = size;
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if ((vr = renderer.p_vkCreateBuffer(queue->device, &buffer_info, NULL, &buffer)))
         goto failed;
     renderer.p_vkGetBufferMemoryRequirements(queue->device, buffer, &requirements);
+    if (!renderer_memory_available(queue, requirements.size))
+    {
+        vr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        goto failed;
+    }
     for (memory_type = 0; memory_type < renderer.memory_properties.memoryTypeCount;
          ++memory_type)
         if ((requirements.memoryTypeBits & (1u << memory_type)) &&
@@ -4152,6 +4214,7 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
         renderer.p_vkFreeMemory(queue->device, root->snapshot_memory, NULL);
     root->snapshot_buffer = buffer;
     root->snapshot_memory = memory;
+    root->snapshot_allocation_size = requirements.size;
     root->snapshot_revision = params->snapshot_revision;
     root->snapshot_geometry_revision = params->geometry_revision;
     root->snapshot_width = params->width;
@@ -5293,6 +5356,239 @@ static VkResult queue_test_signal(VkDevice device, const VkSemaphoreSignalInfo *
     return VK_SUCCESS;
 }
 
+static struct
+{
+    uint64_t requirements_size;
+    VkResult allocation_result;
+    unsigned int allocations, images, buffers, destroyed_buffers;
+    uint32_t pixels[4];
+} memory_test;
+
+static VkResult memory_test_create_image(VkDevice device, const VkImageCreateInfo *info,
+        const VkAllocationCallbacks *allocator, VkImage *image)
+{
+    ++memory_test.images;
+    *image = (VkImage)10;
+    return VK_SUCCESS;
+}
+
+static VkResult memory_test_create_buffer(VkDevice device, const VkBufferCreateInfo *info,
+        const VkAllocationCallbacks *allocator, VkBuffer *buffer)
+{
+    ++memory_test.buffers;
+    *buffer = (VkBuffer)11;
+    return VK_SUCCESS;
+}
+
+static void memory_test_destroy_buffer(VkDevice device, VkBuffer buffer,
+        const VkAllocationCallbacks *allocator)
+{
+    ++memory_test.destroyed_buffers;
+}
+
+static void memory_test_image_requirements(VkDevice device, VkImage image, VkMemoryRequirements *requirements)
+{
+    requirements->size = memory_test.requirements_size;
+    requirements->alignment = 1;
+    requirements->memoryTypeBits = 1;
+}
+
+static void memory_test_buffer_requirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements *requirements)
+{
+    memory_test_image_requirements(device, VK_NULL_HANDLE, requirements);
+}
+
+static VkResult memory_test_allocate(VkDevice device, const VkMemoryAllocateInfo *info,
+        const VkAllocationCallbacks *allocator, VkDeviceMemory *memory)
+{
+    ++memory_test.allocations;
+    if (memory_test.allocation_result) return memory_test.allocation_result;
+    *memory = (VkDeviceMemory)12;
+    return VK_SUCCESS;
+}
+
+static VkResult memory_test_bind_buffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory,
+        VkDeviceSize offset)
+{
+    return VK_SUCCESS;
+}
+
+static VkResult memory_test_map(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
+        VkDeviceSize size, VkMemoryMapFlags flags, void **mapped)
+{
+    if (size > sizeof(memory_test.pixels)) return VK_ERROR_MEMORY_MAP_FAILED;
+    *mapped = memory_test.pixels;
+    return VK_SUCCESS;
+}
+
+static void memory_test_unmap(VkDevice device, VkDeviceMemory memory)
+{
+}
+
+static VkResult memory_test_counter(VkDevice device, VkSemaphore semaphore, uint64_t *counter)
+{
+    *counter = semaphore == (VkSemaphore)1 ? 1 : 0;
+    return VK_SUCCESS;
+}
+
+/* Called only by the controlled fixture, which saves/restores the renderer. */
+static NTSTATUS renderer_memory_self_test(void)
+{
+    struct winewayland_host_renderer_snapshot snapshot = {0};
+    struct winewayland_host_renderer_import import = {0};
+    struct winewayland_host_renderer_frame process = {0};
+    struct winewayland_host_renderer_frame_release release = {WINEWAYLAND_HOST_RENDERER_VERSION,
+            sizeof(release), 3, 7};
+    struct renderer_root *root = &renderer.roots[0];
+    struct renderer_device_queue *queue = &root->device_queue;
+    struct renderer_frame *retained = &renderer.frames[0];
+    struct renderer_slot *slot = &renderer.slots[0];
+    uint32_t pixels[4] = {1, 2, 3, 4};
+    int fds[3] = {-1, -1, -1};
+    unsigned int i;
+    NTSTATUS status = STATUS_SUCCESS;
+
+#define MEMORY_TEST_CHECK(condition) do { if (!(condition)) \
+    { fprintf(stderr, "Renderer memory test failed at line %u.\n", __LINE__); \
+      status = STATUS_DATA_ERROR; goto done; } } while (0)
+
+    memset(&renderer, 0, sizeof(renderer));
+    memset(&queue_test, 0, sizeof(queue_test));
+    memset(&memory_test, 0, sizeof(memory_test));
+    renderer.device = queue->device = (VkDevice)1;
+    renderer.memory_properties.memoryTypeCount = 1;
+    renderer.memory_properties.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    renderer.p_vkCreateImage = memory_test_create_image;
+    renderer.p_vkDestroyImage = queue_test_destroy_image;
+    renderer.p_vkGetImageMemoryRequirements = memory_test_image_requirements;
+    renderer.p_vkCreateBuffer = memory_test_create_buffer;
+    renderer.p_vkDestroyBuffer = memory_test_destroy_buffer;
+    renderer.p_vkGetBufferMemoryRequirements = memory_test_buffer_requirements;
+    renderer.p_vkAllocateMemory = memory_test_allocate;
+    renderer.p_vkFreeMemory = queue_test_free_memory;
+    renderer.p_vkBindBufferMemory = memory_test_bind_buffer;
+    renderer.p_vkMapMemory = memory_test_map;
+    renderer.p_vkUnmapMemory = memory_test_unmap;
+    renderer.p_vkGetSemaphoreCounterValue = memory_test_counter;
+    renderer.p_vkSignalSemaphore = queue_test_signal;
+    root->root_identity = 31;
+    root->root_generation = 47;
+    root->geometry_revision = 1;
+    root->snapshot_memory = (VkDeviceMemory)13;
+    root->snapshot_buffer = (VkBuffer)14;
+    root->snapshot_allocation_size = MAX_RENDERER_ROOT_MEMORY_BYTES / 2;
+    retained->device_queue = queue;
+    retained->allocation_size = MAX_RENDERER_ROOT_MEMORY_BYTES / 2 - 16;
+    snapshot.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    snapshot.size = sizeof(snapshot);
+    snapshot.root_identity = root->root_identity;
+    snapshot.root_generation = root->root_generation;
+    snapshot.snapshot_revision = snapshot.geometry_revision = 1;
+    snapshot.width = snapshot.height = snapshot.client_width = snapshot.client_height = 2;
+    snapshot.stride = 8;
+    snapshot.flags = WINEWAYLAND_HOST_SNAPSHOT_PREMULTIPLIED;
+    snapshot.pixels = (uintptr_t)pixels;
+
+    /* The raw pixels fit exactly, but the driver's padded allocation does not.
+     * Keep the old snapshot and charge it throughout replacement preparation. */
+    memory_test.requirements_size = 32;
+    MEMORY_TEST_CHECK(update_renderer_root_snapshot(&snapshot) == STATUS_NO_MEMORY);
+    MEMORY_TEST_CHECK(!memory_test.allocations && memory_test.buffers == 1 &&
+            memory_test.destroyed_buffers == 1 && !queue_test.memories);
+    MEMORY_TEST_CHECK(!root->snapshot_revision && root->snapshot_memory == (VkDeviceMemory)13 &&
+            root->snapshot_allocation_size == MAX_RENDERER_ROOT_MEMORY_BYTES / 2);
+    memory_test.requirements_size = 16;
+    memory_test.allocation_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    MEMORY_TEST_CHECK(update_renderer_root_snapshot(&snapshot) == STATUS_NO_MEMORY);
+    MEMORY_TEST_CHECK(memory_test.allocations == 1 && !queue_test.memories && !root->snapshot_revision);
+    memory_test.allocation_result = VK_SUCCESS;
+    MEMORY_TEST_CHECK(!update_renderer_root_snapshot(&snapshot));
+    MEMORY_TEST_CHECK(memory_test.allocations == 2 && queue_test.memories == 1 &&
+            root->snapshot_allocation_size == 16 && root->snapshot_revision == 1 &&
+            !memcmp(pixels, memory_test.pixels, sizeof(pixels)));
+    MEMORY_TEST_CHECK(!update_renderer_root_snapshot(&snapshot) && memory_test.allocations == 2);
+
+    /* Another root's allocations exhaust the shared budget, even though this
+     * root has space. No buffer object or memory allocation may be attempted. */
+    renderer.slots[1].device_queue = &renderer.roots[1].device_queue;
+    renderer.slots[1].allocation_size = MAX_RENDERER_ROOT_MEMORY_BYTES;
+    renderer.slots[2].device_queue = &renderer.roots[2].device_queue;
+    renderer.slots[2].allocation_size = MAX_RENDERER_DESKTOP_MEMORY_BYTES -
+            MAX_RENDERER_ROOT_MEMORY_BYTES - MAX_RENDERER_ROOT_MEMORY_BYTES / 2;
+    ++snapshot.snapshot_revision;
+    MEMORY_TEST_CHECK(update_renderer_root_snapshot(&snapshot) == STATUS_NO_MEMORY);
+    MEMORY_TEST_CHECK(memory_test.allocations == 2 && memory_test.buffers == 3 &&
+            root->snapshot_revision == 1);
+    memset(&renderer.slots[1], 0, sizeof(renderer.slots[1]));
+    memset(&renderer.slots[2], 0, sizeof(renderer.slots[2]));
+
+    /* A failed import must consume every transferred fd, even when the claimed
+     * size is UINT64_MAX, without overflowing or allocating native resources. */
+    import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    import.size = sizeof(import);
+    import.root_identity = root->root_identity;
+    import.root_generation = root->root_generation;
+    import.pool_generation = 2;
+    import.width = import.height = 1;
+    import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
+    import.allocation_size = UINT64_MAX;
+    for (i = 0; i < ARRAY_SIZE(fds); ++i)
+        MEMORY_TEST_CHECK((fds[i] = open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0);
+    import.memory_fd = fds[0];
+    import.ready_fd = fds[1];
+    import.reuse_fd = fds[2];
+    MEMORY_TEST_CHECK(import_renderer_slot(&import) == STATUS_NO_MEMORY);
+    MEMORY_TEST_CHECK(import.memory_fd == -1 && import.ready_fd == -1 && import.reuse_fd == -1);
+    for (i = 0; i < ARRAY_SIZE(fds); ++i)
+    {
+        MEMORY_TEST_CHECK(fcntl(fds[i], F_GETFD) == -1 && errno == EBADF);
+        fds[i] = -1;
+    }
+    MEMORY_TEST_CHECK(!memory_test.images && memory_test.allocations == 2);
+
+    /* Two pool generations and a retained frame share the root budget. A copy
+     * cannot allocate until the final WSI reader releases the retained frame. */
+    slot->device_queue = queue;
+    slot->pool_generation = 1;
+    slot->width = slot->height = 1;
+    slot->ready = (VkSemaphore)1;
+    slot->reuse = (VkSemaphore)2;
+    slot->allocation_size = MAX_RENDERER_ROOT_MEMORY_BYTES / 4;
+    renderer.slots[1] = *slot;
+    renderer.slots[1].pool_generation = 2;
+    retained->allocation_size = MAX_RENDERER_ROOT_MEMORY_BYTES / 2 - 16;
+    retained->pool_generation = release.pool_generation;
+    retained->frame_id = release.frame_id;
+    retained->image = (VkImage)15;
+    retained->memory = (VkDeviceMemory)16;
+    retained->complete = TRUE;
+    root->present_source_pool_generation = release.pool_generation;
+    root->present_source_frame_id = release.frame_id;
+    root->present_fence = (VkFence)17;
+    process.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    process.size = sizeof(process);
+    process.pool_generation = slot->pool_generation;
+    process.frame_id = 1;
+    process.ready_value = process.reuse_value = 1;
+    MEMORY_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
+    MEMORY_TEST_CHECK(process_renderer_frame(&process) == STATUS_NO_MEMORY && process.reusable);
+    MEMORY_TEST_CHECK(memory_test.allocations == 2 && queue_test.signals == 1 &&
+            retained->allocation_size == MAX_RENDERER_ROOT_MEMORY_BYTES / 2 - 16);
+    root->present_fence = VK_NULL_HANDLE;
+    MEMORY_TEST_CHECK(!release_renderer_frame(&release));
+    MEMORY_TEST_CHECK(!retained->allocation_size);
+    MEMORY_TEST_CHECK(!update_renderer_root_snapshot(&snapshot) && memory_test.allocations == 3);
+    MEMORY_TEST_CHECK(root->snapshot_revision == snapshot.snapshot_revision);
+done:
+    for (i = 0; i < ARRAY_SIZE(fds); ++i)
+        if (fds[i] >= 0) close(fds[i]);
+    fprintf(stderr, "renderer_memory_self_test=%s status=%#x backend=controlled\n",
+            status ? "failed" : "passed", (unsigned int)status);
+    return status;
+#undef MEMORY_TEST_CHECK
+}
+
 static NTSTATUS renderer_queue_self_test(void *args)
 {
     struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
@@ -5447,6 +5743,9 @@ static NTSTATUS renderer_queue_self_test(void *args)
     QUEUE_TEST_CHECK(!release_renderer_frame(&release));
     QUEUE_TEST_CHECK(queue_test.images == 1 && queue_test.memories == 1 && !queue_test.signals);
     QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
+    pthread_mutex_destroy(&queue->mutex);
+    mutex_initialized = FALSE;
+    status = renderer_memory_self_test();
 done:
     if (cond_initialized) pthread_cond_destroy(&queue->cond);
     if (mutex_initialized) pthread_mutex_destroy(&queue->mutex);

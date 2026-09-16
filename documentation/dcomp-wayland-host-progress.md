@@ -1813,6 +1813,56 @@ Evidence under the existing server Office artifacts directory:
 This validates controlled lifetime behavior, not physical GPU execution.
 Memory-budget admission work continues separately. No personal-laptop access.
 
+## Explicit image-memory admission, September 16
+
+The server already limits producer pool metadata to 256 MiB per root and
+1 GiB per desktop, including two live generations. The producer nevertheless
+allocated all three exportable images before requesting that reservation.
+WineD3D now creates unbound image objects to query their exact requirements,
+reserves the server pool, and only then allocates memory and synchronization
+objects. Existing failure cleanup retires the reservation. Empty reserved
+slots cannot be imported before handle registration. This ordering correction
+built in both PE architectures; the server's existing budget tests were not
+rerun because its policy and protocol did not change. A hardware allocation
+failure test of this producer path remains unavailable on the server.
+
+The host now admits explicit Vulkan memory against 512 MiB per logical root
+device and 1 GiB across its desktop. These fixed policy limits are recorded at
+renderer startup, not advertised as available physical VRAM. Accounting uses
+driver-reported allocation sizes for imported slots, immutable copied frames,
+and uploaded window snapshots. It includes both pool generations, completed
+retained copies, in-flight readers, and the old plus proposed snapshot during
+replacement. Bounded live-record scans avoid a second mutable counter ledger;
+only the event loop allocates and retires these records. An import rejected
+by the budget still consumes all transferred FDs. Copy failure becomes terminal
+only after source reuse recovery succeeds. Replacement failure preserves the
+previous snapshot and revision.
+
+The controlled fixture now exercises the production import, copy, snapshot,
+and release entries with exact-boundary and padded memory requirements,
+driver allocation failure, aggregate exhaustion by other roots, UINT64_MAX
+import metadata and FD closure, two pool generations, and a last WSI reader
+holding the retained image. No large allocations occur in the test callbacks.
+This is a memory-lifetime/admission test, not a hardware or compositor test.
+It runs through the existing `--queue-self-test` entry in x64 and i386.
+
+The initial focused compile found a missing `fcntl.h` include in the new FD
+regression; it was added and final host/WineD3D targets rebuilt without
+warnings. The final task runner retains ABI 17 and protocol 1004. Its WineD3D
+PE files were installed using the canonical builder image's builtin-marking
+and stripping tools, and the host Unix library was replaced from that same
+task build. No full rebuild or new prefix was needed.
+
+Both final architecture runs passed with exit zero. Evidence in the server
+Office artifacts directory is `memory-budget-20260916-{x86_64,i386}.log` and
+`memory-budget-20260916.sh`. The tested host Unix library SHA256 is
+`b7c8d8d880545b70f24540cf865c774866a484c615d1ab9eff00b0b53b9b21fb`.
+
+WSI-managed storage, device-budget negotiation, and the dynamic frame-record
+cap derived from accepted credits plus WSI images remain separate work.
+These changes do not claim the complete resource-budget gate. The personal
+laptop remains unused.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
