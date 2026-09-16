@@ -2032,6 +2032,21 @@ Server artifacts: `unknown-submit-20260916-{x86_64,i386}.log` and
 `5bdff0a9fc545d3ae35a156533165ce3f5cd07117ed99a333e64b404131ffb94`.
 ABI 18/protocol 1004 unchanged. Hardware fault injection remains unverified.
 
+## Producer slot traversal correction, September 16
+
+Producer review found that the three-slot search advanced from the previous
+candidate rather than the original cursor. Starting at slot 0, its candidates
+were 0, 1, 0; it never examined slot 2 and could report `STATUS_DEVICE_BUSY`
+with a reusable slot available. Every iteration now derives its index from
+the fixed `wayland_next_slot` plus the loop offset, visiting all three slots
+once before applying backpressure. The successful cursor update is unchanged.
+
+WineD3D rebuilt and linked in x64 and i386 without warnings. This change has
+source-level traversal/lifetime review and focused build evidence, not a new
+hardware regression. The required reordered GPU reuse test still needs a
+backend with the transport capabilities; the server's Radeon cannot exercise
+that path. No redundant controlled host run was counted as producer coverage.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another

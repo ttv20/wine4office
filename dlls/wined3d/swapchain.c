@@ -2288,10 +2288,9 @@ static HRESULT wined3d_swapchain_vk_submit_wayland_frame(struct wined3d_swapchai
     if (frame_record == ARRAY_SIZE(swapchain_vk->wayland_frames))
         return HRESULT_FROM_NT(STATUS_INSUFFICIENT_RESOURCES);
 
-    slot = swapchain_vk->wayland_next_slot;
     for (n = 0; n < ARRAY_SIZE(swapchain_vk->wayland_slots); ++n)
     {
-        slot = (slot + n) % ARRAY_SIZE(swapchain_vk->wayland_slots);
+        slot = (swapchain_vk->wayland_next_slot + n) % ARRAY_SIZE(swapchain_vk->wayland_slots);
         if (!swapchain_vk->wayland_slots[slot].last_reuse_value) break;
         if (!(vk_info->vk_ops.vkGetSemaphoreCounterValue ?
                 VK_CALL(vkGetSemaphoreCounterValue)(device_vk->vk_device,
