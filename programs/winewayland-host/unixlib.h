@@ -85,7 +85,8 @@ struct winewayland_host_startup
     volatile uint32_t retained_repaints;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 17
+#define WINEWAYLAND_HOST_RENDERER_VERSION 18
+#define WINEWAYLAND_HOST_MAX_FRAME_CREDITS 16
 
 #define WINEWAYLAND_HOST_ACTION_MOVE   1
 #define WINEWAYLAND_HOST_ACTION_RESIZE 2
@@ -203,7 +204,8 @@ struct winewayland_host_renderer_import
     int32_t memory_fd;
     int32_t ready_fd;
     int32_t reuse_fd;
-    uint32_t reserved[2];
+    uint32_t frame_credit_limit;
+    uint32_t reserved;
 };
 
 struct winewayland_host_renderer_retire

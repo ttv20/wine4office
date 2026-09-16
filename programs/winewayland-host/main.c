@@ -33,6 +33,7 @@ C_ASSERT(sizeof(struct winewayland_host_startup) == 168);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
+C_ASSERT(WINEWAYLAND_HOST_MAX_FRAME_CREDITS == WINE_WAYLAND_MAX_FRAME_CREDITS);
 C_ASSERT(sizeof(struct winewayland_host_renderer_retire) == 16);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame) == 48);
 C_ASSERT(sizeof(struct winewayland_host_renderer_frame_release) == 24);
@@ -193,6 +194,7 @@ static int test_renderer(void)
         import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
         import.size = sizeof(import);
         import.pool_generation = 1;
+        import.frame_credit_limit = 3;
         import.allocation_size = 1;
         import.width = import.height = 1;
         import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
@@ -259,6 +261,7 @@ static int test_renderer_queue(void)
 {
     struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
             sizeof(cancel), 31, 47};
+    struct winewayland_host_renderer_import import = {0};
     NTSTATUS status;
 
     if (__wine_init_unix_call()) status = STATUS_DLL_NOT_FOUND;
@@ -271,7 +274,20 @@ static int test_renderer_queue(void)
         --cancel.version;
         if (WINE_UNIX_CALL(unix_renderer_root_cancel, &cancel) != STATUS_REVISION_MISMATCH)
             status = STATUS_DATA_ERROR;
-        else status = WINE_UNIX_CALL(unix_renderer_queue_self_test, NULL);
+        else
+        {
+            import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+            import.size = sizeof(import);
+            import.root_identity = 31;
+            import.root_generation = 47;
+            import.pool_generation = 2;
+            import.allocation_size = UINT64_MAX;
+            import.width = import.height = 1;
+            import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
+            import.frame_credit_limit = 3;
+            import.memory_fd = import.ready_fd = import.reuse_fd = -1;
+            status = WINE_UNIX_CALL(unix_renderer_queue_self_test, &import);
+        }
     }
     printf("renderer_queue_self_test=%s status=%#lx backend=controlled\n", status ? "failed" : "passed", status);
     return status ? 5 : 0;
@@ -1870,6 +1886,7 @@ static NTSTATUS import_buffer_slot(user_handle_t root, uint64_t host_epoch,
     import.height = pool->height;
     import.format = pool->format;
     import.slot = slot_index;
+    import.frame_credit_limit = pool->frame_credit_limit;
     import.memory_type_index = WINE_WAYLAND_BUFFER_SLOT_INFO_MEMORY_TYPE(pool->slot_info);
     import.memory_fd = import.ready_fd = import.reuse_fd = -1;
     status = wine_server_handle_to_fd(wine_server_ptr_handle(slot.memory), GENERIC_ALL,

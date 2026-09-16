@@ -1903,6 +1903,41 @@ Server artifacts: `swapchain-admission-20260916-{x86_64,i386}.log` and
 `9d42398a56d4cc06fe9df750e1df9bead51c75b981261fb1fef8656faf3acdb5`.
 No ABI changes or laptop use. Dynamic storage credits are the next step.
 
+## Credit-derived host storage limit, September 16
+
+Pool import now carries the server-approved frame-credit limit to the native
+renderer. Each copy admission counts all live records on the root's device,
+including completed/retained records across pool generations, against
+`min(16, accepted credits + current WSI image count + 2)`. Full storage returns
+pending before allocating or signaling producer reuse. A new pool import is
+also rejected before creating resources when storage is full. Final-reader
+release, not Present-credit return, makes a record available again. Pool
+metadata, including credits, must agree across every imported slot.
+
+Renderer ABI is 18. One reserved word in the 80-byte import record now carries
+credits; record size is unchanged. Both PE producers, native fixtures, Unix
+tables and the shared header agree. A compile assertion ties its maximum to
+the server's existing 16-credit maximum. The server protocol remains 1004.
+The controlled fixture now receives the real import parameter block from PE,
+then exercises the production importer with it. This covers the new field's
+x64/i386 marshalling without needing an actual Vulkan device.
+
+The storage regression holds nine completed records for three credits and
+four WSI images, plus an unrelated root's record. It verifies no allocation
+or reuse signal on the tenth copy, rejection of a new pool with FD closure,
+and restored allocation eligibility only after explicit frame release.
+All previous queue, memory and swapchain cases also pass in both architectures.
+The three host binaries rebuilt without warnings and were installed together
+into the task stage and runner. This enforces accepted pool credits; changing
+the producer's fixed three-credit request to DXGI-latency-derived negotiation
+remains separate work.
+
+Server artifacts: `frame-storage-20260916-{x86_64,i386}.log` and
+`frame-storage-20260916.sh`. Tested Unix library SHA256:
+`9ac5ac8889fe7adc85a51b0283475464f471ae7027fa9fdf82c100da03671f4f`.
+Both executions returned zero. Tests use controlled backend callbacks, not
+physical GPU or compositor validation. The personal laptop remains off limits.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
@@ -1945,6 +1980,6 @@ and Unix library into an untouched main runner is obsolete. Record the
 deployed binary hashes with each result. Native i386 host self-tests can use
 the explicit `i386-windows/winewayland-host.exe` path; the separate i386
 guest-window prefix initialization limitation above still applies.
-The current server host PE/Unix pair uses renderer ABI 17, with the root record
+The current server host PE/Unix pair uses renderer ABI 18, with the root record
 still 392 bytes and startup fixture ABI 11 now 168 bytes. Earlier Intel runners
 are not current and must not be used without renewed authorization.

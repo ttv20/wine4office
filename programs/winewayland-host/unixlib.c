@@ -349,6 +349,7 @@ struct renderer_slot
     uint32_t width;
     uint32_t height;
     uint32_t memory_type_index;
+    uint32_t frame_credit_limit;
     uint32_t slot;
     VkImage image;
     VkDeviceMemory memory;
@@ -556,6 +557,19 @@ static BOOL renderer_wsi_memory_available(const struct renderer_root *root, uint
                 &renderer.roots[i] == root, &root_available, &desktop_available))
             return FALSE;
     return TRUE;
+}
+
+static BOOL renderer_frame_storage_available(const struct renderer_device_queue *queue,
+        const struct renderer_root *root, uint32_t credits)
+{
+    unsigned int i, count = 0;
+    unsigned int limit = credits + (root ? root->swapchain_image_count : 0) + 2;
+
+    limit = min(limit, MAX_RENDERER_FRAMES_PER_ROOT);
+    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
+        if (renderer.frames[i].frame_id && renderer.frames[i].device_queue == queue)
+            ++count;
+    return count < limit;
 }
 
 static void mark_renderer_input_lost(struct renderer_root *root,
@@ -3248,7 +3262,8 @@ static NTSTATUS import_renderer_slot(void *args)
         params->format != WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM ||
         params->slot >= RENDERER_POOL_SLOTS ||
         params->memory_type_index >= renderer.memory_properties.memoryTypeCount ||
-        params->reserved[0] || params->reserved[1])
+        !params->frame_credit_limit || params->frame_credit_limit > WINEWAYLAND_HOST_MAX_FRAME_CREDITS ||
+        params->reserved)
     {
         status = STATUS_INVALID_PARAMETER;
         goto done;
@@ -3275,7 +3290,17 @@ static NTSTATUS import_renderer_slot(void *args)
         if (candidate->pool_generation && candidate->device_queue == queue)
         {
             if (candidate->pool_generation == params->pool_generation)
+            {
+                if (candidate->allocation_size != params->allocation_size ||
+                    candidate->width != params->width || candidate->height != params->height ||
+                    candidate->memory_type_index != params->memory_type_index ||
+                    candidate->frame_credit_limit != params->frame_credit_limit)
+                {
+                    status = STATUS_REVISION_MISMATCH;
+                    goto done;
+                }
                 generation_known = TRUE;
+            }
             for (j = 0; j < pool_count; ++j)
                 if (pool_generations[j] == candidate->pool_generation) break;
             if (j == pool_count && pool_count < ARRAY_SIZE(pool_generations))
@@ -3285,13 +3310,11 @@ static NTSTATUS import_renderer_slot(void *args)
             candidate->pool_generation != params->pool_generation ||
             candidate->slot != params->slot)
             continue;
-        status = candidate->allocation_size == params->allocation_size &&
-                candidate->width == params->width && candidate->height == params->height &&
-                candidate->memory_type_index == params->memory_type_index ?
-                STATUS_SUCCESS : STATUS_REVISION_MISMATCH;
+        status = STATUS_SUCCESS;
         goto done;
     }
-    if (!generation_known && pool_count >= MAX_RENDERER_POOLS_PER_ROOT)
+    if (!generation_known && (pool_count >= MAX_RENDERER_POOLS_PER_ROOT ||
+            !renderer_frame_storage_available(queue, root, params->frame_credit_limit)))
     {
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto done;
@@ -3362,6 +3385,7 @@ static NTSTATUS import_renderer_slot(void *args)
     imported.width = params->width;
     imported.height = params->height;
     imported.memory_type_index = params->memory_type_index;
+    imported.frame_credit_limit = params->frame_credit_limit;
     imported.slot = params->slot;
     *slot = imported;
     memset(&imported, 0, sizeof(imported));
@@ -3406,7 +3430,7 @@ static NTSTATUS process_renderer_frame(void *args)
     uint64_t ready_counter, reuse_counter;
     uint32_t slot_index;
     uint32_t memory_type;
-    unsigned int i, root_frame_count = 0;
+    unsigned int i;
     BOOL source_ready = FALSE;
     NTSTATUS status;
     VkResult vr;
@@ -3468,10 +3492,8 @@ static NTSTATUS process_renderer_frame(void *args)
         }
     if (!slot) return STATUS_NOT_FOUND;
     queue = slot->device_queue;
-    for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
-        if (renderer.frames[i].frame_id && renderer.frames[i].device_queue == queue)
-            ++root_frame_count;
-    if (root_frame_count >= MAX_RENDERER_FRAMES_PER_ROOT) return STATUS_PENDING;
+    if (!renderer_frame_storage_available(queue, slot->root, slot->frame_credit_limit))
+        return STATUS_PENDING;
     if ((vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->ready,
             &ready_counter)) ||
         (vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->reuse,
@@ -4968,6 +4990,7 @@ static NTSTATUS renderer_self_test(void *args)
             }
     }
     import.pool_generation = ~(uint64_t)0;
+    import.frame_credit_limit = RENDERER_POOL_SLOTS;
     import.allocation_size = requirements.size;
     import.width = import.height = 64;
     import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
@@ -5490,10 +5513,10 @@ static VkResult memory_test_counter(VkDevice device, VkSemaphore semaphore, uint
 }
 
 /* Called only by the controlled fixture, which saves/restores the renderer. */
-static NTSTATUS renderer_memory_self_test(void)
+static NTSTATUS renderer_memory_self_test(const struct winewayland_host_renderer_import *abi_import)
 {
     struct winewayland_host_renderer_snapshot snapshot = {0};
-    struct winewayland_host_renderer_import import = {0};
+    struct winewayland_host_renderer_import import = *abi_import;
     struct winewayland_host_renderer_frame process = {0};
     struct winewayland_host_renderer_frame_release release = {WINEWAYLAND_HOST_RENDERER_VERSION,
             sizeof(release), 3, 7};
@@ -5583,14 +5606,7 @@ static NTSTATUS renderer_memory_self_test(void)
 
     /* A failed import must consume every transferred fd, even when the claimed
      * size is UINT64_MAX, without overflowing or allocating native resources. */
-    import.version = WINEWAYLAND_HOST_RENDERER_VERSION;
-    import.size = sizeof(import);
-    import.root_identity = root->root_identity;
-    import.root_generation = root->root_generation;
-    import.pool_generation = 2;
-    import.width = import.height = 1;
-    import.format = WINEWAYLAND_HOST_FORMAT_BGRA8_UNORM;
-    import.allocation_size = UINT64_MAX;
+    MEMORY_TEST_CHECK(import.frame_credit_limit == 3 && import.allocation_size == UINT64_MAX);
     for (i = 0; i < ARRAY_SIZE(fds); ++i)
         MEMORY_TEST_CHECK((fds[i] = open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0);
     import.memory_fd = fds[0];
@@ -5608,6 +5624,8 @@ static NTSTATUS renderer_memory_self_test(void)
     /* Two pool generations and a retained frame share the root budget. A copy
      * cannot allocate until the final WSI reader releases the retained frame. */
     slot->device_queue = queue;
+    slot->root = root;
+    slot->frame_credit_limit = import.frame_credit_limit;
     slot->pool_generation = 1;
     slot->width = slot->height = 1;
     slot->ready = (VkSemaphore)1;
@@ -5638,6 +5656,45 @@ static NTSTATUS renderer_memory_self_test(void)
     MEMORY_TEST_CHECK(!retained->allocation_size);
     MEMORY_TEST_CHECK(!update_renderer_root_snapshot(&snapshot) && memory_test.allocations == 3);
     MEMORY_TEST_CHECK(root->snapshot_revision == snapshot.snapshot_revision);
+
+    /* Three accepted credits, four WSI images and two replacement records.
+     * Completed records still count; another root's records do not. */
+    root->swapchain_image_count = 4;
+    for (i = 0; i < 10; ++i)
+    {
+        renderer.frames[i].device_queue = i == 9 ? &renderer.roots[1].device_queue : queue;
+        renderer.frames[i].pool_generation = slot->pool_generation;
+        renderer.frames[i].frame_id = 100 + i;
+        renderer.frames[i].complete = TRUE;
+    }
+    process.reusable = 0;
+    i = memory_test.images;
+    MEMORY_TEST_CHECK(process_renderer_frame(&process) == STATUS_PENDING && !process.reusable);
+    MEMORY_TEST_CHECK(memory_test.images == i && memory_test.allocations == 3 && queue_test.signals == 1);
+
+    /* A new pool is also rejected before creating an image when the storage
+     * records are full. A single existing pool avoids the separate two-pool cap. */
+    memset(&renderer.slots[1], 0, sizeof(renderer.slots[1]));
+    import = *abi_import;
+    import.allocation_size = 16;
+    for (i = 0; i < ARRAY_SIZE(fds); ++i)
+        MEMORY_TEST_CHECK((fds[i] = open("/dev/null", O_RDONLY | O_CLOEXEC)) >= 0);
+    import.memory_fd = fds[0];
+    import.ready_fd = fds[1];
+    import.reuse_fd = fds[2];
+    MEMORY_TEST_CHECK(import_renderer_slot(&import) == STATUS_INSUFFICIENT_RESOURCES);
+    MEMORY_TEST_CHECK(!renderer.slots[1].pool_generation && memory_test.allocations == 3);
+    for (i = 0; i < ARRAY_SIZE(fds); ++i)
+    {
+        MEMORY_TEST_CHECK(fcntl(fds[i], F_GETFD) == -1 && errno == EBADF);
+        fds[i] = -1;
+    }
+    release.pool_generation = slot->pool_generation;
+    release.frame_id = 100;
+    MEMORY_TEST_CHECK(!release_renderer_frame(&release));
+    memory_test.allocation_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    MEMORY_TEST_CHECK(process_renderer_frame(&process) == STATUS_NO_MEMORY && process.reusable);
+    MEMORY_TEST_CHECK(memory_test.allocations == 4 && queue_test.signals == 2);
 done:
     for (i = 0; i < ARRAY_SIZE(fds); ++i)
         if (fds[i] >= 0) close(fds[i]);
@@ -5814,6 +5871,7 @@ static NTSTATUS renderer_swapchain_self_test(void)
 
 static NTSTATUS renderer_queue_self_test(void *args)
 {
+    const struct winewayland_host_renderer_import *abi_import = args;
     struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
             sizeof(cancel), 31, 47};
     struct winewayland_host_renderer_frame_release release = {WINEWAYLAND_HOST_RENDERER_VERSION,
@@ -5827,7 +5885,8 @@ static NTSTATUS renderer_queue_self_test(void *args)
     BOOL mutex_initialized = FALSE, cond_initialized = FALSE;
     unsigned int mode;
 
-    (void)args;
+    if (!abi_import || abi_import->version != WINEWAYLAND_HOST_RENDERER_VERSION ||
+        abi_import->size != sizeof(*abi_import)) return STATUS_REVISION_MISMATCH;
     if (renderer.device || renderer.instance || renderer.display) return STATUS_DEVICE_BUSY;
     if (!(saved = malloc(sizeof(*saved)))) return STATUS_NO_MEMORY;
     *saved = renderer;
@@ -5968,7 +6027,7 @@ static NTSTATUS renderer_queue_self_test(void *args)
     QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
     pthread_mutex_destroy(&queue->mutex);
     mutex_initialized = FALSE;
-    status = renderer_memory_self_test();
+    status = renderer_memory_self_test(abi_import);
     if (!status) status = renderer_swapchain_self_test();
 done:
     if (cond_initialized) pthread_cond_destroy(&queue->cond);
