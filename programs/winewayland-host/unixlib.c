@@ -379,6 +379,7 @@ struct renderer_frame
     VkFence fence;
     BOOL complete;
     BOOL submit_done;
+    BOOL submit_state_unknown;
     BOOL reuse_recovered;
     NTSTATUS submit_status;
 };
@@ -1837,6 +1838,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     BOOL queue_work_submitted = job->type == RENDERER_QUEUE_JOB_PRESENT_WAIT;
     BOOL fence_submitted = FALSE;
     BOOL reuse_recovered = FALSE;
+    BOOL submit_state_unknown = FALSE;
     BOOL cancelled;
     BOOL image_discarded = FALSE;
     BOOL commit_proven = FALSE;
@@ -1862,12 +1864,18 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         if (vr)
         {
             status = renderer_queue_status(vr);
-            reuse_recovered = signal_renderer_reuse(queue,
-                    job->u.frame.signal_semaphore, job->u.frame.signal_value);
+            submit_state_unknown = vr != VK_ERROR_OUT_OF_HOST_MEMORY &&
+                    vr != VK_ERROR_OUT_OF_DEVICE_MEMORY && vr != VK_ERROR_DEVICE_LOST;
+            if (!submit_state_unknown)
+                reuse_recovered = signal_renderer_reuse(queue,
+                        job->u.frame.signal_semaphore, job->u.frame.signal_value);
+            else
+                fprintf(stderr, "Vulkan transport copy submission state is unknown: %d.\n", vr);
         }
 
         pthread_mutex_lock(&queue->mutex);
         job->u.frame.frame->submit_status = status;
+        job->u.frame.frame->submit_state_unknown = submit_state_unknown;
         job->u.frame.frame->reuse_recovered = reuse_recovered;
         job->u.frame.frame->submit_done = TRUE;
         pthread_mutex_unlock(&queue->mutex);
@@ -2368,15 +2376,19 @@ static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
 {
     struct renderer_device_queue *queue = frame->device_queue;
     NTSTATUS status;
-    BOOL submit_done;
+    BOOL submit_done, submit_state_unknown;
     VkResult vr;
 
     if (!frame->fence) return frame->complete ? frame->submit_status : STATUS_SUCCESS;
     pthread_mutex_lock(&queue->mutex);
     submit_done = frame->submit_done;
     status = frame->submit_status;
+    submit_state_unknown = frame->submit_state_unknown;
     pthread_mutex_unlock(&queue->mutex);
     if (!submit_done) return STATUS_PENDING;
+    /* Only a known rejected submission or confirmed GPU retirement permits
+     * resource release. Unknown failure can have partially submitted work. */
+    if (submit_state_unknown) return status;
     if (status)
     {
         renderer.p_vkDestroyFence(queue->device, frame->fence, NULL);
@@ -5407,6 +5419,7 @@ struct renderer_queue_test_state
     unsigned int images, memories, signals;
     VkResult fence_error;
     VkResult wait_result;
+    VkResult submit_error;
     BOOL cancel_on_submit, fence_ready, invalid;
     NTSTATUS cancel_status;
 };
@@ -5429,7 +5442,7 @@ static VkResult queue_test_submit(VkQueue queue, uint32_t count, const VkSubmitI
     }
     if (queue_test.submits == queue_test.fail_submit_number)
     {
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
+        return queue_test.submit_error ? queue_test.submit_error : VK_ERROR_OUT_OF_HOST_MEMORY;
     }
     return VK_SUCCESS;
 }
@@ -6127,6 +6140,33 @@ iteration_done:
     QUEUE_TEST_CHECK(!release_renderer_frame(&release));
     QUEUE_TEST_CHECK(queue_test.images == 1 && queue_test.memories == 1 && !queue_test.signals);
     QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
+    memset(&queue_test, 0, sizeof(queue_test));
+    queue_test.root = root;
+    queue_test.fail_submit_number = 1;
+    queue_test.submit_error = VK_ERROR_UNKNOWN;
+    renderer.frames[0].device_queue = queue;
+    renderer.frames[0].pool_generation = release.pool_generation;
+    renderer.frames[0].frame_id = release.frame_id;
+    renderer.frames[0].ready_value = renderer.frames[0].reuse_value = 1;
+    renderer.frames[0].fence = (VkFence)1;
+    renderer.frames[0].command_buffer = (VkCommandBuffer)2;
+    renderer.frames[0].image = (VkImage)3;
+    renderer.frames[0].memory = (VkDeviceMemory)4;
+    memset(&job, 0, sizeof(job));
+    job.type = RENDERER_QUEUE_JOB_FRAME;
+    job.u.frame.frame = &renderer.frames[0];
+    job.u.frame.fence = renderer.frames[0].fence;
+    job.u.frame.command_buffer = renderer.frames[0].command_buffer;
+    job.u.frame.wait_semaphore = root->acquire_semaphore = (VkSemaphore)5;
+    job.u.frame.signal_semaphore = renderer.frames[0].reuse_semaphore = (VkSemaphore)6;
+    job.u.frame.wait_value = job.u.frame.signal_value = 1;
+    execute_renderer_queue_job(queue, &job);
+    process.reusable = 0;
+    QUEUE_TEST_CHECK(process_renderer_frame(&process) == STATUS_UNSUCCESSFUL && !process.reusable);
+    QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_UNSUCCESSFUL);
+    QUEUE_TEST_CHECK(renderer.frames[0].submit_state_unknown && !renderer.frames[0].complete);
+    QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
+            !queue_test.fences && !queue_test.buffers && !queue_test.invalid);
     pthread_mutex_destroy(&queue->mutex);
     mutex_initialized = FALSE;
     status = renderer_memory_self_test(abi_import);

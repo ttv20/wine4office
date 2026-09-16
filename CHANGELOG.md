@@ -27,6 +27,7 @@
 - Bound cached hosted frames by the server-approved presentation credits and active display buffers.
 - Preserve hosted GPU resources when checking for completion fails temporarily.
 - Prevent resize and native-window handoff after an unconfirmed hosted presentation failure.
+- Keep transport buffers pinned when the GPU copy submission outcome is unknown.
 - Let Office install and report KMS client product keys through OSPP and WMI while retaining only derived licensing metadata.
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.

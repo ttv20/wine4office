@@ -2008,6 +2008,30 @@ recovery gate. Compositor-side teardown observation, real WSI fault injection
 and host/device-loss recovery remain open. Unknown copy-submit outcomes need
 the corresponding source-resource pinning check. No laptop access occurred.
 
+## Unknown copy-submit outcomes, September 16
+
+The copy executor had the same unsafe assumption as the earlier presentation
+failure path: every failed `vkQueueSubmit` triggered a CPU source-reuse signal
+and permitted destruction of its command buffer and image. Allocation failure
+provides the required unchanged-submission guarantee; an unknown failure does
+not. The executor now records unknown submission state separately and neither
+signals reuse nor marks that record terminal. Polling preserves all of its
+resources, so its bytes and storage record continue to count toward admission.
+This is bounded pinning pending proven device/queue recovery, not a recovery
+implementation or an invented successful completion.
+
+The controlled regression invokes the real copy executor with
+`VK_ERROR_UNKNOWN`, then calls the production process/release entries. It
+verifies the error result, no producer reuse, a nonterminal pinned record and
+zero resource destruction. Existing allocation-failure and successful-copy
+cases continue to pass. The native host rebuilt without warnings; the full
+focused fixture returned zero through both PE architectures.
+
+Server artifacts: `unknown-submit-20260916-{x86_64,i386}.log` and
+`unknown-submit-20260916.sh`. Tested Unix SHA256:
+`5bdff0a9fc545d3ae35a156533165ce3f5cd07117ed99a333e64b404131ffb94`.
+ABI 18/protocol 1004 unchanged. Hardware fault injection remains unverified.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
