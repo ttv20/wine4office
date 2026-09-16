@@ -19,6 +19,7 @@
 - Stop repeatedly uploading unchanged window frames in the experimental Wayland host.
 - Repaint and resize hosted window frames after DirectComposition content is removed.
 - Keep newer hosted frame snapshots available during resize races and release skipped snapshot handles.
+- Repaint hosted window frames using the last authorized image when the application is not presenting new content.
 - Let Office install and report KMS client product keys through OSPP and WMI while retaining only derived licensing metadata.
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.

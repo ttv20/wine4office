@@ -29,7 +29,7 @@
 
 #include "unixlib.h"
 
-C_ASSERT(sizeof(struct winewayland_host_startup) == 160);
+C_ASSERT(sizeof(struct winewayland_host_startup) == 168);
 C_ASSERT(sizeof(struct winewayland_host_probe) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_create) == 264);
 C_ASSERT(sizeof(struct winewayland_host_renderer_import) == 80);
@@ -838,8 +838,22 @@ struct host_renderer_root
     uint64_t empty_configure_id;
     uint64_t geometry_revision;
     uint64_t present_contributor_id;
+    uint64_t present_binding_generation;
     uint64_t present_frame_id;
     uint64_t present_renderer_pool_generation;
+    struct
+    {
+        uint64_t frame_id;
+        uint64_t pool_generation;
+        uint64_t contributor_id;
+        uint64_t binding_generation;
+        uint64_t scene_generation;
+        uint64_t geometry_revision;
+        uint64_t snapshot_revision;
+        uint64_t configure_id;
+        uint32_t width;
+        uint32_t height;
+    } retained;
     uint64_t native_lease_host_epoch;
     uint64_t native_lease_scene_generation;
     uint64_t native_lease_request_id;
@@ -874,6 +888,7 @@ struct host_renderer_root
     BOOL present_submitted;
     BOOL present_active;
     BOOL restore_present;
+    BOOL repaint_present;
     BOOL native_owned;
     BOOL source_released;
     BOOL frame_snapshot_required;
@@ -1744,10 +1759,36 @@ static struct host_renderer_pool *allocate_renderer_pool(const struct host_rende
     return NULL;
 }
 
+static NTSTATUS release_retained_frame(struct host_renderer_root *root)
+{
+    struct winewayland_host_renderer_frame_release release;
+    NTSTATUS status;
+
+    if (!root->retained.frame_id) return STATUS_SUCCESS;
+    memset(&release, 0, sizeof(release));
+    release.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    release.size = sizeof(release);
+    release.pool_generation = root->retained.pool_generation;
+    release.frame_id = root->retained.frame_id;
+    status = WINE_UNIX_CALL(unix_renderer_release_frame, &release);
+    if (status && status != STATUS_NOT_FOUND) return status;
+    memset(&root->retained, 0, sizeof(root->retained));
+    if (active_fixture_startup)
+        InterlockedDecrement((LONG *)&active_fixture_startup->retained_frames);
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS retire_renderer_pool(struct host_renderer_pool *pool)
 {
     struct winewayland_host_renderer_retire retire;
     NTSTATUS status;
+    unsigned int i;
+
+    /* A retired import pool cannot leave a dangling repaint reference. The
+     * native release still waits for any already submitted WSI reader. */
+    for (i = 0; i < ARRAY_SIZE(renderer_roots); ++i)
+        if (renderer_roots[i].retained.pool_generation == pool->renderer_generation &&
+            (status = release_retained_frame(&renderer_roots[i]))) return status;
 
     memset(&retire, 0, sizeof(retire));
     retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
@@ -1867,6 +1908,7 @@ static void clear_root_present(struct host_renderer_root *root)
     root->present_snapshot_revision = 0;
     root->present_configure_id = 0;
     root->present_contributor_id = 0;
+    root->present_binding_generation = 0;
     root->present_frame_id = 0;
     root->present_renderer_pool_generation = 0;
     root->present_width = 0;
@@ -1877,6 +1919,7 @@ static void clear_root_present(struct host_renderer_root *root)
     root->terminal_backend_status = STATUS_PENDING;
     root->present_submitted = FALSE;
     root->restore_present = FALSE;
+    root->repaint_present = FALSE;
     root->source_released = FALSE;
 }
 
@@ -1911,6 +1954,29 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
     if (!root->present_active) return STATUS_SUCCESS;
     root->terminal_result = result;
     root->terminal_backend_status = backend_status;
+    if (root->present_frame_id && !root->source_released &&
+        result == WINE_WAYLAND_FRAME_RESULT_PRESENTED &&
+        root->scene_disposition == WINE_WAYLAND_SCENE_HOSTED_CONTENT &&
+        root->present_scene_generation == root->scene_generation &&
+        root->present_geometry_revision == root->geometry_revision)
+    {
+        if ((status = release_retained_frame(root))) return status;
+        /* Transfer ownership of one completed host copy, not its producer
+         * slot or Present credit. No retention across a scene/geometry change. */
+        root->retained.frame_id = root->present_frame_id;
+        root->retained.pool_generation = root->present_renderer_pool_generation;
+        root->retained.contributor_id = root->present_contributor_id;
+        root->retained.binding_generation = root->present_binding_generation;
+        root->retained.scene_generation = root->present_scene_generation;
+        root->retained.geometry_revision = root->present_geometry_revision;
+        root->retained.snapshot_revision = root->present_snapshot_revision;
+        root->retained.configure_id = root->present_configure_id;
+        root->retained.width = root->present_width;
+        root->retained.height = root->present_height;
+        root->source_released = TRUE;
+        if (active_fixture_startup)
+            InterlockedIncrement((LONG *)&active_fixture_startup->retained_frames);
+    }
     if (root->present_frame_id && !root->source_released)
     {
         memset(&release, 0, sizeof(release));
@@ -1963,6 +2029,15 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
             active_fixture_startup->empty_frame_height = root->present_height;
             InterlockedIncrement((LONG *)&active_fixture_startup->empty_frames_presented);
         }
+    }
+    if (root->repaint_present && result == WINE_WAYLAND_FRAME_RESULT_PRESENTED &&
+        root->retained.frame_id && root->present_scene_generation == root->retained.scene_generation &&
+        root->present_geometry_revision == root->retained.geometry_revision)
+    {
+        root->retained.snapshot_revision = root->present_snapshot_revision;
+        root->retained.configure_id = root->present_configure_id;
+        if (active_fixture_startup)
+            InterlockedIncrement((LONG *)&active_fixture_startup->retained_repaints);
     }
     if (root->restore_present && result == WINE_WAYLAND_FRAME_RESULT_PRESENTED)
     {
@@ -2146,12 +2221,15 @@ static NTSTATUS process_contributor_frames(struct host_renderer_root *root,
                 renderer_pool->renderer_generation, present_width,
                 present_height, present.image_index != UINT32_MAX,
                 present.present_result, renderer_status, FALSE);
+        root->present_binding_generation = frame.binding_generation;
         if (present.image_index != UINT32_MAX) root->native_owned = TRUE;
         if (renderer_status == STATUS_PENDING) return STATUS_SUCCESS;
         return complete_root_present(root, host_epoch);
     }
     return status == STATUS_NO_MORE_ENTRIES ? STATUS_SUCCESS : status;
 }
+
+static NTSTATUS process_retained_frame(struct host_renderer_root *root, uint64_t host_epoch);
 
 static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t host_epoch,
         const struct host_contributor_info *contributor, BOOL process_frames)
@@ -2161,6 +2239,10 @@ static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t ho
     uint32_t state = (contributor->info >> 16) & 0xff;
     NTSTATUS status;
 
+    if (root->retained.contributor_id == contributor->contributor_id &&
+        (state != WINE_WAYLAND_CONTRIBUTOR_BOUND || contributor->host_epoch != host_epoch ||
+         root->retained.binding_generation != contributor->binding_generation) &&
+        (status = release_retained_frame(root))) return status;
     if (state == WINE_WAYLAND_CONTRIBUTOR_REVOKED)
     {
         if ((status = retire_contributor_pools(root->root, contributor->contributor_id)))
@@ -2179,8 +2261,14 @@ static NTSTATUS process_contributor(struct host_renderer_root *root, uint64_t ho
                 &pool))) return status;
     }
     if (status != STATUS_NO_MORE_ENTRIES) return status;
-    return process_frames ? process_contributor_frames(root, host_epoch, contributor) :
-            STATUS_SUCCESS;
+    if (!process_frames) return STATUS_SUCCESS;
+    if ((status = process_contributor_frames(root, host_epoch, contributor))) return status;
+    /* Repaint only after observing this exact contributor still bound. An
+     * absent entry must not authorize a new read just because a cache exists. */
+    if (root->retained.contributor_id == contributor->contributor_id &&
+        root->retained.binding_generation == contributor->binding_generation)
+        return process_retained_frame(root, host_epoch);
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS process_root_contributors(struct host_renderer_root *root,
@@ -2210,6 +2298,7 @@ static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t h
 
     if ((status = poll_root_present(root, host_epoch))) return status;
     if (root->present_active) return STATUS_PENDING;
+    if ((status = release_retained_frame(root))) return status;
     memset(&retire, 0, sizeof(retire));
     retire.version = WINEWAYLAND_HOST_RENDERER_VERSION;
     retire.size = sizeof(retire);
@@ -2561,6 +2650,58 @@ static NTSTATUS process_restored_window(struct host_renderer_root *root, uint64_
     return complete_root_present(root, host_epoch);
 }
 
+static NTSTATUS process_retained_frame(struct host_renderer_root *root, uint64_t host_epoch)
+{
+    struct winewayland_host_renderer_present present;
+    struct winewayland_host_renderer_root sync;
+    uint64_t snapshot_revision = root->snapshot_geometry_revision == root->geometry_revision ?
+            root->snapshot_revision : 0;
+    NTSTATUS status;
+
+    if (!root->retained.frame_id || root->present_active ||
+        root->scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+        root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+        root->retained.scene_generation != root->scene_generation ||
+        root->retained.geometry_revision != root->geometry_revision ||
+        (root->frame_snapshot_required && !snapshot_revision))
+        return STATUS_SUCCESS;
+    if (root->retained.snapshot_revision == snapshot_revision &&
+        (!root->configure_request_id || root->retained.configure_id == root->configure_request_id))
+        return STATUS_SUCCESS;
+
+    memset(&sync, 0, sizeof(sync));
+    sync.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    sync.size = sizeof(sync);
+    sync.root_identity = root->root_identity;
+    sync.root_generation = root->root_generation;
+    sync.requested_width = root->retained.width;
+    sync.requested_height = root->retained.height;
+    status = WINE_UNIX_CALL(unix_renderer_root_sync, &sync);
+    if (status == STATUS_PENDING || status == STATUS_DEVICE_NOT_READY) return STATUS_SUCCESS;
+    if (status) return status;
+    if (!(sync.flags & WINEWAYLAND_HOST_ROOT_WSI_READY)) return STATUS_SUCCESS;
+
+    memset(&present, 0, sizeof(present));
+    present.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    present.size = sizeof(present);
+    present.root_identity = root->root_identity;
+    present.root_generation = root->root_generation;
+    present.source_pool_generation = root->retained.pool_generation;
+    present.source_frame_id = root->retained.frame_id;
+    present.geometry_revision = root->retained.geometry_revision;
+    present.snapshot_revision = snapshot_revision;
+    status = WINE_UNIX_CALL(unix_renderer_root_present, &present);
+    if (status == STATUS_PENDING && present.image_index == UINT32_MAX) return STATUS_SUCCESS;
+    if (status && status != STATUS_PENDING) return status;
+    /* Repainting consumes neither a new server frame nor a producer credit.
+     * The retained record owns the source until this WSI read is complete. */
+    set_root_present(root, 0, 0, 0, root->retained.width, root->retained.height,
+            present.image_index != UINT32_MAX, present.present_result, status, TRUE);
+    root->repaint_present = TRUE;
+    if (status == STATUS_PENDING) return STATUS_SUCCESS;
+    return complete_root_present(root, host_epoch);
+}
+
 static NTSTATUS process_unmapped_scene(struct host_renderer_root *root, uint64_t host_epoch)
 {
     struct winewayland_host_renderer_root_retire hide;
@@ -2671,6 +2812,13 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
     else if ((status = post_host_window_close(renderer_root, host_epoch)))
         return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
+    if (renderer_root->retained.frame_id &&
+        (renderer_root->scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
+         renderer_root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+         !(window_state.style & WS_VISIBLE) ||
+         renderer_root->retained.scene_generation != renderer_root->scene_generation ||
+         renderer_root->retained.geometry_revision != renderer_root->geometry_revision) &&
+        (status = release_retained_frame(renderer_root))) return status;
     if ((status = process_root_frame_snapshot(renderer_root, host_epoch, &window_state)))
         return status;
     if (active_fixture_startup && active_fixture_startup->frame_snapshot_test_status == STATUS_PENDING &&
@@ -3405,6 +3553,11 @@ static BOOL test_dcomp_empty_frame(HWND window, IDCompositionDevice *device, IDC
     if (FAILED(IDCompositionTarget_SetRoot(target, NULL)) || FAILED(IDCompositionDevice_Commit(device)) ||
         !wait_dcomp_empty_frame(window, startup, 0, 0, 0, 3000))
         return FALSE;
+    if (InterlockedCompareExchange((LONG *)&startup->retained_frames, 0, 0))
+    {
+        printf("dcomp_empty_frame=failed retained content survived removal\n");
+        return FALSE;
+    }
     content_frames = InterlockedCompareExchange((LONG *)&startup->presented_frames, 0, 0);
     previous_frames = InterlockedCompareExchange((LONG *)&startup->empty_frames_presented, 0, 0);
     previous_snapshots = InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0);
@@ -3444,6 +3597,52 @@ static BOOL test_dcomp_empty_frame(HWND window, IDCompositionDevice *device, IDC
     printf("dcomp_empty_frame=passed outputs=%u width=%u height=%u idle_outputs=%u idle_snapshots=%u no_producer_present=passed\n",
             startup->empty_frames_presented, startup->empty_frame_width, startup->empty_frame_height,
             startup->empty_frames_presented - previous_frames, startup->frame_snapshots - previous_snapshots);
+    return TRUE;
+}
+
+static BOOL test_dcomp_retained_frame(HWND window, struct winewayland_host_startup *startup)
+{
+    uint32_t previous_repaints = startup->retained_repaints;
+    uint32_t previous_snapshots = startup->frame_snapshots;
+    uint32_t content_frames = startup->presented_frames;
+    uint32_t discarded_frames = startup->discarded_frames;
+    uint32_t failed_frames = startup->failed_frames;
+    ULONGLONG deadline;
+
+    if (InterlockedCompareExchange((LONG *)&startup->retained_frames, 0, 0) != 1) return FALSE;
+    SetWindowTextW(window, L"DComp host retained repaint");
+    RedrawWindow(window, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+    deadline = GetTickCount64() + 3000;
+    while (GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        if (InterlockedCompareExchange((LONG *)&startup->retained_repaints, 0, 0) > previous_repaints &&
+            InterlockedCompareExchange((LONG *)&startup->frame_snapshots, 0, 0) > previous_snapshots)
+            break;
+        Sleep(20);
+    }
+    if (startup->retained_repaints == previous_repaints || startup->frame_snapshots == previous_snapshots)
+    {
+        printf("dcomp_retained_frame=failed repaint outputs=%u snapshots=%u previous_outputs=%u previous_snapshots=%u\n",
+                startup->retained_repaints, startup->frame_snapshots, previous_repaints, previous_snapshots);
+        return FALSE;
+    }
+    previous_repaints = startup->retained_repaints;
+    previous_snapshots = startup->frame_snapshots;
+    deadline = GetTickCount64() + 1000;
+    while (GetTickCount64() < deadline)
+    {
+        pump_dcomp_test_messages(window, FALSE, NULL, NULL);
+        Sleep(20);
+    }
+    if (startup->retained_frames != 1 || startup->presented_frames != content_frames ||
+        startup->discarded_frames != discarded_frames || startup->failed_frames != failed_frames ||
+        startup->retained_repaints - previous_repaints > 1 ||
+        startup->frame_snapshots - previous_snapshots > 1)
+        return FALSE;
+    printf("dcomp_retained_frame=passed retained=%u repaints=%u producer_results=%u idle_repaints=%u idle_snapshots=%u\n",
+            startup->retained_frames, startup->retained_repaints, content_frames,
+            startup->retained_repaints - previous_repaints, startup->frame_snapshots - previous_snapshots);
     return TRUE;
 }
 
@@ -3488,6 +3687,7 @@ enum dcomp_pipeline_flags
     DCOMP_TEST_INTERACTIVE = 0x100,
     DCOMP_TEST_INTERACTIVE_RESIZE = 0x200,
     DCOMP_TEST_EMPTY_FRAME = 0x400,
+    DCOMP_TEST_RETAINED_FRAME = 0x800,
 };
 
 static int test_dcomp_pipeline(unsigned int flags)
@@ -4201,6 +4401,11 @@ static int test_dcomp_pipeline(unsigned int flags)
 
     if (flags & DCOMP_TEST_EMPTY_FRAME)
     {
+        if ((flags & DCOMP_TEST_RETAINED_FRAME) && !test_dcomp_retained_frame(window, startup))
+        {
+            ret = 7;
+            goto done;
+        }
         ret = test_dcomp_empty_frame(window, dcomp_device, target, startup) ? 0 : 7;
         goto done;
     }
@@ -4633,6 +4838,8 @@ int wmain(int argc, WCHAR **argv)
         return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_INTERACTIVE | DCOMP_TEST_INTERACTIVE_RESIZE);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-empty-frame-test"))
         return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_EMPTY_FRAME);
+    if (argc == 2 && !wcscmp(argv[1], L"--dcomp-retained-frame-test"))
+        return test_dcomp_pipeline(DCOMP_TEST_FRAME | DCOMP_TEST_EMPTY_FRAME | DCOMP_TEST_RETAINED_FRAME);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-multi-root-test"))
         return test_dcomp_pipeline(DCOMP_TEST_MULTI_ROOT);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-frame-failure-test"))
@@ -4660,7 +4867,7 @@ int wmain(int argc, WCHAR **argv)
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[3], NULL, 0),
                 (HANDLE)(UINT_PTR)_wcstoui64(argv[4], NULL, 0), TRUE);
 
-    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-empty-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
+    fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-empty-frame-test | --dcomp-retained-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
     return 2;
 }

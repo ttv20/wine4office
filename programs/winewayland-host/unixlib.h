@@ -41,7 +41,7 @@ struct winewayland_host_probe
     char endpoint_path[WINEWAYLAND_HOST_NAME_MAX];
 };
 
-#define WINEWAYLAND_HOST_STARTUP_VERSION 10
+#define WINEWAYLAND_HOST_STARTUP_VERSION 11
 
 struct winewayland_host_startup
 {
@@ -81,6 +81,8 @@ struct winewayland_host_startup
     volatile uint32_t frame_snapshot_test_status;
     volatile uint32_t frame_snapshot_handles_before;
     volatile uint32_t frame_snapshot_handles_after;
+    volatile uint32_t retained_frames;
+    volatile uint32_t retained_repaints;
 };
 
 #define WINEWAYLAND_HOST_RENDERER_VERSION 16

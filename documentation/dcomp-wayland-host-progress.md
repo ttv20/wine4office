@@ -1637,6 +1637,80 @@ It was not launched. The environment's selected main runner is based on
 `/home/tester/.wine4office`; resolve whether that names the same prefix before
 attempting another runner there. Preserve that existing environment.
 
+## 2026-09-16: retained content repaint and Wine 11.17 integration
+
+Merged current `origin/main` at `5e053caac7dc`, including WineHQ 11.17.
+The task build `dcomp-host-20260916` is a copy-on-write clone of the latest
+successful canonical baseline, `48e595cdf538`, synchronized to the merged
+task source. The new `create-agent-build.sh --reuse-current` option permits
+that incremental lifecycle without starting a full main refresh. It preserves
+the baseline commit in `OWNER.env` and the focused build guard.
+
+Previously the host destroyed each completed GPU copy after its backend
+presentation. A later Wine frame snapshot therefore had no content source
+unless the application issued another Present. The host now retains one
+completed immutable copy per root, within the existing native frame-record
+cap. It tags that reference with contributor, binding, scene, geometry, pool
+and frame identities. New producer output takes priority. A frame-only repaint
+uses the retained copy only after observing that exact contributor still
+bound, with the same scene and geometry. It creates no producer frame result
+or Present credit. Successful completion records the snapshot/configure tuple
+actually submitted, so idle windows do not keep repainting.
+
+Replacement releases the previous copy before retaining the new one. Scene,
+binding, geometry, visibility and native-ownership changes invalidate it.
+Pool and root retirement release their retained references, and the existing
+native WSI-reader pin still prevents freeing an image being read. This is
+same-scene, same-size retention only. It does not authorize old pixels across
+a scene replacement or scale them during resize. Cross-generation retention,
+byte-budget admission and cancellation of already queued but not yet started
+native presentation jobs remain separate work.
+
+Focused builds passed for wineserver, ntdll, win32u, winewayland, WineD3D,
+DComp, DXGI, wow64win and the host, including both PE architectures and the
+affected Unix libraries. The main licensing-module delta from the cloned
+baseline also rebuilt before preparing the runtime. WineD3D reported its
+existing `surface.c` void-pointer-arithmetic warning; the retained-frame
+change produced no warnings. The test runner uses the coherent Wine 11.17
+stage plus these exact rebuilt modules, not selected new binaries in the old
+11.16 runner. Deployed coupled-module hashes matched the server stage.
+Server protocol remains 1004 and renderer ABI 16. Startup fixture ABI is 11,
+168 bytes, with separate retained-image and repaint counters.
+
+The x64 `--dcomp-retained-frame-test` passed with one retained image, two
+frame-only repaints, six producer results and no idle repaints or snapshots.
+The same fixture then removed the DComp root, verified no retained image
+survived, and passed Empty repaint/resize with three outputs and no additional
+producer Present. The section-handle race regression remained at one handle
+before and after. The input/fallback/rehost fixture also passed, with nine
+imports, six presentations, three host/two local activations and all eleven
+input events accepted. The i386 registration fixture passed the new shared
+startup record. These are backend/lifetime results, not scanout or Outlook
+readiness claims.
+
+Evidence was collected before personal-laptop authorization was withdrawn,
+under `elkana:/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/artifacts/`:
+`retained-20260916-02.log`, `retained-20260916-regression.log`,
+`retained-20260916-runner-SHA256SUMS` and the matching session scripts.
+The first `retained-20260916.log` is a harness failure: developer opt-in was
+still disabled, so the hosted path never ran. The corrected script enabled
+it temporarily and restored it to zero on exit.
+
+Both successful runs used a disposable private KWin and D-Bus session capped
+at 2 GiB, two CPU cores and 256 tasks, with a 120-second lifetime limit.
+They completed in 4.5 and 2.7 seconds, peaking at roughly 400 and 406 MiB.
+The last storage check reported 55 GiB free. The final shutdown audit after
+the user's stop instruction found the task unit inactive and zero processes
+with the task prefix. **Do not use the personal laptop again without renewed
+authorization**, including the runner and reproduction paths below. Keep the
+evidence and existing environments; continue source/build work on the server.
+
+The earlier Outlook prefix-identity question was resolved read-only:
+`/home/tester/.wine4office` and `/workspace/home/.wine4office` in the assigned
+Office container are different directories. The older wineserver using the
+former does not own the authenticated workspace prefix. New Outlook has not
+yet been launched or validated by this task.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
@@ -1652,9 +1726,9 @@ The setting is read once per process; restart the application after changing
 it. This controls experimental admission, not server authority or capability
 checks, which remain mandatory after opt-in.
 
-The current Intel test runner is
+The previous Intel test runner, no longer authorized for use, is
 `elkana:/home/ttv20/Projects/wine4office-testing/dcomp-host-import-20260910/runner-root-identity`.
-Use only its mature task prefixes and private compositor. The current x86-64
+Do not run it without renewed user authorization. The earlier x86-64
 guest-window fixtures use `prefix-auto-host-lifecycle-x64`, with
 `XDG_RUNTIME_DIR` set to the task's `runtime` directory,
 `WAYLAND_DISPLAY=wayland-dcomp-import`,
