@@ -1711,6 +1711,84 @@ Office container are different directories. The older wineserver using the
 former does not own the authenticated workspace prefix. New Outlook has not
 yet been launched or validated by this task.
 
+## 2026-09-16: cancel queued presentation and preserve failure-path lifetimes
+
+Confirmed that `execute_renderer_queue_job()` could enter native presentation
+after the host had observed scene removal, geometry replacement, hiding or
+loss of native ownership. Only the eventual result was discarded. The PE host
+now requests cancellation for that exact root lifetime, including retirement
+of a root no longer enumerated by the server. Cancellation and the worker's
+submission claim share the short queue mutex. No Vulkan call runs under it.
+Cancellation before the claim prevents both the recorded content read and
+`vkQueuePresentKHR`; cancellation after the claim leaves the in-flight job
+pinned until its existing completion boundary. An obsolete completion cannot
+apply a scene or restore a window.
+
+Cancellation cannot simply destroy the acquire semaphore: image acquisition
+may still be signalling it. The worker submits an empty batch that waits on
+that semaphore and signals a fence. The source image, command buffer,
+semaphores and geometry token remain pinned until the fence completes. The
+acquired-but-unpresented image is then retired with its swapchain. No
+swapchain-maintenance extension is required. This follows the Vulkan
+[acquisition](https://docs.vulkan.org/refpages/latest/refpages/source/vkAcquireNextImageKHR.html),
+[queue submission](https://docs.vulkan.org/refpages/latest/refpages/source/vkQueueSubmit.html)
+and [swapchain destruction](https://docs.vulkan.org/refpages/latest/refpages/source/vkDestroySwapchainKHR.html)
+contracts.
+
+The same review confirmed two related early-release defects. An allocation
+failure submitting the content commands left acquisition unconsumed; a
+failure submitting the final fence could leave earlier GPU reads in flight.
+Both now retain one bounded retirement job. The first drains acquisition
+without resubmitting content; the second retries only the fence, without
+presenting twice. Allocation-error retries run at a 16 ms interval on the
+per-window executor, not the event loop. Device loss is terminal. An unknown
+submission failure or inability to enqueue retirement leaves the affected
+root unavailable and its resources pinned, rather than inventing a safe
+completion. Recovery from that unavailable state remains a separate gate.
+
+`--queue-self-test` drives the real executor, cancellation, polling and release
+functions with controlled Vulkan responses. Its five deterministic cases are
+early cancellation, allocation failure while draining cancellation, a late
+cancellation invoked from inside the driver-call stub, allocation failure
+before content submission, and allocation failure of the final fence. It
+checks command/Present/wait counts, the bounded retry record, stale root
+generation rejection, idempotent cancellation, and that neither images nor
+synchronization objects nor the geometry token are released before completion.
+The PE entry also checks the new parameter-bearing Unix call and stale ABI
+rejection, including the i386 thunk. Output explicitly says
+`backend=controlled`; these tests do not validate a physical GPU or compositor.
+
+The host's two PE programs and Unix library rebuilt on the canonical task
+build, without warnings. Renderer ABI is now 17; root/retire records remain
+392/24 bytes, server protocol 1004 and startup ABI 11/168 bytes are unchanged.
+Both Unix-call tables and the no-Vulkan implementations include the new
+operations. No other Wine modules required rebuilding for this private ABI.
+
+All work after the laptop restriction ran on the server. The dedicated
+test runner is `runner-cancel-20260916` in the existing
+`dcomp-host-probe-20260909` workspace, copied by reflink from the coherent
+Wine 11.17 stage, with matching rebuilt host binaries. Tests use only
+`/workspace/prefix-cancel-20260916`; existing Office sessions were untouched.
+The initial prefix bootstrap lacked `XDG_RUNTIME_DIR` and exited before the
+fixture. That log is a harness failure, not a product result. Supplying the
+assigned task display fixed execution. An intermediate server-shutdown wait
+timed out; subsequent runs recorded each executable's zero exit code explicitly
+and the final prefix audit found no remaining task processes. No prefix,
+runner, artifact or Office container was removed.
+
+The five-case fixture passed on x64 and i386. Server evidence is under
+`/home/ttv20/wine365vm-agents/dcomp-host-probe-20260909/artifacts/`, including
+`cancel-queue-lifetimes-20260916-{x86_64,i386}.log` and
+`cancel-final-20260916-SHA256SUMS`. The final parameter-marshalling checks use
+`cancel-queue-abi-20260916-{x86_64,i386}.log` and
+`cancel-abi-final-20260916-SHA256SUMS`; both returned zero.
+Real WSI cancellation/recreation, presentation-wait failures, and device-loss
+recovery are not established by this controlled-backend fixture. The server's
+Radeon still does not satisfy the hosted transport capability gate, and the
+personal laptop remains off limits. Generic admission, hosted OpenGL,
+cross-generation retention, complete resource budgets and new Outlook
+validation remain open.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
@@ -1753,5 +1831,6 @@ and Unix library into an untouched main runner is obsolete. Record the
 deployed binary hashes with each result. Native i386 host self-tests can use
 the explicit `i386-windows/winewayland-host.exe` path; the separate i386
 guest-window prefix initialization limitation above still applies.
-The current host PE/Unix pair uses renderer ABI 16, with the root record still
-392 bytes and startup fixture ABI 10 now 160 bytes.
+The current server host PE/Unix pair uses renderer ABI 17, with the root record
+still 392 bytes and startup fixture ABI 11 now 168 bytes. Earlier Intel runners
+are not current and must not be used without renewed authorization.

@@ -85,7 +85,7 @@ struct winewayland_host_startup
     volatile uint32_t retained_repaints;
 };
 
-#define WINEWAYLAND_HOST_RENDERER_VERSION 16
+#define WINEWAYLAND_HOST_RENDERER_VERSION 17
 
 #define WINEWAYLAND_HOST_ACTION_MOVE   1
 #define WINEWAYLAND_HOST_ACTION_RESIZE 2
@@ -336,6 +336,8 @@ enum winewayland_host_unix_func
     unix_renderer_test_input,
     unix_renderer_root_snapshot,
     unix_renderer_root_action,
+    unix_renderer_root_cancel,
+    unix_renderer_queue_self_test,
     winewayland_host_unix_func_count,
 };
 

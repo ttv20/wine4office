@@ -182,6 +182,8 @@ enum renderer_queue_job_type
     RENDERER_QUEUE_JOB_FRAME,
     RENDERER_QUEUE_JOB_PRESENT,
     RENDERER_QUEUE_JOB_PRESENT_WAIT,
+    RENDERER_QUEUE_JOB_PRESENT_CANCEL,
+    RENDERER_QUEUE_JOB_PRESENT_FENCE,
 };
 
 struct renderer_queue_job
@@ -212,6 +214,7 @@ struct renderer_queue_job
             uint32_t image_index;
             uint32_t test_delay_ms;
             VkResult present_result;
+            NTSTATUS retirement_status;
         } present;
     } u;
 };
@@ -287,6 +290,9 @@ struct renderer_root
     BOOL remap_pending;
     uint64_t close_event_count;
     BOOL present_job_done;
+    BOOL present_job_claimed;
+    BOOL present_cancel_requested;
+    BOOL present_image_discarded;
     BOOL present_fence_submitted;
     BOOL present_complete;
     BOOL recreate_swapchain;
@@ -1683,6 +1689,21 @@ static NTSTATUS enqueue_renderer_queue_job_internal(struct renderer_device_queue
         const struct renderer_queue_job *job, BOOL retry);
 static void destroy_renderer_device_queue(struct renderer_device_queue *queue);
 
+static NTSTATUS cancel_renderer_present(struct renderer_root *root)
+{
+    struct renderer_device_queue *queue = &root->device_queue;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!root->present_fence) return STATUS_SUCCESS;
+    pthread_mutex_lock(&queue->mutex);
+    /* Claiming is the worker's submission boundary. Cancellation cannot
+     * revoke an in-flight driver call; its resources stay pinned as usual. */
+    if (root->present_job_claimed) status = STATUS_PENDING;
+    else root->present_cancel_requested = TRUE;
+    pthread_mutex_unlock(&queue->mutex);
+    return status;
+}
+
 static NTSTATUS renderer_queue_status(VkResult vr)
 {
     if (vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
@@ -1704,6 +1725,22 @@ static BOOL signal_renderer_reuse(struct renderer_device_queue *queue,
     return FALSE;
 }
 
+static void retry_renderer_present_retirement(struct renderer_device_queue *queue,
+        const struct renderer_queue_job *job, enum renderer_queue_job_type type,
+        NTSTATUS status, VkResult present_result, VkResult failure)
+{
+    struct renderer_queue_job retry = *job;
+
+    retry.type = type;
+    retry.u.present.retirement_status = status;
+    retry.u.present.present_result = present_result;
+    /* Only allocation errors guarantee that the failed submission changed
+     * no synchronization state. Otherwise keep this root unavailable/pinned. */
+    if ((failure != VK_ERROR_OUT_OF_HOST_MEMORY && failure != VK_ERROR_OUT_OF_DEVICE_MEMORY) ||
+        enqueue_renderer_queue_job_internal(queue, &retry, TRUE))
+        fprintf(stderr, "Vulkan presentation resources could not retire: %d.\n", failure);
+}
+
 static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         const struct renderer_queue_job *job)
 {
@@ -1717,6 +1754,8 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     BOOL queue_work_submitted = job->type == RENDERER_QUEUE_JOB_PRESENT_WAIT;
     BOOL fence_submitted = FALSE;
     BOOL reuse_recovered = FALSE;
+    BOOL cancelled;
+    BOOL image_discarded = FALSE;
     VkResult present_result = VK_SUCCESS, vr;
 
     if (job->type == RENDERER_QUEUE_JOB_FRAME)
@@ -1755,6 +1794,11 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     {
         if (job->u.present.test_delay_ms)
             usleep((useconds_t)job->u.present.test_delay_ms * 1000);
+        pthread_mutex_lock(&queue->mutex);
+        cancelled = job->u.present.root->present_cancel_requested;
+        if (!cancelled) job->u.present.root->present_job_claimed = TRUE;
+        pthread_mutex_unlock(&queue->mutex);
+        if (cancelled) goto cancel;
         submit_info.waitSemaphoreCount = 1;
         submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
         submit_info.pWaitDstStageMask = &wait_stage;
@@ -1763,7 +1807,15 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         submit_info.signalSemaphoreCount = 1;
         submit_info.pSignalSemaphores = &job->u.present.present_semaphore;
         if ((vr = renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info, VK_NULL_HANDLE)))
+        {
             status = renderer_queue_status(vr);
+            if (vr == VK_ERROR_DEVICE_LOST) goto done;
+            /* The acquire semaphore is still live after an allocation
+             * failure. Drain it, but never retry the obsolete content read. */
+            retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_CANCEL,
+                    status, VK_NOT_READY, vr);
+            return;
+        }
         else
         {
             queue_work_submitted = TRUE;
@@ -1777,6 +1829,21 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
             present_info.pNext = &present_id_info;
             present_result = renderer.p_vkQueuePresentKHR(queue->queue, &present_info);
         }
+    }
+    else if (job->type == RENDERER_QUEUE_JOB_PRESENT_CANCEL)
+    {
+        /* An allocation failure must not free the still-pending acquire
+         * semaphore. Retry one bounded record off the host event loop. */
+        usleep(16000);
+        status = job->u.present.retirement_status;
+        goto cancel;
+    }
+    else if (job->type == RENDERER_QUEUE_JOB_PRESENT_FENCE)
+    {
+        usleep(16000);
+        status = job->u.present.retirement_status;
+        present_result = job->u.present.present_result;
+        goto fence;
     }
     else
         present_result = job->u.present.present_result;
@@ -1799,21 +1866,57 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     }
     if (queue_work_submitted)
     {
+fence:
         vr = renderer.p_vkQueueSubmit(queue->queue, 0, NULL, job->u.present.fence);
         if (vr)
         {
-            if (!status) status = renderer_queue_status(vr);
+            if (vr != VK_ERROR_DEVICE_LOST)
+            {
+                retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_FENCE,
+                        status, present_result, vr);
+                return;
+            }
+            status = STATUS_DEVICE_REMOVED;
         }
         else
             fence_submitted = TRUE;
     }
 
+done:
     pthread_mutex_lock(&queue->mutex);
     job->u.present.root->present_result = present_result;
     job->u.present.root->present_job_status = status;
     job->u.present.root->present_fence_submitted = fence_submitted;
+    job->u.present.root->present_image_discarded = image_discarded;
     job->u.present.root->present_job_done = TRUE;
     pthread_mutex_unlock(&queue->mutex);
+    return;
+
+cancel:
+    /* Acquire may still be signalling. Consume its semaphore without the
+     * recorded content read or a native Present, and keep the source pinned
+     * until this fence completes. The acquired image retires with its swapchain. */
+    wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    image_discarded = TRUE;
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
+    submit_info.pWaitDstStageMask = &wait_stage;
+    vr = renderer.p_vkQueueSubmit(queue->queue, 1, &submit_info, job->u.present.fence);
+    if (vr == VK_SUCCESS)
+    {
+        fence_submitted = TRUE;
+        present_result = VK_NOT_READY;
+        if (!status) status = STATUS_RETRY;
+    }
+    else if (vr == VK_ERROR_DEVICE_LOST)
+        status = STATUS_DEVICE_REMOVED;
+    else
+    {
+        retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_CANCEL,
+                status, VK_NOT_READY, vr);
+        return;
+    }
+    goto done;
 }
 
 static void *renderer_queue_worker(void *arg)
@@ -2064,7 +2167,8 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     root->present_source_pool_generation = 0;
     root->present_source_frame_id = 0;
     root->geometry_token_revision = 0;
-    if (!root->present_fence_submitted) root->recreate_swapchain = TRUE;
+    if (!root->present_fence_submitted || root->present_image_discarded)
+        root->recreate_swapchain = TRUE;
     root->present_fence_submitted = FALSE;
     root->present_job_status = status;
     root->present_complete = TRUE;
@@ -4267,6 +4371,9 @@ static NTSTATUS present_renderer_root(void *args)
     root->present_source_pool_generation = params->source_pool_generation;
     root->present_source_frame_id = params->source_frame_id;
     root->present_job_done = FALSE;
+    root->present_job_claimed = FALSE;
+    root->present_cancel_requested = FALSE;
+    root->present_image_discarded = FALSE;
     root->present_fence_submitted = FALSE;
     root->present_complete = FALSE;
     root->present_job_status = STATUS_PENDING;
@@ -4415,6 +4522,19 @@ static NTSTATUS hide_renderer_root(void *args)
     if (wl_display_flush(renderer.display) == -1 && errno != EAGAIN)
         return STATUS_PORT_DISCONNECTED;
     return STATUS_PENDING;
+}
+
+static NTSTATUS cancel_renderer_root(void *args)
+{
+    struct winewayland_host_renderer_root_retire *params = args;
+    struct renderer_root *root;
+
+    if (params->version != WINEWAYLAND_HOST_RENDERER_VERSION || params->size != sizeof(*params))
+        return STATUS_REVISION_MISMATCH;
+    if (!params->root_identity || !params->root_generation) return STATUS_INVALID_PARAMETER;
+    if (!(root = find_renderer_root(params->root_identity, params->root_generation)))
+        return STATUS_NOT_FOUND;
+    return cancel_renderer_present(root);
 }
 
 static NTSTATUS retire_renderer_root(void *args)
@@ -5088,6 +5208,193 @@ static NTSTATUS renderer_headless_self_test(void *args)
     return status;
 }
 
+struct renderer_queue_test_state
+{
+    struct renderer_root *root;
+    unsigned int submits, commands, presents, waits, fences, semaphores, buffers;
+    unsigned int fail_submit_number;
+    BOOL cancel_on_submit, fence_ready, invalid;
+    NTSTATUS cancel_status;
+};
+
+static struct renderer_queue_test_state queue_test;
+
+static VkResult queue_test_submit(VkQueue queue, uint32_t count, const VkSubmitInfo *submits, VkFence fence)
+{
+    ++queue_test.submits;
+    if (count)
+    {
+        queue_test.invalid |= count != 1 || submits->waitSemaphoreCount != 1 ||
+                submits->pWaitSemaphores[0] != queue_test.root->acquire_semaphore;
+        queue_test.commands += submits->commandBufferCount;
+        if (!submits->commandBufferCount)
+            queue_test.invalid |= submits->signalSemaphoreCount != 0 || !fence ||
+                    submits->pWaitDstStageMask[0] != VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        if (queue_test.cancel_on_submit)
+            queue_test.cancel_status = cancel_renderer_present(queue_test.root);
+    }
+    if (queue_test.submits == queue_test.fail_submit_number)
+    {
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    return VK_SUCCESS;
+}
+
+static VkResult queue_test_present(VkQueue queue, const VkPresentInfoKHR *info)
+{
+    ++queue_test.presents;
+    return VK_SUCCESS;
+}
+
+static VkResult queue_test_wait(VkDevice device, VkSwapchainKHR swapchain, uint64_t id, uint64_t timeout)
+{
+    ++queue_test.waits;
+    return VK_SUCCESS;
+}
+
+static VkResult queue_test_fence_status(VkDevice device, VkFence fence)
+{
+    return queue_test.fence_ready ? VK_SUCCESS : VK_NOT_READY;
+}
+
+static void queue_test_destroy_fence(VkDevice device, VkFence fence, const VkAllocationCallbacks *allocator)
+{
+    ++queue_test.fences;
+}
+
+static void queue_test_destroy_semaphore(VkDevice device, VkSemaphore semaphore,
+        const VkAllocationCallbacks *allocator)
+{
+    ++queue_test.semaphores;
+}
+
+static void queue_test_free_commands(VkDevice device, VkCommandPool pool, uint32_t count,
+        const VkCommandBuffer *commands)
+{
+    queue_test.buffers += count;
+}
+
+static NTSTATUS renderer_queue_self_test(void *args)
+{
+    struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
+            sizeof(cancel), 31, 47};
+    struct winewayland_host_renderer_frame_release release = {WINEWAYLAND_HOST_RENDERER_VERSION,
+            sizeof(release), 3, 7};
+    struct vulkan_renderer *saved;
+    struct renderer_root *root = &renderer.roots[0];
+    struct renderer_device_queue *queue = &root->device_queue;
+    struct renderer_queue_job job = {0}, retry;
+    NTSTATUS status = STATUS_SUCCESS;
+    BOOL mutex_initialized = FALSE, cond_initialized = FALSE;
+    unsigned int mode;
+
+    (void)args;
+    if (renderer.device || renderer.instance || renderer.display) return STATUS_DEVICE_BUSY;
+    if (!(saved = malloc(sizeof(*saved)))) return STATUS_NO_MEMORY;
+    *saved = renderer;
+    memset(&renderer, 0, sizeof(renderer));
+    renderer.p_vkQueueSubmit = queue_test_submit;
+    renderer.p_vkQueuePresentKHR = queue_test_present;
+    renderer.p_vkWaitForPresentKHR = queue_test_wait;
+    renderer.p_vkGetFenceStatus = queue_test_fence_status;
+    renderer.p_vkDestroyFence = queue_test_destroy_fence;
+    renderer.p_vkDestroySemaphore = queue_test_destroy_semaphore;
+    renderer.p_vkFreeCommandBuffers = queue_test_free_commands;
+
+#define QUEUE_TEST_CHECK(condition) do { if (!(condition)) \
+    { fprintf(stderr, "Renderer queue test failed at line %u, case %u.\n", __LINE__, mode); \
+      status = STATUS_DATA_ERROR; goto done; } } while (0)
+
+    /* Real executor, cancellation and resource-release paths with controlled
+     * Vulkan responses. No display/device creation or timing-based race. */
+    for (mode = 0; mode < 5; ++mode)
+    {
+        memset(root, 0, sizeof(*root));
+        memset(&queue_test, 0, sizeof(queue_test));
+        queue_test.root = root;
+        queue_test.fail_submit_number = mode == 1 || mode == 3 ? 1 : mode == 4 ? 2 : 0;
+        queue_test.cancel_on_submit = mode == 2;
+        QUEUE_TEST_CHECK(!pthread_mutex_init(&queue->mutex, NULL));
+        mutex_initialized = TRUE;
+        QUEUE_TEST_CHECK(!pthread_cond_init(&queue->cond, NULL));
+        cond_initialized = TRUE;
+        queue->thread_started = TRUE; /* Drive the bounded retry queue explicitly. */
+        root->root_identity = cancel.root_identity;
+        root->root_generation = cancel.root_generation;
+        root->present_fence = (VkFence)1;
+        root->acquire_semaphore = (VkSemaphore)2;
+        root->present_semaphore = (VkSemaphore)3;
+        root->present_command_buffer = (VkCommandBuffer)4;
+        root->present_source_pool_generation = release.pool_generation;
+        root->present_source_frame_id = release.frame_id;
+        root->geometry_token_revision = 5;
+        renderer.frames[0].pool_generation = release.pool_generation;
+        renderer.frames[0].frame_id = release.frame_id;
+        renderer.frames[0].complete = TRUE;
+        job.type = RENDERER_QUEUE_JOB_PRESENT;
+        job.u.present.root = root;
+        job.u.present.acquire_semaphore = root->acquire_semaphore;
+        job.u.present.present_semaphore = root->present_semaphore;
+        job.u.present.command_buffer = root->present_command_buffer;
+        job.u.present.fence = root->present_fence;
+
+        --cancel.root_generation;
+        QUEUE_TEST_CHECK(cancel_renderer_root(&cancel) == STATUS_NOT_FOUND);
+        ++cancel.root_generation;
+        QUEUE_TEST_CHECK(!root->present_cancel_requested);
+        if (mode < 2)
+        {
+            QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
+            QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
+        }
+        execute_renderer_queue_job(queue, &job);
+        if (mode == 1 || mode >= 3)
+        {
+            QUEUE_TEST_CHECK(!root->present_job_done && queue->count == 1);
+            QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
+            retry = queue->jobs[queue->head];
+            queue->head = (queue->head + 1) % ARRAY_SIZE(queue->jobs);
+            --queue->count;
+            QUEUE_TEST_CHECK(retry.type == (mode == 4 ? RENDERER_QUEUE_JOB_PRESENT_FENCE :
+                    RENDERER_QUEUE_JOB_PRESENT_CANCEL));
+            execute_renderer_queue_job(queue, &retry);
+        }
+        QUEUE_TEST_CHECK(root->present_job_done && root->present_fence_submitted && !queue_test.invalid);
+        QUEUE_TEST_CHECK(queue_test.submits == (!mode ? 1 : mode == 4 ? 3 : 2));
+        QUEUE_TEST_CHECK(queue_test.commands == (mode >= 2));
+        QUEUE_TEST_CHECK(queue_test.presents == (mode == 2 || mode == 4) &&
+                queue_test.waits == queue_test.presents);
+        QUEUE_TEST_CHECK(root->present_job_status == (mode < 2 ? STATUS_RETRY :
+                mode == 3 ? STATUS_NO_MEMORY : STATUS_SUCCESS));
+        if (mode == 2)
+            QUEUE_TEST_CHECK(queue_test.cancel_status == STATUS_PENDING && !root->present_cancel_requested);
+        QUEUE_TEST_CHECK(poll_renderer_root_present(root) == STATUS_PENDING);
+        QUEUE_TEST_CHECK(root->geometry_token_revision && !root->present_complete);
+        QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
+        QUEUE_TEST_CHECK(!queue_test.fences && !queue_test.semaphores && !queue_test.buffers);
+        queue_test.fence_ready = TRUE;
+        QUEUE_TEST_CHECK(!poll_renderer_root_present(root));
+        QUEUE_TEST_CHECK(!root->geometry_token_revision && root->present_complete);
+        QUEUE_TEST_CHECK(root->recreate_swapchain == (mode < 2 || mode == 3));
+        QUEUE_TEST_CHECK(queue_test.fences == 1 && queue_test.semaphores == 2 && queue_test.buffers == 1);
+        QUEUE_TEST_CHECK(!release_renderer_frame(&release));
+        QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
+        QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
+        pthread_cond_destroy(&queue->cond);
+        cond_initialized = FALSE;
+        pthread_mutex_destroy(&queue->mutex);
+        mutex_initialized = FALSE;
+    }
+done:
+    if (cond_initialized) pthread_cond_destroy(&queue->cond);
+    if (mutex_initialized) pthread_mutex_destroy(&queue->mutex);
+    renderer = *saved;
+    free(saved);
+    memset(&queue_test, 0, sizeof(queue_test));
+    return status;
+#undef QUEUE_TEST_CHECK
+}
+
 static NTSTATUS destroy_renderer_call(void *args)
 {
     (void)args;
@@ -5189,6 +5496,18 @@ static NTSTATUS renderer_self_test(void *args)
 }
 
 static NTSTATUS renderer_headless_self_test(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS renderer_queue_self_test(void *args)
+{
+    (void)args;
+    return STATUS_NOT_SUPPORTED;
+}
+
+static NTSTATUS cancel_renderer_root(void *args)
 {
     (void)args;
     return STATUS_NOT_SUPPORTED;
@@ -5301,6 +5620,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     test_renderer_input,
     update_renderer_root_snapshot,
     perform_renderer_root_action,
+    cancel_renderer_root,
+    renderer_queue_self_test,
 };
 
 #ifdef _WIN64
@@ -5325,6 +5646,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     test_renderer_input,
     update_renderer_root_snapshot,
     perform_renderer_root_action,
+    cancel_renderer_root,
+    renderer_queue_self_test,
 };
 #endif
 

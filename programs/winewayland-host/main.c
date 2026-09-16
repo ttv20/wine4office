@@ -255,6 +255,28 @@ static int test_shell(void)
     return 0;
 }
 
+static int test_renderer_queue(void)
+{
+    struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
+            sizeof(cancel), 31, 47};
+    NTSTATUS status;
+
+    if (__wine_init_unix_call()) status = STATUS_DLL_NOT_FOUND;
+    else if (WINE_UNIX_CALL(unix_renderer_root_cancel, &cancel) != STATUS_NOT_FOUND)
+        status = STATUS_DATA_ERROR;
+    else
+    {
+        /* Exercise the parameter-bearing entry through both PE architectures,
+         * as well as the deterministic native queue fixture. */
+        --cancel.version;
+        if (WINE_UNIX_CALL(unix_renderer_root_cancel, &cancel) != STATUS_REVISION_MISMATCH)
+            status = STATUS_DATA_ERROR;
+        else status = WINE_UNIX_CALL(unix_renderer_queue_self_test, NULL);
+    }
+    printf("renderer_queue_self_test=%s status=%#lx backend=controlled\n", status ? "failed" : "passed", status);
+    return status ? 5 : 0;
+}
+
 static NTSTATUS sync_test_renderer_root(struct winewayland_host_renderer_root *root)
 {
     NTSTATUS status;
@@ -889,6 +911,7 @@ struct host_renderer_root
     BOOL present_active;
     BOOL restore_present;
     BOOL repaint_present;
+    BOOL present_obsolete;
     BOOL native_owned;
     BOOL source_released;
     BOOL frame_snapshot_required;
@@ -1920,6 +1943,7 @@ static void clear_root_present(struct host_renderer_root *root)
     root->present_submitted = FALSE;
     root->restore_present = FALSE;
     root->repaint_present = FALSE;
+    root->present_obsolete = FALSE;
     root->source_released = FALSE;
 }
 
@@ -2051,7 +2075,7 @@ static NTSTATUS complete_root_frame(struct host_renderer_root *root, uint64_t ho
 
 static NTSTATUS complete_root_present(struct host_renderer_root *root, uint64_t host_epoch)
 {
-    if (root->present_scene_generation != root->scene_generation)
+    if (root->present_obsolete || root->present_scene_generation != root->scene_generation)
         return complete_root_frame(root, host_epoch,
                 WINE_WAYLAND_FRAME_RESULT_DISCARDED, STATUS_SUCCESS);
     if (root->present_backend_status && root->present_backend_status != STATUS_PENDING &&
@@ -2102,6 +2126,25 @@ static NTSTATUS poll_root_present(struct host_renderer_root *root, uint64_t host
     root->present_backend_status = sync.present_status;
     root->present_submitted = FALSE;
     return complete_root_present(root, host_epoch);
+}
+
+static NTSTATUS cancel_root_present(struct host_renderer_root *root)
+{
+    struct winewayland_host_renderer_root_retire cancel;
+    NTSTATUS status;
+
+    if (!root->present_active) return STATUS_SUCCESS;
+    root->present_obsolete = TRUE;
+    if (!root->present_submitted) return STATUS_SUCCESS;
+    memset(&cancel, 0, sizeof(cancel));
+    cancel.version = WINEWAYLAND_HOST_RENDERER_VERSION;
+    cancel.size = sizeof(cancel);
+    cancel.root_identity = root->root_identity;
+    cancel.root_generation = root->root_generation;
+    status = WINE_UNIX_CALL(unix_renderer_root_cancel, &cancel);
+    /* An already claimed job can still emit a commit. Wait for its existing
+     * completion boundary before releasing any image or native ownership. */
+    return status == STATUS_PENDING ? STATUS_SUCCESS : status;
 }
 
 static NTSTATUS process_contributor_frames(struct host_renderer_root *root,
@@ -2296,6 +2339,7 @@ static NTSTATUS retire_renderer_root(struct host_renderer_root *root, uint64_t h
     struct winewayland_host_renderer_root_retire retire;
     NTSTATUS status;
 
+    if ((status = cancel_root_present(root))) return status;
     if ((status = poll_root_present(root, host_epoch))) return status;
     if (root->present_active) return STATUS_PENDING;
     if ((status = release_retained_frame(root))) return status;
@@ -2811,6 +2855,12 @@ static NTSTATUS process_host_root(const struct host_root_info *root, uint64_t ho
         renderer_root->close_request_id = renderer_root->close_event_count;
     else if ((status = post_host_window_close(renderer_root, host_epoch)))
         return status;
+    if (renderer_root->present_active &&
+        (renderer_root->present_scene_generation != renderer_root->scene_generation ||
+         renderer_root->present_geometry_revision != renderer_root->geometry_revision ||
+         renderer_root->native_lease_state != WINE_WAYLAND_NATIVE_LEASE_HOSTED ||
+         !(window_state.style & WS_VISIBLE)) &&
+        (status = cancel_root_present(renderer_root))) return status;
     if ((status = poll_root_present(renderer_root, host_epoch))) return status;
     if (renderer_root->retained.frame_id &&
         (renderer_root->scene_disposition != WINE_WAYLAND_SCENE_HOSTED_CONTENT ||
@@ -4826,6 +4876,7 @@ int wmain(int argc, WCHAR **argv)
     if (argc == 2 && !wcscmp(argv[1], L"--maximize-self-test")) return test_wsi(TRUE);
     if (argc == 2 && !wcscmp(argv[1], L"--launch")) return launch_host();
     if (argc == 2 && !wcscmp(argv[1], L"--registration-test")) return test_registration();
+    if (argc == 2 && !wcscmp(argv[1], L"--queue-self-test")) return test_renderer_queue();
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-test"))
         return test_dcomp_pipeline(0);
     if (argc == 2 && !wcscmp(argv[1], L"--dcomp-pipeline-input-test"))
@@ -4869,5 +4920,6 @@ int wmain(int argc, WCHAR **argv)
 
     fwprintf(stderr, L"Usage: %s --probe | --renderer-test | --transport-self-test | --shell-self-test | --root-self-test | --wsi-self-test | --maximize-self-test | --keyboard-map-self-test | --launch | --registration-test | --dcomp-pipeline-test | --dcomp-pipeline-input-test | --dcomp-frame-test | --dcomp-interactive-test | --dcomp-interactive-resize-test | --dcomp-empty-frame-test | --dcomp-retained-frame-test | --dcomp-multi-root-test | --dcomp-frame-failure-test | --dcomp-auto-host-test | --dcomp-auto-host-input-test | --dcomp-scale-test | --dcomp-startup-lock-test | --dcomp-auto-frame-test | --dcomp-local-test | --dcomp-local-ready-test\n",
             argv[0]);
+    fwprintf(stderr, L"       %s --queue-self-test\n", argv[0]);
     return 2;
 }
