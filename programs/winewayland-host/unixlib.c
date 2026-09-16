@@ -176,6 +176,8 @@ static void destroy_registry_probe(struct registry_probe *probe)
 #define MAX_RENDERER_ENTER_KEYS 64
 #define MAX_RENDERER_ROOT_MEMORY_BYTES (512ull * 1024 * 1024)
 #define MAX_RENDERER_DESKTOP_MEMORY_BYTES (1024ull * 1024 * 1024)
+#define MAX_RENDERER_ROOT_WSI_PIXEL_BYTES (512ull * 1024 * 1024)
+#define MAX_RENDERER_DESKTOP_WSI_PIXEL_BYTES (1024ull * 1024 * 1024)
 
 struct renderer_frame;
 struct renderer_root;
@@ -251,6 +253,7 @@ struct renderer_root
     char title[256];
     VkSurfaceKHR vulkan_surface;
     VkSwapchainKHR swapchain;
+    uint64_t swapchain_pixel_bytes;
     VkImage swapchain_images[8];
     VkSemaphore acquire_semaphore;
     VkSemaphore present_semaphore;
@@ -532,6 +535,25 @@ static BOOL renderer_memory_available(const struct renderer_device_queue *queue,
     for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
         if (!account_renderer_memory(renderer.roots[i].snapshot_allocation_size,
                 &renderer.roots[i].device_queue == queue, &root_available, &desktop_available))
+            return FALSE;
+    return TRUE;
+}
+
+/* WSI owns its memory and does not expose an exact pre-allocation byte size.
+ * Bound logical BGRA storage separately, reserving the maximum admitted image
+ * count before creation, including the still-live old swapchain. This is not
+ * a measurement or bound of opaque driver/compositor allocation overhead. */
+static BOOL renderer_wsi_memory_available(const struct renderer_root *root, uint64_t bytes)
+{
+    uint64_t root_available = MAX_RENDERER_ROOT_WSI_PIXEL_BYTES;
+    uint64_t desktop_available = MAX_RENDERER_DESKTOP_WSI_PIXEL_BYTES;
+    unsigned int i;
+
+    if (!bytes || !account_renderer_memory(bytes, TRUE, &root_available, &desktop_available))
+        return FALSE;
+    for (i = 0; i < ARRAY_SIZE(renderer.roots); ++i)
+        if (!account_renderer_memory(renderer.roots[i].swapchain_pixel_bytes,
+                &renderer.roots[i] == root, &root_available, &desktop_available))
             return FALSE;
     return TRUE;
 }
@@ -2222,6 +2244,7 @@ static void destroy_renderer_root_swapchain(struct renderer_root *root)
     if (root->swapchain && renderer.p_vkDestroySwapchainKHR)
         renderer.p_vkDestroySwapchainKHR(root->device_queue.device, root->swapchain, NULL);
     root->swapchain = VK_NULL_HANDLE;
+    root->swapchain_pixel_bytes = 0;
     memset(root->swapchain_images, 0, sizeof(root->swapchain_images));
     memset(root->swapchain_image_initialized, 0,
             sizeof(root->swapchain_image_initialized));
@@ -3148,6 +3171,9 @@ static NTSTATUS create_renderer(void *args)
     fprintf(stderr, "Renderer explicit-memory limits: root=%llu desktop=%llu bytes.\n",
             (unsigned long long)MAX_RENDERER_ROOT_MEMORY_BYTES,
             (unsigned long long)MAX_RENDERER_DESKTOP_MEMORY_BYTES);
+    fprintf(stderr, "Renderer WSI pixel-storage limits: root=%llu desktop=%llu bytes.\n",
+            (unsigned long long)MAX_RENDERER_ROOT_WSI_PIXEL_BYTES,
+            (unsigned long long)MAX_RENDERER_DESKTOP_WSI_PIXEL_BYTES);
     return STATUS_SUCCESS;
 
 failed:
@@ -3735,6 +3761,7 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     VkImage images[ARRAY_SIZE(root->swapchain_images)];
     VkCompositeAlphaFlagBitsKHR composite_alpha = 0;
     uint32_t format_count = 0, image_count, mode_count = 0, i;
+    uint64_t image_bytes;
     VkExtent2D extent;
     VkResult vr = VK_SUCCESS;
     BOOL has_fifo = FALSE;
@@ -3764,13 +3791,24 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     if (root->swapchain && root->requested_width == requested_width &&
         root->requested_height == requested_height)
         return STATUS_SUCCESS;
+    status = STATUS_NOT_SUPPORTED;
     if ((vr = renderer.p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(renderer.physical_device,
             root->vulkan_surface, &capabilities)))
         goto done;
+    if ((capabilities.supportedUsageFlags & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT)) != (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        goto done;
     if ((vr = renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR(renderer.physical_device,
             root->vulkan_surface, &format_count, NULL)) || !format_count ||
-        !(formats = calloc(format_count, sizeof(*formats))) ||
-        (vr = renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR(renderer.physical_device,
+        format_count > 256)
+        goto done;
+    if (!(formats = calloc(format_count, sizeof(*formats))))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    if ((vr = renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR(renderer.physical_device,
             root->vulkan_surface, &format_count, formats)))
         goto done;
     for (i = 0; i < format_count; ++i)
@@ -3786,8 +3824,14 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     if (!selected_format.format) goto done;
     if ((vr = renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR(renderer.physical_device,
             root->vulkan_surface, &mode_count, NULL)) || !mode_count ||
-        !(present_modes = calloc(mode_count, sizeof(*present_modes))) ||
-        (vr = renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR(renderer.physical_device,
+        mode_count > 256)
+        goto done;
+    if (!(present_modes = calloc(mode_count, sizeof(*present_modes))))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    if ((vr = renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR(renderer.physical_device,
             root->vulkan_surface, &mode_count, present_modes)))
         goto done;
     for (i = 0; i < mode_count; ++i)
@@ -3806,6 +3850,15 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     if (!extent.width || !extent.height)
     {
         status = STATUS_DEVICE_NOT_READY;
+        goto done;
+    }
+    if (extent.width > 16384 || extent.height > 16384 ||
+        capabilities.minImageCount > ARRAY_SIZE(images))
+        goto done;
+    image_bytes = (uint64_t)extent.width * extent.height * 4;
+    if (!renderer_wsi_memory_available(root, image_bytes * ARRAY_SIZE(images)))
+    {
+        status = STATUS_NO_MEMORY;
         goto done;
     }
     image_count = capabilities.minImageCount + 1;
@@ -3839,16 +3892,21 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
     create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     create_info.clipped = VK_TRUE;
     create_info.oldSwapchain = root->swapchain;
-    if ((vr = renderer.p_vkCreateSwapchainKHR(queue->device, &create_info, NULL,
-            &swapchain)))
+    vr = renderer.p_vkCreateSwapchainKHR(queue->device, &create_info, NULL, &swapchain);
+    /* Passing oldSwapchain retires it even if creation fails. Polling above
+     * has drained its users; never acquire from it or pass it as old again. */
+    destroy_renderer_root_swapchain(root);
+    if (vr)
+    {
+        swapchain = VK_NULL_HANDLE;
         goto done;
+    }
     image_count = ARRAY_SIZE(images);
     if ((vr = renderer.p_vkGetSwapchainImagesKHR(queue->device, swapchain, &image_count,
             images)) || !image_count || image_count > ARRAY_SIZE(images))
         goto done;
-    if (root->swapchain)
-        renderer.p_vkDestroySwapchainKHR(queue->device, root->swapchain, NULL);
     root->swapchain = swapchain;
+    root->swapchain_pixel_bytes = image_bytes * image_count;
     swapchain = VK_NULL_HANDLE;
     memcpy(root->swapchain_images, images, image_count * sizeof(images[0]));
     memset(root->swapchain_image_initialized, 0,
@@ -3864,7 +3922,7 @@ done:
     if (swapchain) renderer.p_vkDestroySwapchainKHR(queue->device, swapchain, NULL);
     free(present_modes);
     free(formats);
-    if (status && vr == VK_ERROR_DEVICE_LOST) return STATUS_DEVICE_REMOVED;
+    if (vr) return renderer_queue_status(vr);
     return status;
 }
 
@@ -5589,6 +5647,171 @@ done:
 #undef MEMORY_TEST_CHECK
 }
 
+static struct
+{
+    VkResult capabilities_result, create_result, images_result;
+    VkImageUsageFlags usage;
+    VkFormat format;
+    uint32_t extent_width;
+    VkSwapchainKHR old_swapchain;
+    unsigned int creates, destroys;
+} swapchain_test;
+
+static VkResult swapchain_test_capabilities(VkPhysicalDevice device, VkSurfaceKHR surface,
+        VkSurfaceCapabilitiesKHR *caps)
+{
+    memset(caps, 0, sizeof(*caps));
+    caps->minImageCount = 2;
+    caps->currentExtent.width = swapchain_test.extent_width;
+    caps->currentExtent.height = 64;
+    caps->minImageExtent.width = caps->minImageExtent.height = 1;
+    caps->maxImageExtent.width = caps->maxImageExtent.height = 16384;
+    caps->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    caps->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    caps->supportedUsageFlags = swapchain_test.usage;
+    return swapchain_test.capabilities_result;
+}
+
+static VkResult swapchain_test_formats(VkPhysicalDevice device, VkSurfaceKHR surface,
+        uint32_t *count, VkSurfaceFormatKHR *formats)
+{
+    *count = 1;
+    if (formats)
+    {
+        formats->format = swapchain_test.format;
+        formats->colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    }
+    return VK_SUCCESS;
+}
+
+static VkResult swapchain_test_modes(VkPhysicalDevice device, VkSurfaceKHR surface,
+        uint32_t *count, VkPresentModeKHR *modes)
+{
+    *count = 1;
+    if (modes) *modes = VK_PRESENT_MODE_FIFO_KHR;
+    return VK_SUCCESS;
+}
+
+static VkResult swapchain_test_create(VkDevice device, const VkSwapchainCreateInfoKHR *info,
+        const VkAllocationCallbacks *allocator, VkSwapchainKHR *swapchain)
+{
+    ++swapchain_test.creates;
+    swapchain_test.old_swapchain = info->oldSwapchain;
+    if (swapchain_test.create_result) return swapchain_test.create_result;
+    *swapchain = (VkSwapchainKHR)2;
+    return VK_SUCCESS;
+}
+
+static void swapchain_test_destroy(VkDevice device, VkSwapchainKHR swapchain,
+        const VkAllocationCallbacks *allocator)
+{
+    ++swapchain_test.destroys;
+}
+
+static VkResult swapchain_test_images(VkDevice device, VkSwapchainKHR swapchain,
+        uint32_t *count, VkImage *images)
+{
+    unsigned int i;
+
+    *count = 4;
+    for (i = 0; i < *count; ++i) images[i] = (VkImage)(uintptr_t)(10 + i);
+    return swapchain_test.images_result;
+}
+
+static NTSTATUS renderer_swapchain_self_test(void)
+{
+    struct renderer_root *root = &renderer.roots[0];
+    NTSTATUS status, expected;
+    unsigned int mode;
+
+#define SWAPCHAIN_TEST_CHECK(condition) do { if (!(condition)) \
+    { fprintf(stderr, "Renderer swapchain test failed at line %u, case %u.\n", __LINE__, mode); \
+      return STATUS_DATA_ERROR; } } while (0)
+
+    for (mode = 0; mode < 8; ++mode)
+    {
+        memset(&renderer, 0, sizeof(renderer));
+        memset(&swapchain_test, 0, sizeof(swapchain_test));
+        renderer.p_vkGetPhysicalDeviceSurfaceCapabilitiesKHR = swapchain_test_capabilities;
+        renderer.p_vkGetPhysicalDeviceSurfaceFormatsKHR = swapchain_test_formats;
+        renderer.p_vkGetPhysicalDeviceSurfacePresentModesKHR = swapchain_test_modes;
+        renderer.p_vkCreateSwapchainKHR = swapchain_test_create;
+        renderer.p_vkDestroySwapchainKHR = swapchain_test_destroy;
+        renderer.p_vkGetSwapchainImagesKHR = swapchain_test_images;
+        swapchain_test.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        swapchain_test.format = VK_FORMAT_B8G8R8A8_UNORM;
+        swapchain_test.extent_width = UINT32_MAX;
+        root->configured = TRUE;
+        root->swapchain = (VkSwapchainKHR)1;
+        root->swapchain_pixel_bytes = 4096;
+        expected = STATUS_SUCCESS;
+        switch (mode)
+        {
+        case 1:
+            swapchain_test.format = VK_FORMAT_R8G8B8A8_UNORM;
+            expected = STATUS_NOT_SUPPORTED;
+            break;
+        case 2:
+            swapchain_test.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            expected = STATUS_NOT_SUPPORTED;
+            break;
+        case 3:
+            swapchain_test.create_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            expected = STATUS_NO_MEMORY;
+            break;
+        case 4:
+            swapchain_test.images_result = VK_INCOMPLETE;
+            expected = STATUS_UNSUCCESSFUL;
+            break;
+        case 5:
+            swapchain_test.capabilities_result = VK_ERROR_DEVICE_LOST;
+            expected = STATUS_DEVICE_REMOVED;
+            break;
+        case 6:
+            root->swapchain_pixel_bytes = MAX_RENDERER_ROOT_WSI_PIXEL_BYTES;
+            expected = STATUS_NO_MEMORY;
+            break;
+        case 7:
+            swapchain_test.extent_width = 16385;
+            expected = STATUS_NOT_SUPPORTED;
+            break;
+        }
+        status = create_renderer_root_swapchain(root, 64, 64);
+        SWAPCHAIN_TEST_CHECK(status == expected);
+        if (!mode)
+        {
+            SWAPCHAIN_TEST_CHECK(root->swapchain == (VkSwapchainKHR)2 &&
+                    root->swapchain_image_count == 4 && root->swapchain_pixel_bytes == 64 * 64 * 4 * 4 &&
+                    swapchain_test.creates == 1 && swapchain_test.destroys == 1);
+            SWAPCHAIN_TEST_CHECK(!create_renderer_root_swapchain(root, 64, 64) && swapchain_test.creates == 1);
+        }
+        else if (mode == 3 || mode == 4)
+        {
+            SWAPCHAIN_TEST_CHECK(!root->swapchain && !root->swapchain_pixel_bytes &&
+                    !root->swapchain_image_count && swapchain_test.creates == 1 &&
+                    swapchain_test.destroys == (mode == 3 ? 1 : 2) &&
+                    swapchain_test.old_swapchain == (VkSwapchainKHR)1);
+            swapchain_test.create_result = swapchain_test.images_result = VK_SUCCESS;
+            SWAPCHAIN_TEST_CHECK(!create_renderer_root_swapchain(root, 64, 64));
+            SWAPCHAIN_TEST_CHECK(!swapchain_test.old_swapchain && root->swapchain == (VkSwapchainKHR)2);
+        }
+        else
+            SWAPCHAIN_TEST_CHECK(root->swapchain == (VkSwapchainKHR)1 &&
+                    !swapchain_test.creates && !swapchain_test.destroys);
+    }
+
+    /* Root has space, but the other live roots consume the desktop budget. */
+    swapchain_test.extent_width = UINT32_MAX;
+    renderer.roots[1].swapchain_pixel_bytes = MAX_RENDERER_ROOT_WSI_PIXEL_BYTES;
+    renderer.roots[2].swapchain_pixel_bytes = MAX_RENDERER_DESKTOP_WSI_PIXEL_BYTES -
+            MAX_RENDERER_ROOT_WSI_PIXEL_BYTES - root->swapchain_pixel_bytes;
+    SWAPCHAIN_TEST_CHECK(create_renderer_root_swapchain(root, 64, 64) == STATUS_NO_MEMORY);
+    SWAPCHAIN_TEST_CHECK(!swapchain_test.creates && !swapchain_test.destroys);
+    fprintf(stderr, "renderer_swapchain_self_test=passed backend=controlled\n");
+    return STATUS_SUCCESS;
+#undef SWAPCHAIN_TEST_CHECK
+}
+
 static NTSTATUS renderer_queue_self_test(void *args)
 {
     struct winewayland_host_renderer_root_retire cancel = {WINEWAYLAND_HOST_RENDERER_VERSION,
@@ -5746,6 +5969,7 @@ static NTSTATUS renderer_queue_self_test(void *args)
     pthread_mutex_destroy(&queue->mutex);
     mutex_initialized = FALSE;
     status = renderer_memory_self_test();
+    if (!status) status = renderer_swapchain_self_test();
 done:
     if (cond_initialized) pthread_cond_destroy(&queue->cond);
     if (mutex_initialized) pthread_mutex_destroy(&queue->mutex);

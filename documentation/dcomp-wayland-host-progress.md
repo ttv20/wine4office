@@ -1863,6 +1863,46 @@ cap derived from accepted credits plus WSI images remain separate work.
 These changes do not claim the complete resource-budget gate. The personal
 laptop remains unused.
 
+## WSI admission and replacement failures, September 16
+
+Review of `create_renderer_root_swapchain()` confirmed two independent defects.
+Successful polling overwrote its default failure status, so unsupported formats
+or subsequent Vulkan errors could return success without a usable swapchain.
+Also, failed replacement retained `oldSwapchain` and could acquire from it or
+pass it to the next creation after Vulkan had retired it. The function now
+returns explicit unsupported/allocation/backend errors, and destroys the old
+handle after the creation call has retired it, whether creation succeeds or
+fails. Failures before that call leave the old handle intact. The existing
+presentation polling gate still precedes retirement; this change does not
+establish the unresolved native commit boundary on present-wait failure.
+
+This follows the [Khronos swapchain creation contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainCreateInfoKHR.html),
+which retires a supplied old swapchain even on failure. Required image usage
+is now validated against surface capabilities. Actual native extents and
+enumeration sizes are bounded before multiplication/allocation.
+
+WSI BGRA pixel storage has separate 512 MiB root and 1 GiB desktop policy
+limits, logged at renderer startup. Admission reserves eight images at the
+new native extent before creation, while charging the still-live old images.
+After successful enumeration the record holds the actual admitted image
+count. A returned count above eight is rejected. This bounds requested/live
+logical pixel storage; it is not an exact measurement or bound of opaque
+driver/compositor allocation overhead, or a pre-creation guarantee on the
+driver's returned image count. Full device-budget negotiation remains open.
+
+The controlled fixture calls the production swapchain creation function for
+successful/idempotent replacement, unsupported format/usage, allocation
+failure, incomplete image enumeration, device loss, root/desktop pixel-budget
+exhaustion and oversized native extent. It verifies that pre-call rejection
+preserves the old handle, post-call failure retires it, and retry never passes
+the retired handle again. Host targets rebuilt without warnings; x64 and i386
+fixtures both returned zero. No real GPU or compositor behavior is inferred.
+
+Server artifacts: `swapchain-admission-20260916-{x86_64,i386}.log` and
+`swapchain-admission-20260916.sh`. Tested Unix library SHA256:
+`9d42398a56d4cc06fe9df750e1df9bead51c75b981261fb1fef8656faf3acdb5`.
+No ABI changes or laptop use. Dynamic storage credits are the next step.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another

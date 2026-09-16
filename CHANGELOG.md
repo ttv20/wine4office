@@ -23,6 +23,7 @@
 - Cancel obsolete queued hosted frames and keep presentation resources alive through GPU submission failures.
 - Keep pending hosted image copies alive until the GPU finishes reading their source.
 - Check hosted image-memory budgets before allocating transport pools, cached images and window-frame uploads.
+- Report hosted display-allocation failures correctly and avoid reusing retired presentation buffers.
 - Let Office install and report KMS client product keys through OSPP and WMI while retaining only derived licensing metadata.
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
