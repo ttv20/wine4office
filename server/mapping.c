@@ -1370,6 +1370,7 @@ static int load_version_resource( void **ret_buf, IMAGE_DATA_DIRECTORY *data, si
         return (ret + 3) & ~3;
     }
     free( *ret_buf );
+    *ret_buf = NULL;
     return 0;
 }
 

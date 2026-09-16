@@ -406,7 +406,7 @@ WINADVAPI BOOL        WINAPI EnumServicesStatusW(SC_HANDLE,DWORD,DWORD,LPENUM_SE
 #define                      EnumServicesStatus WINELIB_NAME_AW(EnumServicesStatus)
 WINADVAPI BOOL        WINAPI EnumServicesStatusExA(SC_HANDLE,SC_ENUM_TYPE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD,LPCSTR);
 WINADVAPI BOOL        WINAPI EnumServicesStatusExW(SC_HANDLE,SC_ENUM_TYPE,DWORD,DWORD,LPBYTE,DWORD,LPDWORD,LPDWORD,LPDWORD,LPCWSTR);
-#define                      EnumServicesStatus WINELIB_NAME_AW(EnumServicesStatus)
+#define                      EnumServicesStatusEx WINELIB_NAME_AW(EnumServicesStatusEx)
 WINADVAPI BOOL        WINAPI GetServiceDisplayNameA(SC_HANDLE,LPCSTR,LPSTR,LPDWORD);
 WINADVAPI BOOL        WINAPI GetServiceDisplayNameW(SC_HANDLE,LPCWSTR,LPWSTR,LPDWORD);
 #define                      GetServiceDisplayName WINELIB_NAME_AW(GetServiceDisplayName)

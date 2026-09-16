@@ -63,6 +63,7 @@
 #endif
 
 #ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #endif
 #ifdef __FreeBSD__
@@ -1579,6 +1580,34 @@ void wait_suspend( CONTEXT *context )
     contexts_from_server( context, server_contexts );
     errno = saved_errno;
 }
+
+
+#ifdef __APPLE__
+/**********************************************************************
+ *           apple_spawn_main_thread
+ */
+NTSTATUS apple_spawn_main_thread( void )
+{
+    struct thread_data *data;
+    HANDLE handle;
+    NTSTATUS status;
+    ULONG flags = THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE;
+    CFRunLoopSourceContext context = { .perform = (void (*)(void *))server_init_thread };
+    CFRunLoopSourceRef source;
+
+    if ((status = create_server_thread( &handle, &data, THREAD_ALL_ACCESS, NULL, NULL, NULL, flags, TRUE )))
+        return status;
+    NtClose( handle );
+
+    context.info = data;
+    source = CFRunLoopSourceCreate( NULL, 0, &context );
+    CFRunLoopAddSource( CFRunLoopGetMain(), source, kCFRunLoopCommonModes );
+    CFRunLoopSourceSignal( source );
+    CFRunLoopWakeUp( CFRunLoopGetMain() );
+    CFRelease( source );
+    return STATUS_SUCCESS;
+}
+#endif
 
 
 /**********************************************************************

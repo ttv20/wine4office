@@ -1000,7 +1000,10 @@ static HRESULT WINAPI memresourcestream_ReadFileFragment(IDWriteFontFileStream *
         return E_OUTOFMEMORY;
 
     if (!GetFontFileData(stream->key, 0, offset, fragment, fragment_size))
+    {
+        free(fragment);
         return E_FAIL;
+    }
 
     *fragment_start = *fragment_context = fragment;
     return S_OK;

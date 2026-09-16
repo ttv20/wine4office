@@ -2,4 +2,6 @@ TESTDLL = sppc.dll
 IMPORTS = advapi32 ole32 sppc
 
 SOURCES = \
+	pidgenx.c \
+	pidgenx.spec \
 	sppc.c

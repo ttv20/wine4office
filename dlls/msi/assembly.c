@@ -378,6 +378,7 @@ UINT msi_install_assembly( MSIPACKAGE *package, MSICOMPONENT *comp )
     IAssemblyCache *cache;
     MSIASSEMBLY *assembly = comp->assembly;
     MSIFEATURE *feature = NULL;
+    MSIFILE *file;
 
     if (!init_assembly_caches()) return ERROR_FUNCTION_FAILED;
 
@@ -391,17 +392,22 @@ UINT msi_install_assembly( MSIPACKAGE *package, MSICOMPONENT *comp )
     }
     if (assembly->attributes == msidbAssemblyAttributesWin32)
     {
-        if (!assembly->manifest)
+        if (!(file = msi_get_loaded_file( package, assembly->manifest )))
         {
-            WARN("no manifest\n");
+            WARN( "no matching file for %s\n", debugstr_w(assembly->manifest) );
             return ERROR_FUNCTION_FAILED;
         }
-        manifest = msi_get_loaded_file( package, assembly->manifest )->TargetPath;
+        manifest = file->TargetPath;
         cache = cache_sxs;
     }
     else
     {
-        manifest = msi_get_loaded_file( package, comp->KeyPath )->TargetPath;
+        if (!(file = msi_get_loaded_file( package, comp->KeyPath )))
+        {
+            WARN( "no matching file for %s\n", debugstr_w(comp->KeyPath) );
+            return ERROR_FUNCTION_FAILED;
+        }
+        manifest = file->TargetPath;
         cache = get_net_cache( get_clr_version(manifest) );
         if (!cache) return ERROR_SUCCESS;
     }

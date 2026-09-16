@@ -55,7 +55,6 @@ struct func_device
     struct device base;
     HID_DEVICE_ATTRIBUTES attrs;
     HIDP_DEVICE_DESC device_desc;
-    WCHAR serial[256];
 
     ULONG poll_interval;
     KEVENT halt_event;

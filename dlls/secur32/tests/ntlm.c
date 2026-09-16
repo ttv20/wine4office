@@ -641,9 +641,8 @@ static void testInitializeSecurityContextFlags(void)
         sec_status = InitializeSecurityContextA(NULL, &client.ctxt, NULL, 0, 0, SECURITY_NETWORK_DREP,
                 server.out_buf, 0, &client.ctxt, client.out_buf, &ctxt_attr, &ttl);
         ok(sec_status == SEC_E_OK, "InitializeSecurityContext returned %s\n", getSecError(sec_status));
-        todo_wine_if(test_data[i].req_attr & ISC_REQ_MUTUAL_AUTH)
-            ok(ctxt_attr == test_data[i].ctxt_attr_auth, "ctxt_attr = %lx (negotiated flags: %x)\n",
-                    ctxt_attr, challenge->negotiate_flags);
+        ok(ctxt_attr == test_data[i].ctxt_attr_auth, "ctxt_attr = %lx (negotiated flags: %x)\n",
+                ctxt_attr, challenge->negotiate_flags);
 
         ctxt_attr = 0xffffffff;
         sec_status = AcceptSecurityContext(&server.cred, &server.ctxt, client.out_buf, 0,
@@ -679,6 +678,7 @@ static void testAuth(ULONG data_rep, BOOL fake)
     SecPkgContext_NegotiationInfoA info;
     SecPkgContext_KeyInfoA key;
     SecPkgContext_SessionKey session_key;
+    SecPkgContext_PackageInfoA package_info;
     SecPkgInfoA *pi;
 
     if(QuerySecurityPackageInfoA( sec_pkg_name, &pkg_info)!= SEC_E_OK)
@@ -832,6 +832,12 @@ static void testAuth(ULONG data_rep, BOOL fake)
         sec_status = FreeContextBuffer(pi);
         ok(sec_status == SEC_E_OK, "FreeContextBuffer error %#lx\n", sec_status);
     }
+
+    memset(&package_info, 0, sizeof(package_info));
+    sec_status = QueryContextAttributesA(&client.ctxt, SECPKG_ATTR_PACKAGE_INFO, &package_info);
+    ok(sec_status == SEC_E_OK, "QueryContextAttributesA returned %08lx\n", sec_status);
+    ok(package_info.PackageInfo != NULL, "PackageInfo = NULL\n");
+    ok(!strcmp(package_info.PackageInfo->Name, "NTLM"), "PackageInfo->Name = %s\n", package_info.PackageInfo->Name);
 
 tAuthend:
     cleanupBuffers(&client);

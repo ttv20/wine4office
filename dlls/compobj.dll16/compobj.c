@@ -281,7 +281,10 @@ DWORD WINAPI CoBuildVersion16(void)
  */
 HRESULT WINAPI CoGetMalloc16(MEMCTX context, SEGPTR *malloc)
 {
-    call_IMalloc_AddRef(*malloc = compobj_malloc);
+    if (!compobj_malloc)
+        *malloc = compobj_malloc = IMalloc16_Constructor();
+    else
+        call_IMalloc_AddRef(*malloc = compobj_malloc);
     return S_OK;
 }
 

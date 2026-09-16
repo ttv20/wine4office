@@ -132,7 +132,7 @@ HRESULT format_set_linespacing(struct dwrite_textformat_data *format, DWRITE_LIN
         return E_INVALIDARG;
 
     if (changed)
-        *changed = memcmp(spacing, &format->spacing, sizeof(*spacing));
+        *changed = !!memcmp(spacing, &format->spacing, sizeof(*spacing));
 
     format->spacing = *spacing;
     return S_OK;

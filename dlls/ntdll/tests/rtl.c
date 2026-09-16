@@ -3788,6 +3788,25 @@ static void test_RtlInitializeSid(void)
     ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %#lx.\n", status);
 }
 
+static void test_RtlCopySid(void)
+{
+    SID_IDENTIFIER_AUTHORITY sid_ident = { SECURITY_NT_AUTHORITY };
+    char src_buffer[SECURITY_MAX_SID_SIZE], dst_buffer[SECURITY_MAX_SID_SIZE];
+    PSID src = (PSID)&src_buffer, dst = (PSID)&dst_buffer;
+    NTSTATUS status;
+
+    status = RtlInitializeSid(src, &sid_ident, 1);
+    ok(!status, "Unexpected status %#lx.\n", status);
+    *RtlSubAuthoritySid(src, 0) = SECURITY_LOCAL_SYSTEM_RID;
+
+    status = RtlCopySid(RtlLengthSid(src), dst, src);
+    ok(!status, "Unexpected status %#lx.\n", status);
+    ok(!memcmp(src, dst, RtlLengthSid(src)), "Copied SID doesn't match.\n");
+
+    status = RtlCopySid(RtlLengthSid(src) - 1, dst, src);
+    ok(status == STATUS_BUFFER_TOO_SMALL, "Unexpected status %#lx.\n", status);
+}
+
 static void test_RtlValidSecurityDescriptor(void)
 {
     SECURITY_DESCRIPTOR *sd;
@@ -5686,6 +5705,7 @@ START_TEST(rtl)
     test_RtlCreateHeap();
     test_RtlFirstFreeAce();
     test_RtlInitializeSid();
+    test_RtlCopySid();
     test_RtlValidSecurityDescriptor();
     test_RtlValidRelativeSecurityDescriptor();
     test_RtlFindExportedRoutineByName();

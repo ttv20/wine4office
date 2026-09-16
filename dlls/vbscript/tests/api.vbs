@@ -166,15 +166,15 @@ End Sub
 TestCStr "test", "test"
 TestCStr 3, "3"
 if isEnglishLang then TestCStr 3.5, "3.5"
-if isEnglishLang then TestCStr true, "True"
+TestCStr true, "True"
 
 sub testCStrError()
     on error resume next
     Err.clear()
     CStr(null)
     call ok(Err.number = 94, "Err.number = " & Err.number)
-    if isEnglishLang then call ok(Err.source = "Microsoft VBScript runtime error", "Err.source = " & Err.source)
-    if isEnglishLang then call ok(Err.description = "Invalid use of Null", "Err.description = " & Err.description)
+    call ok(Err.source = "Microsoft VBScript runtime error", "Err.source = " & Err.source)
+    call ok(Err.description = "Invalid use of Null", "Err.description = " & Err.description)
 end sub
 call testCStrError()
 
@@ -193,7 +193,7 @@ sub testChrError
         call Err.clear()
         call Chr(-1)
         call ok(Err.number = 5, "Err.number = " & Err.number)
-        if isEnglishLang then call ok(Err.description = "Invalid procedure call or argument", "Err.description = " & Err.description)
+        call ok(Err.description = "Invalid procedure call or argument", "Err.description = " & Err.description)
 
         call Err.clear()
         call Chr(256)
@@ -369,8 +369,8 @@ sub testLBoundError()
     call Err.clear()
     call LBound(arr, 1, 2)
     call ok(Err.number = 450, "Err.number = " & Err.number)
-    if isEnglishLang then call ok(Err.description = "Wrong number of arguments or invalid property assignment", _
-                                  "Err.description = " & Err.description)
+    call ok(Err.description = "Wrong number of arguments or invalid property assignment", _
+            "Err.description = " & Err.description)
 end sub
 
 sub testUBoundError()
@@ -411,8 +411,8 @@ sub testUBoundError()
     call Err.clear()
     call UBound(arr, 1, 2)
     call ok(Err.number = 450, "Err.number = " & Err.number)
-    if isEnglishLang then call ok(Err.description = "Wrong number of arguments or invalid property assignment", _
-                                  "Err.description = " & Err.description)
+    call ok(Err.description = "Wrong number of arguments or invalid property assignment", _
+            "Err.description = " & Err.description)
 end sub
 
 call testLBoundError()
@@ -826,7 +826,7 @@ TestUCase "test", "TEST"
 TestUCase "123aBC?", "123ABC?"
 TestUCase "", ""
 TestUCase 1, "1"
-if isEnglishLang then TestUCase true, "TRUE"
+TestUCase true, "TRUE"
 TestUCase 0.123, doubleAsString(0.123)
 TestUCase Empty, ""
 Call ok(getVT(UCase(Null)) = "VT_NULL", "getVT(UCase(Null)) = " & getVT(UCase(Null)))
@@ -840,7 +840,7 @@ TestLCase "test", "test"
 TestLCase "123aBC?", "123abc?"
 TestLCase "", ""
 TestLCase 1, "1"
-if isEnglishLang then TestLCase true, "true"
+TestLCase true, "true"
 TestLCase 0.123, doubleAsString(0.123)
 TestLCase Empty, ""
 Call ok(getVT(LCase(Null)) = "VT_NULL", "getVT(LCase(Null)) = " & getVT(LCase(Null)))
@@ -1085,7 +1085,7 @@ End Sub
 TestStrReverse "test", "tset"
 TestStrReverse "", ""
 TestStrReverse 123, "321"
-if isEnglishLang then TestStrReverse true, "eurT"
+TestStrReverse true, "eurT"
 
 Sub TestLeft(str, len, ex)
     Call ok(Left(str, len) = ex, "Left(" & str & ", " & len & ") = " & Left(str, len))
@@ -1098,7 +1098,7 @@ TestLeft 123, 2, "12"
 TestLeft "123456", 1.5, "12"
 TestLeft "123456", 2.5, "12"
 TestLeft "test", "2", "te"
-if isEnglishLang then TestLeft true, 2, "Tr"
+TestLeft true, 2, "Tr"
 
 Sub TestRight(str, len, ex)
     Call ok(Right(str, len) = ex, "Right(" & str & ", " & len & ") = " & Right(str, len))
@@ -1114,7 +1114,7 @@ TestRight empty, 0, ""
 TestRight empty, 1, ""
 TestRight "test", empty, ""
 TestRight "test", empty, ""
-if isEnglishLang then TestRight true, 2, "ue"
+TestRight true, 2, "ue"
 call Right(null, 0)
 call ok(getVT(Right(null, 0)) = "VT_NULL", "getVT(Right(null, 0)) = " & getVT(Right(null, 0)))
 call ok(getVT(Right(null, 1)) = "VT_NULL", "getVT(Right(null, 1)) = " & getVT(Right(null, 1)))
@@ -1143,7 +1143,7 @@ TestTrim "   test", "test"
 TestTrim "test", "test"
 TestTrim "", ""
 TestTrim 123, "123"
-if isEnglishLang then TestTrim true, "True"
+TestTrim true, "True"
 
 Sub TestLTrim(str, exstr)
     Call ok(LTrim(str) = exstr, "LTrim(" & str & ") = " & LTrim(str))
@@ -1155,7 +1155,7 @@ TestLTrim "   test", "test"
 TestLTrim "test", "test"
 TestLTrim "", ""
 TestLTrim 123, "123"
-if isEnglishLang then TestLTrim true, "True"
+TestLTrim true, "True"
 
 Sub TestRTrim(str, exstr)
     Call ok(RTrim(str) = exstr, "RTrim(" & str & ") = " & RTrim(str))
@@ -1167,7 +1167,7 @@ TestRTrim "   test", "   test"
 TestRTrim "test", "test"
 TestRTrim "", ""
 TestRTrim 123, "123"
-if isEnglishLang then TestRTrim true, "True"
+TestRTrim true, "True"
 
 
 sub test_replace(str, find, rep, exp)
@@ -2250,7 +2250,7 @@ call testAsc(3, 51)
 call testAsc("   ", 32)
 call testAsc(Chr(255), 255)
 call testAsc(Chr(0), 0)
-if isEnglishLang then testAsc true, 84
+call testAsc(true, 84)
 if Asc(Chr(&h81)) = &h8145 then
     ' Japanese (CP 932)
     call testAsc(Chr(&h8e8e), -29042)
@@ -2270,8 +2270,8 @@ call testAscW("test", 116)
 call testAscW("3", 51)
 call testAscW(3, 51)
 call testAscW(Chr(0), 0)
-call testAscW(Chr(255), 255)
-if isEnglishLang then testAscW true, 84
+if isEnglishLang then call testAscW(Chr(255), 255)
+call testAscW(true, 84)
 
 sub testAscWError()
     on error resume next
@@ -2294,7 +2294,7 @@ Call ok(ChrW(0) <> "", "ChrW(0) = """"")
 Call ok(ChrW(120.5) = "x", "ChrW(120.5) = " & ChrW(120.5))
 Call ok(ChrW(119.5) = "x", "ChrW(119.5) = " & ChrW(119.5))
 Call ok(ChrW("120") = "x", "ChrW(""120"") = " & ChrW("120"))
-Call ok(ChrW(255) = Chr(255), "ChrW(255) <> Chr(255)")
+if isEnglishLang then Call ok(ChrW(255) = Chr(255), "ChrW(255) <> Chr(255)")
 Call ok(ChrW(0) = Chr(0), "ChrW(0) <> Chr(0)")
 Call ok(AscW(ChrW(8364)) = 8364, "AscW(ChrW(8364)) = " & AscW(ChrW(8364)))
 Call ok(AscW(ChrW(65535)) = -1, "AscW(ChrW(65535)) = " & AscW(ChrW(65535)))
@@ -2355,7 +2355,7 @@ sub testErrRaise()
     err.raise 1, "abc"
     call ok(err.number = 1, "err.number = " & err.number)
     call ok(err.source = "abc", "err.source = " & err.source)
-    if isEnglishLang then call ok(err.description = "Unknown runtime error", "err.description = " & err.description)
+    call ok(err.description = "Unknown runtime error", "err.description = " & err.description)
     call ok(err.helpfile = "", "err.helpfile = " & err.helpfile)
 
     err.raise 1, 2, "desc", "hf", 1
@@ -2378,8 +2378,8 @@ sub testErrRaise()
     err.clear
     err.raise &h8007000E&
     call ok(err.number = 7, "err.number = " & err.number)
-    if isEnglishLang then call ok(err.source = "Microsoft VBScript runtime error", "err.source = " & err.source)
-    if isEnglishLang then call ok(err.description = "Out of memory", "err.description = " & err.description)
+    call ok(err.source = "Microsoft VBScript runtime error", "err.source = " & err.source)
+    call ok(err.description = "Out of memory", "err.description = " & err.description)
     call ok(err.helpfile = "", "err.helpfile = " & err.helpfile)
     call ok(err.helpcontext = 0, "err.helpcontext = " & err.helpcontext)
 
@@ -2388,16 +2388,16 @@ sub testErrRaise()
     err.raise &h8007000E&
     call ok(err.number = 7, "err.number = " & err.number)
     call ok(err.source = "test", "err.source = " & err.source)
-    if isEnglishLang then call ok(err.description = "Unknown runtime error", "err.description = " & err.description)
+    call ok(err.description = "Unknown runtime error", "err.description = " & err.description)
     call ok(err.helpfile = "", "err.helpfile = " & err.helpfile)
     call ok(err.helpcontext = 0, "err.helpcontext = " & err.helpcontext)
 
     err.raise 1, 2, "desc", "hf", 1
     err.unknownIdent
     call ok(err.number = 438, "err.number = " & err.number)
-    if isEnglishLang then call ok(err.source = "Microsoft VBScript runtime error", "err.source = " & err.source)
-    if isEnglishLang then call ok(err.description = "Object doesn't support this property or method", _
-                                  "err.description = " & err.description)
+    call ok(err.source = "Microsoft VBScript runtime error", "err.source = " & err.source)
+    call ok(err.description = "Object doesn't support this property or method", _
+            "err.description = " & err.description)
     call ok(err.helpfile = "", "err.helpfile = " & err.helpfile)
     call ok(err.helpcontext = 0, "err.helpcontext = " & err.helpcontext)
 
@@ -2537,8 +2537,8 @@ call testDatePart("q", datepartDate, 1)
 call testDatePart("m", datepartDate, 3)
 call testDatePart("y", datepartDate, 75)
 call testDatePart("d", datepartDate, 15)
-call testDatePart("w", datepartDate, 4)
-call testDatePart("ww", datepartDate, 12)
+if isEnglishLang then call testDatePart("w", datepartDate, 4)
+if isEnglishLang then call testDatePart("ww", datepartDate, 12)
 call testDatePart("h", datepartDate, 14)
 call testDatePart("n", datepartDate, 30)
 call testDatePart("s", datepartDate, 45)

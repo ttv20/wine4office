@@ -346,13 +346,51 @@ static DWORD ViewModeToListStyle(UINT ViewMode)
 	return dwStyle;
 }
 
+static const WCHAR listview_orig_proc[] = L"ORIG_PROC";
+
+static LRESULT CALLBACK listview_subclass_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    WNDPROC orig_proc = (WNDPROC)GetPropW(hwnd, listview_orig_proc);
+    LVITEMW item;
+    LRESULT ret;
+
+    if (!orig_proc)
+        return 0;
+
+    if (msg == WM_DESTROY)
+    {
+        RemovePropW(hwnd, listview_orig_proc);
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (DWORD_PTR)orig_proc);
+        return CallWindowProcW(orig_proc, hwnd, msg, wParam, lParam);
+    }
+
+    ret = CallWindowProcW(orig_proc, hwnd, msg, wParam, lParam);
+
+    /* Select all on Ctrl-A */
+    if (msg == WM_KEYDOWN)
+    {
+        if (wParam == 'A'
+                && (GetKeyState(VK_CONTROL) & 0x8000)
+                && !(lParam & 0x40000000))
+        {
+            item.stateMask = LVIS_SELECTED;
+            item.state = LVIS_SELECTED;
+            SendMessageW(hwnd, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+        }
+    }
+
+    return ret;
+}
+
 /**********************************************************
 * ShellView_CreateList()
 *
 * - creates the list view window
 */
 static BOOL ShellView_CreateList (IShellViewImpl * This)
-{	DWORD dwStyle, dwExStyle;
+{
+    DWORD dwStyle, dwExStyle;
+    WNDPROC orig_proc;
 
 	TRACE("%p\n",This);
 
@@ -381,6 +419,8 @@ static BOOL ShellView_CreateList (IShellViewImpl * This)
 
 	if(!This->hWndList)
 	  return FALSE;
+        orig_proc = (WNDPROC)SetWindowLongPtrW(This->hWndList, GWLP_WNDPROC, (DWORD_PTR)listview_subclass_proc);
+        SetPropW(This->hWndList, listview_orig_proc, orig_proc);
 
         This->ListViewSortInfo.bIsAscending = TRUE;
         This->ListViewSortInfo.nHeaderID = -1;

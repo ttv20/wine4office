@@ -23,6 +23,7 @@ enum wbm_namespace
 {
     WBEMPROX_NAMESPACE_CIMV2,
     WBEMPROX_NAMESPACE_MS_WINDOWS_STORAGE,
+    WBEMPROX_NAMESPACE_SECURITYCENTER2,
     WBEMPROX_NAMESPACE_STANDARDCIMV2,
     WBEMPROX_NAMESPACE_WMI,
     WBEMPROX_NAMESPACE_LAST,
@@ -256,6 +257,8 @@ HRESULT WbemQualifierSet_create(enum wbm_namespace, const WCHAR *, const WCHAR *
 
 HRESULT process_get_owner(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT process_create(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT licensing_install_product_key(IWbemClassObject *obj, IWbemContext *context,
+        IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_create_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_enum_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_enum_values(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);

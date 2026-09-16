@@ -131,6 +131,7 @@ static UINT DISTINCT_execute( struct tagMSIVIEW *view, MSIRECORD *record )
         return ERROR_FUNCTION_FAILED;
 
     /* build it */
+    dv->row_count = 0;
     for( i=0; i<r_count; i++ )
     {
         struct distinct_set **x = &rowset;

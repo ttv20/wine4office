@@ -48,8 +48,6 @@
 
 /* TRACE helper functions */
 const char *debug_d3dcompiler_d3d_blob_part(D3D_BLOB_PART part);
-const char *debug_d3dcompiler_shader_variable_class(D3D_SHADER_VARIABLE_CLASS c);
-const char *debug_d3dcompiler_shader_variable_type(D3D_SHADER_VARIABLE_TYPE t);
 
 enum shader_type
 {
@@ -523,15 +521,12 @@ void SlDeleteShader(struct bwriter_shader *shader);
     ((DWORD)(ch2) << 16) | ((DWORD)(ch3) << 24 ))
 #define TAG_Aon9 MAKE_TAG('A', 'o', 'n', '9')
 #define TAG_DXBC MAKE_TAG('D', 'X', 'B', 'C')
-#define TAG_FX10 MAKE_TAG('F', 'X', '1', '0')
 #define TAG_ISGN MAKE_TAG('I', 'S', 'G', 'N')
 #define TAG_OSGN MAKE_TAG('O', 'S', 'G', 'N')
 #define TAG_OSG5 MAKE_TAG('O', 'S', 'G', '5')
 #define TAG_PCSG MAKE_TAG('P', 'C', 'S', 'G')
 #define TAG_RDEF MAKE_TAG('R', 'D', 'E', 'F')
 #define TAG_SDBG MAKE_TAG('S', 'D', 'B', 'G')
-#define TAG_SHDR MAKE_TAG('S', 'H', 'D', 'R')
-#define TAG_SHEX MAKE_TAG('S', 'H', 'E', 'X')
 #define TAG_STAT MAKE_TAG('S', 'T', 'A', 'T')
 #define TAG_XNAP MAKE_TAG('X', 'N', 'A', 'P')
 #define TAG_XNAS MAKE_TAG('X', 'N', 'A', 'S')

@@ -442,7 +442,7 @@ static void mmap_add_reserved_area( void *addr, SIZE_T size )
     assert( !((UINT_PTR)addr & host_page_mask) );
     assert( !(size & host_page_mask) );
 
-    if (!((intptr_t)addr + size)) size--;  /* avoid wrap-around */
+    if (!((intptr_t)addr + size)) size -= host_page_size;  /* avoid wrap-around */
     end = (char *)addr + size;
 
     LIST_FOR_EACH( ptr, &reserved_areas )
@@ -494,7 +494,7 @@ static void mmap_remove_reserved_area( void *addr, SIZE_T size )
     assert( !((UINT_PTR)addr & host_page_mask) );
     assert( !(size & host_page_mask) );
 
-    if (!((intptr_t)addr + size)) size--;  /* avoid wrap-around */
+    if (!((intptr_t)addr + size)) size -= host_page_size;  /* avoid wrap-around */
 
     ptr = list_head( &reserved_areas );
     /* find the first area covering address */
@@ -554,9 +554,10 @@ static int mmap_is_in_reserved_area( void *addr, SIZE_T size )
 
     LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
     {
-        if (area->base > addr) break;
+        if ((char *)area->base > (char *)addr + size) break;
         if ((char *)area->base + area->size <= (char *)addr) continue;
         /* area must contain block completely */
+        if (area->base > addr) return -1;
         if ((char *)area->base + area->size < (char *)addr + size) return -1;
         return 1;
     }
@@ -2796,6 +2797,18 @@ static void *get_host_addr_space_limit(void)
 #endif /* _WIN64 */
 
 #ifdef __aarch64__
+
+/***********************************************************************
+ *           is_emulated_code
+ */
+BOOL is_emulated_code( ULONG_PTR ptr )
+{
+    const UINT64 *map = (const UINT64 *)peb->EcCodeBitMap;
+    ULONG_PTR page = ptr / page_size;
+    if (!is_arm64ec() || ptr >= (ULONG_PTR)user_space_limit) return FALSE;
+    return !((map[page / 64] >> (page & 63)) & 1);
+}
+
 
 /***********************************************************************
  *           alloc_arm64ec_map

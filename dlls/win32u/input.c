@@ -620,6 +620,21 @@ BOOL WINAPI NtUserAttachThreadInput( DWORD from, DWORD to, BOOL attach )
     return ret;
 }
 
+static BOOL get_clip_cursor( RECT *rect, struct ratio dpi, MONITOR_DPI_TYPE type )
+{
+    struct object_lock lock = OBJECT_LOCK_INIT;
+    const desktop_shm_t *desktop_shm;
+    NTSTATUS status;
+
+    if (!rect) return FALSE;
+
+    while ((status = get_shared_desktop( &lock, &desktop_shm )) == STATUS_PENDING)
+        *rect = wine_server_get_rect( desktop_shm->cursor.clip );
+
+    if (!status && type == MDT_EFFECTIVE_DPI) *rect = map_rect_raw_to_virt( *rect, dpi );
+    return !status;
+}
+
 /***********************************************************************
  *		update_mouse_coords
  *
@@ -686,6 +701,16 @@ static NTSTATUS send_mouse_motion( UINT flags )
     return status;
 }
 
+/* whether a mouse input motion is being clipped by the host cursor clipping */
+static BOOL is_clipped_motion( MOUSEINPUT mi )
+{
+    RECT rect;
+
+    if (!get_clip_cursor( &rect, no_dpi, MDT_RAW_DPI ) || IsRectEmpty( &rect )) return FALSE;
+    if (!(mi.dwFlags & MOUSEEVENTF_MOVE) || !(mi.dwFlags & MOUSEEVENTF_ABSOLUTE)) return FALSE;
+    return mi.dx == rect.left || mi.dx == rect.right - 1 || mi.dy == rect.top || mi.dy == rect.bottom - 1;
+}
+
 static NTSTATUS accum_mouse_motion( HWND hwnd, UINT flags, INPUT input, const struct raw_mouse *raw )
 {
     struct user_thread_info *info = get_user_thread_info();
@@ -693,7 +718,7 @@ static NTSTATUS accum_mouse_motion( HWND hwnd, UINT flags, INPUT input, const st
 
     /* don't accumulate if there's button / wheel / MOUSEEVENTF_MOVE_NOCOALESCE */
     send = input.mi.mouseData || (input.mi.dwFlags & ~(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE));
-    if (send || info->mouse_hwnd != hwnd) send_mouse_motion( flags );
+    if (send || info->mouse_hwnd != hwnd || is_clipped_motion( input.mi )) send_mouse_motion( flags );
     else if (info->raw_mouse.count + raw->count > ARRAY_SIZE(raw->data)) send_mouse_motion( flags );
 
     input.mi.dwFlags &= ~MOUSEEVENTF_MOVE_NOCOALESCE;
@@ -2848,21 +2873,6 @@ BOOL clip_fullscreen_window( HWND hwnd, BOOL reset )
     SERVER_END_REQ;
 
     return ret;
-}
-
-static BOOL get_clip_cursor( RECT *rect, struct ratio dpi, MONITOR_DPI_TYPE type )
-{
-    struct object_lock lock = OBJECT_LOCK_INIT;
-    const desktop_shm_t *desktop_shm;
-    NTSTATUS status;
-
-    if (!rect) return FALSE;
-
-    while ((status = get_shared_desktop( &lock, &desktop_shm )) == STATUS_PENDING)
-        *rect = wine_server_get_rect( desktop_shm->cursor.clip );
-
-    if (!status && type == MDT_EFFECTIVE_DPI) *rect = map_rect_raw_to_virt( *rect, dpi );
-    return !status;
 }
 
 BOOL process_wine_clipcursor( HWND hwnd, UINT flags, BOOL reset )

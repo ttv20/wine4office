@@ -525,7 +525,12 @@ static LPWSTR get_fusion_filename(MSIPACKAGE *package)
         if (!RegQueryValueExW(hkey, L"InstallPath", NULL, &type, (BYTE *)path, &size))
         {
             len = lstrlenW(path) + lstrlenW(L"fusion.dll") + 2;
-            if (!(filename = malloc(len * sizeof(WCHAR)))) return NULL;
+            if (!(filename = malloc(len * sizeof(WCHAR))))
+            {
+                RegCloseKey(hkey);
+                RegCloseKey(netsetup);
+                return NULL;
+            }
 
             lstrcpyW(filename, path);
             lstrcatW(filename, L"\\");

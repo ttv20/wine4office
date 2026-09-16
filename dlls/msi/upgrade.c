@@ -93,7 +93,11 @@ static void append_productcode( MSIPACKAGE *package, const WCHAR *action_prop, c
 
     if (prop) len += lstrlenW( prop );
     len += lstrlenW( product ) + 2;
-    if (!(newprop = malloc( len * sizeof(WCHAR) ))) return;
+    if (!(newprop = malloc( len * sizeof(WCHAR) )))
+    {
+        free( prop );
+        return;
+    }
     if (prop)
     {
         lstrcpyW( newprop, prop );
