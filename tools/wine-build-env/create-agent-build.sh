@@ -5,7 +5,13 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 source "$script_dir/config.sh"
 remote_host=$(wine_build_remote_host)
 remote_root=$(wine_build_remote_root)
-agent_id=${1:?usage: create-agent-build.sh AGENT_ID}
+reuse_current=false
+if [[ ${1:-} == --reuse-current ]]; then
+    reuse_current=true
+    shift
+fi
+agent_id=${1:?usage: create-agent-build.sh [--reuse-current] AGENT_ID}
+[[ $# == 1 ]] || { echo "Expected one agent ID" >&2; exit 2; }
 
 [[ "$agent_id" =~ ^[a-z0-9][a-z0-9-]{2,47}$ ]] || {
     echo "AGENT_ID must be 3-48 lowercase letters, digits, or hyphens" >&2
@@ -13,7 +19,9 @@ agent_id=${1:?usage: create-agent-build.sh AGENT_ID}
 }
 
 export WINE365_REMOTE_HOST="$remote_host" WINE_BUILD_REMOTE_ROOT="$remote_root"
-"$script_dir/refresh-main-build.sh"
+if [[ "$reuse_current" != true ]]; then
+    "$script_dir/refresh-main-build.sh"
+fi
 remote_payload=$(printf '%s\0' "$agent_id" "$remote_root" | base64 -w0)
 
 ssh -o BatchMode=yes "$remote_host" bash -s -- "$remote_payload" <<'REMOTE'

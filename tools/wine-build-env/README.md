@@ -25,6 +25,13 @@ tools/wine-build-env/run-build-container.sh install "$PWD" "$PWD/build" "$PWD/st
 `sync-agent-source.sh`, `build-agent-targets.sh`, `install-agent-runner.sh`,
 and `remove-agent-build.sh` in lifecycle order.
 
+Use `create-agent-build.sh --reuse-current AGENT_ID` to clone the latest
+already-published baseline without triggering a main refresh. The clone keeps
+that baseline's source commit in `OWNER.env`; synchronize the task source and
+use the focused dry-run gate before building. This permits incremental work
+from the latest successful baseline while a newer main has not yet been built,
+without modifying the shared baseline or silently starting a full build.
+
 ## Remote configuration
 
 Remote commands read `WINE365_REMOTE_HOST`, `WINE_BUILD_REMOTE_ROOT`, and
