@@ -2230,6 +2230,7 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     {
         vr = renderer.p_vkGetFenceStatus(queue->device, root->present_fence);
         if (vr == VK_NOT_READY) return STATUS_PENDING;
+        if (vr && vr != VK_ERROR_DEVICE_LOST) return renderer_queue_status(vr);
         if (vr && !status)
             status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
     }
@@ -2361,6 +2362,7 @@ static NTSTATUS poll_renderer_frame(struct renderer_frame *frame)
     }
     vr = renderer.p_vkGetFenceStatus(queue->device, frame->fence);
     if (vr == VK_NOT_READY) return STATUS_PENDING;
+    if (vr && vr != VK_ERROR_DEVICE_LOST) return renderer_queue_status(vr);
     if (vr)
     {
         status = vr == VK_ERROR_DEVICE_LOST ? STATUS_DEVICE_REMOVED : STATUS_UNSUCCESSFUL;
@@ -3461,7 +3463,8 @@ static NTSTATUS process_renderer_frame(void *args)
             return STATUS_REVISION_MISMATCH;
         if ((status = poll_renderer_frame(candidate)))
         {
-            if (status == STATUS_PENDING) return status;
+            /* A failed fence query is not proof that the copy has stopped. */
+            if (status == STATUS_PENDING || !candidate->complete) return status;
             if (!candidate->reuse_recovered)
                 candidate->reuse_recovered = signal_renderer_reuse(candidate->device_queue,
                         candidate->reuse_semaphore, candidate->reuse_value);
@@ -5359,6 +5362,7 @@ struct renderer_queue_test_state
     unsigned int submits, commands, presents, waits, fences, semaphores, buffers;
     unsigned int fail_submit_number;
     unsigned int images, memories, signals;
+    VkResult fence_error;
     BOOL cancel_on_submit, fence_ready, invalid;
     NTSTATUS cancel_status;
 };
@@ -5400,6 +5404,7 @@ static VkResult queue_test_wait(VkDevice device, VkSwapchainKHR swapchain, uint6
 
 static VkResult queue_test_fence_status(VkDevice device, VkFence fence)
 {
+    if (queue_test.fence_error) return queue_test.fence_error;
     return queue_test.fence_ready ? VK_SUCCESS : VK_NOT_READY;
 }
 
@@ -5973,6 +5978,15 @@ static NTSTATUS renderer_queue_self_test(void *args)
         QUEUE_TEST_CHECK(root->geometry_token_revision && !root->present_complete);
         QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
         QUEUE_TEST_CHECK(!queue_test.fences && !queue_test.semaphores && !queue_test.buffers);
+        if (mode == 2)
+        {
+            queue_test.fence_error = VK_ERROR_OUT_OF_HOST_MEMORY;
+            QUEUE_TEST_CHECK(poll_renderer_root_present(root) == STATUS_NO_MEMORY);
+            QUEUE_TEST_CHECK(root->geometry_token_revision && !root->present_complete);
+            QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
+            QUEUE_TEST_CHECK(!queue_test.fences && !queue_test.semaphores && !queue_test.buffers);
+            queue_test.fence_error = VK_SUCCESS;
+        }
         queue_test.fence_ready = TRUE;
         QUEUE_TEST_CHECK(!poll_renderer_root_present(root));
         QUEUE_TEST_CHECK(!root->geometry_token_revision && root->present_complete);
@@ -6018,6 +6032,15 @@ static NTSTATUS renderer_queue_self_test(void *args)
     QUEUE_TEST_CHECK(renderer.frames[0].frame_id == process.frame_id);
     QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
             !queue_test.fences && !queue_test.buffers);
+    queue_test.fence_error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    QUEUE_TEST_CHECK(process_renderer_frame(&process) == STATUS_NO_MEMORY && !process.reusable);
+    QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NO_MEMORY);
+    queue_test.fence_error = VK_ERROR_UNKNOWN;
+    QUEUE_TEST_CHECK(process_renderer_frame(&process) == STATUS_UNSUCCESSFUL && !process.reusable);
+    QUEUE_TEST_CHECK(renderer.frames[0].frame_id == process.frame_id && !renderer.frames[0].complete);
+    QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&
+            !queue_test.fences && !queue_test.buffers);
+    queue_test.fence_error = VK_SUCCESS;
     queue_test.fence_ready = TRUE;
     QUEUE_TEST_CHECK(!process_renderer_frame(&process) && process.reusable);
     QUEUE_TEST_CHECK(!queue_test.signals && !queue_test.images && !queue_test.memories &&

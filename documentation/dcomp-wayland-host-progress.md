@@ -1938,6 +1938,32 @@ Server artifacts: `frame-storage-20260916-{x86_64,i386}.log` and
 Both executions returned zero. Tests use controlled backend callbacks, not
 physical GPU or compositor validation. The personal laptop remains off limits.
 
+## Fence-query failure lifetime, September 16
+
+Both copy and presentation polling treated any error from `vkGetFenceStatus`
+as terminal, destroying synchronization objects and allowing image release.
+The [Khronos fence query contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetFenceStatus.html)
+also permits allocation/query errors; these do not establish completion of
+the submitted work. Polling now returns those errors without retiring any
+resource or clearing the geometry token. Copy error recovery additionally
+requires a terminal record before it can signal source reuse or destroy the
+image. A subsequent successful query can complete the same retained record.
+Device loss retains the existing distinct terminal handling, not a newly
+claimed native recovery guarantee.
+
+The controlled fixture injects a host-memory error into presentation-fence
+polling and device-memory/unknown errors into copy-fence polling, verifies
+no early reuse or destruction, then allows the same fences to complete.
+The native host rebuilt without warnings. All focused cases passed through
+both PE architectures with exit zero. ABI 18 and protocol 1004 are unchanged.
+Artifacts are `fence-query-20260916-{x86_64,i386}.log` and
+`fence-query-20260916.sh` in the existing server workspace. Tested Unix SHA256:
+`9d927098a0938e5e6c6a97bf195a2bdc07396fe28183face536272a97e12e5e8`.
+
+This is separate from failure of `vkWaitForPresentKHR`, where even GPU fence
+success does not prove the plan's native commit-order boundary. That path
+and unknown submission outcomes are under further review. No laptop access.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
