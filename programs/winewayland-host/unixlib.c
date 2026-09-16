@@ -220,6 +220,7 @@ struct renderer_queue_job
             uint32_t test_delay_ms;
             VkResult present_result;
             NTSTATUS retirement_status;
+            BOOL commit_proven;
         } present;
     } u;
 };
@@ -301,6 +302,8 @@ struct renderer_root
     BOOL present_image_discarded;
     BOOL present_fence_submitted;
     BOOL present_complete;
+    BOOL present_commit_proven;
+    BOOL present_wsi_unavailable;
     BOOL recreate_swapchain;
     BOOL test_block_next_present;
     BOOL test_fail_next_frame_copy;
@@ -1772,6 +1775,7 @@ static NTSTATUS cancel_renderer_present(struct renderer_root *root)
     struct renderer_device_queue *queue = &root->device_queue;
     NTSTATUS status = STATUS_SUCCESS;
 
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
     if (!root->present_fence) return STATUS_SUCCESS;
     pthread_mutex_lock(&queue->mutex);
     /* Claiming is the worker's submission boundary. Cancellation cannot
@@ -1805,13 +1809,14 @@ static BOOL signal_renderer_reuse(struct renderer_device_queue *queue,
 
 static void retry_renderer_present_retirement(struct renderer_device_queue *queue,
         const struct renderer_queue_job *job, enum renderer_queue_job_type type,
-        NTSTATUS status, VkResult present_result, VkResult failure)
+        NTSTATUS status, VkResult present_result, VkResult failure, BOOL commit_proven)
 {
     struct renderer_queue_job retry = *job;
 
     retry.type = type;
     retry.u.present.retirement_status = status;
     retry.u.present.present_result = present_result;
+    retry.u.present.commit_proven = commit_proven;
     /* Only allocation errors guarantee that the failed submission changed
      * no synchronization state. Otherwise keep this root unavailable/pinned. */
     if ((failure != VK_ERROR_OUT_OF_HOST_MEMORY && failure != VK_ERROR_OUT_OF_DEVICE_MEMORY) ||
@@ -1834,6 +1839,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
     BOOL reuse_recovered = FALSE;
     BOOL cancelled;
     BOOL image_discarded = FALSE;
+    BOOL commit_proven = FALSE;
     VkResult present_result = VK_SUCCESS, vr;
 
     if (job->type == RENDERER_QUEUE_JOB_FRAME)
@@ -1877,6 +1883,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         if (!cancelled) job->u.present.root->present_job_claimed = TRUE;
         pthread_mutex_unlock(&queue->mutex);
         if (cancelled) goto cancel;
+        commit_proven = TRUE; /* No native Present has been called yet. */
         submit_info.waitSemaphoreCount = 1;
         submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
         submit_info.pWaitDstStageMask = &wait_stage;
@@ -1891,7 +1898,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
             /* The acquire semaphore is still live after an allocation
              * failure. Drain it, but never retry the obsolete content read. */
             retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_CANCEL,
-                    status, VK_NOT_READY, vr);
+                    status, VK_NOT_READY, vr, commit_proven);
             return;
         }
         else
@@ -1905,6 +1912,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
             present_id_info.swapchainCount = 1;
             present_id_info.pPresentIds = &job->u.present.present_id;
             present_info.pNext = &present_id_info;
+            commit_proven = FALSE;
             present_result = renderer.p_vkQueuePresentKHR(queue->queue, &present_info);
         }
     }
@@ -1921,6 +1929,7 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
         usleep(16000);
         status = job->u.present.retirement_status;
         present_result = job->u.present.present_result;
+        commit_proven = job->u.present.commit_proven;
         goto fence;
     }
     else
@@ -1932,14 +1941,17 @@ static void execute_renderer_queue_job(struct renderer_device_queue *queue,
 
         vr = renderer.p_vkWaitForPresentKHR(queue->device, job->u.present.swapchain,
                 job->u.present.present_id, 1000000000ull);
-        if (vr == VK_TIMEOUT)
+        if (vr == VK_TIMEOUT || vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY)
         {
+            if (vr != VK_TIMEOUT) usleep(16000);
             wait_job.type = RENDERER_QUEUE_JOB_PRESENT_WAIT;
             wait_job.u.present.present_result = present_result;
             if (!enqueue_renderer_queue_job_internal(queue, &wait_job, TRUE)) return;
             status = STATUS_DEVICE_BUSY;
         }
-        else if (vr)
+        else if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR)
+            commit_proven = TRUE;
+        else
             status = renderer_queue_status(vr);
     }
     if (queue_work_submitted)
@@ -1951,7 +1963,7 @@ fence:
             if (vr != VK_ERROR_DEVICE_LOST)
             {
                 retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_FENCE,
-                        status, present_result, vr);
+                        status, present_result, vr, commit_proven);
                 return;
             }
             status = STATUS_DEVICE_REMOVED;
@@ -1966,6 +1978,7 @@ done:
     job->u.present.root->present_job_status = status;
     job->u.present.root->present_fence_submitted = fence_submitted;
     job->u.present.root->present_image_discarded = image_discarded;
+    job->u.present.root->present_commit_proven = commit_proven;
     job->u.present.root->present_job_done = TRUE;
     pthread_mutex_unlock(&queue->mutex);
     return;
@@ -1975,6 +1988,7 @@ cancel:
      * recorded content read or a native Present, and keep the source pinned
      * until this fence completes. The acquired image retires with its swapchain. */
     wait_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    commit_proven = TRUE;
     image_discarded = TRUE;
     submit_info.waitSemaphoreCount = 1;
     submit_info.pWaitSemaphores = &job->u.present.acquire_semaphore;
@@ -1991,7 +2005,7 @@ cancel:
     else
     {
         retry_renderer_present_retirement(queue, job, RENDERER_QUEUE_JOB_PRESENT_CANCEL,
-                status, VK_NOT_READY, vr);
+                status, VK_NOT_READY, vr, commit_proven);
         return;
     }
     goto done;
@@ -2237,15 +2251,27 @@ static NTSTATUS poll_renderer_root_present(struct renderer_root *root)
     renderer.p_vkDestroyFence(queue->device, root->present_fence, NULL);
     renderer.p_vkFreeCommandBuffers(queue->device, queue->command_pool, 1,
             &root->present_command_buffer);
-    renderer.p_vkDestroySemaphore(queue->device, root->present_semaphore, NULL);
+    /* A GPU fence retires source reads, not deferred native WSI commits. Keep
+     * the present semaphore, surface and geometry token if that boundary was
+     * not observed. Only this root becomes unavailable; recovery needs an
+     * independently proven native teardown, not another empty queue fence. */
+    if (root->present_commit_proven)
+    {
+        renderer.p_vkDestroySemaphore(queue->device, root->present_semaphore, NULL);
+        root->present_semaphore = VK_NULL_HANDLE;
+        root->geometry_token_revision = 0;
+    }
+    else
+    {
+        root->present_wsi_unavailable = TRUE;
+        if (!status) status = STATUS_UNSUCCESSFUL;
+    }
     renderer.p_vkDestroySemaphore(queue->device, root->acquire_semaphore, NULL);
     root->present_fence = VK_NULL_HANDLE;
     root->present_command_buffer = VK_NULL_HANDLE;
-    root->present_semaphore = VK_NULL_HANDLE;
     root->acquire_semaphore = VK_NULL_HANDLE;
     root->present_source_pool_generation = 0;
     root->present_source_frame_id = 0;
-    root->geometry_token_revision = 0;
     if (!root->present_fence_submitted || root->present_image_discarded)
         root->recreate_swapchain = TRUE;
     root->present_fence_submitted = FALSE;
@@ -2274,6 +2300,7 @@ static NTSTATUS destroy_renderer_root(struct renderer_root *root)
     unsigned int i;
 
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
     for (i = 0; i < ARRAY_SIZE(renderer.frames); ++i)
         if (renderer.frames[i].frame_id && renderer.frames[i].root == root)
             return STATUS_PENDING;
@@ -3279,6 +3306,11 @@ static NTSTATUS import_renderer_slot(void *args)
             status = STATUS_NOT_FOUND;
             goto done;
         }
+        if (root->present_wsi_unavailable)
+        {
+            status = STATUS_INVALID_DEVICE_STATE;
+            goto done;
+        }
         queue = &root->device_queue;
     }
     else
@@ -3495,7 +3527,8 @@ static NTSTATUS process_renderer_frame(void *args)
         }
     if (!slot) return STATUS_NOT_FOUND;
     queue = slot->device_queue;
-    if (!renderer_frame_storage_available(queue, slot->root, slot->frame_credit_limit))
+    if (!(slot->root && slot->root->present_wsi_unavailable) &&
+        !renderer_frame_storage_available(queue, slot->root, slot->frame_credit_limit))
         return STATUS_PENDING;
     if ((vr = renderer.p_vkGetSemaphoreCounterValue(queue->device, slot->ready,
             &ready_counter)) ||
@@ -3508,6 +3541,11 @@ static NTSTATUS process_renderer_frame(void *args)
     {
         params->reusable = 1;
         return STATUS_REVISION_MISMATCH;
+    }
+    if (slot->root && slot->root->present_wsi_unavailable)
+    {
+        params->reusable = signal_renderer_reuse(queue, slot->reuse, reuse_value);
+        return STATUS_INVALID_DEVICE_STATE;
     }
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -3808,6 +3846,7 @@ static NTSTATUS create_renderer_root_swapchain(struct renderer_root *root,
         requested_height > 16384)
         return STATUS_INVALID_PARAMETER;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
     if (root->recreate_swapchain)
     {
         destroy_renderer_root_swapchain(root);
@@ -4255,6 +4294,7 @@ static NTSTATUS update_renderer_root_snapshot(void *args)
     if (params->snapshot_revision < root->snapshot_revision)
         return STATUS_REVISION_MISMATCH;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
 
     size = (uint64_t)params->stride * params->height;
     if (!renderer_memory_available(queue, size)) return STATUS_NO_MEMORY;
@@ -4357,6 +4397,7 @@ static NTSTATUS present_renderer_root(void *args)
     queue = &root->device_queue;
     if (!root->swapchain) return STATUS_DEVICE_NOT_READY;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
     use_snapshot = !!params->snapshot_revision;
     if (use_snapshot && (!root->snapshot_buffer ||
         params->snapshot_revision != root->snapshot_revision ||
@@ -4523,6 +4564,7 @@ static NTSTATUS present_renderer_root(void *args)
     root->present_image_discarded = FALSE;
     root->present_fence_submitted = FALSE;
     root->present_complete = FALSE;
+    root->present_commit_proven = FALSE;
     root->present_job_status = STATUS_PENDING;
     root->present_result = VK_NOT_READY;
 
@@ -4579,7 +4621,7 @@ done:
 static NTSTATUS validate_renderer_root_action(struct renderer_root *root,
         const struct winewayland_host_renderer_action *params)
 {
-    if (!root->input_authorized || renderer.pointer_root != root ||
+    if (root->present_wsi_unavailable || !root->input_authorized || renderer.pointer_root != root ||
         !renderer.pointer_left_pressed || params->serial != renderer.pointer_left_serial ||
         !root->configured || root->unmapped || root->unmap_callback || root->remap_pending ||
         root->maximized || (root->toplevel_state &
@@ -4652,6 +4694,7 @@ static NTSTATUS hide_renderer_root(void *args)
         return STATUS_NOT_FOUND;
     if (renderer.pointer_root == root) renderer.pointer_left_pressed = FALSE;
     if ((status = poll_renderer_root_present(root))) return status;
+    if (root->present_wsi_unavailable) return STATUS_INVALID_DEVICE_STATE;
     if (root->unmap_callback) return STATUS_PENDING;
     if (root->unmapped) return STATUS_SUCCESS;
 
@@ -5363,6 +5406,7 @@ struct renderer_queue_test_state
     unsigned int fail_submit_number;
     unsigned int images, memories, signals;
     VkResult fence_error;
+    VkResult wait_result;
     BOOL cancel_on_submit, fence_ready, invalid;
     NTSTATUS cancel_status;
 };
@@ -5399,7 +5443,7 @@ static VkResult queue_test_present(VkQueue queue, const VkPresentInfoKHR *info)
 static VkResult queue_test_wait(VkDevice device, VkSwapchainKHR swapchain, uint64_t id, uint64_t timeout)
 {
     ++queue_test.waits;
-    return VK_SUCCESS;
+    return queue_test.wait_result;
 }
 
 static VkResult queue_test_fence_status(VkDevice device, VkFence fence)
@@ -5700,6 +5744,10 @@ static NTSTATUS renderer_memory_self_test(const struct winewayland_host_renderer
     memory_test.allocation_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     MEMORY_TEST_CHECK(process_renderer_frame(&process) == STATUS_NO_MEMORY && process.reusable);
     MEMORY_TEST_CHECK(memory_test.allocations == 4 && queue_test.signals == 2);
+    root->present_wsi_unavailable = TRUE;
+    process.reusable = 0;
+    MEMORY_TEST_CHECK(process_renderer_frame(&process) == STATUS_INVALID_DEVICE_STATE && process.reusable);
+    MEMORY_TEST_CHECK(memory_test.allocations == 4 && queue_test.signals == 3);
 done:
     for (i = 0; i < ARRAY_SIZE(fds); ++i)
         if (fds[i] >= 0) close(fds[i]);
@@ -5913,13 +5961,15 @@ static NTSTATUS renderer_queue_self_test(void *args)
 
     /* Real executor, cancellation and resource-release paths with controlled
      * Vulkan responses. No display/device creation or timing-based race. */
-    for (mode = 0; mode < 5; ++mode)
+    for (mode = 0; mode < 8; ++mode)
     {
         memset(root, 0, sizeof(*root));
         memset(&queue_test, 0, sizeof(queue_test));
         queue_test.root = root;
         queue_test.fail_submit_number = mode == 1 || mode == 3 ? 1 : mode == 4 ? 2 : 0;
         queue_test.cancel_on_submit = mode == 2;
+        queue_test.wait_result = mode == 5 ? VK_ERROR_OUT_OF_HOST_MEMORY :
+                mode == 6 ? VK_ERROR_OUT_OF_DATE_KHR : mode == 7 ? VK_TIMEOUT : VK_SUCCESS;
         QUEUE_TEST_CHECK(!pthread_mutex_init(&queue->mutex, NULL));
         mutex_initialized = TRUE;
         QUEUE_TEST_CHECK(!pthread_cond_init(&queue->cond, NULL));
@@ -5927,6 +5977,8 @@ static NTSTATUS renderer_queue_self_test(void *args)
         queue->thread_started = TRUE; /* Drive the bounded retry queue explicitly. */
         root->root_identity = cancel.root_identity;
         root->root_generation = cancel.root_generation;
+        root->configured = TRUE;
+        root->swapchain = (VkSwapchainKHR)6;
         root->present_fence = (VkFence)1;
         root->acquire_semaphore = (VkSemaphore)2;
         root->present_semaphore = (VkSemaphore)3;
@@ -5943,6 +5995,7 @@ static NTSTATUS renderer_queue_self_test(void *args)
         job.u.present.present_semaphore = root->present_semaphore;
         job.u.present.command_buffer = root->present_command_buffer;
         job.u.present.fence = root->present_fence;
+        job.u.present.swapchain = root->swapchain;
 
         --cancel.root_generation;
         QUEUE_TEST_CHECK(cancel_renderer_root(&cancel) == STATUS_NOT_FOUND);
@@ -5953,23 +6006,48 @@ static NTSTATUS renderer_queue_self_test(void *args)
             QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
             QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
         }
+        if (mode == 7) queue->count = ARRAY_SIZE(queue->jobs);
         execute_renderer_queue_job(queue, &job);
-        if (mode == 1 || mode >= 3)
+        if (mode == 1 || mode == 3 || mode == 4 || mode == 5)
         {
             QUEUE_TEST_CHECK(!root->present_job_done && queue->count == 1);
             QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_PENDING);
             retry = queue->jobs[queue->head];
             queue->head = (queue->head + 1) % ARRAY_SIZE(queue->jobs);
             --queue->count;
-            QUEUE_TEST_CHECK(retry.type == (mode == 4 ? RENDERER_QUEUE_JOB_PRESENT_FENCE :
+            QUEUE_TEST_CHECK(retry.type == (mode == 5 ? RENDERER_QUEUE_JOB_PRESENT_WAIT :
+                    mode == 4 ? RENDERER_QUEUE_JOB_PRESENT_FENCE :
                     RENDERER_QUEUE_JOB_PRESENT_CANCEL));
+            queue_test.wait_result = VK_SUCCESS;
             execute_renderer_queue_job(queue, &retry);
         }
         QUEUE_TEST_CHECK(root->present_job_done && root->present_fence_submitted && !queue_test.invalid);
+        if (mode >= 6)
+        {
+            /* The GPU fence may succeed while no native commit boundary was
+             * observed. Complete source reads, but never authorize a newer
+             * configure, new WSI job, unmap or native-owner handoff. */
+            QUEUE_TEST_CHECK(!root->present_commit_proven && queue_test.presents == 1);
+            queue_test.fence_ready = TRUE;
+            QUEUE_TEST_CHECK(!poll_renderer_root_present(root));
+            QUEUE_TEST_CHECK(root->present_wsi_unavailable && root->geometry_token_revision &&
+                    root->present_complete && root->present_semaphore && !root->present_fence);
+            QUEUE_TEST_CHECK(root->present_job_status == (mode == 6 ? STATUS_UNSUCCESSFUL : STATUS_DEVICE_BUSY));
+            QUEUE_TEST_CHECK(queue_test.fences == 1 && queue_test.semaphores == 1 && queue_test.buffers == 1);
+            QUEUE_TEST_CHECK(!release_renderer_frame(&release));
+            QUEUE_TEST_CHECK(create_renderer_root_swapchain(root, 64, 64) == STATUS_INVALID_DEVICE_STATE);
+            QUEUE_TEST_CHECK(hide_renderer_root(&cancel) == STATUS_INVALID_DEVICE_STATE);
+            QUEUE_TEST_CHECK(retire_renderer_root(&cancel) == STATUS_INVALID_DEVICE_STATE);
+            QUEUE_TEST_CHECK(cancel_renderer_root(&cancel) == STATUS_INVALID_DEVICE_STATE);
+            QUEUE_TEST_CHECK(!poll_renderer_root_present(root));
+            QUEUE_TEST_CHECK(queue_test.fences == 1 && queue_test.semaphores == 1 && queue_test.buffers == 1);
+            goto iteration_done;
+        }
+        QUEUE_TEST_CHECK(root->present_commit_proven && !root->present_wsi_unavailable);
         QUEUE_TEST_CHECK(queue_test.submits == (!mode ? 1 : mode == 4 ? 3 : 2));
         QUEUE_TEST_CHECK(queue_test.commands == (mode >= 2));
-        QUEUE_TEST_CHECK(queue_test.presents == (mode == 2 || mode == 4) &&
-                queue_test.waits == queue_test.presents);
+        QUEUE_TEST_CHECK(queue_test.presents == (mode == 2 || mode == 4 || mode == 5) &&
+                queue_test.waits == queue_test.presents + (mode == 5));
         QUEUE_TEST_CHECK(root->present_job_status == (mode < 2 ? STATUS_RETRY :
                 mode == 3 ? STATUS_NO_MEMORY : STATUS_SUCCESS));
         if (mode == 2)
@@ -5995,6 +6073,7 @@ static NTSTATUS renderer_queue_self_test(void *args)
         QUEUE_TEST_CHECK(!release_renderer_frame(&release));
         QUEUE_TEST_CHECK(release_renderer_frame(&release) == STATUS_NOT_FOUND);
         QUEUE_TEST_CHECK(!cancel_renderer_root(&cancel));
+iteration_done:
         pthread_cond_destroy(&queue->cond);
         cond_initialized = FALSE;
         pthread_mutex_destroy(&queue->mutex);

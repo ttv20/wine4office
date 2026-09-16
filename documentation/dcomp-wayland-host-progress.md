@@ -1964,6 +1964,50 @@ This is separate from failure of `vkWaitForPresentKHR`, where even GPU fence
 success does not prove the plan's native commit-order boundary. That path
 and unknown submission outcomes are under further review. No laptop access.
 
+## Separate GPU retirement from native commit proof, September 16
+
+An analysis-only Claude consultation confirmed the executor/polling path that
+conflated a completed empty GPU fence with the native commit boundary after
+`vkWaitForPresentKHR` failed. It made no source changes. Its attempt to read
+the parent project's runtime plan was denied; the main agent read and checked
+runtime sections 5–6 directly before designing the change. The implemented
+policy follows those sections and the [present-wait contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkWaitForPresentKHR.html),
+not an assumed `vkDeviceWaitIdle` or swapchain-destruction guarantee.
+
+Jobs now record whether native commit order was established by a successful
+matching present wait, or by proving no native Present was called. This fact
+survives fence-submit retries. Transient allocation failures in present-wait
+retry on the existing bounded executor with a 16 ms delay; a timeout keeps the
+existing retry behavior. A hard failure or inability to queue the wait does
+not manufacture a commit proof.
+
+After GPU retirement, polling can release the source image reference, command
+buffer, fence and acquire semaphore, and expose a terminal backend failure.
+Without native proof, it retains the present semaphore, geometry token and
+native root/swapchain in a sticky unavailable state. New WSI allocation,
+presentation, frame uploads, imports, native move/resize, cancellation claims,
+unmap and root retirement are denied. Already accepted source frames can be
+failed without new reads once producer readiness permits safe reuse. The PE
+completion path can return the producer credit without acknowledging native
+retirement or applying a scene. This isolates the failed root; it does not
+implement automatic recovery or claim the old pixels were removed.
+
+The controlled fixture adds present-wait allocation-error retry, out-of-date
+failure after successful GPU completion, and timeout with a full retry queue.
+It checks source release independently from the retained present semaphore,
+held geometry, rejected replacement/unmap/retirement, and idempotent polling.
+The existing fence-only retry verifies commit proof survives that retry too.
+Host targets rebuilt without warnings; all cases returned zero in x64/i386.
+ABI 18 and protocol 1004 are unchanged. Server artifacts:
+`present-boundary-20260916-{x86_64,i386}.log` and
+`present-boundary-20260916.sh`. Tested Unix SHA256:
+`cc4aeeb79913fd7bae8f6b32fa31cdf45519fa538d326395102e9d2e7b570a4a`.
+
+This closes unsafe reuse on an unproven native boundary, not the complete
+recovery gate. Compositor-side teardown observation, real WSI fault injection
+and host/device-loss recovery remain open. Unknown copy-submit outcomes need
+the corresponding source-resource pinning check. No laptop access occurred.
+
 ## Developer activation and reproduction
 
 Hosted DirectComposition is disabled by default, including when another
