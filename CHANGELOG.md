@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.2-beta.1 — 2026-09-19
+
 - Let Office install and report KMS client product keys through OSPP and WMI while retaining only derived licensing metadata.
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
@@ -53,6 +55,8 @@
 - Fix Microsoft 365 sign-in for Outlook.com accounts.
 - Keep Office responsive while DirectX completion events are pending or OpenGL windows are covered on Wayland.
 - Keep keyboard input synchronized with the active host layout when returning to Wine Wayland windows.
+
+[Full changes](https://github.com/ttv20/wine4office/compare/0.2.1-beta.1...0.2.2-beta.1)
 
 ## 0.2.1-beta.1 — 2026-08-23
 
