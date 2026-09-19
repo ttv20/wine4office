@@ -962,6 +962,93 @@ exit 0
         self.assertTrue(callable(output))
         self.assertIn("updated and restarted", result)
 
+    def test_stream_command_timeout_terminates_and_reaps_process(self):
+        processes = []
+        with self.assertRaises(subprocess.TimeoutExpired):
+            backend._stream_command(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                os.environ.copy(), lambda _line: None,
+                process_callback=processes.append, timeout=0.05,
+            )
+
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
+    def test_stream_timeout_kills_descendant_after_group_leader_exits(self):
+        child_pid_file = self.home / "wineboot-child.pid"
+        child_ready_file = self.home / "wineboot-child.ready"
+        leader = """
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
+child_code = '''
+import pathlib
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready")
+time.sleep(60)
+'''
+child = subprocess.Popen([sys.executable, "-c", child_code, sys.argv[2]])
+pathlib.Path(sys.argv[1]).write_text(str(child.pid))
+while not pathlib.Path(sys.argv[2]).exists():
+    time.sleep(0.01)
+time.sleep(60)
+"""
+        processes = []
+        published_child_pids = []
+
+        def record_process(process):
+            processes.append(process)
+            if process is None:
+                return
+            readiness_deadline = time.monotonic() + 2
+            while time.monotonic() < readiness_deadline:
+                try:
+                    child_pid = child_pid_file.read_text().strip()
+                except FileNotFoundError:
+                    child_pid = ""
+                if child_pid.isdecimal() and child_ready_file.is_file():
+                    published_child_pids.append(int(child_pid))
+                    return
+                time.sleep(0.01)
+
+        with mock.patch.object(
+            backend, "PROCESS_TERMINATION_GRACE_SECONDS", 0.05
+        ), self.assertRaises(subprocess.TimeoutExpired):
+            backend._stream_command(
+                [
+                    sys.executable, "-c", leader,
+                    str(child_pid_file), str(child_ready_file),
+                ],
+                os.environ.copy(), lambda _line: None,
+                process_callback=record_process, timeout=0.3,
+            )
+
+        self.assertEqual(len(published_child_pids), 1)
+        child_pid = published_child_pids[0]
+        child_stat = Path(f"/proc/{child_pid}/stat")
+
+        def child_is_running() -> bool:
+            try:
+                return child_stat.read_text().split()[2] != "Z"
+            except FileNotFoundError:
+                return False
+
+        for _attempt in range(100):
+            if not child_is_running():
+                break
+            time.sleep(0.01)
+        self.assertFalse(child_is_running())
+        self.assertEqual(len(processes), 2)
+        self.assertIsNone(processes[-1])
+        self.assertIsNotNone(processes[0].poll())
+
     def test_recreate_restores_old_environment_when_wineboot_fails(self):
         prefix = self.home / ".wine4office"
         self._make_prefix(prefix, "old")

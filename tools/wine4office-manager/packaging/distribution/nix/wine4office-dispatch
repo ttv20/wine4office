@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+: "${WINE4OFFICE_NIX_PAYLOAD:?Wine4Office Nix payload is unavailable}"
+
+case "${1-}" in
+    --manager)
+        shift
+        exec "$WINE4OFFICE_NIX_PAYLOAD/bin/Wine4OfficeManager" "$@"
+        ;;
+    --runner-tool)
+        shift
+        tool=${1-}
+        case $tool in
+            ""|.*|*/*)
+                echo "wine4office: invalid runner tool" >&2
+                exit 2
+                ;;
+        esac
+        shift
+        target=$WINE4OFFICE_NIX_PAYLOAD/runner/bin/$tool
+        if [ ! -x "$target" ]; then
+            echo "wine4office: runner tool is unavailable: $tool" >&2
+            exit 127
+        fi
+        exec "$target" "$@"
+        ;;
+    --exec)
+        shift
+        if [ "$#" -eq 0 ]; then
+            echo "wine4office: --exec requires a command" >&2
+            exit 2
+        fi
+        exec "$@"
+        ;;
+esac
+
+exec "$WINE4OFFICE_NIX_PAYLOAD/bin/Wine4OfficeManager" "$@"

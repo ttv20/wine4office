@@ -9,6 +9,11 @@
 - Update the Wine base to WineHQ 11.17 with improved interface languages and compatibility fixes.
 - Prevent an OpenGL context-switch crash when display-mode emulation is enabled.
 - Prevent hollow Direct2D paths from exhausting memory during geometry processing.
+- Add AppImage, AUR, Nix, Ubuntu, and Fedora packages with durable user installs, package-manager updates, and startup checks.
+- Keep packaged Wine runners current across Nix profile upgrades and prevent AppImage or AUR prereleases from blocking stable upgrades.
+- Keep package-manager updates cancellable and restore Wine after failures or timeouts.
+- Keep Authenticode verification working with multi-digit OpenSSL patch versions.
+- Show Wine4Office and upstream Wine versions separately in release builds.
 - Retry Office installer downloads once, then offer manual download and file selection.
 - Bundle the certificate data needed to verify Office installers in standalone Manager builds.
 - Add Quick and Online Office repairs to the Manager and require Online Repair after a runner upgrade when Office is already installed.
