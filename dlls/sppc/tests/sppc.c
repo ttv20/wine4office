@@ -483,7 +483,7 @@ static void test_office2019_issuance_license(HSLC handle)
     const BYTE *data;
     HRSRC resource;
     HGLOBAL loaded;
-    DWORD size;
+    DWORD program_data_size, size;
     SLID file_id;
     LONG error;
     HRESULT hr;
@@ -498,8 +498,15 @@ static void test_office2019_issuance_license(HSLC handle)
     ok(!!size && !!data, "Failed to load the Office 2019 issuance license.\n");
     if (!size || !data) return;
 
-    if (!GetEnvironmentVariableW(L"ProgramData", program_data, ARRAY_SIZE(program_data)))
+    program_data_size = GetEnvironmentVariableW(L"ProgramData", program_data,
+            ARRAY_SIZE(program_data));
+    if (!program_data_size)
         lstrcpyW(program_data, L"C:\\ProgramData");
+    else if (program_data_size >= ARRAY_SIZE(program_data))
+    {
+        skip("ProgramData is too long for the Office 2019 license path.\n");
+        return;
+    }
     if (swprintf(wine_dir, ARRAY_SIZE(wine_dir), L"%s\\Wine", program_data) < 0 ||
             swprintf(sppc_dir, ARRAY_SIZE(sppc_dir), L"%s\\SPPC", wine_dir) < 0 ||
             swprintf(licenses_dir, ARRAY_SIZE(licenses_dir), L"%s\\Licenses", sppc_dir) < 0 ||
