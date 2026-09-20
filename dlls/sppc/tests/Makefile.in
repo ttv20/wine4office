@@ -4,4 +4,5 @@ IMPORTS = advapi32 ole32 sppc
 SOURCES = \
 	pidgenx.c \
 	pidgenx.spec \
+	resource.rc \
 	sppc.c
