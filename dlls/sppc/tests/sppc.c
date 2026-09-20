@@ -47,6 +47,8 @@ static const SLID office_app_id =
 
 #define PRODUCT_KEY_STORE L"Software\\Wine\\SPPC\\ProductKeys"
 #define CURRENT_KEY_STORE L"Software\\Wine\\SPPC\\CurrentProductKeys"
+#define INSTALLED_LICENSE_STORE L"Software\\Wine\\SPPC\\InstalledLicenses"
+#define TRUSTED_ISSUER_STORE L"Software\\Wine\\SPPC\\TrustedIssuers"
 
 struct installed_product_key
 {
@@ -132,6 +134,136 @@ static BOOL write_test_file(const WCHAR *path, const void *data, DWORD size)
     if (file == INVALID_HANDLE_VALUE) return FALSE;
     ret = WriteFile(file, data, size, &written, NULL) && written == size;
     CloseHandle(file);
+    return ret;
+}
+
+struct registry_value_state
+{
+    BOOL value_existed;
+    DWORD type;
+    DWORD size;
+    BYTE *data;
+};
+
+struct file_state
+{
+    BOOL existed;
+    DWORD size;
+    BYTE *data;
+};
+
+static LONG save_registry_value(const WCHAR *path, const WCHAR *name,
+        struct registry_value_state *state)
+{
+    HKEY key;
+    LONG error;
+
+    memset(state, 0, sizeof(*state));
+    error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_QUERY_VALUE, &key);
+    if (error == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+    if (error) return error;
+    error = RegQueryValueExW(key, name, NULL, &state->type, NULL, &state->size);
+    if (error == ERROR_FILE_NOT_FOUND)
+    {
+        RegCloseKey(key);
+        return ERROR_SUCCESS;
+    }
+    if (error) goto done;
+    if (!(state->data = HeapAlloc(GetProcessHeap(), 0, state->size ? state->size : 1)))
+    {
+        error = ERROR_OUTOFMEMORY;
+        goto done;
+    }
+    error = RegQueryValueExW(key, name, NULL, &state->type, state->data, &state->size);
+    if (!error) state->value_existed = TRUE;
+
+done:
+    RegCloseKey(key);
+    if (error)
+    {
+        if (state->data) HeapFree(GetProcessHeap(), 0, state->data);
+        memset(state, 0, sizeof(*state));
+    }
+    return error;
+}
+
+static LONG restore_registry_value(const WCHAR *path, const WCHAR *name,
+        struct registry_value_state *state)
+{
+    HKEY key;
+    LONG error;
+
+    if (state->value_existed)
+    {
+        error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, path, 0, NULL, 0,
+                KEY_SET_VALUE, NULL, &key, NULL);
+        if (!error)
+        {
+            error = RegSetValueExW(key, name, 0, state->type, state->data, state->size);
+            RegCloseKey(key);
+        }
+    }
+    else
+    {
+        error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_SET_VALUE, &key);
+        if (!error)
+        {
+            error = RegDeleteValueW(key, name);
+            if (error == ERROR_FILE_NOT_FOUND) error = ERROR_SUCCESS;
+            RegCloseKey(key);
+        }
+        else if (error == ERROR_FILE_NOT_FOUND)
+            error = ERROR_SUCCESS;
+    }
+    if (state->data) HeapFree(GetProcessHeap(), 0, state->data);
+    memset(state, 0, sizeof(*state));
+    return error;
+}
+
+static BOOL save_file(const WCHAR *path, struct file_state *state)
+{
+    LARGE_INTEGER size;
+    HANDLE file;
+    DWORD read;
+    BOOL ret = FALSE;
+
+    memset(state, 0, sizeof(*state));
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND;
+    state->existed = TRUE;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart > MAXDWORD ||
+            !(state->data = HeapAlloc(GetProcessHeap(), 0, size.LowPart ? size.LowPart : 1)))
+        goto done;
+    state->size = size.LowPart;
+    ret = ReadFile(file, state->data, state->size, &read, NULL) && read == state->size;
+
+done:
+    CloseHandle(file);
+    if (!ret)
+    {
+        if (state->data) HeapFree(GetProcessHeap(), 0, state->data);
+        memset(state, 0, sizeof(*state));
+    }
+    return ret;
+}
+
+static BOOL restore_file(const WCHAR *path, struct file_state *state)
+{
+    BOOL ret;
+
+    if (state->existed)
+        ret = write_test_file(path, state->data, state->size);
+    else
+    {
+        ret = DeleteFileW(path);
+        if (!ret && (GetLastError() == ERROR_FILE_NOT_FOUND ||
+                GetLastError() == ERROR_PATH_NOT_FOUND))
+            ret = TRUE;
+    }
+    if (state->data) HeapFree(GetProcessHeap(), 0, state->data);
+    memset(state, 0, sizeof(*state));
     return ret;
 }
 
@@ -334,20 +466,104 @@ static void test_SLGetLicensingStatusInformation(void)
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
 }
 
-static void test_SLInstallLicense(void)
+static void test_office2019_issuance_license(HSLC handle)
 {
     static const SLID office2019_issuance_id =
             {0x7256a55f, 0xe989, 0x4e06, {0xb2, 0xc2, 0xc5, 0x27, 0xf4, 0x9e, 0x45, 0x27}};
+    static const WCHAR license_name[] = L"{7256a55f-e989-4e06-b2c2-c527f49e4527}";
+    static const WCHAR issuer_name[] =
+            L"841a618e2cb0c1e29d1a39fcade8f172b5bbaeed5d6611fb54089fd2a6b03408";
+    struct registry_value_state license_value, issuer_value;
+    struct file_state license_file;
+    WCHAR program_data[MAX_PATH], wine_dir[MAX_PATH], sppc_dir[MAX_PATH];
+    WCHAR licenses_dir[MAX_PATH], license_path[MAX_PATH];
+    BOOL license_value_saved = FALSE, issuer_value_saved = FALSE;
+    BOOL wine_dir_existed, sppc_dir_existed, licenses_dir_existed;
+    BOOL restored;
+    const BYTE *data;
+    HRSRC resource;
+    HGLOBAL loaded;
+    DWORD size;
+    SLID file_id;
+    LONG error;
+    HRESULT hr;
+
+    resource = FindResourceW(NULL, L"office2019-issuance.xrm", (const WCHAR *)RT_RCDATA);
+    ok(!!resource, "Failed to find the Office 2019 issuance license, error %lu.\n",
+            GetLastError());
+    if (!resource) return;
+    size = SizeofResource(NULL, resource);
+    loaded = LoadResource(NULL, resource);
+    data = LockResource(loaded);
+    ok(!!size && !!data, "Failed to load the Office 2019 issuance license.\n");
+    if (!size || !data) return;
+
+    if (!GetEnvironmentVariableW(L"ProgramData", program_data, ARRAY_SIZE(program_data)))
+        lstrcpyW(program_data, L"C:\\ProgramData");
+    if (swprintf(wine_dir, ARRAY_SIZE(wine_dir), L"%s\\Wine", program_data) < 0 ||
+            swprintf(sppc_dir, ARRAY_SIZE(sppc_dir), L"%s\\SPPC", wine_dir) < 0 ||
+            swprintf(licenses_dir, ARRAY_SIZE(licenses_dir), L"%s\\Licenses", sppc_dir) < 0 ||
+            swprintf(license_path, ARRAY_SIZE(license_path), L"%s\\%s.xrm-ms",
+                    licenses_dir, license_name) < 0)
+    {
+        skip("Could not construct the Office 2019 license path.\n");
+        return;
+    }
+    wine_dir_existed = GetFileAttributesW(wine_dir) != INVALID_FILE_ATTRIBUTES;
+    sppc_dir_existed = GetFileAttributesW(sppc_dir) != INVALID_FILE_ATTRIBUTES;
+    licenses_dir_existed = GetFileAttributesW(licenses_dir) != INVALID_FILE_ATTRIBUTES;
+    if (!save_file(license_path, &license_file))
+    {
+        skip("Could not preserve the existing Office 2019 issuance license file.\n");
+        return;
+    }
+    error = save_registry_value(INSTALLED_LICENSE_STORE, license_name, &license_value);
+    ok(!error, "Could not preserve the installed-license mapping, error %ld.\n", error);
+    if (error) goto restore_file_state;
+    license_value_saved = TRUE;
+    error = save_registry_value(TRUSTED_ISSUER_STORE, issuer_name, &issuer_value);
+    ok(!error, "Could not preserve the trusted issuer, error %ld.\n", error);
+    if (error) goto restore_registry;
+    issuer_value_saved = TRUE;
+
+    memset(&file_id, 0xcc, sizeof(file_id));
+    hr = SLInstallLicense(handle, size, data, &file_id);
+    ok(hr == S_OK, "Failed to install the Office 2019 issuance license, hr %#lx.\n", hr);
+    ok(IsEqualGUID(&file_id, &office2019_issuance_id),
+            "Office 2019 issuance license produced file ID %s.\n", wine_dbgstr_guid(&file_id));
+
+    error = restore_registry_value(TRUSTED_ISSUER_STORE, issuer_name, &issuer_value);
+    issuer_value_saved = FALSE;
+    ok(!error, "Could not restore the trusted issuer, error %ld.\n", error);
+restore_registry:
+    if (issuer_value_saved)
+    {
+        error = restore_registry_value(TRUSTED_ISSUER_STORE, issuer_name, &issuer_value);
+        ok(!error, "Could not restore the trusted issuer, error %ld.\n", error);
+    }
+    if (license_value_saved)
+    {
+        error = restore_registry_value(INSTALLED_LICENSE_STORE, license_name, &license_value);
+        ok(!error, "Could not restore the installed-license mapping, error %ld.\n", error);
+    }
+restore_file_state:
+    restored = restore_file(license_path, &license_file);
+    error = restored ? ERROR_SUCCESS : GetLastError();
+    ok(restored, "Could not restore the Office 2019 issuance license file, error %ld.\n",
+            error);
+    if (!licenses_dir_existed) RemoveDirectoryW(licenses_dir);
+    if (!sppc_dir_existed) RemoveDirectoryW(sppc_dir);
+    if (!wine_dir_existed) RemoveDirectoryW(wine_dir);
+}
+
+static void test_SLInstallLicense(void)
+{
     static const BYTE arbitrary[] = {0xde, 0xad, 0xbe, 0xef};
     static const BYTE ul_id_only[] =
             "licenseId=\"{f2faf831-a981-40e0-ac9b-7a372eb4b192}\"";
     static const SLID null_id;
     SLID file_id;
     HSLC handle = NULL;
-    HRSRC resource;
-    HGLOBAL loaded;
-    const BYTE *data;
-    DWORD size;
     HRESULT hr;
 
     hr = SLOpen(&handle);
@@ -374,28 +590,7 @@ static void test_SLInstallLicense(void)
     ok(IsEqualGUID(&file_id, &null_id), "UL-ID-only input produced file ID %s.\n",
             wine_dbgstr_guid(&file_id));
 
-    if (winetest_platform_is_wine)
-    {
-        resource = FindResourceW(NULL, L"office2019-issuance.xrm", (const WCHAR *)RT_RCDATA);
-        ok(!!resource, "Failed to find the Office 2019 issuance license, error %lu.\n",
-                GetLastError());
-        if (resource)
-        {
-            size = SizeofResource(NULL, resource);
-            loaded = LoadResource(NULL, resource);
-            data = LockResource(loaded);
-            ok(!!size && !!data, "Failed to load the Office 2019 issuance license.\n");
-            if (size && data)
-            {
-                memset(&file_id, 0xcc, sizeof(file_id));
-                hr = SLInstallLicense(handle, size, data, &file_id);
-                ok(hr == S_OK, "Failed to install the Office 2019 issuance license, hr %#lx.\n", hr);
-                ok(IsEqualGUID(&file_id, &office2019_issuance_id),
-                        "Office 2019 issuance license produced file ID %s.\n",
-                        wine_dbgstr_guid(&file_id));
-            }
-        }
-    }
+    if (winetest_platform_is_wine) test_office2019_issuance_license(handle);
 
     hr = SLClose(handle);
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
