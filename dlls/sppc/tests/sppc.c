@@ -336,12 +336,18 @@ static void test_SLGetLicensingStatusInformation(void)
 
 static void test_SLInstallLicense(void)
 {
+    static const SLID office2019_issuance_id =
+            {0x7256a55f, 0xe989, 0x4e06, {0xb2, 0xc2, 0xc5, 0x27, 0xf4, 0x9e, 0x45, 0x27}};
     static const BYTE arbitrary[] = {0xde, 0xad, 0xbe, 0xef};
     static const BYTE ul_id_only[] =
             "licenseId=\"{f2faf831-a981-40e0-ac9b-7a372eb4b192}\"";
     static const SLID null_id;
     SLID file_id;
     HSLC handle = NULL;
+    HRSRC resource;
+    HGLOBAL loaded;
+    const BYTE *data;
+    DWORD size;
     HRESULT hr;
 
     hr = SLOpen(&handle);
@@ -367,6 +373,29 @@ static void test_SLInstallLicense(void)
     ok(hr == SL_E_VALUE_NOT_FOUND, "Expected SL_E_VALUE_NOT_FOUND, got %#lx.\n", hr);
     ok(IsEqualGUID(&file_id, &null_id), "UL-ID-only input produced file ID %s.\n",
             wine_dbgstr_guid(&file_id));
+
+    if (winetest_platform_is_wine)
+    {
+        resource = FindResourceW(NULL, L"office2019-issuance.xrm", (const WCHAR *)RT_RCDATA);
+        ok(!!resource, "Failed to find the Office 2019 issuance license, error %lu.\n",
+                GetLastError());
+        if (resource)
+        {
+            size = SizeofResource(NULL, resource);
+            loaded = LoadResource(NULL, resource);
+            data = LockResource(loaded);
+            ok(!!size && !!data, "Failed to load the Office 2019 issuance license.\n");
+            if (size && data)
+            {
+                memset(&file_id, 0xcc, sizeof(file_id));
+                hr = SLInstallLicense(handle, size, data, &file_id);
+                ok(hr == S_OK, "Failed to install the Office 2019 issuance license, hr %#lx.\n", hr);
+                ok(IsEqualGUID(&file_id, &office2019_issuance_id),
+                        "Office 2019 issuance license produced file ID %s.\n",
+                        wine_dbgstr_guid(&file_id));
+            }
+        }
+    }
 
     hr = SLClose(handle);
     ok(hr == S_OK, "SLClose failed, hr %#lx.\n", hr);
