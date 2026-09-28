@@ -2766,6 +2766,13 @@ exit 0
         (process / "exe").symlink_to(runner or binding["wine"])
         return process
 
+    def _wine_preloader(self, binding, root=None):
+        runner_root = root or Path(binding["wine"]).parent.parent
+        preloader = runner_root / "lib/wine/x86_64-unix/wine-preloader"
+        preloader.parent.mkdir(parents=True, exist_ok=True)
+        preloader.write_text("preloader\n")
+        return preloader
+
     def test_preload_xdg_paths_and_atomic_modes(self):
         runtime = self.root / "runtime"
         with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(runtime)}):
@@ -3406,6 +3413,91 @@ exit 0
                 binding, "ClickToRunSvc", ownership, proc_root
             )
         )
+        self.assertIsNone(
+            backend._preload_refresh_ownership(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+        )
+
+    def test_component_ownership_refreshes_after_service_pid_change(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+        process.rename(proc_root / "124")
+
+        refreshed = backend._preload_refresh_ownership(
+            binding, "ClickToRunSvc", ownership, proc_root
+        )
+
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed["pid"], 124)
+        self.assertEqual(refreshed["starttime"], ownership["starttime"])
+
+    def test_clicktorun_process_accepts_selected_runner_preloader(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, runner=preloader)
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["runner"], binding["wine"])
+        self.assertTrue(
+            backend._preload_ownership_is_current(
+                binding, "ClickToRunSvc", records[0], proc_root
+            )
+        )
+
+    def test_clicktorun_process_rejects_foreign_runner_preloader(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        foreign_preloader = self._wine_preloader(
+            binding, self.root / "foreign-runner"
+        )
+        self._component_process(binding, proc_root, runner=foreign_preloader)
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(records, [])
+
+    def test_clicktorun_process_requires_unique_readable_identity(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, pid=123, runner=preloader)
+        self._component_process(binding, proc_root, pid=124, runner=preloader)
+
+        self.assertIsNone(
+            backend._preload_unique_component_process_record(
+                binding, "ClickToRunSvc", proc_root
+            )
+        )
+
+    def test_unclassified_unreadable_process_does_not_hide_clicktorun(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, runner=preloader)
+        unreadable = proc_root / "124"
+        unreadable.mkdir()
+        (unreadable / "cmdline").mkdir()
+
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertIsNotNone(ownership)
+        self.assertEqual(ownership["pid"], 123)
 
     def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
         binding = self._preload_binding()
@@ -3495,6 +3587,7 @@ exit 0
         status_path = backend.preload_runtime_status_path()
         states = {"ClickToRunSvc": "stopped"}
         actions = []
+        startup_events = []
         handlers = {}
         ownership = {
             "pid": 123,
@@ -3504,8 +3597,10 @@ exit 0
         }
         appv_process = mock.Mock()
         voip_process = mock.Mock()
+        voip_process.poll.return_value = None
 
         def component_state(_binding, component):
+            startup_events.append(("state", component))
             return states[component], states[component]
 
         def component_action(_binding, action, component):
@@ -3521,8 +3616,17 @@ exit 0
         def stop_sleep(_seconds):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
 
+        def start_voip(_binding):
+            startup_events.append(("voip", None))
+            return voip_process, "READY service=org.wine.VoipCallBroker1"
+
+        def component_running(_binding, component):
+            startup_events.append(("preexisting", component))
+            return False
+
         with mock.patch.object(
-            backend, "_preload_component_process_running", return_value=False
+            backend, "_preload_component_process_running",
+            side_effect=component_running,
         ), mock.patch.object(
             backend, "_preload_component_process_records",
             return_value=([ownership], False),
@@ -3540,8 +3644,7 @@ exit 0
         ) as appv_start, mock.patch.object(
             backend, "_stop_preload_appv", return_value=(True, "stopped")
         ) as appv_stop, mock.patch.object(
-            backend, "_start_preload_voip",
-            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+            backend, "_start_preload_voip", side_effect=start_voip,
         ) as voip_start, mock.patch.object(
             backend, "_stop_preload_voip", return_value=(True, "stopped")
         ) as voip_stop, mock.patch.object(
@@ -3559,6 +3662,14 @@ exit 0
         self.assertEqual(
             actions,
             [("start", "ClickToRunSvc"), ("stop", "ClickToRunSvc")],
+        )
+        self.assertLess(
+            startup_events.index(("preexisting", "ClickToRunSvc")),
+            startup_events.index(("voip", None)),
+        )
+        self.assertLess(
+            startup_events.index(("voip", None)),
+            startup_events.index(("state", "ClickToRunSvc")),
         )
         office.assert_not_called()
         appv_start.assert_called_once_with(binding)
@@ -3782,7 +3893,7 @@ exit 0
                 actions.append((action, component)) or (True, action)
             ),
         ), mock.patch.object(
-            backend, "_preload_ownership_is_current", return_value=False
+            backend, "_preload_refresh_ownership", return_value=None
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
@@ -3837,7 +3948,7 @@ exit 0
                 actions.append((action, component)) or (True, action)
             ),
         ), mock.patch.object(
-            backend, "_preload_ownership_is_current", return_value=False
+            backend, "_preload_refresh_ownership", return_value=None
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(

@@ -5190,7 +5190,9 @@ def _preload_process_record(
     try:
         arguments = process.joinpath("cmdline").read_bytes().split(b"\0")
     except OSError:
-        return None, True
+        # We cannot classify an unreadable process as this component.  Only a
+        # process whose image name matched below may make ownership uncertain.
+        return None, False
     if not arguments or not arguments[0]:
         return None, False
     image = re.split(r"[\\/]", os.fsdecode(arguments[0]))[-1]
@@ -5219,13 +5221,13 @@ def _preload_process_record(
         pid = int(process.name)
     except (IndexError, OSError, UnicodeError, ValueError):
         return None, True
-    if str(runner) != binding["wine"]:
+    if not _runner_executable_matches(runner, binding["wine"]):
         return None, False
     return {
         "pid": pid,
         "starttime": starttime,
         "prefix": binding["prefix"],
-        "runner": str(runner),
+        "runner": binding["wine"],
     }, False
 
 
@@ -5252,6 +5254,18 @@ def _preload_component_process_records(
             records.append(record)
         matching_unknown = matching_unknown or unknown
     return records, matching_unknown
+
+
+def _preload_unique_component_process_record(
+    binding: dict, component: str, proc_root: Path = Path("/proc")
+) -> dict | None:
+    """Return one unambiguous matching process identity."""
+    records, matching_unknown = _preload_component_process_records(
+        binding, component, proc_root
+    )
+    if matching_unknown or len(records) != 1:
+        return None
+    return records[0]
 
 
 def _preload_component_process_running(
@@ -5311,6 +5325,26 @@ def _preload_ownership_is_current(
         binding, component, ownership["pid"], proc_root
     )
     return state == "match" and current == ownership
+
+
+def _preload_refresh_ownership(
+    binding: dict, component: str, ownership: object,
+    proc_root: Path = Path("/proc"),
+) -> dict | None:
+    """Refresh an owned component after a service-controlled PID change."""
+    if not _preload_ownership_record_matches(binding, ownership):
+        return None
+    state, current = _preload_component_process_identity(
+        binding, component, ownership["pid"], proc_root
+    )
+    if state == "match":
+        return dict(current) if current == ownership else None
+    if state != "missing":
+        return None
+    replacement = _preload_unique_component_process_record(
+        binding, component, proc_root
+    )
+    return dict(replacement) if replacement is not None else None
 
 
 def _preload_saved_ownership(
@@ -5544,9 +5578,24 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     voip_process: subprocess.Popen[str] | None = None
     voip_restart_attempts = 0
     try:
+        preexisting_components = {
+            component: _preload_component_process_running(binding, component)
+            for component in PRELOAD_COMPONENTS
+        }
+        # Keep the Wine server alive before querying auto-start services. A
+        # standalone ``sc.exe query`` can otherwise start Click-to-Run and
+        # tear the Wine process tree down before its identity is recorded.
+        voip_restart_attempts += 1
+        voip_process, voip_detail = _start_preload_voip(binding)
+        components[PRELOAD_VOIP_COMPONENT] = {
+            "state": "running" if voip_process is not None else "stopped",
+            "owned": voip_process is not None,
+            "detail": voip_detail,
+        }
+
         for component in PRELOAD_COMPONENTS:
             saved_ownership = _preload_saved_ownership(binding, component)
-            preexisting = _preload_component_process_running(binding, component)
+            preexisting = preexisting_components[component]
             state, detail = _preload_component_state(binding, component)
             ownership = saved_ownership
             if state == "stopped":
@@ -5574,10 +5623,9 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                     )
                     if started:
                         state, detail = _preload_component_state(binding, component)
-                        records, _ = _preload_component_process_records(
+                        ownership = _preload_unique_component_process_record(
                             binding, component
                         )
-                        ownership = records[0] if records else None
                         if ownership is None:
                             detail = (
                                 "Component identity was not readable after start; "
@@ -5588,10 +5636,9 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             elif ownership is None and preexisting is False:
                 # The state query may have auto-started the component.  Only
                 # adopt it after observing a complete, matching identity.
-                records, _ = _preload_component_process_records(
+                ownership = _preload_unique_component_process_record(
                     binding, component
                 )
-                ownership = records[0] if records else None
             components[component] = {
                 "state": state,
                 "owned": ownership is not None,
@@ -5605,11 +5652,6 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             "owned": False,
             "detail": "Waiting for Click-to-Run.",
         }
-        components[PRELOAD_VOIP_COMPONENT] = {
-            "state": "stopped",
-            "owned": False,
-            "detail": "Waiting for the desktop session bus.",
-        }
         _write_preload_heartbeat(status, components, "starting")
 
         while not stopping:
@@ -5617,6 +5659,16 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             for component in PRELOAD_COMPONENTS:
                 state, detail = _preload_component_state(binding, component)
                 record = components[component]
+                if record["owned"]:
+                    ownership = _preload_refresh_ownership(
+                        binding, component, record.get("ownership")
+                    )
+                    record["ownership"] = ownership
+                    record["owned"] = ownership is not None
+                    if ownership is None:
+                        detail = (
+                            "Component ownership was lost; refusing to restart it."
+                        )
                 if state == "running":
                     restart_attempts[component] = 0
                 if (
@@ -5639,10 +5691,9 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                             state, detail = _preload_component_state(
                                 binding, component
                             )
-                            records, _ = _preload_component_process_records(
+                            ownership = _preload_unique_component_process_record(
                                 binding, component
                             )
-                            ownership = records[0] if records else None
                             record["ownership"] = ownership
                             record["owned"] = ownership is not None
                             if ownership is None:
@@ -5739,9 +5790,10 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             record = components[component]
             if not record["owned"]:
                 continue
-            if not _preload_ownership_is_current(
+            ownership = _preload_refresh_ownership(
                 binding, component, record.get("ownership")
-            ):
+            )
+            if ownership is None:
                 record["owned"] = False
                 record["ownership"] = None
                 record["state"] = "unknown"
@@ -5750,6 +5802,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 )
                 _write_preload_heartbeat(status, components, "stopping")
                 continue
+            record["ownership"] = ownership
             stopped, detail = _preload_component_action(binding, "stop", component)
             record["state"] = "stopped" if stopped else "unknown"
             record["detail"] = detail

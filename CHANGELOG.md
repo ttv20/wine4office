@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix Office 2019 volume installation failing while its licensing chain is installed.
+- Prevent intermittent Word Welcome-screen stalls by keeping Click-to-Run preloaded.
 
 ## 0.2.2-beta.1 — 2026-09-19
 
