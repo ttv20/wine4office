@@ -5666,6 +5666,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     voip_process: subprocess.Popen[str] | None = None
     voip_restart_attempts = 0
     handoffs: dict[str, dict] = {}
+    unresolved_handoffs: set[str] = set()
 
     def resolve_handoff(component: str, record: dict) -> str:
         outcome, ownership = _preload_component_handoff_state(
@@ -5692,6 +5693,25 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             )
             handoffs.pop(component, None)
         return outcome
+
+    def abandon_failed_handoff(component: str, record: dict) -> bool:
+        outcome, ownership = _preload_component_handoff_state(
+            binding, component, handoffs[component]
+        )
+        handoffs.pop(component, None)
+        if outcome in {"current", "current-expired"}:
+            record["owned"] = True
+            record["ownership"] = ownership
+            return False
+        record["owned"] = False
+        record["ownership"] = None
+        record["state"] = "unknown"
+        record["detail"] = (
+            "A service action failed during a PID handoff; the component "
+            "was left untouched and cleanup is incomplete."
+        )
+        unresolved_handoffs.add(component)
+        return True
 
     try:
         preexisting_components = {
@@ -5792,8 +5812,25 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                                     "start; ownership was not claimed."
                                 )
                         else:
-                            handoffs.pop(component, None)
-                            detail = start_detail
+                            if handoff is not None:
+                                outcome, current = (
+                                    _preload_component_handoff_state(
+                                        binding, component, handoff
+                                    )
+                                )
+                                handoffs.pop(component, None)
+                                if outcome in {"current", "current-expired"}:
+                                    ownership = current
+                                    detail = start_detail
+                                else:
+                                    ownership = None
+                                    unresolved_handoffs.add(component)
+                                    detail = (
+                                        "Component start failed during a PID "
+                                        "handoff; cleanup is incomplete."
+                                    )
+                            else:
+                                detail = start_detail
             elif ownership is None and preexisting is False:
                 # The state query may have auto-started the component.  Only
                 # adopt it after observing a complete, matching identity.
@@ -5820,6 +5857,15 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             for component in PRELOAD_COMPONENTS:
                 state, detail = _preload_component_state(binding, component)
                 record = components[component]
+                if component in unresolved_handoffs:
+                    record["owned"] = False
+                    record["ownership"] = None
+                    record["state"] = "unknown"
+                    record["detail"] = (
+                        "A failed service action left PID continuity unresolved."
+                    )
+                    degraded.append(component)
+                    continue
                 if component in handoffs:
                     outcome = resolve_handoff(component, record)
                     if outcome == "pending":
@@ -5881,8 +5927,10 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                                 }:
                                     detail = record["detail"]
                             else:
-                                handoffs.pop(component, None)
-                                detail = restart_detail
+                                if abandon_failed_handoff(component, record):
+                                    detail = record["detail"]
+                                else:
+                                    detail = restart_detail
                 if state != "running":
                     degraded.append(component)
                 record["state"] = state
@@ -5942,8 +5990,11 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 )
                 appv_record["owned"] = appv_process is not None
                 appv_record["detail"] = detail
-                if appv_process is None:
-                    handoffs.pop("ClickToRunSvc", None)
+                if appv_process is None and handoff is not None:
+                    if abandon_failed_handoff(
+                        "ClickToRunSvc", clicktorun_record
+                    ) and "ClickToRunSvc" not in degraded:
+                        degraded.append("ClickToRunSvc")
                 elif handoff is not None:
                     outcome = resolve_handoff(
                         "ClickToRunSvc", clicktorun_record
@@ -5991,6 +6042,17 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
 
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
+            if component in unresolved_handoffs:
+                record["owned"] = False
+                record["ownership"] = None
+                record["state"] = "unknown"
+                record["detail"] = (
+                    "A failed service action left PID continuity unresolved; "
+                    "the component was left untouched."
+                )
+                cleanup_failed.append(component)
+                _write_preload_heartbeat(status, components, "stopping")
+                continue
             if component in handoffs:
                 outcome = resolve_handoff(component, record)
                 if outcome not in {"current", "current-expired", "adopted"}:
