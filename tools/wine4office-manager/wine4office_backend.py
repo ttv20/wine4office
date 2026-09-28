@@ -2130,6 +2130,7 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         "    exit 1",
         "fi",
         'export PATH="${wine%/*}${PATH:+:$PATH}"',
+        'export WINEPREFIX="$prefix"',
         'marker="$prefix/.wine4office-managed-prefix"',
         'prefix_info=$(stat -c "%F:%u" -- "$prefix" 2>/dev/null || true)',
         'marker_info=$(stat -c "%F:%u:%a" -- "$marker" 2>/dev/null || true)',
