@@ -5733,21 +5733,66 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 elif ownership is None or _preload_ownership_is_current(
                     binding, component, ownership
                 ):
-                    started, start_detail = _preload_component_action(
-                        binding, "start", component
-                    )
-                    if started:
-                        state, detail = _preload_component_state(binding, component)
-                        ownership = _preload_unique_component_process_record(
-                            binding, component
+                    handoff = None
+                    if ownership is not None:
+                        handoff = _preload_arm_component_handoff(
+                            binding, component, ownership
                         )
-                        if ownership is None:
+                        if handoff is None:
+                            ownership = None
                             detail = (
-                                "Component identity was not readable after start; "
-                                "ownership was not claimed."
+                                "Component start could not be tracked safely; "
+                                "refusing to start it."
                             )
-                    else:
-                        detail = start_detail
+                    if not (
+                        ownership is None and saved_ownership is not None
+                    ):
+                        if handoff is not None:
+                            handoffs[component] = handoff
+                        started, start_detail = _preload_component_action(
+                            binding, "start", component
+                        )
+                        if started:
+                            state, detail = _preload_component_state(
+                                binding, component
+                            )
+                            outcome = None
+                            if handoff is None:
+                                ownership = (
+                                    _preload_unique_component_process_record(
+                                        binding, component
+                                    )
+                                )
+                            else:
+                                outcome, ownership = (
+                                    _preload_component_handoff_state(
+                                        binding, component, handoff
+                                    )
+                                )
+                                if outcome not in {"current", "pending"}:
+                                    handoffs.pop(component, None)
+                                if outcome == "pending":
+                                    state = "pending"
+                                    detail = (
+                                        "Waiting for a worker-caused service "
+                                        "PID handoff."
+                                    )
+                                elif outcome not in {
+                                    "current", "current-expired", "adopted"
+                                }:
+                                    ownership = None
+                                    detail = (
+                                        "Component ownership continuity was lost; "
+                                        "leaving it untouched."
+                                    )
+                            if ownership is None and outcome is None:
+                                detail = (
+                                    "Component identity was not readable after "
+                                    "start; ownership was not claimed."
+                                )
+                        else:
+                            handoffs.pop(component, None)
+                            detail = start_detail
             elif ownership is None and preexisting is False:
                 # The state query may have auto-started the component.  Only
                 # adopt it after observing a complete, matching identity.
