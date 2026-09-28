@@ -5896,7 +5896,9 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 )
                 appv_record["owned"] = appv_process is not None
                 appv_record["detail"] = detail
-                if handoff is not None:
+                if appv_process is None:
+                    handoffs.pop("ClickToRunSvc", None)
+                elif handoff is not None:
                     outcome = resolve_handoff(
                         "ClickToRunSvc", clicktorun_record
                     )
