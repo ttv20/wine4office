@@ -3714,6 +3714,8 @@ exit 0
             backend, "_preload_component_process_running",
             side_effect=component_running,
         ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=None
+        ), mock.patch.object(
             backend, "_preload_component_process_records",
             return_value=([ownership], False),
         ), mock.patch.object(
@@ -3793,6 +3795,8 @@ exit 0
             handlers[signal.SIGTERM](signal.SIGTERM, None)
         with mock.patch.object(
             backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=None
         ), mock.patch.object(
             backend, "_preload_component_process_records",
             return_value=([ownership], False),
