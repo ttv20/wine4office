@@ -837,6 +837,7 @@ sync_test("keyboard_event", function() {
 
     e.initEvent("test", true, true);
     ok(e.key === "", "key = " + e.key);
+    ok(e.char === null, "char = " + e.char);
     ok(e.keyCode === 0, "keyCode = " + e.keyCode);
     ok(e.charCode === 0, "charCode = " + e.charCode);
     ok(e.repeat === false, "repeat = " + e.repeat);
