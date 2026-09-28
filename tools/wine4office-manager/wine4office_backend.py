@@ -4349,6 +4349,7 @@ _PRELOAD_SYSTEMCTL_TIMEOUT = 8
 _PRELOAD_UNIT_STOP_TIMEOUT = int(STOP_GRACE_SECONDS)
 _PRELOAD_WINE_TIMEOUT = 12
 _PRELOAD_APPV_TIMEOUT = 15
+_PRELOAD_HANDOFF_GRACE = 30
 _PRELOAD_APPV_STOP_TIMEOUT = 5
 _PRELOAD_VOIP_TIMEOUT = 15
 _PRELOAD_VOIP_STOP_TIMEOUT = 5
@@ -5198,6 +5199,11 @@ def _preload_process_record(
     image = re.split(r"[\\/]", os.fsdecode(arguments[0]))[-1]
     if image.casefold() != expected_image.casefold():
         return None, False
+    if not any(
+        os.fsdecode(argument).casefold() == "/service"
+        for argument in arguments[1:] if argument
+    ):
+        return None, False
     try:
         environment = process.joinpath("environ").read_bytes().split(b"\0")
     except OSError:
@@ -5331,20 +5337,101 @@ def _preload_refresh_ownership(
     binding: dict, component: str, ownership: object,
     proc_root: Path = Path("/proc"),
 ) -> dict | None:
-    """Refresh an owned component after a service-controlled PID change."""
+    """Return the ownership only while its exact process identity is current."""
+    if not _preload_ownership_is_current(
+        binding, component, ownership, proc_root
+    ):
+        return None
+    return dict(ownership)
+
+
+def _preload_process_cgroup(
+    pid: int, proc_root: Path = Path("/proc")
+) -> str | None:
+    try:
+        cgroup = (proc_root / str(pid) / "cgroup").read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError):
+        return None
+    return cgroup if cgroup else None
+
+
+def _preload_boot_ticks() -> int:
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    return int(time.clock_gettime(time.CLOCK_BOOTTIME) * ticks_per_second)
+
+
+def _preload_arm_component_handoff(
+    binding: dict, component: str, ownership: object,
+    proc_root: Path = Path("/proc"),
+) -> dict | None:
+    """Arm a bounded PID handoff around a worker-caused service action."""
     if not _preload_ownership_record_matches(binding, ownership):
         return None
-    state, current = _preload_component_process_identity(
-        binding, component, ownership["pid"], proc_root
-    )
-    if state == "match":
-        return dict(current) if current == ownership else None
-    if state != "missing":
-        return None
-    replacement = _preload_unique_component_process_record(
+    not_before = _preload_boot_ticks()
+    records, matching_unknown = _preload_component_process_records(
         binding, component, proc_root
     )
-    return dict(replacement) if replacement is not None else None
+    if matching_unknown or records != [ownership]:
+        return None
+    cgroup = _preload_process_cgroup(ownership["pid"], proc_root)
+    if cgroup is None:
+        return None
+    return {
+        "prior": dict(ownership),
+        "cgroup": cgroup,
+        "not_before": not_before,
+        "deadline": time.monotonic() + _PRELOAD_APPV_TIMEOUT
+        + _PRELOAD_HANDOFF_GRACE,
+    }
+
+
+def _preload_component_handoff_state(
+    binding: dict, component: str, handoff: dict,
+    proc_root: Path = Path("/proc"),
+) -> tuple[str, dict | None]:
+    """Resolve an armed service PID handoff without adopting an outsider."""
+    prior = handoff["prior"]
+    state, current = _preload_component_process_identity(
+        binding, component, prior["pid"], proc_root
+    )
+    if state == "match":
+        if current != prior:
+            return "lost", None
+        return (
+            "current" if time.monotonic() <= handoff["deadline"]
+            else "current-expired"
+        ), dict(current)
+    if state != "missing":
+        return "lost", None
+
+    records, matching_unknown = _preload_component_process_records(
+        binding, component, proc_root
+    )
+    if matching_unknown or len(records) > 1:
+        return "lost", None
+    if not records:
+        return (
+            ("pending", None)
+            if time.monotonic() <= handoff["deadline"]
+            else ("expired", None)
+        )
+
+    candidate = records[0]
+    try:
+        candidate_start = int(candidate["starttime"])
+        prior_start = int(prior["starttime"])
+    except (KeyError, TypeError, ValueError):
+        return "lost", None
+    if (
+        candidate_start <= prior_start
+        or candidate_start < handoff["not_before"]
+        or _preload_process_cgroup(candidate["pid"], proc_root)
+        != handoff["cgroup"]
+    ):
+        return "lost", None
+    return "adopted", dict(candidate)
 
 
 def _preload_saved_ownership(
@@ -5577,6 +5664,34 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
     appv_restart_attempts = 0
     voip_process: subprocess.Popen[str] | None = None
     voip_restart_attempts = 0
+    handoffs: dict[str, dict] = {}
+
+    def resolve_handoff(component: str, record: dict) -> str:
+        outcome, ownership = _preload_component_handoff_state(
+            binding, component, handoffs[component]
+        )
+        if outcome in {"current", "current-expired", "adopted"}:
+            record["owned"] = True
+            record["ownership"] = ownership
+            if outcome != "current":
+                handoffs.pop(component, None)
+        elif outcome == "pending":
+            record["owned"] = False
+            record["ownership"] = None
+            record["state"] = "pending"
+            record["detail"] = (
+                "Waiting for a worker-caused service PID handoff."
+            )
+        else:
+            record["owned"] = False
+            record["ownership"] = None
+            record["state"] = "unknown"
+            record["detail"] = (
+                "Component ownership continuity was lost; leaving it untouched."
+            )
+            handoffs.pop(component, None)
+        return outcome
+
     try:
         preexisting_components = {
             component: _preload_component_process_running(binding, component)
@@ -5659,7 +5774,15 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
             for component in PRELOAD_COMPONENTS:
                 state, detail = _preload_component_state(binding, component)
                 record = components[component]
-                if record["owned"]:
+                if component in handoffs:
+                    outcome = resolve_handoff(component, record)
+                    if outcome == "pending":
+                        degraded.append(component)
+                        continue
+                    detail = record["detail"] if outcome not in {
+                        "current", "current-expired", "adopted"
+                    } else detail
+                elif record["owned"]:
                     ownership = _preload_refresh_ownership(
                         binding, component, record.get("ownership")
                     )
@@ -5683,26 +5806,37 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                         record["ownership"] = None
                         detail = "Component ownership was lost; refusing to restart it."
                     else:
-                        restart_attempts[component] += 1
-                        restarted, restart_detail = _preload_component_action(
-                            binding, "start", component
+                        handoff = _preload_arm_component_handoff(
+                            binding, component, record.get("ownership")
                         )
-                        if restarted:
-                            state, detail = _preload_component_state(
-                                binding, component
+                        if handoff is None:
+                            record["owned"] = False
+                            record["ownership"] = None
+                            detail = (
+                                "Component restart could not be tracked safely; "
+                                "ownership was dropped."
                             )
-                            ownership = _preload_unique_component_process_record(
-                                binding, component
-                            )
-                            record["ownership"] = ownership
-                            record["owned"] = ownership is not None
-                            if ownership is None:
-                                detail = (
-                                    "Component identity was not readable after "
-                                    "restart; ownership was dropped."
-                                )
                         else:
-                            detail = restart_detail
+                            handoffs[component] = handoff
+                            restart_attempts[component] += 1
+                            restarted, restart_detail = _preload_component_action(
+                                binding, "start", component
+                            )
+                            if restarted:
+                                state, detail = _preload_component_state(
+                                    binding, component
+                                )
+                                outcome = resolve_handoff(component, record)
+                                if outcome == "pending":
+                                    state = "pending"
+                                    detail = record["detail"]
+                                elif outcome not in {
+                                    "current", "current-expired", "adopted"
+                                }:
+                                    detail = record["detail"]
+                            else:
+                                handoffs.pop(component, None)
+                                detail = restart_detail
                 if state != "running":
                     degraded.append(component)
                 record["state"] = state
@@ -5746,6 +5880,15 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 and components["ClickToRunSvc"]["state"] == "running"
                 and appv_restart_attempts < 3
             ):
+                clicktorun_record = components["ClickToRunSvc"]
+                handoff = None
+                if clicktorun_record["owned"]:
+                    handoff = _preload_arm_component_handoff(
+                        binding, "ClickToRunSvc",
+                        clicktorun_record.get("ownership"),
+                    )
+                    if handoff is not None:
+                        handoffs["ClickToRunSvc"] = handoff
                 appv_restart_attempts += 1
                 appv_process, detail = _start_preload_appv(binding)
                 appv_record["state"] = (
@@ -5753,6 +5896,18 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 )
                 appv_record["owned"] = appv_process is not None
                 appv_record["detail"] = detail
+                if handoff is not None:
+                    outcome = resolve_handoff(
+                        "ClickToRunSvc", clicktorun_record
+                    )
+                    if outcome == "pending":
+                        if "ClickToRunSvc" not in degraded:
+                            degraded.append("ClickToRunSvc")
+                    elif outcome not in {
+                        "current", "current-expired", "adopted"
+                    }:
+                        if "ClickToRunSvc" not in degraded:
+                            degraded.append("ClickToRunSvc")
             if appv_process is None:
                 degraded.append(PRELOAD_APPV_COMPONENT)
 
@@ -5788,6 +5943,17 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
 
         for component in reversed(PRELOAD_COMPONENTS):
             record = components[component]
+            if component in handoffs:
+                outcome = resolve_handoff(component, record)
+                if outcome not in {"current", "current-expired", "adopted"}:
+                    record["state"] = "unknown"
+                    record["detail"] = (
+                        "A service PID handoff was unresolved at shutdown; "
+                        "the component was left untouched."
+                    )
+                    cleanup_failed.append(component)
+                    _write_preload_heartbeat(status, components, "stopping")
+                    continue
             if not record["owned"]:
                 continue
             ownership = _preload_refresh_ownership(

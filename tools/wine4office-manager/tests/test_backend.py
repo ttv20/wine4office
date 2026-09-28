@@ -2745,6 +2745,7 @@ exit 0
     def _component_process(
         self, binding, proc_root, pid=123, prefix=None, runner=None,
         unreadable_environment=False, starttime="42",
+        cgroup="0::/test.slice\n",
     ):
         process = proc_root / str(pid)
         process.mkdir(parents=True)
@@ -2763,6 +2764,7 @@ exit 0
         (process / "stat").write_text(
             f"{pid} (OfficeClickToRun.exe) " + " ".join(stat_fields)
         )
+        (process / "cgroup").write_text(cgroup)
         (process / "exe").symlink_to(runner or binding["wine"])
         return process
 
@@ -3419,22 +3421,67 @@ exit 0
             )
         )
 
-    def test_component_ownership_refreshes_after_service_pid_change(self):
+    def test_component_ownership_handoff_tolerates_gap_and_adopts_successor(self):
         binding = self._preload_binding()
         proc_root = self.root / "proc"
         process = self._component_process(binding, proc_root)
         ownership = backend._preload_unique_component_process_record(
             binding, "ClickToRunSvc", proc_root
         )
-        process.rename(proc_root / "124")
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+            process.rename(proc_root / "gone")
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
 
-        refreshed = backend._preload_refresh_ownership(
-            binding, "ClickToRunSvc", ownership, proc_root
+            self.assertEqual(state, "pending")
+            self.assertIsNone(replacement)
+            self.assertIsNone(
+                backend._preload_refresh_ownership(
+                    binding, "ClickToRunSvc", ownership, proc_root
+                )
+            )
+
+            self._component_process(
+                binding, proc_root, pid=124, starttime="50"
+            )
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+        self.assertEqual(state, "adopted")
+        self.assertEqual(replacement["pid"], 124)
+        self.assertEqual(replacement["starttime"], "50")
+
+    def test_component_ownership_handoff_rejects_foreign_cgroup(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
         )
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+            process.rename(proc_root / "gone")
+            self._component_process(
+                binding, proc_root, pid=124, starttime="50",
+                cgroup="0::/foreign.slice\n",
+            )
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
 
-        self.assertIsNotNone(refreshed)
-        self.assertEqual(refreshed["pid"], 124)
-        self.assertEqual(refreshed["starttime"], ownership["starttime"])
+        self.assertEqual(state, "lost")
+        self.assertIsNone(replacement)
 
     def test_clicktorun_process_accepts_selected_runner_preloader(self):
         binding = self._preload_binding()
@@ -3462,6 +3509,22 @@ exit 0
             binding, self.root / "foreign-runner"
         )
         self._component_process(binding, proc_root, runner=foreign_preloader)
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(records, [])
+
+    def test_clicktorun_process_requires_service_argument(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        (process / "cmdline").write_bytes(
+            b"C:\\Program Files\\Common Files\\Microsoft Shared\\ClickToRun\\"
+            b"OfficeClickToRun.exe\0/update\0"
+        )
 
         records, unknown = backend._preload_component_process_records(
             binding, "ClickToRunSvc", proc_root
