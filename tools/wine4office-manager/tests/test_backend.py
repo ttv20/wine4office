@@ -3483,6 +3483,29 @@ exit 0
         self.assertEqual(state, "lost")
         self.assertIsNone(replacement)
 
+    def test_component_ownership_handoff_rejects_expired_successor(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+        process.rename(proc_root / "gone")
+        self._component_process(binding, proc_root, pid=124, starttime="50")
+        with mock.patch.object(backend.time, "monotonic", return_value=56):
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+        self.assertEqual(state, "lost")
+        self.assertIsNone(replacement)
+
     def test_clicktorun_process_accepts_selected_runner_preloader(self):
         binding = self._preload_binding()
         proc_root = self.root / "proc"

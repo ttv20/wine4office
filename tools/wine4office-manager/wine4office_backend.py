@@ -5425,7 +5425,8 @@ def _preload_component_handoff_state(
     except (KeyError, TypeError, ValueError):
         return "lost", None
     if (
-        candidate_start <= prior_start
+        time.monotonic() > handoff["deadline"]
+        or candidate_start <= prior_start
         or candidate_start < handoff["not_before"]
         or _preload_process_cgroup(candidate["pid"], proc_root)
         != handoff["cgroup"]
