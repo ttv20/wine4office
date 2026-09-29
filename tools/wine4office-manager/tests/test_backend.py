@@ -2745,6 +2745,7 @@ exit 0
     def _component_process(
         self, binding, proc_root, pid=123, prefix=None, runner=None,
         unreadable_environment=False, starttime="42",
+        cgroup="0::/test.slice\n",
     ):
         process = proc_root / str(pid)
         process.mkdir(parents=True)
@@ -2763,8 +2764,16 @@ exit 0
         (process / "stat").write_text(
             f"{pid} (OfficeClickToRun.exe) " + " ".join(stat_fields)
         )
+        (process / "cgroup").write_text(cgroup)
         (process / "exe").symlink_to(runner or binding["wine"])
         return process
+
+    def _wine_preloader(self, binding, root=None):
+        runner_root = root or Path(binding["wine"]).parent.parent
+        preloader = runner_root / "lib/wine/x86_64-unix/wine-preloader"
+        preloader.parent.mkdir(parents=True, exist_ok=True)
+        preloader.write_text("preloader\n")
+        return preloader
 
     def test_preload_xdg_paths_and_atomic_modes(self):
         runtime = self.root / "runtime"
@@ -3406,6 +3415,175 @@ exit 0
                 binding, "ClickToRunSvc", ownership, proc_root
             )
         )
+        self.assertIsNone(
+            backend._preload_refresh_ownership(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+        )
+
+    def test_component_ownership_handoff_tolerates_gap_and_adopts_successor(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+            process.rename(proc_root / "gone")
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+            self.assertEqual(state, "pending")
+            self.assertIsNone(replacement)
+            self.assertIsNone(
+                backend._preload_refresh_ownership(
+                    binding, "ClickToRunSvc", ownership, proc_root
+                )
+            )
+
+            self._component_process(
+                binding, proc_root, pid=124, starttime="50"
+            )
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+        self.assertEqual(state, "adopted")
+        self.assertEqual(replacement["pid"], 124)
+        self.assertEqual(replacement["starttime"], "50")
+
+    def test_component_ownership_handoff_rejects_foreign_cgroup(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+            process.rename(proc_root / "gone")
+            self._component_process(
+                binding, proc_root, pid=124, starttime="50",
+                cgroup="0::/foreign.slice\n",
+            )
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+        self.assertEqual(state, "lost")
+        self.assertIsNone(replacement)
+
+    def test_component_ownership_handoff_rejects_expired_successor(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+        with mock.patch.object(
+            backend, "_preload_boot_ticks", return_value=45
+        ), mock.patch.object(backend.time, "monotonic", return_value=10):
+            handoff = backend._preload_arm_component_handoff(
+                binding, "ClickToRunSvc", ownership, proc_root
+            )
+        process.rename(proc_root / "gone")
+        self._component_process(binding, proc_root, pid=124, starttime="50")
+        with mock.patch.object(backend.time, "monotonic", return_value=56):
+            state, replacement = backend._preload_component_handoff_state(
+                binding, "ClickToRunSvc", handoff, proc_root
+            )
+
+        self.assertEqual(state, "lost")
+        self.assertIsNone(replacement)
+
+    def test_clicktorun_process_accepts_selected_runner_preloader(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, runner=preloader)
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["runner"], binding["wine"])
+        self.assertTrue(
+            backend._preload_ownership_is_current(
+                binding, "ClickToRunSvc", records[0], proc_root
+            )
+        )
+
+    def test_clicktorun_process_rejects_foreign_runner_preloader(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        foreign_preloader = self._wine_preloader(
+            binding, self.root / "foreign-runner"
+        )
+        self._component_process(binding, proc_root, runner=foreign_preloader)
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(records, [])
+
+    def test_clicktorun_process_requires_service_argument(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        process = self._component_process(binding, proc_root)
+        (process / "cmdline").write_bytes(
+            b"C:\\Program Files\\Common Files\\Microsoft Shared\\ClickToRun\\"
+            b"OfficeClickToRun.exe\0/update\0"
+        )
+
+        records, unknown = backend._preload_component_process_records(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertFalse(unknown)
+        self.assertEqual(records, [])
+
+    def test_clicktorun_process_requires_unique_readable_identity(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, pid=123, runner=preloader)
+        self._component_process(binding, proc_root, pid=124, runner=preloader)
+
+        self.assertIsNone(
+            backend._preload_unique_component_process_record(
+                binding, "ClickToRunSvc", proc_root
+            )
+        )
+
+    def test_unclassified_unreadable_process_does_not_hide_clicktorun(self):
+        binding = self._preload_binding()
+        proc_root = self.root / "proc"
+        preloader = self._wine_preloader(binding)
+        self._component_process(binding, proc_root, runner=preloader)
+        unreadable = proc_root / "124"
+        unreadable.mkdir()
+        (unreadable / "cmdline").mkdir()
+
+        ownership = backend._preload_unique_component_process_record(
+            binding, "ClickToRunSvc", proc_root
+        )
+
+        self.assertIsNotNone(ownership)
+        self.assertEqual(ownership["pid"], 123)
 
     def test_appv_helper_waits_for_ready_and_uses_quiet_wine(self):
         binding = self._preload_binding()
@@ -3495,6 +3673,7 @@ exit 0
         status_path = backend.preload_runtime_status_path()
         states = {"ClickToRunSvc": "stopped"}
         actions = []
+        startup_events = []
         handlers = {}
         ownership = {
             "pid": 123,
@@ -3504,8 +3683,10 @@ exit 0
         }
         appv_process = mock.Mock()
         voip_process = mock.Mock()
+        voip_process.poll.return_value = None
 
         def component_state(_binding, component):
+            startup_events.append(("state", component))
             return states[component], states[component]
 
         def component_action(_binding, action, component):
@@ -3521,8 +3702,19 @@ exit 0
         def stop_sleep(_seconds):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
 
+        def start_voip(_binding):
+            startup_events.append(("voip", None))
+            return voip_process, "READY service=org.wine.VoipCallBroker1"
+
+        def component_running(_binding, component):
+            startup_events.append(("preexisting", component))
+            return False
+
         with mock.patch.object(
-            backend, "_preload_component_process_running", return_value=False
+            backend, "_preload_component_process_running",
+            side_effect=component_running,
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=None
         ), mock.patch.object(
             backend, "_preload_component_process_records",
             return_value=([ownership], False),
@@ -3540,8 +3732,7 @@ exit 0
         ) as appv_start, mock.patch.object(
             backend, "_stop_preload_appv", return_value=(True, "stopped")
         ) as appv_stop, mock.patch.object(
-            backend, "_start_preload_voip",
-            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+            backend, "_start_preload_voip", side_effect=start_voip,
         ) as voip_start, mock.patch.object(
             backend, "_stop_preload_voip", return_value=(True, "stopped")
         ) as voip_stop, mock.patch.object(
@@ -3559,6 +3750,14 @@ exit 0
         self.assertEqual(
             actions,
             [("start", "ClickToRunSvc"), ("stop", "ClickToRunSvc")],
+        )
+        self.assertLess(
+            startup_events.index(("preexisting", "ClickToRunSvc")),
+            startup_events.index(("voip", None)),
+        )
+        self.assertLess(
+            startup_events.index(("voip", None)),
+            startup_events.index(("state", "ClickToRunSvc")),
         )
         office.assert_not_called()
         appv_start.assert_called_once_with(binding)
@@ -3596,6 +3795,8 @@ exit 0
             handlers[signal.SIGTERM](signal.SIGTERM, None)
         with mock.patch.object(
             backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=None
         ), mock.patch.object(
             backend, "_preload_component_process_records",
             return_value=([ownership], False),
@@ -3743,6 +3944,326 @@ exit 0
             )["components"]["ClickToRunSvc"]["owned"]
         )
 
+    def test_worker_reports_incomplete_cleanup_after_failed_appv_handoff(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_unique_component_process_record",
+            return_value=ownership,
+        ), mock.patch.object(
+            backend, "_preload_component_state", return_value=("running", "running")
+        ), mock.patch.object(
+            backend, "_preload_refresh_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            return_value=("pending", None),
+        ), mock.patch.object(
+            backend, "_start_preload_appv", return_value=(None, "failed")
+        ), mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_preload_component_action"
+        ) as action, mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(backend.time, "sleep", side_effect=stop_sleep):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        action.assert_not_called()
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertEqual(heartbeat["state"], "degraded")
+        self.assertFalse(heartbeat["components"]["ClickToRunSvc"]["owned"])
+        self.assertIn(
+            "left untouched", heartbeat["components"]["ClickToRunSvc"]["detail"]
+        )
+
+    def test_worker_reports_later_appv_handoff_loss_as_incomplete_cleanup(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        sleep_calls = 0
+        heartbeat_states = []
+        appv_process = mock.Mock()
+        appv_process.poll.return_value = None
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_after_second_iteration(_seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 11:
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            heartbeat_states.append(state)
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_unique_component_process_record",
+            return_value=ownership,
+        ), mock.patch.object(
+            backend, "_preload_component_state", return_value=("running", "running")
+        ), mock.patch.object(
+            backend, "_preload_refresh_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            side_effect=[("current", ownership), ("lost", None)],
+        ), mock.patch.object(
+            backend, "_start_preload_appv",
+            return_value=(appv_process, "READY appv_ms=3512"),
+        ), mock.patch.object(
+            backend, "_stop_preload_appv", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_preload_component_action"
+        ) as action, mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_after_second_iteration
+        ):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        action.assert_not_called()
+        self.assertIn("degraded", heartbeat_states)
+        heartbeat = __import__("json").loads(
+            backend.preload_runtime_status_path().read_text()
+        )
+        self.assertEqual(heartbeat["state"], "degraded")
+        self.assertFalse(heartbeat["components"]["ClickToRunSvc"]["owned"])
+        self.assertEqual(
+            heartbeat["components"]["ClickToRunSvc"]["state"], "unknown"
+        )
+        self.assertIn(
+            "left untouched", heartbeat["components"]["ClickToRunSvc"]["detail"]
+        )
+
+    def test_worker_reports_startup_handoff_loss_as_unknown_immediately(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        heartbeat_states = []
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            clicktorun = components.get("ClickToRunSvc", {})
+            heartbeat_states.append((state, clicktorun.get("state")))
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_saved_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
+        ), mock.patch.object(
+            backend, "_preload_component_state",
+            side_effect=[
+                ("stopped", "stopped"),
+                ("running", "running"),
+                ("running", "running"),
+            ],
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            return_value=("lost", None),
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(True, "started")
+        ), mock.patch.object(
+            backend, "_start_preload_appv"
+        ) as appv_start, mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_sleep
+        ):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn(("starting", "unknown"), heartbeat_states)
+        appv_start.assert_not_called()
+
+    def test_worker_does_not_start_appv_after_restart_handoff_loss(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        heartbeat_states = []
+        appv_process = mock.Mock()
+        appv_process.poll.return_value = None
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            heartbeat_states.append(state)
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_unique_component_process_record",
+            return_value=ownership,
+        ), mock.patch.object(
+            backend, "_preload_component_state",
+            side_effect=[
+                ("running", "running"),
+                ("stopped", "stopped"),
+                ("running", "running"),
+            ],
+        ), mock.patch.object(
+            backend, "_preload_refresh_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            return_value=("lost", None),
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(True, "started")
+        ), mock.patch.object(
+            backend, "_start_preload_appv",
+            return_value=(appv_process, "READY appv_ms=3512"),
+        ) as appv_start, mock.patch.object(
+            backend, "_stop_preload_appv", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_sleep
+        ):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("degraded", heartbeat_states)
+        appv_start.assert_not_called()
 
     def test_worker_drops_ownership_before_restart_when_process_identity_changes(self):
         binding = self._preload_binding()
@@ -3782,7 +4303,7 @@ exit 0
                 actions.append((action, component)) or (True, action)
             ),
         ), mock.patch.object(
-            backend, "_preload_ownership_is_current", return_value=False
+            backend, "_preload_refresh_ownership", return_value=None
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
@@ -3837,7 +4358,7 @@ exit 0
                 actions.append((action, component)) or (True, action)
             ),
         ), mock.patch.object(
-            backend, "_preload_ownership_is_current", return_value=False
+            backend, "_preload_refresh_ownership", return_value=None
         ), mock.patch.object(
             backend, "preload_office_processes", return_value=[]
         ), mock.patch.object(
