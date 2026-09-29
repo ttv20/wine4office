@@ -5692,6 +5692,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 "Component ownership continuity was lost; leaving it untouched."
             )
             handoffs.pop(component, None)
+            unresolved_handoffs.add(component)
         return outcome
 
     def abandon_failed_handoff(component: str, record: dict) -> bool:
@@ -5802,6 +5803,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                                     "current", "current-expired", "adopted"
                                 }:
                                     ownership = None
+                                    unresolved_handoffs.add(component)
                                     detail = (
                                         "Component ownership continuity was lost; "
                                         "leaving it untouched."
@@ -5862,7 +5864,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                     record["ownership"] = None
                     record["state"] = "unknown"
                     record["detail"] = (
-                        "A failed service action left PID continuity unresolved."
+                        "Service PID continuity is unresolved; cleanup is incomplete."
                     )
                     degraded.append(component)
                     continue
@@ -5871,9 +5873,11 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                     if outcome == "pending":
                         degraded.append(component)
                         continue
-                    detail = record["detail"] if outcome not in {
+                    if outcome not in {
                         "current", "current-expired", "adopted"
-                    } else detail
+                    }:
+                        degraded.append(component)
+                        continue
                 elif record["owned"]:
                     ownership = _preload_refresh_ownership(
                         binding, component, record.get("ownership")
@@ -6047,7 +6051,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                 record["ownership"] = None
                 record["state"] = "unknown"
                 record["detail"] = (
-                    "A failed service action left PID continuity unresolved; "
+                    "Service PID continuity is unresolved; "
                     "the component was left untouched."
                 )
                 cleanup_failed.append(component)
