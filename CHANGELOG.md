@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix Office 2019 volume installation failing while its licensing chain is installed.
+
 ## 0.2.2-beta.1 — 2026-09-19
 
 - Fix standalone Manager startup with current OpenSSL 3 releases.
