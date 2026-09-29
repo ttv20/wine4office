@@ -4104,6 +4104,167 @@ exit 0
             "left untouched", heartbeat["components"]["ClickToRunSvc"]["detail"]
         )
 
+    def test_worker_reports_startup_handoff_loss_as_unknown_immediately(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        heartbeat_states = []
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            clicktorun = components.get("ClickToRunSvc", {})
+            heartbeat_states.append((state, clicktorun.get("state")))
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_saved_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
+        ), mock.patch.object(
+            backend, "_preload_component_state",
+            side_effect=[
+                ("stopped", "stopped"),
+                ("running", "running"),
+                ("running", "running"),
+            ],
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            return_value=("lost", None),
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(True, "started")
+        ), mock.patch.object(
+            backend, "_start_preload_appv"
+        ) as appv_start, mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_sleep
+        ):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn(("starting", "unknown"), heartbeat_states)
+        appv_start.assert_not_called()
+
+    def test_worker_does_not_start_appv_after_restart_handoff_loss(self):
+        binding = self._preload_binding()
+        backend._preload_json_write(backend.preload_binding_path(), binding)
+        ownership = {
+            "pid": 123,
+            "starttime": "42",
+            "prefix": binding["prefix"],
+            "runner": binding["wine"],
+        }
+        handoff = {
+            "prior": ownership,
+            "cgroup": "0::/test.slice\n",
+            "not_before": 42,
+            "deadline": 100,
+        }
+        handlers = {}
+        heartbeat_states = []
+        appv_process = mock.Mock()
+        appv_process.poll.return_value = None
+        voip_process = mock.Mock()
+        voip_process.poll.return_value = None
+
+        def install_signal(signum, handler):
+            old = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return old
+
+        def stop_sleep(_seconds):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        real_heartbeat = backend._write_preload_heartbeat
+
+        def capture_heartbeat(path, components, state, detail=""):
+            heartbeat_states.append(state)
+            real_heartbeat(path, components, state, detail)
+
+        with mock.patch.object(
+            backend, "_preload_component_process_running", return_value=False
+        ), mock.patch.object(
+            backend, "_preload_unique_component_process_record",
+            return_value=ownership,
+        ), mock.patch.object(
+            backend, "_preload_component_state",
+            side_effect=[
+                ("running", "running"),
+                ("stopped", "stopped"),
+                ("running", "running"),
+            ],
+        ), mock.patch.object(
+            backend, "_preload_refresh_ownership", return_value=ownership
+        ), mock.patch.object(
+            backend, "_preload_ownership_is_current", return_value=True
+        ), mock.patch.object(
+            backend, "_preload_arm_component_handoff", return_value=handoff
+        ), mock.patch.object(
+            backend, "_preload_component_handoff_state",
+            return_value=("lost", None),
+        ), mock.patch.object(
+            backend, "_preload_component_action", return_value=(True, "started")
+        ), mock.patch.object(
+            backend, "_start_preload_appv",
+            return_value=(appv_process, "READY appv_ms=3512"),
+        ) as appv_start, mock.patch.object(
+            backend, "_stop_preload_appv", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_start_preload_voip",
+            return_value=(voip_process, "READY service=org.wine.VoipCallBroker1"),
+        ), mock.patch.object(
+            backend, "_stop_preload_voip", return_value=(True, "stopped")
+        ), mock.patch.object(
+            backend, "_write_preload_heartbeat", side_effect=capture_heartbeat
+        ), mock.patch.object(
+            backend.signal, "signal", side_effect=install_signal
+        ), mock.patch.object(
+            backend.time, "sleep", side_effect=stop_sleep
+        ):
+            result = backend.run_preload_worker(
+                backend.preload_binding_path(), backend.preload_runtime_status_path()
+            )
+
+        self.assertEqual(result, 1)
+        self.assertIn("degraded", heartbeat_states)
+        appv_start.assert_not_called()
+
     def test_worker_drops_ownership_before_restart_when_process_identity_changes(self):
         binding = self._preload_binding()
         backend._preload_json_write(backend.preload_binding_path(), binding)

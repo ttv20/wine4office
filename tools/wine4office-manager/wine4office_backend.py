@@ -5804,6 +5804,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                                 }:
                                     ownership = None
                                     unresolved_handoffs.add(component)
+                                    state = "unknown"
                                     detail = (
                                         "Component ownership continuity was lost; "
                                         "leaving it untouched."
@@ -5929,6 +5930,7 @@ def run_preload_worker(snapshot_path: PathValue, status_path: PathValue) -> int:
                                 elif outcome not in {
                                     "current", "current-expired", "adopted"
                                 }:
+                                    state = "unknown"
                                     detail = record["detail"]
                             else:
                                 if abandon_failed_handoff(component, record):
