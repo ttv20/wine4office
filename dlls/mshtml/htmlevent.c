@@ -2951,8 +2951,38 @@ static HRESULT WINAPI DOMKeyboardEvent_get_which(IDOMKeyboardEvent *iface, LONG 
 static HRESULT WINAPI DOMKeyboardEvent_get_char(IDOMKeyboardEvent *iface, VARIANT *p)
 {
     DOMKeyboardEvent *This = impl_from_IDOMKeyboardEvent(iface);
-    FIXME("(%p)->(%p)\n", This, p);
-    return E_NOTIMPL;
+    const WCHAR *key;
+    nsAString key_str;
+    UINT32 len;
+    nsresult nsres;
+
+    TRACE("(%p)->(%p)\n", This, p);
+
+    nsAString_Init(&key_str, NULL);
+    nsres = nsIDOMKeyEvent_GetKey(This->nsevent, &key_str);
+    if(NS_FAILED(nsres)) {
+        nsAString_Finish(&key_str);
+        return map_nsresult(nsres);
+    }
+
+    len = nsAString_GetData(&key_str, &key);
+    /* Gecko returns descriptive key names for keys without a character value.
+     * A single Unicode scalar value is the character representation. */
+    if((len == 1 && !IS_HIGH_SURROGATE(key[0]) && !IS_LOW_SURROGATE(key[0])) ||
+       (len == 2 && IS_SURROGATE_PAIR(key[0], key[1]))) {
+        BSTR value = SysAllocStringLen(key, len);
+
+        if(!value) {
+            nsAString_Finish(&key_str);
+            return E_OUTOFMEMORY;
+        }
+        V_VT(p) = VT_BSTR;
+        V_BSTR(p) = value;
+    }else
+        V_VT(p) = VT_NULL;
+
+    nsAString_Finish(&key_str);
+    return S_OK;
 }
 
 static HRESULT WINAPI DOMKeyboardEvent_get_locale(IDOMKeyboardEvent *iface, BSTR *p)
