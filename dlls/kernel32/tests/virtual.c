@@ -360,6 +360,22 @@ static void test_VirtualAllocEx(void)
     CloseHandle(hProcess);
 }
 
+static void test_mem_reset_host_page_neighbors(void)
+{
+    void *addr, *ret;
+
+    addr = VirtualAlloc( NULL, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+    ok( addr != NULL, "VirtualAlloc failed, error %lu\n", GetLastError() );
+    if (!addr) return;
+
+    memset( (char *)addr + 0x1000, 0xa5, 0x3000 );
+    ret = VirtualAlloc( addr, 0x1000, MEM_RESET, PAGE_NOACCESS );
+    ok( ret == addr, "VirtualAlloc MEM_RESET failed, error %lu\n", GetLastError() );
+    ok( *((BYTE *)addr + 0x1000) == 0xa5, "MEM_RESET modified the following page.\n" );
+    ok( *((BYTE *)addr + 0x3fff) == 0xa5, "MEM_RESET modified the end of the host-page neighbour.\n" );
+    ok( VirtualFree( addr, 0, MEM_RELEASE ), "VirtualFree failed, error %lu\n", GetLastError() );
+}
+
 static void test_VirtualAlloc(void)
 {
     void *addr1, *addr2;
@@ -4856,6 +4872,11 @@ START_TEST(virtual)
             test_shared_memory_ro(TRUE, strtol(argv[3], NULL, 16));
             return;
         }
+        if (!strcmp( argv[2], "mem_reset_neighbors" ))
+        {
+            test_mem_reset_host_page_neighbors();
+            return;
+        }
         while (1)
         {
             void *mem;
@@ -4910,6 +4931,7 @@ START_TEST(virtual)
     test_VirtualProtect();
     test_VirtualAllocEx();
     test_VirtualAlloc();
+    test_mem_reset_host_page_neighbors();
     test_MapViewOfFile();
     test_NtAreMappedFilesTheSame();
     test_CreateFileMapping();
