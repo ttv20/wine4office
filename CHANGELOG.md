@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Check Office runtime components in installed 32-bit and 64-bit runner packages.
 - Fix Office 2019 volume installation failing while its licensing chain is installed.
 - Prevent intermittent Word Welcome-screen stalls by keeping Click-to-Run preloaded.
 - Prevent enterprise Microsoft 365 sign-in from getting stuck after entering credentials.

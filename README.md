@@ -89,6 +89,14 @@ WineHQ's Clean Room Guidelines ban LLM-generated code. This whole thing is AI so
 
 ## Credits
 
+Thanks to [Mirko Brombin](https://github.com/mirkobrombin) and the
+[Bottles contributors](https://github.com/bottlesdevs) for their
+[Microsoft 365 compatibility work](https://github.com/bottlesdevs/programs/issues/500)
+in [Soda](https://github.com/bottlesdevs/wine). Their checks of Office WinRT
+classes in installed runner packages inspired Wine4Office's runtime package
+validation. We retain source links in the checks so their contribution can be
+traced.
+
 DirectComposition research and selected compatibility code were adapted from
 [Giang Nguyen's `giang17/wine` D2D1/DComp work](https://github.com/giang17/wine),
 licensed under the GNU LGPL 2.1 or later. Wine4Office retains its native

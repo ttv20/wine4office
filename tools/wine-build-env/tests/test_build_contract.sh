@@ -105,6 +105,22 @@ printf 'wayland driver\n' > "$runner/lib/wine/x86_64-unix/winewayland.so"
 printf 'gss_init_sec_context\n' > "$runner/lib/wine/x86_64-unix/kerberos.so"
 env "${build_env[@]}" "$contract/build.sh" verify
 
+# Validation with a different checker image must preserve the installed build.
+mkdir -p "$source_dir/tools/wine-build-env"
+cat > "$source_dir/tools/wine-build-env/check-office-runtime.sh" <<'EOF'
+#!/bin/sh
+mkdir "$2"
+printf 'runner=%s\n' "$1" > "$2/runtime.log"
+EOF
+chmod 0755 "$source_dir/tools/wine-build-env/check-office-runtime.sh"
+provenance_before=$(sha256sum "$build_dir/WINE4OFFICE_BUILD.env")
+env "${build_env[@]}" WINE_BUILD_IMAGE_ID=different-checker-image WINE_BUILD_RECONFIGURE=1 \
+    "$contract/build.sh" runtime
+[[ $(sha256sum "$build_dir/WINE4OFFICE_BUILD.env") == "$provenance_before" ]] || {
+    echo "Runtime validation changed installed runner provenance" >&2
+    exit 1
+}
+
 printf 'stub kerberos\n' > "$runner/lib/wine/x86_64-unix/kerberos.so"
 if env "${build_env[@]}" "$contract/build.sh" verify >"$tmp/stub.log" 2>&1; then
     echo "Build contract accepted a Kerberos stub" >&2

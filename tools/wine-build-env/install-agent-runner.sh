@@ -25,5 +25,8 @@ flock 9
 WINE_BUILD_CPUS=18 WINE_BUILD_JOBS=18 WINE_BUILD_MEMORY=10g \
     "$workspace/contract/run-build-container.sh" install \
     "$workspace/source" "$workspace/build" "$workspace/stage"
+WINE_BUILD_CPUS=18 WINE_BUILD_JOBS=18 WINE_BUILD_MEMORY=10g \
+    "$workspace/source/tools/wine-build-env/run-build-container.sh" runtime \
+    "$workspace/source" "$workspace/build" "$workspace/stage"
 printf 'runner=%s\n' "$workspace/stage/opt/wine4office"
 REMOTE
