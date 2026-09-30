@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -41,7 +42,10 @@ sys.exit(int(os.environ.get('PROBE_EXIT', '0')))
 """)
         self.executable("wineserver", "#!/bin/sh\nexit 0\n")
         compiler = """#!/usr/bin/env python3
-import pathlib, sys
+import os, pathlib, sys
+if os.environ.get('FAIL_COMPILER') == pathlib.Path(sys.argv[0]).name:
+    print('intentional compiler failure', file=sys.stderr)
+    sys.exit(8)
 pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).touch()
 """
         for name in ("x86_64-w64-mingw32-gcc", "i686-w64-mingw32-gcc"):
@@ -76,7 +80,26 @@ pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).touch()
         result = self.run_gate()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("i386-windows/wine4officeauth.exe", result.stderr)
-        self.assertFalse(self.results.exists())
+        self.assertIn("i386-windows/wine4officeauth.exe",
+                      (self.results / "preflight.log").read_text())
+        self.assertFalse((self.results / "prefix-64").exists())
+
+    def test_missing_tool_leaves_preflight_evidence(self):
+        compiler = self.bin / "i686-w64-mingw32-gcc"
+        compiler.rename(compiler.with_suffix(".disabled"))
+        # Exclude system compilers so the fixture also works on MinGW hosts.
+        for name in ("bash", "python3", "dirname", "mkdir", "timeout", "cat"):
+            (self.bin / name).symlink_to(shutil.which(name))
+        result = self.run_gate(PATH=str(self.bin))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("i686-w64-mingw32-gcc", (self.results / "preflight.log").read_text())
+
+    def test_compilation_failure_still_checks_other_architecture(self):
+        result = self.run_gate(FAIL_COMPILER="x86_64-w64-mingw32-gcc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("intentional compiler failure", (self.results / "compile-64.log").read_text())
+        self.assertIn("supported:32:passed", (self.results / "runtime-32.log").read_text())
+        self.assertIn("Office runtime validation failed", result.stderr)
 
     def test_environment_initialization_failure_is_not_a_product_pass(self):
         result = self.run_gate(BOOT_EXIT="9")

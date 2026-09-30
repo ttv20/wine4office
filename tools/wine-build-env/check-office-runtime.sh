@@ -6,36 +6,48 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
     echo "Usage: $0 RUNNER NEW_RESULT_DIR [--soda]" >&2
     exit 2
 }
-runner=$(cd "$1" && pwd)
+runner=$1
 results=$2
 profile=${3:-}
-[[ -x "$runner/bin/wine" && -x "$runner/bin/wineserver" ]] || {
-    echo "Installed runner is missing Wine executables: $runner" >&2
-    exit 1
-}
-for arch in i386 x86_64; do
-    for module in windows.applicationmodel.dll twinapi.appcore.dll windows.security.enterprisedata.dll \
-            windows.security.authentication.onlineid.dll windows.ui.dll dcomp.dll wine4officeauth.exe; do
-        [[ -f "$runner/lib/wine/$arch-windows/$module" ]] || {
-            echo "Installed runner is missing $arch-windows/$module" >&2
-            exit 1
-        }
-    done
-done
-for tool in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc timeout; do
-    command -v "$tool" >/dev/null || { echo "Required runtime-check tool is missing: $tool" >&2; exit 1; }
-done
 # Never run against an existing prefix or overwrite earlier evidence.
 mkdir -- "$results"
 results=$(cd "$results" && pwd)
+preflight() {
+    runner=$(cd "$runner" && pwd) || return 1
+    [[ -x "$runner/bin/wine" && -x "$runner/bin/wineserver" ]] || {
+        echo "Installed runner is missing Wine executables: $runner" >&2
+        return 1
+    }
+    for arch in i386 x86_64; do
+        for module in windows.applicationmodel.dll twinapi.appcore.dll windows.security.enterprisedata.dll \
+                windows.security.authentication.onlineid.dll windows.ui.dll dcomp.dll wine4officeauth.exe; do
+            [[ -f "$runner/lib/wine/$arch-windows/$module" ]] || {
+                echo "Installed runner is missing $arch-windows/$module" >&2
+                return 1
+            }
+        done
+    done
+    for tool in x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc timeout; do
+        command -v "$tool" >/dev/null || { echo "Required runtime-check tool is missing: $tool" >&2; return 1; }
+    done
+}
+if ! preflight >"$results/preflight.log" 2>&1; then
+    cat "$results/preflight.log" >&2
+    exit 1
+fi
 printf 'runner=%s\nprofile=%s\nresults=%s\n' "$runner" "${profile:---supported}" "$results"
 failures=0
 for bits in 64 32; do
     compiler=x86_64-w64-mingw32-gcc
     [[ $bits == 64 ]] || compiler=i686-w64-mingw32-gcc
     executable=$results/office-runtime-$bits.exe
-    "$compiler" -O2 -Wall -Wextra -Werror "$script_dir/probes/office-runtime.c" \
-        -lole32 -lruntimeobject -o "$executable"
+    if ! "$compiler" -O2 -Wall -Wextra -Werror "$script_dir/probes/office-runtime.c" \
+        -lole32 -lruntimeobject -o "$executable" >"$results/compile-$bits.log" 2>&1; then
+        sed -n '1,70p' "$results/compile-$bits.log" >&2
+        echo "Runtime probe compilation failed ($bits-bit)" >&2
+        failures=$((failures + 1))
+        continue
+    fi
     (
         unset WINELOADER WINESERVER WINEDLLPATH WINE_D3D_CONFIG DISPLAY WAYLAND_DISPLAY
         export WINEPREFIX="$results/prefix-$bits" WINEARCH=win64 WINEDEBUG=-all

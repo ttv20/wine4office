@@ -211,9 +211,13 @@ case "$mode" in
     *) usage ;;
 esac
 
-configure_build
-check_configured_capabilities
-record_provenance
+# A runtime check consumes an installed runner. Its compiler image must not
+# replace the provenance of the image that built that runner.
+if [[ "$mode" != runtime ]]; then
+    configure_build
+    check_configured_capabilities
+    record_provenance
+fi
 
 case "$mode" in
     configure)
