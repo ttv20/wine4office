@@ -109,9 +109,22 @@ jobs:
         run: python3 programs/wine4officeauth/tests/test_authorize_url.py
       - name: Test canonical Wine build contract
         run: tools/wine-build-env/tests/test_build_contract.sh
+      - name: Test Office runtime gate failure handling
+        run: python3 tools/wine-build-env/tests/test_office_runtime.py
 
       - name: Configure and build Wine4Office
         run: tools/wine-build-env/run-build-container.sh full "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/build" "$GITHUB_WORKSPACE/stage"
+
+      - name: Check installed Office runtime components
+        run: tools/wine-build-env/run-build-container.sh runtime "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/build" "$GITHUB_WORKSPACE/stage"
+
+      - name: Preserve Office runtime check logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-runtime-${{ steps.version.outputs.version }}
+          path: build/office-runtime-*/*.log
+          if-no-files-found: warn
 
       - name: Bundle Wine Gecko and Mono
         shell: bash

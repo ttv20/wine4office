@@ -13,7 +13,7 @@ build_dir=$3
 stage_dir=$4
 shift 4
 
-case "$mode" in configure|full|targets|install|verify) ;; *) usage ;; esac
+case "$mode" in configure|full|targets|install|verify|runtime) ;; *) usage ;; esac
 [[ -d "$source_dir" && -x "$source_dir/configure" ]] || { echo "Invalid source directory: $source_dir" >&2; exit 1; }
 mkdir -p "$build_dir" "$stage_dir"
 source_dir=$(cd "$source_dir" && pwd)

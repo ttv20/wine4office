@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Usage: build.sh configure|full|targets|install|verify [MAKE_TARGET...]
+Usage: build.sh configure|full|targets|install|verify|runtime [MAKE_TARGET...]
 
 The caller must mount a Wine source tree, build tree, and stage tree and set
 WINE_SOURCE_DIR, WINE_BUILD_DIR, and WINE_STAGE_DIR when they differ from the
@@ -202,7 +202,7 @@ verify_staged_runner() {
 }
 
 case "$mode" in
-    configure|full|install|verify)
+    configure|full|install|verify|runtime)
         (($# == 0)) || usage
         ;;
     targets)
@@ -246,5 +246,10 @@ case "$mode" in
         ;;
     verify)
         verify_staged_runner
+        ;;
+    runtime)
+        verify_staged_runner
+        "$source_dir/tools/wine-build-env/check-office-runtime.sh" "$stage_dir$prefix" \
+            "$build_dir/office-runtime-$(date -u +%Y%m%dT%H%M%S)-$$"
         ;;
 esac
