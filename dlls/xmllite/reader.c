@@ -1084,6 +1084,7 @@ static HRESULT reader_more(xmlreader *reader)
         readerinput_grow(readerinput, len);
         memcpy(dest->data + dest->written, src->data + src->cur, len);
         dest->written += len;
+        readerinput_shrinkraw(readerinput, len);
     }
     else
     {

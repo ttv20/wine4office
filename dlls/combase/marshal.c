@@ -183,7 +183,7 @@ static HRESULT WINAPI ftmarshaler_inner_QueryInterface(IUnknown *iface, REFIID r
 
     *obj = NULL;
 
-    if (IsEqualIID(&IID_IUnknown, riid))
+    if (IsEqualIID(&IID_IUnknown, riid) || IsEqualIID(&IID_IAgileObject, riid))
         *obj = &marshaler->IUnknown_inner;
     else if (IsEqualIID(&IID_IMarshal, riid))
         *obj = &marshaler->IMarshal_iface;

@@ -1,0 +1,45 @@
+{
+  "upstream": "https://github.com/bottlesdevs/wine",
+  "commit": "2958bf5ebeb2ae1f578413e6f0e9bf95516d9233",
+  "wine4office_base": "abf6dffa4604101a5166511631b37d3d07a96019",
+  "imports": [
+    {
+      "patch": "combase-free-threaded-marshaler-agile.mypatch",
+      "sha256": "8b5072a24f08d7756aaefb17e15ca60d12f4f037cf5e92e8b1b4f22ef27c3170",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/combase-free-threaded-marshaler-agile.mypatch"
+    },
+    {
+      "patch": "winhttp-open-connection-release-on-cert-failure.mypatch",
+      "sha256": "4a086fe5982aa7697477d54ead35a879780b82134666c93cb58d4fb889c526af",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/winhttp-open-connection-release-on-cert-failure.mypatch"
+    },
+    {
+      "patch": "winhttp-send-request-null-optional.mypatch",
+      "sha256": "8db574ecb0e780c4e6417f49abc0221eb1e57a3a8538743ba5a79926f1fc4ec9",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/winhttp-send-request-null-optional.mypatch"
+    },
+    {
+      "patch": "wininet-follow-absolute-redirects.mypatch",
+      "sha256": "cce88ac79b447cd5e8248161f13c182e1521ff4697faa8dbbf6dcdf8c20880db",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/wininet-follow-absolute-redirects.mypatch"
+    },
+    {
+      "patch": "xmllite-reader-large-utf16.mypatch",
+      "sha256": "5627372fe89adb8cf77f7a9879d330a09683d50871aa8197f7d9109a4aca87f1",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/xmllite-reader-large-utf16.mypatch"
+    },
+    {
+      "patch": "xmllite-writer-explicit-xmlns-declaration.mypatch",
+      "sha256": "7d56e9a4cb413fc6bdb3ecafd2c4749e81d96e2eaa3a84acf39b9cbb8cd2637f",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/xmllite-writer-explicit-xmlns-declaration.mypatch"
+    },
+    {
+      "patch": "dwrite-scalar-alpha-texture-blit.mypatch",
+      "sha256": "9da1b573201808184f87df1ffbd6bd46b3d8876877b15009462da267df0233fb",
+      "url": "https://github.com/bottlesdevs/wine/blob/2958bf5ebeb2ae1f578413e6f0e9bf95516d9233/wine-tkg-userpatches/dwrite-scalar-alpha-texture-blit.mypatch"
+    }
+  ],
+  "adaptations": [
+    "The null-optional HTTP regression reads all four body bytes across partial TCP reads and does not index the buffer with a failed recv result."
+  ]
+}

@@ -858,6 +858,7 @@ if (0)
     hr = IXmlReader_Read(reader, &nodetype);
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
 }
+
     set_input_string(reader, "xml");
     TEST_READER_STATE(reader, XmlReadState_Initial);
 
@@ -875,6 +876,49 @@ if (0)
     todo_wine
     ok(FAILED(hr), "Unexpected hr %#lx.\n", hr);
     ok(nodetype == XmlNodeType_None, "Unexpected node type %d\n", nodetype);
+
+    IXmlReader_Release(reader);
+}
+
+static void test_large_utf16_input(void)
+{
+    static const unsigned int text_len = 5000;
+    IUnknown *reader_input;
+    IXmlReader *reader;
+    IStream *stream;
+    const WCHAR *value;
+    WCHAR *xml;
+    UINT len;
+    unsigned int i;
+    HRESULT hr;
+
+    xml = malloc((text_len + 14) * sizeof(*xml));
+    memcpy(xml, L"<root>", 6 * sizeof(*xml));
+    for (i = 0; i < text_len; ++i) xml[6 + i] = 'a';
+    memcpy(xml + 6 + text_len, L"</root>", 7 * sizeof(*xml));
+
+    stream = create_stream_on_data(xml, (text_len + 13) * sizeof(*xml));
+    free(xml);
+
+    hr = CreateXmlReaderInputWithEncodingName((IUnknown *)stream, NULL, L"UTF-16", FALSE, NULL,
+                                               &reader_input);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IStream_Release(stream);
+
+    hr = CreateXmlReader(&IID_IXmlReader, (void **)&reader, NULL);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXmlReader_SetInput(reader, reader_input);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IUnknown_Release(reader_input);
+
+    read_node(reader, XmlNodeType_Element);
+    read_node(reader, XmlNodeType_Text);
+    hr = IXmlReader_GetValue(reader, &value, &len);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(len == text_len, "Unexpected value length %u.\n", len);
+    ok(value[0] == 'a' && value[text_len - 1] == 'a', "Unexpected text value.\n");
+    read_node(reader, XmlNodeType_EndElement);
+    read_node(reader, XmlNodeType_None);
 
     IXmlReader_Release(reader);
 }
@@ -2761,6 +2805,7 @@ START_TEST(reader)
     test_reader_create();
     test_readerinput();
     test_reader_state();
+    test_large_utf16_input();
     test_read_attribute();
     test_read_cdata();
     test_read_comment();
