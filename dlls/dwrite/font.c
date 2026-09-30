@@ -5956,8 +5956,9 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
     for (i = 0; i < analysis->run.glyphCount; ++i)
     {
         BYTE *src = glyph_bitmap.buf, *dst;
-        int x, y, width, height;
+        int x, y, width, height, src_x;
         unsigned int is_1bpp;
+        RECT clipped;
 
         glyph_bitmap.glyph = analysis->run.glyphIndices[i];
         dwrite_fontface_get_glyph_bbox(analysis->run.fontFace, &glyph_bitmap);
@@ -5980,14 +5981,22 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
         OffsetRect(bbox, analysis->origins[i].x, analysis->origins[i].y);
 
         /* blit to analysis bitmap */
-        dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, bbox, &analysis->bounds);
+        clipped = *bbox;
+        if (!IntersectRect(&clipped, &clipped, &analysis->bounds))
+            continue;
+
+        src_x = clipped.left - bbox->left;
+        src += (clipped.top - bbox->top) * glyph_bitmap.pitch;
+        dst = get_pixel_ptr(analysis->bitmap, analysis->texture_type, &clipped, &analysis->bounds);
+        width = clipped.right - clipped.left;
+        height = clipped.bottom - clipped.top;
 
         if (is_1bpp) {
             /* convert 1bpp to 8bpp/24bpp */
             if (analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1) {
                 for (y = 0; y < height; y++) {
                     for (x = 0; x < width; x++)
-                        if (src[x / 8] & masks[x % 8])
+                        if (src[(x + src_x) / 8] & masks[(x + src_x) % 8])
                             dst[3*x] = dst[3*x+1] = dst[3*x+2] = DWRITE_ALPHA_MAX;
                     src += glyph_bitmap.pitch;
                     dst += (analysis->bounds.right - analysis->bounds.left) * 3;
@@ -5996,7 +6005,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             else {
                 for (y = 0; y < height; y++) {
                     for (x = 0; x < width; x++)
-                        if (src[x / 8] & masks[x % 8])
+                        if (src[(x + src_x) / 8] & masks[(x + src_x) % 8])
                             dst[x] = DWRITE_ALPHA_MAX;
                     src += glyph_bitmap.pitch;
                     dst += analysis->bounds.right - analysis->bounds.left;
@@ -6004,6 +6013,7 @@ static HRESULT glyphrunanalysis_render(struct dwrite_glyphrunanalysis *analysis)
             }
         }
         else {
+            src += src_x;
             if (analysis->texture_type == DWRITE_TEXTURE_CLEARTYPE_3x1) {
                 for (y = 0; y < height; y++) {
                     for (x = 0; x < width; x++)
