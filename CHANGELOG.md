@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Import Soda fixes for cross-thread COM objects, HTTP requests and redirects, large UTF-16 and namespaced XML, and safe glyph bitmap copying.
+
 - Fix Office 2019 volume installation failing while its licensing chain is installed.
 - Prevent intermittent Word Welcome-screen stalls by keeping Click-to-Run preloaded.
 - Prevent enterprise Microsoft 365 sign-in from getting stuck after entering credentials.

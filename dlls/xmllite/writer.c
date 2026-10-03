@@ -1095,7 +1095,7 @@ static HRESULT WINAPI xmlwriter_WriteAttributeString(IXmlWriter *iface, LPCWSTR 
             return WR_E_XMLNSPREFIXDECLARATION;
 
         /* Look for exact match defined in current element, and write it out. */
-        if (!(ns = writer_find_ns_current(writer, prefix, value)))
+        if (!(ns = writer_find_ns_current(writer, local, value)))
             ns = writer_push_ns(writer, local, local_len, value);
         ns->emitted = TRUE;
 

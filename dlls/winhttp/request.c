@@ -2552,6 +2552,8 @@ static DWORD send_request( struct request *request, const WCHAR *headers, DWORD 
     free( wire_req );
     if (ret) goto end;
 
+    /* without a buffer the body is supplied later through WinHttpWriteData */
+    if (!optional) optional_len = 0;
     if (optional_len)
     {
         if ((ret = netconn_send( request->netconn, optional, optional_len, &bytes_sent, NULL ))) goto end;

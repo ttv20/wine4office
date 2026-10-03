@@ -89,6 +89,17 @@ WineHQ's Clean Room Guidelines ban LLM-generated code. This whole thing is AI so
 
 ## Credits
 
+Thanks to [Mirko Brombin](https://github.com/mirkobrombin) and the
+[Bottles/Soda contributors](https://github.com/bottlesdevs/wine) for their
+[Microsoft 365 compatibility work](https://github.com/bottlesdevs/programs/issues/500).
+Wine4Office imports their free-threaded marshaler, HTTP request and redirect,
+XML reader/writer fixes, and clipped glyph alpha-texture copying. The original
+regression tests are retained for the COM, HTTP and XML changes, and a new
+DirectWrite regression covers the glyph copying fix.
+The [import manifest](documentation/soda-imports/20260930.json) records the exact
+source revision, patch links, and checksums. Existing Wine4Office fixes are
+retained when adapting Soda changes to our newer Wine base.
+
 DirectComposition research and selected compatibility code were adapted from
 [Giang Nguyen's `giang17/wine` D2D1/DComp work](https://github.com/giang17/wine),
 licensed under the GNU LGPL 2.1 or later. Wine4Office retains its native

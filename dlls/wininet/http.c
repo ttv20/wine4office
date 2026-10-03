@@ -4229,7 +4229,7 @@ static WCHAR *get_redirect_url(http_request_t *request)
     if(b) {
         url_length = 0;
         b = InternetCombineUrlW(orig_url, redirect_url, NULL, &url_length, ICU_ENCODE_SPACES_ONLY);
-        if(!b && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        if(!b && url_length) {
             combined_url = malloc(url_length * sizeof(WCHAR));
             b = InternetCombineUrlW(orig_url, redirect_url, combined_url, &url_length, ICU_ENCODE_SPACES_ONLY);
             if(!b) {

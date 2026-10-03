@@ -1881,6 +1881,32 @@ static void test_WriteAttributeString(void)
 
     IStream_Release(stream);
 
+    /* Explicit declaration of the element prefix. */
+    stream = writer_set_output(writer);
+
+    hr = IXmlWriter_WriteStartDocument(writer, XmlStandalone_Omit);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlWriter_WriteStartElement(writer, L"s", L"Envelope", L"uri");
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlWriter_WriteAttributeString(writer, L"xmlns", L"s", NULL, L"uri");
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlWriter_WriteStartElement(writer, L"s", L"Body", L"uri");
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlWriter_WriteEndDocument(writer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IXmlWriter_Flush(writer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    CHECK_OUTPUT(stream,
+        "<s:Envelope xmlns:s=\"uri\"><s:Body /></s:Envelope>");
+
+    IStream_Release(stream);
+
     IXmlWriter_Release(writer);
 }
 

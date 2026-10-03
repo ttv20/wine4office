@@ -2715,6 +2715,26 @@ static DWORD CALLBACK server_thread(LPVOID param)
             send(c, okmsg, sizeof(okmsg) - 1, 0);
         }
 
+        if (strstr(buffer, "POST /nulloptional"))
+        {
+            DWORD timeout = 5000;
+            int received = 0;
+
+            /* bound the wait for a body that is never sent; the socket is closed below */
+            setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+            ok(!!strstr(buffer, "Content-Length: 4\r\n"), "Header missing from request %s.\n", debugstr_a(buffer));
+            while (received < 4)
+            {
+                r = recv(c, buffer + received, 4 - received, 0);
+                if (r <= 0) break;
+                received += r;
+            }
+            ok(received == 4, "got %d body bytes.\n", received);
+            buffer[received] = 0;
+            ok(!strcmp(buffer, "post"), "got %s.\n", debugstr_a(buffer));
+            send(c, okmsg, sizeof(okmsg) - 1, 0);
+        }
+
         if (strstr(buffer, "GET /cached"))
         {
             send(c, okmsg_length0, sizeof okmsg_length0 - 1, 0);
@@ -2878,6 +2898,38 @@ static void test_chunked_request(int port)
         ok(!count, "got count %ld\n", count);
         WinHttpCloseHandle(req);
     }
+    WinHttpCloseHandle(con);
+    WinHttpCloseHandle(ses);
+}
+
+static void test_null_optional_request(int port)
+{
+    HINTERNET ses, con, req;
+    DWORD count;
+    BOOL ret;
+
+    ses = WinHttpOpen(L"winetest", WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0);
+    ok(ses != NULL, "failed to open session %lu\n", GetLastError());
+
+    con = WinHttpConnect(ses, L"localhost", port, 0);
+    ok(con != NULL, "failed to open a connection %lu\n", GetLastError());
+
+    req = WinHttpOpenRequest(con, L"POST", L"/nulloptional", NULL, NULL, NULL, 0);
+    ok(req != NULL, "failed to open a request %lu\n", GetLastError());
+
+    /* no optional buffer but a length, the body is written afterwards */
+    ret = WinHttpSendRequest(req, NULL, 0, NULL, 4, 4, 0);
+    ok(ret, "failed to send request %lu\n", GetLastError());
+
+    count = 0;
+    ret = WinHttpWriteData(req, "post", 4, &count);
+    ok(ret, "failed to write data %lu\n", GetLastError());
+    ok(count == 4, "got count %lu\n", count);
+
+    ret = WinHttpReceiveResponse(req, NULL);
+    ok(ret, "failed to receive response %lu\n", GetLastError());
+
+    WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
 }
@@ -6578,6 +6630,7 @@ START_TEST (winhttp)
     test_basic_request(si.port, NULL, L"/basic");
     test_basic_request(si.port, L"PUT", L"/test");
     test_chunked_request(si.port);
+    test_null_optional_request(si.port);
     test_no_headers(si.port);
     test_no_content(si.port);
     test_head_request(si.port);

@@ -3526,6 +3526,7 @@ static void test_freethreadedmarshaler(void)
     DWORD size, expected_size;
     HRESULT hr;
     IUnknown *pFTUnknown;
+    IAgileObject *agile_object;
     IMarshal *pFTMarshal;
     IStream *pStream;
     IUnknown *pProxy;
@@ -3535,6 +3536,11 @@ static void test_freethreadedmarshaler(void)
     cLocks = 0;
     hr = CoCreateFreeThreadedMarshaler(NULL, &pFTUnknown);
     ok_ole_success(hr, CoCreateFreeThreadedMarshaler);
+
+    hr = IUnknown_QueryInterface(pFTUnknown, &IID_IAgileObject, (void **)&agile_object);
+    ok_ole_success(hr, IUnknown_QueryInterface);
+    if (SUCCEEDED(hr)) IAgileObject_Release(agile_object);
+
     hr = IUnknown_QueryInterface(pFTUnknown, &IID_IMarshal, (void **)&pFTMarshal);
     ok_ole_success(hr, IUnknown_QueryInterface);
     IUnknown_Release(pFTUnknown);
