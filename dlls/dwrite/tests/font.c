@@ -7749,6 +7749,138 @@ static void test_CreateAlphaTexture(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+static void test_CreateAlphaTexture_clipping(void)
+{
+    static const struct
+    {
+        DWRITE_RENDERING_MODE mode;
+        DWRITE_TEXTURE_TYPE type;
+        unsigned int bpp;
+    }
+    tests[] =
+    {
+        { DWRITE_RENDERING_MODE_ALIASED, DWRITE_TEXTURE_ALIASED_1x1, 1 },
+        { DWRITE_RENDERING_MODE_NATURAL, DWRITE_TEXTURE_CLEARTYPE_3x1, 3 },
+    };
+    /* 2^31 - 128, exactly representable as a float and as an INT */
+    static const float far_origin = 2147483520.0f;
+    unsigned int i, x, y, c, width, height, mismatches, nonzero;
+    DWRITE_GLYPH_OFFSET offsets[2] = {{ 0 }};
+    float advances[2] = { 0.0f };
+    IDWriteGlyphRunAnalysis *analysis;
+    BYTE *expected, *texture, value;
+    IDWriteFontFace *fontface;
+    IDWriteFactory *factory;
+    DWRITE_GLYPH_RUN run;
+    RECT bounds, r;
+    UINT16 glyphs[2];
+    UINT32 ch, size;
+    HRESULT hr;
+
+    factory = create_factory();
+    fontface = create_fontface(factory);
+
+    ch = 'A';
+    hr = IDWriteFontFace_GetGlyphIndices(fontface, &ch, 1, glyphs);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    glyphs[1] = glyphs[0];
+
+    memset(&run, 0, sizeof(run));
+    run.fontFace = fontface;
+    run.fontEmSize = 512.0f;
+    run.glyphIndices = glyphs;
+    run.glyphAdvances = advances;
+    run.glyphOffsets = offsets;
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("Test %u", i);
+
+        run.glyphCount = 1;
+        advances[0] = 0.0f;
+        hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, tests[i].mode,
+                DWRITE_MEASURING_MODE_NATURAL, 0.0f, 0.0f, &analysis);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        SetRectEmpty(&bounds);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, tests[i].type, &bounds);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        if (bounds.left >= 128 || bounds.right < 128 || bounds.bottom - bounds.top < 8)
+        {
+            skip("Unexpected glyph bounds %s.\n", wine_dbgstr_rect(&bounds));
+            IDWriteGlyphRunAnalysis_Release(analysis);
+            winetest_pop_context();
+            continue;
+        }
+
+        width = bounds.right - bounds.left;
+        height = bounds.bottom - bounds.top;
+        size = width * height * tests[i].bpp;
+        expected = malloc(size);
+        texture = malloc(size);
+
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, tests[i].type, &bounds, expected, size);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        for (x = nonzero = 0; x < size; ++x)
+            if (expected[x]) nonzero++;
+        ok(nonzero, "Expected a non-empty texture.\n");
+
+        /* Requested rectangle starts left of and above the analysis bounds. */
+        SetRect(&r, bounds.left - 5, bounds.top - 3, bounds.left + width / 2, bounds.top + height / 2);
+        memset(texture, 0xcf, size);
+        hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, tests[i].type, &r, texture, size);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        mismatches = 0;
+        for (y = 0; y < r.bottom - r.top; ++y)
+        {
+            for (x = 0; x < r.right - r.left; ++x)
+            {
+                for (c = 0; c < tests[i].bpp; ++c)
+                {
+                    if (x < 5 || y < 3)
+                        value = 0;
+                    else
+                        value = expected[((y - 3) * width + x - 5) * tests[i].bpp + c];
+                    if (texture[(y * (r.right - r.left) + x) * tests[i].bpp + c] != value)
+                        mismatches++;
+                }
+            }
+        }
+        ok(!mismatches, "Got %u mismatching bytes in the clipped texture.\n", mismatches);
+
+        IDWriteGlyphRunAnalysis_Release(analysis);
+
+        /* The first glyph box overflows the coordinate range and is not part of the run bounds;
+           the second glyph is placed back at the origin. */
+        run.glyphCount = 2;
+        advances[0] = -far_origin;
+        hr = IDWriteFactory_CreateGlyphRunAnalysis(factory, &run, 1.0f, NULL, tests[i].mode,
+                DWRITE_MEASURING_MODE_NATURAL, far_origin, 0.0f, &analysis);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        SetRectEmpty(&r);
+        hr = IDWriteGlyphRunAnalysis_GetAlphaTextureBounds(analysis, tests[i].type, &r);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(EqualRect(&r, &bounds), "Unexpected bounds %s, expected %s.\n", wine_dbgstr_rect(&r),
+                wine_dbgstr_rect(&bounds));
+        if (EqualRect(&r, &bounds))
+        {
+            memset(texture, 0xcf, size);
+            hr = IDWriteGlyphRunAnalysis_CreateAlphaTexture(analysis, tests[i].type, &bounds, texture, size);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            ok(!memcmp(texture, expected, size), "Unexpected texture data.\n");
+        }
+
+        IDWriteGlyphRunAnalysis_Release(analysis);
+        free(texture);
+        free(expected);
+        winetest_pop_context();
+    }
+
+    IDWriteFontFace_Release(fontface);
+    IDWriteFactory_Release(factory);
+}
+
 static BOOL get_expected_is_symbol(IDWriteFontFace *fontface)
 {
     BOOL exists, is_symbol = FALSE;
@@ -11033,6 +11165,7 @@ START_TEST(font)
     test_GetRecommendedRenderingMode();
     test_GetAlphaBlendParams();
     test_CreateAlphaTexture();
+    test_CreateAlphaTexture_clipping();
     test_IsSymbolFont();
     test_GetPaletteEntries();
     test_TranslateColorGlyphRun();

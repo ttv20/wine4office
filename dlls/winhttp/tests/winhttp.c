@@ -2717,8 +2717,11 @@ static DWORD CALLBACK server_thread(LPVOID param)
 
         if (strstr(buffer, "POST /nulloptional"))
         {
+            DWORD timeout = 5000;
             int received = 0;
 
+            /* bound the wait for a body that is never sent; the socket is closed below */
+            setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
             ok(!!strstr(buffer, "Content-Length: 4\r\n"), "Header missing from request %s.\n", debugstr_a(buffer));
             while (received < 4)
             {

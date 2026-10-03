@@ -94,7 +94,8 @@ Thanks to [Mirko Brombin](https://github.com/mirkobrombin) and the
 [Microsoft 365 compatibility work](https://github.com/bottlesdevs/programs/issues/500).
 Wine4Office imports their free-threaded marshaler, HTTP request and redirect,
 XML reader/writer fixes, and clipped glyph alpha-texture copying. The original
-regression tests are retained for the COM, HTTP and XML changes.
+regression tests are retained for the COM, HTTP and XML changes, and a new
+DirectWrite regression covers the glyph copying fix.
 The [import manifest](documentation/soda-imports/20260930.json) records the exact
 source revision, patch links, and checksums. Existing Wine4Office fixes are
 retained when adapting Soda changes to our newer Wine base.

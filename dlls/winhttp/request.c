@@ -2171,7 +2171,6 @@ static DWORD open_connection( struct request *request )
 
     if (netconn->secure && !(request->server_cert = netconn_get_certificate( netconn )))
     {
-        request->netconn = NULL;
         free( addressW );
         netconn_release( netconn );
         return ERROR_WINHTTP_SECURE_FAILURE;
