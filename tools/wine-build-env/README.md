@@ -25,6 +25,18 @@ tools/wine-build-env/run-build-container.sh install "$PWD" "$PWD/build" "$PWD/st
 `sync-agent-source.sh`, `build-agent-targets.sh`, `install-agent-runner.sh`,
 and `remove-agent-build.sh` in lifecycle order.
 
+## Bundled DXVK
+
+`bundle-dxvk.sh STAGE_RUNNER_ROOT` downloads the pinned DXVK 3.1.1 release,
+verifies its SHA-256, and installs only `dxgi`, `d3d11` and `d3d10core` (x64 and
+x32) plus `manifest.json` and the vendored zlib license (`dxvk/LICENSE`) into
+`STAGE_RUNNER_ROOT/share/wine4office/dxvk/3.1.1/`. The release workflow runs it
+after the Gecko and Mono step, and release packaging refuses a runner without
+the complete bundle. Agent runners skip it unless `WINE4OFFICE_BUNDLE_DXVK=1`
+is set for `install-agent-runner.sh`; the server then needs HTTPS access to
+GitHub and caches the verified tarball under `cache/dxvk` in the build root.
+Without the bundle, Wine4Office Manager keeps the prefix on WineD3D.
+
 ## Remote configuration
 
 Remote commands read `WINE365_REMOTE_HOST`, `WINE_BUILD_REMOTE_ROOT`, and

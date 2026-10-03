@@ -139,6 +139,9 @@ jobs:
           echo "df2dfc1665c2511882e7cabd56eafd0c0a3d94e5a7e86f969277f6c189d418d3  $mono_dir/wine-mono-${mono_version}-x86.msi" \
             | sha256sum --check
 
+      - name: Bundle DXVK
+        run: tools/wine-build-env/bundle-dxvk.sh "$GITHUB_WORKSPACE/stage/opt/wine4office"
+
       - name: Build standalone Wine4OfficeManager
         run: |
           set -euo pipefail

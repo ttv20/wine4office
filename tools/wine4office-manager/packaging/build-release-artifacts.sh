@@ -26,6 +26,17 @@ done
 MONO_VERSION=11.3.0
 mono="$RUNNER/share/wine/mono/wine-mono-${MONO_VERSION}-x86.msi"
 [[ -f "$mono" ]] || { echo "Runner is missing bundled Wine Mono: $mono" >&2; exit 1; }
+DXVK_VERSION=3.1.1
+DXVK_MEMBERS=(manifest.json LICENSE)
+for dxvk_arch in x64 x32; do
+    for dxvk_dll in dxgi d3d11 d3d10core; do
+        DXVK_MEMBERS+=("$dxvk_arch/$dxvk_dll.dll")
+    done
+done
+for dxvk_member in "${DXVK_MEMBERS[@]}"; do
+    dxvk="$RUNNER/share/wine4office/dxvk/${DXVK_VERSION}/$dxvk_member"
+    [[ -f "$dxvk" ]] || { echo "Runner is missing bundled DXVK: $dxvk" >&2; exit 1; }
+done
 [[ $VERSION =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || { echo "Unsafe version: $VERSION" >&2; exit 1; }
 [[ $CHANNEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Unsafe channel: $CHANNEL" >&2; exit 1; }
 command -v zstd >/dev/null || { echo "zstd is required" >&2; exit 1; }
@@ -72,6 +83,13 @@ tar --zstd -tf "$TMP/$WINE_NAME" \
     echo "Wine archive is missing Wine Mono" >&2
     exit 1
 }
+for dxvk_member in "${DXVK_MEMBERS[@]}"; do
+    tar --zstd -tf "$TMP/$WINE_NAME" \
+        | grep -Fx "$WINE_ROOT/share/wine4office/dxvk/${DXVK_VERSION}/$dxvk_member" >/dev/null || {
+        echo "Wine archive is missing DXVK $dxvk_member" >&2
+        exit 1
+    }
+done
 
 (
     cd "$TMP"
