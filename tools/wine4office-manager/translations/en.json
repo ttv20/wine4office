@@ -233,7 +233,7 @@
   "Use DXVK for Direct3D 10 and 11": "Use DXVK for Direct3D 10 and 11",
   "Direct3D backend status": "Direct3D backend status",
   "Checking Vulkan support…": "Checking Vulkan support…",
-  "DXVK {version} is active for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.": "DXVK {version} is active for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.",
+  "DXVK {version} is installed in this Wine environment for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.": "DXVK {version} is installed in this Wine environment for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.",
   "DXVK is selected but not active yet. It is applied when Wine is not running.": "DXVK is selected but not active yet. It is applied when Wine is not running.",
   "DXVK is unavailable; using WineD3D.": "DXVK is unavailable; using WineD3D.",
   "Using WineD3D ({renderer}).": "Using WineD3D ({renderer}).",
@@ -241,5 +241,7 @@
   "The installed Wine runner does not include DXVK 3.1.1.": "The installed Wine runner does not include DXVK 3.1.1.",
   "The Vulkan loader (libvulkan.so.1) is not installed.": "The Vulkan loader (libvulkan.so.1) is not installed.",
   "Only a software (CPU) Vulkan device is available.": "Only a software (CPU) Vulkan device is available.",
-  "Vulkan reported no graphics devices.": "Vulkan reported no graphics devices."
+  "Vulkan reported no graphics devices.": "Vulkan reported no graphics devices.",
+  "Check again": "Check again",
+  "Check Vulkan support for DXVK again": "Check Vulkan support for DXVK again"
 }

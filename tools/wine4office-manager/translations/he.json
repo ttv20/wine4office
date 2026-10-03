@@ -232,7 +232,7 @@
   "Use DXVK for Direct3D 10 and 11": "שימוש ב-DXVK עבור Direct3D 10 ו-11",
   "Direct3D backend status": "מצב מנגנון Direct3D",
   "Checking Vulkan support…": "בודק תמיכה ב-Vulkan…",
-  "DXVK {version} is active for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.": "DXVK {version} פעיל עבור Direct3D 10 ו-11. WebView2 (‏Outlook החדש) משתמש ב-WineD3D.",
+  "DXVK {version} is installed in this Wine environment for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.": "DXVK {version} מותקן בסביבת Wine זו עבור Direct3D 10 ו-11. WebView2 (‏Outlook החדש) משתמש ב-WineD3D.",
   "DXVK is selected but not active yet. It is applied when Wine is not running.": "DXVK נבחר אך עדיין אינו פעיל. הוא יוחל כאשר Wine אינו פועל.",
   "DXVK is unavailable; using WineD3D.": "DXVK אינו זמין; נעשה שימוש ב-WineD3D.",
   "Using WineD3D ({renderer}).": "נעשה שימוש ב-WineD3D ({renderer}).",
@@ -240,5 +240,7 @@
   "The installed Wine runner does not include DXVK 3.1.1.": "רכיב Wine המותקן אינו כולל DXVK 3.1.1.",
   "The Vulkan loader (libvulkan.so.1) is not installed.": "טוען Vulkan ‏(libvulkan.so.1) אינו מותקן.",
   "Only a software (CPU) Vulkan device is available.": "זמין רק התקן Vulkan תוכנתי (מעבד).",
-  "Vulkan reported no graphics devices.": "Vulkan לא דיווח על התקני גרפיקה."
+  "Vulkan reported no graphics devices.": "Vulkan לא דיווח על התקני גרפיקה.",
+  "Check again": "בדיקה חוזרת",
+  "Check Vulkan support for DXVK again": "בדיקה חוזרת של תמיכת Vulkan עבור DXVK"
 }

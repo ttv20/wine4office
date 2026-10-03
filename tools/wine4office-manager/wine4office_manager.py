@@ -211,7 +211,9 @@ def launch_dxvk_setting(config: dict, prefix: str, wine: str) -> bool | None:
     try:
         if not backend.is_prefix_owned(prefix):
             return None
-        return backend.dxvk_requested(config, wine)[0]
+        # Cache only: the Vulkan probe (up to 20 s) runs from the Manager window
+        # and post-install hook, never on the Office launch path.
+        return backend.dxvk_requested(config, wine, probe=False)[0]
     except Exception:  # noqa: BLE001 - never block a launch
         return None
 

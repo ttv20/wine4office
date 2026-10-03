@@ -123,10 +123,11 @@ def _migrate_runner_lifecycle(context: PostInstallContext) -> dict:
 
 
 def _sync_direct3d_backend(context: PostInstallContext) -> dict:
-    """Apply the DXVK default (or a newly bundled DXVK) without closing Office.
+    """Apply the DXVK default (or a newly bundled DXVK) only if Wine is idle.
 
-    Only the background service is paused; when Office is open, the change is
-    deferred to the next Manager launch, graphics apply, or runner update.
+    Nothing is paused, closed or killed: while Office or the background service
+    keeps Wine running, the change waits for the next idle point (graphics
+    apply, runner update, or an Office launch from the Manager).
     """
     prefix = context.config["prefix"]
     wine = context.config["wine"]
@@ -147,19 +148,9 @@ def _sync_direct3d_backend(context: PostInstallContext) -> dict:
         if requested is None:
             context.output(f"Post-install: Direct3D backend left unchanged: {reason}")
             return result
-        if backend.dxvk_prefix_converged(prefix, wine, requested):
-            return result
-        use_x11, _use_vulkan = backend.active_graphics_settings(context.config)
-        preload_update = backend.prepare_preload_runner_update(
-            prefix, use_x11, wine_value=wine
-        )
-        try:
-            result.update(backend.converge_dxvk_state(
-                prefix, wine, requested, context.output, idle_wait=10,
-            ))
-        finally:
-            if preload_update is not None:
-                backend.restore_preload_after_runner_update(preload_update)
+        result.update(backend.converge_dxvk_state(
+            prefix, wine, requested, context.output,
+        ))
     except Exception as error:  # noqa: BLE001 - never block the Manager update
         context.output(f"Post-install: WARNING: {error}")
         return result

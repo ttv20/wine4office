@@ -492,10 +492,20 @@ class ManagerWindow(QMainWindow):
         self.use_opengl.setAccessibleName("Use the OpenGL Direct3D renderer")
         self.use_vulkan.setAccessibleName("Use the Vulkan Direct3D renderer")
         graphics_form.addRow("Direct3D renderer:", renderer_choices)
+        direct3d_status = QWidget()
+        direct3d_status_layout = QHBoxLayout(direct3d_status)
+        direct3d_status_layout.setContentsMargins(0, 0, 0, 0)
         self.direct3d_status_label = QLabel("Checking Vulkan support…")
         self.direct3d_status_label.setWordWrap(True)
         self.direct3d_status_label.setAccessibleName("Direct3D backend status")
-        graphics_form.addRow("", self.direct3d_status_label)
+        direct3d_status_layout.addWidget(self.direct3d_status_label, 1)
+        self.dxvk_check_again_button = self._action_button(
+            "Check again", self.check_dxvk_support_again,
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
+        self.dxvk_check_again_button.setAccessibleName("Check Vulkan support for DXVK again")
+        direct3d_status_layout.addWidget(self.dxvk_check_again_button)
+        graphics_form.addRow("", direct3d_status)
         graphics_layout.addLayout(graphics_form)
 
         self.graphics_restart_panel = QWidget()
@@ -1737,8 +1747,8 @@ class ManagerWindow(QMainWindow):
         available = status.get("dxvk_available")
         if status.get("dxvk_active"):
             text = self._tr(
-                "DXVK {version} is active for Direct3D 10 and 11. "
-                "WebView2 (new Outlook) uses WineD3D."
+                "DXVK {version} is installed in this Wine environment for "
+                "Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D."
             ).format(version=status.get("dxvk_version") or backend.DXVK_VERSION)
         elif status.get("selected") == "dxvk" and available is True:
             text = self._tr(
@@ -1758,6 +1768,11 @@ class ManagerWindow(QMainWindow):
         if unavailable:
             self.use_dxvk.setDisabled(True)
         self.use_dxvk.setToolTip(reason if unavailable else "")
+
+    def check_dxvk_support_again(self) -> None:
+        """Re-run the Vulkan check, e.g. after a driver update or a reboot."""
+        if self.state.refresh_dxvk_support_async(force=True):
+            self.direct3d_status_label.setText(self._tr("Checking Vulkan support…"))
 
     def _graphics_choice_changed(self, _button: QAbstractButton) -> None:
         if not self.initialized:

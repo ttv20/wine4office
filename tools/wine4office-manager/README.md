@@ -111,30 +111,50 @@ DXVK 3.1.1 is the default Direct3D 10/11 backend. Release runners carry its
   their libraries, the GPUs and the DXVK version.
 - **Fallback.** If the runner has no bundle, the GPU lacks Vulkan 1.3, or the
   check fails, the prefix stays on WineD3D (OpenGL unless Vulkan was chosen)
-  and the Manager shows the reason. It only reports DXVK as active when the
-  prefix really has it.
+  and the Manager shows the reason. Results that can change without a driver
+  file change (no Vulkan loader, no driver instance, no device, CPU-only) and
+  unknown results are rechecked after one hour; the fingerprint also includes
+  the kernel DRM driver names and the boot id. **Check again** next to the
+  Direct3D status runs the check immediately. The status says DXVK is
+  *installed in this Wine environment* only when the prefix really has it and
+  no `WINEDLLOVERRIDES` or Office `AppDefaults` entry overrides it.
 - **How it is applied.** Only in Manager-owned prefixes and only while no Wine
   process uses the prefix, the Manager copies the DLLs into
   `drive_c/windows/system32` and `syswow64` (temporary file, fsync, rename,
   SHA-256 check) and sets `HKCU\Software\Wine\DllOverrides` to `native`. It
-  never puts these DLLs into `WINEDLLOVERRIDES`, because that variable would
-  override the WebView2 exclusion. A user's own `WINEDLLOVERRIDES` or
-  conflicting `DllOverrides` value is left alone and keeps WineD3D. Each change
-  is one transaction: a failure restores the previous files and registry
-  values. Ownership is recorded in `<prefix>/.wine4office-dxvk.json`;
-  switching back removes only the values the Manager wrote and restores the
-  runner's builtin DLLs.
+  replaces only Wine's own builtin copies there; a user-placed native DLL
+  (for example a hand-installed DXVK) is never overwritten, and the prefix
+  then keeps WineD3D with that reason. It never puts these DLLs into
+  `WINEDLLOVERRIDES`, because that variable would override the WebView2
+  exclusion. A user's own `WINEDLLOVERRIDES` or conflicting `DllOverrides`
+  value is left alone and keeps WineD3D. Each change is one transaction: a
+  pending ownership record is written first, and a failure restores the
+  previous files and registry values. Ownership is recorded in
+  `<prefix>/.wine4office-dxvk.json`; a value the user later edits is no longer
+  counted as Manager-owned. Switching back removes only the values the Manager
+  wrote and restores the runner's builtin DLLs (or, for runners without
+  `lib/wine/*-windows`, removes the Manager's DLLs so Wine loads its own).
+- **Never closes Office.** The DXVK code never stops, closes or kills Wine and
+  never pauses the background service. It holds an exclusive `flock` on
+  `<prefix>/.wine4office-dxvk.lock` while it checks that Wine is idle and makes
+  its changes; Office launches from the Manager hold the same lock shared while
+  they run Wine commands, and generated shortcut launchers wait on it with
+  `flock -s -w 30` (and keep it open while Office runs). Afterwards the
+  Manager waits up to 15 seconds for its own short-lived wineserver to exit and
+  write `user.reg`; if Wine started again meanwhile, that server saves the
+  values later and the change is reported as pending.
 - **WebView2 exclusion.** DXVK 3.1.1 returns `E_NOTIMPL` from
   `IDXGIFactory2::CreateSwapChainForComposition`, which WebView2's GPU process
   needs; new Outlook then opens no window. The Manager therefore sets
   `HKCU\Software\Wine\AppDefaults\msedgewebview2.exe\DllOverrides` to
   `builtin` for the same three DLLs.
 - **When it changes.** New prefixes get DXVK during creation. Existing prefixes
-  change when you apply graphics settings, after a runner update, after a
-  Manager update (the background service is paused, open Office windows are
-  never closed), and before an Office launch from the Manager when Wine is not
-  running. Desktop shortcuts launch Wine directly and use whatever the prefix
-  already has.
+  change when you apply graphics settings (which stops Wine at your request),
+  after a runner update, after a Manager update, and before an Office launch
+  from the Manager, in each case only if Wine is already idle; otherwise the
+  change waits for the next of these points. Office launches use only the
+  cached Vulkan result and never run the check themselves. Desktop shortcuts
+  launch Wine directly and use whatever the prefix already has.
 - **Existing configurations.** A saved `use_vulkan: true` keeps WineD3D Vulkan;
   every other existing configuration moves to DXVK.
 

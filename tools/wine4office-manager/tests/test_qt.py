@@ -1228,7 +1228,7 @@ class QtManagerTests(unittest.TestCase):
         self._refresh_direct3d(dxvk_active=False)
         self.assertIn("not active yet", self.window.direct3d_status_label.text())
         self._refresh_direct3d(dxvk_active=True, dxvk_version="3.1.1")
-        self.assertIn("DXVK 3.1.1 is active", self.window.direct3d_status_label.text())
+        self.assertIn("DXVK 3.1.1 is installed", self.window.direct3d_status_label.text())
         self.assertIn("WebView2", self.window.direct3d_status_label.text())
         self._refresh_direct3d(selected="opengl", wined3d_renderer="OpenGL")
         self.assertEqual(
@@ -1242,8 +1242,18 @@ class QtManagerTests(unittest.TestCase):
     def test_direct3d_status_uses_manager_language(self):
         self.window.language = "he"
         self._refresh_direct3d(dxvk_active=True, dxvk_version="3.1.1")
-        self.assertIn("DXVK 3.1.1 פעיל", self.window.direct3d_status_label.text())
+        self.assertIn("DXVK 3.1.1 מותקן", self.window.direct3d_status_label.text())
         self.assertEqual(i18n_translate("DXVK (recommended)", "he"), "DXVK (מומלץ)")
+
+    def test_check_again_forces_a_fresh_vulkan_check(self):
+        self.assertEqual(self.window.dxvk_check_again_button.text(), "Check again")
+        with mock.patch.object(self.state, "refresh_dxvk_support_async",
+                               return_value=True) as refresh:
+            self.window.dxvk_check_again_button.click()
+        refresh.assert_called_once_with(force=True)
+        self.assertEqual(
+            self.window.direct3d_status_label.text(), "Checking Vulkan support…"
+        )
 
     def test_startup_starts_background_dxvk_check(self):
         with mock.patch.object(self.state, "refresh_dxvk_support_async") as refresh, \
