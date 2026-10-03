@@ -206,6 +206,16 @@ def stop_and_remove_owned_prefix(value: str | os.PathLike[str], wine: str,
     return remove_owned_prefix(prefix)
 
 
+def launch_dxvk_setting(config: dict, prefix: str, wine: str) -> bool | None:
+    """Return the DXVK state to verify before an Office launch (None skips it)."""
+    try:
+        if not backend.is_prefix_owned(prefix):
+            return None
+        return backend.dxvk_requested(config, wine)[0]
+    except Exception:  # noqa: BLE001 - never block a launch
+        return None
+
+
 class ManagerState:
     """Thread-safe bridge between the Qt event loop and blocking backend work."""
 
@@ -247,7 +257,35 @@ class ManagerState:
         self._preload_request_key = None
         self._preload_checked_at = 0.0
         self._preload_memory_checking = False
+        self.dxvk_support: dict | None = None
+        self._dxvk_support_checking = False
         self._refresh_preload_status_async()
+
+    def refresh_dxvk_support_async(self, force: bool = False) -> bool:
+        """Probe (or read the cached) Vulkan support for DXVK off the UI thread."""
+        with self.lock:
+            if self._dxvk_support_checking:
+                return False
+            if self.dxvk_support is not None and not force:
+                return False
+            self._dxvk_support_checking = True
+
+        def check() -> None:
+            try:
+                result = backend.dxvk_host_support(refresh=force)
+            except Exception as error:  # noqa: BLE001 - report as unknown
+                result = {
+                    "schema": backend.DXVK_PROBE_SCHEMA, "supported": None,
+                    "code": "error", "reason": str(error), "devices": [],
+                }
+            with self.lock:
+                self.dxvk_support = result
+                self._dxvk_support_checking = False
+
+        threading.Thread(
+            target=check, name="wine4office-dxvk-support", daemon=True
+        ).start()
+        return True
 
     def _candidate_config(self, payload: dict) -> dict:
         candidate = dict(self.config)
@@ -267,7 +305,9 @@ class ManagerState:
         for key in ("prefix", "wine", "update_url"):
             if key in payload:
                 candidate[key] = str(payload[key]).strip()
-        graphics_changed = "use_x11" in payload or "use_vulkan" in payload
+        graphics_changed = any(
+            key in payload for key in ("use_x11", "use_vulkan", "use_dxvk")
+        )
         if graphics_changed:
             if candidate.get("graphics_restart_required") is not True:
                 candidate["graphics_active_use_x11"] = bool(
@@ -276,7 +316,11 @@ class ManagerState:
                 candidate["graphics_active_use_vulkan"] = bool(
                     candidate.get("use_vulkan", False)
                 )
-        for key in ("desktop_copy", "use_x11", "use_vulkan", "include_prereleases"):
+                candidate["graphics_active_use_dxvk"] = bool(
+                    candidate.get("use_dxvk", True)
+                )
+        for key in ("desktop_copy", "use_x11", "use_vulkan", "use_dxvk",
+                    "include_prereleases"):
             if key in payload:
                 candidate[key] = bool(payload[key])
         if graphics_changed:
@@ -285,6 +329,8 @@ class ManagerState:
                 != bool(candidate.get("graphics_active_use_x11", True))
                 or bool(candidate.get("use_vulkan", False))
                 != bool(candidate.get("graphics_active_use_vulkan", False))
+                or bool(candidate.get("use_dxvk", True))
+                != bool(candidate.get("graphics_active_use_dxvk", True))
             )
         if "disable_office_telemetry" in payload:
             candidate = backend.set_office_telemetry_disabled(
@@ -316,11 +362,13 @@ class ManagerState:
         active_use_x11, _active_use_vulkan = backend.active_graphics_settings(previous)
         selected_use_x11 = bool(previous.get("use_x11", True))
         selected_use_vulkan = bool(previous.get("use_vulkan", False))
+        selected_use_dxvk = bool(previous.get("use_dxvk", True))
         deadline = time.monotonic() + backend.STOP_GRACE_SECONDS
         preload_update = backend.prepare_preload_runner_update(
             prefix, active_use_x11, wine_value=wine, _deadline=deadline
         )
         config_saved = False
+        direct3d_changed = False
         try:
             backend.stop_wine(
                 prefix, wine, active_use_x11, _deadline=deadline,
@@ -329,12 +377,14 @@ class ManagerState:
             with self.lock:
                 current = self.config
                 expected = (
-                    prefix, wine, selected_use_x11, selected_use_vulkan, True
+                    prefix, wine, selected_use_x11, selected_use_vulkan,
+                    selected_use_dxvk, True
                 )
                 actual = (
                     str(current["prefix"]), str(current["wine"]),
                     bool(current.get("use_x11", True)),
                     bool(current.get("use_vulkan", False)),
+                    bool(current.get("use_dxvk", True)),
                     current.get("graphics_restart_required") is True,
                 )
                 if actual != expected:
@@ -343,9 +393,16 @@ class ManagerState:
                         "the previous settings remain active."
                     )
                 candidate = dict(current)
+            # DXVK lives in the prefix; change it while Wine is stopped. A failed
+            # change is rolled back by the backend and keeps the old settings.
+            direct3d_changed = self._apply_direct3d_backend(
+                prefix, wine, candidate, selected_use_dxvk
+            ).get("changed") is True
+            with self.lock:
                 candidate["graphics_restart_required"] = False
                 candidate["graphics_active_use_x11"] = selected_use_x11
                 candidate["graphics_active_use_vulkan"] = selected_use_vulkan
+                candidate["graphics_active_use_dxvk"] = selected_use_dxvk
                 backend.save_config(candidate)
                 config_saved = True
 
@@ -367,6 +424,16 @@ class ManagerState:
                         f"{error} Additionally, the previous graphics settings "
                         f"could not be restored: {rollback_error}"
                     ) from error
+            if direct3d_changed:
+                try:
+                    self._apply_direct3d_backend(
+                        prefix, wine, previous, backend.active_use_dxvk(previous)
+                    )
+                except Exception as rollback_error:  # noqa: BLE001
+                    self.output(
+                        "WARNING: Could not restore the previous Direct3D backend: "
+                        f"{rollback_error}"
+                    )
             if preload_update is not None:
                 try:
                     backend.restore_preload_after_runner_update(preload_update)
@@ -377,13 +444,27 @@ class ManagerState:
                     ) from error
             raise
 
-    def update_graphics_settings(self, use_x11: bool, use_vulkan: bool) -> dict:
+    def _apply_direct3d_backend(self, prefix: str, wine: str, config: dict,
+                                use_dxvk: bool) -> dict:
+        """Install or remove DXVK in a stopped prefix for the given selection."""
+        requested, reason = backend.dxvk_requested(config, wine, use_dxvk=use_dxvk)
+        if use_dxvk and requested is not True and reason:
+            self.output(f"DXVK is not used: {reason}")
+        result = backend.converge_dxvk_state(
+            prefix, wine, requested, self.output, idle_wait=10,
+        )
+        if result.get("deferred"):
+            self.output(f"WARNING: {result['reason']}")
+        return result
+
+    def update_graphics_settings(self, use_x11: bool, use_vulkan: bool,
+                                 use_dxvk: bool | None = None) -> dict:
         """Persist a pending graphics selection without launching Wine."""
+        payload = {"use_x11": use_x11, "use_vulkan": use_vulkan}
+        if use_dxvk is not None:
+            payload["use_dxvk"] = use_dxvk
         with self.lock:
-            candidate = self._candidate_config({
-                "use_x11": use_x11,
-                "use_vulkan": use_vulkan,
-            })
+            candidate = self._candidate_config(payload)
             backend.save_config(candidate)
             self.config = candidate
             return dict(candidate)
@@ -574,6 +655,7 @@ class ManagerState:
                     backend.create_environment(
                         new_prefix, candidate["wine"], False, self.output,
                         self.cancel_event, self.set_process,
+                        dxvk=backend.dxvk_for_new_prefix(candidate),
                     )
                     initialized = True
                     _ensure_prefix_owned(new_prefix)
@@ -804,6 +886,7 @@ class ManagerState:
                             self.cancel_event, self.set_process,
                         )
                     )
+                    self._sync_direct3d_after_runner_update(config, new_wine)
                     if preload_update is not None:
                         backend.finish_preload_runner_update(preload_update, new_wine)
                         preload_update = None
@@ -834,6 +917,21 @@ class ManagerState:
         self.start_task("update", install)
         with self.lock:
             self.updater["offer"] = None
+
+    def _sync_direct3d_after_runner_update(self, config: dict, wine: str) -> None:
+        """Refresh prefix DXVK files from the new runner while Wine is stopped."""
+        try:
+            requested, reason = backend.dxvk_requested(config, wine)
+            result = backend.converge_dxvk_state(
+                config["prefix"], wine, requested, self.output, idle_wait=15,
+                cancel_event=self.cancel_event, process_callback=self.set_process,
+            )
+            if result.get("deferred"):
+                self.output(f"WARNING: {result['reason']}")
+            elif requested is None:
+                self.output(f"Direct3D backend left unchanged: {reason}")
+        except Exception as error:  # noqa: BLE001 - the runner update succeeded
+            self.output(f"WARNING: {error}")
 
     def _run_updated_manager_post_install(self, config: dict) -> None:
         target = backend.manager_update_target()
@@ -1073,9 +1171,27 @@ class ManagerState:
                     if isinstance(value, dict)
                 },
             }
+        with self.lock:
+            dxvk_support = (
+                dict(self.dxvk_support) if isinstance(self.dxvk_support, dict) else None
+            )
+        try:
+            direct3d = backend.direct3d_status(config, dxvk_support)
+        except (OSError, ValueError) as error:
+            direct3d = {
+                "selected": backend.direct3d_selection(
+                    config.get("use_dxvk", True) is not False,
+                    config.get("use_vulkan") is True,
+                ),
+                "dxvk_available": None, "dxvk_reason": str(error),
+                "dxvk_active": False, "dxvk_version": None,
+                "wined3d_renderer": "OpenGL",
+                "excluded_processes": list(backend.DXVK_EXCLUDED_PROCESSES),
+            }
         return {
             "config": config,
             "status": backend.environment_status(config["prefix"], config["wine"]),
+            "direct3d": direct3d,
             "version": backend.current_version(),
             "wine_version": backend.current_wine_version(),
             "task": task,
@@ -1271,6 +1387,9 @@ def _validate_smoke_test_authenticode() -> None:
 
 
 def main() -> int:
+    if sys.argv[1:] == [backend.DXVK_PROBE_FLAG]:
+        # Child process of backend.run_dxvk_probe(); keep it free of other work.
+        return backend.run_dxvk_probe_cli()
     parser = argparse.ArgumentParser(description="Wine4Office Manager")
     parser.add_argument("--install-shortcut", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--prepare-uninstall", action="store_true", help=argparse.SUPPRESS)
@@ -1454,11 +1573,12 @@ def main() -> int:
         wine = args.wine or defaults["wine"]
         use_x11, use_vulkan = backend.active_graphics_settings(defaults)
         if args.target in backend.APP_META:
+            use_dxvk = launch_dxvk_setting(defaults, prefix, wine)
             if incident.monitoring_enabled(defaults):
                 process = backend.launch_app_process(
                     prefix, wine, args.target, FONT_HELPER, args.documents,
                     use_x11=use_x11, use_vulkan=use_vulkan,
-                    capture_diagnostics=True,
+                    capture_diagnostics=True, use_dxvk=use_dxvk,
                 )
                 return incident.supervise_process(
                     process, app=args.target, prefix=Path(prefix), use_x11=use_x11,
@@ -1467,7 +1587,8 @@ def main() -> int:
                     review_command=MANAGER_RESTART_COMMAND,
                 )
             backend.launch_app(prefix, wine, args.target, FONT_HELPER, args.documents,
-                               use_x11=use_x11, use_vulkan=use_vulkan)
+                               use_x11=use_x11, use_vulkan=use_vulkan,
+                               use_dxvk=use_dxvk)
         else:
             if args.documents:
                 parser.error("Wine tools do not accept document arguments.")

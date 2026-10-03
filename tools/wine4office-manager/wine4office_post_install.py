@@ -122,6 +122,57 @@ def _migrate_runner_lifecycle(context: PostInstallContext) -> dict:
     return {"needed": True, "updated": True, "preload_resumed": resumed}
 
 
+def _sync_direct3d_backend(context: PostInstallContext) -> dict:
+    """Apply the DXVK default (or a newly bundled DXVK) without closing Office.
+
+    Only the background service is paused; when Office is open, the change is
+    deferred to the next Manager launch, graphics apply, or runner update.
+    """
+    prefix = context.config["prefix"]
+    wine = context.config["wine"]
+    result = {"changed": False, "deferred": False, "enabled": None, "reason": ""}
+    try:
+        managed = backend.is_prefix_owned(prefix)
+        valid_runner = Path(wine).is_file() and os.access(wine, os.X_OK)
+    except (OSError, ValueError):
+        managed = valid_runner = False
+    if not managed or not valid_runner:
+        context.output(
+            "Post-install: no managed Wine environment; Direct3D backend left unchanged."
+        )
+        return result
+    try:
+        requested, reason = backend.dxvk_requested(context.config, wine)
+        result["enabled"] = requested
+        if requested is None:
+            context.output(f"Post-install: Direct3D backend left unchanged: {reason}")
+            return result
+        if backend.dxvk_prefix_converged(prefix, wine, requested):
+            return result
+        use_x11, _use_vulkan = backend.active_graphics_settings(context.config)
+        preload_update = backend.prepare_preload_runner_update(
+            prefix, use_x11, wine_value=wine
+        )
+        try:
+            result.update(backend.converge_dxvk_state(
+                prefix, wine, requested, context.output, idle_wait=10,
+            ))
+        finally:
+            if preload_update is not None:
+                backend.restore_preload_after_runner_update(preload_update)
+    except Exception as error:  # noqa: BLE001 - never block the Manager update
+        context.output(f"Post-install: WARNING: {error}")
+        return result
+    if result["deferred"]:
+        context.output(f"Post-install: {result['reason']}")
+    elif result["changed"]:
+        context.output(
+            "Post-install: Direct3D backend updated "
+            f"({'DXVK ' + backend.DXVK_VERSION if result['enabled'] else 'WineD3D'})."
+        )
+    return result
+
+
 def _migrate_managed_shortcuts(context: PostInstallContext) -> dict:
     result = backend.refresh_managed_app_shortcuts(
         context.config["prefix"], context.config["wine"],
@@ -158,6 +209,7 @@ def _refresh_automatic_update_schedule(context: PostInstallContext) -> dict:
 
 POST_INSTALL_HOOKS = (
     _migrate_runner_lifecycle,
+    _sync_direct3d_backend,
     _migrate_managed_shortcuts,
     _refresh_manager_shortcut,
     _refresh_automatic_update_schedule,
