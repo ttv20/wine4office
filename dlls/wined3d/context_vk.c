@@ -4563,10 +4563,12 @@ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *c
                     continue;
                 }
 
-                scissor->offset.x = r->left;
-                scissor->offset.y = r->top;
-                scissor->extent.width =  r->right - r->left;
-                scissor->extent.height = r->bottom - r->top;
+                /* Vulkan requires non-negative offsets and treats the extent as
+                 * unsigned; inverted D3D scissor rectangles are empty. */
+                scissor->offset.x = max(0, r->left);
+                scissor->offset.y = max(0, r->top);
+                scissor->extent.width = max(scissor->offset.x, r->right) - scissor->offset.x;
+                scissor->extent.height = max(scissor->offset.y, r->bottom) - scissor->offset.y;
             }
             else
             {

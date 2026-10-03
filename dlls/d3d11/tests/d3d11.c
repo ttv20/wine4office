@@ -12190,6 +12190,24 @@ static void test_scissor(void)
     color = get_texture_color(test_context.backbuffer, 320, 420);
     ok(compare_color(color, 0xff00ff00, 1), "Got unexpected colour 0x%08lx.\n", color);
 
+    /* An inverted scissor rectangle is empty. */
+    SetRect(&scissor_rect, 480, 360, 160, 120);
+    ID3D11DeviceContext_RSSetScissorRects(immediate_context, 1, &scissor_rect);
+    ID3D11DeviceContext_ClearRenderTargetView(immediate_context, test_context.backbuffer_rtv, red);
+    draw_color_quad(&test_context, &green);
+    color = get_texture_color(test_context.backbuffer, 320, 60);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+    color = get_texture_color(test_context.backbuffer, 80, 240);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+    color = get_texture_color(test_context.backbuffer, 320, 240);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+    color = get_texture_color(test_context.backbuffer, 560, 240);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+    color = get_texture_color(test_context.backbuffer, 320, 420);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+    color = get_texture_color(test_context.backbuffer, 560, 420);
+    ok(compare_color(color, 0xff0000ff, 1), "Got unexpected colour 0x%08lx.\n", color);
+
     ID3D11RasterizerState_Release(rs);
     release_test_context(&test_context);
 }

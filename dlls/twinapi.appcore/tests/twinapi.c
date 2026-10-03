@@ -406,6 +406,58 @@ static void test_AdvertisingManager(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_SharedModeSettings(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_System_Profile_SharedModeSettings;
+    ISharedModeSettingsStatics2 *statics2;
+    ISharedModeSettingsStatics *statics;
+    IActivationFactory *factory;
+    boolean value;
+    HSTRING str;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    check_interface( factory, &IID_IUnknown, TRUE );
+    check_interface( factory, &IID_IInspectable, TRUE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
+    check_interface( factory, &IID_IActivationFactory, TRUE );
+    check_interface( factory, &IID_ISharedModeSettingsStatics, TRUE );
+    check_interface( factory, &IID_ISharedModeSettingsStatics2, TRUE );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISharedModeSettingsStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    value = 0xcc;
+    hr = ISharedModeSettingsStatics_get_IsEnabled( statics, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( value == FALSE || value == TRUE, "got IsEnabled %#x.\n", value );
+    if (!strcmp( winetest_platform, "wine" )) ok( !value, "got IsEnabled %#x.\n", value );
+    ISharedModeSettingsStatics_Release( statics );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ISharedModeSettingsStatics2, (void **)&statics2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    value = 0xcc;
+    hr = ISharedModeSettingsStatics2_get_ShouldAvoidLocalStorage( statics2, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( value == FALSE || value == TRUE, "got ShouldAvoidLocalStorage %#x.\n", value );
+    if (!strcmp( winetest_platform, "wine" )) ok( !value, "got ShouldAvoidLocalStorage %#x.\n", value );
+    ISharedModeSettingsStatics2_Release( statics2 );
+
+    ref = IActivationFactory_Release( factory );
+    ok( ref == 1, "got ref %ld.\n", ref );
+}
+
 static void test_ApplicationView(void)
 {
     static const WCHAR *class_name = RuntimeClass_Windows_UI_ViewManagement_ApplicationView;
@@ -897,6 +949,7 @@ START_TEST(twinapi)
 
     test_EasClientDeviceInformation();
     test_AnalyticsVersionInfo();
+    test_SharedModeSettings();
     test_AdvertisingManager();
     test_ApplicationView();
     test_CoreApplication();

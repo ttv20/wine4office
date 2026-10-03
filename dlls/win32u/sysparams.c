@@ -2231,7 +2231,10 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
     }
     else
     {
-        if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &virtual ) || is_detached_mode( &virtual ))
+        if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &virtual ) || is_detached_mode( &virtual ) ||
+            (read_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &dummy ) &&
+             !mode_compare( &virtual, &dummy ) &&
+             virtual.dmPosition.x == dummy.dmPosition.x && virtual.dmPosition.y == dummy.dmPosition.y))
             virtual = physical;
 
         if ((virtual_modes = get_virtual_modes( current, &physical, host_modes, host_modes_count, &virtual_count )))

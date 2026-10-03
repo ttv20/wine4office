@@ -29,21 +29,30 @@ import "windows.storage.streams.idl";
 import "windows.system.idl";
 
 namespace Windows.System.Profile {
+    apicontract ProfileSharedModeContract;
     typedef enum SystemIdentificationSource SystemIdentificationSource;
     interface IAnalyticsInfoStatics;
     interface IAnalyticsInfoStatics2;
     interface IAnalyticsVersionInfo;
     interface IAnalyticsVersionInfo2;
     interface IRetailInfoStatics;
+    interface ISharedModeSettingsStatics;
+    interface ISharedModeSettingsStatics2;
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
     interface IWindowsIntegrityPolicyStatics;
     runtimeclass AnalyticsVersionInfo;
     runtimeclass AnalyticsInfo;
     runtimeclass RetailInfo;
+    runtimeclass SharedModeSettings;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
     runtimeclass WindowsIntegrityPolicy;
+
+    [contractversion(2.0)]
+    apicontract ProfileSharedModeContract
+    {
+    }
 
     [contract(Windows.Foundation.UniversalApiContract, 3.0)]
     enum SystemIdentificationSource
@@ -86,6 +95,26 @@ namespace Windows.System.Profile {
     {
         [propget] HRESULT IsDemoModeEnabled([out, retval] boolean *value);
         [propget] HRESULT Properties([out, retval] Windows.Foundation.Collections.IMapView<HSTRING, IInspectable *> **value);
+    }
+
+    [
+        contract(Windows.System.Profile.ProfileSharedModeContract, 1.0),
+        exclusiveto(Windows.System.Profile.SharedModeSettings),
+        uuid(893df40e-cad6-4d50-8c49-6fcfc03edb29)
+    ]
+    interface ISharedModeSettingsStatics : IInspectable
+    {
+        [propget] HRESULT IsEnabled([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.System.Profile.ProfileSharedModeContract, 2.0),
+        exclusiveto(Windows.System.Profile.SharedModeSettings),
+        uuid(608988a4-ccf1-4ee8-a5e2-fd6a1d0cfac8)
+    ]
+    interface ISharedModeSettingsStatics2 : IInspectable
+    {
+        [propget] HRESULT ShouldAvoidLocalStorage([out, retval] boolean *value);
     }
 
     [
@@ -155,6 +184,17 @@ namespace Windows.System.Profile {
         threading(both)
     ]
     runtimeclass RetailInfo
+    {
+    }
+
+    [
+        contract(Windows.System.Profile.ProfileSharedModeContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.ISharedModeSettingsStatics, Windows.System.Profile.ProfileSharedModeContract, 1.0),
+        static(Windows.System.Profile.ISharedModeSettingsStatics2, Windows.System.Profile.ProfileSharedModeContract, 2.0),
+        threading(both)
+    ]
+    runtimeclass SharedModeSettings
     {
     }
 
