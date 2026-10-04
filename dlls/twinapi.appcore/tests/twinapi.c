@@ -434,7 +434,6 @@ static void test_SharedModeSettings(void)
     check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IActivationFactory, TRUE );
     check_interface( factory, &IID_ISharedModeSettingsStatics, TRUE );
-    check_interface( factory, &IID_ISharedModeSettingsStatics2, TRUE );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_ISharedModeSettingsStatics, (void **)&statics );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -445,14 +444,19 @@ static void test_SharedModeSettings(void)
     if (!strcmp( winetest_platform, "wine" )) ok( !value, "got IsEnabled %#x.\n", value );
     ISharedModeSettingsStatics_Release( statics );
 
+    /* ProfileSharedModeContract 2.0 (Windows 10 1703) added ISharedModeSettingsStatics2. */
     hr = IActivationFactory_QueryInterface( factory, &IID_ISharedModeSettingsStatics2, (void **)&statics2 );
-    ok( hr == S_OK, "got hr %#lx.\n", hr );
-    value = 0xcc;
-    hr = ISharedModeSettingsStatics2_get_ShouldAvoidLocalStorage( statics2, &value );
-    ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( value == FALSE || value == TRUE, "got ShouldAvoidLocalStorage %#x.\n", value );
-    if (!strcmp( winetest_platform, "wine" )) ok( !value, "got ShouldAvoidLocalStorage %#x.\n", value );
-    ISharedModeSettingsStatics2_Release( statics2 );
+    ok( hr == S_OK || broken( hr == E_NOINTERFACE ), "got hr %#lx.\n", hr );
+    if (FAILED( hr )) win_skip( "ISharedModeSettingsStatics2 not supported.\n" );
+    else
+    {
+        value = 0xcc;
+        hr = ISharedModeSettingsStatics2_get_ShouldAvoidLocalStorage( statics2, &value );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( value == FALSE || value == TRUE, "got ShouldAvoidLocalStorage %#x.\n", value );
+        if (!strcmp( winetest_platform, "wine" )) ok( !value, "got ShouldAvoidLocalStorage %#x.\n", value );
+        ISharedModeSettingsStatics2_Release( statics2 );
+    }
 
     ref = IActivationFactory_Release( factory );
     ok( ref == 1, "got ref %ld.\n", ref );

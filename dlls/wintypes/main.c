@@ -29,6 +29,7 @@ static const struct
 present_contracts[] =
 {
     { L"Windows.Foundation.UniversalApiContract", 10, },
+    { L"Windows.System.Profile.ProfileSharedModeContract", 2, },
 };
 
 static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int version )
