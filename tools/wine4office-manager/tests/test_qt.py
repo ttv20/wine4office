@@ -1245,6 +1245,15 @@ class QtManagerTests(unittest.TestCase):
         self.assertIn("DXVK 3.1.1 מותקן", self.window.direct3d_status_label.text())
         self.assertEqual(i18n_translate("DXVK (recommended)", "he"), "DXVK (מומלץ)")
 
+    def test_supported_dxvk_kept_off_shows_its_reason(self):
+        reason = "AppDefaults\\WINWORD.EXE\\DllOverrides sets d3d11=builtin."
+        self._refresh_direct3d(dxvk_available=True, dxvk_active=False, dxvk_reason=reason)
+        text = self.window.direct3d_status_label.text()
+        self.assertIn("using WineD3D", text)
+        self.assertIn(reason, text)
+        self.assertNotIn("not active yet", text)
+        self.assertTrue(self.window.use_dxvk.isEnabled())
+
     def test_check_again_forces_a_fresh_vulkan_check(self):
         self.assertEqual(self.window.dxvk_check_again_button.text(), "Check again")
         with mock.patch.object(self.state, "refresh_dxvk_support_async",

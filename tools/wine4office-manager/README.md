@@ -126,8 +126,9 @@ DXVK 3.1.1 is the default Direct3D 10/11 backend. Release runners carry its
   (for example a hand-installed DXVK) is never overwritten, and the prefix
   then keeps WineD3D with that reason. It never puts these DLLs into
   `WINEDLLOVERRIDES`, because that variable would override the WebView2
-  exclusion. A user's own `WINEDLLOVERRIDES` or conflicting `DllOverrides`
-  value is left alone and keeps WineD3D. Each change is one transaction: a
+  exclusion. A user's own `WINEDLLOVERRIDES`, a conflicting `DllOverrides`
+  value, or a non-`builtin` WebView2 `AppDefaults` value (which would load
+  DXVK into WebView2) is left alone and keeps WineD3D. Each change is one transaction: a
   pending ownership record is written first, and a failure restores the
   previous files and registry values. Ownership is recorded in
   `<prefix>/.wine4office-dxvk.json`; a value the user later edits is no longer
@@ -137,9 +138,16 @@ DXVK 3.1.1 is the default Direct3D 10/11 backend. Release runners carry its
 - **Never closes Office.** The DXVK code never stops, closes or kills Wine and
   never pauses the background service. It holds an exclusive `flock` on
   `<prefix>/.wine4office-dxvk.lock` while it checks that Wine is idle and makes
-  its changes; Office launches from the Manager hold the same lock shared while
-  they run Wine commands, and generated shortcut launchers wait on it with
-  `flock -s -w 30` (and keep it open while Office runs). Afterwards the
+  its changes. While Wine is idle it reads the current values from `user.reg`
+  (starting no Wine), copies the DLLs, checks once more that no Wine process
+  appeared, and then writes every registry value with a single
+  `wine reg import` (at most 30 s, plus at most 30 s for a rollback import).
+  Office launches from the Manager hold the same lock shared while they run
+  Wine commands, and generated shortcut launchers wait on it with
+  `flock -s -w 90` (and keep it open while Office runs). The 90 s wait is
+  longer than the longest time apply can hold the lock, so a launch only skips
+  the lock if the Manager is stuck; even then a Wine process that appears
+  before the registry import makes apply roll back the DLLs and postpone. Afterwards the
   Manager waits up to 15 seconds for its own short-lived wineserver to exit and
   write `user.reg`; if Wine started again meanwhile, that server saves the
   values later and the change is reported as pending.
@@ -149,7 +157,10 @@ DXVK 3.1.1 is the default Direct3D 10/11 backend. Release runners carry its
   `HKCU\Software\Wine\AppDefaults\msedgewebview2.exe\DllOverrides` to
   `builtin` for the same three DLLs.
 - **When it changes.** New prefixes get DXVK during creation. Existing prefixes
-  change when you apply graphics settings (which stops Wine at your request),
+  change when you apply graphics settings (which stops Wine at your request;
+  if the change cannot complete, for example because Wine is busy or the
+  Vulkan check is inconclusive, the previous DXVK setting stays active and
+  the restart notice stays visible),
   after a runner update, after a Manager update, and before an Office launch
   from the Manager, in each case only if Wine is already idle; otherwise the
   change waits for the next of these points. Office launches use only the

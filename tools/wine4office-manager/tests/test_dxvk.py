@@ -32,19 +32,28 @@ def wine_dll(label):
 
 
 class FakeRegistry:
-    """Simulate `wine reg query/add/delete` for _run_cancellable_command."""
+    """Simulate `wine reg query/import` for _run_cancellable_command.
+
+    Imports are applied value by value, so `fail_on` can fail one in the
+    middle, like a real `reg import` that stops at a bad line. `writes()`
+    lists each imported value change as an add/delete pseudo-command.
+    """
 
     def __init__(self, values=None):
         self.values = {key: dict(entries) for key, entries in (values or {}).items()}
         self.commands = []
         self.environments = []
+        self.changes = []
         self.fail_on = None
+        self.prefix = None
 
     def run(self, command, env, *, cancel_event=None, process_callback=None,
             timeout=30, check=True):
         self.commands.append(list(command))
         self.environments.append(dict(env))
         operation, key = command[2], command[3]
+        if operation == "import":
+            return self._import(command)
         if self.fail_on and self.fail_on(command):
             raise subprocess.CalledProcessError(1, command)
         entries = self.values.setdefault(key, {})
@@ -54,15 +63,52 @@ class FakeRegistry:
             lines = [key.replace("HKCU", "HKEY_CURRENT_USER")]
             lines.extend(f"    {name}    REG_SZ    {data}" for name, data in entries.items())
             return subprocess.CompletedProcess(command, 0, "\n".join(lines) + "\n", "")
-        name = command[command.index("/v") + 1]
-        if operation == "add":
-            entries[name] = command[command.index("/d") + 1]
-        elif operation == "delete":
-            entries.pop(name, None)
+        raise AssertionError(f"unexpected registry command: {command}")
+
+    def _import(self, command):
+        windows_path = command[3]
+        self.assertion_prefix = windows_path
+        relative = windows_path.split("\\", 1)[1].replace("\\", "/")
+        data = (self.prefix / "drive_c" / relative).read_bytes()
+        assert data.startswith(b"\xff\xfe"), "reg files are UTF-16LE with BOM"
+        text = data[2:].decode("utf-16-le")
+        lines = text.split("\r\n")
+        assert lines[0] == "Windows Registry Editor Version 5.00"
+        key = None
+        for line in lines[1:]:
+            if line.startswith("["):
+                key = line[1:-1].replace("HKEY_CURRENT_USER\\", "HKCU\\", 1)
+                continue
+            if not line:
+                continue
+            name, _separator, value = line.partition("=")
+            name = name[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            if value == "-":
+                pseudo = ["wine", "reg", "delete", key, "/v", name, "/f"]
+            else:
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                pseudo = ["wine", "reg", "add", key, "/v", name, "/t", "REG_SZ",
+                          "/d", value, "/f"]
+            if self.fail_on and self.fail_on(pseudo):
+                raise subprocess.CalledProcessError(1, command)
+            self.changes.append(pseudo)
+            entries = self.values.setdefault(key, {})
+            if pseudo[2] == "delete":
+                entries.pop(name, None)
+            else:
+                entries[name] = value
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    def reset_log(self):
+        self.commands.clear()
+        self.environments.clear()
+        self.changes.clear()
+
+    def imports(self):
+        return [command for command in self.commands if command[2] == "import"]
+
     def writes(self):
-        return [command for command in self.commands if command[2] in {"add", "delete"}]
+        return list(self.changes)
 
 
 class DxvkTestCase(unittest.TestCase):
@@ -135,6 +181,16 @@ class DxvkTestCase(unittest.TestCase):
         return path
 
     def _apply(self, registry, enabled, **kwargs):
+        # Wine is idle before apply, so user.reg holds the saved values; after
+        # apply the (simulated) wineserver saves the imported values again.
+        registry.prefix = self.prefix
+        self._write_user_reg(registry)
+        try:
+            return self._apply_without_save(registry, enabled, **kwargs)
+        finally:
+            self._write_user_reg(registry)
+
+    def _apply_without_save(self, registry, enabled, **kwargs):
         with mock.patch.object(backend, "_run_cancellable_command", side_effect=registry.run), \
              mock.patch.object(backend, "wine_running_in_prefix", return_value=False), \
              mock.patch.object(backend, "stop_wine", side_effect=AssertionError("kill")), \
@@ -156,7 +212,10 @@ class DxvkTestCase(unittest.TestCase):
             lines.append("#time=1d9")
             lines.extend(f'"{name}"="{data}"' for name, data in entries.items())
             lines.append("")
-        (self.prefix / "user.reg").write_text("\n".join(lines))
+        # Like wineserver: write a new file and rename it over user.reg.
+        temporary = self.prefix / "user.reg.tmp"
+        temporary.write_text("\n".join(lines))
+        os.replace(temporary, self.prefix / "user.reg")
 
 
 class DxvkConfigTests(DxvkTestCase):
@@ -241,6 +300,10 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
                 )
         self.assertEqual(registry.values[MAIN_KEY], {dll: "native" for dll in DXVK_NAMES})
         self.assertEqual(registry.values[WEBVIEW_KEY], {dll: "builtin" for dll in DXVK_NAMES})
+        # One `wine reg import`, and no `wine reg query` while Wine was idle.
+        self.assertEqual(len(registry.imports()), 1)
+        self.assertEqual([c for c in registry.commands if c[2] != "import"], [])
+        self.assertEqual(list((self.prefix / "drive_c/windows/temp").glob("*.reg")), [])
         adds = [command for command in registry.writes() if command[2] == "add"]
         self.assertEqual(len(adds), 6)
         for command in adds:
@@ -262,20 +325,21 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
     def test_enable_is_idempotent(self):
         registry = FakeRegistry()
         self._apply(registry, True)
-        registry.commands.clear()
+        registry.reset_log()
         result, flush = self._apply(registry, True)
         self.assertEqual(registry.writes(), [])
+        self.assertEqual(registry.imports(), [])
         self.assertTrue(result["enabled"])
         self.assertFalse(result["changed"])
         flush.assert_not_called()
 
     def test_disable_restores_builtins_and_deletes_only_owned_values(self):
-        registry = FakeRegistry({WEBVIEW_KEY: {"dxgi": "native"}})
+        registry = FakeRegistry({WEBVIEW_KEY: {"dxgi": "b"}})
         self._apply(registry, True)
-        # The user's own WebView2 dxgi value is neither replaced nor owned.
-        self.assertEqual(registry.values[WEBVIEW_KEY]["dxgi"], "native")
+        # The user's own (compatible) WebView2 dxgi value is neither replaced nor owned.
+        self.assertEqual(registry.values[WEBVIEW_KEY]["dxgi"], "b")
         registry.values[MAIN_KEY]["d3d11"] = "native,builtin"  # user edited ours
-        registry.commands.clear()
+        registry.reset_log()
 
         result, flush = self._apply(registry, False)
 
@@ -286,7 +350,8 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
             (WEBVIEW_KEY, "d3d11"), (WEBVIEW_KEY, "d3d10core"),
         })
         self.assertEqual(registry.values[MAIN_KEY], {"d3d11": "native,builtin"})
-        self.assertEqual(registry.values[WEBVIEW_KEY], {"dxgi": "native"})
+        self.assertEqual(registry.values[WEBVIEW_KEY], {"dxgi": "b"})
+        self.assertEqual(len(registry.imports()), 1)
         for directory, system in (("x86_64-windows", "system32"), ("i386-windows", "syswow64")):
             for dll in DXVK_NAMES:
                 self.assertEqual(
@@ -298,7 +363,8 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
 
     def test_registry_save_is_awaited_without_closing_wine(self):
         registry = FakeRegistry()
-        running = itertools.chain([False], itertools.repeat(True))
+        running = itertools.chain([False, False], itertools.repeat(True))
+        registry.prefix = self.prefix
         with mock.patch.object(backend, "_run_cancellable_command", side_effect=registry.run), \
              mock.patch.object(backend, "wine_running_in_prefix",
                                side_effect=lambda *_a: next(running)), \
@@ -312,6 +378,29 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
         self.assertTrue(result["enabled"])
         self.assertTrue(result["registry_pending"])
         self.assertFalse(backend.read_dxvk_prefix_state(self.prefix).get("pending"))
+
+    def test_wine_started_without_the_lock_postpones_the_registry_change(self):
+        registry = FakeRegistry()
+        registry.prefix = self.prefix
+        self._write_user_reg(registry)
+        before = {
+            path: path.read_bytes()
+            for path in (self.prefix / "drive_c/windows").rglob("*.dll")
+        }
+        running = iter([False, True])
+        with mock.patch.object(backend, "_run_cancellable_command", side_effect=registry.run), \
+             mock.patch.object(backend, "wine_running_in_prefix",
+                               side_effect=lambda *_a: next(running)):
+            with self.assertRaises(backend.DxvkBusyError):
+                backend.apply_dxvk_state(self.prefix, self.wine, True)
+        self.assertEqual(registry.commands, [])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertIsNone(backend.read_dxvk_prefix_state(self.prefix))
+
+    def test_launch_waits_longer_than_apply_can_hold_the_lock(self):
+        worst_apply = (backend.DXVK_APPLY_LOCK_TIMEOUT_SECONDS
+                       + 2 * backend.DXVK_REG_IMPORT_TIMEOUT_SECONDS)
+        self.assertGreater(backend.DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS, worst_apply)
 
     def test_registry_save_wait_has_no_kill_fallback(self):
         source = (MANAGER_DIR / "wine4office_backend.py").read_text()
@@ -407,17 +496,46 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
         self.assertEqual(registry.values[MAIN_KEY], {})
         self.assertIsNone(backend.read_dxvk_prefix_state(self.prefix))
 
-    def test_user_edit_of_owned_exclusion_is_kept_and_disowned(self):
+    def test_compatible_user_edit_of_owned_exclusion_is_kept_and_disowned(self):
         registry = FakeRegistry()
         self._apply(registry, True)
-        registry.values[WEBVIEW_KEY]["dxgi"] = "native"
-        registry.commands.clear()
+        registry.values[WEBVIEW_KEY]["dxgi"] = "b"
+        registry.reset_log()
         self._apply(registry, True)
         self.assertEqual(registry.writes(), [])
         self.assertNotIn([WEBVIEW_KEY, "dxgi", "builtin"],
                          backend.read_dxvk_prefix_state(self.prefix)["owned_values"])
         self._apply(registry, False)
+        self.assertEqual(registry.values[WEBVIEW_KEY], {"dxgi": "b"})
+
+    def test_native_webview2_override_is_a_conflict(self):
+        for value in ("native", "n,b", ""):
+            with self.subTest(value=value):
+                registry = FakeRegistry({WEBVIEW_KEY: {"d3d11": value}})
+                (self.prefix / backend.DXVK_STATE_NAME).unlink(missing_ok=True)
+                result, _flush = self._apply(registry, True)
+                self.assertFalse(result["enabled"])
+                self.assertIn("msedgewebview2.exe", result["reason"])
+                self.assertEqual(registry.writes(), [])
+                self.assertEqual(registry.values[WEBVIEW_KEY], {"d3d11": value})
+                self.assertTrue(backend.dxvk_prefix_converged(self.prefix, self.wine, True))
+
+    def test_user_switching_owned_exclusion_to_native_disables_dxvk(self):
+        registry = FakeRegistry()
+        self._apply(registry, True)
+        registry.values[WEBVIEW_KEY]["dxgi"] = "native"
+        self._write_user_reg(registry)
+        self.assertFalse(backend.dxvk_prefix_converged(self.prefix, self.wine, True))
+        registry.reset_log()
+        result, _flush = self._apply(registry, True)
+        self.assertFalse(result["enabled"])
         self.assertEqual(registry.values[WEBVIEW_KEY], {"dxgi": "native"})
+        self.assertEqual(registry.values[MAIN_KEY], {})
+        self.assertEqual(
+            self._system_file("system32", "d3d11").read_bytes(),
+            self.builtin_files["x86_64-windows/d3d11.dll"],
+        )
+        self.assertFalse(backend.read_dxvk_prefix_state(self.prefix)["enabled"])
 
     def test_disable_keeps_files_the_user_replaced(self):
         registry = FakeRegistry()
@@ -488,6 +606,8 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
         registry.fail_on = lambda command: (
             command[2] == "add" and command[3] == WEBVIEW_KEY and command[5] == "d3d10core"
         )
+        # The first import fails part-way; the rollback import must undo the
+        # values it already wrote.
         with self.assertRaisesRegex(RuntimeError, "previous Direct3D setup was restored"):
             self._apply(registry, True)
         self.assertEqual({path: path.read_bytes() for path in before}, before)
@@ -847,6 +967,24 @@ class DxvkProbeTests(DxvkTestCase):
         self.assertIn("/proc/sys/kernel/random/boot_id", body)
         self.assertIn('"device/driver"', body)
 
+    def test_status_checks_files_and_registry_not_only_the_record(self):
+        config = backend.default_config()
+        config.update({"prefix": str(self.prefix), "wine": str(self.wine)})
+        supported = backend._probe_result(True, "supported", "")
+        registry = FakeRegistry()
+        self._apply(registry, True)
+        self.assertTrue(backend.direct3d_status(config, supported)["dxvk_active"])
+        registry.values[MAIN_KEY]["d3d11"] = "builtin"
+        self._write_user_reg(registry)
+        status = backend.direct3d_status(config, supported)
+        self.assertFalse(status["dxvk_active"])
+        self.assertIn("not fully set up", status["dxvk_reason"])
+        registry.values[MAIN_KEY]["d3d11"] = "native"
+        self._write_user_reg(registry)
+        self.assertTrue(backend.direct3d_status(config, supported)["dxvk_active"])
+        self._system_file("syswow64", "dxgi").write_bytes(wine_dll("restored by someone"))
+        self.assertFalse(backend.direct3d_status(config, supported)["dxvk_active"])
+
     def test_status_reports_office_app_overrides(self):
         config = backend.default_config()
         config.update({"prefix": str(self.prefix), "wine": str(self.wine)})
@@ -962,7 +1100,10 @@ class DxvkLaunchEnvironmentTests(DxvkTestCase):
         target.write_text("exe")
         text = backend._shortcut_launcher_text("word", self.prefix, self.wine, target, None)
         self.assertIn(backend.DXVK_LOCK_NAME, text)
-        self.assertIn('flock -s -w 30 "$dxvk_lock_fd" || true', text)
+        self.assertIn(
+            f'flock -s -w {int(backend.DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS)} "$dxvk_lock_fd" || true',
+            text,
+        )
         self.assertLess(text.index("flock -s"), text.index('exec "$wine"'))
         script = self.root / "launcher.sh"
         script.write_text(text)
@@ -983,6 +1124,58 @@ class DxvkLaunchEnvironmentTests(DxvkTestCase):
 
 
 class DxvkManagerFlowTests(DxvkTestCase):
+    def _pending_dxvk_state(self):
+        state = manager.ManagerState()
+        state.config.update({
+            "prefix": str(self.prefix), "wine": str(self.wine),
+            "use_dxvk": True, "use_vulkan": False, "use_x11": False,
+            "graphics_active_use_dxvk": False, "graphics_active_use_vulkan": False,
+            "graphics_active_use_x11": True, "graphics_restart_required": True,
+        })
+        return state
+
+    def test_deferred_dxvk_change_is_not_marked_active(self):
+        state = self._pending_dxvk_state()
+        with mock.patch.object(backend, "prepare_preload_runner_update", return_value=None), \
+             mock.patch.object(backend, "stop_wine"), \
+             mock.patch.object(backend, "dxvk_requested", return_value=(True, "")), \
+             mock.patch.object(backend, "converge_dxvk_state",
+                               return_value={"changed": False, "deferred": True,
+                                             "reason": "Wine is running"}), \
+             mock.patch.object(backend, "save_config"):
+            applied = state.apply_graphics_settings()
+        self.assertFalse(applied["graphics_active_use_dxvk"])
+        self.assertTrue(applied["graphics_restart_required"])
+        self.assertFalse(applied["graphics_active_use_x11"])  # display change applied
+
+    def test_unknown_vulkan_support_is_not_marked_active(self):
+        state = self._pending_dxvk_state()
+        with mock.patch.object(backend, "prepare_preload_runner_update", return_value=None), \
+             mock.patch.object(backend, "stop_wine"), \
+             mock.patch.object(backend, "dxvk_requested", return_value=(None, "timeout")), \
+             mock.patch.object(backend, "apply_dxvk_state") as apply, \
+             mock.patch.object(backend, "save_config"):
+            applied = state.apply_graphics_settings()
+        apply.assert_not_called()
+        self.assertFalse(applied["graphics_active_use_dxvk"])
+        self.assertTrue(applied["graphics_restart_required"])
+
+    def test_completed_dxvk_change_and_unsupported_fallback_are_active(self):
+        for requested in (True, False):
+            with self.subTest(requested=requested):
+                state = self._pending_dxvk_state()
+                with mock.patch.object(backend, "prepare_preload_runner_update",
+                                       return_value=None), \
+                     mock.patch.object(backend, "stop_wine"), \
+                     mock.patch.object(backend, "dxvk_requested",
+                                       return_value=(requested, "")), \
+                     mock.patch.object(backend, "converge_dxvk_state",
+                                       return_value={"changed": True, "deferred": False}), \
+                     mock.patch.object(backend, "save_config"):
+                    applied = state.apply_graphics_settings()
+                self.assertTrue(applied["graphics_active_use_dxvk"])
+                self.assertFalse(applied["graphics_restart_required"])
+
     def test_apply_graphics_settings_changes_dxvk_while_wine_is_stopped(self):
         state = manager.ManagerState()
         state.config.update({

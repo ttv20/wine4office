@@ -243,5 +243,6 @@
   "Only a software (CPU) Vulkan device is available.": "Only a software (CPU) Vulkan device is available.",
   "Vulkan reported no graphics devices.": "Vulkan reported no graphics devices.",
   "Check again": "Check again",
-  "Check Vulkan support for DXVK again": "Check Vulkan support for DXVK again"
+  "Check Vulkan support for DXVK again": "Check Vulkan support for DXVK again",
+  "DXVK is not fully set up in this Wine environment; Wine4Office completes it when Wine is not running.": "DXVK is not fully set up in this Wine environment; Wine4Office completes it when Wine is not running."
 }

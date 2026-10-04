@@ -1750,6 +1750,9 @@ class ManagerWindow(QMainWindow):
                 "DXVK {version} is installed in this Wine environment for "
                 "Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D."
             ).format(version=status.get("dxvk_version") or backend.DXVK_VERSION)
+        elif status.get("selected") == "dxvk" and available is True and reason:
+            # Kept off by a conflict, an override, or an incomplete setup.
+            text = f"{self._tr('DXVK is unavailable; using WineD3D.')} {reason}".strip()
         elif status.get("selected") == "dxvk" and available is True:
             text = self._tr(
                 "DXVK is selected but not active yet. It is applied when Wine "
@@ -1817,7 +1820,11 @@ class ManagerWindow(QMainWindow):
             if error is not None:
                 return
             self._set_config_fields(saved)
-            self.notify("Graphics settings applied. They will be used on the next launch.")
+            self.notify(
+                "Graphics settings saved. Wine is still using the previous settings."
+                if saved.get("graphics_restart_required") is True
+                else "Graphics settings applied. They will be used on the next launch."
+            )
 
         self._show_task_progress(
             "wine-stop",

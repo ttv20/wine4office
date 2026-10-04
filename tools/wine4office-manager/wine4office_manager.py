@@ -397,14 +397,24 @@ class ManagerState:
                 candidate = dict(current)
             # DXVK lives in the prefix; change it while Wine is stopped. A failed
             # change is rolled back by the backend and keeps the old settings.
-            direct3d_changed = self._apply_direct3d_backend(
+            direct3d = self._apply_direct3d_backend(
                 prefix, wine, candidate, selected_use_dxvk
-            ).get("changed") is True
+            )
+            direct3d_changed = direct3d.get("changed") is True
+            # Only a completed DXVK change becomes active; a deferred change or an
+            # unknown Vulkan result keeps the previous DXVK setting active and
+            # the restart notice visible.
+            active_use_dxvk = (
+                selected_use_dxvk if direct3d.get("applied") is True
+                else backend.active_use_dxvk(previous)
+            )
             with self.lock:
-                candidate["graphics_restart_required"] = False
+                candidate["graphics_restart_required"] = (
+                    active_use_dxvk != selected_use_dxvk
+                )
                 candidate["graphics_active_use_x11"] = selected_use_x11
                 candidate["graphics_active_use_vulkan"] = selected_use_vulkan
-                candidate["graphics_active_use_dxvk"] = selected_use_dxvk
+                candidate["graphics_active_use_dxvk"] = active_use_dxvk
                 backend.save_config(candidate)
                 config_saved = True
 
@@ -455,8 +465,14 @@ class ManagerState:
         result = backend.converge_dxvk_state(
             prefix, wine, requested, self.output, idle_wait=10,
         )
+        result["applied"] = requested is not None and not result.get("deferred")
         if result.get("deferred"):
             self.output(f"WARNING: {result['reason']}")
+        if not result["applied"]:
+            self.output(
+                "The Direct3D backend was not changed yet; the graphics change "
+                "stays pending."
+            )
         return result
 
     def update_graphics_settings(self, use_x11: bool, use_vulkan: bool,

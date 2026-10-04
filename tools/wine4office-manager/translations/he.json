@@ -242,5 +242,6 @@
   "Only a software (CPU) Vulkan device is available.": "זמין רק התקן Vulkan תוכנתי (מעבד).",
   "Vulkan reported no graphics devices.": "Vulkan לא דיווח על התקני גרפיקה.",
   "Check again": "בדיקה חוזרת",
-  "Check Vulkan support for DXVK again": "בדיקה חוזרת של תמיכת Vulkan עבור DXVK"
+  "Check Vulkan support for DXVK again": "בדיקה חוזרת של תמיכת Vulkan עבור DXVK",
+  "DXVK is not fully set up in this Wine environment; Wine4Office completes it when Wine is not running.": "DXVK אינו מוגדר במלואו בסביבת Wine זו; Wine4Office ישלים זאת כאשר Wine אינו פועל."
 }
