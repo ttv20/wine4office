@@ -1473,11 +1473,16 @@ DXVK_DLL_OVERRIDES_KEY = r"HKCU\Software\Wine\DllOverrides"
 DXVK_STATE_NAME = ".wine4office-dxvk.json"
 DXVK_LOCK_NAME = ".wine4office-dxvk.lock"
 DXVK_APPLY_LOCK_TIMEOUT_SECONDS = 2.0
-# Office launches wait longer for the lock than apply can hold it: the idle
-# check, at most six DLL copies, one `wine reg import` (bounded by
-# DXVK_REG_IMPORT_TIMEOUT_SECONDS) and, on failure, one rollback import.
+# Office launches wait longer for the lock than apply can hold it. Apply holds
+# it for at most: the DLL copies (aborted once DXVK_FILE_PHASE_TIMEOUT_SECONDS
+# have passed), their rollback, one `wine reg import` and one rollback import
+# (each bounded by DXVK_REG_IMPORT_TIMEOUT_SECONDS). Even past that bound the
+# DLL phase is harmless to a starting Office: it only runs while the registry
+# leaves these DLLs on Wine's default (builtin) load order, because enabling
+# copies files before the import and disabling imports before restoring files.
+DXVK_FILE_PHASE_TIMEOUT_SECONDS = 20.0
 DXVK_REG_IMPORT_TIMEOUT_SECONDS = 30.0
-DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS = 90.0
+DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS = 120.0
 _BUILTIN_LOAD_ORDERS = frozenset({"builtin", "b"})
 DXVK_REGISTRY_SAVE_WAIT_SECONDS = 15.0
 _WINE_DLL_SIGNATURES = (b"Wine builtin DLL", b"Wine placeholder DLL")
@@ -1768,6 +1773,18 @@ def _dxvk_override_conflict(values_by_key: dict[str, dict[str, tuple[str, str, s
     non-builtin value for an excluded process (WebView2) would load DXVK there,
     which opens new Outlook without a window. Both keep the prefix on WineD3D.
     """
+    for key, values in values_by_key.items():
+        for dll in DXVK_DLLS:
+            for name in (dll, f"*{dll}"):
+                current = values.get(name.casefold())
+                if current is not None and current[1] != "REG_SZ":
+                    # The Manager only ever writes REG_SZ; another type is the
+                    # user's and must not be overwritten by an import.
+                    return (
+                        f"This Wine environment stores {current[0]} under {key} "
+                        f"as a {current[1]} value; Wine4Office left it unchanged "
+                        "and keeps WineD3D."
+                    )
     values = values_by_key.get(DXVK_DLL_OVERRIDES_KEY, {})
     for dll in DXVK_DLLS:
         for name in (dll, f"*{dll}"):
@@ -1806,8 +1823,8 @@ def _user_reg_query_values(prefix: Path, key: str) -> dict[str, tuple[str, str, 
         raise RuntimeError(f"Could not read the Wine registry file: {prefix / 'user.reg'}")
     relative = key.split("\\", 1)[1] if key.upper().startswith("HKCU\\") else key
     return {
-        folded: (name, "REG_SZ", data)
-        for folded, (name, data) in sections.get(relative.casefold(), {}).items()
+        folded: (name, kind, data)
+        for folded, (name, data, kind) in sections.get(relative.casefold(), {}).items()
     }
 
 
@@ -2137,9 +2154,12 @@ def _apply_dxvk_locked(prefix: Path, wine: Path, enabled: bool, bundle: dict | N
     }
     registry_undo: list[tuple[str, str, tuple[str, str, str] | None]] = []
     file_undo: list[tuple[Path, tuple[bytes, int] | None]] = []
-    try:
-        _write_dxvk_prefix_state(prefix, pending_state)
+
+    def change_files() -> None:
+        deadline = time.monotonic() + DXVK_FILE_PHASE_TIMEOUT_SECONDS
         for target, source, expected in file_plan:
+            if time.monotonic() > deadline:
+                raise TimeoutError("Copying the Direct3D DLLs took too long.")
             file_undo.append((target, _snapshot_file(target)))
             if source is None:
                 target.unlink()
@@ -2147,37 +2167,64 @@ def _apply_dxvk_locked(prefix: Path, wine: Path, enabled: bool, bundle: dict | N
                 _install_verified_file(
                     source, target, expected or _file_sha256(source)
                 )
-        if registry_plan:
-            if not _manager_create and wine_running_in_prefix(prefix, wine):
-                # Someone started Wine without the lock; never change the
-                # registry under a running Office. The files are rolled back.
-                raise DxvkBusyError(
-                    "Wine started in this environment while the Direct3D backend "
-                    "was changing; the change was postponed."
-                )
-            registry_undo = [(key, name, current) for key, name, _data, current in registry_plan]
-            _import_registry_changes(
-                prefix, wine, env,
-                [(key, name, data) for key, name, data, _current in registry_plan],
-                **callbacks,
+
+    def change_registry() -> None:
+        nonlocal registry_undo
+        if not registry_plan:
+            return
+        if not _manager_create and wine_running_in_prefix(prefix, wine):
+            # Someone started Wine without the lock; never change the
+            # registry under a running Office. Completed steps are rolled back.
+            raise DxvkBusyError(
+                "Wine started in this environment while the Direct3D backend "
+                "was changing; the change was postponed."
             )
-        _write_dxvk_prefix_state(prefix, final_state)
-    except BaseException as error:
-        rollback_errors: list[str] = []
-        if registry_undo:
-            try:
-                _import_registry_changes(prefix, wine, env, [
-                    (key, previous[0] if previous else name,
-                     previous[2] if previous else None)
-                    for key, name, previous in registry_undo
-                ])
-            except Exception as rollback_error:  # noqa: BLE001 - report all
-                rollback_errors.append(str(rollback_error))
+        registry_undo = [(key, name, current) for key, name, _data, current in registry_plan]
+        _import_registry_changes(
+            prefix, wine, env,
+            [(key, name, data) for key, name, data, _current in registry_plan],
+            **callbacks,
+        )
+
+    def undo_registry(errors: list[str]) -> None:
+        if not registry_undo:
+            return
+        try:
+            _import_registry_changes(prefix, wine, env, [
+                (key, previous[0] if previous else name,
+                 previous[2] if previous else None)
+                for key, name, previous in registry_undo
+            ])
+        except Exception as rollback_error:  # noqa: BLE001 - report all
+            errors.append(str(rollback_error))
+
+    def undo_files(errors: list[str]) -> None:
         for target, snapshot in reversed(file_undo):
             try:
                 _restore_file(target, snapshot)
             except Exception as rollback_error:  # noqa: BLE001 - report all
-                rollback_errors.append(str(rollback_error))
+                errors.append(str(rollback_error))
+
+    try:
+        _write_dxvk_prefix_state(prefix, pending_state)
+        # Order the steps so the DLL files only change while the registry keeps
+        # these DLLs on Wine's default (builtin) load order; a starting Office
+        # then never mixes DXVK and WineD3D DLLs. Rollback runs in reverse.
+        if enabled:
+            change_files()
+            change_registry()
+        else:
+            change_registry()
+            change_files()
+        _write_dxvk_prefix_state(prefix, final_state)
+    except BaseException as error:
+        rollback_errors: list[str] = []
+        if enabled:
+            undo_registry(rollback_errors)
+            undo_files(rollback_errors)
+        else:
+            undo_files(rollback_errors)
+            undo_registry(rollback_errors)
         if not rollback_errors:
             try:
                 _restore_file(dxvk_state_path(prefix), state_snapshot)
@@ -2217,15 +2264,16 @@ def _user_reg_values(prefix: Path, key: str) -> dict[str, str] | None:
         return None
     relative = key.split("\\", 1)[1] if key.upper().startswith("HKCU\\") else key
     return {
-        folded: data for folded, (_name, data) in sections.get(relative.casefold(), {}).items()
+        folded: data
+        for folded, (_name, data, _kind) in sections.get(relative.casefold(), {}).items()
     }
 
 
-_USER_REG_CACHE: dict[str, tuple[tuple[int, ...], dict[str, dict[str, tuple[str, str]]]]] = {}
+_USER_REG_CACHE: dict[str, tuple[tuple[int, ...], dict[str, dict[str, tuple[str, str, str]]]]] = {}
 
 
-def _user_reg_sections(prefix: Path) -> dict[str, dict[str, tuple[str, str]]] | None:
-    """Parse string values of every key in user.reg, cached by size and mtime."""
+def _user_reg_sections(prefix: Path) -> dict[str, dict[str, tuple[str, str, str]]] | None:
+    """Parse every key's values in user.reg as (name, data, type), cached by stat."""
     path = prefix / "user.reg"
     try:
         info = path.stat()
@@ -2238,9 +2286,11 @@ def _user_reg_sections(prefix: Path) -> dict[str, dict[str, tuple[str, str]]] | 
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
-    sections: dict[str, dict[str, tuple[str, str]]] = {}
-    current: dict[str, tuple[str, str]] | None = None
+    sections: dict[str, dict[str, tuple[str, str, str]]] = {}
+    current: dict[str, tuple[str, str, str]] | None = None
     pattern = re.compile(r'^"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"\s*$')
+    # Other value types: str(2):"…" (expand), str(7):"…", hex…:, dword:.
+    other = re.compile(r'^"((?:[^"\\]|\\.)*)"=((?:str|hex|dword)[^:]*):')
     for line in lines:
         if line.startswith("["):
             closing = line.find("]")
@@ -2253,7 +2303,14 @@ def _user_reg_sections(prefix: Path) -> dict[str, dict[str, tuple[str, str]]] | 
         if match:
             name = re.sub(r"\\(.)", r"\1", match.group(1))
             data = re.sub(r"\\(.)", r"\1", match.group(2))
-            current[name.casefold()] = (name, data)
+            current[name.casefold()] = (name, data, "REG_SZ")
+            continue
+        match = other.match(line)
+        if match:
+            name = re.sub(r"\\(.)", r"\1", match.group(1))
+            # Never treated as a load order: a marker that is neither native
+            # nor builtin, so these values count as user-owned conflicts.
+            current[name.casefold()] = (name, f"<{match.group(2)} value>", match.group(2))
     _USER_REG_CACHE[str(path)] = (identity, sections)
     return sections
 
@@ -2340,8 +2397,7 @@ def dxvk_prefix_converged(prefix_value: PathValue, wine_value: PathValue,
         return False
     owned = _owned_value_keys(state)
     as_query = {
-        key: {name: (name, "REG_SZ", data)
-              for name, data in (_user_reg_values(prefix, key) or {}).items()}
+        key: _user_reg_query_values(prefix, key)
         for key in {key for key, _name, _data in dxvk_managed_registry_values()}
     }
     if (_dxvk_override_conflict(as_query, owned)

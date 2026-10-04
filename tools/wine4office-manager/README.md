@@ -139,15 +139,19 @@ DXVK 3.1.1 is the default Direct3D 10/11 backend. Release runners carry its
   never pauses the background service. It holds an exclusive `flock` on
   `<prefix>/.wine4office-dxvk.lock` while it checks that Wine is idle and makes
   its changes. While Wine is idle it reads the current values from `user.reg`
-  (starting no Wine), copies the DLLs, checks once more that no Wine process
-  appeared, and then writes every registry value with a single
-  `wine reg import` (at most 30 s, plus at most 30 s for a rollback import).
-  Office launches from the Manager hold the same lock shared while they run
-  Wine commands, and generated shortcut launchers wait on it with
-  `flock -s -w 90` (and keep it open while Office runs). The 90 s wait is
-  longer than the longest time apply can hold the lock, so a launch only skips
-  the lock if the Manager is stuck; even then a Wine process that appears
-  before the registry import makes apply roll back the DLLs and postpone. Afterwards the
+  (starting no Wine; values stored as a type other than a string are treated
+  as the user's and keep WineD3D). The DLL files only change while the
+  registry leaves these DLLs on Wine's default builtin load order: enabling
+  copies the DLLs first and then writes every value with a single
+  `wine reg import`; disabling imports first and then restores the DLLs.
+  Right before the import it checks once more that no Wine process appeared,
+  and otherwise rolls back and postpones. Office launches from the Manager
+  hold the same lock shared while they run Wine commands, and generated
+  shortcut launchers wait on it with `flock -s -w 120` (and keep it open while
+  Office runs). 120 s is longer than apply can hold the lock (DLL phase capped
+  at 20 s plus its rollback, one import of at most 30 s plus a rollback
+  import), so a launch only proceeds without the lock if the Manager is
+  stuck, and even then it sees a consistent backend. Afterwards the
   Manager waits up to 15 seconds for its own short-lived wineserver to exit and
   write `user.reg`; if Wine started again meanwhile, that server saves the
   values later and the change is reported as pending.

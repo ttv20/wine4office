@@ -2,7 +2,9 @@
 # Run a built Wine4OfficeManager binary with the hidden DXVK probe flag.
 # The frozen binary re-executes itself for this check; it must print one valid
 # probe result as JSON and exit 0 whether or not a usable GPU is present
-# (llvmpipe-only and loader-less CI runners report supported=false).
+# (llvmpipe-only and loader-less CI runners report supported=false). A probe
+# that crashed inside the binary reports supported=null with code "error";
+# that fails this check, because users would silently stay on WineD3D.
 set -euo pipefail
 
 [[ $# -eq 1 ]] || { echo "Usage: $0 WINE4OFFICE_MANAGER_BINARY" >&2; exit 2; }
@@ -26,8 +28,11 @@ lines = [line for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 assert lines, "the DXVK probe printed nothing"
 result = json.loads(lines[-1])
 assert result["schema"] == 1, result
-assert result["supported"] in (True, False, None), result
 assert isinstance(result["code"], str) and isinstance(result["reason"], str), result
 assert isinstance(result["devices"], list), result
+# The child probe answers True or False for every host it can inspect;
+# None only comes from an exception (code "error") inside the binary.
+assert result["supported"] in (True, False), f"DXVK probe failed: {result}"
+assert result["code"] not in ("error", "timeout"), f"DXVK probe failed: {result}"
 print(f"frozen DXVK probe: PASS (supported={result['supported']}, code={result['code']})")
 PY

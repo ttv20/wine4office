@@ -398,9 +398,123 @@ class DxvkPrefixTransactionTests(DxvkTestCase):
         self.assertIsNone(backend.read_dxvk_prefix_state(self.prefix))
 
     def test_launch_waits_longer_than_apply_can_hold_the_lock(self):
-        worst_apply = (backend.DXVK_APPLY_LOCK_TIMEOUT_SECONDS
-                       + 2 * backend.DXVK_REG_IMPORT_TIMEOUT_SECONDS)
-        self.assertGreater(backend.DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS, worst_apply)
+        # Hold time (not acquisition time): DLL phase and its rollback, one
+        # registry import and one rollback import.
+        worst_hold = (2 * backend.DXVK_FILE_PHASE_TIMEOUT_SECONDS
+                      + 2 * backend.DXVK_REG_IMPORT_TIMEOUT_SECONDS)
+        self.assertGreater(backend.DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS, worst_hold)
+
+    def _record_phases(self, registry, enabled):
+        order = []
+        real_install = backend._install_verified_file
+        real_import = backend._import_registry_changes
+
+        def install(*args, **kwargs):
+            order.append("file")
+            return real_install(*args, **kwargs)
+
+        def import_changes(*args, **kwargs):
+            order.append("registry")
+            return real_import(*args, **kwargs)
+
+        with mock.patch.object(backend, "_install_verified_file", side_effect=install), \
+             mock.patch.object(backend, "_import_registry_changes",
+                               side_effect=import_changes):
+            self._apply(registry, enabled)
+        return order
+
+    def test_files_change_only_while_registry_keeps_builtin_order(self):
+        registry = FakeRegistry()
+        enable_order = self._record_phases(registry, True)
+        self.assertEqual(enable_order, ["file"] * 6 + ["registry"])
+        disable_order = self._record_phases(registry, False)
+        self.assertEqual(disable_order, ["registry"] + ["file"] * 6)
+
+    def test_slow_dll_phase_is_aborted_and_rolled_back(self):
+        before = {
+            path: path.read_bytes()
+            for path in (self.prefix / "drive_c/windows").rglob("*.dll")
+        }
+        registry = FakeRegistry()
+        with mock.patch.object(backend, "DXVK_FILE_PHASE_TIMEOUT_SECONDS", -1.0):
+            with self.assertRaisesRegex(RuntimeError, "took too long.*restored"):
+                self._apply(registry, True)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(registry.imports(), [])
+        self.assertIsNone(backend.read_dxvk_prefix_state(self.prefix))
+
+    def test_disable_rolls_back_registry_when_dll_restore_fails(self):
+        registry = FakeRegistry()
+        self._apply(registry, True)
+        registry.reset_log()
+        with mock.patch.object(backend, "_install_verified_file",
+                               side_effect=OSError("read-only")):
+            with self.assertRaisesRegex(RuntimeError, "disable DXVK.*restored"):
+                self._apply(registry, False)
+        self.assertEqual(len(registry.imports()), 2)
+        self.assertEqual(registry.values[MAIN_KEY], {dll: "native" for dll in DXVK_NAMES})
+        self.assertTrue(backend.read_dxvk_prefix_state(self.prefix)["enabled"])
+
+    def test_non_string_overrides_are_user_owned_conflicts(self):
+        for line in ('"d3d11"=str(2):"native"', '"dxgi"=hex(2):6e,00,00,00',
+                     '"d3d10core"=dword:00000001'):
+            with self.subTest(line=line):
+                (self.prefix / backend.DXVK_STATE_NAME).unlink(missing_ok=True)
+                user_reg = (
+                    "WINE REGISTRY Version 2\n\n"
+                    "[Software\\\\Wine\\\\DllOverrides] 1700000000\n#time=1d9\n"
+                    f"{line}\n"
+                )
+                temporary = self.prefix / "user.reg.tmp"
+                temporary.write_text(user_reg)
+                os.replace(temporary, self.prefix / "user.reg")
+                registry = FakeRegistry()
+                registry.prefix = self.prefix
+                before = self._system_file("system32", "dxgi").read_bytes()
+                result, _flush = self._apply_without_save(registry, True)
+                self.assertFalse(result["enabled"])
+                self.assertIn("value; Wine4Office left it unchanged", result["reason"])
+                self.assertEqual(registry.commands, [])
+                self.assertEqual((self.prefix / "user.reg").read_text(), user_reg)
+                self.assertEqual(self._system_file("system32", "dxgi").read_bytes(), before)
+                self.assertTrue(backend.dxvk_prefix_converged(self.prefix, self.wine, True))
+
+    def test_non_string_webview2_exclusion_is_a_conflict(self):
+        user_reg = (
+            "WINE REGISTRY Version 2\n\n"
+            "[Software\\\\Wine\\\\AppDefaults\\\\msedgewebview2.exe\\\\DllOverrides] 1\n"
+            '"dxgi"=str(2):"builtin"\n'
+        )
+        (self.prefix / "user.reg").write_text(user_reg)
+        registry = FakeRegistry()
+        registry.prefix = self.prefix
+        result, _flush = self._apply_without_save(registry, True)
+        self.assertFalse(result["enabled"])
+        self.assertIn("str(2)", result["reason"])
+        self.assertEqual(registry.commands, [])
+
+    def test_frozen_probe_check_rejects_probe_errors(self):
+        script = MANAGER_DIR / "tests/test_frozen_dxvk_probe.sh"
+        for payload, expected in (
+                (backend._probe_result(False, "cpu-only", "CPU only."), 0),
+                (backend._probe_result(False, "no-loader", "No loader."), 0),
+                (backend._probe_result(True, "supported", "GPU."), 0),
+                (backend._probe_result(None, "error", "The Vulkan check failed: boom"), 1),
+                ({"schema": 1}, 1)):
+            with self.subTest(payload=payload):
+                fake = self.root / "fake-manager"
+                fake.write_text(
+                    "#!/bin/sh\n"
+                    '[ "$1" = "--probe-dxvk-support" ] || exit 9\n'
+                    f"printf '%s\\n' '{json.dumps(payload)}'\n"
+                )
+                fake.chmod(0o755)
+                completed = subprocess.run(
+                    ["bash", str(script), str(fake)],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(completed.returncode != 0, bool(expected),
+                                 completed.stdout + completed.stderr)
 
     def test_registry_save_wait_has_no_kill_fallback(self):
         source = (MANAGER_DIR / "wine4office_backend.py").read_text()
