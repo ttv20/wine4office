@@ -51,6 +51,23 @@ The installer asks before closing an active Wine4Office Manager or Wine
 session. For unattended updates, pass `--force` to close those processes
 without prompting (and force-stop them only if graceful shutdown times out).
 
+### Graphics
+
+Office draws with Direct3D 10/11. Wine4Office uses **DXVK 3.1.1** for this by
+default: it translates Direct3D to Vulkan and ships inside the Wine4Office
+runner. DXVK needs a GPU and a recent driver with **Vulkan 1.3** and the
+extensions DXVK requires (current Mesa or NVIDIA drivers). The Manager checks this
+once per driver change; without Vulkan 1.3 it keeps Wine's built-in renderer,
+WineD3D, and shows the reason next to the Direct3D setting (**Check again**
+repeats the check, for example after a driver update).
+
+The WebView2 component (used by new Outlook) always stays on WineD3D, because
+DXVK 3.1.1 does not implement the composition swapchains it needs.
+
+To switch, open **Environment → Graphics backend** in the Manager and choose
+**DXVK (recommended)**, **OpenGL**, or **Vulkan (WineD3D)**, then **Stop Wine
+and apply**.
+
 ---
 
 ## Build It Yourself

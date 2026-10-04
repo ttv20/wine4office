@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Use DXVK 3.1.1 as the default Direct3D backend on Vulkan 1.3 GPUs, with WineD3D fallback; WebView2 (new Outlook) stays on WineD3D.
 - Fix Office 2019 volume installation failing while its licensing chain is installed.
 - Prevent intermittent Word Welcome-screen stalls by keeping Click-to-Run preloaded.
 - Prevent enterprise Microsoft 365 sign-in from getting stuck after entering credentials.

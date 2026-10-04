@@ -902,7 +902,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(manager.main(), 0)
         launch.assert_called_once_with(
             prefix, wine, "word", manager.FONT_HELPER, [str(self.home / "document.docx")],
-            use_x11=True, use_vulkan=False,
+            use_x11=True, use_vulkan=False, use_dxvk=None,
         )
 
     def _wait_for(self, predicate):

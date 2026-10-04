@@ -111,6 +111,7 @@ def _create_environment_worker(state, config: dict, recreate: bool) -> str:
         cancel_event=state.cancel_event,
         process_callback=state.set_process,
         progress_callback=environment_progress,
+        dxvk=backend.dxvk_for_new_prefix(config),
     )
     if state.cancel_event.is_set():
         raise RuntimeError("Operation cancelled.")
@@ -477,18 +478,34 @@ class ManagerWindow(QMainWindow):
         renderer_layout.setSpacing(6)
         self.renderer_group = QButtonGroup(self)
         self.renderer_group.setExclusive(True)
+        self.use_dxvk = QPushButton("DXVK (recommended)")
         self.use_opengl = QPushButton("OpenGL")
-        self.use_vulkan = QPushButton("Vulkan")
-        for button in (self.use_opengl, self.use_vulkan):
+        self.use_vulkan = QPushButton("Vulkan (WineD3D)")
+        for button in (self.use_dxvk, self.use_opengl, self.use_vulkan):
             button.setCheckable(True)
             button.setMinimumWidth(105)
             self.renderer_group.addButton(button)
             renderer_layout.addWidget(button)
             self.task_sensitive_buttons.append(button)
         renderer_layout.addStretch()
+        self.use_dxvk.setAccessibleName("Use DXVK for Direct3D 10 and 11")
         self.use_opengl.setAccessibleName("Use the OpenGL Direct3D renderer")
         self.use_vulkan.setAccessibleName("Use the Vulkan Direct3D renderer")
         graphics_form.addRow("Direct3D renderer:", renderer_choices)
+        direct3d_status = QWidget()
+        direct3d_status_layout = QHBoxLayout(direct3d_status)
+        direct3d_status_layout.setContentsMargins(0, 0, 0, 0)
+        self.direct3d_status_label = QLabel("Checking Vulkan support…")
+        self.direct3d_status_label.setWordWrap(True)
+        self.direct3d_status_label.setAccessibleName("Direct3D backend status")
+        direct3d_status_layout.addWidget(self.direct3d_status_label, 1)
+        self.dxvk_check_again_button = self._action_button(
+            "Check again", self.check_dxvk_support_again,
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
+        self.dxvk_check_again_button.setAccessibleName("Check Vulkan support for DXVK again")
+        direct3d_status_layout.addWidget(self.dxvk_check_again_button)
+        graphics_form.addRow("", direct3d_status)
         graphics_layout.addLayout(graphics_form)
 
         self.graphics_restart_panel = QWidget()
@@ -1711,6 +1728,7 @@ class ManagerWindow(QMainWindow):
             "desktop_copy": self.desktop_copy.isChecked(),
             "use_x11": self.use_x11.isChecked(),
             "use_vulkan": self.use_vulkan.isChecked(),
+            "use_dxvk": self.use_dxvk.isChecked(),
             "update_url": self.update_edit.text(),
             "include_prereleases": self.include_prereleases.isChecked(),
         }
@@ -1720,12 +1738,52 @@ class ManagerWindow(QMainWindow):
             config.get("graphics_restart_required") is True
         )
 
+    def _update_direct3d_status(self, snapshot: dict) -> None:
+        """Show the backend that is really active and why DXVK may be unavailable."""
+        status = snapshot.get("direct3d")
+        if not isinstance(status, dict):
+            return
+        reason = self._tr(str(status.get("dxvk_reason") or ""))
+        available = status.get("dxvk_available")
+        if status.get("dxvk_active"):
+            text = self._tr(
+                "DXVK {version} is installed in this Wine environment for "
+                "Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D."
+            ).format(version=status.get("dxvk_version") or backend.DXVK_VERSION)
+        elif status.get("selected") == "dxvk" and available is True and reason:
+            # Kept off by a conflict, an override, or an incomplete setup.
+            text = f"{self._tr('DXVK is unavailable; using WineD3D.')} {reason}".strip()
+        elif status.get("selected") == "dxvk" and available is True:
+            text = self._tr(
+                "DXVK is selected but not active yet. It is applied when Wine "
+                "is not running."
+            )
+        elif status.get("selected") == "dxvk" and available is None:
+            text = reason or self._tr("Checking Vulkan support…")
+        elif status.get("selected") == "dxvk":
+            text = f"{self._tr('DXVK is unavailable; using WineD3D.')} {reason}".strip()
+        else:
+            text = self._tr("Using WineD3D ({renderer}).").format(
+                renderer=status.get("wined3d_renderer", "OpenGL")
+            )
+        self.direct3d_status_label.setText(text)
+        unavailable = available is False
+        if unavailable:
+            self.use_dxvk.setDisabled(True)
+        self.use_dxvk.setToolTip(reason if unavailable else "")
+
+    def check_dxvk_support_again(self) -> None:
+        """Re-run the Vulkan check, e.g. after a driver update or a reboot."""
+        if self.state.refresh_dxvk_support_async(force=True):
+            self.direct3d_status_label.setText(self._tr("Checking Vulkan support…"))
+
     def _graphics_choice_changed(self, _button: QAbstractButton) -> None:
         if not self.initialized:
             return
         try:
             config = self.state.update_graphics_settings(
-                self.use_x11.isChecked(), self.use_vulkan.isChecked()
+                self.use_x11.isChecked(), self.use_vulkan.isChecked(),
+                self.use_dxvk.isChecked(),
             )
         except Exception as error:
             self._restore_config_fields()
@@ -1762,7 +1820,11 @@ class ManagerWindow(QMainWindow):
             if error is not None:
                 return
             self._set_config_fields(saved)
-            self.notify("Graphics settings applied. They will be used on the next launch.")
+            self.notify(
+                "Graphics settings saved. Wine is still using the previous settings."
+                if saved.get("graphics_restart_required") is True
+                else "Graphics settings applied. They will be used on the next launch."
+            )
 
         self._show_task_progress(
             "wine-stop",
@@ -1818,8 +1880,11 @@ class ManagerWindow(QMainWindow):
         self.desktop_copy.setChecked(config["desktop_copy"])
         self.use_x11.setChecked(config["use_x11"])
         self.use_wayland.setChecked(not config["use_x11"])
-        self.use_vulkan.setChecked(config.get("use_vulkan", False))
-        self.use_opengl.setChecked(not config.get("use_vulkan", False))
+        use_dxvk = config.get("use_dxvk", True) is not False
+        use_vulkan = config.get("use_vulkan", False) is True
+        self.use_dxvk.setChecked(use_dxvk)
+        self.use_vulkan.setChecked(not use_dxvk and use_vulkan)
+        self.use_opengl.setChecked(not use_dxvk and not use_vulkan)
         self._update_graphics_restart_notice(config)
         self.include_prereleases.setChecked(
             config.get("include_prereleases") is True
@@ -2210,6 +2275,7 @@ class ManagerWindow(QMainWindow):
 
     def finish_startup(self) -> None:
         """Finish first-open choices before showing update or incident prompts."""
+        self.state.refresh_dxvk_support_async()
         def continue_startup() -> None:
             self.start_background_update_check()
             if self.initial_incident is not None:
@@ -3057,6 +3123,7 @@ class ManagerWindow(QMainWindow):
             task["running"] and task.get("kind") not in {"remove", "wine-stop"}
         )
         self._update_preload_status(snapshot)
+        self._update_direct3d_status(snapshot)
         if (self.pending_environment_transition
                 and task["kind"] == "environment-switch" and not task["running"]):
             self._set_config_fields(snapshot["config"])

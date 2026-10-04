@@ -437,9 +437,11 @@ def default_config() -> dict:
         "desktop_copy": False,
         "use_x11": True,
         "use_vulkan": False,
+        "use_dxvk": True,
         "graphics_restart_required": False,
         "graphics_active_use_x11": True,
         "graphics_active_use_vulkan": False,
+        "graphics_active_use_dxvk": True,
         "office_telemetry_disabled": {},
         "office_compatibility_policies": {},
         "update_url": configured_update_url(),
@@ -485,9 +487,27 @@ def load_config() -> dict:
                         if key == "update_url" and not str(saved[key]).strip():
                             continue
                         result[key] = saved[key]
+                _migrate_direct3d_backend(saved, result)
         except (OSError, ValueError):
             pass
     return result
+
+
+def _migrate_direct3d_backend(saved: dict, result: dict) -> None:
+    """Default saved configs without a DXVK choice to DXVK.
+
+    A saved `use_vulkan: true` was an explicit WineD3D Vulkan choice, so it keeps
+    WineD3D; every other configuration moves to the DXVK default.
+    """
+    if "use_dxvk" not in saved:
+        result["use_dxvk"] = saved.get("use_vulkan") is not True
+    if "graphics_active_use_dxvk" not in saved:
+        if saved.get("graphics_restart_required") is True:
+            result["graphics_active_use_dxvk"] = (
+                saved.get("graphics_active_use_vulkan") is not True
+            )
+        else:
+            result["graphics_active_use_dxvk"] = bool(result["use_dxvk"])
 
 
 def active_graphics_settings(config: dict) -> tuple[bool, bool]:
@@ -1438,10 +1458,1507 @@ def install_bundled_wine_mono(prefix: Path, wine: Path, output: Output,
     return True
 
 
+# --- DXVK -----------------------------------------------------------------
+# DXVK replaces Wine's builtin dxgi/d3d11/d3d10core for Office processes. The
+# Manager selects it through the prefix registry (HKCU\Software\Wine\DllOverrides)
+# and never through WINEDLLOVERRIDES: Wine's load order gives that environment
+# variable precedence over AppDefaults, which would defeat the WebView2 exclusion.
+DXVK_VERSION = "3.1.1"
+DXVK_DLLS = ("dxgi", "d3d11", "d3d10core")
+# DXVK 3.1.1 returns E_NOTIMPL from IDXGIFactory2::CreateSwapChainForComposition.
+# WebView2's GPU process needs composition swapchains (new Outlook opens no window
+# without them), so WebView2 keeps Wine's builtin WineD3D DLLs.
+DXVK_EXCLUDED_PROCESSES = ("msedgewebview2.exe",)
+DXVK_DLL_OVERRIDES_KEY = r"HKCU\Software\Wine\DllOverrides"
+DXVK_STATE_NAME = ".wine4office-dxvk.json"
+DXVK_LOCK_NAME = ".wine4office-dxvk.lock"
+DXVK_APPLY_LOCK_TIMEOUT_SECONDS = 2.0
+# Office launches wait longer for the lock than apply can hold it. Apply holds
+# it for at most: the DLL copies (aborted once DXVK_FILE_PHASE_TIMEOUT_SECONDS
+# have passed), their rollback, one `wine reg import` and one rollback import
+# (each bounded by DXVK_REG_IMPORT_TIMEOUT_SECONDS). Even past that bound the
+# DLL phase is harmless to a starting Office: it only runs while the registry
+# leaves these DLLs on Wine's default (builtin) load order, because enabling
+# copies files before the import and disabling imports before restoring files.
+DXVK_FILE_PHASE_TIMEOUT_SECONDS = 20.0
+DXVK_REG_IMPORT_TIMEOUT_SECONDS = 30.0
+DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS = 120.0
+_BUILTIN_LOAD_ORDERS = frozenset({"builtin", "b"})
+DXVK_REGISTRY_SAVE_WAIT_SECONDS = 15.0
+_WINE_DLL_SIGNATURES = (b"Wine builtin DLL", b"Wine placeholder DLL")
+DXVK_STATE_SCHEMA = 1
+DXVK_PROBE_SCHEMA = 1
+DXVK_PROBE_FLAG = "--probe-dxvk-support"
+DXVK_PROBE_TIMEOUT_SECONDS = 20.0
+DXVK_PROBE_RETRY_SECONDS = 3600.0
+# Negative results that can change without a driver-file change (a driver
+# mismatch before a reboot, a session without GPU access) expire like unknown
+# results; "old-api" and "missing-extensions" describe the hardware and stay.
+DXVK_TRANSIENT_PROBE_CODES = frozenset({"no-loader", "no-instance", "no-device", "cpu-only"})
+DXVK_REQUIRED_VULKAN_VERSION = (1, 3)
+# Required device extensions of the D3D10/D3D11 baseline profiles in
+# https://github.com/doitsujin/dxvk/blob/v3.1.1/VP_DXVK_requirements.json
+# ("dxvk_common_required" plus "d3d11_baseline"), and VK_KHR_swapchain for
+# presentation. Feature structures listed there are not checked.
+DXVK_REQUIRED_DEVICE_EXTENSIONS = (
+    "VK_EXT_depth_clip_enable",
+    "VK_EXT_robustness2",
+    "VK_EXT_transform_feedback",
+    "VK_KHR_load_store_op_none",
+    "VK_KHR_maintenance5",
+    "VK_KHR_maintenance6",
+    "VK_KHR_swapchain",
+)
+# (bundle directory, prefix system directory, runner builtin PE directory)
+_DXVK_TARGETS = (
+    ("x64", "system32", "x86_64-windows"),
+    ("x32", "syswow64", "i386-windows"),
+)
+_NATIVE_LOAD_ORDERS = frozenset({"native", "n", "native,builtin", "n,b"})
+_WINE_PROCESS_EXECUTABLES = frozenset({
+    "wine", "wine64", "wine-preloader", "wine64-preloader",
+    "wineserver", "wineserver64",
+})
+
+
+class DxvkBusyError(RuntimeError):
+    """Wine is running in the prefix, so DXVK files must not be changed."""
+
+
+def dxvk_app_defaults_key(executable: str) -> str:
+    return fr"HKCU\Software\Wine\AppDefaults\{executable}\DllOverrides"
+
+
+def dxvk_managed_registry_values() -> tuple[tuple[str, str, str], ...]:
+    """Return every (key, value, data) the Manager writes while DXVK is enabled."""
+    values = [(DXVK_DLL_OVERRIDES_KEY, dll, "native") for dll in DXVK_DLLS]
+    for executable in DXVK_EXCLUDED_PROCESSES:
+        values.extend(
+            (dxvk_app_defaults_key(executable), dll, "builtin") for dll in DXVK_DLLS
+        )
+    return tuple(values)
+
+
+def wine_runner_root(wine_value: PathValue) -> Path:
+    return normalize_path(wine_value).parent.parent
+
+
+def dxvk_bundle_directory(wine_value: PathValue) -> Path:
+    return wine_runner_root(wine_value) / "share/wine4office/dxvk" / DXVK_VERSION
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_dxvk_bundle(wine_value: PathValue) -> dict | None:
+    """Return the verified-manifest DXVK bundle of a runner, or None when absent."""
+    root = dxvk_bundle_directory(wine_value)
+    if not root.exists():
+        return None
+    manifest_path = root / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ValueError(f"The bundled DXVK manifest is unreadable: {manifest_path}") from error
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if (not isinstance(manifest, dict) or manifest.get("version") != DXVK_VERSION
+            or not isinstance(files, dict)):
+        raise ValueError(f"The bundled DXVK manifest is invalid: {manifest_path}")
+    expected = {
+        f"{architecture}/{dll}.dll"
+        for architecture, _system, _builtin in _DXVK_TARGETS for dll in DXVK_DLLS
+    }
+    if set(files) != expected or not all(
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in files.values()):
+        raise ValueError(f"The bundled DXVK manifest lists unexpected files: {manifest_path}")
+    for relative in expected:
+        if not (root / relative).is_file():
+            raise ValueError(f"The bundled DXVK file is missing: {root / relative}")
+    return {"root": root, "version": DXVK_VERSION, "files": dict(files)}
+
+
+def dxvk_state_path(prefix: Path) -> Path:
+    return prefix / DXVK_STATE_NAME
+
+
+def read_dxvk_prefix_state(prefix_value: PathValue) -> dict | None:
+    """Return the Manager's DXVK ownership record for a prefix, if valid."""
+    path = dxvk_state_path(normalize_path(prefix_value))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if (not isinstance(state, dict) or state.get("schema") != DXVK_STATE_SCHEMA
+            or not isinstance(state.get("enabled"), bool)
+            or not isinstance(state.get("files"), dict)
+            or not isinstance(state.get("owned_values"), list)):
+        return None
+    if not all(isinstance(name, str) and isinstance(value, str)
+               for name, value in state["files"].items()):
+        return None
+    if not all(isinstance(item, list) and len(item) == 3
+               and all(isinstance(part, str) for part in item)
+               for item in state["owned_values"]):
+        return None
+    return state
+
+
+def _write_dxvk_prefix_state(prefix: Path, state: dict | None) -> None:
+    path = dxvk_state_path(prefix)
+    if state is None:
+        path.unlink(missing_ok=True)
+        return
+    _preload_json_write(path, state, 0o600)
+
+
+def _wineserver_lock_held(prefix: Path, server_root: Path = Path("/tmp")) -> bool:
+    """Return whether a wineserver currently holds this prefix's server lock.
+
+    wineserver keeps a write lock on /tmp/.wine-UID/server-DEV-INODE/lock for
+    its whole lifetime; F_GETLK only inspects it and never takes the lock.
+    """
+    try:
+        prefix_stat = os.stat(prefix)
+    except OSError:
+        return False
+    lock = (server_root / f".wine-{os.getuid()}"
+            / f"server-{prefix_stat.st_dev:x}-{prefix_stat.st_ino:x}" / "lock")
+    try:
+        descriptor = os.open(
+            lock, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
+    except OSError:
+        return False
+    try:
+        layout = "hhqqi4x"
+        query = struct.pack(layout, fcntl.F_RDLCK, os.SEEK_SET, 0, 0, 0)
+        answer = fcntl.fcntl(descriptor, fcntl.F_GETLK, query)
+        return struct.unpack(layout, answer)[0] != fcntl.F_UNLCK
+    except (OSError, struct.error):
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def wine_running_in_prefix(prefix_value: PathValue, wine_value: PathValue,
+                           proc_root: Path = Path("/proc")) -> bool:
+    """Return whether any Wine process or wineserver is using this prefix."""
+    prefix = normalize_path(prefix_value)
+    if _owned_wine_processes(prefix, wine_value, proc_root):
+        return True
+    if proc_root == Path("/proc") and _wineserver_lock_held(prefix):
+        return True
+    try:
+        processes = tuple(proc_root.iterdir())
+    except OSError:
+        return False
+    expected = os.fsencode(str(prefix))
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            name = Path(os.readlink(process / "exe")).name
+            if name.removesuffix(" (deleted)") not in _WINE_PROCESS_EXECUTABLES:
+                continue
+            environment = process.joinpath("environ").read_bytes().split(b"\0")
+        except (OSError, ValueError):
+            continue
+        if b"WINEPREFIX=" + expected in environment:
+            return True
+    return False
+
+
+def wait_for_prefix_idle(prefix_value: PathValue, wine_value: PathValue,
+                         timeout: float = 0.0, cancel_event=None) -> bool:
+    """Wait until no Wine process uses the prefix; return False on timeout."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if not wine_running_in_prefix(prefix_value, wine_value):
+            return True
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Operation cancelled.")
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def _install_verified_file(source: Path, target: Path, expected_sha256: str) -> None:
+    """Copy source over target atomically after verifying both copies' SHA-256."""
+    if _file_sha256(source) != expected_sha256:
+        raise ValueError(f"Bundled DXVK file failed SHA-256 verification: {source}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".wine4office-tmp", dir=target.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream, source.open("rb") as input_stream:
+            shutil.copyfileobj(input_stream, stream, 1024 * 1024)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o644)
+        if _file_sha256(temporary) != expected_sha256:
+            raise ValueError(f"Copied DXVK file failed SHA-256 verification: {target}")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    try:
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory)
+    except OSError:
+        pass
+    finally:
+        os.close(directory)
+
+
+def _prefix_system_directory(prefix: Path, name: str) -> Path | None:
+    directory = prefix / "drive_c/windows" / name
+    if directory.is_symlink() or not directory.is_dir():
+        return None
+    if directory.resolve() != directory:
+        raise ValueError(f"Refusing a Wine system directory outside the prefix: {directory}")
+    return directory
+
+
+_REG_QUERY_VALUE = re.compile(r"^    (.+?)    (REG_[A-Z0-9_]+)(?:    (.*))?$")
+
+
+def _parse_reg_query_values(text: str) -> dict[str, tuple[str, str, str]]:
+    """Map casefolded value names to (name, type, data) from `wine reg query`."""
+    values: dict[str, tuple[str, str, str]] = {}
+    for line in text.splitlines():
+        match = _REG_QUERY_VALUE.match(line.rstrip("\r"))
+        if match:
+            name, kind, data = match.group(1), match.group(2), match.group(3) or ""
+            values[name.casefold()] = (name, kind, data.strip())
+    return values
+
+
+def _query_registry_key(wine: Path, env: dict[str, str], key: str, *,
+                        cancel_event=None, process_callback=None
+                        ) -> dict[str, tuple[str, str, str]]:
+    completed = _run_cancellable_command(
+        [str(wine), "reg", "query", key], env,
+        cancel_event=cancel_event, process_callback=process_callback, check=False,
+    )
+    if completed.returncode == 1:
+        return {}
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"Could not read {key}: {detail or completed.returncode}")
+    return _parse_reg_query_values(completed.stdout)
+
+
+def _is_native_load_order(data: str) -> bool:
+    return data.replace(" ", "").casefold() in _NATIVE_LOAD_ORDERS
+
+
+def _dxvk_override_conflict(values_by_key: dict[str, dict[str, tuple[str, str, str]]],
+                            owned: set[tuple[str, str, str]]) -> str | None:
+    """Describe a user registry value that DXVK cannot safely coexist with.
+
+    A non-native global DllOverrides value would mix DXVK with builtin DLLs. A
+    non-builtin value for an excluded process (WebView2) would load DXVK there,
+    which opens new Outlook without a window. Both keep the prefix on WineD3D.
+    """
+    for key, values in values_by_key.items():
+        for dll in DXVK_DLLS:
+            for name in (dll, f"*{dll}"):
+                current = values.get(name.casefold())
+                if current is not None and current[1] != "REG_SZ":
+                    # The Manager only ever writes REG_SZ; another type is the
+                    # user's and must not be overwritten by an import.
+                    return (
+                        f"This Wine environment stores {current[0]} under {key} "
+                        f"as a {current[1]} value; Wine4Office left it unchanged "
+                        "and keeps WineD3D."
+                    )
+    values = values_by_key.get(DXVK_DLL_OVERRIDES_KEY, {})
+    for dll in DXVK_DLLS:
+        for name in (dll, f"*{dll}"):
+            current = values.get(name.casefold())
+            if current is None or _is_native_load_order(current[2]):
+                continue
+            if (DXVK_DLL_OVERRIDES_KEY.casefold(), name.casefold(),
+                    current[2].casefold()) in owned:
+                continue
+            return (
+                f"This Wine environment has its own DllOverrides value "
+                f"{current[0]}={current[2] or '(empty)'}; Wine4Office left it "
+                "unchanged and keeps WineD3D."
+            )
+    for executable in DXVK_EXCLUDED_PROCESSES:
+        key = dxvk_app_defaults_key(executable)
+        excluded = values_by_key.get(key, {})
+        for dll in DXVK_DLLS:
+            for name in (dll, f"*{dll}"):
+                current = excluded.get(name.casefold())
+                if current is None or current[2].replace(" ", "").casefold() \
+                        in _BUILTIN_LOAD_ORDERS:
+                    continue
+                return (
+                    f"This Wine environment sets {current[0]}={current[2] or '(empty)'} "
+                    f"for {executable}; DXVK would break it, so Wine4Office left "
+                    "the value unchanged and keeps WineD3D."
+                )
+    return None
+
+
+def _user_reg_query_values(prefix: Path, key: str) -> dict[str, tuple[str, str, str]]:
+    """Return one HKCU key from user.reg in `_parse_reg_query_values` form."""
+    sections = _user_reg_sections(prefix)
+    if sections is None:
+        raise RuntimeError(f"Could not read the Wine registry file: {prefix / 'user.reg'}")
+    relative = key.split("\\", 1)[1] if key.upper().startswith("HKCU\\") else key
+    return {
+        folded: (name, kind, data)
+        for folded, (name, data, kind) in sections.get(relative.casefold(), {}).items()
+    }
+
+
+def _reg_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _import_registry_changes(prefix: Path, wine: Path, env: dict[str, str],
+                             changes: list[tuple[str, str, str | None]],
+                             **callbacks) -> None:
+    """Apply all value changes with one `wine reg import` (None deletes a value).
+
+    One import keeps the window in which the three DLL overrides disagree to
+    the time the wineserver needs for a few set-value requests.
+    """
+    lines = ["Windows Registry Editor Version 5.00", ""]
+    for key in dict.fromkeys(key for key, _name, _data in changes):
+        lines.append("[" + key.replace("HKCU\\", "HKEY_CURRENT_USER\\", 1) + "]")
+        for change_key, name, data in changes:
+            if change_key != key:
+                continue
+            value = "-" if data is None else f'"{_reg_escape(data)}"'
+            lines.append(f'"{_reg_escape(name)}"={value}')
+        lines.append("")
+    temporary_dir = prefix / "drive_c/windows/temp"
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix="wine4office-dxvk-", suffix=".reg", dir=temporary_dir
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write("\ufeff".encode("utf-16-le"))
+            stream.write("\r\n".join(lines).encode("utf-16-le"))
+        _run_cancellable_command(
+            [str(wine), "reg", "import", f"C:\\windows\\temp\\{temporary.name}"],
+            env, timeout=DXVK_REG_IMPORT_TIMEOUT_SECONDS, **callbacks,
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _owned_value_keys(state: dict | None) -> set[tuple[str, str, str]]:
+    if not state:
+        return set()
+    return {
+        (key.casefold(), name.casefold(), data.casefold())
+        for key, name, data in state.get("owned_values", [])
+    }
+
+
+@contextmanager
+def dxvk_prefix_lock(prefix_value: PathValue, *, shared: bool = False,
+                     timeout: float = 0.0):
+    """Hold the per-prefix DXVK lock; yields whether it was acquired.
+
+    apply_dxvk_state takes it exclusively around its idle check and changes.
+    Office launches take it shared while they start Wine, so a launch cannot
+    begin between the idle check and the file/registry changes. Generated
+    shortcut launchers take it shared with `flock -s -w 30` when it exists.
+    """
+    path = normalize_path(prefix_value) / DXVK_LOCK_NAME
+    try:
+        descriptor = os.open(
+            path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+    except OSError:
+        yield False
+        return
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(0.0, timeout)
+        operation = (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB
+        while True:
+            try:
+                fcntl.flock(descriptor, operation)
+                acquired = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _wait_for_registry_save(prefix: Path, wine: Path,
+                            timeout: float | None = None) -> bool:
+    """Wait, without stopping anything, until the prefix's wineserver has exited.
+
+    wineserver writes user.reg itself when it exits after its last client (and
+    periodically while it runs). The Manager never kills or closes Wine here:
+    if another Wine process keeps the server alive, the values stay in that
+    server and are saved later; the ownership record and dxvk_prefix_converged
+    then report the change as pending until user.reg shows it.
+    """
+    if timeout is None:
+        timeout = DXVK_REGISTRY_SAVE_WAIT_SECONDS
+    return wait_for_prefix_idle(prefix, wine, timeout)
+
+
+def _is_wine_dll(path: Path) -> bool:
+    """Return whether a PE file carries Wine's builtin/placeholder signature."""
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(0x40 + 32)
+    except OSError:
+        return False
+    return any(header[0x40:0x40 + len(signature)] == signature
+               for signature in _WINE_DLL_SIGNATURES)
+
+
+def _dxvk_file_conflict(prefix: Path, wine: Path, bundle: dict,
+                        state: dict | None) -> str | None:
+    """Describe a system32/syswow64 DLL that is neither Wine's nor the Manager's."""
+    recorded = state.get("files", {}) if state else {}
+    for architecture, system_name, builtin_dir in _DXVK_TARGETS:
+        directory = prefix / "drive_c/windows" / system_name
+        for dll in DXVK_DLLS:
+            target = directory / f"{dll}.dll"
+            try:
+                digest = _file_sha256(target)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                return f"{system_name}/{dll}.dll cannot be read: {error}"
+            if digest in {
+                bundle["files"][f"{architecture}/{dll}.dll"],
+                recorded.get(f"{system_name}/{dll}.dll"),
+            } or _is_wine_dll(target):
+                continue
+            builtin = wine_runner_root(wine) / "lib/wine" / builtin_dir / f"{dll}.dll"
+            try:
+                if builtin.is_file() and _file_sha256(builtin) == digest:
+                    continue
+            except OSError:
+                pass
+            return (
+                f"{system_name}\\{dll}.dll in this Wine environment is not Wine's "
+                "builtin DLL (it may be your own DXVK or another native DLL); "
+                "Wine4Office left it unchanged and keeps WineD3D."
+            )
+    return None
+
+
+def apply_dxvk_state(prefix_value: PathValue, wine_value: PathValue, enabled: bool,
+                     output: Output = lambda _line: None, *, cancel_event=None,
+                     process_callback=None, wait_for_registry_save: bool = True,
+                     _manager_create: bool = False) -> dict:
+    """Install or remove Manager-owned DXVK in a managed prefix as one transaction.
+
+    Enabling copies the runner's bundled DLLs over Wine's builtin copies in
+    system32/syswow64 and sets DllOverrides to native, with builtin AppDefaults
+    for excluded processes. Disabling restores (or, without runner builtins,
+    removes) only DLLs the Manager installed and deletes only registry values
+    the Manager created that still hold its data. Nothing here closes Wine.
+    The result has `registry_pending` when another Wine session kept the
+    wineserver alive, so user.reg does not show the change yet.
+    """
+    prefix = validate_prefix(prefix_value)
+    if not _manager_create and not is_prefix_owned(prefix):
+        raise ValueError(f"DXVK is managed only in Wine4Office prefixes: {prefix}")
+    wine = require_wine(str(wine_value))
+    bundle = load_dxvk_bundle(wine) if enabled else None
+    if enabled and bundle is None:
+        raise FileNotFoundError(
+            f"The selected Wine runner does not include DXVK {DXVK_VERSION}."
+        )
+    if _manager_create:
+        return _apply_dxvk_locked(
+            prefix, wine, enabled, bundle, output, cancel_event, process_callback,
+            _manager_create=True,
+        )
+    with dxvk_prefix_lock(prefix, timeout=DXVK_APPLY_LOCK_TIMEOUT_SECONDS) as acquired:
+        if not acquired or wine_running_in_prefix(prefix, wine):
+            raise DxvkBusyError(
+                "Wine is running or starting in this environment. Stop Wine to "
+                "change the Direct3D backend."
+            )
+        result = _apply_dxvk_locked(
+            prefix, wine, enabled, bundle, output, cancel_event, process_callback,
+        )
+    result["registry_pending"] = bool(
+        result.pop("registry_changed", False) and wait_for_registry_save
+        and not _wait_for_registry_save(prefix, wine)
+    )
+    if result["registry_pending"]:
+        output("Wine is running again; it saves the Direct3D registry change when it exits.")
+    return result
+
+
+def _apply_dxvk_locked(prefix: Path, wine: Path, enabled: bool, bundle: dict | None,
+                       output: Output, cancel_event, process_callback, *,
+                       _manager_create: bool = False) -> dict:
+    previous_state = read_dxvk_prefix_state(prefix)
+    if not enabled and previous_state is None:
+        return {"changed": False, "enabled": False, "reason": ""}
+    owned = _owned_value_keys(previous_state)
+    env = wine_environment(prefix, wine, True, _manager_create=_manager_create)
+    callbacks = {"cancel_event": cancel_event, "process_callback": process_callback}
+    keys = sorted({key for key, _name, _data in dxvk_managed_registry_values()})
+    if _manager_create:
+        current_values = {
+            key: _query_registry_key(wine, env, key, **callbacks) for key in keys
+        }
+    else:
+        # Wine is idle (checked under the lock), so user.reg is authoritative and
+        # reading it starts no wineserver before the final idle check below.
+        current_values = {key: _user_reg_query_values(prefix, key) for key in keys}
+    conflict = None
+    if enabled:
+        conflict = (
+            _dxvk_override_conflict(current_values, owned)
+            or _dxvk_file_conflict(prefix, wine, bundle, previous_state)
+        )
+        if conflict:
+            output(f"DXVK was not enabled: {conflict}")
+            enabled = False
+
+    # Plan first, so a pending ownership record can be written before anything
+    # changes: after a crash it still names every value and file that may be ours.
+    planned_files: dict[str, str] = {}
+    file_plan: list[tuple[Path, Path | None, str | None]] = []
+    registry_plan: list[tuple[str, str, str | None, tuple[str, str, str] | None]] = []
+    new_owned: list[list[str]] = []
+    if enabled:
+        for architecture, system_name, _builtin in _DXVK_TARGETS:
+            directory = _prefix_system_directory(prefix, system_name)
+            if directory is None:
+                if architecture == "x64":
+                    raise FileNotFoundError(
+                        f"The Wine environment has no {system_name} directory."
+                    )
+                output(f"Skipping 32-bit DXVK: {system_name} is missing.")
+                continue
+            for dll in DXVK_DLLS:
+                target = directory / f"{dll}.dll"
+                relative = f"{architecture}/{dll}.dll"
+                expected = bundle["files"][relative]
+                planned_files[f"{system_name}/{dll}.dll"] = expected
+                try:
+                    if _file_sha256(target) == expected:
+                        continue
+                except FileNotFoundError:
+                    pass
+                file_plan.append((target, bundle["root"] / relative, expected))
+        for key, name, data in dxvk_managed_registry_values():
+            current = current_values[key].get(name.casefold())
+            recorded = (key.casefold(), name.casefold(), data.casefold()) in owned
+            if current is None:
+                registry_plan.append((key, name, data, None))
+                new_owned.append([key, name, data])
+            elif current[2].casefold() == data.casefold():
+                if recorded:
+                    new_owned.append([key, name, data])
+            # A value with other data is the user's (or a user edit of ours):
+            # it stays untouched and is no longer counted as Manager-owned.
+        final_state = {
+            "schema": DXVK_STATE_SCHEMA,
+            "enabled": True,
+            "version": bundle["version"],
+            "files": planned_files,
+            "owned_values": new_owned,
+        }
+    else:
+        builtin_dirs = {system: builtin for _arch, system, builtin in _DXVK_TARGETS}
+        for relative, recorded in (previous_state or {}).get("files", {}).items():
+            system_name, _separator, filename = relative.partition("/")
+            builtin_dir = builtin_dirs.get(system_name)
+            if builtin_dir is None or filename not in {f"{dll}.dll" for dll in DXVK_DLLS}:
+                continue
+            directory = _prefix_system_directory(prefix, system_name)
+            if directory is None:
+                continue
+            target = directory / filename
+            try:
+                current_digest = _file_sha256(target)
+            except FileNotFoundError:
+                continue
+            if current_digest != recorded:
+                output(f"Leaving {target} unchanged; it no longer matches DXVK.")
+                continue
+            builtin = wine_runner_root(wine) / "lib/wine" / builtin_dir / filename
+            if builtin.is_file():
+                file_plan.append((target, builtin, None))
+            else:
+                # System Wine layouts: without a runner copy, removing the
+                # Manager's DLL lets Wine load its own builtin again.
+                file_plan.append((target, None, None))
+        for key, name, data in (previous_state or {}).get("owned_values", []):
+            current = current_values.get(key, {}).get(name.casefold())
+            if current is not None and current[2].casefold() == data.casefold():
+                registry_plan.append((key, name, None, current))
+        final_state = None
+        if conflict:
+            final_state = {
+                "schema": DXVK_STATE_SCHEMA, "enabled": False, "version": None,
+                "files": {}, "owned_values": [], "reason": conflict,
+            }
+
+    state_snapshot = _snapshot_file(dxvk_state_path(prefix))
+    if not file_plan and not registry_plan:
+        _write_dxvk_prefix_state(prefix, final_state)
+        changed = state_snapshot != _snapshot_file(dxvk_state_path(prefix))
+        return {"changed": changed, "enabled": enabled, "reason": conflict or ""}
+
+    previous_files = (previous_state or {}).get("files", {})
+    pending_state = {
+        "schema": DXVK_STATE_SCHEMA,
+        "enabled": enabled,
+        "pending": True,
+        "version": bundle["version"] if enabled else (previous_state or {}).get("version"),
+        "files": {**previous_files, **planned_files},
+        "owned_values": [
+            list(item) for item in dict.fromkeys(
+                tuple(item) for item in [
+                    *(previous_state or {}).get("owned_values", []),
+                    *([key, name, data] for key, name, data, _current in registry_plan
+                      if data is not None),
+                ]
+            )
+        ],
+    }
+    registry_undo: list[tuple[str, str, tuple[str, str, str] | None]] = []
+    file_undo: list[tuple[Path, tuple[bytes, int] | None]] = []
+
+    def change_files() -> None:
+        deadline = time.monotonic() + DXVK_FILE_PHASE_TIMEOUT_SECONDS
+        for target, source, expected in file_plan:
+            if time.monotonic() > deadline:
+                raise TimeoutError("Copying the Direct3D DLLs took too long.")
+            file_undo.append((target, _snapshot_file(target)))
+            if source is None:
+                target.unlink()
+            else:
+                _install_verified_file(
+                    source, target, expected or _file_sha256(source)
+                )
+
+    def change_registry() -> None:
+        nonlocal registry_undo
+        if not registry_plan:
+            return
+        if not _manager_create and wine_running_in_prefix(prefix, wine):
+            # Someone started Wine without the lock; never change the
+            # registry under a running Office. Completed steps are rolled back.
+            raise DxvkBusyError(
+                "Wine started in this environment while the Direct3D backend "
+                "was changing; the change was postponed."
+            )
+        registry_undo = [(key, name, current) for key, name, _data, current in registry_plan]
+        _import_registry_changes(
+            prefix, wine, env,
+            [(key, name, data) for key, name, data, _current in registry_plan],
+            **callbacks,
+        )
+
+    def undo_registry(errors: list[str]) -> None:
+        if not registry_undo:
+            return
+        try:
+            _import_registry_changes(prefix, wine, env, [
+                (key, previous[0] if previous else name,
+                 previous[2] if previous else None)
+                for key, name, previous in registry_undo
+            ])
+        except Exception as rollback_error:  # noqa: BLE001 - report all
+            errors.append(str(rollback_error))
+
+    def undo_files(errors: list[str]) -> None:
+        for target, snapshot in reversed(file_undo):
+            try:
+                _restore_file(target, snapshot)
+            except Exception as rollback_error:  # noqa: BLE001 - report all
+                errors.append(str(rollback_error))
+
+    try:
+        _write_dxvk_prefix_state(prefix, pending_state)
+        # Order the steps so the DLL files only change while the registry keeps
+        # these DLLs on Wine's default (builtin) load order; a starting Office
+        # then never mixes DXVK and WineD3D DLLs. Rollback runs in reverse.
+        if enabled:
+            change_files()
+            change_registry()
+        else:
+            change_registry()
+            change_files()
+        _write_dxvk_prefix_state(prefix, final_state)
+    except BaseException as error:
+        rollback_errors: list[str] = []
+        if enabled:
+            undo_registry(rollback_errors)
+            undo_files(rollback_errors)
+        else:
+            undo_files(rollback_errors)
+            undo_registry(rollback_errors)
+        if not rollback_errors:
+            try:
+                _restore_file(dxvk_state_path(prefix), state_snapshot)
+                if state_snapshot is not None:
+                    os.chmod(dxvk_state_path(prefix), 0o600)
+            except Exception as rollback_error:  # noqa: BLE001 - report all
+                rollback_errors.append(str(rollback_error))
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(error, DxvkBusyError) and not rollback_errors:
+            raise
+        action = "enable" if enabled else "disable"
+        if rollback_errors:
+            # The pending ownership record stays, so a later run can finish.
+            raise RuntimeError(
+                f"Could not {action} DXVK: {error}. Restoring the previous "
+                f"Direct3D setup also failed: {'; '.join(rollback_errors)}"
+            ) from error
+        raise RuntimeError(
+            f"Could not {action} DXVK: {error}. The previous Direct3D setup "
+            "was restored."
+        ) from error
+    if enabled:
+        output(f"DXVK {DXVK_VERSION} is installed for Direct3D 10 and 11.")
+    else:
+        output("Direct3D uses Wine's builtin WineD3D.")
+    return {
+        "changed": True, "enabled": enabled, "reason": conflict or "",
+        "registry_changed": bool(registry_plan),
+    }
+
+
+def _user_reg_values(prefix: Path, key: str) -> dict[str, str] | None:
+    """Read string values of one HKCU key from user.reg without starting Wine."""
+    sections = _user_reg_sections(prefix)
+    if sections is None:
+        return None
+    relative = key.split("\\", 1)[1] if key.upper().startswith("HKCU\\") else key
+    return {
+        folded: data
+        for folded, (_name, data, _kind) in sections.get(relative.casefold(), {}).items()
+    }
+
+
+_USER_REG_CACHE: dict[str, tuple[tuple[int, ...], dict[str, dict[str, tuple[str, str, str]]]]] = {}
+
+
+def _user_reg_sections(prefix: Path) -> dict[str, dict[str, tuple[str, str, str]]] | None:
+    """Parse every key's values in user.reg as (name, data, type), cached by stat."""
+    path = prefix / "user.reg"
+    try:
+        info = path.stat()
+        # Wine saves user.reg through a new file and rename, so the inode
+        # changes with every save even within one timestamp tick.
+        identity = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        cached = _USER_REG_CACHE.get(str(path))
+        if cached and cached[0] == identity:
+            return cached[1]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    sections: dict[str, dict[str, tuple[str, str, str]]] = {}
+    current: dict[str, tuple[str, str, str]] | None = None
+    pattern = re.compile(r'^"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"\s*$')
+    # Other value types: str(2):"…" (expand), str(7):"…", hex…:, dword:.
+    other = re.compile(r'^"((?:[^"\\]|\\.)*)"=((?:str|hex|dword)[^:]*):')
+    for line in lines:
+        if line.startswith("["):
+            closing = line.find("]")
+            section = line[1:closing].replace("\\\\", "\\") if closing > 0 else ""
+            current = sections.setdefault(section.casefold(), {})
+            continue
+        if current is None:
+            continue
+        match = pattern.match(line)
+        if match:
+            name = re.sub(r"\\(.)", r"\1", match.group(1))
+            data = re.sub(r"\\(.)", r"\1", match.group(2))
+            current[name.casefold()] = (name, data, "REG_SZ")
+            continue
+        match = other.match(line)
+        if match:
+            name = re.sub(r"\\(.)", r"\1", match.group(1))
+            # Never treated as a load order: a marker that is neither native
+            # nor builtin, so these values count as user-owned conflicts.
+            current[name.casefold()] = (name, f"<{match.group(2)} value>", match.group(2))
+    _USER_REG_CACHE[str(path)] = (identity, sections)
+    return sections
+
+
+_FILE_DIGEST_CACHE: dict[str, tuple[tuple[int, int, int], str]] = {}
+
+
+def _cached_file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file, recomputed only when its size, mtime or inode change."""
+    try:
+        info = path.stat()
+        identity = (info.st_size, info.st_mtime_ns, info.st_ino)
+        cached = _FILE_DIGEST_CACHE.get(str(path))
+        if cached and cached[0] == identity:
+            return cached[1]
+        digest = _file_sha256(path)
+    except OSError:
+        return None
+    _FILE_DIGEST_CACHE[str(path)] = (identity, digest)
+    return digest
+
+
+def dxvk_prefix_effective(prefix_value: PathValue, state: dict | None = None) -> bool:
+    """Return whether the prefix on disk really has the recorded DXVK setup.
+
+    Checks the recorded DLL hashes and, from user.reg, native global overrides
+    and builtin WebView2 exclusions; it does not trust the record alone.
+    """
+    prefix = normalize_path(prefix_value)
+    if state is None:
+        state = read_dxvk_prefix_state(prefix)
+    if not state or not state["enabled"] or state.get("pending") or not state["files"]:
+        return False
+    for relative, expected in state["files"].items():
+        if _cached_file_sha256(prefix / "drive_c/windows" / relative) != expected:
+            return False
+    overrides = _user_reg_values(prefix, DXVK_DLL_OVERRIDES_KEY)
+    if overrides is None or not all(
+            _is_native_load_order(overrides.get(dll, "")) for dll in DXVK_DLLS):
+        return False
+    for executable in DXVK_EXCLUDED_PROCESSES:
+        excluded = _user_reg_values(prefix, dxvk_app_defaults_key(executable)) or {}
+        if not all(excluded.get(dll, "").replace(" ", "").casefold()
+                   in _BUILTIN_LOAD_ORDERS for dll in DXVK_DLLS):
+            return False
+    return True
+
+
+def office_app_dxvk_override(prefix_value: PathValue) -> str | None:
+    """Describe an AppDefaults entry that keeps an Office program off DXVK."""
+    prefix = normalize_path(prefix_value)
+    for executable in OFFICE_X11_EXECUTABLES:
+        values = _user_reg_values(prefix, dxvk_app_defaults_key(executable)) or {}
+        for dll in DXVK_DLLS:
+            data = values.get(dll)
+            if data is not None and not _is_native_load_order(data):
+                return (
+                    f"AppDefaults\\{executable}\\DllOverrides sets {dll}={data or '(empty)'}, "
+                    f"so {executable} does not use DXVK."
+                )
+    return None
+
+
+def dxvk_prefix_converged(prefix_value: PathValue, wine_value: PathValue,
+                          enabled: bool) -> bool:
+    """Cheaply check, without starting Wine, whether a prefix matches `enabled`."""
+    prefix = normalize_path(prefix_value)
+    state = read_dxvk_prefix_state(prefix)
+    if state is not None and state.get("pending"):
+        return False
+    settled_off = state is None or (
+        not state["enabled"] and not state["files"] and not state["owned_values"]
+    )
+    if not enabled:
+        return settled_off
+    try:
+        bundle = load_dxvk_bundle(wine_value)
+    except ValueError:
+        return False
+    if bundle is None:
+        return False
+    overrides = _user_reg_values(prefix, DXVK_DLL_OVERRIDES_KEY)
+    if overrides is None:
+        return False
+    owned = _owned_value_keys(state)
+    as_query = {
+        key: _user_reg_query_values(prefix, key)
+        for key in {key for key, _name, _data in dxvk_managed_registry_values()}
+    }
+    if (_dxvk_override_conflict(as_query, owned)
+            or _dxvk_file_conflict(prefix, normalize_path(wine_value), bundle, state)):
+        return state is not None and settled_off
+    if state is None or not state["enabled"] or state.get("version") != DXVK_VERSION:
+        return False
+    for architecture, system_name, _builtin in _DXVK_TARGETS:
+        directory = prefix / "drive_c/windows" / system_name
+        if not directory.is_dir():
+            if architecture == "x64":
+                return False
+            continue
+        for dll in DXVK_DLLS:
+            expected = bundle["files"][f"{architecture}/{dll}.dll"]
+            if state["files"].get(f"{system_name}/{dll}.dll") != expected:
+                return False
+            try:
+                if _file_sha256(directory / f"{dll}.dll") != expected:
+                    return False
+            except OSError:
+                return False
+    if not all(_is_native_load_order(overrides.get(dll, "")) for dll in DXVK_DLLS):
+        return False
+    for executable in DXVK_EXCLUDED_PROCESSES:
+        excluded = _user_reg_values(prefix, dxvk_app_defaults_key(executable)) or {}
+        if not all(excluded.get(dll, "").replace(" ", "").casefold()
+                   in _BUILTIN_LOAD_ORDERS for dll in DXVK_DLLS):
+            return False
+    return True
+
+
+def converge_dxvk_state(prefix_value: PathValue, wine_value: PathValue,
+                        enabled: bool | None, output: Output = lambda _line: None, *,
+                        idle_wait: float = 0.0, cancel_event=None,
+                        process_callback=None) -> dict:
+    """Bring a managed prefix to the requested DXVK state when Wine is idle.
+
+    `enabled=None` means support is unknown; the prefix is then left as it is.
+    The result reports `deferred` when Wine is running and nothing was changed.
+    Nothing here closes or kills Wine.
+    """
+    result = {"changed": False, "deferred": False, "enabled": enabled, "reason": ""}
+    prefix = validate_prefix(prefix_value)
+    if enabled is None or not is_prefix_owned(prefix):
+        return result
+    wine = require_wine(str(wine_value))
+    if dxvk_prefix_converged(prefix, wine, enabled):
+        return result
+    deferred_reason = "Wine is running; the Direct3D backend will change after Wine stops."
+    if not wait_for_prefix_idle(prefix, wine, idle_wait, cancel_event):
+        result["deferred"] = True
+        result["reason"] = deferred_reason
+        return result
+    try:
+        applied = apply_dxvk_state(
+            prefix, wine, enabled, output,
+            cancel_event=cancel_event, process_callback=process_callback,
+        )
+    except DxvkBusyError:
+        result["deferred"] = True
+        result["reason"] = deferred_reason
+        return result
+    result.update(applied)
+    return result
+
+
+# --- Vulkan capability probe ----------------------------------------------
+
+def _vulkan_version_text(value: int) -> str:
+    return f"{(value >> 22) & 0x7F}.{(value >> 12) & 0x3FF}.{value & 0xFFF}"
+
+
+def _probe_result(supported: bool | None, code: str, reason: str,
+                  devices: list | None = None) -> dict:
+    return {
+        "schema": DXVK_PROBE_SCHEMA,
+        "supported": supported,
+        "code": code,
+        "reason": reason,
+        "devices": devices or [],
+    }
+
+
+def probe_vulkan_for_dxvk() -> dict:
+    """Inspect Vulkan with ctypes; run only in a child process (see run_dxvk_probe)."""
+    import ctypes
+
+    try:
+        vulkan = ctypes.CDLL("libvulkan.so.1")
+    except OSError:
+        return _probe_result(
+            False, "no-loader",
+            "The Vulkan loader (libvulkan.so.1) is not installed.",
+        )
+
+    class ApplicationInfo(ctypes.Structure):
+        _fields_ = [
+            ("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
+            ("pApplicationName", ctypes.c_char_p), ("applicationVersion", ctypes.c_uint32),
+            ("pEngineName", ctypes.c_char_p), ("engineVersion", ctypes.c_uint32),
+            ("apiVersion", ctypes.c_uint32),
+        ]
+
+    class InstanceCreateInfo(ctypes.Structure):
+        _fields_ = [
+            ("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p),
+            ("flags", ctypes.c_uint32), ("pApplicationInfo", ctypes.POINTER(ApplicationInfo)),
+            ("enabledLayerCount", ctypes.c_uint32), ("ppEnabledLayerNames", ctypes.c_void_p),
+            ("enabledExtensionCount", ctypes.c_uint32),
+            ("ppEnabledExtensionNames", ctypes.c_void_p),
+        ]
+
+    class ExtensionProperties(ctypes.Structure):
+        _fields_ = [("extensionName", ctypes.c_char * 256), ("specVersion", ctypes.c_uint32)]
+
+    class PhysicalDeviceHeader(ctypes.Structure):
+        # Leading members of VkPhysicalDeviceProperties; the buffer below is larger.
+        _fields_ = [
+            ("apiVersion", ctypes.c_uint32), ("driverVersion", ctypes.c_uint32),
+            ("vendorID", ctypes.c_uint32), ("deviceID", ctypes.c_uint32),
+            ("deviceType", ctypes.c_int32), ("deviceName", ctypes.c_char * 256),
+        ]
+
+    required_version = (DXVK_REQUIRED_VULKAN_VERSION[0] << 22) \
+        | (DXVK_REQUIRED_VULKAN_VERSION[1] << 12)
+    required_text = ".".join(str(part) for part in DXVK_REQUIRED_VULKAN_VERSION)
+    try:
+        enumerate_version = vulkan.vkEnumerateInstanceVersion
+    except AttributeError:
+        enumerate_version = None
+    if enumerate_version is None:
+        return _probe_result(
+            False, "old-loader",
+            f"The Vulkan loader is older than Vulkan {required_text}.",
+        )
+    instance_version = ctypes.c_uint32(0)
+    if enumerate_version(ctypes.byref(instance_version)) != 0 \
+            or instance_version.value < required_version:
+        return _probe_result(
+            False, "old-loader",
+            f"The Vulkan loader supports Vulkan "
+            f"{_vulkan_version_text(instance_version.value)}; DXVK {DXVK_VERSION} "
+            f"needs Vulkan {required_text}.",
+        )
+    application = ApplicationInfo(
+        0, None, b"Wine4Office DXVK check", 1, b"Wine4Office", 1, required_version
+    )
+    create_info = InstanceCreateInfo(1, None, 0, ctypes.pointer(application), 0, None, 0, None)
+    instance = ctypes.c_void_p()
+    vulkan.vkCreateInstance.restype = ctypes.c_int32
+    status = vulkan.vkCreateInstance(ctypes.byref(create_info), None, ctypes.byref(instance))
+    if status != 0 or not instance.value:
+        return _probe_result(
+            False, "no-instance",
+            f"No Vulkan driver could be started (VkResult {status}).",
+        )
+    devices: list[dict] = []
+    try:
+        vulkan.vkEnumeratePhysicalDevices.restype = ctypes.c_int32
+        vulkan.vkEnumerateDeviceExtensionProperties.restype = ctypes.c_int32
+        count = ctypes.c_uint32(0)
+        if vulkan.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), None) not in (0, 5):
+            return _probe_result(False, "no-device", "Vulkan reported no graphics devices.")
+        handles = (ctypes.c_void_p * max(1, count.value))()
+        if vulkan.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), handles) not in (0, 5):
+            return _probe_result(False, "no-device", "Vulkan reported no graphics devices.")
+        for index in range(count.value):
+            handle = ctypes.c_void_p(handles[index])
+            buffer = ctypes.create_string_buffer(4096)
+            vulkan.vkGetPhysicalDeviceProperties(handle, buffer)
+            header = PhysicalDeviceHeader.from_buffer(buffer)
+            extension_count = ctypes.c_uint32(0)
+            vulkan.vkEnumerateDeviceExtensionProperties(
+                handle, None, ctypes.byref(extension_count), None
+            )
+            extensions = (ExtensionProperties * max(1, extension_count.value))()
+            vulkan.vkEnumerateDeviceExtensionProperties(
+                handle, None, ctypes.byref(extension_count), extensions
+            )
+            available = {
+                extensions[item].extensionName.decode("ascii", "replace")
+                for item in range(extension_count.value)
+            }
+            devices.append({
+                "name": header.deviceName.decode("utf-8", "replace"),
+                "type": int(header.deviceType),
+                "api_version": _vulkan_version_text(header.apiVersion),
+                "api_supported": header.apiVersion >= required_version,
+                "missing_extensions": [
+                    name for name in DXVK_REQUIRED_DEVICE_EXTENSIONS if name not in available
+                ],
+            })
+    finally:
+        vulkan.vkDestroyInstance(instance, None)
+    return evaluate_dxvk_devices(devices)
+
+
+def evaluate_dxvk_devices(devices: list[dict]) -> dict:
+    """Decide DXVK support from probed device records (type 4 is a CPU device)."""
+    hardware = [device for device in devices if device.get("type") != 4]
+    if not devices:
+        return _probe_result(False, "no-device", "Vulkan reported no graphics devices.")
+    if not hardware:
+        return _probe_result(
+            False, "cpu-only",
+            "Only a software (CPU) Vulkan device is available.", devices,
+        )
+    for device in hardware:
+        if device.get("api_supported") and not device.get("missing_extensions"):
+            return _probe_result(
+                True, "supported",
+                f"{device.get('name', 'GPU')} supports Vulkan "
+                f"{device.get('api_version', '')}.", devices,
+            )
+    best = hardware[0]
+    required_text = ".".join(str(part) for part in DXVK_REQUIRED_VULKAN_VERSION)
+    if not any(device.get("api_supported") for device in hardware):
+        return _probe_result(
+            False, "old-api",
+            f"{best.get('name', 'The GPU')} supports Vulkan "
+            f"{best.get('api_version', 'unknown')}; DXVK {DXVK_VERSION} needs "
+            f"Vulkan {required_text}.", devices,
+        )
+    best = next(device for device in hardware if device.get("api_supported"))
+    return _probe_result(
+        False, "missing-extensions",
+        f"{best.get('name', 'The GPU')} lacks Vulkan extensions DXVK {DXVK_VERSION} "
+        f"needs: {', '.join(best.get('missing_extensions', []))}.", devices,
+    )
+
+
+def run_dxvk_probe_cli() -> int:
+    """Hidden entry point: print one JSON probe result and exit."""
+    try:
+        result = probe_vulkan_for_dxvk()
+    except Exception as error:  # noqa: BLE001 - must always report JSON
+        result = _probe_result(None, "error", f"The Vulkan check failed: {error}")
+    sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def dxvk_probe_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, DXVK_PROBE_FLAG]
+    return [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("wine4office_manager.py")),
+        DXVK_PROBE_FLAG,
+    ]
+
+
+def parse_dxvk_probe_output(stdout: str, returncode: int) -> dict:
+    """Validate the child's JSON; anything unexpected becomes an unknown result."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            break
+        if (isinstance(payload, dict) and payload.get("schema") == DXVK_PROBE_SCHEMA
+                and payload.get("supported") in (True, False, None)
+                and isinstance(payload.get("code"), str)
+                and isinstance(payload.get("reason"), str)
+                and isinstance(payload.get("devices"), list)):
+            return payload
+        break
+    return _probe_result(
+        None, "error",
+        f"The Vulkan check failed (exit status {returncode}).",
+    )
+
+
+def run_dxvk_probe(timeout: float = DXVK_PROBE_TIMEOUT_SECONDS) -> dict:
+    """Run the Vulkan probe in a child process so a driver crash cannot stop the Manager."""
+    try:
+        completed = subprocess.run(
+            dxvk_probe_command(), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _probe_result(
+            None, "timeout",
+            f"The Vulkan check did not finish within {int(timeout)} seconds.",
+        )
+    except OSError as error:
+        return _probe_result(None, "error", f"The Vulkan check could not start: {error}")
+    return parse_dxvk_probe_output(completed.stdout, completed.returncode)
+
+
+def _vulkan_icd_directories() -> list[Path]:
+    config_dirs = [config_home()] + [
+        Path(item) for item in os.environ.get("XDG_CONFIG_DIRS", "/etc/xdg").split(":") if item
+    ]
+    data_dirs = [data_home()] + [
+        Path(item) for item in
+        os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":") if item
+    ]
+    directories = [path / "vulkan/icd.d" for path in config_dirs]
+    directories.append(Path("/etc/vulkan/icd.d"))
+    directories.extend(path / "vulkan/icd.d" for path in data_dirs)
+    directories.extend((Path("/usr/local/share/vulkan/icd.d"), Path("/usr/share/vulkan/icd.d")))
+    return list(dict.fromkeys(directories))
+
+
+def _stat_identity(path: Path) -> list:
+    try:
+        info = path.stat()
+    except OSError:
+        return [str(path), None]
+    return [str(path), info.st_size, info.st_mtime_ns, info.st_ino]
+
+
+def vulkan_icd_fingerprint() -> str:
+    """Fingerprint Vulkan drivers (ICD JSON, their libraries, GPUs) and DXVK version."""
+    records: list = [["dxvk", DXVK_VERSION, DXVK_PROBE_SCHEMA]]
+    for name in ("VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_ADD_DRIVER_FILES",
+                 "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE",
+                 "VK_LOADER_DEVICE_SELECT", "MESA_VK_DEVICE_SELECT"):
+        records.append([name, os.environ.get(name)])
+    manifests: list[Path] = []
+    for value in (os.environ.get("VK_ICD_FILENAMES", ""),
+                  os.environ.get("VK_DRIVER_FILES", ""),
+                  os.environ.get("VK_ADD_DRIVER_FILES", "")):
+        for item in value.split(":"):
+            if item:
+                path = Path(item)
+                manifests.extend(sorted(path.glob("*.json")) if path.is_dir() else [path])
+    for directory in _vulkan_icd_directories():
+        try:
+            manifests.extend(sorted(directory.glob("*.json")))
+        except OSError:
+            continue
+    library_dirs = (
+        Path("/usr/lib/x86_64-linux-gnu"), Path("/usr/lib64"), Path("/usr/lib"),
+        Path("/lib/x86_64-linux-gnu"), Path("/lib64"), Path("/usr/local/lib"),
+    )
+    for manifest in dict.fromkeys(manifests):
+        records.append(["icd", *_stat_identity(manifest)])
+        try:
+            library = json.loads(manifest.read_text(encoding="utf-8"))["ICD"]["library_path"]
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+            continue
+        if not isinstance(library, str):
+            continue
+        candidate = Path(library)
+        if not candidate.is_absolute():
+            if "/" in library:
+                candidate = manifest.parent / library
+            else:
+                candidate = next(
+                    (directory / library for directory in library_dirs
+                     if (directory / library).exists()),
+                    candidate,
+                )
+        records.append(["library", *_stat_identity(candidate)])
+    for directory in library_dirs:
+        loader = directory / "libvulkan.so.1"
+        if loader.exists():
+            records.append(["loader", *_stat_identity(loader.resolve())])
+    for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
+        if "-" in card.name:
+            continue
+        identity = []
+        for field in ("vendor", "device"):
+            try:
+                identity.append((card / "device" / field).read_text().strip())
+            except OSError:
+                identity.append(None)
+        try:
+            identity.append(Path(os.readlink(card / "device/driver")).name)
+        except OSError:
+            identity.append(None)
+        records.append(["gpu", card.name, *identity])
+    try:
+        records.append(["boot", Path("/proc/sys/kernel/random/boot_id").read_text().strip()])
+    except OSError:
+        records.append(["boot", None])
+    return hashlib.sha256(
+        json.dumps(records, sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def dxvk_support_cache_path() -> Path:
+    return config_home() / "wine4office/dxvk-support.json"
+
+
+def cached_dxvk_support() -> dict | None:
+    """Return a cached probe result that still matches this host, without probing."""
+    try:
+        cache = json.loads(dxvk_support_cache_path().read_text(encoding="utf-8"))
+        result = cache["result"]
+        checked_at = float(cache["checked_at"])
+        fingerprint = cache["fingerprint"]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return None
+    if fingerprint != vulkan_icd_fingerprint():
+        return None
+    result = parse_dxvk_probe_output(json.dumps(result), 0)
+    transient = (result.get("supported") is None
+                 or result.get("code") in DXVK_TRANSIENT_PROBE_CODES)
+    if transient and time.time() - checked_at > DXVK_PROBE_RETRY_SECONDS:
+        return None
+    return result
+
+
+def dxvk_host_support(*, refresh: bool = False,
+                      timeout: float = DXVK_PROBE_TIMEOUT_SECONDS) -> dict:
+    """Return cached or freshly probed DXVK host support (`supported` may be None)."""
+    if not refresh:
+        cached = cached_dxvk_support()
+        if cached is not None:
+            return cached
+    fingerprint = vulkan_icd_fingerprint()
+    result = run_dxvk_probe(timeout)
+    try:
+        _preload_json_write(dxvk_support_cache_path(), {
+            "fingerprint": fingerprint,
+            "checked_at": time.time(),
+            "result": result,
+        }, 0o600)
+    except OSError:
+        pass
+    return result
+
+
+def active_use_dxvk(config: dict) -> bool:
+    """Return the DXVK selection that the current Wine session should use."""
+    use_dxvk = config.get("use_dxvk", True) is not False
+    if config.get("graphics_restart_required") is True:
+        use_dxvk = config.get("graphics_active_use_dxvk", use_dxvk) is not False
+    return use_dxvk
+
+
+def direct3d_selection(use_dxvk: bool, use_vulkan: bool) -> str:
+    if use_dxvk:
+        return "dxvk"
+    return "vulkan" if use_vulkan else "opengl"
+
+
+def dxvk_requested(config: dict, wine_value: PathValue, *,
+                   support: dict | None = None, use_dxvk: bool | None = None,
+                   probe: bool = True) -> tuple[bool | None, str]:
+    """Return (enable DXVK?, reason). None means support is still unknown."""
+    if use_dxvk is None:
+        use_dxvk = active_use_dxvk(config)
+    if not use_dxvk:
+        return False, "WineD3D is selected."
+    try:
+        bundle = load_dxvk_bundle(wine_value)
+    except ValueError as error:
+        return False, str(error)
+    if bundle is None:
+        return False, f"The installed Wine runner does not include DXVK {DXVK_VERSION}."
+    if support is None:
+        support = dxvk_host_support() if probe else cached_dxvk_support()
+    if support is None:
+        return None, "Checking Vulkan support…"
+    if support.get("supported") is True:
+        return True, ""
+    if support.get("supported") is False:
+        return False, str(support.get("reason") or "Vulkan support is insufficient.")
+    return None, str(support.get("reason") or "Vulkan support could not be verified.")
+
+
+def dxvk_for_new_prefix(config: dict) -> bool:
+    """Return whether a newly created prefix should start with DXVK."""
+    try:
+        requested, _reason = dxvk_requested(config, config["wine"])
+    except Exception:  # noqa: BLE001 - creation falls back to WineD3D
+        return False
+    return requested is True
+
+
+def environment_dxvk_override(value: str) -> str | None:
+    """Describe a user WINEDLLOVERRIDES entry that keeps a DXVK DLL off native.
+
+    The Manager never adds the DXVK DLLs to WINEDLLOVERRIDES. A user value that
+    names them wins over the prefix registry, so it is respected and reported.
+    """
+    for item in value.split(";"):
+        modules, separator, order = item.partition("=")
+        if not separator:
+            continue
+        names = {
+            part.strip().casefold().lstrip("*").removesuffix(".dll")
+            for part in modules.split(",")
+        }
+        if names.intersection(DXVK_DLLS) and not _is_native_load_order(order):
+            return (
+                f"WINEDLLOVERRIDES={item.strip()} is set in the environment and "
+                "overrides the Direct3D DLLs."
+            )
+    return None
+
+
+def direct3d_status(config: dict, support: dict | None = None) -> dict:
+    """Describe selected and actually active Direct3D backends for the UI."""
+    prefix = str(config.get("prefix", ""))
+    wine = str(config.get("wine", ""))
+    selected = direct3d_selection(
+        config.get("use_dxvk", True) is not False, config.get("use_vulkan") is True
+    )
+    renderer = "Vulkan" if config.get("use_vulkan") is True else "OpenGL"
+    if config.get("graphics_restart_required") is True:
+        renderer = "Vulkan" if config.get("graphics_active_use_vulkan") is True else "OpenGL"
+    if support is None:
+        try:
+            bundled = load_dxvk_bundle(wine) is not None
+        except ValueError:
+            bundled = False
+        requested, reason = (
+            (None, "Checking Vulkan support…") if bundled else
+            (False, f"The installed Wine runner does not include DXVK {DXVK_VERSION}.")
+        )
+    else:
+        requested, reason = dxvk_requested(
+            config, wine, support=support, use_dxvk=True, probe=False,
+        )
+    state = read_dxvk_prefix_state(prefix) if prefix.strip() else None
+    # "Active" means installed in the prefix by the Manager and not overridden
+    # for Office programs; the UI words it as installed, not as in use.
+    active = bool(state and state["enabled"] and not state.get("pending"))
+    if active and not dxvk_prefix_effective(prefix, state):
+        active = False
+        reason = (
+            "DXVK is not fully set up in this Wine environment; Wine4Office "
+            "completes it when Wine is not running."
+        )
+    override = environment_dxvk_override(os.environ.get("WINEDLLOVERRIDES", ""))
+    if active and not override:
+        override = office_app_dxvk_override(prefix)
+    if override:
+        active = False
+        reason = override
+    if state and not state["enabled"] and state.get("reason"):
+        reason = str(state["reason"])
+    return {
+        "selected": selected,
+        "dxvk_available": requested,
+        "dxvk_reason": reason,
+        "dxvk_active": active,
+        "dxvk_version": state.get("version") if active else None,
+        "wined3d_renderer": renderer,
+        "excluded_processes": list(DXVK_EXCLUDED_PROCESSES),
+    }
+
+
 def create_environment(prefix_value: str, wine_value: str, recreate: bool, output: Output,
                        cancel_event=None, process_callback=None,
-                       progress_callback: Callable[[str, int | None], None] | None = None) -> str:
-    """Create or replace a managed Wine prefix and report setup phases."""
+                       progress_callback: Callable[[str, int | None], None] | None = None,
+                       *, dxvk: bool = False) -> str:
+    """Create or replace a managed Wine prefix and report setup phases.
+
+    With `dxvk`, the runner's bundled DXVK is installed before the registry is
+    flushed; a DXVK failure is rolled back and leaves the prefix on WineD3D.
+    """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
     kind = classify_prefix(str(prefix))
@@ -1494,6 +3011,19 @@ def create_environment(prefix_value: str, wine_value: str, recreate: bool, outpu
             "/d", "x11,wayland", "/f",
         ], wine_environment(prefix, wine, _manager_create=True), output,
             cancel_event=cancel_event, process_callback=process_callback)
+        if dxvk:
+            if progress_callback is not None:
+                progress_callback("Installing DXVK…", None)
+            try:
+                apply_dxvk_state(
+                    prefix, wine, True, output, cancel_event=cancel_event,
+                    process_callback=process_callback, wait_for_registry_save=False,
+                    _manager_create=True,
+                )
+            except Exception as error:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise
+                output(f"WARNING: {error} Direct3D uses WineD3D.")
         # Wine writes system.reg and user.reg only when the server shuts down.
         finalize_new_prefix(
             prefix, wine, output, cancel_event=cancel_event,
@@ -1787,12 +3317,16 @@ def launch_app_process(
         prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
         documents: Iterable[str] = (), use_x11: bool = True,
         use_vulkan: bool = False,
-        *, capture_diagnostics: bool = False) -> subprocess.Popen:
+        *, capture_diagnostics: bool = False,
+        use_dxvk: bool | None = None) -> subprocess.Popen:
     """Launch one Office application and return its process handle.
 
     Diagnostic capture is deliberately narrow: Wine's noisy default channels are
     disabled and only exception messages are enabled.  The supervisor drains the
     pipe into a bounded ring so a broken application cannot fill the user's disk.
+
+    `use_dxvk` (True/False) verifies the prefix's Direct3D backend first and
+    repairs it only while no Wine process runs; None skips the check.
     """
     prefix = validate_prefix(prefix_value)
     wine = require_wine(wine_value)
@@ -1800,33 +3334,52 @@ def launch_app_process(
     if not executable:
         raise FileNotFoundError(f"{APP_META[app]['exe']} is not installed in {prefix}")
     managed = is_prefix_owned(prefix)
-    ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
-    if app == "word":
-        prepare_office_building_blocks(prefix)
-    register_cloud_fonts(prefix, wine, helper, use_x11)
-    env = wine_environment(prefix, wine, use_x11, use_vulkan)
-    arguments = [_windows_document_path(document, wine, env) for document in documents]
-    if app == "outlook" and managed:
-        prepare_outlook_first_run(prefix, wine, env)
-        env = _outlook_environment(env)
-    if capture_diagnostics:
-        env["WINEDEBUG"] = "-all,+seh,+timestamp"
-        stdout = subprocess.PIPE
-        stderr = subprocess.STDOUT
-    else:
-        stdout = subprocess.DEVNULL
-        stderr = subprocess.DEVNULL
-    return subprocess.Popen(
-        [str(wine), str(executable), *arguments], env=env,
-        stdout=stdout, stderr=stderr, start_new_session=True,
-    )
+    if managed and use_dxvk is not None:
+        # Before any other Wine command: a running wineserver defers the change.
+        try:
+            converge_dxvk_state(prefix, wine, use_dxvk)
+        except Exception:  # noqa: BLE001 - the launch must not depend on DXVK
+            pass
+
+    def start() -> subprocess.Popen:
+        ensure_safe_x11_defaults(str(prefix), str(wine), use_x11)
+        if app == "word":
+            prepare_office_building_blocks(prefix)
+        register_cloud_fonts(prefix, wine, helper, use_x11)
+        env = wine_environment(prefix, wine, use_x11, use_vulkan)
+        arguments = [
+            _windows_document_path(document, wine, env) for document in documents
+        ]
+        if app == "outlook" and managed:
+            prepare_outlook_first_run(prefix, wine, env)
+            env = _outlook_environment(env)
+        if capture_diagnostics:
+            env["WINEDEBUG"] = "-all,+seh,+timestamp"
+            stdout = subprocess.PIPE
+            stderr = subprocess.STDOUT
+        else:
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
+        return subprocess.Popen(
+            [str(wine), str(executable), *arguments], env=env,
+            stdout=stdout, stderr=stderr, start_new_session=True,
+        )
+
+    if not managed:
+        return start()
+    # Every Wine command of this launch runs under the shared DXVK lock, so a
+    # DXVK change never overlaps a starting Office app. The launch proceeds
+    # without the lock if a change is still running after the timeout.
+    with dxvk_prefix_lock(prefix, shared=True, timeout=DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS):
+        return start()
 
 
 def launch_app(prefix_value: str, wine_value: str, app: str, helper: Path | None = None,
                documents: Iterable[str] = (), use_x11: bool = True,
-               use_vulkan: bool = False) -> int:
+               use_vulkan: bool = False, *, use_dxvk: bool | None = None) -> int:
     process = launch_app_process(
         prefix_value, wine_value, app, helper, documents, use_x11, use_vulkan,
+        use_dxvk=use_dxvk,
     )
     return process.pid
 
@@ -2137,6 +3690,14 @@ def _shortcut_launcher_text(app: str, prefix: Path, wine: Path, executable: Path
         'managed_prefix=false',
         'if [[ $prefix_info == "directory:$(id -u)" && $marker_info == "regular file:$(id -u):600" ]] && cmp -s "$marker" <(printf "Wine4OfficeManager prefix v1\\n"); then',
         '    managed_prefix=true',
+        # Wait while the Manager changes DXVK in this prefix (shared flock on
+        # the lock file it creates); the fd stays open for Wine's lifetime.
+        f'    dxvk_lock="$prefix/{DXVK_LOCK_NAME}"',
+        '    if [[ -f $dxvk_lock && -r $dxvk_lock ]] && command -v flock >/dev/null 2>&1; then',
+        '        exec {dxvk_lock_fd}<"$dxvk_lock"',
+        # A Manager stuck longer than its bounded apply must not block Office.
+        f'        flock -s -w {int(DXVK_LAUNCH_LOCK_TIMEOUT_SECONDS)} "$dxvk_lock_fd" || true',
+        '    fi',
         '    export WINEARCH=win64',
         '    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-riched20=n;mshtml=b}"',
         *(

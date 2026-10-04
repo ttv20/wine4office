@@ -25,6 +25,15 @@ printf 'hidden payload\n' > "$RUNNER/.runner-metadata"
 printf 'gecko x86 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86.msi"
 printf 'gecko x86_64 fixture\n' > "$RUNNER/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi"
 printf 'mono x86 fixture\n' > "$RUNNER/share/wine/mono/wine-mono-11.3.0-x86.msi"
+DXVK_FIXTURE="$RUNNER/share/wine4office/dxvk/3.1.1"
+mkdir -p "$DXVK_FIXTURE/x64" "$DXVK_FIXTURE/x32"
+printf '{"version": "3.1.1"}\n' > "$DXVK_FIXTURE/manifest.json"
+printf 'zlib/libpng license fixture\n' > "$DXVK_FIXTURE/LICENSE"
+for dxvk_arch in x64 x32; do
+    for dxvk_dll in dxgi d3d11 d3d10core; do
+        printf 'MZ dxvk %s %s fixture\n' "$dxvk_arch" "$dxvk_dll" > "$DXVK_FIXTURE/$dxvk_arch/$dxvk_dll.dll"
+    done
+done
 ln -s ../lib/wine/x86_64-windows/kernel32.dll "$RUNNER/bin/kernel32-link"
 printf 'shared hardlink payload\n' > "$RUNNER/share/wine4office/shared target"
 chmod 0640 "$RUNNER/share/wine4office/shared target"
@@ -61,6 +70,18 @@ if "$HERE/packaging/build-release-artifacts.sh" \
     exit 1
 fi
 grep -F "Runner is missing bundled Wine Mono:" "$TMP/missing-mono.log" >/dev/null
+
+MISSING_DXVK_RUNNER="$TMP/missing-dxvk-runner"
+cp -a "$RUNNER" "$MISSING_DXVK_RUNNER"
+rm "$MISSING_DXVK_RUNNER/share/wine4office/dxvk/3.1.1/x32/d3d10core.dll"
+if "$HERE/packaging/build-release-artifacts.sh" \
+    "$MISSING_DXVK_RUNNER" "$MANAGER" "$TMP/release-missing-dxvk" "$VERSION" \
+    "https://updates.example/releases/stable/release.json" \
+    >"$TMP/missing-dxvk.log" 2>&1; then
+    echo "release packaging accepted a runner without the complete DXVK bundle" >&2
+    exit 1
+fi
+grep -F "Runner is missing bundled DXVK:" "$TMP/missing-dxvk.log" >/dev/null
 
 "$HERE/packaging/build-release-artifacts.sh" \
     "$RUNNER" "$MANAGER" "$RELEASE" "$VERSION" \
@@ -107,6 +128,11 @@ tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/gecko/wine-gecko-2.47.4-x86_64.msi" >/dev/null
 tar --zstd -tf "$RELEASE/$WINE_NAME" \
     | grep -Fx "$ROOT/share/wine/mono/wine-mono-11.3.0-x86.msi" >/dev/null
+for dxvk_member in manifest.json LICENSE x64/dxgi.dll x64/d3d11.dll x64/d3d10core.dll \
+    x32/dxgi.dll x32/d3d11.dll x32/d3d10core.dll; do
+    tar --zstd -tf "$RELEASE/$WINE_NAME" \
+        | grep -Fx "$ROOT/share/wine4office/dxvk/3.1.1/$dxvk_member" >/dev/null
+done
 EXTRACTED="$TMP/extracted"
 mkdir -p "$EXTRACTED"
 tar --zstd -xf "$RELEASE/$WINE_NAME" -C "$EXTRACTED"

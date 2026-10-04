@@ -139,6 +139,9 @@ jobs:
           echo "df2dfc1665c2511882e7cabd56eafd0c0a3d94e5a7e86f969277f6c189d418d3  $mono_dir/wine-mono-${mono_version}-x86.msi" \
             | sha256sum --check
 
+      - name: Bundle DXVK
+        run: tools/wine-build-env/bundle-dxvk.sh "$GITHUB_WORKSPACE/stage/opt/wine4office"
+
       - name: Build standalone Wine4OfficeManager
         run: |
           set -euo pipefail
@@ -152,6 +155,7 @@ jobs:
             '${{ steps.version.outputs.channel }}'
           QT_QPA_PLATFORM=offscreen WINE4OFFICE_MANAGER_ROOT="$PWD/tools/wine4office-manager" \
             build/manager/Wine4OfficeManager --smoke-test
+          tools/wine4office-manager/tests/test_frozen_dxvk_probe.sh build/manager/Wine4OfficeManager
 
       - name: Package separate release artifacts
         env:

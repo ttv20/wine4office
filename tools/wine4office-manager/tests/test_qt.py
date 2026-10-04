@@ -36,6 +36,11 @@ except ImportError:
     HAS_QT = False
 
 
+def i18n_translate(text, language):
+    import wine4office_i18n
+    return wine4office_i18n.translate(text, language)
+
+
 @unittest.skipUnless(HAS_QT, "PySide6 is not installed")
 class QtManagerTests(unittest.TestCase):
     @classmethod
@@ -58,9 +63,11 @@ class QtManagerTests(unittest.TestCase):
             "desktop_copy": False,
             "use_x11": True,
             "use_vulkan": False,
+            "use_dxvk": False,
             "graphics_restart_required": False,
             "graphics_active_use_x11": True,
             "graphics_active_use_vulkan": False,
+            "graphics_active_use_dxvk": False,
             "update_url": "",
             "include_prereleases": False,
             "office_telemetry_disabled": {},
@@ -80,6 +87,10 @@ class QtManagerTests(unittest.TestCase):
             mock.patch.object(backend, "load_config", return_value=dict(self.config)),
             mock.patch.object(backend, "save_config"),
             mock.patch.object(backend, "environment_status", return_value=dict(self.status)),
+            mock.patch.object(
+                backend, "dxvk_host_support",
+                return_value=backend._probe_result(True, "supported", "GPU ok."),
+            ),
         ]
         for patch in self.patches:
             patch.start()
@@ -1138,6 +1149,128 @@ class QtManagerTests(unittest.TestCase):
             self.window._tr("Stop Wine and apply"),
         )
 
+    def _direct3d_snapshot(self, **changes):
+        snapshot = self.state.snapshot()
+        snapshot["direct3d"] = {
+            "selected": "dxvk", "dxvk_available": True, "dxvk_reason": "",
+            "dxvk_active": False, "dxvk_version": None,
+            "wined3d_renderer": "OpenGL", "excluded_processes": ["msedgewebview2.exe"],
+            **changes,
+        }
+        return snapshot
+
+    def _refresh_direct3d(self, **changes):
+        snapshot = self._direct3d_snapshot(**changes)
+        with mock.patch.object(self.state, "snapshot", return_value=snapshot):
+            self.window.refresh_state()
+
+    def test_direct3d_choices_offer_dxvk_first_with_accessible_names(self):
+        buttons = self.window.renderer_group.buttons()
+        self.assertEqual(
+            [button.text() for button in buttons],
+            ["DXVK (recommended)", "OpenGL", "Vulkan (WineD3D)"],
+        )
+        self.assertEqual(
+            self.window.use_dxvk.accessibleName(), "Use DXVK for Direct3D 10 and 11"
+        )
+        self.assertEqual(
+            self.window.use_opengl.accessibleName(), "Use the OpenGL Direct3D renderer"
+        )
+        self.assertEqual(
+            self.window.use_vulkan.accessibleName(), "Use the Vulkan Direct3D renderer"
+        )
+        self.assertEqual(
+            self.window.direct3d_status_label.accessibleName(), "Direct3D backend status"
+        )
+
+    def test_selecting_dxvk_saves_choice_and_requests_restart(self):
+        self.assertTrue(self.window.use_opengl.isChecked())
+        self._refresh_direct3d(selected="opengl", dxvk_available=True)
+        self.assertTrue(self.window.use_dxvk.isEnabled())
+        self.window.use_dxvk.click()
+        config = self.state.snapshot()["config"]
+        self.assertTrue(config["use_dxvk"])
+        self.assertFalse(config["use_vulkan"])
+        self.assertTrue(config["graphics_restart_required"])
+        self.window.use_vulkan.click()
+        config = self.state.snapshot()["config"]
+        self.assertFalse(config["use_dxvk"])
+        self.assertTrue(config["use_vulkan"])
+        self.window.use_opengl.click()
+        config = self.state.snapshot()["config"]
+        self.assertFalse(config["use_dxvk"])
+        self.assertFalse(config["use_vulkan"])
+        self.assertFalse(config["graphics_restart_required"])
+
+    def test_dxvk_default_config_checks_dxvk(self):
+        self.window._set_config_fields({**self.config, "use_dxvk": True})
+        self.assertTrue(self.window.use_dxvk.isChecked())
+        self.assertFalse(self.window.use_opengl.isChecked())
+        self.assertFalse(self.window.use_vulkan.isChecked())
+
+    def test_runner_without_dxvk_bundle_disables_dxvk_choice(self):
+        self.window.refresh_state()
+        self.assertFalse(self.window.use_dxvk.isEnabled())
+        self.assertIn("does not include DXVK", self.window.use_dxvk.toolTip())
+
+    def test_unsupported_dxvk_is_disabled_with_reason(self):
+        reason = "Only a software (CPU) Vulkan device is available."
+        self._refresh_direct3d(dxvk_available=False, dxvk_reason=reason)
+        self.assertFalse(self.window.use_dxvk.isEnabled())
+        self.assertEqual(self.window.use_dxvk.toolTip(), reason)
+        self.assertIn(reason, self.window.direct3d_status_label.text())
+        self.assertIn("using WineD3D", self.window.direct3d_status_label.text())
+        self._refresh_direct3d(dxvk_available=True)
+        self.assertTrue(self.window.use_dxvk.isEnabled())
+        self.assertEqual(self.window.use_dxvk.toolTip(), "")
+
+    def test_direct3d_status_reports_only_real_dxvk_state(self):
+        self._refresh_direct3d(dxvk_active=False)
+        self.assertIn("not active yet", self.window.direct3d_status_label.text())
+        self._refresh_direct3d(dxvk_active=True, dxvk_version="3.1.1")
+        self.assertIn("DXVK 3.1.1 is installed", self.window.direct3d_status_label.text())
+        self.assertIn("WebView2", self.window.direct3d_status_label.text())
+        self._refresh_direct3d(selected="opengl", wined3d_renderer="OpenGL")
+        self.assertEqual(
+            self.window.direct3d_status_label.text(), "Using WineD3D (OpenGL)."
+        )
+        self._refresh_direct3d(dxvk_available=None, dxvk_reason="")
+        self.assertEqual(
+            self.window.direct3d_status_label.text(), "Checking Vulkan support…"
+        )
+
+    def test_direct3d_status_uses_manager_language(self):
+        self.window.language = "he"
+        self._refresh_direct3d(dxvk_active=True, dxvk_version="3.1.1")
+        self.assertIn("DXVK 3.1.1 מותקן", self.window.direct3d_status_label.text())
+        self.assertEqual(i18n_translate("DXVK (recommended)", "he"), "DXVK (מומלץ)")
+
+    def test_supported_dxvk_kept_off_shows_its_reason(self):
+        reason = "AppDefaults\\WINWORD.EXE\\DllOverrides sets d3d11=builtin."
+        self._refresh_direct3d(dxvk_available=True, dxvk_active=False, dxvk_reason=reason)
+        text = self.window.direct3d_status_label.text()
+        self.assertIn("using WineD3D", text)
+        self.assertIn(reason, text)
+        self.assertNotIn("not active yet", text)
+        self.assertTrue(self.window.use_dxvk.isEnabled())
+
+    def test_check_again_forces_a_fresh_vulkan_check(self):
+        self.assertEqual(self.window.dxvk_check_again_button.text(), "Check again")
+        with mock.patch.object(self.state, "refresh_dxvk_support_async",
+                               return_value=True) as refresh:
+            self.window.dxvk_check_again_button.click()
+        refresh.assert_called_once_with(force=True)
+        self.assertEqual(
+            self.window.direct3d_status_label.text(), "Checking Vulkan support…"
+        )
+
+    def test_startup_starts_background_dxvk_check(self):
+        with mock.patch.object(self.state, "refresh_dxvk_support_async") as refresh, \
+             mock.patch.object(self.window, "prompt_reliability_on_first_launch",
+                               return_value=True):
+            self.window.finish_startup()
+        refresh.assert_called_once_with()
+
     def test_apply_graphics_settings_stops_old_backend_then_clears_notice(self):
         self.window.use_wayland.click()
         self.assertTrue(self.state.snapshot()["config"]["graphics_restart_required"])
@@ -1832,7 +1965,8 @@ class QtManagerTests(unittest.TestCase):
         target = self.home / "slow-prefix"
         self.window.prefix_edit.setText(str(target))
 
-        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback,
+                       dxvk=False):
             time.sleep(0.35)
             self._make_prefix(Path(prefix))
             return "ready"

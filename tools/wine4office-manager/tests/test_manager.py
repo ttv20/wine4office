@@ -391,7 +391,8 @@ class ManagerTests(unittest.TestCase):
         self._make_prefix(old)
         new = self.home / "initialized-prefix"
 
-        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback,
+                       dxvk=False):
             self._make_prefix(Path(prefix))
             self._mark_prefix(Path(prefix))
             return "ready"
@@ -424,7 +425,8 @@ class ManagerTests(unittest.TestCase):
             state.config, new, desired
         )
 
-        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback,
+                       dxvk=False):
             self._make_prefix(Path(prefix))
             self._mark_prefix(Path(prefix))
             return "ready"
@@ -632,7 +634,8 @@ class ManagerTests(unittest.TestCase):
         self._make_prefix(old, "old")
         new = self.home / "new-prefix"
 
-        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback,
+                       dxvk=False):
             self.assertEqual(state.config["prefix"], str(old))
             self._make_prefix(Path(prefix), "new")
             self._mark_prefix(Path(prefix))
@@ -699,7 +702,8 @@ class ManagerTests(unittest.TestCase):
         self._make_prefix(old, "old")
         new = self.home / "cancelled-prefix"
 
-        def initialize(prefix, wine, recreate, output, cancel_event, process_callback):
+        def initialize(prefix, wine, recreate, output, cancel_event, process_callback,
+                       dxvk=False):
             self._make_prefix(Path(prefix), "new")
             self._mark_prefix(Path(prefix))
             cancel_event.set()

@@ -227,5 +227,21 @@
   "Microsoft 365 Enterprise / Education — manage installations and download the online installer.": "Microsoft 365 Enterprise / Education — ניהול התקנות והורדת המתקין המקוון.",
   "Personal or family account": "חשבון אישי או משפחתי",
   "Microsoft 365 Personal / Family — manage your subscription, devices, and download the online installer.": "Microsoft 365 Personal / Family — ניהול המינוי, המכשירים והורדת המתקין המקוון.",
-  "Could not open the Microsoft 365 account page:": "לא ניתן לפתוח את דף החשבון של Microsoft 365:"
+  "Could not open the Microsoft 365 account page:": "לא ניתן לפתוח את דף החשבון של Microsoft 365:",
+  "DXVK (recommended)": "DXVK (מומלץ)",
+  "Use DXVK for Direct3D 10 and 11": "שימוש ב-DXVK עבור Direct3D 10 ו-11",
+  "Direct3D backend status": "מצב מנגנון Direct3D",
+  "Checking Vulkan support…": "בודק תמיכה ב-Vulkan…",
+  "DXVK {version} is installed in this Wine environment for Direct3D 10 and 11. WebView2 (new Outlook) uses WineD3D.": "DXVK {version} מותקן בסביבת Wine זו עבור Direct3D 10 ו-11. WebView2 (‏Outlook החדש) משתמש ב-WineD3D.",
+  "DXVK is selected but not active yet. It is applied when Wine is not running.": "DXVK נבחר אך עדיין אינו פעיל. הוא יוחל כאשר Wine אינו פועל.",
+  "DXVK is unavailable; using WineD3D.": "DXVK אינו זמין; נעשה שימוש ב-WineD3D.",
+  "Using WineD3D ({renderer}).": "נעשה שימוש ב-WineD3D ({renderer}).",
+  "Installing DXVK…": "מתקין DXVK…",
+  "The installed Wine runner does not include DXVK 3.1.1.": "רכיב Wine המותקן אינו כולל DXVK 3.1.1.",
+  "The Vulkan loader (libvulkan.so.1) is not installed.": "טוען Vulkan ‏(libvulkan.so.1) אינו מותקן.",
+  "Only a software (CPU) Vulkan device is available.": "זמין רק התקן Vulkan תוכנתי (מעבד).",
+  "Vulkan reported no graphics devices.": "Vulkan לא דיווח על התקני גרפיקה.",
+  "Check again": "בדיקה חוזרת",
+  "Check Vulkan support for DXVK again": "בדיקה חוזרת של תמיכת Vulkan עבור DXVK",
+  "DXVK is not fully set up in this Wine environment; Wine4Office completes it when Wine is not running.": "DXVK אינו מוגדר במלואו בסביבת Wine זו; Wine4Office ישלים זאת כאשר Wine אינו פועל."
 }

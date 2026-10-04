@@ -180,4 +180,20 @@ grep -F 'wine_build_repository_variable WINE365_REMOTE_HOST' "$contract/config.s
 grep -F 'wine_build_repository_variable WINE_BUILD_REMOTE_ROOT' "$contract/config.sh" >/dev/null
 grep -F 'wine_build_repository_variable WINE_BUILD_REPO_URL' "$contract/config.sh" >/dev/null
 
+dxvk_runner=$tmp/dxvk-runner
+mkdir -p "$dxvk_runner/bin"
+printf '#!/bin/sh\nexit 0\n' > "$dxvk_runner/bin/wine"
+chmod 0755 "$dxvk_runner/bin/wine"
+printf 'not the pinned DXVK release\n' > "$tmp/dxvk-forged.tar.gz"
+if DXVK_TARBALL="$tmp/dxvk-forged.tar.gz" "$contract/bundle-dxvk.sh" "$dxvk_runner" \
+    >"$tmp/dxvk-forged.log" 2>&1; then
+    echo "bundle-dxvk.sh accepted a tarball with the wrong SHA-256" >&2
+    exit 1
+fi
+grep -F 'does not match the pinned SHA-256' "$tmp/dxvk-forged.log" >/dev/null
+[[ ! -e "$dxvk_runner/share/wine4office/dxvk/3.1.1" ]]
+grep -F 'zlib/libpng license' "$contract/dxvk/LICENSE" >/dev/null
+grep -F 'bundle-dxvk.sh "$GITHUB_WORKSPACE/stage/opt/wine4office"' \
+    "$root/.github/workflows/wine4office-release.yml" >/dev/null
+
 echo "canonical Wine build contract: PASS"
